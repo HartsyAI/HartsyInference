@@ -1,5 +1,7 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 
 namespace HartsyInference.Engine.Tests.Services;
 
@@ -34,6 +36,43 @@ public sealed class MeshServicePaintUpscalerTests : IDisposable
     {
         Assert.Equal(expected, MeshService.PaintTextureSize(grid, bakesReference));
     }
+
+    [Fact]
+    public void SidePictures_AreReportedUnbakedWhenTheReferenceProjectionIsOff()
+    {
+        MeshRequest withViews = new() { Views = [new MeshViewImage { View = MeshView.Left, Image = Picture(alpha: 0) }] };
+        Assert.Contains(EngineKnobs.PaintProjectReference.Id, MeshService.UnbakedViewsWarning(withViews, projectReference: false));
+        Assert.Null(MeshService.UnbakedViewsWarning(withViews, projectReference: true));
+        Assert.Null(MeshService.UnbakedViewsWarning(new MeshRequest(), projectReference: false));
+    }
+
+    [Fact]
+    public void PaintSides_BakesCutoutsAndWarnsForPicturesWithoutOne()
+    {
+        List<string> warnings = [];
+        List<MeshViewImage> views =
+        [
+            new() { View = MeshView.Left, Image = Picture(alpha: 0) },
+            new() { View = MeshView.Back, Image = Picture(alpha: 255) },
+            new() { View = MeshView.Right, Image = Picture(alpha: null) },
+        ];
+
+        List<PaintSideReference> sides = MeshService.PaintSides(views, warnings);
+
+        Assert.Equal(90, Assert.Single(sides).Azimuth);
+        Assert.Equal(2, warnings.Count);
+        Assert.Contains("Back picture has an alpha plane that is opaque everywhere", warnings[0]);
+        Assert.Contains("Right picture has no alpha plane", warnings[1]);
+    }
+
+    // A 2 x 2 picture whose first pixel has the given alpha and the rest are opaque; null alpha means no alpha plane.
+    private static ImageData Picture(byte? alpha) => new()
+    {
+        Rgb = new byte[2 * 2 * 3],
+        Width = 2,
+        Height = 2,
+        Alpha = alpha is { } first ? [first, 255, 255, 255] : null,
+    };
 
     [Fact]
     public void PaintUpscaler_NeedsBothTheKnobAndTheCheckpoint()

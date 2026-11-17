@@ -2902,8 +2902,7 @@ public static class ModelCatalog
                 with { Assets = [.. Hunyuan3DAssets("Hunyuan3D-2", "hunyuan3d-dit-v2-0-turbo", "hunyuan3d-turbo",
                     "5ee5a81e4df08a1c65b79910bf5b145a90376e526794f4607a4d5d068d62f269",
                     "4712421fe32d57c678be3be2b608acdb8871985f0b81646a883d136abc63feb7"), .. Hunyuan3DFlashVdmVaeAssets] },
-            // Four-view conditioning needs several images; MeshRequest carries one, so this id downloads but is not CLI-drivable yet.
-            E("hunyuan3d-mv", d3, "Hunyuan3D-2mv (multiview)", "Flux MMDiT + VecSet VAE, four-view DINOv2 conditioning", st)
+            E("hunyuan3d-mv", d3, "Hunyuan3D-2mv (multiview)", "Flux MMDiT + VecSet VAE, four-view DINOv2 conditioning", st, cli: true)
                 with { Assets = Hunyuan3DAssets("Hunyuan3D-2mv", "hunyuan3d-dit-v2-mv", "hunyuan3d-mv",
                     "d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c",
                     "315fd5bf601d1d103130b9fda202f1bd28eda495e68ed1621bc823d5519c5e5b") },

@@ -20,13 +20,23 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects, cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21, hunyuan3d-part, hunyuan3d-xpart, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out, or a GLB mesh with --mesh), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), hunyuan3d-xpart (X-Part: mesh in, GLB with every P3-SAM part generated again as a complete shape, one coloured node per part, boxes printed; --steps flow steps, default 50, --grid marching-cubes grid per part, default 256), hunyuan3d-omni (image in, a control signal with --control, GLB mesh out; --steps flow steps, default 50, --grid marching-cubes grid, default 384, guidance 4.5), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini, and hunyuan3d-mv, which also takes --view pictures), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out, or a GLB mesh with --mesh), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), hunyuan3d-xpart (X-Part: mesh in, GLB with every P3-SAM part generated again as a complete shape, one coloured node per part, boxes printed; --steps flow steps, default 50, --grid marching-cubes grid per part, default 256), hunyuan3d-omni (image in, a control signal with --control, GLB mesh out; --steps flow steps, default 50, --grid marching-cubes grid, default 384, guidance 4.5), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Reference image for the texturing models (hunyuan3d-paint, hunyuan3d-paint21).</summary>
         [CommandOption("--image")]
         [Description("Reference image (PNG) the texturing models paint the input mesh from (hunyuan3d-paint, hunyuan3d-paint21). With --grid it sets the texture size (default 2048) and --steps the sampler steps (default 30 for hunyuan3d-paint, 15 for hunyuan3d-paint21).")]
         public string? Image { get; init; }
+
+        /// <summary>Extra pictures of the subject, <c>side=path</c> (repeatable): hunyuan3d-mv and the paint models.</summary>
+        [CommandOption("--view")]
+        [Description("An extra picture of the subject as side=path.png, side one of left, back or right (repeatable, each side once): hunyuan3d-mv builds the shape from the input image (the front) and these; hunyuan3d-paint and hunyuan3d-paint21 bake each picture with alpha onto the surfaces its camera sees. left is the subject's own left side.")]
+        public string[]? Views { get; init; }
+
+        /// <summary>Input preparation: none (default) or auto.</summary>
+        [CommandOption("--preprocess")]
+        [Description("none (default) uses the input image and --view pictures as given; auto mattes a picture without alpha and frames each picture the way the model expects (the Hunyuan3D shape builds: the subject recentred on white with a 15 % border).")]
+        public string? Preprocess { get; init; }
 
         /// <summary>hunyuan3d-omni: the control kind.</summary>
         [CommandOption("--control")]
@@ -185,6 +195,10 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             parameters.Put("prompt-point", string.Join('\n', settings.PromptPoints));
         if (settings.Image is not null)
             parameters.Put("image", settings.Image);
+        if (settings.Preprocess is not null)
+            parameters.Put("preprocess", settings.Preprocess);
+        if (settings.Views is { Length: > 0 })
+            parameters.Put("view", string.Join('\n', settings.Views));
         if (settings.Mask is not null)
             parameters.Put("mask", settings.Mask);
         if (settings.Control is not null)

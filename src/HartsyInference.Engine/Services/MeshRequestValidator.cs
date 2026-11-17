@@ -25,6 +25,7 @@ internal static class MeshRequestValidator
             throw new NotSupportedException($"3D model '{id}' has no {request.Quality} preset; leave Quality at Default.").ForField(nameof(MeshRequest.Quality));
         if (request.Control is not null && !MeshModelIds.OmniMesh.Contains(id))
             throw new NotSupportedException($"3D model '{id}' takes no control signal; Control applies to {MeshModelIds.Omni}.").ForField(nameof(MeshRequest.Control));
+        ValidateViews(id, request);
         if (request.Mesh && id != MeshModelIds.Sam3dObjects)
             throw new NotSupportedException($"3D model '{id}' takes no Mesh option; it applies to {MeshModelIds.Sam3dObjects}, which returns splats unless asked for a mesh.").ForField(nameof(MeshRequest.Mesh));
         if (id != MeshModelIds.Trellis2 && id != MeshModelIds.Pixal3D)
@@ -231,6 +232,36 @@ internal static class MeshRequestValidator
         if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)
             throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The Omni grid must be between 32 and 512 (0 takes the default of 384).").ForField(nameof(MeshRequest.GridResolution));
         OmniControlMapper.Validate(id, request.Control);
+    }
+
+    /// <summary>Extra views: only the models that take them, each side once, each a well-formed image, and with a front picture to go with them.</summary>
+    private static void ValidateViews(string id, MeshRequest request)
+    {
+        if (request.Views is not { Count: > 0 } views)
+            return;
+        if (!MeshModelIds.TakesViews(id))
+        {
+            throw new NotSupportedException($"3D model '{id}' takes one picture; Views apply to {MeshModelIds.Hunyuan3DMultiView} and {string.Join(", ", MeshModelIds.PaintMesh)}.")
+                .ForField(nameof(MeshRequest.Views));
+        }
+        if (request.Image is null)
+            throw new NotSupportedException("Views go with a front picture; supply MeshRequest.Image.").ForField(nameof(MeshRequest.Image));
+        HashSet<MeshView> seen = [];
+        foreach (MeshViewImage view in views)
+        {
+            if (view is null || view.Image is null)
+                throw new ArgumentException("A view has no image.", nameof(request)).ForField(nameof(MeshRequest.Views));
+            if (!Enum.IsDefined(view.View))
+                throw new ArgumentOutOfRangeException(nameof(request), view.View, "A view must be Left, Back or Right; the front is MeshRequest.Image.").ForField(nameof(MeshRequest.Views));
+            if (!seen.Add(view.View))
+                throw new ArgumentException($"The {view.View} view is given twice; give each side at most once.", nameof(request)).ForField(nameof(MeshRequest.Views));
+            ImageData image = view.Image;
+            if (image.Width <= 0 || image.Height <= 0 || image.Rgb is null || image.Rgb.Length != (long)image.Width * image.Height * 3
+                || (image.Alpha is not null && image.Alpha.Length != (long)image.Width * image.Height))
+            {
+                throw new ArgumentException($"The {view.View} view's pixel planes do not match its size.", nameof(request)).ForField(nameof(MeshRequest.Views));
+            }
+        }
     }
 
     private static void ValidatePaint(string id, MeshRequest request, bool matterAvailable)

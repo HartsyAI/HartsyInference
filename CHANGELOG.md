@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.437
+
+- Added optional left, back and right pictures to image-to-3D (`MeshRequest.Views`, API `viewPngs`, CLI `--view`):
+  Hunyuan3D-2mv (`hunyuan3d-mv`) builds the shape from all of them, and Hunyuan3D Paint bakes each onto its own side.
+
 ## alpha.436
 
 - Hunyuan3D Paint 2.1's reference projection no longer paints the face onto a hat brim the shape model put lower than

@@ -12,7 +12,14 @@ namespace HartsyInference.ThreeD.Paint;
 /// <param name="OffsetX">Picture x at the view's left edge.</param>
 /// <param name="OffsetY">Picture y at the view's first row.</param>
 /// <param name="Facing">Per pixel, how squarely the surface there faces the front camera: the cosine between its face normal and the view direction (0 to 1). Null treats every pixel as facing it.</param>
-public sealed record PaintReferenceProjection(float[] Image, bool[] Covered, int Resolution, double Fit, double MirroredFit, double Scale, double OffsetX, double OffsetY, float[]? Facing = null);
+/// <param name="Elevation">Elevation in degrees of the camera the picture was taken from; 0 for the front picture.</param>
+/// <param name="Azimuth">Azimuth in degrees of that camera (<see cref="PaintCamera"/>'s convention); 0 for the front picture.</param>
+public sealed record PaintReferenceProjection(float[] Image, bool[] Covered, int Resolution, double Fit, double MirroredFit, double Scale, double OffsetX, double OffsetY,
+    float[]? Facing = null, double Elevation = 0, double Azimuth = 0);
+
+/// <summary>A picture to bake with <see cref="PaintReferenceProjector.ApplyToTexels(IReadOnlyList{PaintReferencePicture}, PaintViewRenderer, PaintTexelSurface, float[], bool[], double, CancellationToken)"/>:
+/// its placement on its own camera and the picture itself, RGB bytes and subject mask at its own size.</summary>
+public sealed record PaintReferencePicture(PaintReferenceProjection Placement, byte[] Rgb, byte[] Alpha, int Width, int Height);
 
 /// <summary>Bakes the reference picture onto the surfaces the front camera sees, at the picture's own resolution. Paint repaints every view at 512 px, so
 /// on a full figure a face is a few dozen pixels wide and its eyes, nose and brows are lost; the front view is the one the picture was drawn from, so the
@@ -38,7 +45,14 @@ public static class PaintReferenceProjector
     /// <param name="rgb">The picture, RGB bytes, row 0 first.</param>
     /// <param name="alpha">One byte per pixel; at or above <see cref="SubjectAlpha"/> is subject.</param>
     public static PaintReferenceProjection? Project(PaintViewRenderer renderer, ReadOnlySpan<byte> rgb, ReadOnlySpan<byte> alpha, int width, int height, int resolution,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        Project(renderer, rgb, alpha, width, height, resolution, 0, 0, cancellationToken);
+
+    /// <summary>Fits the picture's subject to the view of <paramref name="renderer"/>'s mesh from the camera at <paramref name="elevation"/> and
+    /// <paramref name="azimuth"/> (degrees) and lays the picture out at <paramref name="resolution"/>. Returns null when the picture has no subject or the
+    /// mesh has no silhouette from that camera.</summary>
+    public static PaintReferenceProjection? Project(PaintViewRenderer renderer, ReadOnlySpan<byte> rgb, ReadOnlySpan<byte> alpha, int width, int height, int resolution,
+        double elevation, double azimuth, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(renderer);
         if (width <= 0 || height <= 0 || rgb.Length != width * height * 3 || alpha.Length != width * height)
@@ -53,7 +67,7 @@ public static class PaintReferenceProjector
         int erosion = Math.Max(1, Math.Max(width, height) / 512);
         bool[] inner = Erode(subject, width, height, erosion);
 
-        bool[] silhouette = Silhouette(renderer.Rasterize(0, 0, FitResolution, cancellationToken));
+        bool[] silhouette = Silhouette(renderer.Rasterize(elevation, azimuth, FitResolution, cancellationToken));
         if (!Bounds(silhouette, FitResolution, FitResolution, out int sx0, out int sy0, out int sx1, out int sy1)
             || !Bounds(subject, width, height, out int px0, out int py0, out int px1, out int py1))
             return null;
@@ -65,7 +79,7 @@ public static class PaintReferenceProjector
         (scale, offsetX, offsetY, double fit) = Refine(silhouette, subject, width, height, scale, offsetX, offsetY, py1 + 1 - py0, cancellationToken);
         double mirroredFit = Overlap(silhouette, subject, width, height, -scale, (px0 + px1 + 1) - offsetX, offsetY, cancellationToken);
 
-        PaintViewProjection front = renderer.Project(0, 0);
+        PaintViewProjection front = renderer.Project(elevation, azimuth);
         ViewRaster raster = ViewRasterizer.Rasterize(front.Clip, renderer.Frame.Indices, resolution, resolution, cancellationToken);
         float[] faceFacing = FaceFacing(front.Camera, renderer.Frame.Indices);
         float[] facing = new float[resolution * resolution];
@@ -91,7 +105,7 @@ public static class PaintReferenceProjector
                 covered[pixel] = true;
             }
         });
-        return new PaintReferenceProjection(image, covered, resolution, fit, mirroredFit, scale, offsetX, offsetY, facing);
+        return new PaintReferenceProjection(image, covered, resolution, fit, mirroredFit, scale, offsetX, offsetY, facing, elevation, azimuth);
     }
 
     /// <summary>Writes the picture into the albedo texels the front camera sees, at the picture's own resolution: each texel is placed in the picture through the front
@@ -108,61 +122,59 @@ public static class PaintReferenceProjector
         byte[] rgb, byte[] alpha, int width, int height, double depthThreshold, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(placement);
+        return ApplyToTexels([new PaintReferencePicture(placement, rgb, alpha, width, height)], renderer, surface, texture, known, depthThreshold, cancellationToken);
+    }
+
+    /// <summary>Bakes several pictures of the subject, each through its own camera, as <see cref="ApplyToTexels(PaintReferenceProjection, PaintViewRenderer,
+    /// PaintTexelSurface, float[], bool[], byte[], byte[], int, int, double, CancellationToken)"/> bakes one. Where two pictures see a texel, the one its
+    /// surface faces more squarely leads: their colours are blended by facing weight times facing to the <see cref="BlendSharpness"/>, and the blend replaces
+    /// the views by the strongest picture's facing weight. Returns how many texels took a picture.</summary>
+    public static int ApplyToTexels(IReadOnlyList<PaintReferencePicture> pictures, PaintViewRenderer renderer, PaintTexelSurface surface, float[] texture, bool[] known,
+        double depthThreshold, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(pictures);
         ArgumentNullException.ThrowIfNull(renderer);
         ArgumentNullException.ThrowIfNull(surface);
         if (texture.Length != surface.Width * surface.Height * 3 || known.Length != surface.Width * surface.Height)
             throw new ArgumentException("The texture does not match the surface.");
-        if (rgb.Length != width * height * 3 || alpha.Length != width * height)
-            throw new ArgumentException("The picture's colour and alpha planes do not match its size.");
+        foreach (PaintReferencePicture picture in pictures)
+        {
+            ArgumentNullException.ThrowIfNull(picture);
+            ArgumentNullException.ThrowIfNull(picture.Placement);
+            if (picture.Rgb.Length != picture.Width * picture.Height * 3 || picture.Alpha.Length != picture.Width * picture.Height)
+                throw new ArgumentException("The picture's colour and alpha planes do not match its size.");
+        }
 
-        // The front depth buffer at least as fine as the texture, so a texel's visibility is decided at its own scale.
+        // The depth buffer at least as fine as the texture, so a texel's visibility is decided at its own scale.
         int side = Math.Max(2048, Math.Max(surface.Width, surface.Height));
-        PaintViewProjection front = renderer.Project(0, 0);
-        int[] indices = renderer.Frame.Indices;
-        ViewRaster raster = ViewRasterizer.Rasterize(front.Clip, indices, side, side, cancellationToken);
-        float[] z = new float[front.Camera.Length / 3];
-        for (int i = 0; i < z.Length; i++)
-            z[i] = front.Camera[i * 3 + 2];
-        float[] depth = raster.Interpolate(z, indices, 1);
-        float[] faceFacing = SmoothFacing(front.Camera, indices, FacingSmoothingPasses);
+        PictureCamera[] cameras = new PictureCamera[pictures.Count];
+        for (int k = 0; k < cameras.Length; k++)
+            cameras[k] = PictureCamera.Create(pictures[k], renderer, side, cancellationToken);
 
-        bool[] subject = new bool[width * height];
-        for (int i = 0; i < subject.Length; i++)
-            subject[i] = alpha[i] >= SubjectAlpha;
-        bool[] inner = Erode(subject, width, height, Math.Max(1, Math.Max(width, height) / 512));
-        // A drawn picture outlines its subject with a dark line a few pixels wide. Where the surface turns away near the silhouette (the sides of a head), that line would be stretched
-        // across it, so near the outline only surfaces facing the camera squarely take the picture.
-        bool[] deep = Erode(subject, width, height, Math.Max(2, Math.Max(width, height) / OutlineShare));
-        PaintOccluderAlignment? alignment = PaintOccluderAlignment.Create(depth, raster.FaceIds, side, rgb, subject, width, height, placement,
-            cancellationToken);
-
-        double toView = 1.0 / (PaintCamera.OrthoScale * 0.5);
-        double[] w2c = front.WorldToCamera;
         int written = 0;
         Parallel.For(0, surface.Count, new ParallelOptions { CancellationToken = cancellationToken }, i =>
         {
-            (double cx, double cy, double cz, _) = PaintCamera.Transform(w2c, surface.Positions[i * 3], surface.Positions[i * 3 + 1], surface.Positions[i * 3 + 2]);
-            double u = cx * toView * 0.5 + 0.5, v = cy * toView * 0.5 + 0.5;
-            if (u < 0 || u >= 1 || v < 0 || v >= 1)
+            Span<float> colour = stackalloc float[3], sum = stackalloc float[3];
+            float weight = 0f, total = 0f;
+            int contributors = 0;
+            foreach (PictureCamera camera in cameras)
+            {
+                if (!camera.Sample(surface.Positions, i, depthThreshold, colour, out float w, out float facing))
+                    continue;
+                float share = w * MathF.Pow(facing, BlendSharpness);
+                for (int c = 0; c < 3; c++)
+                    sum[c] += share * colour[c];
+                total += share;
+                weight = Math.Max(weight, w);
+                contributors++;
+            }
+            if (contributors == 0)
                 return;
-            int pixel = (int)(v * side) * side + (int)(u * side);
-            int face = raster.FaceIds[pixel];
-            if (face == 0 || !VisibleNear(raster.FaceIds, depth, side, pixel, cz, depthThreshold))
-                return;
-            float weight = Math.Clamp((faceFacing[face - 1] - TexelFacingNone) / (TexelFacingFull - TexelFacingNone), 0f, 1f);
-            if (weight <= 0f)
-                return;
-            // The same mapping Project fitted: picture pixel = Scale * view coordinate + Offset, at pixel centres.
-            // A nearer part the mesh put off the drawing samples it shifted onto its own edge.
-            (double du, double dv) = alignment is null ? (0, 0) : alignment.Shift(u, v, cz);
-            double x = placement.Scale * (u + du) + placement.OffsetX - 0.5, y = placement.Scale * (v + dv) + placement.OffsetY - 0.5;
-            int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height || !inner[ny * width + nx]
-                || (!deep[ny * width + nx] && faceFacing[face - 1] < OutlineFacing))
-                return;
+            // One picture keeps its own colour exactly; several are blended.
+            if (contributors > 1)
+                for (int c = 0; c < 3; c++)
+                    colour[c] = total > 0f ? sum[c] / total : colour[c];
             int texel = surface.Texels[i];
-            Span<float> colour = stackalloc float[3];
-            SampleBicubic(rgb, width, height, x, y, colour);
             if (!known[texel])
                 weight = 1f;
             for (int c = 0; c < 3; c++)
@@ -171,6 +183,94 @@ public static class PaintReferenceProjector
             Interlocked.Increment(ref written);
         });
         return written;
+    }
+
+    /// <summary>Where two pictures see a texel, each one's share of the colour grows with this power of how squarely the surface faces its camera, so the
+    /// squarer view leads and the change from one picture to the next is a short blend.</summary>
+    public const float BlendSharpness = 8f;
+
+    // One picture's camera for the texel bake: the depth buffer and facing from that camera, the picture's subject masks and its placement.
+    private sealed class PictureCamera
+    {
+        private readonly PaintReferencePicture _picture;
+        private readonly ViewRaster _raster;
+        private readonly float[] _depth, _faceFacing;
+        private readonly bool[] _inner, _deep;
+        private readonly PaintOccluderAlignment? _alignment;
+        private readonly double[] _worldToCamera;
+        private readonly int _side;
+
+        private PictureCamera(PaintReferencePicture picture, ViewRaster raster, float[] depth, float[] faceFacing, bool[] inner, bool[] deep,
+            PaintOccluderAlignment? alignment, double[] worldToCamera, int side)
+        {
+            _picture = picture;
+            _raster = raster;
+            _depth = depth;
+            _faceFacing = faceFacing;
+            _inner = inner;
+            _deep = deep;
+            _alignment = alignment;
+            _worldToCamera = worldToCamera;
+            _side = side;
+        }
+
+        public static PictureCamera Create(PaintReferencePicture picture, PaintViewRenderer renderer, int side, CancellationToken cancellationToken)
+        {
+            PaintReferenceProjection placement = picture.Placement;
+            PaintViewProjection view = renderer.Project(placement.Elevation, placement.Azimuth);
+            int[] indices = renderer.Frame.Indices;
+            ViewRaster raster = ViewRasterizer.Rasterize(view.Clip, indices, side, side, cancellationToken);
+            float[] z = new float[view.Camera.Length / 3];
+            for (int i = 0; i < z.Length; i++)
+                z[i] = view.Camera[i * 3 + 2];
+            float[] depth = raster.Interpolate(z, indices, 1);
+            float[] faceFacing = SmoothFacing(view.Camera, indices, FacingSmoothingPasses);
+
+            int width = picture.Width, height = picture.Height;
+            bool[] subject = new bool[width * height];
+            for (int i = 0; i < subject.Length; i++)
+                subject[i] = picture.Alpha[i] >= SubjectAlpha;
+            bool[] inner = Erode(subject, width, height, Math.Max(1, Math.Max(width, height) / 512));
+            // A drawn picture outlines its subject with a dark line a few pixels wide. Where the surface turns away near the silhouette (the sides of a head), that line would be
+            // stretched across it, so near the outline only surfaces facing the camera squarely take the picture.
+            bool[] deep = Erode(subject, width, height, Math.Max(2, Math.Max(width, height) / OutlineShare));
+            PaintOccluderAlignment? alignment = PaintOccluderAlignment.Create(depth, raster.FaceIds, side, picture.Rgb, subject, width, height, placement,
+                cancellationToken);
+            return new PictureCamera(picture, raster, depth, faceFacing, inner, deep, alignment, view.WorldToCamera, side);
+        }
+
+        // The picture's colour at surface point i, its facing weight (0 to 1, by facing alone) and the smoothed facing; false where the picture does not reach.
+        public bool Sample(float[] positions, int i, double depthThreshold, Span<float> colour, out float weight, out float facing)
+        {
+            weight = 0f;
+            facing = 0f;
+            int side = _side;
+            double toView = 1.0 / (PaintCamera.OrthoScale * 0.5);
+            (double cx, double cy, double cz, _) = PaintCamera.Transform(_worldToCamera, positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+            double u = cx * toView * 0.5 + 0.5, v = cy * toView * 0.5 + 0.5;
+            if (u < 0 || u >= 1 || v < 0 || v >= 1)
+                return false;
+            int pixel = (int)(v * side) * side + (int)(u * side);
+            int face = _raster.FaceIds[pixel];
+            if (face == 0 || !VisibleNear(_raster.FaceIds, _depth, side, pixel, cz, depthThreshold))
+                return false;
+            facing = _faceFacing[face - 1];
+            weight = Math.Clamp((facing - TexelFacingNone) / (TexelFacingFull - TexelFacingNone), 0f, 1f);
+            if (weight <= 0f)
+                return false;
+            // The same mapping Project fitted: picture pixel = Scale * view coordinate + Offset, at pixel centres.
+            // A nearer part the mesh put off the drawing samples it shifted onto its own edge.
+            PaintReferenceProjection placement = _picture.Placement;
+            int width = _picture.Width, height = _picture.Height;
+            (double du, double dv) = _alignment is null ? (0, 0) : _alignment.Shift(u, v, cz);
+            double x = placement.Scale * (u + du) + placement.OffsetX - 0.5, y = placement.Scale * (v + dv) + placement.OffsetY - 0.5;
+            int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height || !_inner[ny * width + nx]
+                || (!_deep[ny * width + nx] && facing < OutlineFacing))
+                return false;
+            SampleBicubic(_picture.Rgb, width, height, x, y, colour);
+            return true;
+        }
     }
 
     // Passes of neighbour averaging on the vertex facing in ApplyToTexels.

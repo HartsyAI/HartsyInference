@@ -58,7 +58,7 @@ public sealed class MeshPlanRouteTests : IAsyncLifetime
     [Fact]
     public async Task DescribeOfAnUnknownModelIsA404()
     {
-        HttpResponseMessage response = await _http.GetAsync("/v1/native/mesh/describe/hunyuan3d-mv");
+        HttpResponseMessage response = await _http.GetAsync("/v1/native/mesh/describe/hunyuan3d-mv-turbo");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -70,7 +70,7 @@ public sealed class MeshPlanRouteTests : IAsyncLifetime
 
         Assert.Equal("NoCatalogEntry", status.RootElement.GetProperty("modelBlocker").GetProperty("kind").GetString());
         Assert.False(status.RootElement.GetProperty("complete").GetBoolean());
-        Assert.Equal(HttpStatusCode.NotFound, (await _http.GetAsync("/v1/native/mesh/assets/hunyuan3d-mv")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _http.GetAsync("/v1/native/mesh/assets/hunyuan3d-mv-turbo")).StatusCode);
     }
 
     [Fact]
