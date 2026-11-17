@@ -111,13 +111,16 @@ public sealed class Ernie5TextPathTests : IDisposable
     }
 
     [Fact]
-    public void Text_path_loads_on_one_device_and_refuses_a_split_by_name()
+    public void Text_path_takes_a_gpu_layer_split_and_refuses_tensor_parallelism_or_a_cpu_stage_by_name()
     {
-        TextService.RequireSingleDeviceErnie5([], tensorParallelDegree: 1);
+        TextService.RequireRunnableErnie5Placement([], tensorParallelDegree: 1);
+        TextService.RequireRunnableErnie5Placement(["cuda:0", "cuda:1"], tensorParallelDegree: 1);
 
-        NotSupportedException split = Assert.Throws<NotSupportedException>(() => TextService.RequireSingleDeviceErnie5(["cuda:0", "cuda:1"], 1));
-        Assert.Contains("cuda:0 + cuda:1", split.Message);
-        NotSupportedException tp = Assert.Throws<NotSupportedException>(() => TextService.RequireSingleDeviceErnie5([], tensorParallelDegree: 2));
+        NotSupportedException cpu = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement(["cuda:0", "cpu"], 1));
+        Assert.Contains("'cpu' is not (cuda:0 + cpu)", cpu.Message);
+        NotSupportedException mixed = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement(["cuda:0", "vulkan:0"], 1));
+        Assert.Contains("mixed GPU kinds", mixed.Message);
+        NotSupportedException tp = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement([], tensorParallelDegree: 2));
         Assert.Contains("tensor-parallel degree is 2", tp.Message);
     }
 

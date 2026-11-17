@@ -10,6 +10,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Ernie5;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vulkan;
 using Xunit;
@@ -27,7 +28,8 @@ namespace HartsyInference.Engine.Tests.Services;
 /// (prefill, decode); <c>ERNIE_REAL_SET</c> = knob pins for the run, <c>id=value</c> separated by commas (for example
 /// <c>numerics.moeExpertPrefetchThreads=32</c>); <c>ERNIE_REAL_DECODE_FEED</c> = a comma list of token ids fed at the decode steps instead
 /// of the argmax (one step each, so <c>ERNIE_REAL_DECODE_STEPS</c> is ignored; with <c>ERNIE_DUMP_LAYERS</c> the whole fed sequence goes to <c>tokens.json</c> for the reference
-/// comparison); <c>ERNIE_REAL_PRECISION</c> = <c>reference</c> (default: F32 GEMMs, the GEMM pins of the <c>reference</c> knob profile) or
+/// comparison); <c>ERNIE_REAL_STAGES</c> = CUDA ordinals to split the layers over evenly, one stage each, and <c>ERNIE_REAL_PRELOAD_EXPERTS</c> =
+/// <c>1</c> to also preload every routed expert (both with <c>ERNIE_REAL_RESIDENT=1</c>); <c>ERNIE_REAL_PRECISION</c> = <c>reference</c> (default: F32 GEMMs, the GEMM pins of the <c>reference</c> knob profile) or
 /// <c>production</c> (each GPU backend's default GEMM: TF32 on CUDA, F16 inputs on Vulkan); other knobs keep their defaults in both. On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
 /// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
 /// is its token limit there, default 16).</remarks>
@@ -112,10 +114,20 @@ public sealed class Ernie5RealCheckpointTests
         string? profileDir = Environment.GetEnvironmentVariable("ERNIE_REAL_PROFILE");
         // Pushed before the backend is built, so construction-scope pins (numerics.noTf32, numerics.vkF16Gemm, ...) reach it.
         using IDisposable? knobs = PushKnobs(profileDir, Environment.GetEnvironmentVariable("ERNIE_REAL_SET"));
+        // ERNIE_REAL_STAGES = CUDA ordinals, one stage each, the layers split evenly over them in order (a repeated ordinal is allowed, for a split on
+        // one card); ERNIE_REAL_PRELOAD_EXPERTS=1 also preloads every routed expert and block-scale grid.
+        int[] stages = ParseIds(Environment.GetEnvironmentVariable("ERNIE_REAL_STAGES") ?? "");
+        if (stages.Length > 1 && device != "cuda") throw new ArgumentException("ERNIE_REAL_STAGES needs ERNIE_REAL_DEVICE=cuda.");
+        bool preloadExperts = Environment.GetEnvironmentVariable("ERNIE_REAL_PRELOAD_EXPERTS") == "1";
+        CudaBackend OpenCuda(int ordinal) => production ? new CudaBackend(ordinal, Ernie5ModelGpuParityTests.PtxDirectory())
+            : new CudaBackend(ordinal, Ernie5ModelGpuParityTests.PtxDirectory()) { HighPrecisionGemm = true };
+        using DisposeAll earlierStages = new([.. stages.SkipLast(1).Select(o => (IBackend)OpenCuda(o))]);
+        // As the Text path's split does: with every weight preloaded, a cached cast would spend the small headroom left.
+        if (stages.Length > 1)
+            foreach (IBackend stage in earlierStages.Items) stage.CacheWeightCasts = false;
         using IBackend backend = device switch
         {
-            "cuda" => production ? new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory())
-                : new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory()) { HighPrecisionGemm = true },
+            "cuda" => OpenCuda(stages.Length > 1 ? stages[^1] : 0),
             "vulkan" => production ? new VulkanBackend() : new VulkanBackend { EnableF16Gemm = false },
             "cpu" => new CpuBackend(),
             _ => throw new ArgumentException($"ERNIE_REAL_DEVICE must be cuda, vulkan or cpu, not '{device}'."),
@@ -126,7 +138,18 @@ public sealed class Ernie5RealCheckpointTests
         int decodeSteps = feed?.Length ?? (int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1);
         int capacity = tokens.Length + decodeSteps + 1;
         Stopwatch load = Stopwatch.StartNew();
-        using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = capacity, ResidentWeights = resident });
+        LlmPlacement? placement = null;
+        if (stages.Length > 1)
+        {
+            backend.CacheWeightCasts = false;
+            int layerCount = Ernie5Config.Load(Path.Combine(dir, "config.json")).NumHiddenLayers;
+            IBackend[] stageBackends = [.. earlierStages.Items, backend];
+            placement = new([.. stageBackends.Select((b, k) => new LlmStage(b, k * layerCount / stages.Length, (k + 1) * layerCount / stages.Length))]);
+        }
+        using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions
+        {
+            MaxSequenceTokens = capacity, ResidentWeights = resident, Placement = placement, PreloadExperts = preloadExperts,
+        });
         load.Stop();
         using Ernie5SequenceState state = model.CreateState(capacity);
         // Declared after the model so it is disposed first; attached before the first forward, so no expert is promoted outside it.
@@ -182,7 +205,8 @@ public sealed class Ernie5RealCheckpointTests
             Console.WriteLine($"ERNIE expert cache: resident rows {stats.ResidentRows}, streamed rows {stats.StreamedRows}, admitted {stats.Admitted}, "
                 + $"resident share {stats.ResidentShare:P1}.");
         }
-        Console.WriteLine($"ERNIE real run on {device} ({precision} precision, resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
+        Console.WriteLine($"ERNIE real run on {device}{(stages.Length > 1 ? $" stages [{string.Join(",", stages)}]" : "")} ({precision} precision, resident {resident}, "
+            + $"preloaded experts {preloadExperts}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s{prefillIo}, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
             + $"{(feed is null ? "greedy tokens" : "argmax per step")} [{string.Join(",", generated)}].");
         if (feed is not null)
@@ -192,6 +216,16 @@ public sealed class Ernie5RealCheckpointTests
             int agree = feed.Zip(choices).Count(p => p.First == p.Second);
             Console.WriteLine($"ERNIE decode feed [{string.Join(",", feed)}]: the engine's argmax matched {agree} of {feed.Length} fed tokens; "
                 + $"argmax after the last fed token {generated[^1]}.");
+        }
+    }
+
+    private sealed class DisposeAll(IReadOnlyList<IBackend> items) : IDisposable
+    {
+        public IReadOnlyList<IBackend> Items { get; } = items;
+
+        public void Dispose()
+        {
+            foreach (IBackend item in Items) item.Dispose();
         }
     }
 

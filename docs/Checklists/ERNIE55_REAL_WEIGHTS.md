@@ -171,9 +171,12 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 
 ## Open
 
-- Decode speed: decode is bound by how fast the experts' storage reads (the reads overlap the expert loop since #928; 32 readers did not
-  speed up decode on one pod, while prefill gained about 9%). A local disk, more page cache, or several GPUs holding the experts are the
-  next steps.
+- Decode speed: on one GPU, decode is bound by how fast the experts' storage reads (the reads overlap the expert loop since #928; 32 readers
+  did not speed up decode on one pod, while prefill gained about 9%). The layers can now be split over several GPUs with every weight,
+  routed experts included, preloaded on its stage (`Ernie5LoadOptions.Placement` and `PreloadExperts`; the Text path does this for a
+  `cuda:0+cuda:1` key or the engine's shard devices, and the harness takes `ERNIE_REAL_STAGES`). That takes the storage reads off the decode
+  path. It is not yet measured on the real weights, which need about 288 GB of device memory over the stages. The stages run one after
+  another, so it speeds up one sequence, not several at once.
 - MTP speculative decoding in the Text path, and MTP parity on real weights.
 - A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.

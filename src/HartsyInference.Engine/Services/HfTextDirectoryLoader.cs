@@ -50,11 +50,12 @@ internal static class HfTextDirectoryLoader
     /// <summary>Loads a host reference directory onto <paramref name="backend"/>. DeepSeek-V4.1 keeps its weights on the host, so the caller passes a CPU
     /// backend; ERNIE-5.5 and Kimi K3.1 run on the backend they are given.</summary>
     /// <exception cref="HartsyInferenceException">The directory's model_type is not supported, it has no usable tokenizer.json, or the checkpoint is invalid.</exception>
-    internal static IHostReferenceTextModel LoadHostReference(HfCheckpointInfo info, IBackend backend)
+    /// <param name="ernie5">ERNIE-5.5 load options in place of <see cref="Ernie5OptionsFor"/>, such as a layer split over several devices.</param>
+    internal static IHostReferenceTextModel LoadHostReference(HfCheckpointInfo info, IBackend backend, Ernie5LoadOptions? ernie5 = null)
     {
         RequireSupported(info);
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
-            return Ernie5TextModel.Load(backend, info.Root, Ernie5OptionsFor(backend.Device));
+            return Ernie5TextModel.Load(backend, info.Root, ernie5 ?? Ernie5OptionsFor(backend.Device));
         if (IsKimiK31(info))
             return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);

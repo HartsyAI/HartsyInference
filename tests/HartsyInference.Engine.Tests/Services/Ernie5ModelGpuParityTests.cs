@@ -94,6 +94,30 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     }
 
     // One FP8 linear whose weight spans two row blocks and three column blocks with distinct scales, on the device and the CPU.
+    // Two stages on one device (two backends, so each holds its own weight cache), every weight preloaded: the split and the expert preload must
+    // give the CPU's logits, and no forward may read a routed expert from the checkpoint.
+    [ErnieCudaFact]
+    public void Cuda_SyntheticErnieFp8_TwoStagesWithEveryWeightPreloaded_LogitsMatchCpu()
+    {
+        string dir = WriteCheckpoint(Ernie5SyntheticCheckpoint.Storage.Fp8);
+        using CpuBackend cpu = new();
+        float[] want = Logits(dir, cpu, resident: true);
+        using CudaBackend first = new(0, PtxDirectory());
+        using CudaBackend second = new(0, PtxDirectory());
+        int layers = Ernie5Config.Load(Path.Combine(dir, "config.json")).NumHiddenLayers;
+        LLM.Transformer.LlmPlacement split = new([new LLM.Transformer.LlmStage(first, 0, 1), new LLM.Transformer.LlmStage(second, 1, layers)]);
+        using Ernie5Model model = Ernie5Model.Load(dir, second, new Ernie5LoadOptions
+        {
+            MaxSequenceTokens = Tokens.Length + 1, ResidentWeights = true, Placement = split, PreloadExperts = true,
+        });
+        // Every routed expert is on one of the two devices' caches before the first forward.
+        Assert.All(model.EnumerateExpertWeights(), t => Assert.True(first.IsWeightResident(t) || second.IsWeightResident(t), "a routed expert is not preloaded"));
+        using Ernie5SequenceState state = model.CreateState(Tokens.Length + 1);
+        float[] prefill = model.Forward(Tokens, state, allRows: true);
+        float[] decode = model.Forward([Tokens[^1] + 1], state);
+        AssertClose(want, [.. prefill, .. decode], "CUDA two-stage");
+    }
+
     [ErnieCudaFact]
     public void Cuda_Fp8LinearWithMultipleBlocks_MatchesCpu() => LinearParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA");
 
