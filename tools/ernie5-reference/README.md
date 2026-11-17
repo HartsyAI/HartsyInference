@@ -195,6 +195,10 @@ state, so it can still be flagged, and the note then names the nearest earlier n
 The reference reads nearly every routed expert at this length, so it makes about one full pass over the checkpoint; its indexer scores
 are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).
 
+Real checkpoint, 2026-11-16 (RTX 4090, `2317bb2e3`): layers 0 to 6 match at every position and the argmax after the last position is
+1232 on both sides. From layer 7 on, 22 single positions after one MoE routing near tie (layer 7, position 1919) fall below cosine
+0.999. The run, the per-position error table and the explanation are in `docs/Checklists/ERNIE55_REAL_WEIGHTS.md`.
+
 ### Expected behaviour on the real checkpoint
 
 - Step 1 runs layers 0 to 42 at any length. A layer that uses an unsupported rope type raises `NotImplementedError` with the
