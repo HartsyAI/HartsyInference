@@ -927,7 +927,7 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
         if (ernie)
-            RequireSingleDeviceErnie5(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
+            RequireRunnableErnie5Placement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -965,11 +965,11 @@ public sealed partial class TextService : ITextService, IDisposable
     /// <paramref name="gateOrdinals"/>, no KV pool since the sequence states own their storage) and load fields. The slot owns the backend from
     /// here; a failed load disposes it.</summary>
     private void LoadHostReferenceInto(TextDeviceSlot slot, HfCheckpointInfo checkpoint, string path, IBackend backend, IReadOnlyList<int> gateOrdinals,
-        ResidencyPlan? plan)
+        ResidencyPlan? plan, Ernie5LoadOptions? ernie5 = null)
     {
         try
         {
-            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
+            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend, ernie5);
         }
         catch
         {
@@ -1016,17 +1016,34 @@ public sealed partial class TextService : ITextService, IDisposable
         return CreateBackendFor("cpu");
     }
 
-    /// <summary>Refuses an ERNIE-5.5 load that names more than one device: the model has no layer split or tensor parallelism, so it would
-    /// otherwise load on one device while the request asked for several.</summary>
-    /// <param name="shardDevices">The devices the request shards over; empty when it names one device.</param>
+    /// <summary>Refuses an ERNIE-5.5 placement the model cannot run: tensor parallelism (it has none; several devices split its layers instead),
+    /// or a layer split that names a device that is not a GPU (the split exists to hold every weight in device memory).</summary>
+    /// <param name="shardDevices">The devices the request splits the layers over; empty when it names one device.</param>
     /// <param name="tensorParallelDegree">The engine's tensor-parallel degree.</param>
-    /// <exception cref="NotSupportedException">The request names two or more devices, or the engine's tensor-parallel degree is above 1.</exception>
-    internal static void RequireSingleDeviceErnie5(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
+    /// <exception cref="NotSupportedException">The engine's tensor-parallel degree is above 1, or a split names a non-GPU device.</exception>
+    internal static void RequireRunnableErnie5Placement(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
     {
-        if (shardDevices.Count >= 2)
-            throw new NotSupportedException($"ERNIE-5.5 runs on one device; the request names {shardDevices.Count} ({string.Join(" + ", shardDevices)}).");
         if (tensorParallelDegree > 1)
-            throw new NotSupportedException($"ERNIE-5.5 has no tensor-parallel path; the engine's tensor-parallel degree is {tensorParallelDegree}.");
+            throw new NotSupportedException($"ERNIE-5.5 has no tensor-parallel path; the engine's tensor-parallel degree is {tensorParallelDegree}. "
+                + "Name several devices without tensor parallelism to split its layers over them.");
+        if (shardDevices.Count >= 2)
+            foreach (string device in shardDevices)
+                if (!BackendFactory.IsDeviceKind(BackendFactory.Kind(device)))
+                    throw new NotSupportedException($"An ERNIE-5.5 layer split holds every weight in device memory, so each stage must be a GPU; "
+                        + $"'{device}' is not ({string.Join(" + ", shardDevices)}).");
+    }
+
+    /// <summary>Plans an ERNIE-5.5 layer split over <paramref name="shardDevices"/> by the checkpoint's bytes per layer (explicit engine ratios win,
+    /// else free memory), with the LM head charged to the last stage.</summary>
+    private IReadOnlyList<LlmStagePlan> PlanErnie5Split(string deviceKey, string root, string[] shardDevices)
+    {
+        Ernie5Config config = Ernie5Config.Load(Path.Combine(root, "config.json"));
+        long checkpointBytes = Directory.EnumerateFiles(root, "*.safetensors").Sum(f => new FileInfo(f).Length);
+        // BF16 LM head; the MTP layer and the embedding stay in the average, which errs toward more room per stage.
+        long headBytes = 2L * config.VocabSize * config.HiddenSize;
+        long perLayer = Math.Max(1, (checkpointBytes - headBytes) / Math.Max(1, config.NumHiddenLayers));
+        IReadOnlyList<float>? ratios = deviceKey.Contains('+') ? null : _engine.Placement.ShardRatios;
+        return PlacementPlanner.LlmSplitPlan(shardDevices, ratios, config.NumHiddenLayers, perLayer, headBytes);
     }
 
     /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
@@ -1036,6 +1053,12 @@ public sealed partial class TextService : ITextService, IDisposable
     private void LoadErnie5Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         DisposeSlotBackends(slot);
+        string[] shardDevices = ResolveShardDevices(deviceKey);
+        if (shardDevices.Length >= 2)
+        {
+            LoadErnie5Split(slot, deviceKey, checkpoint, path, shardDevices);
+            return;
+        }
         IBackend backend = CreateBackendFor(deviceKey);
         LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
         string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
@@ -1043,6 +1066,41 @@ public sealed partial class TextService : ITextService, IDisposable
             ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
             : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
         Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
+    }
+
+    /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed
+    /// experts and block-scale grids included) preloaded on its stage's device, so no forward reads the checkpoint. A stage whose weights do not fit
+    /// its device refuses the load by name. The stages run one after another (a pipeline), so this speeds up one sequence by taking the weight
+    /// reads off its path; it does not overlap requests.</summary>
+    private void LoadErnie5Split(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path, string[] shardDevices)
+    {
+        IReadOnlyList<LlmStagePlan> plan = PlanErnie5Split(deviceKey, checkpoint.Root, shardDevices);
+        List<IBackend> backends = [];
+        try
+        {
+            foreach (LlmStagePlan stage in plan) backends.Add(CreateBackendFor(stage.Device));
+        }
+        catch
+        {
+            foreach (IBackend b in backends) b.Dispose();
+            throw;
+        }
+        LlmPlacement placement = new([.. plan.Select((p, i) => new LlmStage(backends[i], p.StartLayer, p.EndLayer))]);
+        Ernie5LoadOptions options = HfTextDirectoryLoader.Ernie5OptionsFor(backends[^1].Device) with { Placement = placement, PreloadExperts = true };
+        try
+        {
+            // Owns the last backend from here, and disposes it on a failed load.
+            LoadHostReferenceInto(slot, checkpoint, path, backends[^1], [.. GateOrdinalsFor(slot, deviceKey)], plan: null, ernie5: options);
+        }
+        catch
+        {
+            foreach (IBackend b in backends.Take(backends.Count - 1)) b.Dispose();
+            throw;
+        }
+        slot.ExtraStageBackends = backends.Take(backends.Count - 1).ToList();
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' split over "
+            + string.Join(" + ", plan.Select(p => $"{p.Device}[{p.StartLayer},{p.EndLayer})")) + " with every weight preloaded.");
     }
 
     /// <summary>Loads a Kimi K3.1 directory onto the devices the request names. One device loads the whole decoder; two or more (a request-level

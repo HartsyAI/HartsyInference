@@ -1,3 +1,5 @@
+using HartsyInference.LLM.Transformer;
+
 namespace HartsyInference.LLM.Ernie5;
 
 /// <summary>How <see cref="Ernie5Model"/> holds its weights and how long its sequences may be.</summary>
@@ -16,4 +18,14 @@ public sealed record Ernie5LoadOptions
     /// sequence state their caches. When false their keys are skipped (<see cref="Ernie5WeightCoverage.SkippedMtp"/>). Without
     /// <see cref="ResidentWeights"/> every draft call reads and dequantizes the whole MTP layer again, its routed experts included.</summary>
     public bool Mtp { get; init; }
+
+    /// <summary>Layer ranges per backend (a pipeline split across devices): each layer runs on its stage's backend, and the head read-out, LM
+    /// head and MTP layer on the last stage's. The residual stream between layers is a host array, so a stage boundary needs no device copy.
+    /// Null runs every layer on the backend the model is built with. Needs <see cref="ResidentWeights"/> when it has more than one stage.</summary>
+    public LlmPlacement? Placement { get; init; }
+
+    /// <summary>With <see cref="ResidentWeights"/> on GPU stages, also preloads every routed expert and every block-scale grid, so no weight is read
+    /// from the checkpoint during a forward. The load is refused, naming the stage, when a stage's weights do not fit its device's budget
+    /// (<see cref="Ernie5Model.PreloadBudget"/>).</summary>
+    public bool PreloadExperts { get; init; }
 }

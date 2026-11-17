@@ -84,6 +84,21 @@ internal sealed class Ernie5Layer : IDisposable
     /// <summary>The latent MoE block, or null for a dense-FFN layer.</summary>
     internal MoeFeedForward? Moe => _moe;
 
+    /// <summary>The routed experts' projections grouped for one device allocation each (every expert's gate, up, then down), followed by their
+    /// block-scale grids grouped the same way; nothing for a dense layer. A preload of all of them leaves no weight to read from the
+    /// checkpoint during a forward.</summary>
+    internal IEnumerable<IReadOnlyList<Tensor>> EnumerateExpertPreloadGroups()
+    {
+        if (_moe is null) yield break;
+        List<IReadOnlyList<Tensor>> groups = [.. _moe.EnumerateExpertGroups()];
+        foreach (IReadOnlyList<Tensor> group in groups) yield return group;
+        foreach (IReadOnlyList<Tensor> group in groups)
+        {
+            List<Tensor> scales = [.. group.Select(t => t.QuantInfo?.Fp8BlockScaleInv).OfType<Tensor>()];
+            if (scales.Count > 0) yield return scales;
+        }
+    }
+
     /// <summary>The weights every token reads: attention, norms, the dense FFN, and the MoE block's routers, latent projections and shared
     /// expert, each FP8 weight followed by its block-scale grid. The routed experts are left out; a token reads ten of them.</summary>
     public IEnumerable<Tensor> EnumerateDenseWeights()
