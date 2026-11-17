@@ -23,6 +23,12 @@ public sealed partial class CudaBackend
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
         AttentionCallValidation.Validate(in call);
+        RunValidatedAttentionRows(rows, in call);
+    }
+
+    /// <summary><see cref="RunAttentionRows"/> for a call the caller has already passed through <see cref="AttentionCallValidation"/>.</summary>
+    private void RunValidatedAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
+    {
         if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
         AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
@@ -60,7 +66,7 @@ public sealed partial class CudaBackend
                 }
                 throw new AttentionUnsupportedException($"CUDA attention serves a call its legacy entry point can carry; this one has {gap}.");
             }
-            RunViewCall(in call);
+            RunValidatedAttentionRows(RowsFor(call.Route), in call);
             return;
         }
         Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
@@ -85,12 +91,6 @@ public sealed partial class CudaBackend
                     call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
                 break;
         }
-    }
-
-    /// <summary>A call the legacy entries cannot carry, planned over its route's rows with its own geometry checked first.</summary>
-    private void RunViewCall(in AttentionCall call)
-    {
-        RunAttentionRows(RowsFor(call.Route), in call);
     }
 
     /// <inheritdoc/>

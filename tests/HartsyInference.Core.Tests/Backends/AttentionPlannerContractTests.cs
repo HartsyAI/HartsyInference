@@ -49,6 +49,7 @@ public sealed class AttentionPlannerContractTests
         AttentionKernelCapability capability = Capability("narrow") with { NarrowsF32To = AttentionFormats.F16 };
         AttentionCall exact = operands.Call;
         AttentionCall queryKeyOnly = exact with { Numerics = new() { QueryKey = AttentionFormats.F16 } };
+        AttentionCall probValueOnly = exact with { Numerics = new() { ProbValue = AttentionFormats.F16 } };
         AttentionCall both = exact with
         {
             Numerics = new() { QueryKey = AttentionFormats.F16, ProbValue = AttentionFormats.F16 },
@@ -56,6 +57,7 @@ public sealed class AttentionPlannerContractTests
 
         Assert.Equal(AttentionExclusion.Numerics, capability.Excludes(in exact));
         Assert.Equal(AttentionExclusion.Numerics, capability.Excludes(in queryKeyOnly));
+        Assert.Equal(AttentionExclusion.Numerics, capability.Excludes(in probValueOnly));
         Assert.Equal(AttentionExclusion.None, capability.Excludes(in both));
     }
 

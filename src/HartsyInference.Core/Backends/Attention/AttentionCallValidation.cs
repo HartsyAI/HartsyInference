@@ -3,18 +3,26 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>Validates the common attention-call boundary before a backend plans or writes output.</summary>
+/// <remarks>Every malformed-call check runs before any unsupported-format check, so a call that is both malformed and
+/// refused reports the malformation. Per-head sinks and ALiBi slopes follow the documented <c>[Hq]</c> F32 contract;
+/// a different dtype or count is malformed, as the CUDA flash contract has always treated it.</remarks>
 internal static class AttentionCallValidation
 {
-    /// <summary>Checks geometry, addressability, numerical refusals and output ownership.</summary>
+    /// <summary>Checks geometry, addressability, logit terms, mask windows, output ownership and numerical refusals.</summary>
     /// <exception cref="ArgumentException">The call is malformed.</exception>
-    /// <exception cref="AttentionUnsupportedException">The call stores an explicitly refused format.</exception>
+    /// <exception cref="AttentionUnsupportedException">The call is well formed but stores a refused or unread format.</exception>
     public static void Validate(in AttentionCall call)
     {
-        AttentionFormats refused = call.Numerics.Refused & AttentionNumerics.OperandFormats(in call);
-        if (refused != AttentionFormats.None)
-            throw new AttentionUnsupportedException($"The call refuses {refused}, and an operand or the output is stored in it.");
         if (!float.IsFinite(call.Scale))
             throw new ArgumentOutOfRangeException(nameof(call), "Attention scale must be finite.");
+        if (!float.IsFinite(call.Logits.Softcap) || call.Logits.Softcap < 0f)
+            throw new ArgumentOutOfRangeException(nameof(call), "Attention softcap must be finite and non-negative.");
+        AttentionMask mask = call.Mask;
+        if (mask.WindowLeft < 0 || mask.WindowRight < 0 || mask.BlockSize < 0)
+            throw new ArgumentOutOfRangeException(nameof(call),
+                $"Attention windows and block size must be non-negative; got left={mask.WindowLeft}, right={mask.WindowRight}, block={mask.BlockSize}.");
+        if (!call.Positions.OnDevice && call.Positions.QueryOffset < 0)
+            throw new ArgumentOutOfRangeException(nameof(call), $"Attention query offset {call.Positions.QueryOffset} is negative.");
 
         AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
         if (q.Batch <= 0 || q.Heads <= 0 || q.Tokens <= 0 || q.HeadDim <= 0 || k.Heads <= 0 || k.Tokens <= 0 || v.HeadDim <= 0)
@@ -32,33 +40,33 @@ internal static class AttentionCallValidation
                 throw new ArgumentException($"Operand {Describe(x)} addresses past its {x.Storage.ElementCount}-element tensor.");
         if (ReferenceEquals(o.Storage, q.Storage) || ReferenceEquals(o.Storage, k.Storage) || ReferenceEquals(o.Storage, v.Storage))
             throw new ArgumentException("Attention output must not alias an input.", nameof(call));
-
-        ValidateBias(call.Mask.Bias, q, k);
+        if (mask.Bias is { } bias && !BiasBroadcasts(bias.Shape, q, k))
+            throw new ArgumentException($"Bias {bias.Shape} does not broadcast to [{q.Batch},{q.Heads},{q.Tokens},{k.Tokens}].");
         ValidatePerHead(call.Logits.Sinks, q.Heads, "Sinks");
         ValidatePerHead(call.Logits.AlibiSlopes, q.Heads, "ALiBi slopes");
+
+        if (mask.Bias is { } unread && unread.DType != DType.F32)
+            throw new AttentionUnsupportedException($"Attention reads F32 additive bias, not {unread.DType}.");
+        AttentionFormats refused = call.Numerics.Refused & AttentionNumerics.OperandFormats(in call);
+        if (refused != AttentionFormats.None)
+            throw new AttentionUnsupportedException($"The call refuses {refused}, and an operand or the output is stored in it.");
     }
 
-    private static void ValidateBias(Tensor? bias, AttentionOperand query, AttentionOperand key)
+    /// <summary>The host reference's broadcast rule: rank 2–4, every axis either 1 or the full extent. The legacy GPU kernels
+    /// accept a narrower set (the key axis must be <c>Skv</c>); their rows decline the rest after this boundary.</summary>
+    private static bool BiasBroadcasts(TensorShape s, AttentionOperand query, AttentionOperand key)
     {
-        if (bias is null) return;
-        if (bias.DType != DType.F32)
-            throw new AttentionUnsupportedException($"Attention reads F32 additive bias, not {bias.DType}.");
-        TensorShape s = bias.Shape;
         int rank = s.Rank;
-        bool fits = rank is >= 2 and <= 4 && (s[rank - 1] == 1 || s[rank - 1] == key.Tokens)
+        return rank is >= 2 and <= 4 && (s[rank - 1] == 1 || s[rank - 1] == key.Tokens)
             && (s[rank - 2] == 1 || s[rank - 2] == query.Tokens)
             && (rank < 3 || s[rank - 3] == 1 || s[rank - 3] == query.Heads)
             && (rank < 4 || s[0] == 1 || s[0] == query.Batch);
-        if (!fits)
-            throw new ArgumentException($"Bias {s} does not broadcast to [{query.Batch},{query.Heads},{query.Tokens},{key.Tokens}].");
     }
 
     private static void ValidatePerHead(Tensor? tensor, int heads, string name)
     {
-        if (tensor is not null && tensor.DType != DType.F32)
-            throw new AttentionUnsupportedException($"{name} are F32, not {tensor.DType}.");
-        if (tensor is { ElementCount: var count } && count < heads)
-            throw new ArgumentException($"{name} hold {count} values for {heads} heads.");
+        if (tensor is not null && (tensor.DType != DType.F32 || tensor.ElementCount != heads))
+            throw new ArgumentException($"{name} must be F32 with exactly {heads} values; got {tensor.DType} {tensor.Shape}.");
     }
 
     private static string Describe(in AttentionOperand x) =>

@@ -15,8 +15,7 @@ public sealed partial class CpuBackend
         switch (LegacyRoute(in call))
         {
             case AttentionRoute.Dense:
-                ScaledDotProductAttention(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.Mask.Bias,
-                    call.Scale, call.Numerics.LegacyAssertedBounded);
+                RunDenseAttention(in call);
                 break;
             case AttentionRoute.Flash or AttentionRoute.FlashDevice:
                 if (call.Positions.OnDevice)
