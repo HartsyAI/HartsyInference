@@ -31,7 +31,7 @@ internal static class MeshMemoryProfile
     /// <summary>Whether the request makes the engine matte its image: TRELLIS.2 and Pixal3D always matte an image without a usable alpha plane, and the models whose input the engine prepares do under <see cref="MeshPreprocess.Auto"/>.</summary>
     internal static bool Mattes(string id, MeshRequest request) =>
         request.Image is { } image && !MeshPreparationService.HasUsableAlpha(image)
-        && (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || id == MeshModelIds.Idol || (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id)));
+        && (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || MeshModelIds.IsIdol(id) || (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id)));
 
     /// <summary>The video memory Windows gives one process before it pages the rest, about 8 GiB (see <c>vram.preloadHeadroomMb</c>).</summary>
     public const long WindowsProcessBudgetBytes = 8L << 30;

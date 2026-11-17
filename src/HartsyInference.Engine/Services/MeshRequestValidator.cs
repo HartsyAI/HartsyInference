@@ -93,9 +93,9 @@ internal static class MeshRequestValidator
         {
             Sam3dObjectsRequestMapper.Validate(request);
         }
-        else if (id == MeshModelIds.Idol)
+        else if (MeshModelIds.IsIdol(id))
         {
-            IdolRequestMapper.Validate(request);
+            IdolRequestMapper.Validate(request, id);
             if (!MeshPreparationService.HasUsableAlpha(request.Image) && !matterAvailable)
             {
                 throw new NotSupportedException("Idol needs the foreground cut out: send an image with alpha, or install the BiRefNet matting checkpoint (Vision/BiRefNet-matting/model.safetensors).")

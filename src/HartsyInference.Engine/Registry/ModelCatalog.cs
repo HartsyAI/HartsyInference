@@ -429,6 +429,25 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>Idol-turbo (<c>akhaliq/idol-turbo</c>, Apache-2.0): Idol's denoiser distilled into two rank-32 phase LoRAs (slow while the shifted time is 0.5 or more, fast below), so 5 guidance-free steps replace 50 guided ones.
+    /// It runs the base Idol files, so the entry lists them at the same folder and with the same hashes as <c>idol</c> (a model that has them already downloads only the two LoRAs, 59 MB each) and adds the Comfy-format
+    /// LoRAs, which are pre-scaled for strength 1.0, in <c>loras/</c> (revision 45cdd41f1f4d6d70496daa7d619f57ad79307a37; an asset carries no revision field, so a changed file fails the hash check). The hashes are the repository's LFS
+    /// oids, equal to the sha256 of the downloaded bytes.</summary>
+    private static CatalogEntry IdolTurbo() => new CatalogEntry
+    {
+        Id = "idol-turbo", Modality = Modality.Mesh, DisplayName = "Idol-turbo (image to Gaussian splats, 5 steps)",
+        Architecture = "Idol (DINOv3 ViT-H+/16 + FLUX.2 VAE, 370M rectified-flow transformer, octree and Gaussian decoders) with slow and fast rank-32 phase LoRAs",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "Comfy-Org/Idol",
+        Assets =
+        [
+            .. Idol().Assets!,
+            new ModelAsset { Repo = "akhaliq/idol-turbo", RepoPath = "loras/idol_turbo_slow_comfy.safetensors", TargetSubdir = "3D/idol", TargetName = "loras/idol_turbo_slow_comfy.safetensors",
+                Role = "slow phase LoRA (high-noise steps)", Sha256 = "4b27bbbf87d002762d8d0c840fdbf8b48d740c9fac2ba34d4e607196861f843f" },
+            new ModelAsset { Repo = "akhaliq/idol-turbo", RepoPath = "loras/idol_turbo_fast_comfy.safetensors", TargetSubdir = "3D/idol", TargetName = "loras/idol_turbo_fast_comfy.safetensors",
+                Role = "fast phase LoRA (low-noise steps)", Sha256 = "1111341fbe27c2e80534fcac236a12c4484b334c407d993d601e9a86f9b36e8a" },
+        ],
+    };
+
     /// <summary>SAM 3D Objects (facebookresearch/sam-3d-objects), image plus object mask to Gaussian splats with a pose: a mixture-of-transformers structure flow conditioned on two DINOv2 towers and a
     /// pointmap, a sparse SLAT flow, and the Gaussian decoder, with MoGe estimating the pointmap. Meta's checkpoints are gated and pickled; this entry names the ungated third-party safetensors conversion
     /// <c>apozz/sam-3d-objects-safetensors</c> (revision cbb995af47eae6c30d2f2a087f5195be2365a2e2; an asset carries no revision field, so a changed file fails
@@ -2951,6 +2970,7 @@ public static class ModelCatalog
             Trellis2(),
             Pixal3D(),
             Idol(),
+            IdolTurbo(),
             Sam3dObjects(),
             HairDeck(),
 

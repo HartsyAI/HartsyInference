@@ -18,6 +18,12 @@ public static class MeshModelIds
     /// <summary>Idol (Sperid Labs): image to Gaussian splats (PLY) with a 50-step guided rectified-flow denoiser; the engine mattes, frames and encodes the image itself.</summary>
     public const string Idol = "idol";
 
+    /// <summary>Idol-turbo: Idol's denoiser with two distilled phase LoRAs, 5 guidance-free steps instead of 50 guided ones; the same files, folder and output as <see cref="Idol"/> plus the LoRAs.</summary>
+    public const string IdolTurbo = "idol-turbo";
+
+    /// <summary>The Idol family: ids that run <c>IdolImageTo3DPipeline</c>.</summary>
+    public static bool IsIdol(string id) => id == Idol || id == IdolTurbo;
+
     /// <summary>Hunyuan3D-2mv: the shape build conditioned on up to four views (<see cref="Requests.MeshRequest.Image"/> as the front and
     /// <see cref="Requests.MeshRequest.Views"/>).</summary>
     public const string Hunyuan3DMultiView = "hunyuan3d-mv";
@@ -26,7 +32,7 @@ public static class MeshModelIds
     public static readonly IReadOnlyList<string> Hunyuan3D = ["hunyuan3d", "hunyuan3d-fast", "hunyuan3d-turbo", "hunyuan3d-mini", Hunyuan3DMultiView];
 
     /// <summary>Image-to-3D models: their request carries <see cref="Requests.MeshRequest.Image"/>.</summary>
-    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", Pixal3D, Sam3dObjects, Idol];
+    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", Pixal3D, Sam3dObjects, Idol, IdolTurbo];
 
     /// <summary>Scene-decomposition models: their request carries <see cref="Requests.MeshRequest.SceneMesh"/>.</summary>
     public static readonly IReadOnlyList<string> SceneMesh = ["cola3d"];

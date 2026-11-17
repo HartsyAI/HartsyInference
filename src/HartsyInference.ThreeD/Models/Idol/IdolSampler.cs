@@ -22,10 +22,10 @@ public static class IdolSampler
     /// <summary>Denoises <paramref name="noiseLatent"/> <c>[1, 8192, 16]</c> and <paramref name="noiseCamera"/> <c>[1, 1, 5]</c> (neither is modified) into the
     /// object latent and the input camera. <paramref name="positive"/> and <paramref name="negative"/> are the image streams of
     /// <see cref="IdolDenoiser.EmbedContext"/> for the picture and for zeros. A <paramref name="guidance"/> of 0 runs the conditional pass alone.
-    /// The caller owns both results.</summary>
+    /// <paramref name="passScope"/> opens a scope around each forward pass, given that pass's <c>1000·t</c> (Idol-turbo switches its phase expert there). The caller owns both results.</summary>
     public static (Tensor Latent, Tensor Camera) Sample(IBackend backend, IdolDenoiser model, Tensor positive, Tensor negative,
         Tensor noiseLatent, Tensor noiseCamera, int steps = DefaultSteps, float guidance = DefaultGuidance, double rescaleT = DefaultRescaleT,
-        Action<int>? onStep = null)
+        Action<int>? onStep = null, Func<float, IDisposable>? passScope = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(model);
@@ -45,6 +45,7 @@ public static class IdolSampler
                 using (latent)
                 using (camera)
                 {
+                    using IDisposable? scope = passScope?.Invoke(tModel);
                     (Tensor vLatent, Tensor vCamera) = model.Forward(backend, latent, camera, tModel, conditional ? positive : negative);
                     using (vLatent)
                     using (vCamera)
