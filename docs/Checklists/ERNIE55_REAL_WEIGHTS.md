@@ -117,9 +117,12 @@ layer completes 18 compressor groups and every DSA query from position 2,176 sel
   | 22 | 7.6e-6 | 6.8e-6 | 7.3e-6 | 7.2e-6 | 1.5e-3 | 1.3e-3 | 4.0e-4 |
   | 35 | 4.9e-6 | 4.5e-6 | 6.1e-6 | 2.3e-5 | 1.9e-3 | 1.7e-3 | 1.0e-3 |
 
-  - **Before the tie:** up to layer 7 the error is flat across every band, so nothing breaks with length.
-  - **After the tie:** from layer 8, every position after 1919 reads that position's changed state through attention. Only those
-    positions carry the extra error.
+  - **Before the tie:** up to layer 7 the error stays within 1.5x across every band (a slow rise with length, 5.1e-6 to 7.3e-6 at
+    layer 7), so nothing breaks with length.
+  - **After the tie:** from layer 8, every position after 1919 reads that position's changed state through attention, and those
+    positions jump to 1e-4 to 2e-3. Positions before 1920 stay below 1e-5 through layer 28. At layer 35 the 1792-1919 band rises to
+    2.3e-5; causal attention means position 1919 can't reach them, so something else does. That rise is not traced. It may be
+    smaller routing flips that stay above cosine 0.999, which `--explain` does not list.
   - **Later dips:** that small extra error then tips a few more routing near ties after position 1919. That is why every dip is at
     1919 or later. 13 of the 22 first drops have a router gap within the smallest 5.1% of their layer, at the drop's layer or the one
     before. The other 9 all come after earlier ties, which fits propagation.
@@ -127,8 +130,9 @@ layer completes 18 compressor groups and every DSA query from position 2,176 sel
 - **Indexer near ties are common at this scale.** 76 of the 132 selecting positions have a kept/dropped gap below 1e-4 of the spread,
   so `--tie-margin` refuses (`--max-tie-fraction`); read `--explain` instead.
 - **Production precision** (`ERNIE_REAL_PRECISION=production`, TF32 GEMMs, #935), on the 13-position decode parity: all 43 layers reach
-  cosine 0.9999989 or more at every position (relative error 9e-5 to 5e-4), and the argmax after the last position is 1232 on both
-  sides.
+  cosine 0.9999989 or more at every single position (the whole-stream relative error per layer is 9e-5 to 5e-4), and the argmax
+  after the last position is 1232 on both sides. Without `ERNIE_REAL_PRECISION` the harness runs the `reference` GEMM pins, so every
+  other run above needs no extra configuration.
 
 ## What is not verified
 
