@@ -13,6 +13,7 @@ using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using HartsyInference.ThreeD.Sampling;
+using HartsyInference.ThreeD.Models;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
@@ -133,7 +134,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         {
             Pixal3DNaf naf = Pixal3DNaf.Load(files.Naf);
             owned.Add(naf);
-            Pixal3DConditionerStage conditioner = new(Trellis2ImageConditioner.Load(files.Dino), naf);
+            Pixal3DConditionerStage conditioner = new(Dinov3ImageConditioner.Load(files.Dino), naf);
             owned.Add(conditioner);
             Pixal3DStructureStage structure = Pixal3DStructureStage.Load(files.StructureFlow, files.StructureDecoder);
             owned.Add(structure);
