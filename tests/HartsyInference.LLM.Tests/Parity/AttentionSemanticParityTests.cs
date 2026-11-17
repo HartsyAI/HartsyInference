@@ -242,6 +242,75 @@ public sealed class AttentionSemanticParityTests
             Assert.InRange(Math.Abs(Read(output, c) - 7), 0, 3e-3 * 7);
     }
 
+    /// <summary>The attention softmax replaced the legacy softmax (and separate F32 mask add) on the materialized and
+    /// query-tiled rows. Finite rows must stay bit-identical to it, so a request whose attention never excludes a whole
+    /// row (Krea 2's strict-F32 text encoder, with its finite <c>-1e30</c> causal sentinel) keeps its exact output.</summary>
+    [CudaTheory]
+    [InlineData("f32", false)]
+    [InlineData("f32", true)]
+    [InlineData("f16", false)]
+    public unsafe void AttentionSoftmaxReproducesLegacySoftmaxBitsOnFiniteRows(string dtype, bool masked)
+    {
+        const int rows = 37, columns = 1031;
+        bool half = dtype == "f16";
+        int elementSize = half ? 2 : 4, count = rows * columns;
+        using CudaContext context = new();
+        using CudaStream stream = new();
+        using CudaKernels kernels = new(CudaPtxDirectory.Resolve(), context);
+        Random random = new(20261116);
+        float[] scores = new float[count], bias = new float[count];
+        for (int i = 0; i < count; i++)
+        {
+            scores[i] = (float)(random.NextDouble() * 24 - 12);
+            int row = i / columns, column = i % columns;
+            bias[i] = column > row * 28 ? -1e30f : (float)(random.NextDouble() - 0.5);
+        }
+        Half[] halves = Array.ConvertAll(scores, x => (Half)x);
+        ulong legacy = 0, current = 0, mask = 0;
+        try
+        {
+            legacy = CudaMemory.AllocatePersistent((nuint)(count * elementSize));
+            current = CudaMemory.AllocatePersistent((nuint)(count * elementSize));
+            mask = CudaMemory.AllocatePersistent((nuint)(count * 4));
+            if (half)
+                fixed (Half* source = halves)
+                {
+                    CudaMemory.CopyHostToDeviceAsync(legacy, source, (nuint)(count * 2), stream.Handle);
+                    CudaMemory.CopyHostToDeviceAsync(current, source, (nuint)(count * 2), stream.Handle);
+                }
+            else
+                fixed (float* source = scores)
+                {
+                    CudaMemory.CopyHostToDeviceAsync(legacy, source, (nuint)(count * 4), stream.Handle);
+                    CudaMemory.CopyHostToDeviceAsync(current, source, (nuint)(count * 4), stream.Handle);
+                }
+            fixed (float* source = bias) CudaMemory.CopyHostToDeviceAsync(mask, source, (nuint)(count * 4), stream.Handle);
+
+            if (masked) kernels.LaunchAdd(legacy, legacy, mask, count, stream.Handle);
+            if (half) kernels.LaunchSoftmaxF16(legacy, columns, rows, stream.Handle);
+            else kernels.LaunchSoftmax(legacy, columns, rows, stream.Handle);
+            kernels.LaunchAttentionSoftmax(current, masked ? mask : 0, columns, rows, half, stream.Handle);
+
+            byte[] expected = new byte[count * elementSize], actual = new byte[count * elementSize];
+            fixed (byte* target = expected) CudaMemory.CopyDeviceToHostAsync(target, legacy, (nuint)expected.Length, stream.Handle);
+            fixed (byte* target = actual) CudaMemory.CopyDeviceToHostAsync(target, current, (nuint)actual.Length, stream.Handle);
+            stream.Synchronize();
+            int first = expected.AsSpan().SequenceCompareTo(actual) == 0 ? -1 : Mismatch(expected, actual) / elementSize;
+            Assert.True(first < 0, $"First differing element {first} (row {first / columns}, column {first % columns}).");
+        }
+        finally
+        {
+            stream.Synchronize();
+            foreach (ulong buffer in (ReadOnlySpan<ulong>)[legacy, current, mask]) if (buffer != 0) CudaMemory.Free(buffer);
+        }
+
+        static int Mismatch(byte[] a, byte[] b)
+        {
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return i;
+            return -1;
+        }
+    }
+
     [CudaTheory]
     [InlineData(false, "nan")]
     [InlineData(true, "nan")]
