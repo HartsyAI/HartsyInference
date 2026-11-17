@@ -54,6 +54,13 @@ public sealed class IdolRequestMapperTests
     public void AGuidanceOutOfRangeIsRejected(double guidance)
         => Assert.Equal(nameof(MeshRequest.Guidance), MeshFieldTag.FieldOf(Assert.Throws<ArgumentOutOfRangeException>(() => IdolRequestMapper.Validate(Request() with { Guidance = guidance }))));
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(1001)]
+    [InlineData(100000)]
+    public void AStepCountOutsideZeroToAThousandIsRejected(int steps)
+        => Assert.Equal(nameof(MeshRequest.Steps), MeshFieldTag.FieldOf(Assert.Throws<ArgumentOutOfRangeException>(() => IdolRequestMapper.Validate(Request() with { Steps = steps }))));
+
     [Fact]
     public void AGridAFieldOfViewAndANegativeStepCountAreRejected()
     {

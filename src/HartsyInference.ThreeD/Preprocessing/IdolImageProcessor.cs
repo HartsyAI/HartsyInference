@@ -26,7 +26,7 @@ public static class IdolImageProcessor
     public static double Margin(IdolFraming framing) => framing == IdolFraming.Photo ? 1.7 : 1.2;
 
     /// <summary>Prepares one image. <paramref name="alpha"/> is its coverage when it has a real one (some pixel below 255); otherwise
-    /// (null or fully opaque) <paramref name="matter"/> estimates it on the resized picture.</summary>
+    /// (null or fully opaque) <paramref name="matter"/> estimates it on the resized picture. Whether it has one is decided on the image as given, before the resize.</summary>
     /// <exception cref="ArgumentException">The image is malformed, has no matte, or the matte is empty.</exception>
     public static PreparedImage Process(IBackend backend, byte[] rgb, byte[]? alpha, int width, int height, IdolFraming framing, IForegroundMatter? matter)
     {
@@ -36,7 +36,8 @@ public static class IdolImageProcessor
         int scaledHeight = Math.Max(1, (int)Math.Round(height * scale, MidpointRounding.ToEven));
         byte[] scaled = PilRgba.ResizeLanczos(ForegroundPixels.ToRgba(rgb, coverage), width, height, scaledWidth, scaledHeight);
 
-        if (!HasRealAlpha(scaled))
+        // The decision is the original image's, the one the engine's validator and memory planner made; the resize cannot flip it.
+        if (!HasRealAlpha(coverage))
         {
             if (matter is null)
                 throw new ArgumentException("The image has no alpha and no matting model is available to cut the object out.", nameof(alpha));
@@ -75,12 +76,12 @@ public static class IdolImageProcessor
         return new PreparedImage(PilRgba.CompositeOnBlack(square, Size, Size), Size, Size);
     }
 
-    /// <summary>Whether the RGBA image carries a matte: some pixel is not fully opaque (idol-sdk's <c>has_real_alpha</c>).</summary>
-    internal static bool HasRealAlpha(byte[] rgba)
+    /// <summary>Whether the coverage plane carries a matte: some pixel is not fully opaque (idol-sdk's <c>has_real_alpha</c>).</summary>
+    internal static bool HasRealAlpha(ReadOnlySpan<byte> coverage)
     {
-        for (int i = 3; i < rgba.Length; i += 4)
+        foreach (byte a in coverage)
         {
-            if (rgba[i] < 255)
+            if (a < 255)
                 return true;
         }
 

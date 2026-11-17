@@ -1018,11 +1018,11 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     IdolImageTo3DPipeline pipeline = new(_engine.Backend, directory, MeshPreparationInternalMatter(), LoadFlux2Vae);
                     HartsyInference.ThreeD.Geometry.GaussianSplatCloud splats = pipeline.Generate(
                         image.Rgb, image.Alpha, image.Width, image.Height, options,
-                        (stage, step, total) =>
+                        (phase, stage, step, total) =>
                         {
                             cancel.ThrowIfCancellationRequested();
-                            int index = stage.StartsWith("Preparing", StringComparison.Ordinal) ? 1 : stage.StartsWith("Encoding", StringComparison.Ordinal) ? 2 : stage.StartsWith("Denoising", StringComparison.Ordinal) ? 3 : 4;
-                            progress?.Report(MeshProgress.Plain(index == 3 ? step : index < 3 ? 0 : steps, steps, stage, step, total, index, 4));
+                            int index = (int)phase;
+                            progress?.Report(MeshProgress.Plain(phase == IdolStage.Denoising ? step : phase < IdolStage.Denoising ? 0 : steps, steps, stage, step, total, index, 4));
                         },
                         line => Logs.Info($"[idol] {line}"),
                         cancel);

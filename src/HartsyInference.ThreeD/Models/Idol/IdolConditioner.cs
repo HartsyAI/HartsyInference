@@ -9,8 +9,8 @@ namespace HartsyInference.ThreeD.Models.Idol;
 /// <summary>Idol's two image streams (idol-sdk's <c>ImageEncoder</c>) for a prepared 1024 px picture: <c>feature1</c>, the DINOv3 ViT-H+
 /// tokens after the model's final norm and a non-affine LayerNorm <c>[1, 4101, 1280]</c>, and <c>feature2</c>, the FLUX.2 VAE latent
 /// (the posterior mean) patchified 2 × 2, BatchNorm-normalised, flattened to 4096 tokens of 128 channels and prefixed by five zero tokens
-/// <c>[1, 4101, 128]</c>. Idol samples the posterior; Budget3D's encoder, and this one, take its mean. Borrows its components.</summary>
-public sealed class IdolConditioner
+/// <c>[1, 4101, 128]</c>. Idol samples the posterior; Budget3D's encoder, and this one, take its mean. Stateless: each stage is run on its own so the encoders need not be loaded together.</summary>
+public static class IdolConditioner
 {
     /// <summary><c>batch_norm_eps</c> of the FLUX.2 VAE's config.</summary>
     public const float BatchNormEps = 1e-4f;
@@ -18,31 +18,13 @@ public sealed class IdolConditioner
     private const int PatchSize = 2;
     private const int ZeroTokens = 5;
 
-    private readonly Dinov3ImageConditioner _dino;
-    private readonly VaeEncoder _vae;
-    private readonly Tensor _bnMean, _bnVar;
-
-    /// <param name="dino">The ViT-H+/16 conditioner, loaded for 1024 px.</param>
-    /// <param name="vae">The FLUX.2 VAE encoder.</param>
-    /// <param name="bnMean">The VAE's BatchNorm running mean of the patchified latent, F32 <c>[128]</c>.</param>
-    /// <param name="bnVar">The running variance, F32 <c>[128]</c>.</param>
-    public IdolConditioner(Dinov3ImageConditioner dino, VaeEncoder vae, Tensor bnMean, Tensor bnVar)
+    /// <summary>The DINOv3 stream <c>[1, 4101, 1280]</c> of the prepared <c>1024 × 1024</c> RGB24 picture from a ViT-H+/16 conditioner loaded for 1024 px; the caller owns it.</summary>
+    public static Tensor DinoTokens(IBackend backend, Dinov3ImageConditioner dino, ReadOnlySpan<byte> rgb)
     {
-        _dino = dino ?? throw new ArgumentNullException(nameof(dino));
-        _vae = vae ?? throw new ArgumentNullException(nameof(vae));
-        _bnMean = bnMean ?? throw new ArgumentNullException(nameof(bnMean));
-        _bnVar = bnVar ?? throw new ArgumentNullException(nameof(bnVar));
-    }
-
-    /// <summary>The DINOv3 stream <c>[1, 4101, 1280]</c> of the prepared <c>1024 × 1024</c> RGB24 picture; the caller owns it.</summary>
-    public Tensor DinoTokens(IBackend backend, ReadOnlySpan<byte> rgb)
-    {
+        ArgumentNullException.ThrowIfNull(dino);
         Require(rgb);
-        return _dino.Encode(backend, rgb, IdolImageProcessor.Size, IdolImageProcessor.Size, IdolImageProcessor.Size, finalNorm: true);
+        return dino.Encode(backend, rgb, IdolImageProcessor.Size, IdolImageProcessor.Size, IdolImageProcessor.Size, finalNorm: true);
     }
-
-    /// <summary>The VAE stream <c>[1, 4101, 128]</c> of the prepared picture; the caller owns it.</summary>
-    public Tensor VaeTokens(IBackend backend, ReadOnlySpan<byte> rgb) => VaeTokens(backend, _vae, _bnMean, _bnVar, rgb);
 
     /// <summary>The VAE stream of the prepared <c>1024 × 1024</c> RGB24 picture from an encoder and the VAE's BatchNorm statistics; the
     /// caller owns the result.</summary>

@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Models;
+using HartsyInference.ThreeD.Models.TrellisV2;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 

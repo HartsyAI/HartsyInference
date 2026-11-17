@@ -8,12 +8,12 @@ using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Models;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using HartsyInference.ThreeD.Sampling;
-using HartsyInference.ThreeD.Models;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
