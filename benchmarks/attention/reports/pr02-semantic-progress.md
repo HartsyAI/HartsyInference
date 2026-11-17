@@ -74,6 +74,12 @@ Full affected GPU categories run sequentially on Windows 11, RTX 3060 (SM86), dr
 | Diffusion | 18 | 0 | 2 |
 | Engine | 12 | 0 | 10 |
 
+After integrating current `main` (merge commit `0f4fdb159`, including #913's exactly-`-FLT_MAX` decode fix) and the
+softmax correction, the same categories rerun sequentially on the RTX 3060 at `b0e03e2f5`: Core 21 passes; LLM 104
+passes/19 skips; Diffusion 18 passes/2 skips; Engine 17 passes/10 skips; no failures. The four conflicted Flash and
+fused-decode PTX files were rebuilt from the merged source in the pinned CUDA 13.0.88 image (whose rebuild of every
+other `lm` and `attention` kernel matched the shipped bytes), not taken from either side.
+
 Four reported passes are guarded two/eight-GPU NCCL/Kimi checks and remain unvalidated. Real-weight resource
 skips remain unvalidated too. The standalone Cuda.Tests folder has no project; its loose source is not a
 separately executed suite.
