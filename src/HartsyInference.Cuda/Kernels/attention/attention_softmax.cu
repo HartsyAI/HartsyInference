@@ -1,5 +1,6 @@
 // Materialized attention softmax. Add the public F32 bias without narrowing or clamping it.
-// All -infinity rows produce zero probabilities; NaN and +infinity scores propagate NaN.
+// All -infinity rows produce zero probabilities; NaN and +infinity scores propagate NaN. Finite rows reproduce the
+// legacy softmax_f32/_f16 arithmetic bit for bit (same block size, reduction order, ex2.approx and rcp.approx).
 // One 256-thread block per row; dynamic shared memory is blockDim.x * sizeof(float).
 // Build: ./build.sh (pinned NVRTC, sm_80 baseline and sm_75 floor).
 #include <cuda_fp16.h>
@@ -49,7 +50,13 @@ __device__ void attention_softmax(T* data, const float* bias, unsigned int rowLe
         __syncthreads();
     }
     sum = scratch[0];
-    float inverse = sum > 0.0f ? 1.0f / sum : (isnan(sum) ? sum : 0.0f);
+    // rcp.approx, not 1.0f / sum (rcp.rn): the legacy softmax_f32/_f16 PTX normalized with the approximate reciprocal,
+    // so finite rows stay bit-identical to it. Only all-excluded and NaN rows differ, as the contract requires.
+    float inverse;
+    if (sum > 0.0f)
+        asm("rcp.approx.f32 %0, %1;" : "=f"(inverse) : "f"(sum));
+    else
+        inverse = isnan(sum) ? sum : 0.0f;
     for (unsigned int c = tid; c < rowLen; c += blockDim.x)
         data[base + c] = (T)((float)data[base + c] * inverse);
 }
