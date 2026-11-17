@@ -25,8 +25,10 @@ public static class GaussianSplatActivations
         return 0.5f * MathF.Log(sp * sp + minKernel * minKernel);
     }
 
-    /// <summary>The rotation <c>q_R ⊗ (w, x, y, z)</c> that turns a z-up splat to the y-up convention viewers use (a 90° turn about
-    /// x, matching <c>(x, y, z) → (x, −z, y)</c> for positions), in the same w-first order.</summary>
-    public static (float W, float X, float Y, float Z) TurnToYUp(float w, float x, float y, float z)
+    /// <summary>The rotation <c>(w, x, y, z) ⊗ q_R</c>, the turn <c>q_R = (√½, √½, 0, 0)</c> (90° about x, the same map as <c>(x, y, z) → (x, −z, y)</c> for positions) composed AFTER the
+    /// splat's own rotation, in the same w-first order: as matrices <c>R_q · T</c>. This is what the TRELLIS and SAM 3D builders have always written, and the output is pinned byte for byte.
+    /// It is not the product the TRELLIS reference writes: <c>save_ply</c> applies <c>T · R_q</c> (<c>q_R ⊗ q</c>), which differs by a rotation about x unless the splat's own rotation is about x;
+    /// the two agree only for such splats. Changing the builders to the reference's order is a change of output and needs a render check, so it is a separate change.</summary>
+    public static (float W, float X, float Y, float Z) TurnToYUpAfter(float w, float x, float y, float z)
         => (C45 * w - C45 * x, C45 * x + C45 * w, C45 * y + C45 * z, C45 * z - C45 * y);
 }

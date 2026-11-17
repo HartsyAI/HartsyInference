@@ -5,12 +5,16 @@
     <IsPackable>false</IsPackable>
     <RootNamespace>HartsyInference.GenCapture</RootNamespace>
     <AssemblyName>hartsy-gencapture</AssemblyName>
+    <AttentionProductionRoot Condition="'$(AttentionProductionRoot)' == ''">$(MSBuildThisFileDirectory)..\..</AttentionProductionRoot>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/HartsyInference.Engine/HartsyInference.Engine.csproj" />
+    <Compile Include="../../benchmarks/Shared/BenchmarkKnobProfiles.cs" Link="Shared/BenchmarkKnobProfiles.cs" />
+    <ProjectReference Include="$(AttentionProductionRoot)/src/HartsyInference.Engine/HartsyInference.Engine.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="../../src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../benchmarks/attention/protocol.json" Link="attention-protocol.json"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="$(AttentionProductionRoot)/src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="$(AttentionProductionRoot)/src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

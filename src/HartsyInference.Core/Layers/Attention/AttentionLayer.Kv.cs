@@ -12,6 +12,7 @@ public sealed partial class AttentionLayer
     public Tensor AttendOverKvHeadMajor(IBackend backend, Tensor qMh, Tensor? kMh, Tensor? vMh, IAttentionKvSource? source,
         int layer, int kvLayer, in KvAttentionCall call, OperandOwnership consume = OperandOwnership.All)
     {
+        using AttentionEvidenceContext evidence = AttentionEvidence.Context("attention.kv", layer);
         bool ownQ = (consume & OperandOwnership.Query) != 0;
         bool ownK = kMh is not null && (consume & OperandOwnership.Key) != 0;
         bool ownV = vMh is not null && (consume & OperandOwnership.Value) != 0;

@@ -36,14 +36,31 @@ public sealed class HeadRmsNorm : IDisposable
         ArgumentNullException.ThrowIfNull(heads);
         ArgumentNullException.ThrowIfNull(gamma);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        TensorShape shape = gammaShape ?? heads.Shape;
+        if (shape.ElementCount != heads.Shape.ElementCount)
+            throw new ArgumentException($"The gamma shape {shape} does not hold the {heads.Shape.ElementCount} elements of the heads {heads.Shape}.", nameof(gammaShape));
         Tensor rms = new(heads.Shape, DType.F32);
-        backend.RmsNorm(rms, heads, Ones, _eps);
-        heads.Dispose();
-        TensorShape shape = gammaShape ?? rms.Shape;
-        Tensor o = new(shape, DType.F32);
-        backend.AffineBroadcastLastDim(o, shape.Equals(rms.Shape) ? rms : rms.Reshape(shape), gamma, null);
-        rms.Dispose();
-        return o;
+        try
+        {
+            backend.RmsNorm(rms, heads, Ones, _eps);
+            heads.Dispose();
+            Tensor o = new(shape, DType.F32);
+            try
+            {
+                backend.AffineBroadcastLastDim(o, shape.Equals(rms.Shape) ? rms : rms.Reshape(shape), gamma, null);
+            }
+            catch
+            {
+                o.Dispose();
+                throw;
+            }
+
+            return o;
+        }
+        finally
+        {
+            rms.Dispose();
+        }
     }
 
     public void Dispose()

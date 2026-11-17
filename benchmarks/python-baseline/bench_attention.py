@@ -24,6 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
+if "--fixture" in sys.argv:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "attention"))
+    from kitchen_operation import main as shared_fixture_main
+    sys.exit(shared_fixture_main())
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
