@@ -259,7 +259,10 @@ public sealed class Ernie5AttentionLayersParityTests
         {
             using HcaAttention layer = new(backend, _settings, _weights, _rope);
             HcaAttentionState state = new(Prefill + Decode, _settings);
-            layer.Forward(X.AsSpan(0, Prefill * Dim), Prefill, 0, state, y.AsSpan(0, Prefill * Dim));
+            // Two prefill chunks: the second starts past the window, so on a GPU it reads ring slots in one batched call.
+            const int first = 13;
+            layer.Forward(X.AsSpan(0, first * Dim), first, 0, state, y.AsSpan(0, first * Dim));
+            layer.Forward(X.AsSpan(first * Dim, (Prefill - first) * Dim), Prefill - first, first, state, y.AsSpan(first * Dim, (Prefill - first) * Dim));
             for (int t = Prefill; t < Prefill + Decode; t++)
                 layer.Forward(X.AsSpan(t * Dim, Dim), 1, t, state, y.AsSpan(t * Dim, Dim));
         }
