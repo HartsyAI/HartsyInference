@@ -176,7 +176,72 @@ public sealed class X0FlowPredictorTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new SnrCalibration(0f));
         Assert.Throws<ArgumentOutOfRangeException>(() => new SnrCalibration(-1f));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SnrCalibration(float.PositiveInfinity));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new SnrCalibration(float.NaN));
         Assert.Equal(0.4f, default(SnrCalibration).Sigma(0.4f), 6);   // the unset struct is the identity
+        Assert.Equal(1f, default(SnrCalibration).Scale);
+        Assert.Equal(new SnrCalibration(1f), default(SnrCalibration));
+        Assert.Equal(new SnrCalibration(1f).GetHashCode(), default(SnrCalibration).GetHashCode());
+        Assert.True(new SnrCalibration(2f) != default);
+    }
+
+    /// <summary>Returning one tensor for both branches is how the engine signals a guidance-free evaluation, so it must not
+    /// be read as a guided pair (which would use or free the tensor twice), on either path.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheSameTensorForBothBranchesIsGuidanceFree(bool withTransform)
+    {
+        using CpuBackend backend = new();
+        using Tensor x = Tensor1([0.5f, 1f]);
+        const float sigma = 0.5f;
+        X0FlowPredictor.GuidedX0Transform? transform = withTransform ? (guided, _) => guided : null;
+
+        using DenoisePrediction prediction = new X0FlowPredictor(backend,
+            (_, _, _) => { Tensor both = Tensor1([0.2f, 0.4f]); return (both, both); }, 4f, Floor, GuidanceAnchor.Uncond, transform)
+            .Predict(x, sigma, 0);
+
+        Assert.Same(prediction.Cond, prediction.Uncond);
+        Assert.Equal(1f, prediction.Guidance);
+        AssertEqual([(0.5f - 0.2f) / sigma, (1f - 0.4f) / sigma], prediction.Cond);
+    }
+
+    [Fact]
+    public void ATransformThatReturnsItsInputWorksOnAGuidanceFreeEvaluation()
+    {
+        using CpuBackend backend = new();
+        using Tensor x = Tensor1([0.5f]);
+
+        using DenoisePrediction prediction = new X0FlowPredictor(backend, (_, _, _) => (Tensor1([0.2f]), null), 4f, Floor,
+            GuidanceAnchor.Uncond, (guided, _) => guided).Predict(x, 0.5f, 0);
+
+        AssertEqual([(0.5f - 0.2f) / 0.5f], prediction.Cond);
+    }
+
+    [Fact]
+    public void TheFloorIsForwardedAsTheEpsilonOfTheConversion()
+    {
+        using CpuBackend backend = new();
+        using Tensor x = Noise(3, 16);
+        using Tensor condX0 = Noise(4, 16);
+        float[] condValues = condX0.AsReadOnlySpan<float>().ToArray();
+
+        using DenoisePrediction prediction = new X0FlowPredictor(backend, (_, _, _) => (Tensor1(condValues), null), 1f, Floor)
+            .Predict(x, 0.01f, 0);
+        using Tensor expected = X0Prediction.ToVelocityDevice(backend, condX0, x, 0.01f, Floor);
+
+        Assert.True(expected.AsReadOnlySpan<float>().SequenceEqual(prediction.Cond.AsReadOnlySpan<float>()));
+    }
+
+    [Fact]
+    public void ATransformThatThrowsPropagatesItsException()
+    {
+        using CpuBackend backend = new();
+        using Tensor x = Tensor1([0.5f]);
+        X0FlowPredictor predictor = new(backend, (_, _, _) => (Tensor1([0.2f]), Tensor1([0.1f])), 4f, Floor,
+            GuidanceAnchor.Uncond, (_, _) => throw new InvalidOperationException("transform failed"));
+
+        Assert.Throws<InvalidOperationException>(() => predictor.Predict(x, 0.5f, 0));
     }
 
     private static Tensor Tensor1(float[] values)
