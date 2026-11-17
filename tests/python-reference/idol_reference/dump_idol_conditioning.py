@@ -7,6 +7,7 @@ is given one here by keying out its plain background (corner colour, tolerance 2
 the engine test reads exactly the pixels this script saw.
 
 Writes conditioning.safetensors:
+  input_rgba       uint8 [H, W, 4]        the image the script preprocessed (its alpha is the matte)
   prepared         uint8 [1024, 1024, 3]  idol.preprocess.preprocess_image output (composited on black)
   pixels           [1, 3, 1024, 1024]     prepared / 255
   dino_prenorm     [1, 4101, 1280]        hidden state after the last block, before DINOv3's own final norm
@@ -96,6 +97,7 @@ tokens = ((lat - bn_mean) / bn_std).float().flatten(2).transpose(1, 2).contiguou
 feature2 = torch.cat([torch.zeros(b, 5, tokens.shape[2]), tokens], dim=1)
 
 common.save(a.out, "conditioning", {
+    "input_rgba": torch.from_numpy(np.array(image.convert("RGBA"))),
     "prepared": torch.from_numpy(np.array(prepared)), "pixels": pixels, "dino_prenorm": dino_prenorm, "dino_last": dino_last,
     "feature1": feature1, "vae_mean": vae_mean, "feature2": feature2,
 }, meta={"mode": a.mode, "batch_norm_eps": vae.config.batch_norm_eps, "image": os.path.basename(a.image)})
