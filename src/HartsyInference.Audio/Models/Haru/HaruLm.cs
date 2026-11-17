@@ -25,11 +25,12 @@ internal sealed unsafe class HaruLm : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         _config = config;
+        Capacity = Math.Min(capacity, config.Lm.MaxPositionEmbeddings);
         _latentBias = Scalar(weights, "latent_bias");
         _latentScale = Scalar(weights, "latent_scale");
         _embedTable = weights.TryGetValue("lm.embed_tokens.weight", out Tensor? table)
             ? table : throw new KeyNotFoundException("The Haru checkpoint has no tensor 'lm.embed_tokens.weight'.");
-        _trunk = Qwen35Model.FromHuggingFace(weights, config.Lm, Math.Min(capacity, config.Lm.MaxPositionEmbeddings), "lm", lmHeadKey: null);
+        _trunk = Qwen35Model.FromHuggingFace(weights, config.Lm, Capacity, "lm", lmHeadKey: null);
         _modelAudio = new HaruAudioProjector(weights, "model_audio_proj", config.LatentDim, config.Lm.HiddenSize);
         _userAudio = new HaruAudioProjector(weights, "user_audio_proj", config.LatentDim, config.Lm.HiddenSize);
     }
@@ -37,6 +38,9 @@ internal sealed unsafe class HaruLm : IDisposable
     internal int HiddenSize => _config.Lm.HiddenSize;
 
     internal int VocabSize => _config.Lm.VocabSize;
+
+    /// <summary>Most positions the conversation may reach: prompt plus frames.</summary>
+    internal int Capacity { get; }
 
     /// <summary>Positions the trunk has consumed since the last <see cref="Reset"/>.</summary>
     internal int Position => _trunk.CurrentPosition;
