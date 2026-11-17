@@ -107,7 +107,7 @@ layer completes 18 compressor groups and every DSA query from position 2,176 sel
 - From layer 7 on, 22 of the 2,308 positions fall below cosine 0.999 in some layer. The lowest is 0.924, at position 2062 in layer 42,
   the last layer, whose activations are largest. `compare.py --explain` traces them to one MoE routing near tie: at layer 7, position
   1919's last routed and first unrouted experts are 1.3e-6 of the routing-score spread apart (the smallest 0.1% of that layer).
-- Median relative error per position band, engine against reference:
+- Median relative error per position band, engine against reference (a subset of the 9 bands and 14 layers computed):
 
   | Layer | 0-127 | 512-1023 | 1536-1791 | 1792-1919 | 1920-2047 | 2048-2175 | 2176-2307 |
   |---|---|---|---|---|---|---|---|
@@ -115,12 +115,13 @@ layer completes 18 compressor groups and every DSA query from position 2,176 sel
   | 7 | 5.1e-6 | 5.3e-6 | 6.7e-6 | 6.8e-6 | 6.7e-6 | 6.8e-6 | 7.3e-6 |
   | 8 | 5.1e-6 | 5.1e-6 | 6.7e-6 | 6.7e-6 | 4.7e-4 | 9.6e-5 | 8.6e-5 |
   | 22 | 7.6e-6 | 6.8e-6 | 7.3e-6 | 7.2e-6 | 1.5e-3 | 1.3e-3 | 4.0e-4 |
+  | 28 | 6.0e-6 | 5.8e-6 | 7.2e-6 | 9.8e-6 | 1.9e-3 | 1.6e-3 | 8.2e-4 |
   | 35 | 4.9e-6 | 4.5e-6 | 6.1e-6 | 2.3e-5 | 1.9e-3 | 1.7e-3 | 1.0e-3 |
 
-  - **Before the tie:** up to layer 7 the error stays within 1.5x across every band (a slow rise with length, 5.1e-6 to 7.3e-6 at
+  - **Before the tie:** up to layer 7 the error stays within 1.5x across all 9 bands (a slow rise with length, 5.1e-6 to 7.3e-6 at
     layer 7), so nothing breaks with length.
   - **After the tie:** from layer 8, every position after 1919 reads that position's changed state through attention, and those
-    positions jump to 1e-4 to 2e-3. Positions before 1920 stay below 1e-5 through layer 28. At layer 35 the 1792-1919 band rises to
+    positions jump to about 9e-5 to 2e-3. Positions before 1920 stay below 1e-5 through layer 28. At layer 35 the 1792-1919 band rises to
     2.3e-5; causal attention means position 1919 can't reach them, so something else does. That rise is not traced. It may be
     smaller routing flips that stay above cosine 0.999, which `--explain` does not list.
   - **Later dips:** that small extra error then tips a few more routing near ties after position 1919. That is why every dip is at
