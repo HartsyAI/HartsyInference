@@ -35,7 +35,7 @@ public sealed class IdolOctreeDecoder : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        int cells = centres.Length / 3, d = _config.ModelChannels;
+        int cells = IdolAnchorEmbedding.CheckedCount(centres), d = _config.ModelChannels;
 
         using Tensor points = new(new TensorShape(1, cells, 3), DType.F32);
         centres.CopyTo(points.AsSpan<float>());
