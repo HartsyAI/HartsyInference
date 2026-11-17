@@ -140,6 +140,71 @@ public sealed class IdolModelTests
         }
     }
 
+    [Fact]
+    public void EmbedContext_AndForward_RejectInputsOfTheWrongShape()
+    {
+        IdolConfig tiny = TinyConfig();
+        Dictionary<string, Tensor> tensors = TinyTensors(tiny, seed: 8);
+        try
+        {
+            using IdolWeights weights = IdolWeights.FromTensors(tiny, tensors);
+            using IdolDenoiser model = new(weights);
+            using Tensor f1 = Random(new TensorShape(1, tiny.CondTokens, tiny.CondChannels), 1, 1f);
+            using Tensor f2 = Random(new TensorShape(1, tiny.CondTokens, tiny.Cond2Channels), 2, 1f);
+            using Tensor shortF2 = Random(new TensorShape(1, tiny.CondTokens - 1, tiny.Cond2Channels), 3, 1f);
+            using Tensor wideF2 = Random(new TensorShape(1, tiny.CondTokens, tiny.Cond2Channels + 1), 4, 1f);
+            Assert.Throws<ArgumentException>(() => model.EmbedContext(Backend, f1, shortF2));
+            Assert.Throws<ArgumentException>(() => model.EmbedContext(Backend, f1, wideF2));
+            Assert.Throws<ArgumentException>(() => model.EmbedContext(Backend, f2, f1));
+
+            using Tensor context = model.EmbedContext(Backend, f1, f2);
+            using Tensor z = Random(new TensorShape(1, tiny.Tokens, tiny.LatentChannels), 5, 1f);
+            using Tensor cam = Random(new TensorShape(1, 1, tiny.CameraChannels), 6, 1f);
+            using Tensor wideZ = Random(new TensorShape(1, tiny.Tokens, tiny.LatentChannels + 1), 5, 1f);
+            using Tensor wideCam = Random(new TensorShape(1, 1, tiny.CameraChannels + 1), 6, 1f);
+            using Tensor badContext = Random(new TensorShape(1, 3, tiny.ModelChannels + 1), 7, 1f);
+            Assert.Throws<ArgumentException>(() => model.Forward(Backend, wideZ, cam, 500f, context));
+            Assert.Throws<ArgumentException>(() => model.Forward(Backend, z, wideCam, 500f, context));
+            Assert.Throws<ArgumentException>(() => model.Forward(Backend, z, cam, 500f, badContext));
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
+    public void EnumerateWeights_ListsExactlyWhatTheBlocksAndTheRotaryLayersRead()
+    {
+        IdolConfig tiny = TinyConfig();
+        Dictionary<string, Tensor> tensors = TinyTensors(tiny, seed: 9);
+        try
+        {
+            using IdolWeights weights = IdolWeights.FromTensors(tiny, tensors);
+            using IdolDenoiser model = new(weights);
+            Tensor[] listed = [.. model.EnumerateWeights()];
+
+            // Nothing twice, and none of the originals whose reshaped views the blocks read.
+            Assert.Equal(listed.Length, listed.Distinct(ReferenceEqualityComparer.Instance).Count());
+            for (int i = 0; i < tiny.Blocks; i++)
+            {
+                Assert.DoesNotContain(listed, t => ReferenceEquals(t, weights[$"blocks.{i}.attn.q_norm.gamma"]));
+                Assert.DoesNotContain(listed, t => ReferenceEquals(t, weights[$"blocks.{i}.attn.k_norm.gamma"]));
+                Assert.DoesNotContain(listed, t => ReferenceEquals(t, weights[$"repo_layers.{i}.freqs_0"]));
+            }
+
+            // One angle matrix per rotary layer (2 + 2 refiner and the joint blocks), a [pairs, 3] matrix each.
+            int repoLayers = 2 * tiny.RefinerBlocks + tiny.Blocks;
+            Assert.Equal(repoLayers, listed.Count(t => t.Shape.Rank == 2 && t.Shape[0] == tiny.HeadDim / 2 && t.Shape[1] == 3));
+            // Everything listed is live: a backend can read its shape.
+            Assert.All(listed, t => Assert.True(t.Shape.ElementCount > 0));
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+    }
+
     /// <summary>Two heads of 8, two joint blocks, one refiner block and 16 tokens: every code path of the full model at toy size.</summary>
     private static IdolConfig TinyConfig() => new()
     {

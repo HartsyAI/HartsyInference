@@ -43,7 +43,7 @@ public sealed record IdolConfig
     /// <summary>MLP hidden width.</summary>
     public int MlpHidden => ModelChannels * MlpRatio;
 
-    /// <summary>Tokens of the image condition: the class token, four registers and a 64 × 64 patch grid at 1024 px.</summary>
+    /// <summary>Tokens of the image condition: the class token, four registers and a 64 × 64 patch grid at 1024 px. Informational: it is in no <c>config.json</c> and the model reads the length of the features it is given.</summary>
     public int CondTokens { get; init; } = 4101;
 
     /// <summary>The configuration in a checkpoint's <c>config.json</c> (its <c>denoiser.args</c> object); unnamed fields keep their released values.</summary>
@@ -70,6 +70,8 @@ public sealed record IdolConfig
         };
         if (c.ModelChannels != c.Heads * c.HeadDim)
             throw new FormatException($"Idol width {c.ModelChannels} is not {c.Heads} heads of {c.HeadDim}.");
+        if (c.HeadDim % 2 != 0)
+            throw new FormatException($"Idol's rotary position rotates channel pairs, so a head of {c.HeadDim} channels must be even.");
         return c;
     }
 }

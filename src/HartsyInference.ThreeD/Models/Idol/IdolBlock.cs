@@ -48,8 +48,22 @@ internal sealed class IdolBlock : IDisposable
         }
     }
 
-    /// <summary>The unit scale of the head norm, the one tensor the block owns; the weights it reads belong to <see cref="IdolWeights"/>.</summary>
+    /// <summary>The unit scale of the head norm; the other weights the block reads belong to <see cref="IdolWeights"/>.</summary>
     internal Tensor HeadNormOnes => _headNorm.Ones;
+
+    /// <summary>Exactly the tensors a forward pass hands to the backend, for <c>PreloadWeights</c> and <c>FreeWeights</c>: the q and k gains as the reshaped views the norm reads (a backend caches by tensor identity, so the originals would not be the preloaded ones), and the head norm's ones.</summary>
+    internal IEnumerable<Tensor> EnumerateWeights()
+    {
+        yield return _qkvW; yield return _qkvB; yield return _outW; yield return _outB;
+        yield return _qGamma; yield return _kGamma;
+        yield return _mlp0W; yield return _mlp0B; yield return _mlp2W; yield return _mlp2B;
+        if (_shiftTable is not null)
+            yield return _shiftTable;
+        foreach (Tensor? t in new[] { _norm1W, _norm1B, _norm2W, _norm2B })
+            if (t is not null)
+                yield return t;
+        yield return _headNorm.Ones;
+    }
 
     /// <summary><paramref name="x"/> <c>[1, L, C]</c> through the block; <paramref name="timeModulation"/> is the shared <c>[1, 6C]</c>
     /// adaLN output (null for the unmodulated block). Returns a new tensor; borrows both inputs.</summary>
@@ -62,9 +76,14 @@ internal sealed class IdolBlock : IDisposable
         {
             // m: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp.
             Tensor x1 = SelfAttention(backend, x, n, m, repo, rotationTap);
-            Tensor x2 = FeedForward(backend, x1, m);
-            x1.Dispose();
-            return x2;
+            try
+            {
+                return FeedForward(backend, x1, m);
+            }
+            finally
+            {
+                x1.Dispose();
+            }
         }
         finally
         {
@@ -120,14 +139,28 @@ internal sealed class IdolBlock : IDisposable
             using Tensor h = Normed(backend, x, m?[1], m?[0], _norm1W, _norm1B);
             using Tensor qkv = new(new TensorShape(1, n, 3L * _width), DType.F32);
             backend.Linear(qkv, h, _qkvW, _qkvB);
-            Tensor q = TokenMajor(backend, qkv, 0, n);
-            Tensor k = TokenMajor(backend, qkv, _width, n);
-            Tensor v = TokenMajor(backend, qkv, 2 * _width, n);
-            repo.Apply(backend, q, cos, sin);
-            repo.Apply(backend, k, cos, sin);
-            Tensor qn = _headNorm.Apply(backend, q, _qGamma, new TensorShape(1, n, _width));
-            Tensor kn = _headNorm.Apply(backend, k, _kGamma, new TensorShape(1, n, _width));
-            using Tensor ctx = Attend(backend, qn, kn, v, n);
+            Tensor? q = null, k = null, v = null, qn = null, kn = null;
+            Tensor ctx0;
+            try
+            {
+                q = TokenMajor(backend, qkv, 0, n);
+                k = TokenMajor(backend, qkv, _width, n);
+                v = TokenMajor(backend, qkv, 2 * _width, n);
+                repo.Apply(backend, q, cos, sin);
+                repo.Apply(backend, k, cos, sin);
+                qn = _headNorm.Apply(backend, q, _qGamma, new TensorShape(1, n, _width));   // consumes q
+                kn = _headNorm.Apply(backend, k, _kGamma, new TensorShape(1, n, _width));   // consumes k
+                ctx0 = Attend(backend, qn, kn, v, n);                                      // consumes qn, kn and v
+            }
+            catch
+            {
+                // Dispose is idempotent, so what an operation already consumed is not freed twice.
+                foreach (Tensor? t in new[] { q, k, v, qn, kn })
+                    t?.Dispose();
+                throw;
+            }
+
+            using Tensor ctx = ctx0;
             using Tensor proj = Linear(backend, ctx, _outW, _outB, _width);
             Tensor x1 = new(x.Shape, DType.F32);
             if (_modulated)
@@ -199,6 +232,8 @@ internal sealed class IdolBlock : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        _qGamma.Dispose();
+        _kGamma.Dispose();
         _headNorm.Dispose();
     }
 }
