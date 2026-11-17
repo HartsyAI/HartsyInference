@@ -52,6 +52,20 @@ public sealed class HeadRmsNormTests
     }
 
     [Fact]
+    public void Apply_RefusesAGammaShapeOfTheWrongSizeBeforeConsumingAnything()
+    {
+        using HeadRmsNorm norm = new(HeadDim);
+        using Tensor heads = new(new TensorShape(1, Tokens, Heads, HeadDim), DType.F32);
+        using Tensor g = new(new TensorShape(Heads * HeadDim), DType.F32);
+
+        Assert.Throws<ArgumentException>(() => norm.Apply(Backend, heads, g, new TensorShape(1, Tokens + 1, Heads * HeadDim)));
+
+        // The input is still the caller's: a refusal is not a consume.
+        Assert.Equal(new TensorShape(1, Tokens, Heads, HeadDim), heads.Shape);
+        _ = heads.AsReadOnlySpan<float>();
+    }
+
+    [Fact]
     public void Apply_ConsumesItsInput()
     {
         using HeadRmsNorm norm = new(HeadDim);
