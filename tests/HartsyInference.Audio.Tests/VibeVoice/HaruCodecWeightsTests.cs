@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HartsyInference.Audio.Models.Haru;
 using HartsyInference.Audio.Models.VibeVoice;
+using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
@@ -41,6 +42,10 @@ public sealed class HaruCodecWeightsTests
     [InlineData("codec.encoder.stages.x.0.fc1.weight")]
     [InlineData("codec.encoder.stages.1.0.fc3.weight")]
     [InlineData("codec.encoder.norm.weight")]
+    [InlineData("codec.encoder.stages.01.0.fc1.weight")]
+    [InlineData("codec.encoder.stages.+1.0.fc1.weight")]
+    [InlineData("codec.encoder.stages. 1.0.fc1.weight")]
+    [InlineData("codec.encoder.down.-1.weight")]
     public void RemapKey_RefusesAKeyOutsideTheLayout(string key) => Assert.Throws<InvalidDataException>(() => HaruCodecWeights.RemapKey(key));
 
     [Fact]
@@ -51,6 +56,30 @@ public sealed class HaruCodecWeightsTests
         int codecTensors = weights.Descriptors.Keys.Count(static k => k.StartsWith("codec.", StringComparison.Ordinal));
         Assert.True(codecTensors > 100);
         Assert.Equal(codecTensors, HaruCodecWeights.Remap(weights.GetAllTensors()).Count);
+    }
+
+    [Theory]
+    [InlineData("codec.encoder.down.9.weight")] // a seventh down layer: the config has six ratios
+    [InlineData("codec.decoder.up.9.bias")]
+    [InlineData("codec.encoder.stages.9.0.fc1.weight")] // a stage the config does not have
+    [InlineData("codec.encoder.stages.0.5.fc1.weight")] // a block beyond the stage's depth
+    public void Create_RefusesATensorOutsideTheConfiguredLayout(string extraKey)
+    {
+        using SafeTensorsLoader weights = new();
+        weights.Load(Path.Combine(Dir, "haru_tiny.safetensors"));
+        Dictionary<string, Tensor> all = new(weights.GetAllTensors(), StringComparer.Ordinal);
+        all[extraKey] = all["codec.encoder.stem.weight"];
+        using JsonDocument config = JsonDocument.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => HaruCodec.Create(config.RootElement.GetProperty("codec"), all));
+        Assert.Contains("codec tensors", error.Message);
+    }
+
+    [Fact]
+    public void ConfigFrom_RefusesAFieldItDoesNotRead()
+    {
+        using JsonDocument doc = JsonDocument.Parse(ReleasedCodec.Replace("\"latent_std\":0.5", "\"latent_std\":0.5,\"causal\":false"));
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => HaruCodec.ConfigFrom(doc.RootElement));
+        Assert.Contains("causal", error.Message);
     }
 
     [Fact]
