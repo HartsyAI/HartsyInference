@@ -38,6 +38,27 @@ P2 production pin remains immutable while the corrected harness and first-diverg
   Only actual negative infinity represents the exclusion tested here. New F32/F16/BF16 controls pin finite
   sentinel behavior and separate nonzero-score/ordinary-bias mixing at the existing dtype tolerances.
 
+## Krea CUDA identity failure: diagnosis
+
+The 4090 report's P2 Krea CUDA image failed the identity gate while Vulkan stayed identical. Source tracing, then
+a direct kernel control, located the mechanism before any candidate-output tolerance was considered:
+
+- Krea 2's Qwen3-VL-4B text encoder runs strict-F32 SDPA (no `allowF16`) with a finite `-1e30` causal mask, so on
+  CUDA it takes the materialized or query-tiled rows. Its DiT attention is unmasked grouped token-major cuDNN F16,
+  which PR 02 does not change. The Vulkan scalar path has no PR 02 source change.
+- PR 02 replaced the legacy `softmax_f32`/`softmax_f16` PTX on those rows with `attention_softmax`. Both compute
+  `ex2.approx((x - max) * log2e)` with the same 256-thread block and reduction order, but the new kernel normalized
+  with `rcp.rn` (`1.0f / sum`) where the legacy kernel used `rcp.approx`. Every finite F32 row therefore changed in
+  its last bits, masked or not; F16 storage rounding hid the difference there.
+- `AttentionSoftmaxReproducesLegacySoftmaxBitsOnFiniteRows` compares the two kernels bit for bit on 37×1031 rows
+  (F32 masked with a `-1e30` sentinel, F32 unmasked, F16 unmasked). With the previous PTX both F32 cases fail at
+  the first normalized row; with `rcp.approx` restored all three pass on the RTX 3060. Fully excluded rows still
+  give zero and NaN still propagates.
+
+This explains a CUDA-only, all-pixel identity break. It does not by itself clear the Krea gate: a real Krea 2
+Turbo generation must still reproduce `main` exactly on the frozen request, and the 4090 cohort must rerun it.
+The identity gate is unchanged; no tolerance was derived.
+
 ## Local validation
 
 The new GPU semantic class covers 45 cases: softcap/ALiBi ordering, empty local windows with non-finite sinks,
@@ -52,6 +73,12 @@ Full affected GPU categories run sequentially on Windows 11, RTX 3060 (SM86), dr
 | LLM | 101 | 0 | 19 |
 | Diffusion | 18 | 0 | 2 |
 | Engine | 12 | 0 | 10 |
+
+After integrating current `main` (merge commit `0f4fdb159`, including #913's exactly-`-FLT_MAX` decode fix) and the
+softmax correction, the same categories rerun sequentially on the RTX 3060 at `b0e03e2f5`: Core 21 passes; LLM 104
+passes/19 skips; Diffusion 18 passes/2 skips; Engine 17 passes/10 skips; no failures. The four conflicted Flash and
+fused-decode PTX files were rebuilt from the merged source in the pinned CUDA 13.0.88 image (whose rebuild of every
+other `lm` and `attention` kernel matched the shipped bytes), not taken from either side.
 
 Four reported passes are guarded two/eight-GPU NCCL/Kimi checks and remain unvalidated. Real-weight resource
 skips remain unvalidated too. The standalone Cuda.Tests folder has no project; its loose source is not a
