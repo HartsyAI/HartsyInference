@@ -69,7 +69,7 @@ public sealed class MeshSettingsTests
     [Fact]
     public void AnUnknownModelHasNoParametersAndKeepsTheEngineVersion()
     {
-        MeshSettingsUsed settings = MeshService.SettingsOf("hunyuan3d-mv", new MeshRequest());
+        MeshSettingsUsed settings = MeshService.SettingsOf("hunyuan3d-mv-turbo", new MeshRequest());
 
         Assert.Empty(settings.Parameters);
         Assert.Null(settings.Seed);

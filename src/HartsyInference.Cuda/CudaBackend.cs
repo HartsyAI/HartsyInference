@@ -8969,7 +8969,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     });
 
     /// <inheritdoc/>
-    public override bool IsWeightResident(Tensor weight) => GpuTransferHelper.IsWeightCached(weight);
+    public override bool IsWeightResident(Tensor weight)
+    {
+        // Callers ask between ops (the MoE prefetch picks the experts to read), so enter one to resolve this backend's cache with several live.
+        using OpScope _op = EnterOp();
+        return GpuTransferHelper.IsWeightCached(weight);
+    }
 
     private static int _preloadSkipWarned;
 

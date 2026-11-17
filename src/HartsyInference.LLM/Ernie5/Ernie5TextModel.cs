@@ -7,9 +7,10 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Ernie5;
 
-/// <summary>Everything the Text path needs to run an ERNIE-5.5 directory on the host: the generation model, the tokenizer from the checkpoint's
-/// <c>tokenizer.json</c>, and the chat template from its <c>chat_template.jinja</c>.</summary>
-/// <remarks>Owns the generation model, which owns the checkpoint. The host reference path only: weights are read on the CPU.</remarks>
+/// <summary>Everything the Text path needs to run an ERNIE-5.5 directory: the generation model, the tokenizer from the checkpoint's
+/// <c>tokenizer.json</c>, and the chat template from its <c>chat_template.jinja</c>. A base checkpoint without that file (the published
+/// ERNIE-5.5-Flash-Base) gets a plain-text completion template instead.</summary>
+/// <remarks>Owns the generation model, which owns the checkpoint. The model runs on the backend it is loaded on.</remarks>
 public sealed class Ernie5TextModel : IHostReferenceTextModel
 {
     private Ernie5TextModel(Ernie5GenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template)
@@ -31,8 +32,8 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
     IGenerationModel IHostReferenceTextModel.Generation => Generation;
 
     /// <summary>Loads <paramref name="directory"/>; the result owns everything it opened.</summary>
-    /// <exception cref="HartsyInferenceException">The directory lacks a tokenizer or chat template, the tokenizer is not byte-level BPE, or its
-    /// special ids disagree with <c>config.json</c>.</exception>
+    /// <exception cref="HartsyInferenceException">The directory lacks a tokenizer, the tokenizer is not byte-level BPE or its post-processor cannot be
+    /// applied, or its special ids disagree with <c>config.json</c>.</exception>
     public static Ernie5TextModel Load(IBackend backend, string directory, Ernie5LoadOptions options)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -40,10 +41,9 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), templatePath = Path.Combine(directory, "chat_template.jinja");
         if (!File.Exists(tokenizerPath))
             throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the ERNIE-5.5 Text path needs to build its prompt.");
-        // TODO(ernie5): the base checkpoint ships no chat_template.jinja, so this refusal blocks the Text path on it. Finish it with a built-in
-        // ERNIE-5.5 template used when the file is absent, once that template is checked against the reference.
-        if (!File.Exists(templatePath))
-            throw new HartsyInferenceException($"'{directory}' has no chat_template.jinja, which the ERNIE-5.5 Text path needs.");
+        // The base checkpoint ships no chat template; Baidu serves it through /v1/completions with a raw prompt, so the prompt is the plain text
+        // wrapped as tokenizer.json's post-processor wraps it, not a guessed chat format.
+        bool chat = File.Exists(templatePath);
 
         // Config and tokenizer first: both are cheap, so a bad file fails before the weight load.
         Ernie5Config config = Ernie5Config.Load(Path.Combine(directory, "config.json"));
@@ -53,15 +53,24 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
         List<int> stopIds = StopIds(directory, config);
         try
         {
-            (tokenizer, template) = HfChatAssets.Load(directory, stopIds, bosLiteral, eosLiteral);
+            if (chat)
+            {
+                (tokenizer, template) = HfChatAssets.Load(directory, stopIds, bosLiteral, eosLiteral);
+            }
+            else
+            {
+                tokenizer = HfChatAssets.LoadTokenizer(directory, stopIds, bosLiteral, eosLiteral);
+                template = HfChatAssets.LoadCompletionTemplate(directory);
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or JsonException or FormatException)
         {
             // Both files come through one call, so the message names both rather than guessing which one failed.
-            throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
+            string files = chat ? $"'{tokenizerPath}' or '{templatePath}'" : $"'{tokenizerPath}'";
+            throw new HartsyInferenceException($"{files} could not be loaded: {ex.Message}", ex);
         }
 
-        // TODO(ernie5): the Text path never sets Ernie5LoadOptions.Mtp (HfTextDirectoryLoader.Ernie5Options leaves it false), so MTP layer 43 does not
+        // TODO(ernie5): the Text path never sets Ernie5LoadOptions.Mtp (HfTextDirectoryLoader.Ernie5OptionsFor leaves it false), so MTP layer 43 does not
         // run. Finish it by loading with Mtp on and driving MtpForward as a draft step in generation.
         Ernie5Model model = Ernie5Model.Load(directory, backend, options);
         try

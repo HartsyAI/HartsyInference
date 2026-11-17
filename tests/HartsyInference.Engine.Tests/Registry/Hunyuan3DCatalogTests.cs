@@ -37,11 +37,13 @@ public sealed class Hunyuan3DCatalogTests
     }
 
     [Fact]
-    public void SingleImageBuilds_AreWiredToTheMeshServiceAndMultiviewIsNot()
+    public void EveryBuild_IsWiredToTheMeshService()
     {
         Assert.All(MeshModelIds.Hunyuan3D, id => Assert.Contains(id, MeshModelIds.ImageToMesh));
-        Assert.DoesNotContain("hunyuan3d-mv", MeshModelIds.All);
-        Assert.False(ModelCatalog.Find("hunyuan3d-mv")!.CliDrivable);
+        Assert.Contains("hunyuan3d-mv", MeshModelIds.All);
+        Assert.True(ModelCatalog.Find("hunyuan3d-mv")!.CliDrivable);
+        Assert.True(MeshModelIds.TakesViews("hunyuan3d-mv"));
+        Assert.False(MeshModelIds.TakesViews("hunyuan3d"));
     }
 
     [Theory]

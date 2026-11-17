@@ -16,6 +16,8 @@ public sealed class ExpertWeights
         {
             AddDistinct(tensors, matrix.Weight);
             foreach (Tensor companion in matrix.Companions) AddDistinct(tensors, companion);
+            // A block-FP8 weight carries its scale grid on QuantInfo rather than a recipe; the block linear reads it on every call too.
+            if (matrix.Weight.QuantInfo?.Fp8BlockScaleInv is { } blockScale) AddDistinct(tensors, blockScale);
         }
         Tensors = tensors;
         long bytes = 0;
@@ -35,7 +37,8 @@ public sealed class ExpertWeights
     /// <summary>Up projection.</summary>
     public ExpertMatrix W3 { get; }
 
-    /// <summary>Every tensor that has to be resident for this expert to run: three weights and their scales, global scales and biases.</summary>
+    /// <summary>Every tensor that has to be resident for this expert to run: three weights and their scales, global scales and biases,
+    /// including a block-FP8 weight's scale grid from <see cref="QuantWeightInfo.Fp8BlockScaleInv"/>.</summary>
     public IReadOnlyList<Tensor> Tensors { get; }
 
     /// <summary>Total device bytes of <see cref="Tensors"/>.</summary>

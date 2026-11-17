@@ -912,7 +912,8 @@ public sealed partial class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
-    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 or ERNIE-5.5 checkpoint onto its host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
+    /// <summary>Loads a Hugging Face text directory: a host reference model (DeepSeek-V4.1, ERNIE-5.5, Kimi K3.1), a stateful family, or
+    /// MiniMax-M3. DeepSeek-V4.1 keeps its weights on the host, so its slot gets a CPU backend whatever device was asked for.</summary>
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
@@ -924,6 +925,9 @@ public sealed partial class TextService : ITextService, IDisposable
             KimiK31Refusals.RequireRunnablePlacement(deviceKey, ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree,
                 _engine.Placement.ShardRatios, HfTextDirectoryLoader.ReadKimiK31Config(checkpoint));
         }
+        bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
+        if (ernie)
+            RequireRunnableErnie5Placement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -940,18 +944,32 @@ public sealed partial class TextService : ITextService, IDisposable
             LoadKimiK31Directory(slot, deviceKey, checkpoint, path);
             return;
         }
+        if (ernie)
+        {
+            LoadErnie5Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
         // after the unload, so the memory of a model this load replaces counts as free
-        bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
-        string modelName = ernie ? "ERNIE-5.5" : "DeepSeek-V4.1";
-        ResidencyPlan? plan = ernie ? null : EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
+        const string modelName = "DeepSeek-V4.1";
+        ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (plan is not null)
             ResidencyPlanner.RequireAdmitted(plan);
-        else if (ernie)
-            Logs.Warning("[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
-        IBackend backend = ReplaceWithHostBackend(slot, deviceKey, modelName);
+        // Host-backed and CPU-only: its rounds run ungated.
+        LoadHostReferenceInto(slot, checkpoint, path, ReplaceWithHostBackend(slot, deviceKey, modelName), gateOrdinals: [], plan);
+        if (plan?.Verdict == MemoryFitVerdict.Streamed)
+            Logs.Info($"[TextService] {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
+        Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
+    }
+
+    /// <summary>Loads a host reference directory onto <paramref name="backend"/> and makes it the slot's model: pipeline, scheduler (gated on
+    /// <paramref name="gateOrdinals"/>, no KV pool since the sequence states own their storage) and load fields. The slot owns the backend from
+    /// here; a failed load disposes it.</summary>
+    private void LoadHostReferenceInto(TextDeviceSlot slot, HfCheckpointInfo checkpoint, string path, IBackend backend, IReadOnlyList<int> gateOrdinals,
+        ResidencyPlan? plan, Ernie5LoadOptions? ernie5 = null)
+    {
         try
         {
-            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
+            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend, ernie5);
         }
         catch
         {
@@ -960,15 +978,12 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         slot.Backend = backend;
         slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
-        // Host-backed and CPU-only: its rounds run ungated, and its sequence states own their storage (no KV pool).
-        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null, gateOrdinals: []);
+        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null,
+            gateOrdinals: gateOrdinals);
         slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
         slot.ResidencyPlan = plan;
-        if (plan?.Verdict == MemoryFitVerdict.Streamed)
-            Logs.Info($"[TextService] {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
-        Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
     /// <summary>Disposes the slot's stage and primary backends and clears its placement, before a load builds its own backend.</summary>
@@ -999,6 +1014,103 @@ public sealed partial class TextService : ITextService, IDisposable
         if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
             Logs.Warning($"[TextService] {modelName} runs on the host only; '{deviceKey}' is ignored and the model loads on the CPU.");
         return CreateBackendFor("cpu");
+    }
+
+    /// <summary>Refuses an ERNIE-5.5 placement the model cannot run: tensor parallelism (it has none; several devices split its layers instead),
+    /// a layer split that names a device that is not a GPU (the split exists to hold every weight in device memory), or one that mixes GPU kinds
+    /// (the stages hand off through host memory, which should work, but no mixed split has been run).</summary>
+    /// <param name="shardDevices">The devices the request splits the layers over; empty when it names one device.</param>
+    /// <param name="tensorParallelDegree">The engine's tensor-parallel degree.</param>
+    /// <exception cref="NotSupportedException">The engine's tensor-parallel degree is above 1, or a split names a non-GPU device or mixes GPU kinds.</exception>
+    internal static void RequireRunnableErnie5Placement(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
+    {
+        if (tensorParallelDegree > 1)
+            throw new NotSupportedException($"ERNIE-5.5 has no tensor-parallel path; the engine's tensor-parallel degree is {tensorParallelDegree}. "
+                + "Name several devices without tensor parallelism to split its layers over them.");
+        if (shardDevices.Count >= 2)
+            foreach (string device in shardDevices)
+                if (!BackendFactory.IsDeviceKind(BackendFactory.Kind(device)))
+                    throw new NotSupportedException($"An ERNIE-5.5 layer split holds every weight in device memory, so each stage must be a GPU; "
+                        + $"'{device}' is not ({string.Join(" + ", shardDevices)}).");
+        if (shardDevices.Count >= 2 && shardDevices.Select(BackendFactory.Kind).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            throw new NotSupportedException($"An ERNIE-5.5 layer split over mixed GPU kinds has not been run; name devices of one kind ({string.Join(" + ", shardDevices)}).");
+    }
+
+    /// <summary>Plans an ERNIE-5.5 layer split over <paramref name="shardDevices"/> by the checkpoint's bytes per layer (explicit engine ratios win,
+    /// else free memory), with the LM head charged to the last stage.</summary>
+    private IReadOnlyList<LlmStagePlan> PlanErnie5Split(string deviceKey, string root, string[] shardDevices)
+    {
+        Ernie5Config config = Ernie5Config.Load(Path.Combine(root, "config.json"));
+        long checkpointBytes = Directory.EnumerateFiles(root, "*.safetensors").Sum(f => new FileInfo(f).Length);
+        // BF16 LM head; the MTP layer and the embedding stay in the average, which errs toward more room per stage.
+        long headBytes = 2L * config.VocabSize * config.HiddenSize;
+        long perLayer = Math.Max(1, (checkpointBytes - headBytes) / Math.Max(1, config.NumHiddenLayers));
+        IReadOnlyList<float>? ratios = deviceKey.Contains('+') ? null : _engine.Placement.ShardRatios;
+        return PlacementPlanner.LlmSplitPlan(shardDevices, ratios, config.NumHiddenLayers, perLayer, headBytes);
+    }
+
+    /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
+    /// weights are preloaded while the device has room; the routed experts stay mapped and are uploaded as tokens pick them. On the CPU each
+    /// layer is read and dequantized on every forward. Scheduler rounds take the device gate, so a GPU run does not share the card with
+    /// another generation.</summary>
+    private void LoadErnie5Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        string[] shardDevices = ResolveShardDevices(deviceKey);
+        if (shardDevices.Length >= 2)
+        {
+            LoadErnie5Split(slot, deviceKey, checkpoint, path, shardDevices);
+            return;
+        }
+        IBackend backend = CreateBackendFor(deviceKey);
+        LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning(backend.Device.IsGpu
+            ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
+            : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
+        Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
+    }
+
+    /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed
+    /// experts and block-scale grids included) preloaded on its stage's device, so no forward reads the checkpoint. A stage whose weights do not fit
+    /// its device refuses the load by name. The stages run one after another (a pipeline), so this speeds up one sequence by taking the weight
+    /// reads off its path; it does not overlap requests.</summary>
+    private void LoadErnie5Split(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path, string[] shardDevices)
+    {
+        IReadOnlyList<LlmStagePlan> plan = PlanErnie5Split(deviceKey, checkpoint.Root, shardDevices);
+        List<IBackend> backends = [];
+        try
+        {
+            foreach (LlmStagePlan stage in plan)
+            {
+                IBackend stageBackend = CreateBackendFor(stage.Device);
+                backends.Add(stageBackend);
+                // Every weight is preloaded, so only the small headroom PreloadBudget keeps is left; a cached 16-bit copy of a weight would
+                // spend it. Recomputing the cast per call keeps the device's use to the preloaded weights and each op's buffers.
+                stageBackend.CacheWeightCasts = false;
+            }
+        }
+        catch
+        {
+            foreach (IBackend b in backends) b.Dispose();
+            throw;
+        }
+        LlmPlacement placement = new([.. plan.Select((p, i) => new LlmStage(backends[i], p.StartLayer, p.EndLayer))]);
+        Ernie5LoadOptions options = HfTextDirectoryLoader.Ernie5OptionsFor(backends[^1].Device) with { Placement = placement, PreloadExperts = true };
+        try
+        {
+            // Owns the last backend from here, and disposes it on a failed load.
+            LoadHostReferenceInto(slot, checkpoint, path, backends[^1], [.. GateOrdinalsFor(slot, deviceKey)], plan: null, ernie5: options);
+        }
+        catch
+        {
+            foreach (IBackend b in backends.Take(backends.Count - 1)) b.Dispose();
+            throw;
+        }
+        slot.ExtraStageBackends = backends.Take(backends.Count - 1).ToList();
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' split over "
+            + string.Join(" + ", plan.Select(p => $"{p.Device}[{p.StartLayer},{p.EndLayer})")) + " with every weight preloaded.");
     }
 
     /// <summary>Loads a Kimi K3.1 directory onto the devices the request names. One device loads the whole decoder; two or more (a request-level
@@ -1045,9 +1157,11 @@ public sealed partial class TextService : ITextService, IDisposable
     /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>
     private void LoadMiniMaxM3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
-        long availableBytes = ReadAvailableMemoryKb() * 1024;
-        if (availableBytes <= 0)
+        long availableKb = ReadAvailableMemoryKb();
+        if (availableKb < 0)
             Logs.Warning("[TextService] Free host memory is unknown, so the MiniMax-M3 memory guard is off; a load larger than RAM will not be refused.");
+        // The loader reads a budget of 0 as no limit, so a known, exhausted budget is passed as one byte: every load is then refused.
+        long availableBytes = availableKb < 0 ? 0 : Math.Max(1, availableKb * 1024);
         IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "MiniMax-M3");
         GgufLanguageModel? model = null;
         try
@@ -1091,11 +1205,12 @@ public sealed partial class TextService : ITextService, IDisposable
     private static ResidencyPlan? EnsureRamHeadroomForDeepSeekV41(string directory) => EnsureRamHeadroomForDeepSeekV41(directory, ReadAvailableMemoryKb());
 
     /// <summary>The guard with the free host RAM supplied, so a test can judge synthetic memory. Plans from the checkpoint headers only, before any weight is mapped.</summary>
-    /// <param name="availableKb">Free host RAM in KiB; zero or less means unknown, and the plan is not made and the load is not refused.</param>
+    /// <param name="availableKb">Free host RAM in KiB; below zero means unknown, and the plan is not made and the load is not refused. Zero is a
+    /// known, exhausted budget.</param>
     /// <returns>The residency plan, or null when the free memory is unknown.</returns>
     internal static ResidencyPlan? EnsureRamHeadroomForDeepSeekV41(string directory, long availableKb)
     {
-        if (availableKb <= 0)
+        if (availableKb < 0)
             return null;
         ResidencyPlan plan = DeepSeekV41HostPlanner.Plan(directory, availableKb * 1024);
         if (plan.Verdict == MemoryFitVerdict.Infeasible)
@@ -1887,7 +2002,7 @@ public sealed partial class TextService : ITextService, IDisposable
     private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null)
     {
         long availableKb = ReadAvailableMemoryKb();
-        if (availableKb <= 0)
+        if (availableKb < 0)
             return;
         long fileBytes;
         try { fileBytes = new FileInfo(path).Length; }
@@ -1939,9 +2054,10 @@ public sealed partial class TextService : ITextService, IDisposable
         return bytes;
     }
 
-    /// <summary>MemAvailable from /proc/meminfo in KiB, or 0 when unavailable (non-Linux).</summary>
+    /// <summary>Free host memory in KiB (<see cref="HostMemoryInfo.AvailableBytes"/>: on Linux the smaller of MemAvailable and the cgroup's room),
+    /// or -1 when unknown. Zero is a known, exhausted budget (a full cgroup), so callers refuse on it rather than skip their check.</summary>
     private static long ReadAvailableMemoryKb()
-        => (HostMemoryInfo.AvailableBytes() ?? 0) / 1024;
+        => HostMemoryInfo.AvailableBytes() is { } bytes ? bytes / 1024 : -1;
 
     /// <summary>Cheap <c>general.architecture</c> read (metadata only) to route a GGUF to the transformer or SSM loader.</summary>
     private static string PeekArchitecture(string path)

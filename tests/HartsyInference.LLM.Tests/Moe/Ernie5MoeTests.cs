@@ -1,4 +1,7 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Backends.Experts;
+using HartsyInference.Core.Moe;
+using HartsyInference.Core.Moe.Residency;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Gguf;
@@ -95,6 +98,36 @@ public sealed class Ernie5MoeTests
         float[] actual = quiet.Run(x, n);
         AssertClose(Reference(plain, x, n), actual, Tol, "output");
         AssertClose(actual, loudMoe.Run(x, n), 1e-6f, "output with the idle expert scaled");
+    }
+
+    [Fact]
+    public void Prefetch_ListsOnlyTheSelectedExpertsThatAreNotOnTheDevice()
+    {
+        using Loaded moe = new(Weights.Create(41, Small, new Flags()));
+        List<Tensor> experts = [.. moe.Block.EnumerateExpertWeights()];   // gate, up, down per expert, in expert order
+        List<int>[] tokens = new List<int>[Small.Experts];
+        for (int e = 0; e < tokens.Length; e++) tokens[e] = [];
+        tokens[1].Add(0);
+        tokens[3].AddRange([0, 2]);
+
+        List<Tensor> pending = [experts[0]];   // a stale entry, cleared by the call
+        int[] first = new int[Small.Experts], end = new int[Small.Experts];
+
+        moe.Block.RoutedPrefetchSet(tokens, _ => false, pending, first, end);
+        Assert.Equal(experts.Skip(3).Take(3).Concat(experts.Skip(9).Take(3)), pending);
+        Assert.Equal((0, 3), (first[1], end[1]));
+        Assert.Equal((3, 6), (first[3], end[3]));
+        Assert.Equal(first[2], end[2]);   // no tokens, nothing to wait for
+
+        // Expert 3's up projection is already on the device, so it is not read again.
+        moe.Block.RoutedPrefetchSet(tokens, w => ReferenceEquals(w, experts[10]), pending, first, end);
+        Assert.Equal(5, pending.Count);
+        Assert.DoesNotContain(experts[10], pending);
+        Assert.Equal((3, 5), (first[3], end[3]));
+
+        moe.Block.RoutedPrefetchSet(tokens, _ => true, pending, first, end);
+        Assert.Empty(pending);
+        Assert.All(Enumerable.Range(0, Small.Experts), ex => Assert.Equal(first[ex], end[ex]));
     }
 
     [Theory]
@@ -354,6 +387,101 @@ public sealed class Ernie5MoeTests
         float[] x = Input(n * dims.Hidden, 45);
         using Loaded moe = new(w);
         AssertClose(Reference(w, x, n), moe.Run(x, n), Tol, "fp8 output");
+    }
+
+    [Fact]
+    public void Fp8Experts_OffloadWithoutHostRunner_RunsEveryMissOnTheBackendAndMatchesTheDirectPath()
+    {
+        // SiTU experts in block FP8: the CPU expert kernels read neither, so every miss must run on the backend from its own copy.
+        Dims dims = new(260, 140, 140, 6, 6, 2);
+        Weights w = Weights.Create(43, dims, new Flags(Split: true), fp8Experts: true);
+        const int n = 4;
+        float[] x = Input(n * dims.Hidden, 45);
+        float[] expected;
+        using (Loaded direct = new(w)) expected = direct.Run(x, n);
+
+        using Loaded moe = new(w);
+        // Room for about two experts, so the second forward runs some resident and some missed.
+        using MoeExpertOffload offload = new(new HostExpertCache(150_000), host: null, new DecayedLfuHysteresisPolicy(0.99996, 0.25));
+        moe.Block.AttachOffload(offload, layer: 1);
+        Assert.True(offload.Streams(1));
+        AssertClose(expected, moe.Run(x, n), Tol, "first forward");
+        AssertClose(expected, moe.Run(x, n), Tol, "second forward");
+
+        MoeOffloadStats stats = offload.Stats;
+        Assert.Equal(0, stats.HostRows);
+        Assert.Equal(2 * n * dims.TopK, stats.ResidentRows + stats.StreamedRows);
+        Assert.True(stats.ResidentRows > 0, "the cache admitted nothing");
+        Assert.True(stats.StreamedRows > 0, "no miss ran from a per-call copy");
+    }
+
+    [Fact]
+    public void Fp8Experts_OffloadWithoutHostRunner_AdmitsMissesBeforeTheyRun()
+    {
+        // Room for every expert: each first-forward miss is admitted before it runs, so the second forward finds every expert resident and
+        // the cache never needed the after-layer admission.
+        Dims dims = new(260, 140, 140, 6, 6, 2);
+        Weights w = Weights.Create(43, dims, new Flags(Split: true), fp8Experts: true);
+        const int n = 4;
+        float[] x = Input(n * dims.Hidden, 45);
+        float[] expected;
+        using (Loaded direct = new(w)) expected = direct.Run(x, n);
+
+        using Loaded moe = new(w);
+        using MoeExpertOffload offload = new(new HostExpertCache(10_000_000), host: null, new DecayedLfuHysteresisPolicy(0.99996, 0.25));
+        moe.Block.AttachOffload(offload, layer: 1);
+        AssertClose(expected, moe.Run(x, n), Tol, "first forward");
+        MoeOffloadStats first = offload.Stats;
+        Assert.Equal(0, first.ResidentRows);
+        Assert.Equal(n * dims.TopK, first.StreamedRows);
+        Assert.True(first.Admitted > 0, "nothing was admitted before the experts ran");
+        Assert.Equal(first.Admitted, offload.CacheBase.Stats.ResidentExperts);
+
+        AssertClose(expected, moe.Run(x, n), Tol, "second forward");
+        MoeOffloadStats second = offload.Stats;
+        Assert.Equal(n * dims.TopK, second.ResidentRows);
+        Assert.Equal(first.StreamedRows, second.StreamedRows);
+        Assert.Equal(first.Admitted, second.Admitted);
+    }
+
+    [Fact]
+    public void SituExperts_OffloadWithHostRunner_IsRefusedAtAttach()
+    {
+        Weights w = Weights.Create(43, new Dims(260, 140, 140, 6, 6, 2), new Flags(), fp8Experts: true);
+        using Loaded moe = new(w);
+        using MoeExpertOffload offload = new(new HostExpertCache(150_000), new UnusedHostRunner(), new DecayedLfuHysteresisPolicy(0.99996, 0.25));
+        Assert.Throws<NotSupportedException>(() => moe.Block.AttachOffload(offload, layer: 1));
+    }
+
+    [Fact]
+    public void ExpertWeights_ListABlockFp8WeightsScaleGrid()
+    {
+        using Tensor scale = new(new TensorShape(1, 1), DType.F32);
+        Tensor[] projections = new Tensor[3];
+        try
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                projections[i] = new Tensor(new TensorShape(128, 128), DType.F8E4M3);
+                projections[i].QuantInfo = new QuantWeightInfo { Format = "fp8_block_scale_inv", Fp8BlockScaleInv = scale, Fp8BlockSize = 128 };
+            }
+            ExpertWeights weights = new(new ExpertKey(1, 0), new ExpertMatrix(projections[0]), new ExpertMatrix(projections[1]),
+                new ExpertMatrix(projections[2]));
+            // The shared grid is listed once, after the weights that carry it.
+            Assert.Equal(4, weights.Tensors.Count);
+            Assert.Same(scale, weights.Tensors[1]);
+            Assert.Equal(3 * 128 * 128 + sizeof(float), weights.Bytes);
+        }
+        finally
+        {
+            foreach (Tensor? t in projections) t?.Dispose();
+        }
+    }
+
+    private sealed class UnusedHostRunner : IExpertHostRunner
+    {
+        public void Run(ExpertProgram program, ExpertKey key, ReadOnlySpan<float> x, int rows, Span<float> y) =>
+            throw new InvalidOperationException("The host runner was not meant to run.");
     }
 
     // The host reference. Everything is double, and each step follows the ERNIE definition in the comments.
@@ -671,6 +799,8 @@ public sealed class Ernie5MoeTests
                 throw;
             }
         }
+
+        public MoeFeedForward Block => _block;
 
         public float[] Run(float[] x, int n)
         {

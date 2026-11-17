@@ -12,7 +12,8 @@ internal sealed class SplitStage
     public SplitStage(string pattern, SplitBehavior behavior, bool invert)
     {
         ArgumentNullException.ThrowIfNull(pattern);
-        _regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        // tokenizer.json patterns are Oniguruma ones; rewrite the quantifier forms .NET reads differently
+        _regex = new Regex(OnigurumaPattern.ToDotNet(pattern), RegexOptions.Compiled | RegexOptions.CultureInvariant);
         _behavior = behavior;
         _invert = invert;
     }

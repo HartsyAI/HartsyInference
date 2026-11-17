@@ -142,7 +142,7 @@ internal static class MeshModelProfiles
             Paint("hunyuan3d-paint", "Tencent Hunyuan 3D 2.0 Community License", "Albedo only; metallic is 0 and roughness 1.",
                 new MeshCost { Basis = "A 30-step run was estimated at 175 s from a 12-step run on a card shared with another process; no isolated peak." }, peak: null),
             Paint("hunyuan3d-paint21", "Tencent Hunyuan 3D 2.1 Community License", "PBR texture (base color, metallic, roughness).",
-                new MeshCost { PeakVramGiB = 9.8, TypicalSeconds = 99, Basis = "RTX 3060, 512 px views, 15 UniPC steps, no upscaler, a 19,800-triangle mesh; the first run on a saturated card took 246 s." },
+                new MeshCost { PeakVramGiB = 9.8, TypicalSeconds = 330, Basis = "RTX 3060, 512 px views, 15 UniPC steps: 99 s on a 19,800-triangle mesh without the view upscaler; the default Real-ESRGAN upscaler adds about 220 s (a 2048 texture on upstream's penguin demo took about 330 s in all)." },
                 peak: _ => 9.8),
         ];
         return all.ToDictionary(profile => profile.Id, StringComparer.OrdinalIgnoreCase);
@@ -157,8 +157,10 @@ internal static class MeshModelProfiles
                     Grid(null, null, 1, null, "Marching-cubes samples per axis; the checkpoint's default when unset."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = Hunyuan2Terms, Restrictions = HunyuanRestrictions },
-                new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
-                note: "Expects the foreground recentred on white at 512 px; the engine does not prepare the image yet.",
+                id == MeshModelIds.Hunyuan3DMultiView
+                    ? new MeshCost { TypicalSeconds = 120, Basis = "One RTX 3060 (12 GB) run at the defaults: 120 s from the front picture alone and 185 s with left, back and right added (each view lengthens the conditioning); peak memory not measured." }
+                    : new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
+                note: "Expects the foreground recentred on white at 512 px; Preprocess Auto prepares it.",
                 presets: Presets(
                     new MeshPreset { GridResolution = 384, Basis = "The Gradio demo's High decoding mode; the default grid is 256. Not run at 384 on the 3060." },
                     new MeshPreset { GridResolution = 512, Basis = "The largest grid the demo offers; not run on the 3060 (the FlashVDM and dense decodes both grow with the cube)." }));
@@ -189,7 +191,7 @@ internal static class MeshModelProfiles
             Id = id,
             Input = input,
             Outputs = outputs,
-            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), QualityField(presets), .. OutputFields(outputs)],
+            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), .. OutputFields(outputs)],
             Licence = licence,
             Cost = cost,
             PeakGiB = peak,
@@ -243,6 +245,12 @@ internal static class MeshModelProfiles
         ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per distinct point, at most 8,192: a denser cloud is subsampled with the seed), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
         : Rejected(nameof(MeshRequest.Control));
 
+    private static MeshFieldSpec ViewsField(string id) => id == MeshModelIds.Hunyuan3DMultiView
+        ? Used(nameof(MeshRequest.Views), "none", null, null, null, "Pictures of the subject's left, back and right besides the front Image, each at most once; the shape is built from all of them. The same subject, pose and framing in every picture, each prepared like the front (Preprocess Auto does it).")
+        : MeshModelIds.PaintMesh.Contains(id)
+            ? Used(nameof(MeshRequest.Views), "none", null, null, null, "Pictures of the subject's left, back and right besides the front Image, each at most once: with the reference projection on, each picture with alpha is baked onto the surfaces its camera sees (a picture that does not line up with the mesh's silhouette from there is left out with a warning). The generated views are conditioned on the front picture alone.")
+            : Rejected(nameof(MeshRequest.Views));
+
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
         ? new()
         {
@@ -287,7 +295,7 @@ internal static class MeshModelProfiles
         nameof(MeshRequest.Samples) => "1",
         nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) or nameof(MeshRequest.Remesh) => "false",
         nameof(MeshRequest.Quality) => nameof(MeshQuality.Default),
-        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) => "unset",
+        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) or nameof(MeshRequest.Views) => "unset",
         _ => "0",
     };
 

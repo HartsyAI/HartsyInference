@@ -69,6 +69,73 @@ public static class HfTokenizerJson
             ignoreMerges: ignoreMerges, preTokenizer: pipeline);
     }
 
+    /// <summary>The special-token ids the <c>post_processor</c> wraps a single sequence in, which Hugging Face adds when it encodes with
+    /// <c>add_special_tokens=True</c> (the default, and what a serving <c>/v1/completions</c> endpoint does with a raw prompt). A missing or null
+    /// post-processor and a <c>ByteLevel</c> one add none; a <c>Sequence</c> applies its processors in order, each wrapping the last one's output.
+    /// The caller owns <paramref name="json"/> (this does not dispose it).</summary>
+    /// <exception cref="NotSupportedException">The post-processor is a kind this reader does not apply (Bert, Roberta), or its single template
+    /// has no <c>$A</c> or names <c>$B</c>.</exception>
+    /// <exception cref="InvalidOperationException">The template names a special token its <c>special_tokens</c> map does not define, or the
+    /// post-processor lacks a key its type requires.</exception>
+    public static (int[] Prefix, int[] Suffix) ReadSingleSequenceSpecials(Stream json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+        using JsonDocument doc = JsonDocument.Parse(json);
+        List<int> prefix = [], suffix = [];
+        if (doc.RootElement.TryGetProperty("post_processor", out JsonElement processor))
+            ApplyPostProcessor(processor, prefix, suffix);
+        return ([.. prefix], [.. suffix]);
+    }
+
+    // Wraps the current prefix and suffix in what this processor adds around its input.
+    private static void ApplyPostProcessor(JsonElement processor, List<int> prefix, List<int> suffix)
+    {
+        if (processor.ValueKind == JsonValueKind.Null) return;
+        string? type = processor.TryGetProperty("type", out JsonElement t) ? t.GetString() : null;
+        switch (type)
+        {
+            case "ByteLevel":
+                return;
+            case "Sequence":
+                foreach (JsonElement inner in Required(processor, "processors", "Sequence post_processor").EnumerateArray())
+                    ApplyPostProcessor(inner, prefix, suffix);
+                return;
+            case "TemplateProcessing":
+                break;
+            default:
+                throw new NotSupportedException($"tokenizer.json has a '{type ?? "untyped"}' post_processor, whose special tokens this reader does not apply.");
+        }
+
+        JsonElement specials = Required(processor, "special_tokens", "TemplateProcessing post_processor");
+        List<int> before = [], after = [];
+        bool sawA = false;
+        foreach (JsonElement piece in Required(processor, "single", "TemplateProcessing post_processor").EnumerateArray())
+        {
+            if (piece.TryGetProperty("Sequence", out JsonElement sequence))
+            {
+                string? id = Required(sequence, "id", "template Sequence piece").GetString();
+                if (id != "A" || sawA)
+                    throw new NotSupportedException($"tokenizer.json's single-sequence template names sequence '{id}', where only one '$A' is expected.");
+                sawA = true;
+                continue;
+            }
+            string literal = Required(Required(piece, "SpecialToken", "template piece"), "id", "template SpecialToken piece").GetString()
+                ?? throw new InvalidOperationException("tokenizer.json's single-sequence template has a special token with no id.");
+            if (!specials.TryGetProperty(literal, out JsonElement special))
+                throw new InvalidOperationException($"tokenizer.json's single-sequence template names '{literal}', which its special_tokens map does not define.");
+            foreach (JsonElement id in Required(special, "ids", $"special token '{literal}'").EnumerateArray())
+                (sawA ? after : before).Add(id.GetInt32());
+        }
+        if (!sawA) throw new NotSupportedException("tokenizer.json's single-sequence template has no '$A', so it does not say where the text goes.");
+        prefix.InsertRange(0, before);
+        suffix.AddRange(after);
+    }
+
+    // A key the post-processor shape requires; a missing one is a malformed file, named for the caller's load error.
+    private static JsonElement Required(JsonElement element, string key, string where)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(key, out JsonElement value) ? value
+            : throw new InvalidOperationException($"tokenizer.json's {where} has no '{key}'.");
+
     /// <summary>Reads <c>model.merges</c>, accepting both the legacy <c>"left right"</c> string form and the newer <c>["left","right"]</c> pair form, normalizing to the space-joined form the BPE core expects.</summary>
     private static string[] ReadMerges(JsonElement model)
     {
