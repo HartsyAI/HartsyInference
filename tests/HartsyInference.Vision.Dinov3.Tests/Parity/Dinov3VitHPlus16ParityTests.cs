@@ -24,7 +24,7 @@ public sealed class Dinov3VitHPlus16ParityTests
     private const int Resolution = 1024;
 
     // Peak-relative: max abs error over the stage's peak |reference| (the last blocks carry massive-activation channels in the
-    // thousands). FP32 CPU against FP32 CPU; the starting points are the add-model values.
+    // thousands). FP32 CPU against FP32 CPU; the limits are those of the ViT-L parity test.
     private const double PreNormTolerance = 1e-4;
     private const double FinalTolerance = 1e-4;
 
@@ -77,6 +77,8 @@ public sealed class Dinov3VitHPlus16ParityTests
     /// <summary>The reference's own ImageNet normalisation of its [0, 1] pixels, <c>(x - mean) / std</c> in float32.</summary>
     private static Tensor Normalize(Tensor pixels)
     {
+        Assert.Equal(DType.F32, pixels.DType);
+        Assert.Equal(new TensorShape(1, 3, Resolution, Resolution), pixels.Shape);
         Tensor o = new(pixels.Shape, DType.F32);
         ReadOnlySpan<float> src = pixels.AsReadOnlySpan<float>();
         Span<float> dst = o.AsSpan<float>();
