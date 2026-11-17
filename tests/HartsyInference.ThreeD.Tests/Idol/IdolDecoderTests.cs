@@ -128,7 +128,7 @@ public sealed class IdolDecoderTests
     }
 
     [Fact]
-    public void Cloud_ForZeroFeaturesIsTheInitialSplat()
+    public void ToCloud_AndTheDecodersRefuseMalformedPointsAndFeatures()
     {
         IdolDecoderConfig tiny = TinyConfig();
         Dictionary<string, Tensor> tensors = TinyTensors(tiny);
@@ -136,8 +136,45 @@ public sealed class IdolDecoderTests
         {
             using IdolDecoderWeights weights = IdolDecoderWeights.FromTensors(tiny, tensors);
             using IdolGaussianDecoder gaussian = new(weights);
+            using Tensor oneRow = new(new TensorShape(1, 1, tiny.GaussianOutputChannels), DType.F32);
+            using Tensor twoRows = new(new TensorShape(1, 2, tiny.GaussianOutputChannels), DType.F32);
+            using Tensor half = new(new TensorShape(1, 1, tiny.GaussianOutputChannels), DType.F16);
+            float[] one = [0.25f, 0.5f, 0.75f];
+
+            Assert.Throws<ArgumentException>(() => gaussian.ToCloud(one, twoRows));   // more rows than anchors
+            Assert.Throws<ArgumentException>(() => gaussian.ToCloud([0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f], oneRow));   // fewer rows than anchors
+            Assert.Throws<ArgumentException>(() => gaussian.ToCloud(one, half));
+            Assert.Throws<ArgumentException>(() => gaussian.ToCloud([0.25f, 0.5f], oneRow));
+            Assert.Throws<ArgumentException>(() => gaussian.ToCloud([], oneRow));
+            Assert.Throws<ArgumentException>(() => IdolAnchorEmbedding.Build([0.25f, 0.5f, 0.75f, 0.1f], 12));
+        }
+        finally
+        {
+            foreach (Tensor t in tensors.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Config_RefusesAGaussianDecoderWhoseWidthDiffersFromTheOctreesOne()
+    {
+        const string json = "{\"decoder\":{\"args\":{\"model_channels\":1024,\"num_heads\":16,\"mlp_ratio\":4,\"cond_channels\":16,\"num_blocks\":4}},"
+            + "\"decoder_gs\":{\"args\":{\"model_channels\":512,\"num_heads\":16,\"mlp_ratio\":4,\"num_blocks\":16}}}";
+
+        Assert.Throws<FormatException>(() => IdolDecoderConfig.FromJson(json));
+    }
+
+    [Fact]
+    public void Cloud_ForZeroFeaturesIsTheInitialSplat()
+    {
+        IdolDecoderConfig tiny = TinyConfig();
+        Dictionary<string, Tensor> tensors = TinyTensors(tiny);
+        try
+        {
+            using IdolDecoderWeights weights = IdolDecoderWeights.FromTensors(tiny, tensors);
+            // Cleared before the decoder is made, so the test does not depend on ToCloud reading the weights at call time.
             tensors["gs.points_offset_perturbation"].AsSpan<float>().Clear();
             tensors["gs.base_offset_scale"].AsSpan<float>().Clear();
+            using IdolGaussianDecoder gaussian = new(weights);
             using Tensor features = new(new TensorShape(1, 1, tiny.GaussianOutputChannels), DType.F32);
 
             GaussianSplatCloud cloud = gaussian.ToCloud([0.25f, 0.5f, 0.75f], features);

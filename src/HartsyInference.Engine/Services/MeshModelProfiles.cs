@@ -82,7 +82,7 @@ internal static class MeshModelProfiles
                     Summary = "Apache-2.0 (Idol weights and idol-sdk, Sperid Labs); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
                     Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
                 },
-                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                new MeshCost { PeakVramGiB = 4.9, TypicalSeconds = 220, Basis = "The default request (50 steps, 262,144 splats, F16 blocks) through the CLI on an RTX 3060, one picture with alpha: 220 s, 4.1 s per step, a 4.9 GiB peak of the card (about 1.2 GiB of it the desktop). With F32 blocks a step is about 16 s." },
                 note: "Mattes (BiRefNet) an image without alpha, crops around the object, encodes it with DINOv3 ViT-H+ and the FLUX.2 VAE, denoises an 8192-token latent and decodes 262,144 Gaussians by default; returns a PLY."),
             Profile(MeshModelIds.IdolTurbo, MeshInputKind.Image, MeshOutputKinds.Splats,
                 [Steps("5", 0, 1000, "Euler steps; each runs the 12k-token transformer once, with the slow phase LoRA while the shifted time is 0.5 or more and the fast one below it. The distillation is for 4 to 8 steps."),

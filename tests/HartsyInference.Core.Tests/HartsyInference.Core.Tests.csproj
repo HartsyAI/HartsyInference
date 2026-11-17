@@ -6,12 +6,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionFixture.cs" Link="Evidence/AttentionFixture.cs" />
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionArms.cs" Link="Evidence/AttentionArms.cs" />
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionEvidenceContract.cs" Link="Evidence/AttentionEvidenceContract.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionOracle.cs" Link="Evidence/AttentionOracle.cs" />
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionBenchShape.cs" Link="Evidence/AttentionBenchShape.cs" />
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
   </ItemGroup>

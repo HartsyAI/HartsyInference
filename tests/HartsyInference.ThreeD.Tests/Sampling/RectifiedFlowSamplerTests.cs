@@ -3,8 +3,9 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using Xunit;
 using HartsyInference.ThreeD.Sampling;
+using HartsyInference.ThreeD.Tests.TrellisV2;
 
-namespace HartsyInference.ThreeD.Tests.TrellisV2;
+namespace HartsyInference.ThreeD.Tests.Sampling;
 
 public sealed class RectifiedFlowSamplerTests
 {

@@ -32,7 +32,7 @@ public sealed unsafe class Dinov3VisionEncoder
         _preset = preset;
         _layers = new Dinov3Layer[preset.NumLayers];
         for (int i = 0; i < preset.NumLayers; i++)
-            _layers[i] = new Dinov3Layer(preset.HiddenSize, preset.NumHeads, preset.IntermediateSize, preset.LayerNormEps);
+            _layers[i] = new Dinov3Layer(preset.HiddenSize, preset.NumHeads, preset.IntermediateSize, preset.LayerNormEps, preset.GatedMlp);
     }
 
     public Dinov2Preset Preset => _preset;

@@ -91,13 +91,12 @@ public sealed class IdolConditioningParityTests
         using Dinov3ImageConditioner dinoConditioner = Dinov3ImageConditioner.Load(dino, IdolImageProcessor.Size);
         using Flux2VaeComponents vaeComponents = Flux2VaeComponents.Load(vae, "idol");
         Assert.NotNull(vaeComponents.Encoder);
-        IdolConditioner conditioner = new(dinoConditioner, vaeComponents.Encoder!, vaeComponents.BnMean, vaeComponents.BnVar);
         CpuBackend backend = new();
         List<string> failures = [];
 
-        using (Tensor feature1 = conditioner.DinoTokens(backend, prepared))
+        using (Tensor feature1 = IdolConditioner.DinoTokens(backend, dinoConditioner, prepared))
             Report("feature1 (DINOv3 ViT-H+, final norm, LayerNorm)", feature1, r["feature1"], 1e-4, failures);
-        using (Tensor feature2 = conditioner.VaeTokens(backend, prepared))
+        using (Tensor feature2 = IdolConditioner.VaeTokens(backend, vaeComponents.Encoder!, vaeComponents.BnMean, vaeComponents.BnVar, prepared))
             Report("feature2 (FLUX.2 VAE mean, patchified, BN, 5 zero tokens)", feature2, r["feature2"], VaeTolerance, failures);
         Assert.True(failures.Count == 0, string.Join("; ", failures));
     }

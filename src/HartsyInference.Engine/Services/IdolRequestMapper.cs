@@ -36,8 +36,8 @@ public static class IdolRequestMapper
             throw new NotSupportedException("Idol has no grid; GridResolution applies to the mesh models.").ForField(nameof(MeshRequest.GridResolution));
         if (request.FieldOfViewRadians is not null)
             throw new NotSupportedException("Idol takes no field of view; FieldOfViewRadians applies to pixal3d.").ForField(nameof(MeshRequest.FieldOfViewRadians));
-        if (request.Steps < 0)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "Steps must not be negative; 0 takes the model's default (50, or 5 for idol-turbo).").ForField(nameof(MeshRequest.Steps));
+        if (request.Steps is < 0 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "Steps must be between 1 and 1000 (0 takes the model default: 50, or 5 for idol-turbo).").ForField(nameof(MeshRequest.Steps));
         if (request.Guidance is { } g && (g < 0 || g > 20 || double.IsNaN(g)))
             throw new ArgumentOutOfRangeException(nameof(request), g, "Guidance must be between 0 and 20.").ForField(nameof(MeshRequest.Guidance));
         IdolOptions probe = new() { Splats = request.SplatCount };

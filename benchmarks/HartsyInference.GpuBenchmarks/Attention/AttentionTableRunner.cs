@@ -21,6 +21,7 @@ public static unsafe class AttentionTableRunner
     /// [--oracle-rows 64] [--outlier] [--seed 1234]</c>.</summary>
     public static int Run(string[] args)
     {
+        if (args.Contains("--fixture", StringComparer.Ordinal)) return AttentionEvidenceRunner.Run(args);
         Dictionary<string, string> o = ParseArgs(args);
         AttentionBenchShape s = AttentionBenchShape.Load(o["shapes"]).SingleOrDefault(x => x.Id == o["shape"])
             ?? throw new ArgumentException($"shape '{o["shape"]}' not in {o["shapes"]}");

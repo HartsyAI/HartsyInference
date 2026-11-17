@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.438
+
+- Hunyuan3D Paint keeps the front picture where it and a side picture both see a surface squarely, instead of blending
+  them, so a side picture no longer lays its own features over the face (a doubled ear and tusk on the Orc's cheeks).
+
 ## alpha.437
 
 - Added optional left, back and right pictures to image-to-3D (`MeshRequest.Views`, API `viewPngs`, CLI `--view`):

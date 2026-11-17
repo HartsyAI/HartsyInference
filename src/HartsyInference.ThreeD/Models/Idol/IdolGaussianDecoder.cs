@@ -35,7 +35,7 @@ public sealed class IdolGaussianDecoder : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        int count = anchors.Length / 3, d = _config.ModelChannels;
+        int count = IdolAnchorEmbedding.CheckedCount(anchors), d = _config.ModelChannels;
 
         using Tensor points = new(new TensorShape(1, count, 3), DType.F32);
         anchors.CopyTo(points.AsSpan<float>());
@@ -93,8 +93,12 @@ public sealed class IdolGaussianDecoder : IDisposable
     /// Opacities are written as the logit of the sigmoid clamped to [1e-6, 1 − 1e-6], as idol-sdk's PLY does, so no splat is infinite.</summary>
     public GaussianSplatCloud ToCloud(ReadOnlySpan<float> anchors, Tensor features)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        ArgumentNullException.ThrowIfNull(features);
         int per = _config.GaussiansPerAnchor;
-        int count = anchors.Length / 3;
+        int count = IdolAnchorEmbedding.CheckedCount(anchors);
+        if (features.DType != DType.F32 || features.Shape.Rank != 3 || features.Shape[0] != 1 || features.Shape[1] != count || features.Shape[2] != _config.GaussianOutputChannels)
+            throw new ArgumentException($"The features of {count} anchors are a float32 [1, {count}, {_config.GaussianOutputChannels}] tensor from Features; got {features.DType} {features.Shape}.", nameof(features));
         long total = (long)count * per;
         float[] pos = new float[total * 3], dc = new float[total * 3], scl = new float[total * 3], rot = new float[total * 4], op = new float[total];
         ReadOnlySpan<float> f = features.AsReadOnlySpan<float>();

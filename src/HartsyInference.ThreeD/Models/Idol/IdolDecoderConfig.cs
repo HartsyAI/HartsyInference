@@ -80,6 +80,10 @@ public sealed record IdolDecoderConfig
 
         if (root.TryGetProperty("decoder_gs", out JsonElement gs) && gs.TryGetProperty("args", out JsonElement ga))
         {
+            // The two decoders share the width, heads and MLP ratio in every release; the code reads one value for both, so a config that splits them is refused.
+            foreach ((string name, int expected) in new[] { ("model_channels", c.ModelChannels), ("num_heads", c.Heads), ("mlp_ratio", c.MlpRatio) })
+                if (Int(ga, name, expected) != expected)
+                    throw new FormatException($"The Gaussian decoder's {name} differs from the octree decoder's ({expected}); the engine builds both at one width.");
             c = c with { GaussianBlocks = Int(ga, "num_blocks", c.GaussianBlocks) };
             if (ga.TryGetProperty("representation_config", out JsonElement rep))
             {

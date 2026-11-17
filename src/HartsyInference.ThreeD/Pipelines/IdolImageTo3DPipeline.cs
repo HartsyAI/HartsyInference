@@ -11,27 +11,20 @@ using HartsyInference.ThreeD.Preprocessing;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
-/// <summary>The FLUX.2 VAE as Idol's conditioner needs it: the encoder, the BatchNorm statistics of the patchified latent, and what to
-/// dispose when the encoder is done. The engine builds it from its FLUX.2 VAE loader; this package cannot reference the engine.</summary>
-public sealed class Flux2VaeEncoderHandle : IDisposable
+/// <summary>The stages of an Idol generation, in order; progress reports carry one so a consumer does not parse stage names.</summary>
+public enum IdolStage
 {
-    private readonly IDisposable? _owner;
+    /// <summary>Matting, framing and compositing of the picture.</summary>
+    Preparing = 1,
 
-    public Flux2VaeEncoderHandle(VaeEncoder encoder, Tensor bnMean, Tensor bnVar, IDisposable? owner = null)
-    {
-        Encoder = encoder ?? throw new ArgumentNullException(nameof(encoder));
-        BnMean = bnMean ?? throw new ArgumentNullException(nameof(bnMean));
-        BnVar = bnVar ?? throw new ArgumentNullException(nameof(bnVar));
-        _owner = owner;
-    }
+    /// <summary>DINOv3 and the FLUX.2 VAE.</summary>
+    Encoding = 2,
 
-    public VaeEncoder Encoder { get; }
+    /// <summary>The denoiser's steps.</summary>
+    Denoising = 3,
 
-    public Tensor BnMean { get; }
-
-    public Tensor BnVar { get; }
-
-    public void Dispose() => _owner?.Dispose();
+    /// <summary>The octree and Gaussian decoders.</summary>
+    Decoding = 4,
 }
 
 /// <summary>What one Idol generation is asked for.</summary>
@@ -90,7 +83,7 @@ public sealed unsafe class IdolImageTo3DPipeline
     /// <param name="directory">The model folder.</param>
     /// <param name="matter">Mattes an image without alpha; null refuses one.</param>
     /// <param name="loadVae">Opens the FLUX.2 VAE file as an encoder; the pipeline disposes the handle.</param>
-    /// <param name="blockDType">What the denoiser's and the decoders' block matrices are held as: null takes F16 ( idol-sdk's own precision for its blocks, half the memory and 16-bit GEMMs) or F32.</param>
+    /// <param name="blockDType">What the denoiser's and the decoders' block matrices are held as: null takes F16 (idol-sdk's own precision for its blocks, half the memory and 16-bit GEMMs) or F32.</param>
     public IdolImageTo3DPipeline(IBackend backend, string directory, IForegroundMatter? matter, Func<string, Flux2VaeEncoderHandle> loadVae, DType? blockDType = null)
     {
         DType dtype = blockDType ?? DType.F16;
@@ -126,9 +119,9 @@ public sealed unsafe class IdolImageTo3DPipeline
     }
 
     /// <summary>Generates the splats of one picture (<paramref name="rgb"/> with an optional <paramref name="alpha"/> matte).</summary>
-    /// <param name="report">Stage name, step and step count; it may throw to cancel.</param>
+    /// <param name="report">The stage, its display name, the step and the step count; it may throw to cancel.</param>
     public GaussianSplatCloud Generate(byte[] rgb, byte[]? alpha, int width, int height, IdolOptions options,
-        Action<string, int, int>? report = null, Action<string>? log = null, CancellationToken cancel = default)
+        Action<IdolStage, string, int, int>? report = null, Action<string>? log = null, CancellationToken cancel = default)
     {
         ValidateOptions(options);
         IReadOnlyList<string> missing = MissingFiles(_directory, options.Turbo);
@@ -138,27 +131,27 @@ public sealed unsafe class IdolImageTo3DPipeline
         float guidance = options.Turbo ? 0f : options.Guidance ?? IdolSampler.DefaultGuidance;
         int splats = options.Splats == 0 ? DefaultSplats : options.Splats;
         Stopwatch clock = Stopwatch.StartNew();
-        void Stage(string name, int step = 0, int total = 1)
+        void Stage(IdolStage stage, string name, int step = 0, int total = 1)
         {
             cancel.ThrowIfCancellationRequested();
-            report?.Invoke(name, step, total);
+            report?.Invoke(stage, name, step, total);
         }
 
-        Stage("Preparing the picture");
+        Stage(IdolStage.Preparing, "Preparing the picture");
         PreparedImage prepared = IdolImageProcessor.Process(_backend, rgb, alpha, width, height, options.Framing, _matter);
         log?.Invoke($"prepared {prepared.Width}x{prepared.Height} ({clock.Elapsed.TotalSeconds:F1} s)");
 
-        Stage("Encoding the picture");
+        Stage(IdolStage.Encoding, "Encoding the picture");
         (Tensor feature1, Tensor feature2) = Condition(prepared.Rgb, log);
         using (feature1)
         using (feature2)
         {
             cancel.ThrowIfCancellationRequested();
-            Stage("Denoising", 0, steps);
-            Tensor latent = Denoise(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, options.Turbo, (step) => Stage("Denoising", step, steps), log);
+            Stage(IdolStage.Denoising, "Denoising", 0, steps);
+            Tensor latent = Denoise(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, options.Turbo, (step) => Stage(IdolStage.Denoising, "Denoising", step, steps), log);
             using (latent)
             {
-                Stage("Decoding the splats");
+                Stage(IdolStage.Decoding, "Decoding the splats");
                 return Decode(latent, splats, options.Seed, log, cancel);
             }
         }
@@ -174,7 +167,7 @@ public sealed unsafe class IdolImageTo3DPipeline
             _backend.PreloadWeights(dino.EnumerateWeights());
             try
             {
-                feature1 = dino.Encode(_backend, prepared, IdolImageProcessor.Size, IdolImageProcessor.Size, IdolImageProcessor.Size, finalNorm: true);
+                feature1 = IdolConditioner.DinoTokens(_backend, dino, prepared);
                 _ = feature1.DataPointer;
             }
             finally
@@ -202,6 +195,9 @@ public sealed unsafe class IdolImageTo3DPipeline
         }
     }
 
+    /// <summary>The camera token's noise stream: a different one from the latent's for every seed, with no int overflow at the top of the seed range.</summary>
+    private static int CameraSeed(int seed) => seed ^ 0x2545F491;
+
     private Tensor Denoise(Tensor feature1, Tensor feature2, int seed, int steps, float guidance, double rescaleT, bool turbo, Action<int> onStep, Action<string>? log)
     {
         Stopwatch clock = Stopwatch.StartNew();
@@ -219,7 +215,7 @@ public sealed unsafe class IdolImageTo3DPipeline
             using Tensor zero1 = new(feature1.Shape, DType.F32), zero2 = new(feature2.Shape, DType.F32);
             using Tensor? blank = adapters is null ? model.EmbedContext(_backend, zero1, zero2) : null;
             using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, config.Tokens, config.LatentChannels), seed);
-            using Tensor cameraNoise = SeedGenerator.CreateNoise(new TensorShape(1, 1, config.CameraChannels), seed + 1);
+            using Tensor cameraNoise = SeedGenerator.CreateNoise(new TensorShape(1, 1, config.CameraChannels), CameraSeed(seed));
             log?.Invoke($"denoiser loaded, image streams embedded ({clock.Elapsed.TotalSeconds:F1} s)");
             (Tensor latent, Tensor camera) = IdolSampler.Sample(_backend, model, positive, blank ?? positive, noise, cameraNoise, steps, guidance, rescaleT, onStep, adapters is null ? null : adapters.Phase);
             camera.Dispose();
