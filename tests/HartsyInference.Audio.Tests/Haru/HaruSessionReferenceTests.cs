@@ -15,21 +15,6 @@ public sealed unsafe class HaruSessionReferenceTests(ITestOutputHelper output)
 {
     private static readonly string Dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Haru");
 
-    /// <summary>Replays the draws the upstream run made, in order; a draw of another size means the call order drifted.</summary>
-    private sealed class ScriptedNoise(List<float[]> draws) : IHaruNoise
-    {
-        private int _next;
-
-        internal int Remaining => draws.Count - _next;
-
-        public void FillGaussian(Span<float> destination)
-        {
-            float[] draw = draws[_next++];
-            Assert.Equal(draw.Length, destination.Length);
-            draw.CopyTo(destination);
-        }
-    }
-
     private static float[] Read(Tensor t) => new ReadOnlySpan<float>((void*)t.DataPointer, (int)t.ElementCount).ToArray();
 
     private static int[] ReadInts(Tensor t) => new ReadOnlySpan<int>((void*)t.DataPointer, (int)t.ElementCount).ToArray();
@@ -45,57 +30,16 @@ public sealed unsafe class HaruSessionReferenceTests(ITestOutputHelper output)
     [InlineData("runC", "Haru speaks first.", true, true, 2f)]
     public void Conversation_MatchesUpstream(string run, string card, bool withReference, bool speakFirst, float eopBias)
     {
-        using SafeTensorsLoader weights = new();
-        weights.Load(Path.Combine(Dir, "haru_tiny.safetensors"));
-        using SafeTensorsLoader expected = new();
-        expected.Load(Path.Combine(Dir, "haru_session_expected.safetensors"));
-        HaruConfig config = HaruConfig.FromJson(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        Dictionary<string, Tensor> tensors = weights.GetAllTensors();
-        using CpuBackend backend = new();
-        using HaruLm lm = new(config, tensors, capacity: 256);
-        using HaruMeanFlowHead head = new(config.Head);
-        head.LoadWeights(tensors);
-        using HaruCodecSession codec = new(HaruCodec.Create(config.Codec, tensors), backend, config.LatentDim, config.Codec.FixStd);
-
-        List<float[]> draws = [];
-        for (int i = 0; expected.Descriptors.ContainsKey($"{run}.draw.{i}"); i++)
-        {
-            draws.Add(Read(expected.GetTensor($"{run}.draw.{i}")));
-        }
-        ScriptedNoise noise = new(draws);
-        HaruDuplexOptions options = new() { Temperature = 0f, Seed = 1, SpeakFirst = speakFirst, EopBias = eopBias };
-        HaruDuplexSession session = new(config, lm, head, codec, ByteCodec, backend, options, noise);
-
-        float[] user = Read(expected.GetTensor("in.user"));
-        float[] reference = withReference ? Read(expected.GetTensor("in.reference")) : [];
-        int[] wantTokens = ReadInts(expected.GetTensor($"{run}.tokens"));
-        float[] wantAudio = Read(expected.GetTensor($"{run}.audio"));
+        using HaruReferenceModel model = new(Path.Combine(Dir, "haru_tiny.safetensors"), Path.Combine(Dir, "config.json"), capacity: 256);
         string[] wantText = JsonSerializer.Deserialize<Dictionary<string, string[]>>(File.ReadAllText(Path.Combine(Dir, "haru_session_expected.json")))![run];
-
-        int frame = config.FrameSamples;
-        List<HaruFrame> frames = [session.Start(card, reference)];
-        for (int i = 0; i < wantTokens.Length - 1; i++)
-        {
-            frames.Add(session.Step(user.AsSpan(i * frame, frame)));
-        }
-
-        Assert.Equal(wantTokens, frames.Select(static f => f.Token).ToArray());
-        Assert.Equal(wantText, frames.Select(static f => f.Text).ToArray());
-        Assert.Equal(0, noise.Remaining);
-        float worst = 0;
-        float scale = 1e-12f;
-        for (int f = 0; f < frames.Count; f++)
-        {
-            for (int s = 0; s < frame; s++)
-            {
-                float want = wantAudio[f * frame + s];
-                worst = MathF.Max(worst, MathF.Abs(frames[f].Audio[s] - want));
-                scale = MathF.Max(scale, MathF.Abs(want));
-            }
-        }
-        output.WriteLine($"{run}: tokens {string.Join(' ', wantTokens)}; audio max|d|={worst:E3} max|ref|={scale:E3} rel={worst / scale:E3}");
-        Assert.True(scale > 0.01f && scale <= 1f, $"the reference audio should be speech-sized, not {scale}");
-        Assert.True(worst / scale < 5e-4f, $"audio relative error {worst / scale:E3}");
+        (bool tokens, bool text, float audio, int leftover, int[] ids) = model.ReplayConversation(Path.Combine(Dir, "haru_session_expected.safetensors"),
+            run, card, withReference ? "in.reference" : null, wantText, ByteCodec,
+            new HaruDuplexOptions { Temperature = 0f, Seed = 1, SpeakFirst = speakFirst, EopBias = eopBias });
+        output.WriteLine($"{run}: tokens {string.Join(' ', ids)}; audio rel={audio:E3}");
+        Assert.True(tokens, "tokens differ from upstream");
+        Assert.True(text, "text differs from upstream");
+        Assert.Equal(0, leftover);
+        Assert.True(audio < 5e-4f, $"audio relative error {audio:E3}");
     }
 
     [Fact]

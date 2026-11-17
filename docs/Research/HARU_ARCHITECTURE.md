@@ -130,7 +130,15 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
   (peak 0.49-0.58), matches to 3.2e-5, 1.0e-4 and 2.7e-4 relative to peak. That is float noise fed back through the language model: the
   codec alone agrees to 5e-7. Reference preparation (silence trim, margin, last N seconds) is equal to upstream's, sample for sample.
   The tiny codec's output heads are scaled by 1e-3 (encoder) and 1e-4 (decoder) in the fixture so its audio is not clamped.
-- Not run: the trunk, head and loop on real weights; any GPU run; the moved VibeVoice head on
+- 2026-11-17, **released weights**, CPU, the checkpoint verified against its pin (10,540,113,510 B, sha256 `ad2c3534...47c0fa`),
+  upstream run in PyTorch with the same BF16 weights widened to F32 per call (`tools/haru/real_reference.py`), engine run on its CPU
+  backend (`HaruRealWeightsTests`, opt-in through `HARU_REAL_DIR`; 1 m 24 s and 8 m 59 s):
+  - fixed inputs, a 14-position prompt then 4 single positions: hidden states 5.1e-5 relative, text logits 4.8e-5, F32 PAD/EOP logits
+    2.7e-5, MeanFlow head latents 9.5e-7;
+  - a conversation: character card, a voice clip and a user recording from the HartsyPhone eval set (8 kHz phone speech resampled
+    to 24 kHz), greedy, 16 frames, every random draw of the upstream run replayed (all 48 consumed): **tokens and text identical**
+    (PAD, PAD, EOP, "Hello", ",", then silence), audio 1.9e-3 relative to peak. The model starts to speak by itself on the recording.
+- Not run: a long generation (16 frames is 2.1 s; no Whisper check yet); any GPU run; the moved VibeVoice head on
   a GPU or in a real VibeVoice generation; wideband speech; GPU.
 
 Regression net rebuilt for shared code (all CPU): `VibeVoiceCodecStreamingTests` (whole vs streamed, pinned decode),
