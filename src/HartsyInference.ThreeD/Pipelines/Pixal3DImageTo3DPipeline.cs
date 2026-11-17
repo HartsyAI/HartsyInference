@@ -12,6 +12,7 @@ using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
@@ -273,9 +274,9 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         int target = ResolveGrid(options.Grid);
         Pixal3DView view = ViewOf(options);
         int seed = options.Seed ?? SeedGenerator.RandomSeed();
-        Trellis2SamplerParams structureParams = WithSteps(_config.SparseStructureSampler, options.Steps);
-        Trellis2SamplerParams shapeParams = WithSteps(_config.ShapeSampler, options.Steps);
-        Trellis2SamplerParams? textureParams = textured ? WithSteps(_config.TextureSampler!, options.Steps) : null;
+        FlowSamplerParams structureParams = WithSteps(_config.SparseStructureSampler, options.Steps);
+        FlowSamplerParams shapeParams = WithSteps(_config.ShapeSampler, options.Steps);
+        FlowSamplerParams? textureParams = textured ? WithSteps(_config.TextureSampler!, options.Steps) : null;
 
         // Structure conditioning, structure, coarse conditioning, coarse shape, upsample, fine conditioning, fine shape, decode, then the mesh, or for
         // texture its conditioning, flow, decode and bake.
@@ -445,7 +446,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
 
     private static Pixal3DView ViewOf(Pixal3DOptions options) => new(options.FovRadians ?? Pixal3DView.DefaultFovRadians, options.MeshScale);
 
-    private static Trellis2SamplerParams WithSteps(Trellis2SamplerParams parameters, int steps)
+    private static FlowSamplerParams WithSteps(FlowSamplerParams parameters, int steps)
         => steps > 0 ? parameters with { Steps = steps } : parameters;
 
     private static void DisposeConditioning(ref Pixal3DCondition? cond, ref Pixal3DCondition? negCond)

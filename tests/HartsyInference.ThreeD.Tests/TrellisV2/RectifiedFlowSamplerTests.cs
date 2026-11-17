@@ -2,12 +2,13 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using Xunit;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Tests.TrellisV2;
 
-public sealed class Trellis2FlowSamplerTests
+public sealed class RectifiedFlowSamplerTests
 {
-    private static Trellis2SamplerParams Params(
+    private static FlowSamplerParams Params(
         int steps, float strength, float rescale = 0f, double lo = 0.0, double hi = 1.0, double rescaleT = 1.0) => new()
     {
         Steps = steps,
@@ -22,7 +23,7 @@ public sealed class Trellis2FlowSamplerTests
     public void Schedule_WarpsALinearGridByRescaleT()
     {
         // t' = 3t / (1 + 2t) over t = 1, 0.75, 0.5, 0.25, 0.
-        double[] schedule = Trellis2FlowSampler.Schedule(4, 3.0);
+        double[] schedule = RectifiedFlowSampler.Schedule(4, 3.0);
 
         Assert.Equal(new[] { 1.0, 0.9, 0.75, 0.5, 0.0 }, schedule.Select(v => Math.Round(v, 12)));
     }
@@ -30,7 +31,7 @@ public sealed class Trellis2FlowSamplerTests
     [Fact]
     public void Schedule_ShippedStructureSettings_StartAtOneEndAtZeroAndDecrease()
     {
-        double[] schedule = Trellis2FlowSampler.Schedule(12, 5.0);
+        double[] schedule = RectifiedFlowSampler.Schedule(12, 5.0);
 
         Assert.Equal(13, schedule.Length);
         Assert.Equal(1.0, schedule[0]);
@@ -44,7 +45,7 @@ public sealed class Trellis2FlowSamplerTests
     [Fact]
     public void Schedule_RescaleOfOneIsLinear()
     {
-        double[] schedule = Trellis2FlowSampler.Schedule(5, 1.0);
+        double[] schedule = RectifiedFlowSampler.Schedule(5, 1.0);
 
         for (int i = 0; i <= 5; i++)
             Assert.Equal(1.0 - i / 5.0, schedule[i], 12);
@@ -57,7 +58,7 @@ public sealed class Trellis2FlowSamplerTests
         using Tensor noise = new(new TensorShape(1, 3), DType.F32);
         List<(float T, bool Conditional)> calls = [];
 
-        using Tensor result = Trellis2FlowSampler.Sample(backend, noise, Params(2, 3f, lo: 0.0, hi: 1.0), (x, t, conditional) =>
+        using Tensor result = RectifiedFlowSampler.Sample(backend, noise, Params(2, 3f, lo: 0.0, hi: 1.0), (x, t, conditional) =>
         {
             calls.Add((t, conditional));
             return new Tensor(x.Shape, DType.F32);
@@ -74,7 +75,7 @@ public sealed class Trellis2FlowSamplerTests
         using Tensor noise = new(new TensorShape(1, 3), DType.F32);
         List<(float T, bool Conditional)> calls = [];
 
-        using Tensor result = Trellis2FlowSampler.Sample(backend, noise, Params(2, 3f, lo: 0.6, hi: 1.0), (x, t, conditional) =>
+        using Tensor result = RectifiedFlowSampler.Sample(backend, noise, Params(2, 3f, lo: 0.6, hi: 1.0), (x, t, conditional) =>
         {
             calls.Add((t, conditional));
             return new Tensor(x.Shape, DType.F32);
@@ -93,7 +94,7 @@ public sealed class Trellis2FlowSamplerTests
         noise.AsSpan<float>()[1] = -1f;
         const float pos = 0.5f, neg = 0.25f, strength = 7.5f;
 
-        using Tensor result = Trellis2FlowSampler.Sample(backend, noise, Params(1, strength), (x, t, conditional) =>
+        using Tensor result = RectifiedFlowSampler.Sample(backend, noise, Params(1, strength), (x, t, conditional) =>
         {
             Tensor v = new(x.Shape, DType.F32);
             v.AsSpan<float>().Fill(conditional ? pos : neg);
@@ -115,7 +116,7 @@ public sealed class Trellis2FlowSamplerTests
         using Tensor noise = new(new TensorShape(1, 2), DType.F32);
         int calls = 0;
 
-        using Tensor result = Trellis2FlowSampler.Sample(backend, noise, Params(1, 1f), (x, t, conditional) =>
+        using Tensor result = RectifiedFlowSampler.Sample(backend, noise, Params(1, 1f), (x, t, conditional) =>
         {
             calls++;
             Assert.True(conditional);
@@ -137,7 +138,7 @@ public sealed class Trellis2FlowSamplerTests
         float[] neg = [0.1f, 0.2f, -0.3f, 0.0f, 0.3f, -0.1f];
         float[] guided = (float[])pos.Clone();
 
-        Trellis2FlowSampler.RescaleGuidance(x, guided, neg, 6f, 1f, t, sigmaMin);
+        RectifiedFlowSampler.RescaleGuidance(x, guided, neg, 6f, 1f, t, sigmaMin);
 
         // After the blend with weight 1, the x0 recovered from the new prediction has the conditional x0's std.
         double StdOfX0(float[] prediction) => Std(x.Select((v, i) => (1 - sigmaMin) * v - (sigmaMin + (1 - sigmaMin) * t) * prediction[i]).ToArray());
@@ -152,7 +153,7 @@ public sealed class Trellis2FlowSamplerTests
         float[] neg = [0.1f, 0.2f, -0.3f, 0.0f];
         float[] guided = (float[])pos.Clone();
 
-        Trellis2FlowSampler.RescaleGuidance(x, guided, neg, 4f, 0f, 0.5, 1e-5);
+        RectifiedFlowSampler.RescaleGuidance(x, guided, neg, 4f, 0f, 0.5, 1e-5);
 
         for (int i = 0; i < x.Length; i++)
             Assert.Equal(4f * pos[i] + (1 - 4f) * neg[i], guided[i], 5);
@@ -168,7 +169,7 @@ public sealed class Trellis2FlowSamplerTests
         float[] pos = [0f, 0f];
         float[] neg = [1f, -1f];
 
-        Trellis2FlowSampler.RescaleGuidance(x, pos, neg, 2f, 0.5f, 0.5, 1e-12);
+        RectifiedFlowSampler.RescaleGuidance(x, pos, neg, 2f, 0.5f, 0.5, 1e-12);
 
         Assert.Equal(-0.5f, pos[0], 5);
         Assert.Equal(0.5f, pos[1], 5);
@@ -182,10 +183,10 @@ public sealed class Trellis2FlowSamplerTests
         noise.AsSpan<float>()[0] = 1f;
         noise.AsSpan<float>()[1] = -1f;
 
-        using Tensor result = Trellis2FlowSampler.Sample(
+        using Tensor result = RectifiedFlowSampler.Sample(
             backend,
             noise,
-            new Trellis2SamplerParams
+            new FlowSamplerParams
             {
                 Steps = 1, GuidanceStrength = 2f, GuidanceRescale = 0.5f, IntervalLow = 0.0, IntervalHigh = 1.0, RescaleT = 1.0, SigmaMin = 1e-12,
             },
@@ -216,7 +217,7 @@ public sealed class Trellis2FlowSamplerTests
         using Tensor noise = new(new TensorShape(1, 2), DType.F32);
         Tensor? seen = null;
 
-        Assert.Throws<OperationCanceledException>(() => Trellis2FlowSampler.Sample(
+        Assert.Throws<OperationCanceledException>(() => RectifiedFlowSampler.Sample(
             backend,
             noise,
             Params(3, 1f),
@@ -238,7 +239,7 @@ public sealed class Trellis2FlowSamplerTests
         using CpuBackend backend = new();
         using Tensor noise = new(new TensorShape(1, 4), DType.F32);
 
-        Assert.Throws<InvalidOperationException>(() => Trellis2FlowSampler.Sample(
+        Assert.Throws<InvalidOperationException>(() => RectifiedFlowSampler.Sample(
             backend, noise, Params(1, 1f), (x, t, conditional) => new Tensor(new TensorShape(1, 3), DType.F32)));
     }
 
@@ -248,7 +249,7 @@ public sealed class Trellis2FlowSamplerTests
     [InlineData(4, float.NaN, 1.0)]
     public void Parameters_AreValidated(int steps, float strength, double rescaleT)
     {
-        Trellis2SamplerParams bad = Params(steps, strength, rescaleT: rescaleT);
+        FlowSamplerParams bad = Params(steps, strength, rescaleT: rescaleT);
 
         Assert.Throws<ArgumentException>(bad.Validate);
     }

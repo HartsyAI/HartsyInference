@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
@@ -10,8 +11,8 @@ public sealed class Trellis2PipelineConfig
     public const int ShapeLatentChannels = 32;
 
     private Trellis2PipelineConfig(
-        Trellis2SamplerParams structure, Trellis2SamplerParams shape, float[] mean, float[] std, string defaultPipelineType,
-        Trellis2SamplerParams? texture, float[]? textureMean, float[]? textureStd)
+        FlowSamplerParams structure, FlowSamplerParams shape, float[] mean, float[] std, string defaultPipelineType,
+        FlowSamplerParams? texture, float[]? textureMean, float[]? textureStd)
     {
         SparseStructureSampler = structure;
         ShapeSampler = shape;
@@ -23,9 +24,9 @@ public sealed class Trellis2PipelineConfig
         TextureLatentStd = textureStd;
     }
 
-    public Trellis2SamplerParams SparseStructureSampler { get; }
+    public FlowSamplerParams SparseStructureSampler { get; }
 
-    public Trellis2SamplerParams ShapeSampler { get; }
+    public FlowSamplerParams ShapeSampler { get; }
 
     /// <summary>Per-channel mean of <c>shape_slat_normalization</c>; sampled latents are denormalized as <c>x · std + mean</c>.</summary>
     public float[] ShapeLatentMean { get; }
@@ -36,7 +37,7 @@ public sealed class Trellis2PipelineConfig
     public string DefaultPipelineType { get; }
 
     /// <summary><c>tex_slat_sampler</c>, or null when the file names none.</summary>
-    public Trellis2SamplerParams? TextureSampler { get; }
+    public FlowSamplerParams? TextureSampler { get; }
 
     /// <summary>Per-channel mean of <c>tex_slat_normalization</c>; the sampled texture latent is denormalized as <c>x · std + mean</c>. Null without one.</summary>
     public float[]? TextureLatentMean { get; }
@@ -65,7 +66,7 @@ public sealed class Trellis2PipelineConfig
         JsonElement args = root.GetProperty("args");
         JsonElement norm = args.GetProperty("shape_slat_normalization");
         (float[] mean, float[] std) = Normalization(norm, "shape_slat_normalization");
-        Trellis2SamplerParams? texture = null;
+        FlowSamplerParams? texture = null;
         float[]? textureMean = null, textureStd = null;
         bool hasSampler = args.TryGetProperty("tex_slat_sampler", out JsonElement textureNode);
         bool hasNorm = args.TryGetProperty("tex_slat_normalization", out JsonElement textureNorm);
@@ -73,14 +74,14 @@ public sealed class Trellis2PipelineConfig
             throw new ArgumentException("pipeline.json needs both tex_slat_sampler and tex_slat_normalization for texture, or neither; it has one.");
         if (hasSampler)
         {
-            texture = Trellis2SamplerParams.FromNode(textureNode);
+            texture = FlowSamplerParams.FromNode(textureNode);
             (textureMean, textureStd) = Normalization(textureNorm, "tex_slat_normalization");
         }
 
         string type = args.TryGetProperty("default_pipeline_type", out JsonElement t) ? t.GetString() ?? "1024_cascade" : "1024_cascade";
         return new Trellis2PipelineConfig(
-            Trellis2SamplerParams.FromNode(args.GetProperty("sparse_structure_sampler")),
-            Trellis2SamplerParams.FromNode(args.GetProperty("shape_slat_sampler")),
+            FlowSamplerParams.FromNode(args.GetProperty("sparse_structure_sampler")),
+            FlowSamplerParams.FromNode(args.GetProperty("shape_slat_sampler")),
             mean,
             std,
             type,

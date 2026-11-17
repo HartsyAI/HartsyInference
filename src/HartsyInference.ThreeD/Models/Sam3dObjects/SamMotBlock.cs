@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Layers;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -18,15 +19,13 @@ namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 internal sealed class SamMotBlock
 {
     private const float NormEps = 1e-6f;
-    // F.normalize clamps the L2 norm at 1e-12 so an all-zero head gives 0; RmsNorm adds eps to the mean square, so 1e-24 / head_dim is the same clamp.
-    private const float RmsClampSquared = 1e-24f;
 
     private readonly SamMotFlowConfig _config;
     private readonly IReadOnlyList<string> _streams;
     private readonly AttentionLayer _attention;
     private readonly Tensor _modulationWeight;
     private readonly Tensor _modulationBias;
-    private readonly Tensor _onesHeadDim;
+    private readonly HeadRmsNorm _headNorm;
     private readonly Dictionary<string, StreamWeights> _weights = new(StringComparer.Ordinal);
 
     public SamMotBlock(SamMotFlowConfig config, IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -37,8 +36,7 @@ internal sealed class SamMotBlock
         _attention = new AttentionLayer(new AttentionLayerConfig { Heads = heads, KvHeads = heads, HeadDim = headDim, ComputeDType = DType.F32, AllowF16 = false });
         _modulationWeight = SamWeights.RequireLinear(weights, prefix + "adaLN_modulation.1.weight", 6 * c, c);
         _modulationBias = SamWeights.Require(weights, prefix + "adaLN_modulation.1.bias", 6 * c);
-        _onesHeadDim = new Tensor(new TensorShape(headDim), DType.F32);
-        _onesHeadDim.AsSpan<float>().Fill(1f);
+        _headNorm = new HeadRmsNorm(headDim);
         foreach (string s in _streams)
         {
             string self = prefix + "self_attn.", cross = $"{prefix}cross_attn.{s}.", mlp = $"{prefix}mlp.{s}.mlp.";
@@ -239,12 +237,9 @@ internal sealed class SamMotBlock
     private Tensor QkNorm(IBackend backend, Tensor flat, Tensor gammaFlat)
     {
         int tokens = (int)flat.Shape[1];
-        Tensor normed = new(new TensorShape(1, tokens, _config.Heads, _config.HeadDim), DType.F32);
-        backend.RmsNorm(normed, flat.Reshape(normed.Shape), _onesHeadDim, RmsClampSquared / _config.HeadDim);
+        Tensor scaled = _headNorm.Apply(backend, flat.Reshape(new TensorShape(1, tokens, _config.Heads, _config.HeadDim)), gammaFlat,
+            new TensorShape(1, tokens, _config.ModelChannels));
         flat.Dispose();
-        Tensor scaled = new(new TensorShape(1, tokens, _config.ModelChannels), DType.F32);
-        backend.AffineBroadcastLastDim(scaled, normed.Reshape(scaled.Shape), gammaFlat, null);
-        normed.Dispose();
         return scaled;
     }
 
