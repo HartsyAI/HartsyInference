@@ -6,6 +6,7 @@
     <BenchmarkRevision Condition="'$(BenchmarkRevision)' == ''">working-tree</BenchmarkRevision>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Shared/BenchmarkKnobProfiles.cs" Link="Shared/BenchmarkKnobProfiles.cs" />
     <Content Include="web/*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <ProjectReference Include="../../src/HartsyInference.Engine/HartsyInference.Engine.csproj" />
     <AssemblyMetadata Include="BenchmarkRevision" Value="$(BenchmarkRevision)" />
