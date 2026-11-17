@@ -11,6 +11,9 @@ P2 production pin remains immutable while the corrected harness and first-diverg
 
 - CPU FlashAttention now preserves a NaN normalization result and treats a negative-infinite sink as absent.
   Two empty-row sink controls failed before the fix; all five scalar controls pass afterward.
+- CPU dense (`cpu.simd`) attention returned NaN on a fully excluded row: its softmax subtracted a −∞ maximum from
+  −∞ scores. It now returns zero probabilities for an all-−∞ row while a NaN score still propagates. A direct
+  control with a fully excluded row, a partly visible row and an excluded-plus-NaN row failed before the change.
 - Both CUDA monolithic Flash variants now apply softcap before ALiBi. Four causal/noncausal and F32/F16 KV
   controls failed before the change, each with approximately 2.01 absolute output error.
 - CUDA materialized F32/BF16 attention returned NaN on fully excluded rows; F16 returned the mean value, 13,

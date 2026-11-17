@@ -231,6 +231,8 @@ public static class AttentionKernels
     }
 
     /// <summary>Applies numerically stable softmax in-place over a float buffer.</summary>
+    /// <remarks>A row whose every score is −∞ is fully excluded: its probabilities are zero, so the output row is zero
+    /// (docs/ATTENTION_CONTRACT.md §3) rather than the NaN that <c>−∞ − (−∞)</c> would give. A NaN score stays NaN.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe void SoftmaxInPlace(float* data, int count)
     {
@@ -242,6 +244,13 @@ public static class AttentionKernels
             {
                 maxVal = data[i];
             }
+        }
+
+        if (float.IsNegativeInfinity(maxVal))
+        {
+            for (int i = 0; i < count; i++)
+                data[i] = float.IsNaN(data[i]) ? float.NaN : 0f;
+            return;
         }
 
         // Compute exp(x - max) and sum
