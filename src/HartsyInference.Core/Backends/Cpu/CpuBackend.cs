@@ -124,6 +124,11 @@ public sealed partial class CpuBackend : IBackend
                 $"CPU SDPA needs [B,H,S,D] operands with K/V heads equal to Q's; got Q={query.Shape}, K={key.Shape}, V={value.Shape}, output={output.Shape}.");
         if (mask is not null) _ = AttentionMaskLayout.Of(mask, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
         AttentionKernels.ScaledDotProductAttention(output, query, key, value, mask, scale);
+        if (AttentionEvidence.Enabled)
+        {
+            AttentionCall observed = AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16);
+            AttentionEvidence.Executed("cpu", "cpu.simd", null, in observed);
+        }
     }
 
     /// <inheritdoc />

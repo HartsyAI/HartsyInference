@@ -1,0 +1,268 @@
+[
+  {
+    "id": "sage-inputs",
+    "api": "sage_attention.int8_attention",
+    "parameters": {
+      "dtype": [
+        "f32",
+        "f16",
+        "bf16"
+      ],
+      "layout": [
+        "head-major",
+        "supported-strided"
+      ],
+      "head_dim": [
+        64,
+        128,
+        256
+      ]
+    },
+    "hartsy_current": "deliberately different",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "sage-grouping",
+    "api": "sage_attention.int8_attention",
+    "parameters": {
+      "heads": [
+        [
+          4,
+          4
+        ],
+        [
+          4,
+          2
+        ],
+        [
+          4,
+          1
+        ]
+      ],
+      "lengths": [
+        [
+          32,
+          32
+        ],
+        [
+          16,
+          48
+        ],
+        [
+          48,
+          16
+        ]
+      ]
+    },
+    "hartsy_current": "deliberately different",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "sage-padding",
+    "api": "sage_attention.int8_attention",
+    "parameters": {
+      "head_dim": [
+        40,
+        80,
+        96,
+        112,
+        160
+      ]
+    },
+    "hartsy_current": "deliberately different",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "sage-masks",
+    "api": "sage_attention.int8_attention",
+    "parameters": {
+      "dtype": [
+        "bool",
+        "f16",
+        "bf16",
+        "f32"
+      ],
+      "broadcast": [
+        "key",
+        "query",
+        "head",
+        "batch",
+        "full"
+      ],
+      "excluded_rows": true
+    },
+    "hartsy_current": "deliberately different",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "sage-rotation",
+    "api": "sage_attention.int8_attention",
+    "parameters": {
+      "transforms": [
+        "H4",
+        "H64",
+        "signed-H128",
+        "padded-H128"
+      ],
+      "representative_key": true,
+      "qkv": "signed-int8",
+      "probabilities": "unsigned-int8",
+      "state": "f32"
+    },
+    "hartsy_current": "out of scope",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "sage-prequantized",
+    "api": "sage_attention.prequantize_int8_attention / int8_attention_from_prequantized",
+    "parameters": {
+      "reuse_counts": [
+        1,
+        2,
+        4,
+        8
+      ]
+    },
+    "hartsy_current": "out of scope",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "decode-bf16",
+    "api": "flash_attention.flash_attention_decode",
+    "parameters": {
+      "head_dim": [
+        64,
+        128,
+        256
+      ],
+      "grouping": [
+        "MHA",
+        "GQA",
+        "MQA"
+      ],
+      "per_sequence_lengths": true,
+      "capacity_tail": true
+    },
+    "hartsy_current": "deliberately different",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "decode-lse",
+    "api": "flash_attention.flash_attention_decode_gqa",
+    "parameters": {
+      "return_lse": true,
+      "causal": [
+        false,
+        true
+      ],
+      "native_head_dim": 256,
+      "native_dtype": "bf16"
+    },
+    "hartsy_current": "out of scope",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "decode-tree-merge",
+    "api": "flash_attention.flash_attention_decode_tree_merge",
+    "parameters": {
+      "prefix_counted_once": true,
+      "mask": "int32-tree",
+      "lse": "natural-log"
+    },
+    "hartsy_current": "out of scope",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "decode-step-merge",
+    "api": "flash_attention.flash_attention_decode_step_merge",
+    "parameters": {
+      "visibility": "causal-current-step"
+    },
+    "hartsy_current": "out of scope",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "sol-general",
+    "api": "sol_attn",
+    "parameters": {
+      "routing": [
+        "tau",
+        "topk"
+      ],
+      "tail": [
+        true,
+        false
+      ],
+      "partial_blocks": true,
+      "key_bias": true,
+      "sink_blocks": true,
+      "sink_queries": true,
+      "coarse_gate": true,
+      "token_aug": true
+    },
+    "hartsy_current": "out of scope",
+    "required_final": [
+      "cuda",
+      "vulkan"
+    ],
+    "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  },
+  {
+    "id": "hartsy-vsa",
+    "api": "IVideoSparseAttentionSession",
+    "parameters": {
+      "variant": "checkpoint-specific coarse-gate VSA"
+    },
+    "hartsy_current": "deliberately different",
+    "required_final": [
+      "preserve; not a replacement for general Sol-Attn"
+    ],
+    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+  }
+]

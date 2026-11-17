@@ -8,6 +8,9 @@ Until Pages is enabled and results are accepted, the repository's [snapshot](gen
 
 ## Run and contribute
 
+The separate [attention evidence program](attention/README.md) defines PR 01's pristine/diagnostic builds,
+shared Kitchen fixtures and gated primary workloads. Its endpoints and timing protocol differ from the community suites.
+
 Use a clean checkout of an exact engine commit and .NET 10 SDK, or a self-contained runner from the
 [benchmark runner Releases](https://github.com/HartsyAI/HartsyInference/releases). Maintainers publish those
 with [Release benchmark runner](../.github/workflows/benchmark-release.yml); CI artifacts also support pre-release testing. Keep its Ptx, Spirv and suites folders.

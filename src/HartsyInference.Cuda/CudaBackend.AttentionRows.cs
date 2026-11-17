@@ -25,6 +25,7 @@ public sealed partial class CudaBackend
         if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
         AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
+        AttentionEvidence.Executed("cuda", row.Capability.Id, t_attentionRoute, in call, row.Capability.Lowering);
         AttentionPlanLog.Ran("cuda", row, in call);
     }
 
