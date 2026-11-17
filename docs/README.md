@@ -23,6 +23,7 @@ git preserves removed history.
 | Hunyuan3D shape models: pins, licence terms, upstream-to-C# stage map, findings | [Research/HUNYUAN3D_ARCHITECTURE.md](Research/HUNYUAN3D_ARCHITECTURE.md) |
 | Hunyuan3D Paint (texturing): pins, hashes, licence, 2.5D UNet, renderer and bake, reuse map | [Research/HUNYUAN3D_PAINT_ARCHITECTURE.md](Research/HUNYUAN3D_PAINT_ARCHITECTURE.md) |
 | Hunyuan3D Part (P3-SAM segmentation, X-Part decomposition): pins, weights, licence, reuse map | [Research/HUNYUAN3D_PART_ARCHITECTURE.md](Research/HUNYUAN3D_PART_ARCHITECTURE.md) |
+| Haru-4B (full-duplex speech-to-speech): pins, constants, frame loop, codec key map, reuse map, evidence | [Research/HARU_ARCHITECTURE.md](Research/HARU_ARCHITECTURE.md) |
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
 | Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
 | 3D weights inventory: which files are linked, repacked and self-hosted, with the licence terms that bind a host | [Research/WEIGHTS_HOSTING_3D.md](Research/WEIGHTS_HOSTING_3D.md) |
