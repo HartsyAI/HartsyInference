@@ -20,6 +20,7 @@ internal sealed class Ernie5Layer : IDisposable
     private readonly IBackend _backend;
     private readonly Ernie5Config _cfg;
     private readonly List<Tensor> _owned = [];
+    private readonly HashSet<Tensor> _moeInputs = new(ReferenceEqualityComparer.Instance);
     private readonly HyperConnection _attnHc;
     private readonly HyperConnection _ffnHc;
     private readonly Tensor _attnNorm;
@@ -60,7 +61,12 @@ internal sealed class Ernie5Layer : IDisposable
             else
             {
                 Dictionary<string, Tensor> moe = new(StringComparer.Ordinal);
-                foreach ((string checkpoint, string engine) in Ernie5WeightNames.MoeKeys(cfg, index)) moe[engine] = Own(source.Read(checkpoint));
+                foreach ((string checkpoint, string engine) in Ernie5WeightNames.MoeKeys(cfg, index))
+                {
+                    Tensor t = Own(source.Read(checkpoint));
+                    moe[engine] = t;
+                    _moeInputs.Add(t);
+                }
                 _moe = new MoeFeedForward(MoeSettings(cfg), cfg.HiddenSize, lowVram: false);
                 _moe.LoadWeights(moe, prefix);
             }
@@ -75,17 +81,60 @@ internal sealed class Ernie5Layer : IDisposable
     /// <summary>Layer index; MTP layers follow the decoder layers.</summary>
     public int Index { get; }
 
+    /// <summary>The latent MoE block, or null for a dense-FFN layer.</summary>
+    internal MoeFeedForward? Moe => _moe;
+
+    /// <summary>The routed experts' projections grouped for one device allocation each (every expert's gate, up, then down), followed by their
+    /// block-scale grids grouped the same way; nothing for a dense layer. A preload of all of them leaves no weight to read from the
+    /// checkpoint during a forward.</summary>
+    internal IEnumerable<IReadOnlyList<Tensor>> EnumerateExpertPreloadGroups()
+    {
+        if (_moe is null) yield break;
+        List<IReadOnlyList<Tensor>> groups = [.. _moe.EnumerateExpertGroups()];
+        foreach (IReadOnlyList<Tensor> group in groups) yield return group;
+        foreach (IReadOnlyList<Tensor> group in groups)
+        {
+            List<Tensor> scales = [.. group.Select(t => t.QuantInfo?.Fp8BlockScaleInv).OfType<Tensor>()];
+            // A projection's experts are all block-FP8 or none is; a mix would leave some grids out of the preload unnoticed.
+            if (scales.Count != 0 && scales.Count != group.Count)
+                throw new InvalidDataException($"Layer {Index}: {scales.Count} of {group.Count} experts of one projection carry a block-scale grid.");
+            if (scales.Count > 0) yield return scales;
+        }
+    }
+
+    /// <summary>The weights every token reads: attention, norms, the dense FFN, and the MoE block's routers, latent projections and shared
+    /// expert, each FP8 weight followed by its block-scale grid. The routed experts are left out; a token reads ten of them.</summary>
+    public IEnumerable<Tensor> EnumerateDenseWeights()
+    {
+        HashSet<Tensor> seen = new(ReferenceEqualityComparer.Instance);
+        IEnumerable<Tensor> dense = _owned.Where(t => !_moeInputs.Contains(t));
+        if (_moe is not null) dense = dense.Concat(_moe.EnumerateDenseWeights());
+        foreach (Tensor t in dense)
+        {
+            if (!seen.Add(t)) continue;
+            yield return t;
+            if (t.QuantInfo?.Fp8BlockScaleInv is { } scale && seen.Add(scale)) yield return scale;
+        }
+    }
+
     /// <summary>Runs the layer on <paramref name="stream"/> (<c>[tokens, hc, hidden]</c>) in place.</summary>
     public void Forward(float[] stream, int tokens, int startPos, Ernie5SequenceState state)
     {
+        // The whole layer, so the hyper-connection mixes and norms show as this less the attn and ffn stages.
+        using StageProfiler.Scope layerScope = StageProfiler.Begin(_backend, "ernie5", "layer");
         int d = _cfg.HiddenSize;
         float[] x = new float[tokens * d], sub = new float[tokens * d];
         RunSublayer(_attnHc, _attnNorm, stream, tokens, x, sub, (input, output) =>
         {
+            using StageProfiler.Scope _ = StageProfiler.Begin(_backend, "ernie5", _hca is not null ? "attn.hca" : "attn.dsa");
             if (_hca is not null) _hca.Forward(input, tokens, startPos, state.Hca(Index), output);
             else _dsa!.Forward(input, tokens, startPos, state.Dsa(Index), output);
         });
-        RunSublayer(_ffnHc, _ffnNorm, stream, tokens, x, sub, (input, output) => Ffn(input, tokens, output));
+        RunSublayer(_ffnHc, _ffnNorm, stream, tokens, x, sub, (input, output) =>
+        {
+            using StageProfiler.Scope _ = StageProfiler.Begin(_backend, "ernie5", _moe is not null ? "ffn.moe" : "ffn.dense");
+            Ffn(input, tokens, output);
+        });
     }
 
     /// <summary>Shape of layer <paramref name="index"/>'s HCA attention.</summary>
@@ -169,6 +218,7 @@ internal sealed class Ernie5Layer : IDisposable
         Tensor Read(string leaf) => Own(source.Read(Ernie5WeightNames.Attn(index, leaf)));
         float[] Host(string leaf) => HostF32(source, Ernie5WeightNames.Attn(index, leaf));
         string[] l = Ernie5WeightNames.HcaLeaves;
+        (Tensor woa, Tensor? woaScale) = GroupedOutput(source, Ernie5WeightNames.Attn(index, l[5]));
         return new HcaAttentionWeights
         {
             WqA = Read(l[0]),
@@ -176,7 +226,8 @@ internal sealed class Ernie5Layer : IDisposable
             WqB = Read(l[2]),
             Wkv = Read(l[3]),
             KvNorm = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[4]))),
-            WoA = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[5]))),
+            WoA = woa,
+            WoAScaleInv = woaScale,
             WoB = Read(l[6]),
             Sink = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[7]))),
             CompressorWkv = Read(l[8]),
@@ -214,6 +265,17 @@ internal sealed class Ernie5Layer : IDisposable
             OGate = _cfg.UseGatedAttn ? Read(Ernie5WeightNames.AttnGate) : null,
             HeadMix = _cfg.UseVhaAttention ? FoldVha(index, source, _cfg.MlaHeads) : null,
         };
+    }
+
+    // The grouped output projection stays FP8 with its 128x128 scale grid, which the block-diagonal linear reads directly, so it costs a quarter of
+    // an F32 copy on the host and on the device. Any other storage is decoded to F32.
+    private (Tensor Weight, Tensor? ScaleInv) GroupedOutput(IErnie5WeightSource source, string name)
+    {
+        Tensor t = source.Read(name);
+        if (t.DType == DType.F8E4M3 && t.QuantInfo is { Fp8BlockScaleInv: { } scale, Fp8BlockSize: Fp8BlockF32Codec.DefaultBlock })
+            return (Own(t), scale);
+        if (t.DType == DType.F32) return (Own(t), null);
+        using (t) return (Own(ProjectionOps.EnsureF32(t)), null);
     }
 
     // m = I + V U^T, rounded to BF16 as the reference's fold in the BF16 weights' dtype is (vLLM fold_vha).

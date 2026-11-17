@@ -301,21 +301,43 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 ImageData image = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
+                // The extra views of a multiview build are prepared like the front, before the shape model loads for the same reason. A cutout sent without
+                // preparation is composited on white, as upstream's processor does, so the colour under its transparent pixels never reaches the encoder.
+                List<Hunyuan3DViewImage>? views = id == MeshModelIds.Hunyuan3DMultiView
+                    ? [new Hunyuan3DViewImage(Hunyuan3DView.Front, RgbOnWhite(image), image.Width, image.Height), .. PrepareViews(id, request, cancel)
+                        .Select(view => new Hunyuan3DViewImage(MeshViews.ToHunyuan(view.View), RgbOnWhite(view.Image), view.Image.Width, view.Image.Height))]
+                    : null;
                 LoadedMesh loaded = GetOrLoad(spec, id);
-                ImageTo3DRequest job = new ImageTo3DRequest
-                {
-                    ImageRgb = image.Rgb,
-                    Width = image.Width,
-                    Height = image.Height,
-                    GridResolution = request.GridResolution,
-                    Steps = request.Steps,
-                    Seed = MeshSeed.ForSampler(request.Seed),
-                };
-                ThreeDResult result = loaded.Generate(job, p =>
+                Action<GenerationProgress> report = p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
-                }, cancel);
+                };
+                ThreeDResult result;
+                if (views is not null)
+                {
+                    Hunyuan3DMultiViewRequest multiView = new()
+                    {
+                        Views = views,
+                        GridResolution = request.GridResolution,
+                        Steps = request.Steps,
+                        Seed = MeshSeed.ForSampler(request.Seed),
+                    };
+                    result = ((Hunyuan3DShapePipeline)loaded.Pipeline).GenerateMultiView(multiView, report, cancel);
+                }
+                else
+                {
+                    ImageTo3DRequest job = new ImageTo3DRequest
+                    {
+                        ImageRgb = image.Rgb,
+                        Width = image.Width,
+                        Height = image.Height,
+                        GridResolution = request.GridResolution,
+                        Steps = request.Steps,
+                        Seed = MeshSeed.ForSampler(request.Seed),
+                    };
+                    result = loaded.Generate(job, report, cancel);
+                }
                 if (result.Mesh is { TriangleCount: > 0 } mesh)
                 {
                     return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
@@ -642,16 +664,12 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>Texturing: one GLB holding the input mesh with a baked PBR material painted from the reference image. <see cref="MeshRequest.Steps"/> is the sampler step
-    /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
+    /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 4096 when the reference picture or a side picture is baked in,
+    /// so a face gets as many texels as the picture has pixels, else 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
     private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
-        HunyuanPaintOptions options = new()
-        {
-            Steps = request.Steps == 0 ? null : request.Steps,
-            TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
-            Seed = MeshSeed.ForSampler(request.Seed),
-        };
+        bool projectReference = EngineKnobs.PaintProjectReference.Value;
 
         return Task.Run(
             () =>
@@ -660,17 +678,83 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 ImageData reference = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     reference = _engine.MeshPreparationInternal.Prepare(id, reference, cancel).Image;
+                // Side pictures are only ever baked by the reference projection, so with it off they are not prepared at all.
+                List<string> warnings = [];
+                List<PaintSideReference> sides = [];
+                if (UnbakedViewsWarning(request, projectReference) is { } unbaked)
+                    warnings.Add(unbaked);
+                else if (projectReference)
+                    sides = PaintSides(PrepareViews(id, request, cancel), warnings);
+                // The default size follows the prepared pictures: preparation can add the alpha that lets a picture be baked in.
+                HunyuanPaintOptions options = new()
+                {
+                    Steps = request.Steps == 0 ? null : request.Steps,
+                    TextureSize = PaintTextureSize(request.GridResolution, projectReference && (reference.HasAlpha || sides.Count > 0)),
+                    Seed = MeshSeed.ForSampler(request.Seed),
+                    ProjectReference = projectReference,
+                };
                 byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
-                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
+                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.HasAlpha ? reference.Alpha : default, reference.Width,
+                    reference.Height, sides, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
-                return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb", Warnings = result.Warnings };
+                return new MeshResult
+                {
+                    Data = PbrGlbWriter.Write(result.Mesh, result.Material),
+                    Format = "glb",
+                    Warnings = warnings.Count == 0 ? result.Warnings : [.. warnings, .. result.Warnings],
+                };
             },
             cancel);
     }
+
+    /// <summary>The Paint texture size: the request's grid when set, else 4096 when the reference picture is baked in (a full figure's face then gets as many texels as the picture
+    /// has pixels), else 2048.</summary>
+    internal static int PaintTextureSize(int gridResolution, bool bakesReference) => gridResolution != 0 ? gridResolution : bakesReference ? 4096 : 2048;
+
+    /// <summary>The warning for side pictures sent to Paint while the reference projection (the only thing that bakes them) is off; null otherwise.</summary>
+    internal static string? UnbakedViewsWarning(MeshRequest request, bool projectReference) =>
+        !projectReference && request.Views is { Count: > 0 }
+            ? $"The side pictures were not baked: they are baked by the reference projection, and {EngineKnobs.PaintProjectReference.Id} is off."
+            : null;
+
+    /// <summary>The prepared side pictures Paint can bake: each needs a cutout (an alpha plane with some transparency) to be placed by its outline. The others are left out, each
+    /// with a warning.</summary>
+    internal static List<PaintSideReference> PaintSides(IEnumerable<MeshViewImage> views, List<string> warnings)
+    {
+        List<PaintSideReference> sides = [];
+        foreach (MeshViewImage view in views)
+        {
+            if (MeshPreparationService.HasUsableAlpha(view.Image))
+            {
+                sides.Add(new PaintSideReference(MeshViews.PaintAzimuth(view.View), CompositeOnWhite(view.Image), view.Image.Alpha!, view.Image.Width, view.Image.Height));
+            }
+            else
+            {
+                string why = view.Image.HasAlpha ? "an alpha plane that is opaque everywhere, so no cutout" : "no alpha plane";
+                warnings.Add($"The {view.View} picture has {why}, so it was not baked; send it cut out, or set Preprocess Auto to cut it out.");
+            }
+        }
+        return sides;
+    }
+
+    /// <summary>The request's extra views, each prepared like the front picture when <see cref="MeshRequest.Preprocess"/> is Auto; empty when there are none.</summary>
+    private List<MeshViewImage> PrepareViews(string id, MeshRequest request, CancellationToken cancel)
+    {
+        List<MeshViewImage> views = [];
+        foreach (MeshViewImage view in request.Views ?? [])
+        {
+            cancel.ThrowIfCancellationRequested();
+            views.Add(request.Preprocess == MeshPreprocess.Auto ? view with { Image = _engine.MeshPreparationInternal.Prepare(id, view.Image, cancel).Image } : view);
+        }
+        return views;
+    }
+
+    /// <summary>A picture's colour as the shape models take it: composited on white when it carries alpha.</summary>
+    private static byte[] RgbOnWhite(ImageData image) => image.HasAlpha ? CompositeOnWhite(image) : image.Rgb;
 
     /// <summary>The reference composited on white, as the Paint pipelines expect.</summary>
     private static byte[] CompositeOnWhite(ImageData image)
@@ -708,9 +792,10 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 string? upscaler = PaintUpscaler(folder, upscale);
                 if (upscale && upscaler is null)
                 {
-                    Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (it is lllyasviel/Annotators RealESRGAN_x4plus.pth, not downloaded with the model): the views are baked without the upscaler.");
+                    Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (lllyasviel/Annotators RealESRGAN_x4plus.pth, one of the model's catalog assets): the views are baked without the upscaler and come out softer. Download the model's assets again to add it.");
                 }
                 HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, upscaler);
+                loader.Pipeline.StageLog = line => Logs.Debug($"[Paint] {line}");
                 _paintPipelines[folder] = loader;
                 return loader;
             }
@@ -800,7 +885,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                         return new MeshResult { Data = Trellis2ImageTo3DPipeline.ToGlb(textured), Format = "glb" };
                     }
 
-                    Mesh mesh = runtime.Pipeline.Generate(image, options, report);
+                    Mesh mesh = runtime.Pipeline.Generate(image, options, report, cancel);
+                    cancel.ThrowIfCancellationRequested();
                     return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
                 }
                 finally
@@ -837,7 +923,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     cancel,
                     pipeline => options.Texture
                         ? Pixal3DImageTo3DPipeline.ToGlb(pipeline.GenerateTextured(image, options, Report, cancel))
-                        : GlbWriter.Write(pipeline.Generate(image, options, Report)));
+                        : GlbWriter.Write(pipeline.Generate(image, options, Report, cancel)));
             },
             cancel);
     }

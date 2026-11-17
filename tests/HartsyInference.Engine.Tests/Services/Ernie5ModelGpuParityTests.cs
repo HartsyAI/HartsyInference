@@ -64,7 +64,60 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     public void Vulkan_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new VulkanBackend { EnableF16Gemm = false }, "Vulkan", resident: false,
         Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides);
 
+    // The engine's Text service end to end on the device: the slot's backend is the requested GPU (resident layers), and a request generates on the
+    // pipeline and, with continuous batching on, on the scheduler under the device gate. The tokens must match the CPU run of the same request.
+    // FP8 is the real checkpoint's storage, whose resident preload and per-call expert upload the service turns on.
+    [ErnieCudaFact]
+    public Task Cuda_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.F32);
+
+    [ErnieCudaFact]
+    public Task Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    [ErnieVulkanFact]
+    public Task Vulkan_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.F32);
+
+    [ErnieVulkanFact]
+    public Task Vulkan_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    private async Task TextServiceOn(string device, Ernie5SyntheticCheckpoint.Storage storage)
+    {
+        string dir = Path.Combine(_root, $"service-{storage}-" + device.Replace(':', '-'));
+        Ernie5SyntheticCheckpoint.Write(dir, storage: storage);
+        Ernie5TextPathTests.ServiceRun cpu = await Ernie5TextPathTests.GenerateThroughService(dir, "cpu", continuousBatching: false);
+        foreach (bool batching in new[] { false, true })
+        {
+            Ernie5TextPathTests.ServiceRun run = await Ernie5TextPathTests.GenerateThroughService(dir, device, batching);
+            Assert.True(run.Device.IsGpu, $"{device} loaded on {run.Device}.");
+            Assert.Equal(batching, run.Scheduled);
+            Assert.Equal(cpu.Result.Text, run.Result.Text);
+        }
+    }
+
     // One FP8 linear whose weight spans two row blocks and three column blocks with distinct scales, on the device and the CPU.
+    // Two stages on one device (two backends, so each holds its own weight cache), every weight preloaded: the split and the expert preload must
+    // give the CPU's logits, and no forward may read a routed expert from the checkpoint.
+    [ErnieCudaFact]
+    public void Cuda_SyntheticErnieFp8_TwoStagesWithEveryWeightPreloaded_LogitsMatchCpu()
+    {
+        string dir = WriteCheckpoint(Ernie5SyntheticCheckpoint.Storage.Fp8);
+        using CpuBackend cpu = new();
+        float[] want = Logits(dir, cpu, resident: true);
+        using CudaBackend first = new(0, PtxDirectory());
+        using CudaBackend second = new(0, PtxDirectory());
+        int layers = Ernie5Config.Load(Path.Combine(dir, "config.json")).NumHiddenLayers;
+        LLM.Transformer.LlmPlacement split = new([new LLM.Transformer.LlmStage(first, 0, 1), new LLM.Transformer.LlmStage(second, 1, layers)]);
+        using Ernie5Model model = Ernie5Model.Load(dir, second, new Ernie5LoadOptions
+        {
+            MaxSequenceTokens = Tokens.Length + 1, ResidentWeights = true, Placement = split, PreloadExperts = true,
+        });
+        // Every routed expert is on one of the two devices' caches before the first forward.
+        Assert.All(model.EnumerateExpertWeights(), t => Assert.True(first.IsWeightResident(t) || second.IsWeightResident(t), "a routed expert is not preloaded"));
+        using Ernie5SequenceState state = model.CreateState(Tokens.Length + 1);
+        float[] prefill = model.Forward(Tokens, state, allRows: true);
+        float[] decode = model.Forward([Tokens[^1] + 1], state);
+        AssertClose(want, [.. prefill, .. decode], "CUDA two-stage");
+    }
+
     [ErnieCudaFact]
     public void Cuda_Fp8LinearWithMultipleBlocks_MatchesCpu() => LinearParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA");
 

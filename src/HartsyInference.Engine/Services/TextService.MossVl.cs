@@ -111,10 +111,10 @@ public sealed partial class TextService
 
     /// <summary>Refuses a MOSS-VL checkpoint folder on the CPU when the host cannot hold it widened: the CPU path keeps every projection as
     /// F32, twice the BF16 shards (about 42 GB for the released model), plus a fixed margin for activations and the mapped shards' pages.</summary>
-    /// <param name="availableKb">Free host RAM in KiB; zero or less means unknown, and nothing is refused.</param>
+    /// <param name="availableKb">Free host RAM in KiB; below zero means unknown, and nothing is refused. Zero is a known, exhausted budget.</param>
     internal static void EnsureRamHeadroomForMossVlFolderOnCpu(string folder, long availableKb)
     {
-        if (availableKb <= 0 || !Directory.Exists(folder))
+        if (availableKb < 0 || !Directory.Exists(folder))
             return;
         long shardBytes = Directory.EnumerateFiles(folder, "*.safetensors").Sum(f => new FileInfo(f).Length);
         const long MarginBytes = 4L << 30;

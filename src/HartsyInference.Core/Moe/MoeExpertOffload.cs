@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Moe.Residency;
@@ -6,7 +7,8 @@ namespace HartsyInference.Core.Moe;
 
 /// <summary>Running totals of where a model's routed experts ran.</summary>
 /// <param name="ResidentRows">Routed (token, slot) pairs served by an expert resident in the device cache.</param>
-/// <param name="StreamedRows">Pairs served on the device by an expert uploaded for that one call (a large batch, such as a prefill).</param>
+/// <param name="StreamedRows">Pairs served on the device by an expert uploaded for that call: a miss copied for one large batch (a
+/// prefill), and, on an offload with no host runner, a miss admitted into the cache just before it ran.</param>
 /// <param name="HostRows">Pairs served on the CPU.</param>
 /// <param name="Admitted">Experts queued for upload into the cache after a miss.</param>
 public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRows, long HostRows, long Admitted)
@@ -22,10 +24,12 @@ public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRo
 /// Expert offload for one model: a device cache holds as many routed experts as its budget allows, and the rest run elsewhere.
 /// An expert the cache holds runs on the device; a miss runs on the CPU through <see cref="Host"/>, or, when it serves at least
 /// <see cref="StreamRowThreshold"/> rows in one call (a prefill), on the device from a copy uploaded for that call, since moving its
-/// weights once costs less than computing that many rows on the CPU.
+/// weights once costs less than computing that many rows on the CPU. With no host runner every miss runs on the device that way,
+/// for experts the CPU kernels cannot read.
 /// </summary>
 /// <remarks>
-/// <para><b>Admission.</b> After a layer runs, its misses may be queued for upload so later steps find them resident. Misses fill
+/// <para><b>Admission.</b> After a layer runs, its misses may be queued for upload so later steps find them resident; with no host
+/// runner they are admitted before the layer runs them instead (<see cref="AdmitNow"/>), since each miss is uploaded anyway. Misses fill
 /// free room first, as many as fit without evicting anything (at most <see cref="MaxFillsPerLayer"/>). Beyond that a miss may
 /// displace a resident expert only when its recent use (<see cref="DecayedLfuHysteresisPolicy"/>, the same scores that choose
 /// eviction victims) reaches <see cref="AdmitMinScore"/>, and at most <see cref="MaxSwapsPerLayer"/> per layer per step, so a full
@@ -33,7 +37,8 @@ public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRo
 /// next step's plan waits only for the experts it uses.</para>
 /// <para><b>Model contract.</b> A MoE block registers each layer's experts with <see cref="RegisterLayer"/>, plans each forward with
 /// <see cref="ExpertScheduler.Plan"/> against <see cref="Cache"/> and <see cref="Policy"/>, and reports with
-/// <see cref="Record"/> and <see cref="AfterLayer"/>. The weights a layer registers must be the tensors its device path projects
+/// <see cref="Record"/> and <see cref="AfterLayer"/>, or, with no host runner, admits with <see cref="AdmitNow"/> before running the
+/// misses and pins them with a second lease. The weights a layer registers must be the tensors its device path projects
 /// with, so a resident expert's device copy is the one the projection finds.</para>
 /// </remarks>
 public sealed class MoeExpertOffload : IDisposable
@@ -48,13 +53,12 @@ public sealed class MoeExpertOffload : IDisposable
 
     /// <summary>Creates the offload over <paramref name="cache"/>, which must not have been used yet.</summary>
     /// <param name="cache">The device expert cache; its budget is the offload's expert budget.</param>
-    /// <param name="host">Runs experts on the CPU.</param>
+    /// <param name="host">Runs experts on the CPU; null runs every miss on the device from a copy uploaded for that call.</param>
     /// <param name="scores">Recent-use scores: attached to <paramref name="cache"/> to choose eviction victims, and read for admission.</param>
     /// <param name="owned">Disposed with the offload after the cache, for whatever else the caller built for it.</param>
-    public MoeExpertOffload(ExpertCacheBase cache, IExpertHostRunner host, DecayedLfuHysteresisPolicy scores, IDisposable? owned = null)
+    public MoeExpertOffload(ExpertCacheBase cache, IExpertHostRunner? host, DecayedLfuHysteresisPolicy scores, IDisposable? owned = null)
     {
         ArgumentNullException.ThrowIfNull(cache);
-        ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(scores);
         if (cache is not IResidencyAwareExpertCache residency)
             throw new ArgumentException("The offload needs a residency-aware cache.", nameof(cache));
@@ -72,8 +76,8 @@ public sealed class MoeExpertOffload : IDisposable
     /// <summary>The device cache, for prefetching and stats.</summary>
     public ExpertCacheBase CacheBase { get; }
 
-    /// <summary>Runs the experts the device does not hold.</summary>
-    public IExpertHostRunner Host { get; }
+    /// <summary>Runs the experts the device does not hold; null when every miss runs on the device.</summary>
+    public IExpertHostRunner? Host { get; }
 
     /// <summary>Resident experts on the device, misses elsewhere; the planner never uploads.</summary>
     public IMissExecutionPolicy Policy => ResidentFirstPolicy.Instance;
@@ -112,7 +116,7 @@ public sealed class MoeExpertOffload : IDisposable
     }
 
     /// <summary>Whether a miss serving <paramref name="rows"/> pairs runs on the device from an uploaded copy rather than on the CPU.</summary>
-    public bool Streams(int rows) => rows >= StreamRowThreshold;
+    public bool Streams(int rows) => Host is null || rows >= StreamRowThreshold;
 
     /// <summary>Counts one expert's rows by where they ran.</summary>
     public void Record(ExpertPlacement placement, bool streamed, int rows)
@@ -123,35 +127,59 @@ public sealed class MoeExpertOffload : IDisposable
     }
 
     /// <summary>Queues some of a layer's misses for upload, by the admission rule in the type remarks. Call after the layer's lease is
-    /// released.</summary>
+    /// released. An offload with no host runner admits before the layer runs instead (<see cref="AdmitNow"/>).</summary>
     public void AfterLayer(List<ExpertKey> misses)
     {
         ArgumentNullException.ThrowIfNull(misses);
         if (misses.Count == 0) return;
+        SelectAdmissions(misses, _admit);
+        if (_admit.Count == 0) return;
+        int started = CacheBase.Prefetch(CollectionsMarshal.AsSpan(_admit));
+        Interlocked.Add(ref _admitted, started);
+    }
+
+    /// <summary>Uploads the misses the admission rule admits into the cache now, before the layer runs them, so an admitted expert is read
+    /// once and then runs from its cached copy, rather than from a per-call copy and again for admission after the layer. For an offload
+    /// with no host runner, whose every miss is uploaded anyway. The caller pins <paramref name="admitted"/> with a lease before running
+    /// them; a key whose upload did not start stays a miss there.</summary>
+    /// <returns>Uploads started.</returns>
+    public int AdmitNow(List<ExpertKey> misses, List<ExpertKey> admitted)
+    {
+        ArgumentNullException.ThrowIfNull(misses);
+        ArgumentNullException.ThrowIfNull(admitted);
+        admitted.Clear();
+        if (misses.Count == 0) return 0;
+        SelectAdmissions(misses, admitted);
+        if (admitted.Count == 0) return 0;
+        int started = CacheBase.Prefetch(CollectionsMarshal.AsSpan(admitted));
+        Interlocked.Add(ref _admitted, started);
+        return started;
+    }
+
+    // The admission rule: whole experts that fit the free room first, then hot misses that may displace a resident expert.
+    private void SelectAdmissions(List<ExpertKey> misses, List<ExpertKey> into)
+    {
+        into.Clear();
         ExpertCacheStats stats = CacheBase.Stats;
         // Free room is whole experts that fit without evicting anything; past that, only a hot miss may displace a resident one.
         long expertBytes = ExpertBytes(misses[0]);
         long free = stats.BudgetBytes - stats.ResidentBytes;
         int fills = expertBytes > 0 ? (int)Math.Min(MaxFillsPerLayer, Math.Max(0, free / expertBytes)) : 0;
         int swaps = MaxSwapsPerLayer;
-        _admit.Clear();
         foreach (ExpertKey key in misses)
         {
             if (fills > 0)
             {
-                _admit.Add(key);
+                into.Add(key);
                 fills--;
             }
             else if (swaps > 0 && _scores.ScoreOf(key) >= AdmitMinScore)
             {
-                _admit.Add(key);
+                into.Add(key);
                 swaps--;
             }
             if (fills == 0 && swaps == 0) break;
         }
-        if (_admit.Count == 0) return;
-        int started = CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_admit));
-        Interlocked.Add(ref _admitted, started);
     }
 
     /// <summary>Bytes one expert of <paramref name="key"/>'s layer occupies; every expert of a layer has the same shape.</summary>
@@ -178,7 +206,7 @@ public sealed class MoeExpertOffload : IDisposable
         {
             keys.Clear();
             for (int e = 0; e < Math.Min(perLayer, count); e++) keys.Add(new ExpertKey(layer, e));
-            if (CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(keys)) < keys.Count) break;
+            if (CacheBase.Prefetch(CollectionsMarshal.AsSpan(keys)) < keys.Count) break;
         }
     }
 

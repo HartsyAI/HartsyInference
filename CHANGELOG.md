@@ -3,6 +3,65 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.437
+
+- Added optional left, back and right pictures to image-to-3D (`MeshRequest.Views`, API `viewPngs`, CLI `--view`):
+  Hunyuan3D-2mv (`hunyuan3d-mv`) builds the shape from all of them, and Hunyuan3D Paint bakes each onto its own side.
+
+## alpha.436
+
+- Hunyuan3D Paint 2.1's reference projection no longer paints the face onto a hat brim the shape model put lower than
+  drawn: the brim takes the picture's own brim and outline, and the face under it stays in place.
+
+## alpha.435
+
+- Hunyuan3D Paint 2.1 bakes the reference picture itself onto the surfaces the front camera sees, so a face looks like the picture.
+
+## alpha.434
+
+- Hunyuan3D Paint 2.1 textures match upstream's: the reference projection is off and the Real-ESRGAN view upscaler is on (and downloads with the model) by default.
+
+## alpha.433
+
+- Hunyuan3D Paint 2.1 views match upstream's, and 3D shape runs stop promptly when cancelled.
+
+## alpha.432
+
+- **Fixed: the second background removal after a free memory no longer fails.** `FreeMemory` disposed the vision service's weight mappings
+  but kept its model caches, so the next RMBG cutout (or any cached vision model) reused a model whose weights were closed and threw
+  "Cannot access a disposed object: MmapHandle". In SwarmUI's 3D tab this failed every texturing run after the first one that needed a
+  cutout. The caches are now emptied with the weights, and the next request loads afresh.
+
+## alpha.431
+
+- **Fixed: Hunyuan3D Paint no longer streaks surfaces that no view sees.** The engine filled unpainted texels from their UV chart alone, so a
+  surface hidden from all six views (a forehead under a hat brim, seen when looking up at the model) came out as coloured vertical streaks.
+  It now runs upstream's mesh-vertex inpaint first (`PaintVertexInpaint`, a port of `meshVerticeInpaint`): unpainted vertices take the
+  colour of the mesh around them, and those seed the 2D fill.
+- **Fixed: the reference picture is only baked onto surfaces that face the front.** It was also pasted onto surfaces turned far from the
+  front camera (a brim's underside), where the front picture has almost no pixels and stretched into a strip of face on the hat. It now
+  applies fully up to about 50 degrees off the view direction and fades out by about 70; the painted views cover the rest.
+
+## alpha.430
+
+- **Fixed: `MeshCleaner.RemoveFlatComponents` sees a flat piece whatever way it is turned.** Thickness was the thinnest side of the
+  piece's axis-aligned box, so a sheet tilted 45 degrees about two axes measured 0.71 of its width and stayed. It is now the spread of
+  the piece's vertices along the normal of their best-fitting plane (or the thinnest axis, if smaller).
+
+## alpha.429
+
+- **Added: Hunyuan3D Paint bakes the reference picture into the front of the texture.** Paint repaints each view at 512 px, so on a full
+  figure a face is a few dozen pixels wide and comes out without eyes or brows; upstream's Python pipeline loses it the same way. When the
+  reference carries alpha, the picture's outline is fitted to the mesh's front silhouette, the picture is moved locally (up to 10 px at
+  512, smoothed) onto the generated front view, which follows the mesh's own geometry, and then, at its own resolution, replaces that
+  view's albedo except where the two still show different surfaces. On the Old Sage test character the face went from a melted blur to
+  the picture's glasses, brows, nose and beard lines (2026-11-14, RTX 3060, 2048 texture; the bake took 15 s, as before). A poor fit
+  (under 80 percent overlap) falls back to the generated view with a warning. **Behaviour change:** any caller that sends a transparent PNG now gets this by default; the knob
+  `numerics.paintProjectReference` (or `HunyuanPaintOptions.ProjectReference`) turns it off. Send the reference square and as large as it
+  comes: the diffusion still sees it resized to the view size.
+- **Added: `MeshCleanOptions.FlatComponentThicknessRatio` and `MeshCleaner.RemoveFlatComponents`.** Drops loose pieces thinner than a share
+  of the mesh's diagonal whatever their area, such as the flat sheets image-to-3D models leave beside a figure. Off by default.
+
 ## alpha.428
 
 - **Added: a stall warning for the TRELLIS.2 and Pixal3D flow stages.** When no step finishes for ten times the median step (never under

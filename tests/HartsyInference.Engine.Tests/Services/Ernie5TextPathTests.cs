@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -9,6 +10,8 @@ using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Tests.Services;
 
@@ -91,6 +94,112 @@ public sealed class Ernie5TextPathTests : IDisposable
         HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(info));
 
         Assert.Contains(named, ex.Message);
+    }
+
+    [Fact]
+    public void Text_path_keeps_layers_resident_on_a_gpu_and_streams_them_on_the_cpu()
+    {
+        Assert.False(HfTextDirectoryLoader.Ernie5OptionsFor(DeviceKind.Cpu).ResidentWeights);
+        Assert.True(HfTextDirectoryLoader.Ernie5OptionsFor(DeviceKind.Cuda(1)).ResidentWeights);
+        Assert.True(HfTextDirectoryLoader.Ernie5OptionsFor(DeviceKind.Vulkan()).ResidentWeights);
+        Assert.All(new[] { DeviceKind.Cpu, DeviceKind.Cuda() }, d =>
+        {
+            Ernie5LoadOptions options = HfTextDirectoryLoader.Ernie5OptionsFor(d);
+            Assert.Equal(HfTextDirectoryLoader.MaxSequenceTokens, options.MaxSequenceTokens);
+            Assert.False(options.Mtp);
+        });
+    }
+
+    [Fact]
+    public void Text_path_takes_a_gpu_layer_split_and_refuses_tensor_parallelism_or_a_cpu_stage_by_name()
+    {
+        TextService.RequireRunnableErnie5Placement([], tensorParallelDegree: 1);
+        TextService.RequireRunnableErnie5Placement(["cuda:0", "cuda:1"], tensorParallelDegree: 1);
+
+        NotSupportedException cpu = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement(["cuda:0", "cpu"], 1));
+        Assert.Contains("'cpu' is not (cuda:0 + cpu)", cpu.Message);
+        NotSupportedException mixed = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement(["cuda:0", "vulkan:0"], 1));
+        Assert.Contains("mixed GPU kinds", mixed.Message);
+        NotSupportedException tp = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement([], tensorParallelDegree: 2));
+        Assert.Contains("tensor-parallel degree is 2", tp.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Text_service_loads_on_the_requested_cpu_and_generates(bool continuousBatching)
+    {
+        ServiceRun run = await GenerateThroughService(WriteCheckpoint("service-" + continuousBatching), "cpu", continuousBatching);
+
+        Assert.True(run.Device.IsCpu);
+        Assert.Equal(continuousBatching, run.Scheduled);
+        Assert.InRange(run.Result.CompletionTokens, 1, 4);
+    }
+
+    [Fact]
+    public void Base_checkpoint_without_a_chat_template_prompts_with_the_post_processor_prefix()
+    {
+        string dir = Path.Combine(_root, "base-prefix");
+        Ernie5SyntheticCheckpoint.Write(dir, baseLayout: true);
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(Probe(dir), backend);
+
+        int[] ids = model.Template.Encode(model.Tokenizer, [new ChatMessage("user", "hi")], addGenerationPrompt: true);
+
+        // tokenizer("hi") on the base layout: the post-processor's end token, then the merged "hi".
+        Assert.IsType<RawCompletionTemplate>(model.Template);
+        Assert.Equal([Ernie5SyntheticCheckpoint.EosId, 258], ids);
+    }
+
+    [Fact]
+    public void Base_checkpoint_with_a_malformed_post_processor_names_the_tokenizer_file()
+    {
+        string dir = Path.Combine(_root, "base-malformed");
+        Ernie5SyntheticCheckpoint.Write(dir, baseLayout: true);
+        string noSpecials = "{\"type\":\"TemplateProcessing\",\"single\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"pair\":[]}";
+        File.WriteAllText(Path.Combine(dir, "tokenizer.json"), Ernie5SyntheticCheckpoint.TokenizerJson(noSpecials));
+        using CpuBackend backend = new();
+
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.LoadHostReference(Probe(dir), backend));
+
+        Assert.Contains("tokenizer.json", ex.Message);
+        Assert.Contains("special_tokens", ex.Message);
+    }
+
+    [Fact]
+    public async Task Base_checkpoint_without_a_chat_template_generates_through_the_text_service()
+    {
+        string dir = Path.Combine(_root, "base-service");
+        Ernie5SyntheticCheckpoint.Write(dir, baseLayout: true);
+
+        ServiceRun run = await GenerateThroughService(dir, "cpu", continuousBatching: false);
+
+        // "Hello" is five byte tokens after the one prefix token.
+        Assert.Equal(6, run.Result.PromptTokens);
+        Assert.InRange(run.Result.CompletionTokens, 1, 4);
+    }
+
+    /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
+    /// the slot's backend runs on.</summary>
+    internal sealed record ServiceRun(TextResult Result, bool Scheduled, DeviceKind Device);
+
+    /// <summary>Loads <paramref name="directory"/> through the engine's Text service on <paramref name="device"/> and generates up to four tokens,
+    /// with the continuous-batching knob pinned for the load and the request.</summary>
+    internal static async Task<ServiceRun> GenerateThroughService(string directory, string device, bool continuousBatching)
+    {
+        using IDisposable knobs = KnobProfileScope.Push(KnobProfile.Create("ernie5-text-service").With(EngineKnobs.ContinuousBatching, continuousBatching));
+        using InferenceEngine engine = new(device);
+        ModelSpec spec = new() { Requested = directory, Modality = Modality.Text, LocalPath = directory };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "Hello" }],
+            Device = device,
+            Temperature = 0,
+            MaxTokens = 4,
+        };
+        TextResult result = await engine.Text.GenerateAsync(spec, request);
+        TextDeviceSlot slot = ((TextService)engine.Text).SlotFor(device) ?? throw new InvalidOperationException($"No slot ran on '{device}'.");
+        return new ServiceRun(result, slot.Scheduler is not null, slot.Backend!.Device);
     }
 
     [Fact]

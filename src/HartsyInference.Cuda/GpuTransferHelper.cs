@@ -627,6 +627,25 @@ internal static unsafe class GpuTransferHelper
             {
                 return false;
             }
+            // A borrowed mapped view goes through the staging buffer like any other upload of it: a direct copy from the
+            // mapping page-faults inside the driver call, which stalled whole runs on a network volume.
+            if (MappedUploadStaging.IsMappedView(tensor))
+            {
+                Context?.EnsureCurrent();
+                buffer = AllocateWeight(bytes);
+                try
+                {
+                    GpuTransferHelper.UploadTo(this, buffer, tensor, (nuint)bytes);
+                }
+                catch
+                {
+                    FreeDevice(buffer, bytes);
+                    buffer = 0;
+                    throw;
+                }
+                PromoteToWeight(tensor, buffer);
+                return true;
+            }
             // Read the host pointer BEFORE allocating. It runs EnsureCpuData, and when ANOTHER backend already
             // holds this tensor that fires its demote hook, which makes the OTHER backend's context current and
             // does not put ours back — allocating then lands in the wrong context and the pointer cached here is
@@ -1070,8 +1089,9 @@ internal static unsafe class GpuTransferHelper
         CudaMemory.CopyHostToDeviceAsync(destination, host, byteSize, stream);
     }
 
-    /// <summary>Uploads a borrowed mapped tensor through the backend's staging buffer, one chunk per async copy.</summary>
-    private static unsafe void StageMappedUpload(State s, ulong destination, Tensor source, nuint byteSize, nint stream)
+    /// <summary>Uploads a borrowed mapped tensor through the backend's staging buffer, one chunk per async copy on
+    /// <paramref name="stream"/>, waiting for each copy before the buffer is reused; returns once the last copy is done.</summary>
+    internal static unsafe void StageMappedUpload(State s, ulong destination, Tensor source, nuint byteSize, nint stream)
     {
         long total = (long)byteSize;
         lock (s.MappedStaging)

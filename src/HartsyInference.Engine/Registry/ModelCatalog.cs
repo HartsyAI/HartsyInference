@@ -162,7 +162,9 @@ public static class ModelCatalog
             Repack = new AssetRepack { MirrorPath = "hunyuan3d-paint21/vae/diffusion_pytorch_model.safetensors", Sha256 = "ed31a6bcc917e4da1b694281b7242f1246ffb5adba47eb81133d1bbae7a7ac3b" } },
         new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
             Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
-        // The Real-ESRGAN view upscaler (lllyasviel/Annotators RealESRGAN_x4plus.pth, 67,040,989 B, sha256 4fa0d389...) is opt-in (knob numerics.paintUpscaleViews) and not downloaded with the model.
+        // The view upscaler upstream runs on every generated view (knob numerics.paintUpscaleViews, on by default). A pickle, read by the safe parser only.
+        new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "RealESRGAN_x4plus.pth",
+            Role = "upscaler", Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
     ];
 
     /// <summary>Hunyuan3D-Omni (<c>tencent/Hunyuan3D-Omni</c> at <c>70e803bf</c>): the DiT, the VAE and the control encoder (pickles, read by the safe parser only) with their configs, and DINOv2-large (<c>facebook/dinov2-large</c> at
@@ -1053,7 +1055,7 @@ public static class ModelCatalog
             // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
             DeepSeekV41Catalog.Build(),
 
-            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the CPU without MTP.
+            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
             // Text / LLM — Kimi K3.1 Pro: text decoder on the Text path (device-chosen backend, no vision, single device); structural until a real run.
@@ -2900,8 +2902,7 @@ public static class ModelCatalog
                 with { Assets = [.. Hunyuan3DAssets("Hunyuan3D-2", "hunyuan3d-dit-v2-0-turbo", "hunyuan3d-turbo",
                     "5ee5a81e4df08a1c65b79910bf5b145a90376e526794f4607a4d5d068d62f269",
                     "4712421fe32d57c678be3be2b608acdb8871985f0b81646a883d136abc63feb7"), .. Hunyuan3DFlashVdmVaeAssets] },
-            // Four-view conditioning needs several images; MeshRequest carries one, so this id downloads but is not CLI-drivable yet.
-            E("hunyuan3d-mv", d3, "Hunyuan3D-2mv (multiview)", "Flux MMDiT + VecSet VAE, four-view DINOv2 conditioning", st)
+            E("hunyuan3d-mv", d3, "Hunyuan3D-2mv (multiview)", "Flux MMDiT + VecSet VAE, four-view DINOv2 conditioning", st, cli: true)
                 with { Assets = Hunyuan3DAssets("Hunyuan3D-2mv", "hunyuan3d-dit-v2-mv", "hunyuan3d-mv",
                     "d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c",
                     "315fd5bf601d1d103130b9fda202f1bd28eda495e68ed1621bc823d5519c5e5b") },

@@ -27,12 +27,12 @@ public sealed class HunyuanPaintCatalogTests
     }
 
     [Fact]
-    public void PaintPbr_AlsoCarriesTheDinoEncoderButNotTheOptInUpscaler()
+    public void PaintPbr_AlsoCarriesTheDinoEncoderAndTheViewUpscaler()
     {
         CatalogEntry entry = ModelCatalog.Find("hunyuan3d-paint21")!;
 
         Assert.Contains(entry.Assets, a => a.Repo == "facebook/dinov2-giant" && a.FileName == "dino/model.safetensors");
-        Assert.DoesNotContain(entry.Assets, a => a.FileName == "RealESRGAN_x4plus.pth");
+        Assert.Contains(entry.Assets, a => a.Repo == "lllyasviel/Annotators" && a.FileName == "RealESRGAN_x4plus.pth");
     }
 
     [Fact]

@@ -5,7 +5,7 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Ernie5;
 
-/// <summary>Adapts a loaded ERNIE-5.5 host reference model to <see cref="IGenerationModel"/> so the shared pipeline can drive it.</summary>
+/// <summary>Adapts a loaded ERNIE-5.5 model to <see cref="IGenerationModel"/> so the shared pipeline can drive it.</summary>
 /// <remarks>Owns the model. Text only, one token per decode step, no speculation. A prefill must start at the sequence's committed length.
 /// Not thread-safe: run one sequence at a time.</remarks>
 public sealed class Ernie5GenerationModel : IGenerationModel
@@ -13,7 +13,7 @@ public sealed class Ernie5GenerationModel : IGenerationModel
     private readonly Ernie5Model _model;
 
     /// <param name="model">The loaded model; this adapter takes ownership.</param>
-    /// <param name="outputBackend">Backend that hosts the returned hidden and logits tensors (the CPU backend).</param>
+    /// <param name="outputBackend">Backend the model runs on. The hidden and logits tensors it returns are host tensors whatever the backend.</param>
     /// <param name="maxTokens">The longest sequence the model was loaded for.</param>
     public Ernie5GenerationModel(Ernie5Model model, IBackend outputBackend, int maxTokens)
     {
@@ -121,7 +121,7 @@ public sealed class Ernie5GenerationModel : IGenerationModel
         return rowsPerLayer * c.NumHiddenLayers * rowFloats * sizeof(float);
     }
 
-    /// <summary>Free and total host memory as the runtime sees it; there is no device on this path.</summary>
+    /// <summary>Free and total host memory as the runtime sees it, also when the model runs on a GPU: the sequence states live on the host.</summary>
     public CapacitySnapshot Capacity()
     {
         GCMemoryInfo info = GC.GetGCMemoryInfo();
