@@ -32,6 +32,8 @@ internal sealed class IdolRePo : IDisposable
         _finalW = weights[$"{prefix}.final_map.weight"];
         Tensor[] freqs = [weights[$"{prefix}.freqs_0"], weights[$"{prefix}.freqs_1"], weights[$"{prefix}.freqs_2"]];
         _pairs = (int)(freqs[0].Shape[0] + freqs[1].Shape[0] + freqs[2].Shape[0]);
+        if (_pairs * 2 != config.HeadDim)
+            throw new ArgumentException($"'{prefix}' rotates {_pairs} channel pairs per head but a head is {config.HeadDim} wide ({config.HeadDim / 2} pairs).", nameof(weights));
         _angleMatrix = new Tensor(new TensorShape(_pairs, 3), DType.F32);
         Span<float> m = _angleMatrix.AsSpan<float>();
         int row = 0;
@@ -46,6 +48,13 @@ internal sealed class IdolRePo : IDisposable
 
     /// <summary>Rotation angles pairs per head.</summary>
     internal int Pairs => _pairs;
+
+    /// <summary>Exactly the tensors <see cref="Angles"/> hands to the backend (the frequencies are folded into the angle matrix and are not read again).</summary>
+    internal IEnumerable<Tensor> EnumerateWeights()
+    {
+        yield return _normW; yield return _normB; yield return _gateW; yield return _contentW; yield return _finalW;
+        yield return _angleMatrix;
+    }
 
     /// <summary>The cosines and sines of the rotation of every token and head: two <c>[L, heads, pairs]</c> tensors computed from the block
     /// input <paramref name="x"/> <c>[1, L, C]</c>. The caller owns both.</summary>

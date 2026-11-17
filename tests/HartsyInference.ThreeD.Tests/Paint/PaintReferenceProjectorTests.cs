@@ -328,4 +328,64 @@ public sealed class PaintReferenceProjectorTests
             Assert.Equal(colours[k].B / 255f, texture[texel * 3 + 2], 0.02f);
         }
     }
+
+    [Fact]
+    public void ApplyToTexels_TheFirstPictureKeepsASurfaceBothCamerasSeeSquarely()
+    {
+        // A front face (+z), a 45-degree bevel and the subject's left side (+x), each with its own third of the atlas. The bevel faces the front camera and
+        // the azimuth-90 camera equally (about 0.7) and both pictures are at full weight there; it must take the first picture (the caller's own) alone,
+        // not half of each: blending two differently drawn pictures there laid a side drawing's ear over the front picture's face.
+        const int size = 300, atlas = 96;
+        float[][] faces =
+        [
+            [-0.5f, -0.5f, 0.5f, 0.2f, -0.5f, 0.5f, 0.2f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f],
+            [0.2f, -0.5f, 0.5f, 0.5f, -0.5f, 0.2f, 0.5f, 0.5f, 0.2f, 0.2f, 0.5f, 0.5f],
+            [0.5f, -0.5f, 0.2f, 0.5f, -0.5f, -0.5f, 0.5f, 0.5f, -0.5f, 0.5f, 0.5f, 0.2f],
+        ];
+        List<float> vertices = [], uvs = [];
+        List<int> indices = [];
+        for (int k = 0; k < 3; k++)
+        {
+            int b = vertices.Count / 3;
+            vertices.AddRange(faces[k]);
+            uvs.AddRange([k / 3f, 1, (k + 1) / 3f, 1, (k + 1) / 3f, 0, k / 3f, 0]);
+            indices.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+        Mesh mesh = new() { Vertices = [.. vertices], Indices = [.. indices], Uvs = [.. uvs] };
+        PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
+        PaintViewRenderer renderer = new(frame);
+        PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, atlas, atlas);
+        (byte R, byte G, byte B)[] colours = [(220, 40, 40), (40, 200, 40)];
+        double[] azimuths = [0, 90];
+        List<PaintReferencePicture> pictures = [];
+        for (int k = 0; k < 2; k++)
+        {
+            byte[] rgb = new byte[size * size * 3], alpha = new byte[size * size];
+            for (int y = 60; y < 240; y++)
+                for (int x = 60; x < 240; x++)
+                {
+                    int p = y * size + x;
+                    alpha[p] = 255;
+                    (rgb[p * 3], rgb[p * 3 + 1], rgb[p * 3 + 2]) = colours[k];
+                }
+            PaintReferenceProjection placement = PaintReferenceProjector.Project(renderer, rgb, alpha, size, size, 256, 0, azimuths[k])!;
+            Assert.True(placement.Fit > 0.9, $"picture at {azimuths[k]} degrees fits {placement.Fit:F3}");
+            pictures.Add(new PaintReferencePicture(placement, rgb, alpha, size, size));
+        }
+        float[] texture = new float[atlas * atlas * 3];
+        bool[] known = new bool[atlas * atlas];
+
+        PaintReferenceProjector.ApplyToTexels(pictures, renderer, surface, texture, known, 3e-3);
+
+        // The front takes the front picture, the bevel the front picture too, and the side the side picture.
+        int[] expected = [0, 0, 1];
+        for (int k = 0; k < 3; k++)
+        {
+            int texel = atlas / 2 * atlas + (int)((k + 0.5) / 3 * atlas);
+            Assert.True(known[texel], $"face {k} took no picture");
+            Assert.Equal(colours[expected[k]].R / 255f, texture[texel * 3], 0.02f);
+            Assert.Equal(colours[expected[k]].G / 255f, texture[texel * 3 + 1], 0.02f);
+            Assert.Equal(colours[expected[k]].B / 255f, texture[texel * 3 + 2], 0.02f);
+        }
+    }
 }

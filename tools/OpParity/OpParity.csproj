@@ -7,6 +7,10 @@
     <AssemblyName>hartsy-opparity</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionFixture.cs" Link="Shared/AttentionFixture.cs" />
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionOracle.cs" Link="Shared/AttentionOracle.cs" />
+    <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionBenchShape.cs" Link="Shared/AttentionBenchShape.cs" />
+    <Compile Include="../../benchmarks/Shared/BenchmarkKnobProfiles.cs" Link="Shared/BenchmarkKnobProfiles.cs" />
     <ProjectReference Include="../../src/HartsyInference.Engine/HartsyInference.Engine.csproj" />
   </ItemGroup>
   <!-- Compiled kernels beside the executable so BackendFactory resolves them the way the CLI does. -->

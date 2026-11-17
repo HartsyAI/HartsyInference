@@ -26,6 +26,7 @@ public sealed partial class VulkanBackend
     {
         AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
+        AttentionEvidence.Executed("vulkan", row.Capability.Id, t_attentionRoute, in call, row.Capability.Lowering);
         AttentionPlanLog.Ran("vulkan", row, in call);
     }
 

@@ -35,7 +35,7 @@ public sealed class AttentionOracle
         int d = _s.D, skv = _s.Skv, kvh = h / (_s.Hq / _s.Hkv);
         long qBase = (((long)b * _s.Hq + h) * _s.Sq + row) * d;
         long kvBase = ((long)b * _s.Hkv + kvh) * skv * d;
-        int visible = _s.Causal ? Math.Min(skv, _s.QOffset + row + 1) : skv;
+        int visible = _s.Causal ? (int)Math.Clamp((long)_s.QOffset + row + 1, 0, skv) : skv;
         double[] scores = new double[visible];
         double max = double.NegativeInfinity;
         for (int j = 0; j < visible; j++)
@@ -96,7 +96,7 @@ public sealed class AttentionOracle
                 maxAbs = Math.Max(maxAbs, Math.Abs(e));
             }
         }
-        double rel = den > 0 ? Math.Sqrt(num / den) : double.NaN;
+        double rel = den > 0 ? Math.Sqrt(num / den) : num == 0 ? 0 : double.PositiveInfinity;
         double refNorm = Math.Sqrt(refs.Sum(x => x.Ref.Sum(v => v * v)));
         double cos = na > 0 && refNorm > 0 ? dot / (Math.Sqrt(na) * refNorm) : double.NaN;
         return (rel, cos, maxAbs, sample.Count);

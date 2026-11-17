@@ -1,0 +1,202 @@
+{
+  "schema": 1,
+  "cohort": "windows-rtx3060-torch291-cu130-python",
+  "status": "partial, numerical review pending",
+  "environment": {
+    "path": "k0-torch29-environment-v2.json",
+    "sha256": "b164e3b0ab3340752256f36aff70523bf9b74779f9525249d6026326bc8d6353",
+    "bytes": 15852
+  },
+  "source_matrix": {
+    "path": "k0-matrix-v4.json",
+    "sha256": "dd2854d51840368e58be46828dc2c3a72555d4494c5fb2f60eac85d489459fe7",
+    "bytes": 243866
+  },
+  "cells": [
+    {
+      "case_id": "bf16-mha-common",
+      "api": "decode-gqa",
+      "fixture_sha256": "ff42b26be470a1a87a2f344f16fbe598c1fd09430ce3275ed0ca22c5c2e86aee",
+      "k0_status": "K0-valid",
+      "native_available": false,
+      "cuda_extension_available": false,
+      "quality_passed": true,
+      "rel_l2": 0.0016737769299397848,
+      "lse_max_abs": 2.025582377385149e-07,
+      "executed_python_functions": [
+        "comfy_kitchen.flash_attention:_decode_gqa_torch",
+        "comfy_kitchen.flash_attention:flash_attention_decode_gqa"
+      ],
+      "output_device": "cuda:0",
+      "kernel_trace_available": false,
+      "raw": {
+        "path": "k0-gqa-route-proof.json",
+        "sha256": "65e4bf2f069d63375c26c225b0f96152854b8cd9c36daa9c00b3e7010c923d29",
+        "bytes": 1931
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "case_id": "decode-gqa-d64-hk2-causal0",
+      "api": "decode-gqa",
+      "fixture_sha256": "97158bd83512d36e38d7bf6c86b18696ca60ec330a1324af88dcfda642288113",
+      "k0_status": "K0-valid",
+      "native_available": false,
+      "cuda_extension_available": false,
+      "quality_passed": true,
+      "rel_l2": 0.0016444828354643005,
+      "lse_max_abs": 3.5390860997353e-07,
+      "executed_python_functions": [
+        "comfy_kitchen.flash_attention:_decode_gqa_torch",
+        "comfy_kitchen.flash_attention:flash_attention_decode_gqa"
+      ],
+      "output_device": "cuda:0",
+      "kernel_trace_available": false,
+      "raw": {
+        "path": "k0-decode-gqa-d64-hk2-causal0-diagnostic.json",
+        "sha256": "0789964698c6b76a16aed9b8b930003eb7db8003c889a5ee14e37820c41ae478",
+        "bytes": 1941
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "case_id": "decode-gqa-d64-hk2-causal1",
+      "api": "decode-gqa",
+      "fixture_sha256": "34d557fb31773b0b89e2045852867cfa3eb15eadcea112c91bf0f954957f64ae",
+      "k0_status": "K0-valid",
+      "native_available": false,
+      "cuda_extension_available": false,
+      "quality_passed": true,
+      "rel_l2": 0.0016875463563629908,
+      "lse_max_abs": 3.038661695597966e-07,
+      "executed_python_functions": [
+        "comfy_kitchen.flash_attention:_decode_gqa_torch",
+        "comfy_kitchen.flash_attention:flash_attention_decode_gqa"
+      ],
+      "output_device": "cuda:0",
+      "kernel_trace_available": false,
+      "raw": {
+        "path": "k0-decode-gqa-d64-hk2-causal1-diagnostic.json",
+        "sha256": "2ba19bb21119ed9aac6639c44f2d736f210ccad81672722c20a733515cf2b0d8",
+        "bytes": 1961
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "case_id": "tree-merge",
+      "api": "tree-merge",
+      "fixture_sha256": "a2603927787035a81184bd2dec8e2d968dd95aff4974b11b2854daa0a3a4b450",
+      "k0_status": "K0-valid",
+      "native_available": false,
+      "cuda_extension_available": false,
+      "quality_passed": true,
+      "rel_l2": 0.0016294758295003942,
+      "executed_python_functions": [
+        "comfy_kitchen.flash_attention:_tree_merge_torch",
+        "comfy_kitchen.flash_attention:flash_attention_decode_gqa_is_available",
+        "comfy_kitchen.flash_attention:flash_attention_decode_tree_merge",
+        "comfy_kitchen.flash_attention:is_available"
+      ],
+      "output_device": "cuda:0",
+      "kernel_trace_available": false,
+      "raw": {
+        "path": "k0-tree-merge-diagnostic.json",
+        "sha256": "2d9dc4c32cda79bcce5fa45d8d3ccb73ecf4f08500357ac100c00c9aabce1361",
+        "bytes": 1894
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "case_id": "tree-merge",
+      "api": "step-merge",
+      "fixture_sha256": "a2603927787035a81184bd2dec8e2d968dd95aff4974b11b2854daa0a3a4b450",
+      "k0_status": "K0-valid",
+      "native_available": false,
+      "cuda_extension_available": false,
+      "quality_passed": true,
+      "rel_l2": 0.0016526520732538848,
+      "executed_python_functions": [
+        "comfy_kitchen.flash_attention:_tree_merge_torch",
+        "comfy_kitchen.flash_attention:flash_attention_decode_gqa_is_available",
+        "comfy_kitchen.flash_attention:flash_attention_decode_step_merge",
+        "comfy_kitchen.flash_attention:flash_attention_decode_tree_merge",
+        "comfy_kitchen.flash_attention:is_available"
+      ],
+      "output_device": "cuda:0",
+      "kernel_trace_available": false,
+      "raw": {
+        "path": "k0-step-merge-diagnostic.json",
+        "sha256": "c1726797b11c70a67c37a37aa1d458f1950a4564dde375e689570d4b734ce7be",
+        "bytes": 2001
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "case_id": "sol-block_len",
+      "api": "sol",
+      "fixture_sha256": "3736561f20e450a7eae32ee7b85ad06eb4259fbebeb0a10407defc1a1ff8af26",
+      "k0_status": "K0-valid",
+      "cuda_extension_available": false,
+      "quality_passed": true,
+      "rel_l2": 0.0016587960360211445,
+      "unspecified_query_rows_excluded": 108,
+      "executed_python_functions": [
+        "comfy_kitchen.backends.eager.sol_attn:_block_lengths",
+        "comfy_kitchen.backends.eager.sol_attn:_op_sol_attn",
+        "comfy_kitchen.backends.eager.sol_attn:_pool",
+        "comfy_kitchen.backends.eager.sol_attn:_valid_rows",
+        "comfy_kitchen.backends.eager.sol_attn:sol_attn",
+        "comfy_kitchen.constraints:ExactDims.check",
+        "comfy_kitchen.constraints:ParamConstraint.check_device",
+        "comfy_kitchen.constraints:ParamConstraint.check_dtype",
+        "comfy_kitchen.constraints:ValidationResult.ok",
+        "comfy_kitchen.constraints:__create_fn__.<locals>.__init__",
+        "comfy_kitchen.constraints:sol_attn_common_call_rule",
+        "comfy_kitchen.constraints:validate_function_call",
+        "comfy_kitchen.constraints:validate_param",
+        "comfy_kitchen.registry:BackendRegistry.get_capable_backend",
+        "comfy_kitchen.registry:BackendRegistry.get_implementation",
+        "comfy_kitchen.registry:BackendRegistry.is_available",
+        "comfy_kitchen.registry:BackendRegistry.validate_backend_for_call",
+        "comfy_kitchen:sol_attn"
+      ],
+      "output_device": "cuda:0",
+      "kernel_trace_available": false,
+      "raw": {
+        "path": "k0-sol-partial-d128-diagnostic.json",
+        "sha256": "13afe5d698e4439acf017add81f66abb4213b16a1ebb266a66d0c54820195b22",
+        "bytes": 3274
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "api": "sage",
+      "fixture_sha256": "ff42b26be470a1a87a2f344f16fbe598c1fd09430ce3275ed0ca22c5c2e86aee",
+      "k0_status": "K0-rejected",
+      "native_available": false,
+      "cuda_extension_available": false,
+      "reason": "RuntimeError: INT8 attention requires the comfy-kitchen CUDA extension on SM75 or newer, or the HIP extension on an AMD device with matrix cores (RDNA3 or newer)",
+      "raw": {
+        "path": "k0-sage-rejection.json",
+        "sha256": "231bcfebc68cc1b37214b7737d8a525ae05bd6074bb32448c0fca4bba9793e5a",
+        "bytes": 523
+      },
+      "matched_quality_eligible": false
+    },
+    {
+      "api": "sol",
+      "fixture_sha256": "fb1008e6346be6e7b83acc1fec0306303e50f4ca363a906aac6fcb2e976f761e",
+      "k0_status": "K0-rejected",
+      "cuda_extension_available": false,
+      "reason": "NoCapableBackendError: No backend can handle 'sol_attn': eager: q: head_dim must be 128",
+      "raw": {
+        "path": "k0-sol-negative-d64.json",
+        "sha256": "123d5739d1c082bd2e1c8e9c3583b19ae5d353a20a7de95d6f8a5df4a4f85756",
+        "bytes": 471
+      },
+      "matched_quality_eligible": false
+    }
+  ],
+  "other_source_cells": "Not executed",
+  "exceptions_accepted": false
+}

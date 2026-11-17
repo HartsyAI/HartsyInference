@@ -26,6 +26,8 @@ if (!opts.TryGetValue("command", out string? command))
 }
 return command switch
 {
+    "attention-freeze-qwen" => HartsyInference.GenCapture.AttentionWorkloadFreeze.Run(opts),
+    "attention-request" => HartsyInference.GenCapture.AttentionRequestEvidence.RunAsync(opts).GetAwaiter().GetResult(),
     "manifest" => WriteManifest(opts),
     "compare" => Compare(opts),
     _ => Usage(),

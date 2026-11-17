@@ -22,6 +22,7 @@ if (args.Length == 0 || !args_.TryGetValue("command", out string? command))
     return 2;
 }
 string family = args_.GetValueOrDefault("op", "all");
+if (command == "shared-attention") return SharedAttentionCheck.Run(args_);
 string? caseFilter = args_.GetValueOrDefault("case");
 List<OpCase> selected = Registry.Cases().Where(c => (family == "all" || c.Family == family) && (caseFilter is null || c.Name.Contains(caseFilter, StringComparison.Ordinal))).ToList();
 if (command == "list")
