@@ -7,6 +7,10 @@ internal static class AttentionExecution
     public static AttentionPlan Plan(IReadOnlyList<AttentionKernelRow> rows, in AttentionCall call) =>
         AttentionPlanner.Plan(rows, Prepare(in call));
 
+    /// <summary>Normalizes and plans a call whose boundary was already validated.</summary>
+    public static AttentionPlan PlanValidated(IReadOnlyList<AttentionKernelRow> rows, in AttentionCall call) =>
+        AttentionPlanner.Plan(rows, Normalize(in call));
+
     /// <summary>Validates, normalizes and runs one call through the supplied rows.</summary>
     public static AttentionKernelRow Run(IReadOnlyList<AttentionKernelRow> rows, in AttentionCall call) =>
         AttentionPlanner.Run(rows, Prepare(in call));

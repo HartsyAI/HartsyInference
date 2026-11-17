@@ -75,8 +75,9 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
-        AttentionCall planned = call.Route == AttentionRoute.TokenMajorGqa ? call with { Route = AttentionRoute.TokenMajor } : call;
-        return AttentionExecution.Plan(RowsFor(planned.Route), in planned);
+        AttentionCall prepared = AttentionExecution.Prepare(in call);
+        if (prepared.Route == AttentionRoute.TokenMajorGqa) prepared = prepared with { Route = AttentionRoute.TokenMajor };
+        return AttentionExecution.PlanValidated(RowsFor(prepared.Route), in prepared);
     }
 
     /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>

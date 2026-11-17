@@ -89,7 +89,11 @@ public sealed partial class CudaBackend
     }
 
     /// <inheritdoc/>
-    public AttentionPlan PlanAttention(in AttentionCall call) => AttentionExecution.Plan(RowsFor(call.Route), in call);
+    public AttentionPlan PlanAttention(in AttentionCall call)
+    {
+        AttentionCall prepared = AttentionExecution.Prepare(in call);
+        return AttentionExecution.PlanValidated(RowsFor(prepared.Route), in prepared);
+    }
 
     private static AttentionKernelCapability Cap(string id, AttentionRoute entry, AttentionDTypes q, AttentionDTypes kv,
         AttentionLayouts layouts) => new() { Id = id, Entry = entry, QueryTypes = q, KvTypes = kv, Layouts = layouts };
