@@ -37,6 +37,8 @@ internal static class DuplexDispatch
         double seconds = result.ModelAudio.Length / (double)result.SampleRate;
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"{seconds:F1}s, {result.Frames} frames, {result.MedianFrameSeconds * 1000:F0} ms median per frame ({result.MaxFrameSeconds * 1000:F0} ms max)");
+        if (parameters.GetStringOrNull("transcript") is { Length: > 0 } transcriptPath)
+            File.WriteAllText(transcriptPath, result.Text, new System.Text.UTF8Encoding(false));
         GeneratedArtifact artifact = new()
         {
             Kind = ArtifactKind.Audio,

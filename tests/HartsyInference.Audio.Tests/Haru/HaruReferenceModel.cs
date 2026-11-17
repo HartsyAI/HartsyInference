@@ -131,7 +131,7 @@ internal sealed unsafe class HaruReferenceModel : IDisposable
         {
             draws.Add(Read(expected.GetTensor($"{prefix}.draw.{i}")));
         }
-        ScriptedNoise noise = new(draws);
+        HaruScriptedNoise noise = new(draws);
         HaruDuplexSession session = new(Config, Lm, Head, Codec, text, Backend, options, noise);
         float[] user = Read(expected.GetTensor("in.user"));
         float[] reference = referenceKey is null ? [] : Read(expected.GetTensor(referenceKey));
@@ -160,20 +160,5 @@ internal sealed unsafe class HaruReferenceModel : IDisposable
         Lm.Dispose();
         Backend.Dispose();
         _weights.Dispose();
-    }
-
-    /// <summary>Replays the draws the upstream run made, in order; a draw of another size means the call order drifted.</summary>
-    private sealed class ScriptedNoise(List<float[]> draws) : IHaruNoise
-    {
-        private int _next;
-
-        internal int Remaining => draws.Count - _next;
-
-        public void FillGaussian(Span<float> destination)
-        {
-            float[] draw = draws[_next++];
-            Assert.Equal(draw.Length, destination.Length);
-            draw.CopyTo(destination);
-        }
     }
 }

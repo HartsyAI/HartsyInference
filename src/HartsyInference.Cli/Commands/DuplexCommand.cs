@@ -87,6 +87,11 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         [Description("Sampler seed; the same seed and recording repeat the conversation (default 1).")]
         public int? Seed { get; init; }
 
+        /// <summary>Write the words the model spoke, as UTF-8 text.</summary>
+        [CommandOption("--transcript")]
+        [Description("Write the words the model spoke to this UTF-8 text file.")]
+        public string? Transcript { get; init; }
+
         /// <summary>Directory to save the WAV to.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to save the WAV (defaults to the output root).")]
@@ -123,6 +128,8 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         parameters.PutIfSet("top-k", settings.TopK);
         parameters.PutIfSet("eop-bias", settings.EopBias);
         parameters.PutIfSet("seed", settings.Seed);
+        if (settings.Transcript is { Length: > 0 })
+            parameters.Put("transcript", settings.Transcript);
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, null, Modality.Speech);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, null, "haru");
