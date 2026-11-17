@@ -44,6 +44,9 @@ internal sealed unsafe class HaruLm : IDisposable
     /// <summary>The trunk, for weight preloading and placement.</summary>
     internal Qwen35Model Trunk => _trunk;
 
+    /// <summary>The raw codec latent of a normalized one, <c>x / scale - bias</c>.</summary>
+    internal float Unscale(float normalized) => normalized / _latentScale - _latentBias;
+
     /// <summary>Clears the conversation: every layer's recurrent state and the attention cache.</summary>
     internal void Reset() => _trunk.ResetState();
 

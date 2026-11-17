@@ -114,6 +114,11 @@ def main() -> None:
         state[name] = torch.randn(value.shape) * scale
         if name.endswith(("gamma", ".norm.weight", "ffn_norm.weight")):
             state[name] += 1.0
+    # Random codec weights would give audio and latents thousands of times larger than speech; the output heads are scaled down so the
+    # tiny model's audio stays inside plus or minus one and its latents stay O(1).
+    for key, factor in (("codec.encoder.head.weight", 1e-3), ("codec.encoder.head.bias", 1e-3),
+                        ("codec.decoder.head.weight", 1e-4), ("codec.decoder.head.bias", 1e-4)):
+        state[key] = state[key] * factor
     state["latent_scale"] = torch.tensor(0.2)
     state["latent_bias"] = torch.tensor(0.05)
     model.load_state_dict(state)
