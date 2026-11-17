@@ -158,6 +158,34 @@ public sealed class ConvPixelHeadTests
     }
 
     [Fact]
+    public void AHeadWhoseUpsamplingDoesNotMatchThePatchSizeIsRefused()
+    {
+        using Weights oneBlock = new(Inner, [8], withBias: false, seed: 9);
+        ConvPixelHead head = new(Inner, oneBlock.Build());
+        WanVideoConfig patch4 = new()
+        {
+            NumHeads = Heads, HeadDim = HeadDim, NumLayers = Layers, FfnDim = Ffn, InChannels = 3, OutChannels = 3,
+            VaeLatentChannels = 3, TextDim = TextDim, FreqDim = FreqDim, PatchSize = (1, 4, 4),
+        };
+
+        Assert.Equal((1, 2, 2), head.Upsample);
+        Assert.Throws<ArgumentException>(() => new WanVideoTransformer(patch4) { OutputHead = head });
+    }
+
+    [Fact]
+    public void HeadRefusesATokenOrEmbeddingThatIsNotF32()
+    {
+        using CpuBackend backend = new();
+        using Weights weights = new(HeadWidth, [FirstWidth], withBias: false, seed: 5);
+        ConvPixelHead head = new(HeadWidth, weights.Build());
+        using Tensor hidden = IrisZTestData.Random(new Random(1), GridT * GridH * GridW, HeadWidth);
+        using Tensor embedding = IrisZTestData.Random(new Random(2), 1, HeadWidth);
+        using Tensor halfHidden = hidden.CastTo(DType.F16);
+
+        Assert.Throws<ArgumentException>(() => head.Forward(backend, halfHidden, embedding, (GridT, GridH, GridW)));
+    }
+
+    [Fact]
     public void AnOutputHeadRefusesPerFrameTimesteps()
     {
         using CpuBackend backend = new();
@@ -167,7 +195,7 @@ public sealed class ConvPixelHeadTests
             NumHeads = Heads, HeadDim = HeadDim, NumLayers = Layers, FfnDim = Ffn, InChannels = 3, OutChannels = 3,
             VaeLatentChannels = 3, TextDim = TextDim, FreqDim = FreqDim, PatchSize = (1, 4, 4),
         };
-        using Weights headWeights = new(Inner, [8], withBias: false, seed: 9);
+        using Weights headWeights = new(Inner, [8, 6], withBias: false, seed: 9);
         using WanVideoTransformer transformer = new(config) { OutputHead = new ConvPixelHead(Inner, headWeights.Build()) };
         transformer.LoadWeights(checkpoint.Weights);
         using Tensor frames = IrisZTestData.Random(new Random(11), 1, 3, 3, 4, 4);

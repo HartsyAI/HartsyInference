@@ -27,7 +27,11 @@ public sealed record ConvPixelHeadWeights(Tensor BottleneckWeight, Tensor? Bottl
 /// <item>Biases are optional, as the weights carry them; the paper does not say.</item>
 /// <item>The timestep embedding added to the tokens is whatever the caller passes (the DiT's own).</item>
 /// </list>
-/// Runs in F32 on the existing <see cref="CausalConv3d"/> and the backend's <c>ConvTranspose2d</c>.</summary>
+/// Runs in F32 on the existing <see cref="CausalConv3d"/> and the backend's <c>ConvTranspose2d</c>.
+/// <para>Memory at real size is the caller's to plan: the head holds whole-clip F32 activations, and the batched causal
+/// convolution makes a padded copy of its input, so 81 frames at 480x832 with a last width near 128 needs on the order of
+/// 17 GB for one buffer. The head is causal, so a chunked run through <see cref="CausalConv3d.ForwardStreaming"/> would
+/// bound it; that path fills the first chunk's past by replicating the oldest frame, not with zeros, so check it before use.</para></summary>
 public sealed class ConvPixelHead : IDitOutputHead
 {
     private readonly int _inputDim;
@@ -74,9 +78,14 @@ public sealed class ConvPixelHead : IDitOutputHead
     public int UpBlockCount { get; }
 
     /// <inheritdoc/>
+    public (int T, int H, int W) Upsample => (1, 1 << UpBlockCount, 1 << UpBlockCount);
+
+    /// <inheritdoc/>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor timestepEmbedding, (int T, int H, int W) grid)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        if (hidden.DType != DType.F32 || timestepEmbedding.DType != DType.F32)
+            throw new ArgumentException($"The head runs in F32; got hidden {hidden.DType} and timestep embedding {timestepEmbedding.DType}.");
         (int t, int h, int w) = grid;
         int tokens = t * h * w;
         if (hidden.Shape.Rank != 2 || hidden.Shape[0] != tokens || hidden.Shape[1] != _inputDim)

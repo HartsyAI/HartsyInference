@@ -62,10 +62,24 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     internal DType ForwardActivation(IBackend backend, int timestepGroups, bool imageContext, bool stepCache) =>
         imageContext || stepCache ? DType.F32 : BranchActivation(backend, timestepGroups == 1);
 
+    private readonly IDitOutputHead? _outputHead;
+
     /// <summary>Replaces the norm, modulation and linear output projection with a head of the caller's own (a model that
-    /// predicts pixels instead of latent patches). Set it before <see cref="LoadWeights"/>: with a head set, the checkpoint
-    /// does not need <c>proj_out.*</c> or <c>scale_shift_table</c>. Not combined with context parallelism.</summary>
-    public IDitOutputHead? OutputHead { get; set; }
+    /// predicts pixels instead of latent patches). Set at construction, so the weights the load reads and the weights
+    /// <see cref="EnumerateWeights"/> reports cannot drift apart: with a head, the checkpoint does not need
+    /// <c>proj_out.*</c> or <c>scale_shift_table</c>, and <see cref="Forward(IBackend, Tensor, Tensor, float[], DeviceFeatureCache?, CpForwardContext?)"/>
+    /// returns the head's output instead of <c>[1, outChannels, T, H, W]</c>. The head's upsampling must equal the patch size,
+    /// or the output would not be the input's size. Not combined with context parallelism or per-frame timesteps.</summary>
+    public IDitOutputHead? OutputHead
+    {
+        get => _outputHead;
+        init
+        {
+            if (value is not null && value.Upsample != _config.PatchSize)
+                throw new ArgumentException($"The head upsamples by {value.Upsample} but the patch size is {_config.PatchSize}; the output would not match the input's size.", nameof(value));
+            _outputHead = value;
+        }
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {

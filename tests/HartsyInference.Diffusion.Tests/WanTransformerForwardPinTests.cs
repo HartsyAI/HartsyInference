@@ -10,7 +10,8 @@ namespace HartsyInference.Diffusion.Tests;
 /// from the tree on 2026-11-05, and several models share <see cref="WanVideoTransformer"/>, so a change to its input
 /// embedding, block loop or output head had nothing that failed on a silent change of the numbers. This does not show the
 /// forward matches the Wan reference (the layer-diff against it needs the real weights); it shows a refactor kept the
-/// numbers it had. The golden sums are values this code produced, not values from a reference.</summary>
+/// numbers it had. The golden values are what this code produced, not values from a reference. The run is F32 on the CPU
+/// backend; the F16 branch path a GPU backend can take has its own numbers, so these do not carry over to it.</summary>
 public sealed class WanTransformerForwardPinTests
 {
     private const int TextLength = 5;
@@ -18,12 +19,11 @@ public sealed class WanTransformerForwardPinTests
     private const int LatentHeight = 4;
     private const int LatentWidth = 4;
 
-    // Sum and sum of squares of the velocity for each forward below. Relative tolerance, not exact: the CPU kernels may
-    // split a reduction differently on another machine.
-    private const double SingleTimestepSum = 48.218642860651016;
-    private const double SingleTimestepSquares = 1185.6868315964696;
-    private const double PerFrameTimestepSum = 48.76617577672005;
-    private const double PerFrameTimestepSquares = 1166.7405797909341;
+    // Fingerprint of the velocity for each forward below: sum, sum of squares, a position-weighted sum (sum of v[i]·(i+1),
+    // so a permuted token or channel changes it), and the first, a middle and the last value. Relative tolerance, not exact:
+    // the CPU kernels may split a reduction differently on another machine.
+    private static readonly double[] SingleTimestep = [-264.61846899986267, 1137.8716598252431, -23226.772809684277, -3.1172897815704346, -0.34743446111679077, -1.3682007789611816];
+    private static readonly double[] PerFrameTimestep = [-266.9602277725935, 1075.614074899884, -26666.346339821815, -1.0185980796813965, 2.1148500442504883, -1.9022417068481445];
     private const double RelativeTolerance = 1e-4;
 
     private static WanVideoConfig TinyConfig => new()
@@ -54,9 +54,7 @@ public sealed class WanTransformerForwardPinTests
     [Fact]
     public void SingleTimestepForwardKeepsItsNumbers()
     {
-        (double sum, double squares) = Forward([0.6f]);
-
-        AssertPinned(sum, squares, SingleTimestepSum, SingleTimestepSquares);
+        AssertPinned(Fingerprint(Forward([600f])), SingleTimestep);
     }
 
     /// <summary>One timestep per latent frame is the TI2V per-frame-modulation path, which runs different glue in every
@@ -64,22 +62,34 @@ public sealed class WanTransformerForwardPinTests
     [Fact]
     public void PerFrameTimestepForwardKeepsItsNumbers()
     {
-        (double sum, double squares) = Forward([0f, 0.6f, 0.6f]);
-
-        AssertPinned(sum, squares, PerFrameTimestepSum, PerFrameTimestepSquares);
+        AssertPinned(Fingerprint(Forward([0f, 600f, 600f])), PerFrameTimestep);
     }
 
     [Fact]
     public void ForwardIsDeterministic()
     {
-        (double firstSum, double firstSquares) = Forward([0.6f]);
-        (double secondSum, double secondSquares) = Forward([0.6f]);
-
-        Assert.Equal(firstSum, secondSum);
-        Assert.Equal(firstSquares, secondSquares);
+        Assert.Equal(Fingerprint(Forward([600f])), Fingerprint(Forward([600f])));
     }
 
-    private static (double Sum, double Squares) Forward(float[] timesteps)
+    /// <summary>A second forward on the same transformer and the same encoder tensor reads the cached text context instead of
+    /// building it, and must give the same numbers.</summary>
+    [Fact]
+    public void ASecondForwardOnTheSameTransformerReusesTheCachedContext()
+    {
+        using CpuBackend backend = new();
+        using TinyWanCheckpoint checkpoint = new();
+        using WanVideoTransformer transformer = new(TinyConfig);
+        transformer.LoadWeights(checkpoint.Weights);
+        using Tensor latent = IrisZTestData.Random(new Random(11), 1, Channels, LatentFrames, LatentHeight, LatentWidth);
+        using Tensor text = IrisZTestData.Random(new Random(12), TextLength, TextDim);
+
+        using Tensor first = transformer.Forward(backend, latent, text, [600f]);
+        using Tensor second = transformer.Forward(backend, latent, text, [600f]);
+
+        Assert.True(first.AsReadOnlySpan<float>().SequenceEqual(second.AsReadOnlySpan<float>()));
+    }
+
+    private static float[] Forward(float[] timesteps)
     {
         using CpuBackend backend = new();
         using TinyWanCheckpoint checkpoint = new();
@@ -91,21 +101,29 @@ public sealed class WanTransformerForwardPinTests
         using Tensor velocity = transformer.Forward(backend, latent, text, timesteps);
 
         Assert.Equal(new TensorShape([1L, Channels, LatentFrames, LatentHeight, LatentWidth]), velocity.Shape);
-        double sum = 0, squares = 0;
         foreach (float value in velocity.AsReadOnlySpan<float>())
-        {
             Assert.True(float.IsFinite(value), "the velocity holds a non-finite value");
-            sum += value;
-            squares += (double)value * value;
-        }
-        return (sum, squares);
+        return velocity.AsReadOnlySpan<float>().ToArray();
     }
 
-    private static void AssertPinned(double sum, double squares, double expectedSum, double expectedSquares)
+    private static double[] Fingerprint(float[] values)
     {
-        Assert.True(Math.Abs(sum - expectedSum) <= RelativeTolerance * Math.Max(1.0, Math.Abs(expectedSum)),
-            $"sum {sum:R} against the pinned {expectedSum:R}");
-        Assert.True(Math.Abs(squares - expectedSquares) <= RelativeTolerance * Math.Max(1.0, expectedSquares),
-            $"sum of squares {squares:R} against the pinned {expectedSquares:R}");
+        double sum = 0, squares = 0, weighted = 0;
+        for (int i = 0; i < values.Length; i++)
+        {
+            sum += values[i];
+            squares += (double)values[i] * values[i];
+            weighted += (double)values[i] * (i + 1);
+        }
+        return [sum, squares, weighted, values[0], values[values.Length / 2 + 3], values[^1]];
+    }
+
+    private static void AssertPinned(double[] actual, double[] expected)
+    {
+        for (int i = 0; i < expected.Length; i++)
+        {
+            Assert.True(Math.Abs(actual[i] - expected[i]) <= RelativeTolerance * Math.Max(1.0, Math.Abs(expected[i])),
+                $"fingerprint[{i}] {actual[i]:R} against the pinned {expected[i]:R}; actual: [{string.Join(", ", actual.Select(v => v.ToString("R")))}]");
+        }
     }
 }

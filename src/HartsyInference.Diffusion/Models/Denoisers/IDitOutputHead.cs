@@ -8,6 +8,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// embedding and blocks as usual and hands the result here.</summary>
 public interface IDitOutputHead
 {
+    /// <summary>The factor the head scales the token grid by on each axis (time, height, width). It must equal the
+    /// transformer's patch size, which the transformer checks when the head is set.</summary>
+    (int T, int H, int W) Upsample { get; }
+
     /// <summary>Maps the last block's tokens <c>[S, dim]</c> (token order <c>t, h, w</c> over <paramref name="grid"/>) and the
     /// timestep embedding <c>[1, dim]</c> to the model's output tensor. Neither input is disposed; the caller owns the result.</summary>
     Tensor Forward(IBackend backend, Tensor hidden, Tensor timestepEmbedding, (int T, int H, int W) grid);

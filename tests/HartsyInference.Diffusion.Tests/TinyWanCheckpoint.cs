@@ -49,10 +49,10 @@ internal sealed class TinyWanCheckpoint : IDisposable
                     Weights[$"{block}.{attention}.{projection}.weight"] = Random(Inner, Inner);
                     Weights[$"{block}.{attention}.{projection}.bias"] = Random(Inner);
                 }
-                Weights[$"{block}.{attention}.norm_q.weight"] = Ones(Inner);
-                Weights[$"{block}.{attention}.norm_k.weight"] = Ones(Inner);
+                Weights[$"{block}.{attention}.norm_q.weight"] = Scale(Inner);
+                Weights[$"{block}.{attention}.norm_k.weight"] = Scale(Inner);
             }
-            Weights[$"{block}.norm2.weight"] = Ones(Inner);
+            Weights[$"{block}.norm2.weight"] = Scale(Inner);
             Weights[$"{block}.norm2.bias"] = Random(Inner);
             Weights[$"{block}.ffn.net.0.proj.weight"] = Random(Ffn, Inner);
             Weights[$"{block}.ffn.net.0.proj.bias"] = Random(Ffn);
@@ -70,5 +70,13 @@ internal sealed class TinyWanCheckpoint : IDisposable
 
     private Tensor Random(params long[] dims) => IrisZTestData.Random(_rng, dims);
 
-    private static Tensor Ones(params long[] dims) => IrisZTestData.Filled(1f, dims);
+    // Norm weights near 1 but all different, so a dropped weight or a swapped norm_q / norm_k moves the output. The biases are
+    // random and non-zero for the same reason: they load with TryGetValue, so a renamed bias key would otherwise go unnoticed.
+    private Tensor Scale(params long[] dims)
+    {
+        Tensor tensor = Random(dims);
+        Span<float> values = tensor.AsSpan<float>();
+        for (int i = 0; i < values.Length; i++) values[i] += 1f;
+        return tensor;
+    }
 }
