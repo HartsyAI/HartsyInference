@@ -48,6 +48,9 @@ public sealed record Dinov2Preset
     /// float32, as Hugging Face's <c>DINOv3ViTModel</c> does (Idol's reference).</summary>
     public bool RoundRopePeriodsToBf16 { get; init; } = true;
 
+    /// <summary>DINOv3 only: the MLP is SwiGLU (<c>silu(gate_proj(x)) · up_proj(x)</c>, the ViT-H+) and not the plain GELU one. <c>Dinov3Layer</c> requires <c>mlp.gate_proj</c> in every layer when this is set and refuses a checkpoint that has it when it is not, so a preset and a file that disagree fail at load.</summary>
+    public bool GatedMlp { get; init; }
+
     /// <summary>LayerNorm epsilon (1e-6 for DINOv2; 1e-5 for the DINOv3 ViT-S/B/L checkpoints).</summary>
     public float LayerNormEps { get; init; } = 1e-6f;
 
@@ -148,7 +151,7 @@ public sealed record Dinov2Preset
         Name = "facebook/dinov3-vith16plus-pretrain-lvd1689m",
         HiddenSize = 1280, NumLayers = 32, NumHeads = 20, IntermediateSize = 5120,
         ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, LayerNormEps = 1e-5f,
-        RoundRopePeriodsToBf16 = false,
+        RoundRopePeriodsToBf16 = false, GatedMlp = true,
     };
 
     /// <summary>The DINOv2 variant an HF-layout checkpoint was trained as, read from its width

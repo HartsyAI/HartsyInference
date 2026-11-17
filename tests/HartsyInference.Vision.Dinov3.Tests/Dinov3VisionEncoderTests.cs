@@ -133,9 +133,46 @@ public sealed class Dinov3VisionEncoderTests
     }
 
     [Fact]
+    public void AGatedPresetRefusesAPlainCheckpointAndAPlainPresetRefusesAGatedOne()
+    {
+        Dinov2Preset plain = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 1 };
+        Dinov2Preset gated = plain with { GatedMlp = true };
+        Dictionary<string, Tensor> plainWeights = Dinov3Fixture.Tiny(plain, seed: 31);
+        Dictionary<string, Tensor> gatedWeights = Dinov3Fixture.Tiny(gated, seed: 32, gated: true);
+        try
+        {
+            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(plainWeights));
+            Assert.Throws<NotSupportedException>(() => new Dinov3VisionEncoder(plain).LoadWeights(gatedWeights));
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(plainWeights);
+            Dinov3Fixture.Dispose(gatedWeights);
+        }
+    }
+
+    [Fact]
+    public void AGatedCheckpointMissingTheGateOfALaterLayerIsRefused()
+    {
+        Dinov2Preset gated = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 2, GatedMlp = true };
+        Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(gated, seed: 33, gated: true);
+        try
+        {
+            weights.Remove("layer.1.mlp.gate_proj.weight", out Tensor? gone);
+            gone?.Dispose();
+
+            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(weights));
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
     public void GatedMlp_IsSiluOfGateTimesUp_ScaledByLayerScale()
     {
-        Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 1 };
+        Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 1, GatedMlp = true };
         Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(preset, seed: 21, gated: true);
         try
         {
