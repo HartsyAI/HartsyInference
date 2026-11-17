@@ -138,10 +138,10 @@ public sealed class HcaAttention : IDisposable
     }
 
     // Every query of the chunk in one SparseLatentAttention call. Window source: the ring as it stood before this chunk (the last Window
-    // positions before startPos, position j at slot j % Window; none for a chunk from position 0), then the chunk's own rows, so any chunk at
-    // any position is described. Query at position p sees positions max(p - Window + 1, 0) .. p: a position before startPos is its ring
-    // slot, one in the chunk is ringRows + (j - startPos). Then latent j as windowRows + j where p sees it ((p + 1) / ratio), -1 where it does not yet. Each row is both
-    // key and value (MQA, one KV head).
+    // positions before startPos, position j at slot j % Window; none for a chunk from position 0), then the chunk's own rows, so any chunk
+    // at any position is described. Query at position p sees positions max(p - Window + 1, 0) .. p: a position before startPos is its ring
+    // slot, one in the chunk is ringRows + (j - startPos). Then latent j as windowRows + j where p sees it ((p + 1) / ratio), and -1 where
+    // it does not yet. Each row is both key and value (MQA, one KV head).
     private float[] Attend(float[] q, float[] kv, int tokens, int startPos, HcaAttentionState state)
     {
         // CUDA only. The CPU's SparseLatentAttention is the scalar reference, slower than its SIMD attention; Vulkan's drifts about 1.1e-3 in
