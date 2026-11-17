@@ -90,9 +90,12 @@ public sealed unsafe class IdolImageTo3DPipeline
         _loadVae = loadVae ?? throw new ArgumentNullException(nameof(loadVae));
     }
 
+    /// <summary>The files a model folder holds.</summary>
+    public static IReadOnlyList<string> RequiredFiles { get; } = [DenoiserFile, DinoFile, VaeFile, DecoderFile];
+
     /// <summary>The files of <paramref name="directory"/> that are missing, empty when it holds a complete model.</summary>
     public static IReadOnlyList<string> MissingFiles(string directory)
-        => [.. new[] { DenoiserFile, DinoFile, VaeFile, DecoderFile }.Where(f => !File.Exists(Path.Combine(directory, f)))];
+        => [.. RequiredFiles.Where(f => !File.Exists(Path.Combine(directory, f)))];
 
     /// <summary>Throws when <paramref name="options"/> cannot drive a run.</summary>
     public static void ValidateOptions(IdolOptions options)

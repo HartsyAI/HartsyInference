@@ -71,6 +71,9 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Quality) => request with { Quality = MeshQuality.Max },
         nameof(MeshRequest.Remesh) => request with { Remesh = true, Texture = true },
         nameof(MeshRequest.Views) => request with { Views = [new MeshViewImage { View = MeshView.Left, Image = Image() }] },
+        nameof(MeshRequest.Guidance) => request with { Guidance = 2 },
+        nameof(MeshRequest.SplatCount) => request with { SplatCount = 65536 },
+        nameof(MeshRequest.Framing) => request with { Framing = MeshFraming.Photo },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
