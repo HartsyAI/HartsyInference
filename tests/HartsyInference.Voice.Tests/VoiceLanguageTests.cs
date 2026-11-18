@@ -11,17 +11,29 @@ namespace HartsyInference.Voice.Tests;
 public sealed class VoiceLanguageTests
 {
     [Theory]
-    [InlineData("en")]
-    [InlineData("fr")]
-    [InlineData("yue")]
-    public void ALanguageCodeOfTwoOrThreeLettersIsAccepted(string code) => new VoiceAgentOptions { Language = code }.Validate();
+    [InlineData("en", "en")]
+    [InlineData("fr", "fr")]
+    [InlineData("yue", "yue")]
+    [InlineData("EN", "en")]
+    [InlineData("en-US", "en")]
+    [InlineData("en_US", "en")]
+    [InlineData(" fr-CA ", "fr")]
+    public void AWhisperLanguageIsAcceptedAndStoredNormalized(string code, string stored)
+    {
+        VoiceAgentOptions options = new() { Language = code };
+
+        options.Validate();
+
+        Assert.Equal(stored, options.Language);
+    }
 
     [Theory]
     [InlineData("")]
+    [InlineData("   ")]
     [InlineData("e")]
     [InlineData("english")]
     [InlineData("e1")]
-    [InlineData("en-US")]
+    [InlineData("zz")]
     public void AnythingElseIsRefused(string code) =>
         Assert.Throws<ArgumentOutOfRangeException>(() => new VoiceAgentOptions { Language = code }.Validate());
 
@@ -37,6 +49,16 @@ public sealed class VoiceLanguageTests
         speech.Transcribe(new float[16_000]);
 
         Assert.Equal("fr", transcriber!.LastOptions!.Language);
+    }
+
+    [Fact]
+    public async Task ASessionAskingForTheSameLanguageInAnotherSpellingMatchesItsModelSet()
+    {
+        VoiceAgentOptions loaded = VoiceHarness.DefaultOptions();
+        using CpuBackend device = new();
+        await using VoiceModelSet models = new(loaded, new FakeSpeech(), device, () => new LevelVadModel(), createDenoiser: null);
+
+        await using VoiceAgentSession session = new(models, new ScriptedTextService(), new ToolRegistry(), loaded with { Language = "EN-us" });
     }
 
     [Fact]

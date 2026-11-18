@@ -241,22 +241,14 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     }
 
     /// <summary>A message the caller typed: answered like a transcribed utterance (it becomes a user turn, the model replies, the
-    /// reply is spoken) with the same events and metrics, minus the recognition timings. While a reply is audible and
-    /// <see cref="VoiceAgentOptions.BargeInEnabled"/> is on it interrupts that reply exactly as speech would; with barge-in off,
-    /// or while the model is still thinking, it queues behind the turn in progress. Completes when its reply has played or was
-    /// interrupted; cancelled if the session ends first.</summary>
+    /// reply is spoken) with the same events and metrics, minus the recognition timings. While a reply or a spoken prompt is
+    /// audible and <see cref="VoiceAgentOptions.BargeInEnabled"/> is on it interrupts that audio exactly as speech would; with
+    /// barge-in off, or while the model is still thinking, it queues behind the turn in progress. Completes when its reply has
+    /// played or was interrupted; cancelled if the session ends first.</summary>
     /// <exception cref="ArgumentException">The text has no letters or digits, or is longer than <see cref="MaxTypedTextChars"/>.</exception>
     /// <exception cref="InvalidOperationException">The session is not started or has ended, or is <see cref="VoiceAgentOptions.TranscribeOnly"/>.</exception>
     public Task SubmitUserTextAsync(string text, CancellationToken cancel = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(text);
-        string message = text.Trim();
-        if (message.Length > MaxTypedTextChars || !HasWords(message))
-        {
-            throw new ArgumentException(message.Length > MaxTypedTextChars
-                ? $"A typed message is at most {MaxTypedTextChars} characters."
-                : "A typed message needs at least one letter or digit.", nameof(text));
-        }
         if (_options.TranscribeOnly)
         {
             throw new InvalidOperationException("The session only transcribes; nothing would answer a typed message.");
@@ -265,28 +257,28 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         {
             throw new InvalidOperationException("The session has not been started.");
         }
+        ArgumentException.ThrowIfNullOrWhiteSpace(text);
+        string message = text.Trim();
+        if (message.Length > MaxTypedTextChars || !HasWords(message))
+        {
+            throw new ArgumentException(message.Length > MaxTypedTextChars
+                ? $"A typed message is at most {MaxTypedTextChars} characters."
+                : "A typed message needs at least one letter or digit.", nameof(text));
+        }
+        // Read before the write: the turn the message queues behind is the one it may interrupt, never the one it starts.
+        int speaking = _options.BargeInEnabled ? _signals.SpeakingTurn : 0;
         TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!_inputs.Writer.TryWrite(VoiceTurnInput.Typed(message, completion, MonotonicClock.NowNs())))
         {
             throw new InvalidOperationException("The session has ended.");
         }
         // After the write, so the turn loop finds the message waiting when the interrupted turn ends instead of going idle first.
-        InterruptReplyForTypedText();
-        return cancel.CanBeCanceled ? completion.Task.WaitAsync(cancel) : completion.Task;
-    }
-
-    private void InterruptReplyForTypedText()
-    {
-        if (!_options.BargeInEnabled)
-        {
-            return;
-        }
-        int speaking = _signals.SpeakingTurn;
         long now = MonotonicClock.NowNs();
         if (speaking != 0 && _signals.TryBargeIn(speaking, now))
         {
             Emit(new VoiceAgentEvent { Kind = VoiceAgentEventKind.BargeIn, TurnId = speaking, TimestampNs = now });
         }
+        return cancel.CanBeCanceled ? completion.Task.WaitAsync(cancel) : completion.Task;
     }
 
     /// <summary>A key the caller pressed (0-9, *, #, A-D), as the host learned it out of band (RFC 2833, SIP INFO): answered

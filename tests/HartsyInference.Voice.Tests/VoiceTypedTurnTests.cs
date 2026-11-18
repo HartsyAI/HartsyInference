@@ -157,11 +157,13 @@ public sealed class VoiceTypedTurnTests
         Assert.Contains(harness.Session.Transcript, t => t.Role == TextRole.User && t.Text == "open the mixer");
     }
 
-    [Fact]
-    public async Task ATranscribeOnlySessionRefusesATypedMessage()
+    [Theory]
+    [InlineData("hello")]
+    [InlineData("?!")]
+    public async Task ATranscribeOnlySessionRefusesAnyTypedMessageTheSameWay(string message)
     {
         await using VoiceHarness harness = await VoiceHarness.StartAsync(Options(transcribeOnly: true));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Session.SubmitUserTextAsync("hello"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => harness.Session.SubmitUserTextAsync(message));
     }
 }
