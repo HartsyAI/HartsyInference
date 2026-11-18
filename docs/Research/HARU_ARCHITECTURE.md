@@ -160,7 +160,14 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
     user samples or reply frames**, compute median 67 ms, p99 96 ms, max 213 ms (inside the 400 ms a two-frame lead allows); the client's own playout simulation counted 2 of
     2,250 frames late, the worst by 141 ms (the client and the server shared the machine). The text turned repetitive late in the run ("strawberry, strawberry cake"): the
     model, not the pacing.
-  - Not measured: lead 0 on the same run (the p99 of 96 ms says few frames, but not none, would miss a 133 ms slot), a 10-minute run, a remote client, narrowband microphones.
+  - A 10-minute conversation after the review fixes of #972 (the question repeated with gaps, the recording sent at its own 8 kHz and resampled to 24 kHz; 4,499 frames;
+    card at 9% utilisation before the start, the server's own work 14 to 44%): server side **0 late frames, 0 rebases, 1 silence frame, 0 dropped user samples (now counting
+    what the pacer trims) and 0 dropped reply frames**, compute median 59 ms, p99 83 ms, max 223 ms against the 400 ms a two-frame lead allows; the client's playout simulation counted 7 of
+    4,499 frames late, the worst by 100 ms (client and server on one machine). The model answered coherently in the telephone band; its text becomes a list of cake options with
+    repeats late in the run.
+  - The earlier "0 dropped" figures above came from counters that could not move (reply drops were never counted and trimmed audio was not); only the late and rebase counts
+    of those runs stand. #972 fixed the counters and the review's two bugs (a bad input rate leaking the model, a server-ended conversation aborting the socket).
+  - Not measured: lead 0 on the same run, a remote client (over a real network), a 4090.
 
 - 2026-11-17, released codec, real weights, CPU F32 (`HaruCodecRealWeightsTests`, opt-in through `HARU_CODEC_REAL_DIR`): the
   `codec.*` byte range of `model.safetensors` @ `8d6e83bc` (1,374,784,002 B, which is 687,392,001 BF16 parameters; fetched by
