@@ -98,7 +98,7 @@ config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no 
 - The runner is an `ITtsRunner` (cache, eviction, leases and footprint unchanged) that also implements `IDuplexSpeechRunner`; `Synthesize` refuses with a pointer to the duplex API.
 - Contract: `ISpeechService.OpenDuplexAsync` and `RespondAsync` as default interface members; `IDuplexSpeechSession` (`Start`, `Step`) over a lease that takes the call lock and the device gate per frame and pins the model. One conversation per loaded model.
 - Precisions: `HaruWeights` converts only the language model's attention, delta-rule and feed-forward matrices (Q8_0, Q6_K, or Q4_K/Q5_K for the feed-forward with Q6_K for the rest); the tied embedding table, head, projectors and codec stay as stored. Cache: `CacheRoot/tts/_gguf-cache/higurashi-ai_Haru-4B-<precision>-v1.gguf`.
-- Consumers: `hartsy duplex <recording> -m haru:q4 --reference voice.wav --card "..." --stereo`, `POST /v1/native/duplex/respond` (base64 clips in JSON, long-running queue).
+- Consumers: `hartsy duplex <recording> -m haru:q8 --reference voice.wav --card "..." --stereo`, `POST /v1/native/duplex/respond` (base64 clips in JSON, long-running queue).
 
 ## Evidence
 
@@ -111,6 +111,18 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
   streamed decode frames 3.1e-6. Streaming and whole-clip agree in the engine on a separate synthetic codec
   (`VibeVoiceCodecStreamingTests`, bit-exact on CPU). This settles the codec questions: down/up index base is 0 with a
   separate stem, mid-frame padding matches, no shared-code change is needed.
+- 2026-11-17, released weights on the RTX 3060 (CUDA, `hartsy duplex`, the HartsyPhone eval question recorded as a 14 s clip, a voice clip, a card, a
+  25 s reply tail so the model has room to answer; the reply Whisper-transcribed with `whisper:base`, which also transcribes the user channel as the
+  question, so the check itself is sound):
+  - **Q8_0**: coherent English ("A, vanilla cake. B, birthday cake. C, strawberry cake. D, chocolate cake. And, D, no, thank you."), 271 frames, the Whisper
+    text matches the model's own text stream, peak VRAM 8.1 GB. 114 ms median per frame with a 167 ms maximum on an idle card (3-second tail run), 184 ms
+    median when another process held the card at 43% utilisation: **not yet real time against the 133 ms budget**.
+  - **Q4_K, Q5_K, Q6_K**: the replies are not intelligible (mixed-language fragments and repetition for Q4, a lone "Hm" or question marks for Q5 and Q6),
+    although they run faster (median 66 to 73 ms per frame). Q4_K had already differed from upstream at frame 3 of the replayed 16-frame
+    conversation (14 of 16 tokens); Q8_0 matches all 16. The earlier Q4 run that gave Chinese for an English question used a 3-second tail and the
+    same weights: it was a K-quant failure, not a short tail.
+  - A 3-second tail is too short for any variant to answer the 14 s question: use `--tail-seconds 20` or more.
+
 - 2026-11-17, released codec, real weights, CPU F32 (`HaruCodecRealWeightsTests`, opt-in through `HARU_CODEC_REAL_DIR`): the
   `codec.*` byte range of `model.safetensors` @ `8d6e83bc` (1,374,784,002 B, which is 687,392,001 BF16 parameters; fetched by
   HTTP range, the whole-file sha256 not checked) against the upstream PyTorch codec loaded `strict=True` from the same
@@ -186,6 +198,8 @@ dead voice-session links and the `RealtimeScheduling` entry in `docs/Agents/AGEN
 ## Open questions
 
 - Whether the full 110 codec tensors equal VibeVoice-1.5B's (two compared).
-- Q8_0 against Q4_K decode speed for the trunk on the 3060 (`AudioLmQuant.cs` claims Q8_0 takes a slow path).
+- Why the K-quants lose the conversation (see Evidence, 2026-11-17 GPU): which matrices are sensitive (attention, delta-rule, first or last layers) is not
+  known; a per-matrix sweep would tell whether a mixed Q8_0/K-quant file keeps coherence at less than Q8_0's size and time.
+- Q8_0 decode speed on the 3060 is 114 ms median per frame with a 167 ms maximum against the 133 ms budget (`AudioLmQuant.cs` says Q8_0 takes a slow path).
 - Whether `Qwen35Model` per-step decode of 4B on the 3060 meets the 133 ms frame with the codec; not measured.
 - Behaviour on narrowband phone audio, behind RNNoise, and without headphones: untested upstream.

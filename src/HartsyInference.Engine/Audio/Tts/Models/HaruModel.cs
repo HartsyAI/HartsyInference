@@ -15,7 +15,8 @@ namespace HartsyInference.Engine.Audio;
 /// recorded consent and real-time voice conversion.
 ///
 /// <para>The variant picks the precision of the language model's matrices: native (BF16, 10.5 GB for the whole checkpoint), or <c>q8</c>,
-/// <c>q6</c>, <c>q5</c> or <c>q4</c>, converted once into a disk cache. On a 12 GB card use <c>q4</c> or <c>q8</c>.</para></summary>
+/// <c>q6</c>, <c>q5</c> or <c>q4</c>, converted once into a disk cache. Measured on the released weights, only <c>q8</c> and native keep the conversation
+/// coherent: the K-quant variants (<c>q6</c>, <c>q5</c>, <c>q4</c>) answer with unintelligible speech, so <c>q8</c> is the one for a 12 GB card.</para></summary>
 internal static class HaruModel
 {
     internal const string Repo = "higurashi-ai/Haru-4B";
@@ -56,6 +57,8 @@ internal static class HaruModel
     private static async Task<ITtsRunner> LoadAsync(TtsLoadContext context, string variant, CancellationToken cancel)
     {
         HaruPrecision precision = ParsePrecision(variant);
+        if (precision is not (HaruPrecision.Native or HaruPrecision.Q8_0))
+            Logs.Warning($"[Audio][Haru] {precision} is a K-quant: on the released weights its replies are not intelligible (Q8_0 and native are). Use haru:q8 on a 12 GB card.");
         IReadOnlyDictionary<string, string> paths = await AudioModelCache.FetchAllAsync(Repo, Files(), Category, ct: cancel).ConfigureAwait(false);
         string cache = Path.Combine(AudioModelCache.CacheRoot, Category, "_gguf-cache",
             $"{Repo.Replace('/', '_')}-{precision.ToString().ToLowerInvariant()}-v{HaruWeights.CacheVersion}.gguf");

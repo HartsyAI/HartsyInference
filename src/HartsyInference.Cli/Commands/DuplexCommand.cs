@@ -17,9 +17,9 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         [Description("Audio of the user (any rate, mixed down to mono).")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id with an optional precision, e.g. haru:q4.</summary>
+        /// <summary>Model id with an optional precision, e.g. haru:q8.</summary>
         [CommandOption("-m|--model")]
-        [Description("Full-duplex model, optionally 'id:precision' (haru, haru:q8, haru:q4). A 12 GB card needs q8 or q4.")]
+        [Description("Full-duplex model, optionally 'id:precision' (haru, haru:q8). A 12 GB card needs q8; q6, q5 and q4 load but do not answer intelligibly.")]
         public string Model { get; init; } = "haru";
 
         /// <summary>Compute backend selector.</summary>
