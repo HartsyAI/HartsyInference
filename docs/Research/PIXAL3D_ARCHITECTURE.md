@@ -61,7 +61,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 | Shape decode, mesh | `FlexiDualGridVaeDecoder`, `fill_holes`, dual-grid mesh | `ShapeVaeDecoder`, `DualGridMesherStage` | 1:1, same file (sha256 `e3b718d3...`) |
 | Texture flow | `imgshape2tex` flow, 64 input channels (shape latent concatenated), 1024 | none (the TRELLIS.2 texture path is being added by another session) | out of scope for shape-only; same block as the shape flow once proj is supported |
 | Texture decode, bake | `SparseUnetVaeDecoder`, `to_glb` with remesh and texture baking | none yet; [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md) covers the toolkit | later |
-| Samplers | `FlowEulerGuidanceIntervalSampler` | `Trellis2FlowSampler` | 1:1 (file identical to TRELLIS.2; `pipeline.json` sampler and normalization blocks equal the local TRELLIS.2 ones) |
+| Samplers | `FlowEulerGuidanceIntervalSampler` | `RectifiedFlowSampler` | 1:1 (file identical to TRELLIS.2; `pipeline.json` sampler and normalization blocks equal the local TRELLIS.2 ones) |
 
 ### Shared with the local files
 

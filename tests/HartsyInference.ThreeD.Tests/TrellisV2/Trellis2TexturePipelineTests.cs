@@ -13,6 +13,7 @@ using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using Xunit;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Tests.TrellisV2;
 
@@ -458,7 +459,7 @@ public sealed class Trellis2TexturePipelineTests
     private sealed class StubStructure(Rig rig) : ITrellis2StructureStage
     {
         public int[] Sample(
-            IBackend backend, Tensor cond, Tensor negCond, int seed, Trellis2SamplerParams parameters, int outputResolution, Action<int>? onStep)
+            IBackend backend, Tensor cond, Tensor negCond, int seed, FlowSamplerParams parameters, int outputResolution, Action<int>? onStep)
         {
             rig.Calls.Add($"structure@{outputResolution} steps={parameters.Steps} seed={seed}");
             rig.Tensors.Add(negCond);
@@ -472,7 +473,7 @@ public sealed class Trellis2TexturePipelineTests
     {
         public SparseTensor Sample(
             IBackend backend, Trellis2ShapeFlowKind kind, int[] coords, int gridResolution, Tensor cond, Tensor negCond, int seed,
-            Trellis2SamplerParams parameters, Action<int>? onStep)
+            FlowSamplerParams parameters, Action<int>? onStep)
         {
             rig.Calls.Add($"shape {kind} grid={gridResolution} seed={seed} steps={parameters.Steps}");
             for (int s = 1; s <= parameters.Steps; s++)
@@ -533,7 +534,7 @@ public sealed class Trellis2TexturePipelineTests
 
         public SparseTensor Sample(
             IBackend backend, Trellis2ShapeFlowKind kind, SparseTensor shape, Tensor cond, Tensor negCond, int seed,
-            Trellis2SamplerParams parameters, Action<int>? onStep)
+            FlowSamplerParams parameters, Action<int>? onStep)
         {
             rig.Calls.Add($"texture {kind} voxels={shape.Count} seed={seed} steps={parameters.Steps}");
             rig.TextureCond = cond;

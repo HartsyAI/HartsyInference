@@ -2,7 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.ThreeD.Models.TrellisV2;
+namespace HartsyInference.ThreeD.Sampling;
 
 /// <summary>
 /// Upstream <c>FlowEulerGuidanceIntervalSampler</c>: Euler integration of the rectified flow from <c>t = 1</c> (noise) to 0 on a
@@ -10,7 +10,7 @@ namespace HartsyInference.ThreeD.Models.TrellisV2;
 /// std-matched rescale of the guided <c>x0</c>. Layout-agnostic: it only does element-wise math over the whole latent, so the
 /// dense stage-1 latent and the sparse shape latent share it. The model sees <c>1000 · t</c>.
 /// </summary>
-public static class Trellis2FlowSampler
+public static class RectifiedFlowSampler
 {
     /// <summary>Velocity of the model for the current latent: <c>(x, 1000·t, conditional)</c>; the sampler disposes the result.</summary>
     public delegate Tensor Predict(Tensor x, float tModel, bool conditional);
@@ -32,7 +32,7 @@ public static class Trellis2FlowSampler
 
     /// <summary>Denoises <paramref name="noise"/> (F32, any shape); the caller owns the returned sample, and the noise is not modified.</summary>
     /// <param name="onStep">Called after each step; it may throw to cancel, and the sample is released first.</param>
-    public static Tensor Sample(IBackend backend, Tensor noise, Trellis2SamplerParams parameters, Predict predict, Action<int>? onStep = null)
+    public static Tensor Sample(IBackend backend, Tensor noise, FlowSamplerParams parameters, Predict predict, Action<int>? onStep = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(noise);
@@ -62,7 +62,7 @@ public static class Trellis2FlowSampler
         }
     }
 
-    private static void Step(IBackend backend, Tensor x, double t, double tPrev, Trellis2SamplerParams p, Predict predict)
+    private static void Step(IBackend backend, Tensor x, double t, double tPrev, FlowSamplerParams p, Predict predict)
     {
         float tModel = (float)(1000.0 * t);
         float delta = (float)(tPrev - t);
