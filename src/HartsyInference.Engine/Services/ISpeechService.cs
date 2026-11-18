@@ -28,4 +28,17 @@ public interface ISpeechService
     /// voice.</remarks>
     Task<ISynthesizerLease> OpenSynthesizerAsync(ModelSpec spec, CancellationToken cancel = default) =>
         throw new NotSupportedException("This speech-service implementation does not expose synthesizer leases.");
+
+    /// <summary>Loads a full-duplex speech-to-speech model (Haru-4B) for <paramref name="spec"/> exactly as <see cref="SynthesizeAsync"/>
+    /// loads a synthesizer (same catalog, cache key and download) and opens a conversation on it; see
+    /// <see cref="IDuplexSpeechSession"/>. A text-to-speech model is refused: it has no user stream to listen to.</summary>
+    Task<IDuplexSpeechSession> OpenDuplexAsync(ModelSpec spec, DuplexSpeechRequest request, CancellationToken cancel = default) =>
+        throw new NotSupportedException("This speech-service implementation does not expose full-duplex conversations.");
+
+    /// <summary>Plays a recording of the user (<paramref name="user"/>, any rate, mixed to mono) to a full-duplex model frame by frame, as in
+    /// a live conversation, and returns what it answered. <paramref name="tailSeconds"/> of silence (up to
+    /// <see cref="SpeechService.MaxTailSeconds"/>) let the model finish after the recording ends. A recording longer than the request's
+    /// <see cref="DuplexSpeechRequest.MaxFrames"/> or than the model's capacity is refused before it is played.</summary>
+    Task<DuplexResult> RespondAsync(ModelSpec spec, DuplexSpeechRequest request, AudioClip user, double tailSeconds = 0, CancellationToken cancel = default) =>
+        throw new NotSupportedException("This speech-service implementation does not expose full-duplex conversations.");
 }
