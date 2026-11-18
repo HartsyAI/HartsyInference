@@ -23,13 +23,20 @@ public sealed class IdolWeights : IDisposable
     private readonly List<Tensor> _owned;
     private bool _disposed;
 
-    private IdolWeights(IdolConfig config, Dictionary<string, Tensor> tensors, SafeTensorsLoader loader, List<Tensor> owned)
+    private IdolWeights(IdolConfig config, Dictionary<string, Tensor> tensors, SafeTensorsLoader loader, List<Tensor> owned, Dictionary<string, PhaseFactors>? experts = null)
     {
         Config = config;
         Tensors = tensors;
         _loader = loader;
         _owned = owned;
+        Experts = experts;
     }
+
+    /// <summary>The slow and fast LoRA factors of one block matrix, as Budget3D-Idol-Turbo's checkpoint embeds them (<c>slow_A</c> <c>[rank, in]</c>, <c>slow_B</c> <c>[out, rank]</c>, the same for fast); borrowed from the file.</summary>
+    public readonly record struct PhaseFactors(Tensor SlowA, Tensor SlowB, Tensor FastA, Tensor FastB);
+
+    /// <summary>The phase experts a checkpoint carries inside its block matrices (Budget3D-Idol-Turbo's file), keyed by module (<c>blocks.0.attn.qkv</c>); null for a plain checkpoint. LoRA alpha 128 over rank 32 is a scale of 4.</summary>
+    public IReadOnlyDictionary<string, PhaseFactors>? Experts { get; }
 
     /// <summary>The architecture these weights were checked against.</summary>
     public IdolConfig Config { get; }
@@ -67,7 +74,7 @@ public sealed class IdolWeights : IDisposable
             Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal);
             foreach (string key in ExpectedShapes(config).Keys)
             {
-                if (!source.TryGetValue(key, out Tensor? t))
+                if (!source.TryGetValue(key, out Tensor? t) && !(IsBlockModuleParameter(key) && source.TryGetValue(BaseKey(key), out t)))
                     throw new HartsyInferenceException($"The Idol checkpoint has no tensor '{key}'.");
                 DType target = linearDType is { } narrow && narrow != DType.F32 && IsBlockLinear(key) ? narrow : DType.F32;
                 Tensor converted = t.DType == target ? t : t.CastTo(target);
@@ -79,7 +86,7 @@ public sealed class IdolWeights : IDisposable
             Tensor posPe = ReadPosPe(posPePath, config);
             owned.Add(posPe);
             tensors["pos_pe"] = posPe;
-            IdolWeights weights = new(config, tensors, loader, owned);
+            IdolWeights weights = new(config, tensors, loader, owned, ReadExperts(source, config));
             weights.CheckShapes();
             return weights;
         }
@@ -90,6 +97,37 @@ public sealed class IdolWeights : IDisposable
             loader.Dispose();
             throw;
         }
+    }
+
+    // The weight or the bias of one of the four block modules.
+    private static bool IsBlockModuleParameter(string key)
+    {
+        string stem = key.EndsWith(".weight", StringComparison.Ordinal) ? key[..^".weight".Length] : key.EndsWith(".bias", StringComparison.Ordinal) ? key[..^".bias".Length] : "";
+        return stem.Length > 0 && IsBlockLinear(stem + ".weight");
+    }
+
+    // A checkpoint that embeds its LoRA keeps each block matrix under <module>.base.weight / .base.bias next to <module>.slow_A, slow_B, fast_A and fast_B.
+    private static string BaseKey(string key) => key.EndsWith(".weight", StringComparison.Ordinal) ? key[..^".weight".Length] + ".base.weight" : key[..^".bias".Length] + ".base.bias";
+
+    private static Dictionary<string, PhaseFactors>? ReadExperts(Dictionary<string, Tensor> source, IdolConfig config)
+    {
+        if (!source.ContainsKey("blocks.0.attn.qkv.slow_A"))
+            return null;
+        Dictionary<string, PhaseFactors> experts = new(StringComparer.Ordinal);
+        foreach (string key in ExpectedShapes(config).Keys)
+        {
+            if (!IsBlockLinear(key) || !key.EndsWith(".weight", StringComparison.Ordinal))
+                continue;
+            string module = key[..^".weight".Length];
+            if (!source.TryGetValue(module + ".slow_A", out Tensor? slowA) || !source.TryGetValue(module + ".slow_B", out Tensor? slowB)
+                || !source.TryGetValue(module + ".fast_A", out Tensor? fastA) || !source.TryGetValue(module + ".fast_B", out Tensor? fastB))
+                throw new HartsyInferenceException($"The Idol checkpoint embeds phase experts but '{module}' lacks one of slow_A, slow_B, fast_A or fast_B.");
+            if (slowA.DType != DType.F32 || slowB.DType != DType.F32 || fastA.DType != DType.F32 || fastB.DType != DType.F32)
+                throw new HartsyInferenceException($"The embedded phase experts of '{module}' are not float32.");
+            experts[module] = new PhaseFactors(slowA, slowB, fastA, fastB);
+        }
+
+        return experts;
     }
 
     /// <summary>Wraps tensors already in memory (tests); borrowed, and <c>pos_pe</c> must be among them.</summary>

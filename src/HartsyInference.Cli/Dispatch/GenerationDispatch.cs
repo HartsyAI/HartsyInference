@@ -861,6 +861,7 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
             Guidance = parameters.GetDoubleOrNull("guidance"),
+            TokenBudget = parameters.GetDoubleOrNull("budget"),
             SplatCount = parameters.GetInt("splats", 0),
             Framing = ParseMeshFraming(parameters.GetStringOrNull("framing")),
             Samples = parameters.GetInt("samples", 1),

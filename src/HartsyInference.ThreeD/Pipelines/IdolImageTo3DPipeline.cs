@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models;
 using HartsyInference.ThreeD.Models.Idol;
+using HartsyInference.ThreeD.Models.Idol.Budget;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using HartsyInference.ThreeD.Preprocessing;
 
@@ -50,6 +51,12 @@ public sealed record IdolOptions
 
     /// <summary>Idol-turbo: the denoiser carries the slow and fast phase LoRAs, takes no guidance and one pass per step, and <see cref="Steps"/> 0 means 5.</summary>
     public bool Turbo { get; init; }
+
+    /// <summary>Budget3D: the denoiser is BudgetAny's fine-tune and runs on <see cref="TokenBudget"/> of Idol's 8192 latent tokens (with <see cref="Turbo"/>, Budget3D-Idol-Turbo, whose experts are in its own file).</summary>
+    public bool Budget3D { get; init; }
+
+    /// <summary>Budget3D: the fraction of the 8192 latent tokens the denoiser runs on, 0.0625 to 1 (1 is Idol's own dense layout); 0 takes 1. Snapped to a token count the octree can realise.</summary>
+    public double TokenBudget { get; init; }
 }
 
 /// <summary>Idol, image to 3D Gaussian splats (Sperid Labs, Apache-2.0): the picture is prepared (matte, erode, crop), encoded by DINOv3 ViT-H+ and the
@@ -67,6 +74,13 @@ public sealed unsafe class IdolImageTo3DPipeline
     /// <summary>The two phase experts of idol-turbo (Comfy format, akhaliq/idol-turbo <c>loras/</c>), beside the base files.</summary>
     public const string TurboSlowFile = "loras/idol_turbo_slow_comfy.safetensors";
     public const string TurboFastFile = "loras/idol_turbo_fast_comfy.safetensors";
+
+    /// <summary>BudgetAny's Budget3D-Idol and Budget3D-Idol-Turbo checkpoints (full float32 denoisers with the adapters; the turbo's experts are inside its file), beside Idol's own files.</summary>
+    public const string Budget3DFile = "diffusion_models/budget3d_idol.safetensors";
+    public const string Budget3DTurboFile = "diffusion_models/budget3d_idol_turbo.safetensors";
+
+    /// <summary>The smallest budget: 512 of the 8192 tokens.</summary>
+    public const double MinTokenBudget = 0.0625;
 
     /// <summary>Gaussians of a default request.</summary>
     public const int DefaultSplats = 262144;
@@ -100,8 +114,12 @@ public sealed unsafe class IdolImageTo3DPipeline
     public static IReadOnlyList<string> RequiredFiles { get; } = [DenoiserFile, DinoFile, VaeFile, DecoderFile];
 
     /// <summary>The files of <paramref name="directory"/> that are missing, empty when it holds a complete model.</summary>
-    public static IReadOnlyList<string> MissingFiles(string directory, bool turbo = false)
-        => [.. (turbo ? [.. RequiredFiles, TurboSlowFile, TurboFastFile] : RequiredFiles).Where(f => !File.Exists(Path.Combine(directory, f)))];
+    public static IReadOnlyList<string> MissingFiles(string directory, bool turbo = false, bool budget3D = false)
+        => [.. Required(turbo, budget3D).Where(f => !File.Exists(Path.Combine(directory, f)))];
+
+    /// <summary>The files a variant reads: Idol's encoders and decoders always; the denoiser is Idol's, or BudgetAny's (with the turbo experts inside), or Idol's with the two turbo LoRAs.</summary>
+    public static IReadOnlyList<string> Required(bool turbo, bool budget3D)
+        => budget3D ? [budget3D && turbo ? Budget3DTurboFile : Budget3DFile, DinoFile, VaeFile, DecoderFile] : turbo ? [.. RequiredFiles, TurboSlowFile, TurboFastFile] : RequiredFiles;
 
     /// <summary>Throws when <paramref name="options"/> cannot drive a run.</summary>
     public static void ValidateOptions(IdolOptions options)
@@ -113,6 +131,10 @@ public sealed unsafe class IdolImageTo3DPipeline
             throw new ArgumentOutOfRangeException(nameof(options), g, "Guidance must be finite and not negative.");
         if (options.Turbo && options.Guidance is > 0f)
             throw new ArgumentOutOfRangeException(nameof(options), options.Guidance, "Idol-turbo takes no guidance: the distilled LoRAs carry it.");
+        if (options.TokenBudget != 0 && !options.Budget3D)
+            throw new ArgumentOutOfRangeException(nameof(options), options.TokenBudget, "A token budget applies to the Budget3D models.");
+        if (options.TokenBudget != 0 && (!double.IsFinite(options.TokenBudget) || options.TokenBudget < MinTokenBudget || options.TokenBudget > 1))
+            throw new ArgumentOutOfRangeException(nameof(options), options.TokenBudget, $"The token budget is {MinTokenBudget} to 1 of Idol's 8192 latent tokens.");
         int splats = options.Splats == 0 ? DefaultSplats : options.Splats;
         if (splats < MinSplats || splats > MaxSplats || splats % 32 != 0)
             throw new ArgumentOutOfRangeException(nameof(options), splats, $"Idol writes {MinSplats} to {MaxSplats} Gaussians, a multiple of 32.");
@@ -124,10 +146,10 @@ public sealed unsafe class IdolImageTo3DPipeline
         Action<IdolStage, string, int, int>? report = null, Action<string>? log = null, CancellationToken cancel = default)
     {
         ValidateOptions(options);
-        IReadOnlyList<string> missing = MissingFiles(_directory, options.Turbo);
+        IReadOnlyList<string> missing = MissingFiles(_directory, options.Turbo, options.Budget3D);
         if (missing.Count > 0)
             throw new FileNotFoundException($"'{_directory}' lacks Idol files: {string.Join(", ", missing)}.");
-        int steps = options.Steps == 0 ? (options.Turbo ? IdolTurboAdapters.DefaultSteps : IdolSampler.DefaultSteps) : options.Steps;
+        int steps = options.Steps == 0 ? (options.Turbo ? IdolTurboAdapters.DefaultSteps : IdolSampler.DefaultSteps) : options.Steps;   // Budget3D takes the same defaults as the model it fine-tunes
         float guidance = options.Turbo ? 0f : options.Guidance ?? IdolSampler.DefaultGuidance;
         int splats = options.Splats == 0 ? DefaultSplats : options.Splats;
         Stopwatch clock = Stopwatch.StartNew();
@@ -148,7 +170,9 @@ public sealed unsafe class IdolImageTo3DPipeline
         {
             cancel.ThrowIfCancellationRequested();
             Stage(IdolStage.Denoising, "Denoising", 0, steps);
-            Tensor latent = Denoise(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, options.Turbo, (step) => Stage(IdolStage.Denoising, "Denoising", step, steps), log);
+            Tensor latent = options.Budget3D
+                ? DenoiseBudget(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, options.Turbo, options.TokenBudget == 0 ? 1.0 : options.TokenBudget, (step) => Stage(IdolStage.Denoising, "Denoising", step, steps), log)
+                : Denoise(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, options.Turbo, (step) => Stage(IdolStage.Denoising, "Denoising", step, steps), log);
             using (latent)
             {
                 Stage(IdolStage.Decoding, "Decoding the splats");
@@ -197,6 +221,45 @@ public sealed unsafe class IdolImageTo3DPipeline
 
     /// <summary>The camera token's noise stream: a different one from the latent's for every seed, with no int overflow at the top of the seed range.</summary>
     private static int CameraSeed(int seed) => seed ^ 0x2545F491;
+
+    // Budget3D: BudgetAny's denoiser on a layout of the requested fraction of the 8192 tokens (the dense layout at 1). The base model refreshes the layout at steps 0 and 5; the turbo, with its experts in the
+    // file, at every step and with an image stream per phase.
+    private Tensor DenoiseBudget(Tensor feature1, Tensor feature2, int seed, int steps, float guidance, double rescaleT, bool turbo, double tokenBudget, Action<int> onStep, Action<string>? log)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        string path = Path.Combine(_directory, turbo ? Budget3DTurboFile : Budget3DFile);
+        using IdolWeights weights = IdolWeights.Load(path, linearDType: _blockDType);
+        using BudgetAdapterWeights adapterWeights = BudgetAdapterWeights.Load(path);
+        using IdolTurboAdapters? adapters = turbo ? IdolTurboAdapters.AttachEmbedded(weights) : null;
+        using IdolDenoiser trunk = new(adapters?.Weights ?? weights);
+        using BudgetDenoiser model = new(trunk, adapterWeights);
+        IdolConfig config = weights.Config;
+        _backend.PreloadWeights(trunk.EnumerateWeights());
+        _backend.PreloadWeights(model.EnumerateWeights());
+        try
+        {
+            using Tensor? positive = adapters is null ? trunk.EmbedContext(_backend, feature1, feature2) : null;
+            using PhaseContexts? phases = adapters?.EmbedContexts(_backend, trunk, feature1, feature2);
+            using Tensor zero1 = new(feature1.Shape, DType.F32), zero2 = new(feature2.Shape, DType.F32);
+            using Tensor? blank = adapters is null && guidance > 0f ? trunk.EmbedContext(_backend, zero1, zero2) : null;
+            using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, config.Tokens, config.LatentChannels), seed);
+            using Tensor cameraNoise = SeedGenerator.CreateNoise(new TensorShape(1, 1, config.CameraChannels), CameraSeed(seed));
+            log?.Invoke($"Budget3D denoiser loaded, image streams embedded ({clock.Elapsed.TotalSeconds:F1} s)");
+            int tokens = BudgetLayout.SnapTokens(tokenBudget * BudgetOctree.Points);
+            (Tensor latent, Tensor camera, BudgetLayout layout) = BudgetSampler.Sample(_backend, model, positive ?? phases!.Slow, blank, noise, cameraNoise, tokens, steps, guidance, rescaleT,
+                relayoutEvery: turbo ? 1 : BudgetSampler.BaseRelayoutEvery, relayoutUntil: turbo ? -1 : BudgetSampler.BaseRelayoutUntil, onStep, adapters is null ? null : adapters.Phase, phases is null ? null : phases.At);
+            camera.Dispose();
+            _ = latent.DataPointer;
+            log?.Invoke($"{steps} steps on {layout.Tokens} of {BudgetOctree.Points} tokens ({clock.Elapsed.TotalSeconds:F1} s)");
+            return latent;
+        }
+        finally
+        {
+            _backend.Sync();
+            _backend.FreeWeights(trunk.EnumerateWeights());
+            _backend.FreeWeights(model.EnumerateWeights());
+        }
+    }
 
     private Tensor Denoise(Tensor feature1, Tensor feature2, int seed, int steps, float guidance, double rescaleT, bool turbo, Action<int> onStep, Action<string>? log)
     {

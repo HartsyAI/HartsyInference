@@ -20,7 +20,9 @@ public static class IdolRequestMapper
             Splats = request.SplatCount,
             Framing = request.Framing == MeshFraming.Photo ? IdolFraming.Photo : IdolFraming.Object,
             Seed = MeshSeed.ForSampler(request.Seed) ?? Random.Shared.Next(),
-            Turbo = modelId == MeshModelIds.IdolTurbo,
+            Turbo = MeshModelIds.IsIdolTurbo(modelId),
+            Budget3D = MeshModelIds.IsBudget3D(modelId),
+            TokenBudget = request.TokenBudget ?? 0,
         };
     }
 
@@ -28,7 +30,7 @@ public static class IdolRequestMapper
     public static void Validate(MeshRequest request, string modelId = MeshModelIds.Idol)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (modelId == MeshModelIds.IdolTurbo && request.Guidance is not null)
+        if (MeshModelIds.IsIdolTurbo(modelId) && request.Guidance is not null)
             throw new NotSupportedException($"'{modelId}' takes no Guidance: the distilled LoRAs carry it and the sampler runs one pass per step.").ForField(nameof(MeshRequest.Guidance));
         if (request.Image is null)
             throw new NotSupportedException("Idol needs MeshRequest.Image, a picture of one object.").ForField(nameof(MeshRequest.Image));
@@ -40,6 +42,14 @@ public static class IdolRequestMapper
             throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "Steps must be between 1 and 1000 (0 takes the model default: 50, or 5 for idol-turbo).").ForField(nameof(MeshRequest.Steps));
         if (request.Guidance is { } g && (g < 0 || g > 20 || double.IsNaN(g)))
             throw new ArgumentOutOfRangeException(nameof(request), g, "Guidance must be between 0 and 20.").ForField(nameof(MeshRequest.Guidance));
+        if (request.TokenBudget is { } budget)
+        {
+            if (!MeshModelIds.IsBudget3D(modelId))
+                throw new NotSupportedException($"'{modelId}' takes no TokenBudget; it applies to the Budget3D models.").ForField(nameof(MeshRequest.TokenBudget));
+            if (!double.IsFinite(budget) || budget < IdolImageTo3DPipeline.MinTokenBudget || budget > 1)
+                throw new ArgumentOutOfRangeException(nameof(request), budget, $"TokenBudget must be between {IdolImageTo3DPipeline.MinTokenBudget} and 1.").ForField(nameof(MeshRequest.TokenBudget));
+        }
+
         IdolOptions probe = new() { Splats = request.SplatCount };
         try
         {
@@ -56,8 +66,14 @@ public static class IdolRequestMapper
     {
         ArgumentNullException.ThrowIfNull(request);
         if (MeshModelIds.IsIdol(modelId))
+        {
+            if (!MeshModelIds.IsBudget3D(modelId) && request.TokenBudget is not null)
+                throw new NotSupportedException($"'{modelId}' takes no TokenBudget; it applies to the Budget3D models.").ForField(nameof(MeshRequest.TokenBudget));
             return;
-        if (request.Guidance is not null)
+        }
+
+        if (request.TokenBudget is not null)
+            throw new NotSupportedException($"'{modelId}' takes no TokenBudget; it applies to the Budget3D models.").ForField(nameof(MeshRequest.TokenBudget));        if (request.Guidance is not null)
             throw new NotSupportedException($"'{modelId}' takes no Guidance; it applies to {MeshModelIds.Idol}.").ForField(nameof(MeshRequest.Guidance));
         if (request.SplatCount != 0)
             throw new NotSupportedException($"'{modelId}' takes no SplatCount; it applies to {MeshModelIds.Idol}.").ForField(nameof(MeshRequest.SplatCount));

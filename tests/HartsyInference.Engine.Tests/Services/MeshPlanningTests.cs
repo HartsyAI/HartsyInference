@@ -74,6 +74,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Guidance) => request with { Guidance = 2 },
         nameof(MeshRequest.SplatCount) => request with { SplatCount = 65536 },
         nameof(MeshRequest.Framing) => request with { Framing = MeshFraming.Photo },
+        nameof(MeshRequest.TokenBudget) => request with { TokenBudget = 0.5 },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 

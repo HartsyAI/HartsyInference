@@ -150,6 +150,11 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("idol: classifier-free guidance strength w, (1 + w)*v(image) - w*v(blank); default 3, 0 runs one pass per step instead of two.")]
         public double? Guidance { get; init; }
 
+        /// <summary>budget3d-idol: the fraction of Idol's latent tokens the denoiser runs on.</summary>
+        [CommandOption("--budget")]
+        [Description("budget3d-idol and budget3d-idol-turbo: the fraction of Idol's 8192 latent tokens the denoiser runs on, 0.0625 to 1 (default 1, Idol's dense layout; 0.5 about halves the work of a step).")]
+        public double? Budget { get; init; }
+
         /// <summary>idol: Gaussians to write.</summary>
         [CommandOption("--splats")]
         [Description("idol: Gaussians to write, 32768 to 1048576 in multiples of 32; 0 or unset takes 262144.")]
@@ -229,6 +234,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             parameters.Put("fov", fov.ToString("R", CultureInfo.InvariantCulture));
         if (settings.Guidance is { } guidance)
             parameters.Put("guidance", guidance.ToString("R", CultureInfo.InvariantCulture));
+        if (settings.Budget is { } budget)
+            parameters.Put("budget", budget.ToString("R", CultureInfo.InvariantCulture));
         if (settings.Splats != 0)
             parameters.Put("splats", settings.Splats.ToString(CultureInfo.InvariantCulture));
         if (settings.Framing is not null)
