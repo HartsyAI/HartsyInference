@@ -6,6 +6,22 @@ namespace HartsyInference.Vision.Dinov3.Tests;
 /// <summary>Synthetic DINOv3 and DINOv2 checkpoints in the HF key layout, sized from a preset. Values are seeded.</summary>
 internal static class Dinov3Fixture
 {
+    /// <summary>Only the keys and shapes <see cref="Dinov2Preset.FromDinov3Weights"/> reads, for a ViT-H+/16 checkpoint (SwiGLU).</summary>
+    public static Dictionary<string, Tensor> HugePlusHeaderOnly()
+    {
+        Dictionary<string, Tensor> w = new(StringComparer.Ordinal)
+        {
+            ["embeddings.patch_embeddings.weight"] = Alloc(1280, 3, 16, 16),
+            ["embeddings.cls_token"] = Alloc(1, 1, 1280),
+            ["embeddings.register_tokens"] = Alloc(1, 4, 1280),
+            ["layer.0.mlp.up_proj.weight"] = Alloc(5120, 1280),
+            ["layer.0.mlp.gate_proj.weight"] = Alloc(5120, 1280),
+        };
+        for (int i = 0; i < 32; i++)
+            w[$"layer.{i}.norm1.weight"] = Alloc(1280);
+        return w;
+    }
+
     /// <summary>Only the keys and shapes <see cref="Dinov2Preset.FromDinov3Weights"/> reads, for a ViT-L/16 checkpoint.</summary>
     public static Dictionary<string, Tensor> LargeHeaderOnly()
     {
@@ -36,7 +52,7 @@ internal static class Dinov3Fixture
 
     /// <summary>A complete HF-layout DINOv3 checkpoint for a small preset (hidden 128, two 64-wide heads, a 4-storage-token
     /// layout). Norm weights are 1 and biases 0, so the final norm's output is a plain per-token standardization.</summary>
-    public static Dictionary<string, Tensor> Tiny(Dinov2Preset preset, int seed)
+    public static Dictionary<string, Tensor> Tiny(Dinov2Preset preset, int seed, bool gated = false)
     {
         Random rng = new(seed);
         int h = preset.HiddenSize, inter = preset.IntermediateSize, p = preset.PatchSize;
@@ -71,6 +87,7 @@ internal static class Dinov3Fixture
             Fill(l + "layer_scale1.lambda1", 0.1f, h);
             Ones(l + "norm2.weight", h); Zeros(l + "norm2.bias", h);
             Fill(l + "mlp.up_proj.weight", 0.05f, inter, h); Fill(l + "mlp.up_proj.bias", 0.05f, inter);
+            if (gated) { Fill(l + "mlp.gate_proj.weight", 0.05f, inter, h); Fill(l + "mlp.gate_proj.bias", 0.05f, inter); }
             Fill(l + "mlp.down_proj.weight", 0.05f, h, inter); Fill(l + "mlp.down_proj.bias", 0.05f, h);
             Fill(l + "layer_scale2.lambda1", 0.1f, h);
         }

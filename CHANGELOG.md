@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.439
+
+- Hunyuan3D Paint lets a side picture paint the surfaces the front picture sees only obliquely, so the front
+  picture's collar is no longer baked onto the side of a head, cut off in a straight line where the collar ends.
+
 ## alpha.438
 
 - Hunyuan3D Paint keeps the front picture where it and a side picture both see a surface squarely, instead of blending
