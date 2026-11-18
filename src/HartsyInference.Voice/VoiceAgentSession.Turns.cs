@@ -238,6 +238,12 @@ public sealed partial class VoiceAgentSession
                     session.CountDiscarded(id, reason);
                     return;
                 }
+                if (session._options.TranscribeOnly)
+                {
+                    session.AddTranscript(id, TextRole.User, heard, interrupted: false);
+                    session.Emit(VoiceAgentEventKind.UserTranscript, id, heard);
+                    return;
+                }
                 session.AddUserTurn(id, heard);
                 _userAdded = true;
                 reply = ReplyAsync(token);

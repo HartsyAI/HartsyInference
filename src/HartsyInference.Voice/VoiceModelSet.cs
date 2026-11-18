@@ -121,7 +121,8 @@ public sealed class VoiceModelSet : IAsyncDisposable
             ModelSpec tts = ModelResolver.Resolve(options.TtsModel, null, Modality.Speech);
             ModelSpec stt = ModelResolver.Resolve(options.SttModel, null, Modality.Transcribe);
             speech = await VoiceLeaseSpeech.OpenAsync(token => engine.Speech.OpenSynthesizerAsync(tts, token),
-                token => engine.Transcribe.OpenTranscriberAsync(stt, token), ModelSelector.Parse(options.TtsModel).Variant, cancel).ConfigureAwait(false);
+                token => engine.Transcribe.OpenTranscriberAsync(stt, token), ModelSelector.Parse(options.TtsModel).Variant, options.Language,
+                cancel).ConfigureAwait(false);
             return new VoiceModelSet(options, speech, device, createVad, createDenoiser, frontEnd);
         }
         catch

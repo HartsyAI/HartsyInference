@@ -4,9 +4,9 @@ namespace HartsyInference.Voice;
 
 /// <summary>Models, devices and conversation settings for a <see cref="VoiceModelSet"/> and the
 /// <see cref="VoiceAgentSession"/>s it serves.</summary>
-/// <remarks>The model and device fields (<see cref="SttModel"/>, <see cref="TtsModel"/>, <see cref="AudioDevice"/>,
-/// <see cref="Denoise"/>, <see cref="CpuThreadCap"/>) are applied when the model set loads; a session built on that
-/// set must carry the same values. Every other field is per session.</remarks>
+/// <remarks>The model and device fields (<see cref="SttModel"/>, <see cref="TtsModel"/>, <see cref="Language"/>,
+/// <see cref="AudioDevice"/>, <see cref="Denoise"/>, <see cref="CpuThreadCap"/>) are applied when the model set loads; a
+/// session built on that set must carry the same values. Every other field is per session.</remarks>
 public sealed record VoiceAgentOptions
 {
     /// <summary>The instruction every conversation starts with when none is given.</summary>
@@ -29,6 +29,10 @@ public sealed record VoiceAgentOptions
 
     /// <summary>Speech synthesizer and its voice.</summary>
     public string TtsModel { get; init; } = "kokoro:af_heart";
+
+    /// <summary>Language the recognizer hears, an ISO 639-1 code. English-only checkpoints ignore it; a multilingual one needs
+    /// it, because with no language it answers with hallucinated loops. The synthesizer's language is its voice's.</summary>
+    public string Language { get; init; } = "en";
 
     /// <summary>Rate of the audio <see cref="VoiceAgentSession.ReadOutbound(Span{float})"/> returns.</summary>
     public int OutboundSampleRate { get; init; } = 16_000;
@@ -57,6 +61,12 @@ public sealed record VoiceAgentOptions
     /// beside them are absent; it never falls back to raw audio. Default true: adds 640 samples (40 ms) of
     /// algorithmic delay ahead of endpointing and barge-in detection.</summary>
     public bool Denoise { get; init; } = true;
+
+    /// <summary>Recognize and report only: each utterance raises <see cref="VoiceAgentEventKind.UserTranscript"/> and the session
+    /// calls neither the language model nor the synthesizer for it, so a host can use the call as a command channel.
+    /// <see cref="VoiceAgentSession.SubmitUserTextAsync"/> is refused (nothing would answer it). The model set still loads its
+    /// synthesizer, and <see cref="VoiceAgentSession.SpeakAsync"/> still works. Default false.</summary>
+    public bool TranscribeOnly { get; init; }
 
     /// <summary>First message of every conversation.</summary>
     public string SystemPrompt { get; init; } = DefaultSystemPrompt;
@@ -139,6 +149,7 @@ public sealed record VoiceAgentOptions
         ArgumentException.ThrowIfNullOrWhiteSpace(AudioDevice);
         ArgumentException.ThrowIfNullOrWhiteSpace(SttModel);
         ArgumentException.ThrowIfNullOrWhiteSpace(TtsModel);
+        Require(IsLanguageCode(Language), nameof(Language), Language, "must be a two or three letter language code such as \"en\"");
         ArgumentNullException.ThrowIfNull(SystemPrompt);
         Require(OutboundSampleRate is >= 8_000 and <= 48_000, nameof(OutboundSampleRate), OutboundSampleRate, "must be 8000-48000 Hz");
         // The VAD pads a segment by 30 ms and scores 32 ms chunks, so a shorter hangover would end a turn inside
@@ -162,6 +173,22 @@ public sealed record VoiceAgentOptions
         {
             throw new NotSupportedException("Partial transcripts need a streaming recognizer, which the voice session does not have yet; set PartialTranscripts to false.");
         }
+    }
+
+    private static bool IsLanguageCode(string? code)
+    {
+        if (code is null || code.Length is < 2 or > 3)
+        {
+            return false;
+        }
+        foreach (char c in code)
+        {
+            if (!char.IsAsciiLetter(c))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void Require(bool condition, string name, object value, string rule)
