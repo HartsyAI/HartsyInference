@@ -134,6 +134,15 @@ public sealed class IdolWeights : IDisposable
             && (key.EndsWith(".attn.qkv.weight", StringComparison.Ordinal) || key.EndsWith(".attn.out.weight", StringComparison.Ordinal)
                 || key.EndsWith(".mlp.mlp.0.weight", StringComparison.Ordinal) || key.EndsWith(".mlp.mlp.2.weight", StringComparison.Ordinal));
 
+    /// <summary>Idol's 8192 token positions, <c>[8192 × 3]</c> floats, from the engine's embedded copy; Budget3D's checkpoints carry no <c>pos_pe</c> and use these.</summary>
+    public static float[] EmbeddedPositions()
+    {
+        byte[] raw = EmbeddedPosPe();
+        float[] values = new float[raw.Length / sizeof(float)];
+        Buffer.BlockCopy(raw, 0, values, 0, raw.Length);
+        return values;
+    }
+
     private static byte[] EmbeddedPosPe()
     {
         using Stream stream = typeof(IdolWeights).Assembly.GetManifestResourceStream($"idol/{PosPeFileName}")
