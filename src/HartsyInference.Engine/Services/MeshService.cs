@@ -1041,15 +1041,17 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private HartsyInference.ThreeD.Pipelines.Stages.IForegroundMatter? MeshPreparationInternalMatter()
         => _engine.MeshPreparationInternal.SharedMatter is { IsAvailable: true } matter ? matter : null;
 
-    /// <summary>The folder the Idol family reads (the one holding <c>diffusion_models/</c>, <c>clip_vision/</c> and <c>vae/</c>): the path itself, or the nearest parent of it that holds <c>diffusion_models/</c>. The model resolver
-    /// returns the catalog's primary file (<c>diffusion_models/idol_fp16.safetensors</c>, or the Budget3D checkpoint beside it), which is one of the files, not the folder.</summary>
+    /// <summary>The folder the Idol family reads (the one holding <c>diffusion_models/</c>, <c>clip_vision/</c> and <c>vae/</c>). The model resolver returns the catalog's primary file (<c>diffusion_models/idol_fp16.safetensors</c>,
+    /// or the Budget3D checkpoint beside it), which is one of the files, not the folder; every Idol file is one level below the install root, so this takes the path itself or its parent, whichever holds <c>diffusion_models/</c>
+    /// (the walk stops there, so an unrelated <c>diffusion_models/</c> higher up is never taken). When neither does, it returns the file's folder (or the folder given), so the missing-files message names the install the caller meant.</summary>
     internal static string IdolFolder(string localPath)
     {
         string full = Path.GetFullPath(localPath);
         string start = File.Exists(full) ? Path.GetDirectoryName(full)! : full;
-        for (string? directory = start; directory is not null; directory = Path.GetDirectoryName(directory))
+        string? parent = Path.GetDirectoryName(start.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        foreach (string? directory in new[] { start, parent })
         {
-            if (Directory.Exists(Path.Combine(directory, "diffusion_models")))
+            if (directory is not null && Directory.Exists(Path.Combine(directory, "diffusion_models")))
                 return directory;
         }
 

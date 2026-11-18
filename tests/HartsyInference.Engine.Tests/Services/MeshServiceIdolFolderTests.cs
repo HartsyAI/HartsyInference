@@ -32,10 +32,21 @@ public sealed class MeshServiceIdolFolderTests : IDisposable
     }
 
     [Fact]
-    public void IdolFolder_FindsNoInstall_ReturnsWhatItWasGiven()
+    public void IdolFolder_FindsNoInstall_ReturnsTheFolderOfTheFileItWasGiven()
     {
         Touch("elsewhere/model.safetensors");
 
         Assert.Equal(Path.GetFullPath(Path.Combine(_root, "elsewhere")), MeshService.IdolFolder(Path.Combine(_root, "elsewhere", "model.safetensors")));
+    }
+
+    [Fact]
+    public void IdolFolder_IgnoresAnUnrelatedDiffusionModelsFolderHigherUp()
+    {
+        // A Comfy or SwarmUI model root has a diffusion_models/ of its own; a partial Idol install under it must not resolve to the root.
+        Touch("diffusion_models/other.safetensors");
+        Touch("3D/idol/clip_vision/dino_v3_vit_h_bf16.safetensors");
+
+        Assert.Equal(Path.GetFullPath(Path.Combine(_root, "3D", "idol", "clip_vision")), MeshService.IdolFolder(Path.Combine(_root, "3D", "idol", "clip_vision", "dino_v3_vit_h_bf16.safetensors")));
+        Assert.Equal(Path.GetFullPath(Path.Combine(_root, "3D", "idol")), MeshService.IdolFolder(Path.Combine(_root, "3D", "idol")));
     }
 }
