@@ -118,7 +118,7 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
     text matches the model's own text stream, peak VRAM 8.1 GB. 114 ms median per frame with a 167 ms maximum on an idle card (3-second tail run), 184 ms
     median when another process held the card at 43% utilisation: **not yet real time against the 133 ms budget**.
   - **Q4_K, Q5_K, Q6_K**: the replies are not intelligible (mixed-language fragments and repetition for Q4, a lone "Hm" or question marks for Q5 and Q6),
-    although they run faster (median 66 to 73 ms per frame). Q4_K had already differed from upstream at frame 3 of the replayed 16-frame
+    although they run faster (median 66 to 77 ms per frame). Q4_K had already differed from upstream at frame 3 of the replayed 16-frame
     conversation (14 of 16 tokens); Q8_0 matches all 16. The earlier Q4 run that gave Chinese for an English question used a 3-second tail and the
     same weights: it was a K-quant failure, not a short tail.
   - A 3-second tail is too short for any variant to answer the 14 s question: use `--tail-seconds 20` or more.
