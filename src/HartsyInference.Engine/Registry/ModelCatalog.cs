@@ -1991,6 +1991,23 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Haru-4B (higurashi-ai/Haru-4B @ 8d6e83bc): full-duplex speech-to-speech. A Qwen3.5-4B trunk reads the user's audio and its own
+                // text and audio every 133 ms; the VibeVoice acoustic codec and a one-step MeanFlow head carry the audio. Pretrained base
+                // model: no instructions, no tools. Weights and code Apache-2.0; the codec is the MIT VibeVoice tokenizer, whose card forbids
+                // voice impersonation without recorded consent and real-time voice conversion. `hartsy duplex -m haru:q4` answers a recording
+                // (`:q8`, `:q6`, `:q5`, `:q4` convert the language model once into a disk cache; native BF16 is 10.5 GB). Matches the
+                // upstream PyTorch model on the CPU backend with the released weights; no GPU run recorded yet.
+                Id = "haru", Modality = tts, DisplayName = "Haru-4B", Architecture = "Qwen3.5-4B + VibeVoice codec + MeanFlow head (full duplex)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "higurashi-ai/Haru-4B", RepoPath = "config.json", TargetSubdir = "Audio/Haru", Role = "config", Sha256 = "ff29b2dab25780d33fe1ea8efc3d1364d31e7bef95b0b08514b935305ba2f427" },
+                    new() { Repo = "higurashi-ai/Haru-4B", RepoPath = "tokenizer.json", TargetSubdir = "Audio/Haru", Role = "tokenizer", Sha256 = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523" },
+                    new() { Repo = "higurashi-ai/Haru-4B", RepoPath = "model.safetensors", TargetSubdir = "Audio/Haru", Role = "weights", Sha256 = "ad2c3534ef6bd88525e22e5da3ac4fb739368406bf3b1c852cbafbade647c0fa" },
+                },
+            },
+            new CatalogEntry
+            {
                 // Breeze TTS 2 (BreezeBlue): T5Gemma2 text encoder + Qwen3 backbone + depth decoder + Qwen3-TTS-Tokenizer-12Hz
                 // vocoder. Voice clone / design / direction. Research and non-commercial weights.
                 Id = "breeze", Modality = tts, DisplayName = "Breeze TTS 2", Architecture = "T5Gemma2 + Qwen3 backbone + depth decoder", Status = st,
