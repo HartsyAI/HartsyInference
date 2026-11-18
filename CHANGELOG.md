@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.443
+
+- MiniMax Music 3 loads the Hartsy repack the Audio Backend card installs and other flow-transformer files: the official diffusers
+  weights (file, shards or index), fp16 copies, Comfy-Org fp32/fp16/int8, and GGUF builds that keep the diffusers names.
+
 ## alpha.442
 
 - Added support for Haru-4B, a full-duplex speech-to-speech model that listens and speaks at once: `hartsy duplex <recording> -m haru:q8`

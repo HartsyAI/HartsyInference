@@ -372,6 +372,16 @@ forward. Parity is byte-identical across that change.
 
 Stage timing is emitted at `Info`; the CLI defaults to `Warning`, so use `diagnostics.logLevel=Info` to see it.
 
+**User-selected flow transformer** (`--model-path`, a host's `localPath`): the layout is read from tensor names, not the
+file name. Loaded: the official diffusers `transformer` (file, shards, index or folder), the Hartsy repack (the same
+tensors merged into one fp32 file, no condition encoder), a Comfy-Org DiT (fp32, fp16, int8 ConvRot), and a GGUF whose
+tensors keep the diffusers names (the community Serveurperso and audio-cpp builds are named so). Refused by name: the
+condition encoder alone and fused-QKV `blk.N.attn_qkv` GGUFs made for native C++ runtimes. F16 norm and bias vectors are
+widened to F32 on load: left F16 they turn a device-resident DiT to NaN, which reads as silent audio. Real-weight runs
+(3060, `:q8` language model, 4 s, seed 1): the Hartsy fp32 file, and the engine's own Q8_0 and Q4_K_M GGUF of it, all
+non-silent stereo 44.1 kHz; the Q8_0 DiT correlates 0.995 with the fp32 one, Q4_K_M 0.876. Int8 ConvRot and the
+community GGUF files themselves are covered by synthetic tests only.
+
 **Performance grind plan: `MINIMAX_MUSIC3_PERF.md`** (phases, hardware protocol, out-of-scope list).
 
 **Versus the reference** (4090, 15.0 s of audio = 375 frames = 3 windows, identical prompt/seed/steps, generation
