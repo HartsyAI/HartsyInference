@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.441
+
+- Added word-level timestamps to Whisper (and distil-whisper): `WordTimestamps` now returns one span per word, and
+  `AudioRequest.AlignText` times a script or lyrics you already have instead of transcribing.
+
 ## alpha.440
 
 - Added Idol, Idol-turbo and Budget3D: one picture of an object to up to a million 3D Gaussians (a PLY), with `hartsy 3d <image> -m idol`,
