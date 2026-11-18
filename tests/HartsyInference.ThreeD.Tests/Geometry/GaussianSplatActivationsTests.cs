@@ -37,6 +37,34 @@ public sealed class GaussianSplatActivationsTests
     }
 
     [Fact]
+    public void TurnToYUp_IsTheLeftProductWithAQuarterTurnAboutX()
+    {
+        // (w, x, y, z) = identity turns to (sqrt 1/2, sqrt 1/2, 0, 0), the turn itself.
+        (float w, float x, float y, float z) = GaussianSplatActivations.TurnToYUp(1f, 0f, 0f, 0f);
+        Assert.Equal(Math.Sqrt(0.5), w, 6);
+        Assert.Equal(Math.Sqrt(0.5), x, 6);
+        Assert.Equal(0f, y);
+        Assert.Equal(0f, z);
+
+        // The left product against a hand-expanded Hamilton product, for an orientation that is not about x.
+        (float qw, float qx, float qy, float qz) = (0.4f, 0.1f, 0.7f, -0.3f);
+        double c = Math.Sqrt(0.5);
+        (float rw, float rx, float ry, float rz) = GaussianSplatActivations.TurnToYUp(qw, qx, qy, qz);
+        Assert.Equal(c * qw - c * qx, rw, 5);
+        Assert.Equal(c * qx + c * qw, rx, 5);
+        Assert.Equal(c * qy - c * qz, ry, 5);
+        Assert.Equal(c * qz + c * qy, rz, 5);
+
+        // The other order differs in the y and z mixing only, and the two agree for a rotation about x.
+        (float aw, float ax, float ay, float az) = GaussianSplatActivations.TurnToYUpAfter(qw, qx, qy, qz);
+        Assert.Equal(rw, aw);
+        Assert.Equal(rx, ax);
+        Assert.Equal(c * qy + c * qz, ay, 5);
+        Assert.Equal(c * qz - c * qy, az, 5);
+        Assert.Equal(GaussianSplatActivations.TurnToYUp(0.6f, 0.8f, 0f, 0f), GaussianSplatActivations.TurnToYUpAfter(0.6f, 0.8f, 0f, 0f));
+    }
+
+    [Fact]
     public void TurnToYUpAfter_ComposesTheQuarterTurnAfterTheSplatsOwnRotation()
     {
         // Identity turns to the turn itself.
