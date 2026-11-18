@@ -277,6 +277,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> SpeechAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
+        if (parameters.GetBool("duplex", false))
+            return await DuplexDispatch.RunAsync(engine, spec, parameters, cancel).ConfigureAwait(false);
         double speed = parameters.GetFloat("speed", 1f);
         SpeechRequest request = new SpeechRequest
         {
