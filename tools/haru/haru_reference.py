@@ -48,7 +48,7 @@ CONFIG = {
         "full_attention_interval": 4,
         "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"],
         "linear_conv_kernel_dim": 4,
-        "linear_key_head_dim": 32,
+        "linear_key_head_dim": 16,
         "linear_value_head_dim": 16,
         "linear_num_key_heads": 2,
         "linear_num_value_heads": 4,

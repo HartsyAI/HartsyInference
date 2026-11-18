@@ -62,9 +62,13 @@ internal static class HaruCodec
 
     /// <summary>Builds the tokenizer over <paramref name="weights"/> (the checkpoint's tensors, <c>codec.*</c> among them), which must
     /// outlive it. The model reads its tensors through <see cref="HaruCodecWeights.Remap"/>.</summary>
-    internal static VibeVoiceAcousticTokenizerModel Create(JsonElement codecConfig, IReadOnlyDictionary<string, Tensor> weights)
+    internal static VibeVoiceAcousticTokenizerModel Create(JsonElement codecConfig, IReadOnlyDictionary<string, Tensor> weights) =>
+        Create(ConfigFrom(codecConfig), weights);
+
+    /// <summary><see cref="Create(JsonElement, IReadOnlyDictionary{string, Tensor})"/> from a config already read.</summary>
+    internal static VibeVoiceAcousticTokenizerModel Create(VibeVoiceTokenizerConfig config, IReadOnlyDictionary<string, Tensor> weights)
     {
-        VibeVoiceAcousticTokenizerModel model = new(ConfigFrom(codecConfig), HaruCodecWeights.Prefix);
+        VibeVoiceAcousticTokenizerModel model = new(config, HaruCodecWeights.Prefix);
         Dictionary<string, Tensor> remapped = HaruCodecWeights.Remap(weights);
         model.LoadWeights(remapped);
         // The shared loaders read only the keys they expect, so a tensor outside the configured layout (an extra stage, block or down/up
