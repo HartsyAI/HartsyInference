@@ -84,6 +84,17 @@ internal static class MeshModelProfiles
                 },
                 new MeshCost { PeakVramGiB = 4.9, TypicalSeconds = 220, Basis = "The default request (50 steps, 262,144 splats, F16 blocks) through the CLI on an RTX 3060, one picture with alpha: 220 s, 4.1 s per step, a 4.9 GiB peak of the card (about 1.2 GiB of it the desktop). With F32 blocks a step is about 16 s." },
                 note: "Mattes (BiRefNet) an image without alpha, crops around the object, encodes it with DINOv3 ViT-H+ and the FLUX.2 VAE, denoises an 8192-token latent and decodes 262,144 Gaussians by default; returns a PLY."),
+            Profile(MeshModelIds.IdolTurbo, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("5", 0, 1000, "Euler steps; each runs the 12k-token transformer once, with the slow phase LoRA while the shifted time is 0.5 or more and the fast one below it. The distillation is for 4 to 8 steps."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Idol and the idol-turbo LoRAs, which are a derivative of Idol); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                note: "Idol with its guidance and most of its steps distilled into two phase LoRAs: 5 steps and no blank pass, so the denoiser runs 5 forwards instead of 100. Same preparation, decoders and PLY as idol; Guidance does not apply."),
             Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
                 [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
@@ -256,11 +267,11 @@ internal static class MeshModelProfiles
         ? Used(nameof(MeshRequest.Guidance), "3", 0, 20, null, "Classifier-free guidance strength w of the sampler: (1 + w)·v(image) - w·v(blank); 0 runs one pass per step instead of two.")
         : Rejected(nameof(MeshRequest.Guidance));
 
-    private static MeshFieldSpec SplatCountField(string id) => id == MeshModelIds.Idol
+    private static MeshFieldSpec SplatCountField(string id) => MeshModelIds.IsIdol(id)
         ? Used(nameof(MeshRequest.SplatCount), "262144", 32768, 1048576, "splats", "Gaussians in the result, a multiple of 32 (32 per anchor point); 0 takes 262,144. The decoders' cost grows with it.")
         : Rejected(nameof(MeshRequest.SplatCount));
 
-    private static MeshFieldSpec FramingField(string id) => id == MeshModelIds.Idol
+    private static MeshFieldSpec FramingField(string id) => MeshModelIds.IsIdol(id)
         ? new() { Name = nameof(MeshRequest.Framing), Access = MeshFieldAccess.Used, Default = nameof(MeshFraming.Object), Values = [nameof(MeshFraming.Object), nameof(MeshFraming.Photo)],
             Note = "How tightly the picture is cropped around the object: Object (renders, generated pictures) leaves 20 %, Photo (photographs) 70 %." }
         : Rejected(nameof(MeshRequest.Framing));

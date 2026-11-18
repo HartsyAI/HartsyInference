@@ -71,6 +71,37 @@ public sealed class IdolRequestMapperTests
     }
 
     [Fact]
+    public void IdolTurboIsTheSameRequestWithTheTurboFlagAndNoGuidance()
+    {
+        IdolOptions options = IdolRequestMapper.ToOptions(Request() with { Seed = 7, SplatCount = 65536 }, MeshModelIds.IdolTurbo);
+
+        Assert.True(options.Turbo);
+        Assert.Equal(0, options.Steps);   // the pipeline takes the model's 5
+        Assert.False(IdolRequestMapper.ToOptions(Request()).Turbo);
+        Assert.Equal(nameof(MeshRequest.Guidance), MeshFieldTag.FieldOf(Assert.Throws<NotSupportedException>(() => IdolRequestMapper.Validate(Request() with { Guidance = 0 }, MeshModelIds.IdolTurbo))));
+        IdolRequestMapper.RejectForOtherModels(Request() with { SplatCount = 65536, Framing = MeshFraming.Photo }, MeshModelIds.IdolTurbo);
+        Assert.Equal(nameof(MeshRequest.Guidance), MeshFieldTag.FieldOf(Assert.Throws<NotSupportedException>(() => IdolRequestMapper.RejectForOtherModels(Request() with { Guidance = 3 }, "trellis2"))));
+    }
+
+    [Fact]
+    public void TheTurboProfileAndCatalogEntryShareIdolsFilesAndAddTheTwoLoras()
+    {
+        MeshModelProfile profile = MeshModelProfiles.Find(MeshModelIds.IdolTurbo)!;
+        Assert.Equal(MeshOutputKinds.Splats, profile.Outputs);
+        Assert.Equal(MeshFieldAccess.Rejected, profile.Fields.Single(f => f.Name == nameof(MeshRequest.Guidance)).Access);
+        Assert.Equal(MeshFieldAccess.Used, profile.Fields.Single(f => f.Name == nameof(MeshRequest.SplatCount)).Access);
+        Assert.Equal("5", profile.Fields.Single(f => f.Name == nameof(MeshRequest.Steps)).Default);
+
+        string[] turbo = [.. HartsyInference.Engine.Registry.ModelCatalog.Find(MeshModelIds.IdolTurbo)!.Assets!.Select(a => a.TargetName ?? a.FileName)];
+        string[] idol = [.. HartsyInference.Engine.Registry.ModelCatalog.Find(MeshModelIds.Idol)!.Assets!.Select(a => a.TargetName ?? a.FileName)];
+        Assert.All(idol, file => Assert.Contains(file, turbo));
+        Assert.Contains(IdolImageTo3DPipeline.TurboSlowFile, turbo);
+        Assert.Contains(IdolImageTo3DPipeline.TurboFastFile, turbo);
+        Assert.Empty(IdolImageTo3DPipeline.MissingFiles(Path.Combine(Path.GetTempPath(), "no-such-idol"), turbo: false).Except(IdolImageTo3DPipeline.RequiredFiles));
+        Assert.Equal(2, IdolImageTo3DPipeline.MissingFiles(Path.Combine(Path.GetTempPath(), "no-such-idol"), turbo: true).Except(IdolImageTo3DPipeline.RequiredFiles).Count());
+    }
+
+    [Fact]
     public void OtherModelsRejectIdolsFields()
     {
         Assert.Equal(nameof(MeshRequest.Guidance), MeshFieldTag.FieldOf(Assert.Throws<NotSupportedException>(() => IdolRequestMapper.RejectForOtherModels(Request() with { Guidance = 3 }, "trellis2"))));

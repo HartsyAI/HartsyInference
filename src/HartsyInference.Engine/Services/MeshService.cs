@@ -295,8 +295,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             return GeneratePixal3DAsync(spec, request, progress, cancel);
         if (id == MeshModelIds.Sam3dObjects)
             return GenerateSam3dAsync(spec, request, progress, cancel);
-        if (id == MeshModelIds.Idol)
-            return GenerateIdolAsync(spec, request, progress, cancel);
+        if (MeshModelIds.IsIdol(id))
+            return GenerateIdolAsync(spec, request, progress, cancel, id);
         return Task.Run(
             () =>
             {
@@ -995,15 +995,15 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     /// Idol: image to Gaussian splats. Each stage (DINOv3 and the VAE, the denoiser, the two decoders) loads its weights from the model folder, runs and releases them, so nothing stays loaded between
     /// requests and the pipeline fits a 12 GB card; requests run one at a time. The image's alpha plane is its matte; an image without one is matted by the engine's BiRefNet.
     /// </summary>
-    private Task<MeshResult> GenerateIdolAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    private Task<MeshResult> GenerateIdolAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel, string modelId)
     {
-        string directory = spec.LocalPath ?? throw new FileNotFoundException("No model folder found for 'idol'. Download the catalog assets (`hartsy pull idol`) or supply the model directory as the local path.");
-        IReadOnlyList<string> missing = IdolImageTo3DPipeline.MissingFiles(directory);
+        string directory = spec.LocalPath ?? throw new FileNotFoundException($"No model folder found for '{modelId}'. Download the catalog assets (`hartsy pull {modelId}`) or supply the model directory as the local path.");
+        IdolOptions options = IdolRequestMapper.ToOptions(request, modelId);
+        IReadOnlyList<string> missing = IdolImageTo3DPipeline.MissingFiles(directory, options.Turbo);
         if (missing.Count > 0)
-            throw new FileNotFoundException($"'{directory}' lacks Idol files: {string.Join(", ", missing)}.");
-        IdolOptions options = IdolRequestMapper.ToOptions(request);
+            throw new FileNotFoundException($"'{directory}' lacks {modelId} files: {string.Join(", ", missing)}.");
         ImageData image = request.Image!;
-        int steps = options.Steps == 0 ? IdolSampler.DefaultSteps : options.Steps;
+        int steps = options.Steps == 0 ? (options.Turbo ? IdolTurboAdapters.DefaultSteps : IdolSampler.DefaultSteps) : options.Steps;
         int disposalsWhenQueued = Volatile.Read(ref _disposals);
 
         return Task.Run(
@@ -1024,9 +1024,9 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                             int index = (int)phase;
                             progress?.Report(MeshProgress.Plain(phase == IdolStage.Denoising ? step : phase < IdolStage.Denoising ? 0 : steps, steps, stage, step, total, index, 4));
                         },
-                        line => Logs.Info($"[idol] {line}"),
+                        line => Logs.Info($"[{modelId}] {line}"),
                         cancel);
-                    Logs.Info($"[idol] {splats.Count} splats");
+                    Logs.Info($"[{modelId}] {splats.Count} splats");
                     return new MeshResult { Data = PlyWriter.WriteSplats(splats), Format = "ply" };
                 }
                 finally

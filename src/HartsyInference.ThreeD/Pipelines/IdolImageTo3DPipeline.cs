@@ -47,6 +47,9 @@ public sealed record IdolOptions
 
     /// <summary>Seed of the initial noise and of the anchor draws.</summary>
     public int Seed { get; init; }
+
+    /// <summary>Idol-turbo: the denoiser carries the slow and fast phase LoRAs, takes no guidance and one pass per step, and <see cref="Steps"/> 0 means 5.</summary>
+    public bool Turbo { get; init; }
 }
 
 /// <summary>Idol, image to 3D Gaussian splats (Sperid Labs, Apache-2.0): the picture is prepared (matte, erode, crop), encoded by DINOv3 ViT-H+ and the
@@ -60,6 +63,10 @@ public sealed unsafe class IdolImageTo3DPipeline
     public const string DinoFile = "clip_vision/dino_v3_vit_h_bf16.safetensors";
     public const string VaeFile = "vae/flux2-vae.safetensors";
     public const string DecoderFile = "vae/idol_decoder_fp16.safetensors";
+
+    /// <summary>The two phase experts of idol-turbo (Comfy format, akhaliq/idol-turbo <c>loras/</c>), beside the base files.</summary>
+    public const string TurboSlowFile = "loras/idol_turbo_slow_comfy.safetensors";
+    public const string TurboFastFile = "loras/idol_turbo_fast_comfy.safetensors";
 
     /// <summary>Gaussians of a default request.</summary>
     public const int DefaultSplats = 262144;
@@ -93,8 +100,8 @@ public sealed unsafe class IdolImageTo3DPipeline
     public static IReadOnlyList<string> RequiredFiles { get; } = [DenoiserFile, DinoFile, VaeFile, DecoderFile];
 
     /// <summary>The files of <paramref name="directory"/> that are missing, empty when it holds a complete model.</summary>
-    public static IReadOnlyList<string> MissingFiles(string directory)
-        => [.. RequiredFiles.Where(f => !File.Exists(Path.Combine(directory, f)))];
+    public static IReadOnlyList<string> MissingFiles(string directory, bool turbo = false)
+        => [.. (turbo ? [.. RequiredFiles, TurboSlowFile, TurboFastFile] : RequiredFiles).Where(f => !File.Exists(Path.Combine(directory, f)))];
 
     /// <summary>Throws when <paramref name="options"/> cannot drive a run.</summary>
     public static void ValidateOptions(IdolOptions options)
@@ -104,6 +111,8 @@ public sealed unsafe class IdolImageTo3DPipeline
             throw new ArgumentOutOfRangeException(nameof(options), options.Steps, "Steps must not be negative.");
         if (options.Guidance is { } g && (g < 0f || !float.IsFinite(g)))
             throw new ArgumentOutOfRangeException(nameof(options), g, "Guidance must be finite and not negative.");
+        if (options.Turbo && options.Guidance is > 0f)
+            throw new ArgumentOutOfRangeException(nameof(options), options.Guidance, "Idol-turbo takes no guidance: the distilled LoRAs carry it.");
         int splats = options.Splats == 0 ? DefaultSplats : options.Splats;
         if (splats < MinSplats || splats > MaxSplats || splats % 32 != 0)
             throw new ArgumentOutOfRangeException(nameof(options), splats, $"Idol writes {MinSplats} to {MaxSplats} Gaussians, a multiple of 32.");
@@ -115,11 +124,11 @@ public sealed unsafe class IdolImageTo3DPipeline
         Action<IdolStage, string, int, int>? report = null, Action<string>? log = null, CancellationToken cancel = default)
     {
         ValidateOptions(options);
-        IReadOnlyList<string> missing = MissingFiles(_directory);
+        IReadOnlyList<string> missing = MissingFiles(_directory, options.Turbo);
         if (missing.Count > 0)
             throw new FileNotFoundException($"'{_directory}' lacks Idol files: {string.Join(", ", missing)}.");
-        int steps = options.Steps == 0 ? IdolSampler.DefaultSteps : options.Steps;
-        float guidance = options.Guidance ?? IdolSampler.DefaultGuidance;
+        int steps = options.Steps == 0 ? (options.Turbo ? IdolTurboAdapters.DefaultSteps : IdolSampler.DefaultSteps) : options.Steps;
+        float guidance = options.Turbo ? 0f : options.Guidance ?? IdolSampler.DefaultGuidance;
         int splats = options.Splats == 0 ? DefaultSplats : options.Splats;
         Stopwatch clock = Stopwatch.StartNew();
         void Stage(IdolStage stage, string name, int step = 0, int total = 1)
@@ -139,7 +148,7 @@ public sealed unsafe class IdolImageTo3DPipeline
         {
             cancel.ThrowIfCancellationRequested();
             Stage(IdolStage.Denoising, "Denoising", 0, steps);
-            Tensor latent = Denoise(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, (step) => Stage(IdolStage.Denoising, "Denoising", step, steps), log);
+            Tensor latent = Denoise(feature1, feature2, options.Seed, steps, guidance, options.RescaleT, options.Turbo, (step) => Stage(IdolStage.Denoising, "Denoising", step, steps), log);
             using (latent)
             {
                 Stage(IdolStage.Decoding, "Decoding the splats");
@@ -189,22 +198,28 @@ public sealed unsafe class IdolImageTo3DPipeline
     /// <summary>The camera token's noise stream: a different one from the latent's for every seed, with no int overflow at the top of the seed range.</summary>
     private static int CameraSeed(int seed) => seed ^ 0x2545F491;
 
-    private Tensor Denoise(Tensor feature1, Tensor feature2, int seed, int steps, float guidance, double rescaleT, Action<int> onStep, Action<string>? log)
+    private Tensor Denoise(Tensor feature1, Tensor feature2, int seed, int steps, float guidance, double rescaleT, bool turbo, Action<int> onStep, Action<string>? log)
     {
         Stopwatch clock = Stopwatch.StartNew();
         using IdolWeights weights = IdolWeights.Load(Path.Combine(_directory, DenoiserFile), linearDType: _blockDType);
-        using IdolDenoiser model = new(weights);
+        using IdolTurboAdapters? adapters = turbo
+            ? IdolTurboAdapters.Attach(_backend, weights, Path.Combine(_directory, TurboSlowFile), Path.Combine(_directory, TurboFastFile))
+            : null;
+        using IdolDenoiser model = new(adapters?.Weights ?? weights);
         IdolConfig config = weights.Config;
         _backend.PreloadWeights(model.EnumerateWeights());
         try
         {
-            using Tensor positive = model.EmbedContext(_backend, feature1, feature2);
+            using Tensor? positive = adapters is null ? model.EmbedContext(_backend, feature1, feature2) : null;
+            using PhaseContexts? phases = adapters?.EmbedContexts(_backend, model, feature1, feature2);
+            // Without guidance there is no blank pass, so the blank image streams are not embedded.
             using Tensor zero1 = new(feature1.Shape, DType.F32), zero2 = new(feature2.Shape, DType.F32);
-            using Tensor negative = model.EmbedContext(_backend, zero1, zero2);
+            using Tensor? blank = adapters is null ? model.EmbedContext(_backend, zero1, zero2) : null;
             using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, config.Tokens, config.LatentChannels), seed);
             using Tensor cameraNoise = SeedGenerator.CreateNoise(new TensorShape(1, 1, config.CameraChannels), CameraSeed(seed));
             log?.Invoke($"denoiser loaded, image streams embedded ({clock.Elapsed.TotalSeconds:F1} s)");
-            (Tensor latent, Tensor camera) = IdolSampler.Sample(_backend, model, positive, negative, noise, cameraNoise, steps, guidance, rescaleT, onStep);
+            (Tensor latent, Tensor camera) = IdolSampler.Sample(_backend, model, positive ?? phases!.Slow, blank ?? positive ?? phases!.Slow, noise, cameraNoise, steps, guidance, rescaleT, onStep,
+                adapters is null ? null : adapters.Phase, phases is null ? null : phases.At);
             camera.Dispose();
             _ = latent.DataPointer;
             log?.Invoke($"{steps} steps ({clock.Elapsed.TotalSeconds:F1} s)");
