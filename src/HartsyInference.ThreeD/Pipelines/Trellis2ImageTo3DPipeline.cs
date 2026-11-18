@@ -10,6 +10,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Models;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
@@ -147,7 +148,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         List<IDisposable> owned = [];
         try
         {
-            Trellis2ConditionerStage conditioner = new(Trellis2ImageConditioner.Load(files.Dino));
+            Trellis2ConditionerStage conditioner = new(Dinov3ImageConditioner.Load(files.Dino));
             owned.Add(conditioner);
             Trellis2StructureStage structure = Trellis2StructureStage.Load(files.StructureFlow, files.StructureDecoder);
             owned.Add(structure);

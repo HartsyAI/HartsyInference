@@ -29,7 +29,8 @@ public sealed class IdolDecoderWeights : IDisposable
     public Tensor this[string key]
         => Tensors.TryGetValue(key, out Tensor? t) ? t : throw new HartsyInferenceException($"The Idol decoder checkpoint has no tensor '{key}'.");
 
-    public static IdolDecoderWeights Load(string checkpointPath, IdolDecoderConfig? config = null)
+    /// <param name="linearDType">What the decoders' block matrices are held as: F32 (an exact widening, what the parity tests use) or F16 (half the memory, 16-bit GEMMs with F32 accumulation).</param>
+    public static IdolDecoderWeights Load(string checkpointPath, IdolDecoderConfig? config = null, DType? linearDType = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         if (!File.Exists(checkpointPath))
@@ -46,10 +47,11 @@ public sealed class IdolDecoderWeights : IDisposable
             {
                 if (!source.TryGetValue(key, out Tensor? t))
                     throw new HartsyInferenceException($"The Idol decoder checkpoint has no tensor '{key}'.");
-                Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-                if (!ReferenceEquals(f32, t))
-                    owned.Add(f32);
-                tensors[key] = f32;
+                DType target = linearDType is { } narrow && narrow != DType.F32 && IsBlockLinear(key) ? narrow : DType.F32;
+                Tensor converted = t.DType == target ? t : t.CastTo(target);
+                if (!ReferenceEquals(converted, t))
+                    owned.Add(converted);
+                tensors[key] = converted;
             }
 
             IdolDecoderWeights weights = new(config, tensors, loader, owned);
@@ -64,6 +66,11 @@ public sealed class IdolDecoderWeights : IDisposable
             throw;
         }
     }
+
+    // The attention projections and the MLP of the blocks of both decoders.
+    private static bool IsBlockLinear(string key)
+        => (key.StartsWith("octree.blocks.", StringComparison.Ordinal) || key.StartsWith("gs.blocks.", StringComparison.Ordinal)) && key.EndsWith(".weight", StringComparison.Ordinal)
+            && (key.Contains(".to_", StringComparison.Ordinal) || key.Contains(".mlp.mlp.", StringComparison.Ordinal));
 
     /// <summary>Wraps tensors already in memory (tests); borrowed.</summary>
     internal static IdolDecoderWeights FromTensors(IdolDecoderConfig config, Dictionary<string, Tensor> tensors)

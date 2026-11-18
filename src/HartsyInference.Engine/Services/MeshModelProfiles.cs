@@ -73,6 +73,17 @@ internal static class MeshModelProfiles
                 new MeshCost { TypicalSeconds = 450, Basis = "Splats: RTX 3060, F32 flows, one example image; the SLAT flow fills the card, so no peak is stated. Mesh: RTX 3060, F16 flow weights (numerics.flowF16Weights), one bust, 340 s and an 11.8 GiB peak of the 12 GiB card (F32 flows are not recorded for the mesh path)." },
                 peak: request => request.Mesh ? 11.8 : null,
                 note: "The image's alpha plane is the mask of the object to lift."),
+            Profile(MeshModelIds.Idol, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("50", 0, 1000, "Euler steps of the denoiser; each runs the 12k-token transformer twice (with and without the image) unless Guidance is 0."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Idol weights and idol-sdk, Sperid Labs); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { PeakVramGiB = 4.9, TypicalSeconds = 220, Basis = "The default request (50 steps, 262,144 splats, F16 blocks) through the CLI on an RTX 3060, one picture with alpha: 220 s, 4.1 s per step, a 4.9 GiB peak of the card (about 1.2 GiB of it the desktop). With F32 blocks a step is about 16 s." },
+                note: "Mattes (BiRefNet) an image without alpha, crops around the object, encodes it with DINOv3 ViT-H+ and the FLUX.2 VAE, denoises an 8192-token latent and decodes 262,144 Gaussians by default; returns a PLY."),
             Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
                 [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
@@ -191,7 +202,7 @@ internal static class MeshModelProfiles
             Id = id,
             Input = input,
             Outputs = outputs,
-            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), .. OutputFields(outputs)],
+            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), GuidanceField(id), SplatCountField(id), FramingField(id), .. OutputFields(outputs)],
             Licence = licence,
             Cost = cost,
             PeakGiB = peak,
@@ -240,6 +251,19 @@ internal static class MeshModelProfiles
     private static MeshFieldSpec MeshField(string id) => id == MeshModelIds.Sam3dObjects
         ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (geometry-only GLB; the mesh decoder's vertex colours are noisy and not written) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
         : Rejected(nameof(MeshRequest.Mesh));
+
+    private static MeshFieldSpec GuidanceField(string id) => id == MeshModelIds.Idol
+        ? Used(nameof(MeshRequest.Guidance), "3", 0, 20, null, "Classifier-free guidance strength w of the sampler: (1 + w)·v(image) - w·v(blank); 0 runs one pass per step instead of two.")
+        : Rejected(nameof(MeshRequest.Guidance));
+
+    private static MeshFieldSpec SplatCountField(string id) => id == MeshModelIds.Idol
+        ? Used(nameof(MeshRequest.SplatCount), "262144", 32768, 1048576, "splats", "Gaussians in the result, a multiple of 32 (32 per anchor point); 0 takes 262,144. The decoders' cost grows with it.")
+        : Rejected(nameof(MeshRequest.SplatCount));
+
+    private static MeshFieldSpec FramingField(string id) => id == MeshModelIds.Idol
+        ? new() { Name = nameof(MeshRequest.Framing), Access = MeshFieldAccess.Used, Default = nameof(MeshFraming.Object), Values = [nameof(MeshFraming.Object), nameof(MeshFraming.Photo)],
+            Note = "How tightly the picture is cropped around the object: Object (renders, generated pictures) leaves 20 %, Photo (photographs) 70 %." }
+        : Rejected(nameof(MeshRequest.Framing));
 
     private static MeshFieldSpec ControlField(string id) => id == MeshModelIds.Omni
         ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per distinct point, at most 8,192: a denser cloud is subsampled with the seed), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
@@ -295,7 +319,8 @@ internal static class MeshModelProfiles
         nameof(MeshRequest.Samples) => "1",
         nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) or nameof(MeshRequest.Remesh) => "false",
         nameof(MeshRequest.Quality) => nameof(MeshQuality.Default),
-        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) or nameof(MeshRequest.Views) => "unset",
+        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) or nameof(MeshRequest.Views) or nameof(MeshRequest.Guidance) => "unset",
+        nameof(MeshRequest.Framing) => nameof(MeshFraming.Object),
         _ => "0",
     };
 

@@ -206,13 +206,13 @@ public sealed class IdolModelTests
     }
 
     /// <summary>Two heads of 8, two joint blocks, one refiner block and 16 tokens: every code path of the full model at toy size.</summary>
-    private static IdolConfig TinyConfig() => new()
+    internal static IdolConfig TinyConfig() => new()
     {
         Tokens = 16, LatentChannels = 4, CameraChannels = 5, ModelChannels = 16, CondChannels = 6, Cond2Channels = 3,
         Blocks = 2, RefinerBlocks = 1, Heads = 2, HeadDim = 8, MlpRatio = 2, CondTokens = 5,
     };
 
-    private static Dictionary<string, Tensor> TinyTensors(IdolConfig c, int seed)
+    internal static Dictionary<string, Tensor> TinyTensors(IdolConfig c, int seed)
     {
         Dictionary<string, Tensor> t = new(StringComparer.Ordinal);
         int s = seed * 1000;
@@ -237,7 +237,7 @@ public sealed class IdolModelTests
         return t;
     }
 
-    private static Tensor Random(TensorShape shape, int seed, float scale)
+    internal static Tensor Random(TensorShape shape, int seed, float scale)
     {
         Tensor t = new(shape, DType.F32);
         Random rng = new(seed);

@@ -404,6 +404,31 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>Idol (Sperid Labs, <c>speridlabs/idol</c>), one picture of an object to up to a million 3D Gaussians: DINOv3 ViT-H+/16 and the FLUX.2 VAE encode the picture, a 370 M rectified-flow transformer denoises an
+    /// 8192-token latent (50 guided steps), and an octree decoder and a Gaussian decoder place and shape the splats. The files are Comfy-Org's ungated repack <c>Comfy-Org/Idol</c> (revision
+    /// e907d8dca6c465735eaf4ce9b3a3c2c6401d5705; an asset carries no revision field, so a changed file fails the hash check); the hashes are the repository's LFS oids, checked against the downloaded bytes. They keep
+    /// Comfy's folders (<c>diffusion_models</c>, <c>clip_vision</c>, <c>vae</c>) under <c>3D/idol</c>. Idol's token positions (<c>pos_pe</c>, 98 KB) are in no repack and ship inside the engine. Licences: Idol weights
+    /// and code Apache-2.0; DINOv3 under the DINOv3 License (Meta, custom; the original repository is gated, this file is Comfy-Org's redistribution of it); the FLUX.2 VAE Apache-2.0 (FLUX.2-klein-4B); BiRefNet-matting MIT.</summary>
+    private static CatalogEntry Idol() => new CatalogEntry
+    {
+        Id = "idol", Modality = Modality.Mesh, DisplayName = "Idol (image to Gaussian splats)",
+        Architecture = "DINOv3 ViT-H+/16 + FLUX.2 VAE conditioning, 370M rectified-flow transformer with learned RoPE, octree and Gaussian decoders",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "Comfy-Org/Idol",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "diffusion_models/idol_fp16.safetensors", TargetSubdir = "3D/idol", TargetName = "diffusion_models/idol_fp16.safetensors",
+                Role = "denoiser", Sha256 = "9abf6a99fc6bdad701901b12de8fe1b256f02cae4948f7489d25d86b11b52a93" },
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "clip_vision/dino_v3_vit_h_bf16.safetensors", TargetSubdir = "3D/idol", TargetName = "clip_vision/dino_v3_vit_h_bf16.safetensors",
+                Role = "image encoder (DINOv3 ViT-H+/16)", Sha256 = "a29ef35101a16966972a0d50732a6f3a608ff7cfffb2afa9bbe9007cb842cc53" },
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "vae/flux2-vae.safetensors", TargetSubdir = "3D/idol", TargetName = "vae/flux2-vae.safetensors",
+                Role = "image encoder (FLUX.2 VAE)", Sha256 = "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3" },
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "vae/idol_decoder_fp16.safetensors", TargetSubdir = "3D/idol", TargetName = "vae/idol_decoder_fp16.safetensors",
+                Role = "octree and Gaussian decoders", Sha256 = "6a146a1e6b2653f74422f7ea835eb8715c547c7de8fc4545051f15c247ae54a9" },
+            new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
+                Role = "matting (optional)", Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+        },
+    };
+
     /// <summary>SAM 3D Objects (facebookresearch/sam-3d-objects), image plus object mask to Gaussian splats with a pose: a mixture-of-transformers structure flow conditioned on two DINOv2 towers and a
     /// pointmap, a sparse SLAT flow, and the Gaussian decoder, with MoGe estimating the pointmap. Meta's checkpoints are gated and pickled; this entry names the ungated third-party safetensors conversion
     /// <c>apozz/sam-3d-objects-safetensors</c> (revision cbb995af47eae6c30d2f2a087f5195be2365a2e2; an asset carries no revision field, so a changed file fails
@@ -2942,6 +2967,7 @@ public static class ModelCatalog
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
             Trellis2(),
             Pixal3D(),
+            Idol(),
             Sam3dObjects(),
             HairDeck(),
 

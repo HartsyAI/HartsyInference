@@ -96,6 +96,8 @@ Desktop.ini
 *.pth
 *.onnx
 *.bin
+# Idol's 98 KB token positions, an embedded resource of the ThreeD package
+!src/HartsyInference.ThreeD/Models/Idol/Resources/*.bin
 
 ## Generated output images (entire Output/ tree, including date-stamped subfolders and reference images)
 /Output/

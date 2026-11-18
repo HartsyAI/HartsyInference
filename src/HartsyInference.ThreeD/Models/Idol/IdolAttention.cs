@@ -16,14 +16,15 @@ internal static class IdolAttention
     }
 
     /// <summary>Attention of token-major <paramref name="q"/> (<paramref name="queryTokens"/> rows) over <paramref name="k"/> and <paramref name="v"/>
-    /// (<paramref name="keyTokens"/> rows), without a mask; consumes the three.</summary>
+    /// (<paramref name="keyTokens"/> rows), without a mask; consumes the three. The queries and keys are RMS-normalised in every Idol attention, so their scores
+    /// are bounded and the backend may run it in F16, as idol-sdk's attention does.</summary>
     internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int queryTokens, int keyTokens, int heads, int headDim, float scale)
     {
         using Tensor qh = ToHeadMajor(backend, q, queryTokens, heads, headDim);
         using Tensor kh = ToHeadMajor(backend, k, keyTokens, heads, headDim);
         using Tensor vh = ToHeadMajor(backend, v, keyTokens, heads, headDim);
         Tensor att = new(new TensorShape(1, heads, queryTokens, headDim), DType.F32);
-        backend.ScaledDotProductAttention(att, qh, kh, vh, null, scale);
+        backend.ScaledDotProductAttention(att, qh, kh, vh, null, scale, allowF16: true);
         Tensor flat = new(new TensorShape(1, queryTokens, (long)heads * headDim), DType.F32);
         backend.Permute0213(flat, att, heads, queryTokens, headDim);
         att.Dispose();

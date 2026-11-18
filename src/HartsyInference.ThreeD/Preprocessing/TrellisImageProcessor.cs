@@ -37,10 +37,10 @@ public static class TrellisImageProcessor
         int cropWidth = x1 - x0;
         int cropHeight = y1 - y0;
         // PIL filters RGBA premultiplied (RGBa): multiply, resize, divide back, as Image.resize does for this mode.
-        Premultiply(crop);
+        PilRgba.Premultiply(crop);
         byte[] resized = new byte[size * size * 4];
         Resample.LanczosPil8(crop, cropWidth, cropHeight, 4, resized, size, size);
-        Unpremultiply(resized);
+        PilRgba.Unpremultiply(resized);
 
         byte[] output = new byte[size * size * 3];
         for (int i = 0; i < size * size; i++)
@@ -53,26 +53,4 @@ public static class TrellisImageProcessor
     }
 
     private static int Round(double value) => (int)Math.Round(value, MidpointRounding.ToEven);
-
-    private static void Premultiply(byte[] rgba)
-    {
-        for (int i = 0; i < rgba.Length; i += 4)
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                int t = rgba[i + c] * rgba[i + 3] + 128;
-                rgba[i + c] = (byte)((t + (t >> 8)) >> 8);
-            }
-        }
-    }
-
-    private static void Unpremultiply(byte[] rgba)
-    {
-        for (int i = 0; i < rgba.Length; i += 4)
-        {
-            int a = rgba[i + 3];
-            for (int c = 0; c < 3; c++)
-                rgba[i + c] = a == 0 ? (byte)0 : (byte)Math.Min(255 * rgba[i + c] / a, 255);
-        }
-    }
 }
