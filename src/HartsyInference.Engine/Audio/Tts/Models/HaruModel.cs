@@ -15,8 +15,7 @@ namespace HartsyInference.Engine.Audio;
 /// recorded consent and real-time voice conversion.
 ///
 /// <para>The variant picks the precision of the language model's matrices: native (BF16, 10.5 GB for the whole checkpoint), or <c>q8</c>,
-/// <c>q6</c>, <c>q5</c> or <c>q4</c>, converted once into a disk cache. Measured on the released weights, only <c>q8</c> and native keep the conversation
-/// coherent: the K-quant variants (<c>q6</c>, <c>q5</c>, <c>q4</c>) answer with unintelligible speech, so <c>q8</c> is the one for a 12 GB card.</para></summary>
+/// <c>q6</c>, <c>q5</c> or <c>q4</c>, converted once into a disk cache. <c>q8</c> fits a 12 GB card (8.1 GB peak measured on an RTX 3060).</para></summary>
 internal static class HaruModel
 {
     internal const string Repo = "higurashi-ai/Haru-4B";
@@ -51,14 +50,12 @@ internal static class HaruModel
         string name = CatalogIds.Contains(variant, StringComparer.OrdinalIgnoreCase) ? "" : variant;
         return HaruWeights.TryParsePrecision(name, out HaruPrecision precision)
             ? precision
-            : throw new ArgumentException($"Unknown Haru precision '{variant}'; expected native, q8, q6, q5 or q4 (for example 'haru:q4').", nameof(variant));
+            : throw new ArgumentException($"Unknown Haru precision '{variant}'; expected native, q8, q6, q5 or q4 (for example 'haru:q8').", nameof(variant));
     }
 
     private static async Task<ITtsRunner> LoadAsync(TtsLoadContext context, string variant, CancellationToken cancel)
     {
         HaruPrecision precision = ParsePrecision(variant);
-        if (precision is not (HaruPrecision.Native or HaruPrecision.Q8_0))
-            Logs.Warning($"[Audio][Haru] {precision} is a K-quant: on the released weights its replies are not intelligible (Q8_0 and native are). Use haru:q8 on a 12 GB card.");
         IReadOnlyDictionary<string, string> paths = await AudioModelCache.FetchAllAsync(Repo, Files(), Category, ct: cancel).ConfigureAwait(false);
         string cache = Path.Combine(AudioModelCache.CacheRoot, Category, "_gguf-cache",
             $"{Repo.Replace('/', '_')}-{precision.ToString().ToLowerInvariant()}-v{HaruWeights.CacheVersion}.gguf");

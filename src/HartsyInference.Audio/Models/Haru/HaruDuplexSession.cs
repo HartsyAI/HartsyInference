@@ -36,6 +36,7 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     private int _disposed;
     private bool _done;
     private bool _timed;
+    private float[]? _logits;
 
     /// <summary>Creates a session; <paramref name="noise"/> defaults to a generator seeded with <see cref="HaruDuplexOptions.Seed"/>.</summary>
     internal HaruDuplexSession(HaruConfig config, HaruLm lm, HaruMeanFlowHead head, HaruCodecSession codec, HaruTextCodec text,
@@ -211,7 +212,10 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     private float[] TextLogits(Tensor row)
     {
         using Tensor all = _lm.Logits(_backend, row, 1);
-        float[] logits = new ReadOnlySpan<float>((void*)all.DataPointer, _lm.VocabSize).ToArray();
+        // One buffer for the life of the session: a fresh 1 MB array every frame lands on the large object heap and brought a full collection every
+        // 18 frames or so.
+        float[] logits = _logits ??= new float[_lm.VocabSize];
+        new ReadOnlySpan<float>((void*)all.DataPointer, _lm.VocabSize).CopyTo(logits);
         Span<float> exact = stackalloc float[2];
         _lm.StreamLogits(row, 0, _silentTokens, exact);
         logits[_config.PadTokenId] = exact[0];

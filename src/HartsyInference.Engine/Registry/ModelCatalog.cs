@@ -1976,9 +1976,8 @@ public static class ModelCatalog
                 // text and audio every 133 ms; the VibeVoice acoustic codec and a one-step MeanFlow head carry the audio. Pretrained base
                 // model: no instructions, no tools. Weights and code Apache-2.0; the codec is the MIT VibeVoice tokenizer, whose card forbids
                 // voice impersonation without recorded consent and real-time voice conversion. `hartsy duplex -m haru:q8` answers a recording
-                // (`:q8`, `:q6`, `:q5`, `:q4` convert the language model once into a disk cache; native BF16 is 10.5 GB; only `:q8` and native answer
-                // intelligibly, the K-quants do not). Matches the upstream PyTorch model on the CPU backend with the released weights; Q8_0 on the 3060
-                // answers coherently but is not yet real time.
+                // (`:q8`, `:q6`, `:q5`, `:q4` convert the language model once into a disk cache; native BF16 is 10.5 GB). Matches the upstream PyTorch
+                // model on the CPU backend with the released weights; Q8_0 on the 3060 answers coherently (Whisper-checked), the K-quants did not.
                 Id = "haru", Modality = tts, DisplayName = "Haru-4B", Architecture = "Qwen3.5-4B + VibeVoice codec + MeanFlow head (full duplex)",
                 Status = vp, CliDrivable = true,
                 Assets = new ModelAsset[]

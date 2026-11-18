@@ -13,8 +13,16 @@ public sealed class HaruStageTimer
     private readonly List<double>[] _seconds = Array.ConvertAll(Stages, _ => new List<double>());
     private readonly List<double> _frames = [];
     private long _mark;
+    private int _gc0 = -1, _gc1, _gc2;
 
-    internal void Begin() => _mark = Stopwatch.GetTimestamp();
+    internal void Begin()
+    {
+        if (_gc0 < 0)
+        {
+            (_gc0, _gc1, _gc2) = (GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2));
+        }
+        _mark = Stopwatch.GetTimestamp();
+    }
 
     /// <summary>Closes the running stage and starts the next one.</summary>
     internal void Lap(int stage)
@@ -72,6 +80,23 @@ public sealed class HaruStageTimer
             return frames == 0 ? $"{name} -" : $"{name} {median * 1000:F1}/{max * 1000:F0} ms";
         }));
         (double m, double p99, double max, int over, int n) = FrameSummary(budget);
-        return n == 0 ? stages : $"{stages}; whole frame median {m * 1000:F0}, p99 {p99 * 1000:F0}, max {max * 1000:F0} ms, {over} of {n} over {budget * 1000:F0} ms";
+        if (n == 0)
+        {
+            return stages;
+        }
+        string gc = $"GC gen0/1/2 during the run {GC.CollectionCount(0) - _gc0}/{GC.CollectionCount(1) - _gc1}/{GC.CollectionCount(2) - _gc2}";
+        return $"{stages}; whole frame median {m * 1000:F0}, p99 {p99 * 1000:F0}, max {max * 1000:F0} ms, {over} of {n} over {budget * 1000:F0} ms; {gc}; slowest frames: {Slowest(5)}";
+    }
+
+    /// <summary>The slowest frames with the stage that took the most in each: <c>#412 580 ms (trunk 540)</c>. Frames over budget that share a stage
+    /// point at that stage; frames that share only a moment in time point at something else on the machine.</summary>
+    public string Slowest(int count)
+    {
+        int n = Math.Min(_frames.Count, _seconds[Stages.Length - 1].Count);
+        return string.Join(", ", Enumerable.Range(0, n).OrderByDescending(i => _frames[i]).Take(count).Select(i =>
+        {
+            int worst = Enumerable.Range(0, Stages.Length).MaxBy(s => _seconds[s][i]);
+            return $"#{i} {_frames[i] * 1000:F0} ms ({Stages[worst]} {_seconds[worst][i] * 1000:F0})";
+        }));
     }
 }

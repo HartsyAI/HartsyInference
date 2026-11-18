@@ -115,12 +115,12 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
   25 s reply tail so the model has room to answer; the reply Whisper-transcribed with `whisper:base`, which also transcribes the user channel as the
   question, so the check itself is sound):
   - **Q8_0**: coherent English ("A, vanilla cake. B, birthday cake. C, strawberry cake. D, chocolate cake. And, D, no, thank you."), 271 frames, the Whisper
-    text matches the model's own text stream, peak VRAM 8.1 GB. 114 ms median per frame with a 167 ms maximum on an idle card (3-second tail run), 184 ms
+    text matches the model's own text stream, peak VRAM 8.1 GB (`nvidia-smi` samples of the whole card, so the figures of different runs and variants are not comparable: Q4 read 9.2 GB in an earlier run on a busier card). 114 ms median per frame with a 167 ms maximum on an idle card (3-second tail run), 184 ms
     median when another process held the card at 43% utilisation: **not yet real time against the 133 ms budget**.
-  - **Q4_K, Q5_K, Q6_K**: the replies are not intelligible (mixed-language fragments and repetition for Q4, a lone "Hm" or question marks for Q5 and Q6),
+  - **Q4_K, Q5_K, Q6_K**: the replies are not intelligible (mixed-language fragments and repetition for Q4, a lone "Hm" for Q6, question marks for Q5),
     although they run faster (median 66 to 77 ms per frame). Q4_K had already differed from upstream at frame 3 of the replayed 16-frame
-    conversation (14 of 16 tokens); Q8_0 matches all 16. The earlier Q4 run that gave Chinese for an English question used a 3-second tail and the
-    same weights: it was a K-quant failure, not a short tail.
+    conversation (14 of 16 tokens); Q8_0 matches all 16 (`HaruQuantizedParityTests` on CUDA, with `HARU_REAL_DIR`, `HARU_PRECISION` and `HARU_BACKEND=cuda`). The earlier Q4 run that gave Chinese for an English question used a 3-second tail and the
+    same weights: the 25 s tail did not change what Q4_K says.
   - A 3-second tail is too short for any variant to answer the 14 s question: use `--tail-seconds 20` or more.
 
 - 2026-11-17, per-stage profile of `haru:q8` on the 3060 (the session logs `Per frame, median/max` at the end of a conversation; the HartsyPhone clip, 106 frames):
@@ -210,9 +210,9 @@ dead voice-session links and the `RealtimeScheduling` entry in `docs/Agents/AGEN
 ## Open questions
 
 - Whether the full 110 codec tensors equal VibeVoice-1.5B's (two compared).
-- Why the K-quants lose the conversation (see Evidence, 2026-11-17 GPU): which matrices are sensitive (attention, delta-rule, first or last layers) is not
-  known; a per-matrix sweep would tell whether a mixed Q8_0/K-quant file keeps coherence at less than Q8_0's size and time.
+- Why the K-quants lose the conversation (see Evidence, 2026-11-17 GPU) is open: this PR does not rule out a quantizer or kernel fault. A comparison of the
+  CUDA K-quant linear with a matmul over the dequantized weight, and a per-tensor sweep, follow in a separate PR.
 - Tail latency on the 3060: a frame is over the 133 ms budget about 7% of the time under contention (see Evidence, per-stage profile); a live session needs an output buffer of two to three frames or a quieter card.
-- Whether a mixed file (Q8_0 attention, Q6_K/Q5_K/Q4_K feed-forward) keeps the conversation: it does not (tried 2026-11-17, all three replies unintelligible), so the K-quant failure is in the feed-forward matrices too, not only the attention.
-- Whether `Qwen35Model` per-step decode of 4B on the 3060 meets the 133 ms frame with the codec; not measured.
+- Whether a mixed file (Q8_0 attention, Q6_K/Q5_K/Q4_K feed-forward) keeps the conversation: it does not (tried 2026-11-17, all three replies unintelligible), so the K-quants fail is in the feed-forward matrices too, not only the attention.
+- Native BF16 on a GPU (its evidence so far is 16-frame token parity on the CPU, no GPU run) and on a larger card such as a 4090: not measured. The Q8_0 frame time on the 3060 is in Evidence.
 - Behaviour on narrowband phone audio, behind RNNoise, and without headphones: untested upstream.
