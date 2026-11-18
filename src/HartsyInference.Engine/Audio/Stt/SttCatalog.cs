@@ -234,7 +234,9 @@ internal static class SttCatalog
         },
     };
 
-    /// <summary>The Whisper family's timed decode: one span per word, aligned through cross-attention, when the request asks for word timestamps (aligning its known text when it has one); otherwise the model's native phrase spans.</summary>
+    /// <summary>The Whisper family's timed decode: one span per word, aligned through cross-attention, when the
+    /// request asks for word timestamps (aligning its known text when it has one); otherwise the model's native
+    /// phrase spans.</summary>
     private static IReadOnlyList<SttSegment> TimedWhisper(WhisperPipeline pipeline, IBackend backend, float[] audio, AudioRequest request)
     {
         WhisperOptions options = ToWhisperOptions(request, pipeline.IsMultilingual);

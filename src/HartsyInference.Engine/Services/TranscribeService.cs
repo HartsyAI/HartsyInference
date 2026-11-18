@@ -7,7 +7,10 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock; a lease hands the same resident runner to a caller that passes PCM and gates the device itself. Whisper times words by cross-attention alignment (see <see cref="BuildWords"/>) and diarization comes from <see cref="SpeakerDiarizer"/>.</summary>
+/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the
+/// shared audio device under the generation lock; a lease hands the same resident runner to a caller that passes PCM
+/// and gates the device itself. Whisper times words by cross-attention alignment (see <see cref="BuildWords"/>) and
+/// diarization comes from <see cref="SpeakerDiarizer"/>.</summary>
 public sealed class TranscribeService : ITranscribeService
 {
     private readonly InferenceEngine _engine;
@@ -42,7 +45,8 @@ public sealed class TranscribeService : ITranscribeService
             if (request.WordTimestamps && !string.IsNullOrWhiteSpace(request.AlignText) && windows.Count > 1)
             {
                 throw new ArgumentException(
-                    $"Known text is aligned within one {runner.MaxInputSeconds:0}-second window, but the clip needs {windows.Count}.", nameof(request));
+                    $"Known text is aligned within one {runner.MaxInputSeconds:0}-second window, but the clip needs {windows.Count}.",
+                    nameof(request));
             }
 
             IReadOnlyList<SttSegment>? segments = null;
@@ -169,7 +173,10 @@ public sealed class TranscribeService : ITranscribeService
         return (descriptor, descriptor.ResolveRepo(selector.Variant));
     }
 
-    /// <summary>Projects the model's timed spans onto <see cref="WordSegment"/>s. A Whisper-family model returns true words; a model with only phrase timestamps would carry the whole span's text in <see cref="WordSegment.Word"/>. Speaker indices are filled from the diarized span with the largest time overlap.</summary>
+    /// <summary>Projects the model's timed spans onto <see cref="WordSegment"/>s. A Whisper-family model returns true
+    /// words; a model with only phrase timestamps would carry the whole span's text in
+    /// <see cref="WordSegment.Word"/>. Speaker indices are filled from the diarized span with the largest time
+    /// overlap.</summary>
     private static IReadOnlyList<WordSegment>? BuildWords(IReadOnlyList<SttSegment>? segments,
         IReadOnlyList<DiarizedSegment>? speakers)
     {

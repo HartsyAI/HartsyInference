@@ -209,7 +209,7 @@ public sealed class WhisperTokenizer : IDisposable
     }
 
     /// <summary>Normalizes a caller-supplied language code to the ISO-639-1 form Whisper's table uses: lowercases and strips any BCP-47 / locale region subtag, so <c>"en-US"</c>, <c>"en_US"</c>, and <c>"EN"</c> all map to <c>"en"</c>. Multi-letter codes without a separator (e.g. <c>"yue"</c>) pass through unchanged. Without this, a UI/API defaulting to a locale like <c>"en-US"</c> throws "Unknown Whisper language code".</summary>
-    private static string NormalizeLanguageCode(string code)
+    public static string NormalizeLanguageCode(string code)
     {
         if (string.IsNullOrWhiteSpace(code)) return code;
         string c = code.Trim().ToLowerInvariant();

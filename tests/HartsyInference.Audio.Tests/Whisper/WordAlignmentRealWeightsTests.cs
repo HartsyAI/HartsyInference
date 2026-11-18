@@ -2,6 +2,7 @@ using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -27,7 +28,8 @@ public sealed class WhisperAlignmentFactAttribute : FactAttribute
     }
 }
 
-/// <summary>Word alignment on real speech: a clip built from separately spoken words, with the voiced burst of each measured from its energy. Needs whisper-base in the model cache.</summary>
+/// <summary>Word alignment on real speech: a clip built from separately spoken words, with the voiced burst of each
+/// measured from its energy. Needs whisper-base in the model cache.</summary>
 [Trait("Category", "Integration")]
 public sealed class WordAlignmentRealWeightsTests(ITestOutputHelper output)
 {
@@ -57,6 +59,26 @@ public sealed class WordAlignmentRealWeightsTests(ITestOutputHelper output)
             {
                 Assert.True(words[i].Start >= words[i - 1].End - 1e-6, $"word {i} starts before word {i - 1} ends");
             }
+        }
+    }
+
+    [Fact]
+    public void EncodeText_KeepsSpacesAndNonAsciiText_ThroughDecode()
+    {
+        string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".cache", "hartsyinference", "models", "stt", "openai--whisper-base");
+        if (!File.Exists(Path.Combine(directory, "vocab.json")))
+        {
+            output.WriteLine("SKIPPED: the whisper-base tokenizer files are not cached; the byte-level encode did not run.");
+            return;
+        }
+        using WhisperTokenizer tokenizer = new(directory);
+
+        foreach (string text in new[] { " Hello, world! It's 2026.", " café 你好 😀" })
+        {
+            int[] ids = tokenizer.EncodeText(text);
+            Assert.True(ids.Length > 1);
+            Assert.Equal(text, tokenizer.Decode(ids));
         }
     }
 

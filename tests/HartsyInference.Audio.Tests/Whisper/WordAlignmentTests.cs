@@ -9,7 +9,9 @@ using Xunit;
 
 namespace HartsyInference.Audio.Tests.Whisper;
 
-/// <summary>The word-timing math behind Whisper word timestamps, checked without weights: the DTW and median filter on small hand-made matrices, the word grouping on a fake vocabulary, and the whole attention-to-word-times chain on attention built to peak where each token is "spoken".</summary>
+/// <summary>The word-timing math behind Whisper word timestamps, checked without weights: the DTW and median filter
+/// on small hand-made matrices, the word grouping on a fake vocabulary, and the whole attention-to-word-times chain
+/// on attention built to peak where each token is "spoken".</summary>
 public sealed unsafe class WordAlignmentTests
 {
     [Fact]
@@ -62,6 +64,16 @@ public sealed unsafe class WordAlignmentTests
     }
 
     [Fact]
+    public void Dtw_BreaksATieTowardTheRightwardStep()
+    {
+        // On a flat matrix every move costs the same, and OpenAI's aligner advances in time before it advances to the next row.
+        (int[] rows, int[] cols) = DynamicTimeWarping.Align(new float[4], 2, 2);
+
+        Assert.Equal([0, 1, 1], rows);
+        Assert.Equal([0, 0, 1], cols);
+    }
+
+    [Fact]
     public void Dtw_RejectsAMismatchedMatrix()
     {
         Assert.Throws<ArgumentException>(() => DynamicTimeWarping.Align(new float[5], 2, 3));
@@ -109,6 +121,17 @@ public sealed unsafe class WordAlignmentTests
     }
 
     [Fact]
+    public void AlignmentHeads_IgnoreAPairThatIsNotTwoNumbers()
+    {
+        WhisperConfig cfg = WhisperConfig.Tiny;
+        using JsonDocument doc = JsonDocument.Parse("""{"alignment_heads": [["a", 1], [2, 1], [1]]}""");
+
+        IReadOnlyList<WhisperAlignmentHead> heads = WhisperAlignmentHeads.Parse(doc.RootElement, cfg);
+
+        Assert.Equal([new WhisperAlignmentHead(2, 1)], heads);
+    }
+
+    [Fact]
     public void AlignmentHeads_FallBackToTheUpperHalfOfTheDecoder()
     {
         WhisperConfig cfg = WhisperConfig.Tiny;
@@ -132,7 +155,7 @@ public sealed unsafe class WordAlignmentTests
         IReadOnlyList<WhisperWordTokens> words = WhisperWordSplitter.Split(Decoder(vocabulary), new[] { 0, 1, 2, 3, 4, 5 }, "en");
 
         Assert.Equal(
-            [new WhisperWordTokens(" Hello,", 3), new WhisperWordTokens(" world!", 3)],
+            [new WhisperWordTokens(" Hello,", 3, TrailTokens: 1), new WhisperWordTokens(" world!", 3, TrailTokens: 1)],
             words);
     }
 
@@ -145,11 +168,20 @@ public sealed unsafe class WordAlignmentTests
         Func<ReadOnlyMemory<int>, string> decode = ids =>
         {
             int[] run = ids.ToArray();
-            if (run.SequenceEqual([1, 2]))
+            System.Text.StringBuilder text = new();
+            for (int i = 0; i < run.Length; i++)
             {
-                return "吗";
+                if (run[i] == 1 && i + 1 < run.Length && run[i + 1] == 2)
+                {
+                    text.Append('吗');
+                    i++;
+                }
+                else
+                {
+                    text.Append(vocabulary[run[i]]);
+                }
             }
-            return string.Concat(run.Select(id => vocabulary[id]));
+            return text.ToString();
         };
 
         IReadOnlyList<WhisperWordTokens> words = WhisperWordSplitter.Split(decode, new[] { 0, 1, 2, 3 }, "zh");
@@ -159,7 +191,53 @@ public sealed unsafe class WordAlignmentTests
             words);
     }
 
-    /// <summary>Attention that peaks on frames <c>[10r, 10r + 10)</c> for the row at absolute decoder position <c>1 + r</c>: queries and keys are one-hot over eight slots, so the cross-attention softmax is flat except on the frames a row is meant to read.</summary>
+    [Fact]
+    public void Splitter_KeepsAMarkWithNoSpaceInItsWord_AndTimesPunctuationOutOfAWord()
+    {
+        // "..." is not one of the single marks the rule treats as stray punctuation, so it stays on the word before it.
+        string[] vocabulary = [" wait", "...", " \"", " Hello", "."];
+
+        Assert.Equal([new WhisperWordTokens(" wait...", 2)], WhisperWordSplitter.Split(Decoder(vocabulary), new[] { 0, 1 }, "en"));
+        Assert.Equal(
+            [new WhisperWordTokens(" \" Hello.", 3, LeadTokens: 1, TrailTokens: 1)],
+            WhisperWordSplitter.Split(Decoder(vocabulary), new[] { 2, 3, 4 }, "en"));
+    }
+
+    [Theory]
+    [InlineData("zh-CN", 2)]
+    [InlineData("ZH", 2)]
+    [InlineData("ja_JP", 2)]
+    [InlineData("en", 1)]
+    [InlineData(null, 2)]
+    public void Splitter_ReadsLocaleCodes_AndFallsBackToTheTextsScript(string? language, int expectedWords)
+    {
+        string[] vocabulary = ["你", "好"];
+
+        Assert.Equal(expectedWords, WhisperWordSplitter.Split(Decoder(vocabulary), new[] { 0, 1 }, language).Count);
+    }
+
+    [Fact]
+    public void Splitter_TreatsUnlabelledLatinTextAsSpaced()
+    {
+        string[] vocabulary = [" Hel", "lo", " world"];
+
+        Assert.Equal(2, WhisperWordSplitter.Split(Decoder(vocabulary), new[] { 0, 1, 2 }, null).Count);
+    }
+
+    [Fact]
+    public void Splitter_DoesNotLetARealReplacementMarkSwallowTheTextAfterIt()
+    {
+        string replacement = ((char)0xFFFD).ToString();
+        string[] vocabulary = [" a", replacement, " b"];
+
+        IReadOnlyList<WhisperWordTokens> words = WhisperWordSplitter.Split(Decoder(vocabulary), new[] { 0, 1, 2 }, "en");
+
+        Assert.Equal([new WhisperWordTokens(" a" + replacement, 2), new WhisperWordTokens(" b", 1)], words);
+    }
+
+    /// <summary>Attention that peaks on frames <c>[10r, 10r + 10)</c> for the row at absolute decoder position <c>1 +
+    /// r</c>: queries and keys are one-hot over eight slots, so the cross-attention softmax is flat except on the
+    /// frames a row is meant to read.</summary>
     private static WhisperAttentionProbe PeakedProbe(int rows, int framesPerRow, int frames)
     {
         const int headDim = 8;
@@ -193,7 +271,7 @@ public sealed unsafe class WordAlignmentTests
     {
         WhisperAttentionProbe probe = PeakedProbe(rows: 6, framesPerRow: 10, frames: 50);
 
-        ReadOnlySpan<float> mean = probe.MeanAttention;
+        float[] mean = probe.MeanAttention();
 
         Assert.Equal(6 * 50, mean.Length);
         // Row 2 reads frames 10-19, so it stands above its own reading of frame 45 after the per-frame normalization.
@@ -215,7 +293,7 @@ public sealed unsafe class WordAlignmentTests
     {
         WhisperAttentionProbe probe = new([new WhisperAlignmentHead(0, 0), new WhisperAlignmentHead(1, 0)], 50);
 
-        Assert.Throws<InvalidOperationException>(() => probe.MeanAttention.ToArray());
+        Assert.Throws<InvalidOperationException>(() => probe.MeanAttention());
     }
 
     [Theory]
@@ -245,6 +323,21 @@ public sealed unsafe class WordAlignmentTests
         Assert.Equal(0.4, timed[0].End, 1);
         Assert.Equal(timed[0].End, timed[1].Start, 5);
         Assert.Equal(0.6, timed[1].End, 1);
+    }
+
+    [Fact]
+    public void Timings_LeaveAttachedPunctuationOutOfAWordsSpan()
+    {
+        // Sequence: [start, no-timestamps, t0, t1, comma, t3, end]: the comma belongs to the first word's text but not to its span.
+        WhisperAttentionProbe probe = PeakedProbe(rows: 7, framesPerRow: 10, frames: 70);
+        WhisperWordTokens[] words = [new(" ab,", 3, TrailTokens: 1), new(" c", 1)];
+
+        IReadOnlyList<WhisperWord> timed = WhisperWordTimings.Compute(probe, promptLength: 2, words);
+
+        Assert.Equal(0.0, timed[0].Start, 2);
+        Assert.Equal(0.4, timed[0].End, 1);
+        Assert.Equal(0.6, timed[1].Start, 1);
+        Assert.Equal(0.8, timed[1].End, 1);
     }
 
     [Fact]

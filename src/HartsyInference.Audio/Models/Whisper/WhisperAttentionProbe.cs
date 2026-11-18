@@ -6,7 +6,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
 
-/// <summary>Collects the decoder's cross-attention for a set of alignment heads during one decoder pass and keeps their mean. The decoder runs fused attention that never surfaces its weights, so the probe recomputes them from the query and the cached encoder keys for the heads it was asked to watch. Each head is folded into one running sum as it is captured, so the memory held is one matrix however many heads are watched.</summary>
+/// <summary>Collects the decoder's cross-attention for a set of alignment heads during one decoder pass and keeps their mean.
+/// The decoder's fused attention never surfaces its weights, so the probe recomputes them from the query and the cached
+/// encoder keys for the heads it watches. Each head is folded into one running sum as it is captured, so the memory held
+/// is one matrix however many heads are watched. A probe records one pass and is not thread-safe.</summary>
 public sealed class WhisperAttentionProbe
 {
     /// <summary>The median window along time, in frames.</summary>
@@ -15,15 +18,6 @@ public sealed class WhisperAttentionProbe
     private readonly IReadOnlyList<WhisperAlignmentHead> _heads;
     private float[]? _sum;
     private int _captured;
-
-    /// <summary>The heads watched.</summary>
-    public IReadOnlyList<WhisperAlignmentHead> Heads => _heads;
-
-    /// <summary>Audio frames each row spans: encoder positions at 50 per second, cut to the audio's own length before the softmax.</summary>
-    public int Frames { get; }
-
-    /// <summary>Decoder positions captured, the rows of <see cref="MeanAttention"/>.</summary>
-    public int Rows { get; private set; }
 
     /// <summary>Watches <paramref name="heads"/> over the first <paramref name="frames"/> encoder positions.</summary>
     public WhisperAttentionProbe(IReadOnlyList<WhisperAlignmentHead> heads, int frames)
@@ -38,23 +32,31 @@ public sealed class WhisperAttentionProbe
         Frames = frames;
     }
 
-    /// <summary>The mean over the watched heads of each head's attention, as a row-major <c>[Rows, Frames]</c> matrix: every head's softmax is normalized to zero mean and unit variance across the rows of each frame (so a frame every token attends to alike carries no signal), then median-filtered along time, as OpenAI's Whisper word timestamps do.</summary>
-    public ReadOnlySpan<float> MeanAttention
+    /// <summary>The heads watched.</summary>
+    public IReadOnlyList<WhisperAlignmentHead> Heads => _heads;
+
+    /// <summary>Audio frames each row spans: encoder positions at 50 per second, cut to the audio's own length before the softmax.</summary>
+    public int Frames { get; }
+
+    /// <summary>Decoder positions captured, the rows of <see cref="MeanAttention"/>.</summary>
+    public int Rows { get; private set; }
+
+    /// <summary>The mean over the watched heads of each head's attention, a row-major <c>[Rows, Frames]</c> matrix. Every
+    /// head's softmax is normalized to zero mean and unit variance across the rows of each frame, so a frame every token
+    /// attends to alike carries no signal, then median-filtered along time, as OpenAI's Whisper word timestamps do.</summary>
+    public float[] MeanAttention()
     {
-        get
+        if (_sum is null || _captured != _heads.Count)
         {
-            if (_sum is null || _captured != _heads.Count)
-            {
-                throw new InvalidOperationException($"The decoder has captured {_captured} of {_heads.Count} watched heads.");
-            }
-            float[] mean = new float[_sum.Length];
-            float inverse = 1f / _heads.Count;
-            for (int i = 0; i < mean.Length; i++)
-            {
-                mean[i] = _sum[i] * inverse;
-            }
-            return mean;
+            throw new InvalidOperationException($"The decoder has captured {_captured} of {_heads.Count} watched heads.");
         }
+        float[] mean = new float[_sum.Length];
+        float inverse = 1f / _heads.Count;
+        for (int i = 0; i < mean.Length; i++)
+        {
+            mean[i] = _sum[i] * inverse;
+        }
+        return mean;
     }
 
     /// <summary>Whether any watched head lives in decoder layer <paramref name="layer"/>.</summary>
@@ -70,8 +72,10 @@ public sealed class WhisperAttentionProbe
         return false;
     }
 
-    /// <summary>Records the watched heads of <paramref name="layer"/> for a decoder pass of <paramref name="rows"/> positions from this layer's head-major query <c>[1, H, rows, D]</c> and encoder keys <c>[1, H, E, D]</c>.</summary>
-    internal unsafe void Capture(IBackend backend, int layer, Tensor queryHeadMajor, Tensor encoderKeys, int rows, float scale)
+    /// <summary>Records the watched heads of <paramref name="layer"/> for a decoder pass of <paramref name="rows"/>
+    /// positions from this layer's head-major query <c>[1, H, rows, D]</c> and encoder keys <c>[1, H, E,
+    /// D]</c>.</summary>
+    internal void Capture(IBackend backend, int layer, Tensor queryHeadMajor, Tensor encoderKeys, int rows, float scale)
     {
         int heads = (int)queryHeadMajor.Shape[1];
         int headDim = (int)queryHeadMajor.Shape[3];
@@ -90,7 +94,7 @@ public sealed class WhisperAttentionProbe
         float[] keys = new float[heads * encoderFrames * headDim];
         backend.ReadResidentInto(encoderKeys, keys);
         float[] queries = new float[heads * rows * headDim];
-        new ReadOnlySpan<float>((void*)queryHeadMajor.DataPointer, queries.Length).CopyTo(queries);
+        backend.ReadResidentInto(queryHeadMajor, queries);
 
         float[] weights = new float[rows * Frames];
         int frames = Frames;
@@ -122,7 +126,8 @@ public sealed class WhisperAttentionProbe
         }
     }
 
-    /// <summary>Gives each column of the row-major <c>[rows, cols]</c> matrix zero mean and unit variance across its rows; a flat column becomes zero.</summary>
+    /// <summary>Gives each column of the row-major <c>[rows, cols]</c> matrix zero mean and unit variance across its
+    /// rows; a flat column becomes zero.</summary>
     private static void NormalizeColumns(Span<float> data, int rows, int cols)
     {
         for (int c = 0; c < cols; c++)

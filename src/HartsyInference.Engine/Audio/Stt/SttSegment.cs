@@ -1,6 +1,8 @@
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>One timestamped span of a transcript: a single word when <see cref="IsWord"/> (Whisper, aligned through cross-attention), otherwise whatever the model natively emits — for Whisper's <c>&lt;|t|&gt;</c> tokens a phrase/utterance chunk.</summary>
+/// <summary>One timestamped span of a transcript: a single word when <see cref="IsWord"/> (Whisper, aligned through
+/// cross-attention), otherwise whatever the model natively emits — for Whisper's <c>&lt;|t|&gt;</c> tokens a
+/// phrase/utterance chunk.</summary>
 internal sealed record SttSegment
 {
     /// <summary>The span's transcript text. A word keeps the leading space that marks it as following another word.</summary>

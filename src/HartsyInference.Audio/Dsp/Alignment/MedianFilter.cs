@@ -3,7 +3,9 @@ namespace HartsyInference.Audio.Dsp.Alignment;
 /// <summary>Sliding median along the columns of a row-major matrix.</summary>
 public static class MedianFilter
 {
-    /// <summary>Replaces every element of each row of the <c>[rows, cols]</c> matrix with the median of the <paramref name="width"/> elements centred on it, mirroring the row at both edges without repeating the edge sample. A row no longer than half the window is left as it is.</summary>
+    /// <summary>Replaces every element of each row of the <c>[rows, cols]</c> matrix with the median of the
+    /// <paramref name="width"/> elements centred on it, mirroring the row at both edges without repeating the edge
+    /// sample. A row no longer than half the window is left as it is.</summary>
     /// <param name="width">The odd window length; 1 leaves the data untouched.</param>
     public static void Rows(Span<float> data, int rows, int cols, int width)
     {

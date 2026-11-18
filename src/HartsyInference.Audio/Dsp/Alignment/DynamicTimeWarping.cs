@@ -7,7 +7,10 @@ public static class DynamicTimeWarping
     private const sbyte Down = 1;
     private const sbyte Right = 2;
 
-    /// <summary>Finds the lowest-cost monotonic path from <c>(0, 0)</c> to <c>(rows - 1, cols - 1)</c> through a row-major <c>[rows, cols]</c> cost matrix, stepping diagonally, down a row or right a column. A tie goes to the rightward step unless the diagonal or downward one is strictly cheaper, which is the rule OpenAI's Whisper aligner uses.</summary>
+    /// <summary>Finds the lowest-cost monotonic path from <c>(0, 0)</c> to <c>(rows - 1, cols - 1)</c> through a
+    /// row-major <c>[rows, cols]</c> cost matrix, stepping diagonally, down a row or right a column. A tie goes to
+    /// the rightward step unless the diagonal or downward one is strictly cheaper, which is the rule OpenAI's Whisper
+    /// aligner uses.</summary>
     /// <returns>The visited cells in order: <c>Rows[i]</c> and <c>Cols[i]</c> are the i-th cell's row and column.</returns>
     public static (int[] Rows, int[] Cols) Align(ReadOnlySpan<float> cost, int rows, int cols)
     {

@@ -173,8 +173,13 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         return ParseSegments(DecodeTokens(backend, mel, opts with { WithTimestamps = true }, timer), seconds);
     }
 
-    /// <summary>Times every word of the clip by aligning the text to the audio through the decoder's cross-attention. With no <paramref name="knownText"/> (null, empty or whitespace) the clip is transcribed first and that transcript is aligned; with it, the given text is aligned as it stands (a forced alignment, for lyrics or a script the caller already has). Covers the first 30 s of the clip, like <see cref="TranscribeAudio"/>; a text that does not fit the decoder's context throws. Returns an empty list when there is no text.</summary>
-    public IReadOnlyList<WhisperWord> AlignWords(IBackend backend, float[] audio, int sampleRate, string? knownText = null, WhisperOptions? options = null)
+    /// <summary>Times every word of the clip by aligning the text to the audio through the decoder's cross-attention.
+    /// With no <paramref name="knownText"/> (null, empty or whitespace) the clip is transcribed first and that
+    /// transcript is aligned; with it, the given text is aligned as it stands (a forced alignment, for lyrics or a
+    /// script the caller already has). Covers the first 30 s of the clip, like <see cref="TranscribeAudio"/>; a text
+    /// that does not fit the decoder's context throws. Returns an empty list when there is no text.</summary>
+    public IReadOnlyList<WhisperWord> AlignWords(IBackend backend, float[] audio, int sampleRate, string? knownText = null,
+        WhisperOptions? options = null)
     {
         ThrowIfDisposed();
         WhisperOptions opts = (options ?? new WhisperOptions()) with { WithTimestamps = false };
@@ -204,12 +209,15 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
                 text = [.. _tokenizer.EncodeText(" " + known)];
             }
             text.RemoveAll(id => id >= _tokenizer.EotId);
-            return AlignTokens(backend, encoded, text, seconds, opts);
+            IReadOnlyList<WhisperWord> words = AlignTokens(backend, encoded, text, seconds, opts);
+            timer?.Report($"tokens={text.Count} words={words.Count}");
+            return words;
         }
         finally { encoded.Dispose(); }
     }
 
-    /// <summary>Runs one teacher-forced decoder pass over <c>[prompt, text, end-of-text]</c> and reads the words' times off the alignment heads' attention.</summary>
+    /// <summary>Runs one teacher-forced decoder pass over <c>[prompt, text, end-of-text]</c> and reads the words'
+    /// times off the alignment heads' attention.</summary>
     private IReadOnlyList<WhisperWord> AlignTokens(IBackend backend, Tensor encoded, List<int> text, double audioSeconds, WhisperOptions opts)
     {
         if (text.Count == 0)
@@ -220,7 +228,8 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         int[] sequence = [.. prompt, .. text, _tokenizer.EotId];
         if (sequence.Length > _cfg.MaxTextPositions)
         {
-            throw new ArgumentException($"The text takes {sequence.Length} decoder positions but the model holds {_cfg.MaxTextPositions}; align it in shorter parts.");
+            throw new ArgumentException($"The text takes {sequence.Length} decoder positions but the model holds "
+                + $"{_cfg.MaxTextPositions}; align it in shorter parts.");
         }
 
         int frames = Math.Clamp((int)(audioSeconds * WhisperWordTimings.FramesPerSecond), 1, _cfg.MaxAudioPositions);

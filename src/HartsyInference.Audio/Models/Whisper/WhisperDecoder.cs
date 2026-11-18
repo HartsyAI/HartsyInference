@@ -177,9 +177,14 @@ public sealed unsafe class WhisperDecoder : IDisposable
     }
 
     /// <summary>Runs the decoder for a single new token position; on first call pass the full prompt sequence (e.g. <c>[SOT, lang, transcribe, notimestamps]</c>) and on subsequent calls pass either the full sequence so far or just the newly appended token — the decoder uses positions <c>[CurrentPos, CurrentPos + len(tokenIds))</c> of the cache.</summary>
-    /// <param name="probe">When given, records the cross-attention weights of its alignment heads for every position in <paramref name="tokenIds"/>; meant for one teacher-forced pass over a whole token sequence.</param>
     /// <returns>Logits over the vocabulary <c>[1, vocabSize]</c> for the LAST token in <paramref name="tokenIds"/>.</returns>
-    public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state, WhisperAttentionProbe? probe = null)
+    public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state) => DecodeStep(backend, tokenIds, state, null);
+
+    /// <summary>As <see cref="DecodeStep(IBackend, ReadOnlySpan{int}, DecodeState)"/>, also recording the
+    /// cross-attention of the probe's alignment heads for every position in <paramref name="tokenIds"/>; meant for
+    /// one teacher-forced pass over a whole sequence.</summary>
+    /// <returns>Logits over the vocabulary <c>[1, vocabSize]</c> for the LAST token in <paramref name="tokenIds"/>.</returns>
+    public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state, WhisperAttentionProbe? probe)
     {
         ThrowIfDisposed();
         int newCount = tokenIds.Length;
