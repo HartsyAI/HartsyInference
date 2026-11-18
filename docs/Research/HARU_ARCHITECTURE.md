@@ -78,8 +78,8 @@ user stream. Prefill runs in chunks of 512. There is no explicit barge-in logic:
 | Head | `VibeVoiceDiffusionHead` is key-bound and `internal` | new shared layer stack, see the plan |
 | DRY sampler | none in `src/` | new `ISamplerStep` |
 
-Codec key map (Haru to engine; `tok.` is the caller's prefix). Verified on the tiny checkpoint below with no change to the
-shared classes:
+Codec key map (Haru to engine), implemented in `Audio/Models/Haru/HaruCodecWeights.cs` (a key outside it throws) with the
+config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no change to the shared classes:
 
 | Haru | Engine |
 |---|---|
@@ -98,17 +98,26 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
 1) from the unmodified upstream modules and writes fixtures under `tests/HartsyInference.Audio.Tests/Fixtures/Haru/`
 (upstream `7fe6b766`, transformers 5.22.2, torch 2.6.0, CPU F32, one thread).
 
-- 2026-11-17, codec, unmodified engine classes through the key map above, CPU F32: whole clip ending mid-frame
+- 2026-11-17, codec, unmodified engine classes built by `HaruCodec.Create`, CPU F32 (`HaruCodecReferenceTests`): whole clip ending mid-frame
   (5 x 3200 + 1234 samples) encode 9.1e-7 relative, whole decode 2.1e-6, three streamed encode frames 8.3e-7, three
   streamed decode frames 3.1e-6. Streaming and whole-clip agree in the engine on a separate synthetic codec
   (`VibeVoiceCodecStreamingTests`, bit-exact on CPU). This settles the codec questions: down/up index base is 0 with a
   separate stem, mid-frame padding matches, no shared-code change is needed.
-- Not run: trunk, projectors, head and the full frame loop against the fixture; any real-weight run.
+- 2026-11-17, released codec, real weights, CPU F32 (`HaruCodecRealWeightsTests`, opt-in through `HARU_CODEC_REAL_DIR`): the
+  `codec.*` byte range of `model.safetensors` @ `8d6e83bc` (1,374,784,002 B, which is 687,392,001 BF16 parameters; fetched by
+  HTTP range, the whole-file sha256 not checked) against the upstream PyTorch codec loaded `strict=True` from the same
+  bytes, on 6.05 s of an 8 kHz phone recording resampled linearly to 24 kHz (a clip of the HartsyPhone eval set,
+  `ae91bf895267.wav`, 145,234 samples, ends mid-frame): whole encode 1.1e-5 relative, whole decode of the upstream latents
+  2.3e-6, three streamed encode frames 2.7e-6, three streamed decode frames 4.2e-6. 1 m 47 s on the CPU backend.
+- Not run: trunk, projectors, head and the full frame loop against the fixture; wideband speech; GPU.
 
 Regression net rebuilt for shared code (all CPU): `VibeVoiceCodecStreamingTests` (whole vs streamed, pinned decode),
 `Qwen35HuggingFaceParityTests` (tiny Qwen3.5 trunk vs transformers, 2e-4; restored from `e9474bb06^`),
 `SamplerChainGoldenTests` (pinned token digests of three configurations). Real-weight baselines (VibeVoice-1.5B speech
 through Whisper, Qwen3.5 GGUF greedy digest) need weights that are not on the dev box and are still to be taken.
+To rerun the real-weight codec check: fetch the `codec.*` range into a standalone safetensors file (`tools/haru/fetch_codec.py`), run the upstream codec
+on a clip (`tools/haru/codec_reference.py`) to write `codec_real_expected.safetensors`, then `HARU_CODEC_REAL_DIR=<dir> HARTSY_REQUIRE_REAL_WEIGHTS=1 dotnet test
+tests/HartsyInference.Audio.Tests -m:1 --filter FullyQualifiedName~HaruCodecRealWeights`.
 
 ## Doc debt found
 
