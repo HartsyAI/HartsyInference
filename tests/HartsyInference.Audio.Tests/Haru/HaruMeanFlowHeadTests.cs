@@ -63,26 +63,9 @@ public sealed unsafe class HaruMeanFlowHeadTests(ITestOutputHelper output)
     [Fact]
     public void Sample_MatchesUpstreamHead()
     {
-        using Fixture f = new();
-        using HaruMeanFlowHead head = new(f.Config);
-        head.LoadWeights(f.Tensors);
-        using CpuBackend backend = new();
-        float[] hidden = Read(f.Expected.GetTensor("ref.hidden"));
-        float[] noise = Read(f.Expected.GetTensor("in.noise"));
-        int n = hidden.Length / f.Config.HiddenSize;
-        using Tensor h = Make(hidden, 1, n, f.Config.HiddenSize);
-        using Tensor z = Make(noise, 1, n, f.Config.LatentDim);
-        using Tensor normalized = head.Sample(backend, h, z);
-
-        float scale = Read(f.Tensors["latent_scale"])[0];
-        float bias = Read(f.Tensors["latent_bias"])[0];
-        float[] latents = Read(normalized);
-        for (int i = 0; i < latents.Length; i++)
-        {
-            latents[i] = latents[i] / scale - bias;
-        }
-        float rel = RelativeError(latents, Read(f.Expected.GetTensor("ref.head_latents")));
-        output.WriteLine($"head latents: n={latents.Length} rel={rel:E3}");
+        using HaruReferenceModel model = new(Path.Combine(Dir, "haru_tiny.safetensors"), Path.Combine(Dir, "config.json"), capacity: 64);
+        float rel = model.CompareHead(Path.Combine(Dir, "haru_tiny_expected.safetensors"));
+        output.WriteLine($"head latents: rel={rel:E3}");
         Assert.True(rel < 2e-5f, $"relative error {rel:E3}");
     }
 

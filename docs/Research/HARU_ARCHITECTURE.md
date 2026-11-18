@@ -76,7 +76,7 @@ user stream. Prefill runs in chunks of 512. There is no explicit barge-in logic:
 | Codec | `VibeVoiceAcousticTokenizerModel` (encoder, decoder, streaming cache) | key names only (below) |
 | Tokenizer | `HfTokenizerJson.LoadByteLevelBpe`, checked by `Models/Haru/HaruTokenizer` | none |
 | Head | `Audio/Layers/AdaLnSwiGluStack` + `ScalarEmbed` (shared with `VibeVoiceDiffusionHead`), `Models/Haru/HaruMeanFlowHead` | none |
-| DRY sampler | none in `src/` | new `ISamplerStep` |
+| DRY sampler | `LLM/Sampling/DryPenaltyStep` (new, shared), `SamplerChain.FromSteps` | none |
 
 Codec key map (Haru to engine), implemented in `Audio/Models/Haru/HaruCodecWeights.cs` (a key outside it throws) with the
 config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no change to the shared classes:
@@ -123,7 +123,24 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
   `HaruTokenizerTests`, opt-in through `HARU_TOKENIZER_JSON`): the engine's loader reads it, `<|audio_pad|>` is 248076 and
   `<|audio_end|>` is 248071 as the config says, and a mixed English and Japanese system prompt encodes to the same 18 ids as
   the `tokenizers` library. The released config parses and passes `HaruConfig`'s checks.
-- Not run: the full frame loop; the trunk and head on real weights; the moved VibeVoice head on
+- 2026-11-17, DRY penalty (`DryPenaltyStepTests`): the penalties equal the upstream sampler's on eight fixed histories (random,
+  periodic with exempt gaps, longer than the window, allowed length 2, capped, one token, empty, only exempt tokens).
+- 2026-11-17, the conversation loop, CPU F32, greedy (`HaruSessionReferenceTests`): prompt build, 512-position prefill, six user
+  frames stepped, text and audio out, three runs (card and reference; empty prompt; speak-first with an EOP bias of 2). Every random
+  draw of the upstream run is recorded and replayed in order (the posterior of the reference and of each user frame, the head noise),
+  all draws are consumed, and **tokens and text are identical** in all three runs (7 frames each). Audio, un-clamped and speech-sized
+  (peak 0.49-0.58), matches to 3.2e-5, 1.0e-4 and 2.7e-4 relative to peak. That is float noise fed back through the language model: the
+  codec alone agrees to 5e-7. Reference preparation (silence trim, margin, last N seconds) is equal to upstream's, sample for sample.
+  The tiny codec's output heads are scaled by 1e-3 (encoder) and 1e-4 (decoder) in the fixture so its audio is not clamped.
+- 2026-11-17, **released weights**, CPU, the checkpoint verified against its pin (10,540,113,510 B, sha256 `ad2c3534...47c0fa`),
+  upstream run in PyTorch with the same BF16 weights widened to F32 per call (`tools/haru/real_reference.py`), engine run on its CPU
+  backend (`HaruRealWeightsTests`, opt-in through `HARU_REAL_DIR`; 1 m 24 s and 8 m 59 s):
+  - fixed inputs, a 14-position prompt then 4 single positions: hidden states 5.1e-5 relative, text logits 4.8e-5, F32 PAD/EOP logits
+    2.7e-5, MeanFlow head latents 9.5e-7;
+  - a conversation: character card, a voice clip and a user recording from the HartsyPhone eval set (8 kHz phone speech resampled
+    to 24 kHz), greedy, 16 frames, every random draw of the upstream run replayed (all 48 consumed): **tokens and text identical**
+    (PAD, PAD, EOP, "Hello", ",", then silence), audio 1.9e-3 relative to peak. The model starts to speak by itself on the recording.
+- Not run: a long generation (16 frames is 2.1 s; no Whisper check yet); any GPU run; the moved VibeVoice head on
   a GPU or in a real VibeVoice generation; wideband speech; GPU.
 
 Regression net rebuilt for shared code (all CPU): `VibeVoiceCodecStreamingTests` (whole vs streamed, pinned decode),
@@ -146,6 +163,10 @@ tests/HartsyInference.Audio.Tests -m:1 --filter FullyQualifiedName~HaruCodecReal
   pass channels-first. Not fixed here: the class is shared by every VibeVoice model.
 - `HaruLm` clamps its capacity to the model's `max_position_embeddings` and exposes the result as `Capacity`; the session reports
   a conversation that reaches it as done rather than failing inside the trunk cache.
+- Where the session follows upstream on purpose: the DRY penalty is applied to the raw logits before the temperature divides them
+  (`_emit` before `sample_token`), with PAD, EOP and EOS exempt; an EOS the model samples after the first frame is ordinary text, as
+  upstream does not end the session on it. Where it differs: bytes of a half-finished character are given up when a gap starts or
+  after four tokens, instead of being carried across the gap (`HaruStreamDetokenizer`); `Step` refuses to run after the last frame.
 
 ## Doc debt found
 
