@@ -123,6 +123,18 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
     same weights: it was a K-quant failure, not a short tail.
   - A 3-second tail is too short for any variant to answer the 14 s question: use `--tail-seconds 20` or more.
 
+- 2026-11-17, per-stage profile of `haru:q8` on the 3060 (the session logs `Per frame, median/max` at the end of a conversation; the HartsyPhone clip, 106 frames):
+  with the default VRAM guard the codec decode was **143 ms median** of the 133 ms frame (trunk 23, encoder 18, logits 8, head 3): the Windows
+  preload guard (`vram.preloadHeadroomMb`, 2 GB) left 150 to 350 MB of the last weights on the host and a convolution whose weight uploads per op costs more than
+  the whole trunk. Putting the codec first in the preload order only moved the cost to the trunk (134 ms). Lifting the guard
+  (`vram.overcommitReliefMb=0`) made everything resident (median 67 to 73 ms) but a 5-minute run stalled once for 137 s (200 of 2,287 frames over budget): the
+  guard is right, the footprint has to shrink. The codec's weights are stored BF16 and were widened to F32 (2.75 GB); keeping them as stored on CUDA
+  (the convolution casts on the device to the same values) frees 1.4 GB: all weights resident under the default guard, **Q8 output byte-identical** to the F32
+  run, and a 5-minute run (2,287 frames) with no stall: median 98 ms, p99 226 ms, max 282 ms, 151 of 2,287 frames (6.6%) over 133 ms, on a card another
+  process was also using (stage medians were 1.5 to 2 times those of an idle card, where the whole frame is 67 to 73 ms median).
+- 2026-11-17, mixed precisions (`q8-ff6`, `q8-ff5`, `q8-ff4`: Q8_0 attention and delta-rule, K-quant feed-forward), same clip, 25 s tail: all three replies unintelligible
+  ("Hm", mixed-language fragments, repetition). Only Q8_0 for every matrix (and native) keeps the conversation; the variants were removed.
+
 - 2026-11-17, released codec, real weights, CPU F32 (`HaruCodecRealWeightsTests`, opt-in through `HARU_CODEC_REAL_DIR`): the
   `codec.*` byte range of `model.safetensors` @ `8d6e83bc` (1,374,784,002 B, which is 687,392,001 BF16 parameters; fetched by
   HTTP range, the whole-file sha256 not checked) against the upstream PyTorch codec loaded `strict=True` from the same
@@ -200,6 +212,7 @@ dead voice-session links and the `RealtimeScheduling` entry in `docs/Agents/AGEN
 - Whether the full 110 codec tensors equal VibeVoice-1.5B's (two compared).
 - Why the K-quants lose the conversation (see Evidence, 2026-11-17 GPU): which matrices are sensitive (attention, delta-rule, first or last layers) is not
   known; a per-matrix sweep would tell whether a mixed Q8_0/K-quant file keeps coherence at less than Q8_0's size and time.
-- Q8_0 decode speed on the 3060 is 114 ms median per frame with a 167 ms maximum against the 133 ms budget (`AudioLmQuant.cs` says Q8_0 takes a slow path).
+- Tail latency on the 3060: a frame is over the 133 ms budget about 7% of the time under contention (see Evidence, per-stage profile); a live session needs an output buffer of two to three frames or a quieter card.
+- Whether a mixed file (Q8_0 attention, Q6_K/Q5_K/Q4_K feed-forward) keeps the conversation: it does not (tried 2026-11-17, all three replies unintelligible), so the K-quant failure is in the feed-forward matrices too, not only the attention.
 - Whether `Qwen35Model` per-step decode of 4B on the 3060 meets the 133 ms frame with the codec; not measured.
 - Behaviour on narrowband phone audio, behind RNNoise, and without headphones: untested upstream.
