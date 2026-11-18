@@ -1,10 +1,15 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
 /// <summary>Converts the Comfy-Org MiniMax-Music-3 single-file DiT checkpoint (<c>diffusion_models/minimax_music3_dit_*.safetensors</c>: <c>diffusion_transformer.*</c> with fused QKV, plus the four condition-encoder tensors under Comfy naming) into the engine's diffusers-derived naming (<c>transformer_blocks.{i}.attn.to_q/…</c> and the <c>condition_encoder</c> keys). The Comfy file carries ONLY the flow DiT + condition encoder — the language model, depth decoder, vocoder, and tokenizer are not in it and load from the official repo.</summary>
 public static class MiniMaxMusic3CheckpointConverter
 {
+    /// <summary>True when the header is a Comfy-Org MiniMax-Music-3 DiT single file.</summary>
+    public static bool IsComfyDit(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors) =>
+        MiniMaxMusic3DitLayouts.Detect(descriptors.Keys) == MiniMaxMusic3DitLayout.ComfyDit;
+
     private static readonly string[] ConditionKeys = ["layer_weight_logits", "layer_scale", "proj.weight", "proj.bias"];
 
     private static readonly string[] TopLevelDitKeys =
@@ -161,6 +166,10 @@ public static class MiniMaxMusic3CheckpointConverter
                 case "ff.ff.2.bias": transformer[$"{prefix}.ff_out.bias"] = tensor; break;
                 case "self_attn.to_qkv.weight":
                     SplitQkvRows(tensor, prefix, transformer);
+                    if (!ReferenceEquals(tensor, source))
+                    {
+                        tensor.Dispose();
+                    }
                     break;
                 default:
                     throw new NotSupportedException($"Unrecognized MiniMax-Music-3 Comfy DiT layer key '{key}' — refusing a partial conversion.");

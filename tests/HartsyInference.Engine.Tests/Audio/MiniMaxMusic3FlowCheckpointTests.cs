@@ -119,6 +119,23 @@ public sealed class MiniMaxMusic3FlowCheckpointTests : IDisposable
     }
 
     [Fact]
+    public void Open_ComfyDit_Fp16_Widens_Norm_Vectors_And_Host_Read_Tensors()
+    {
+        Dictionary<string, Tensor> comfy = new Dictionary<string, Tensor>(StringComparer.Ordinal)
+        {
+            ["diffusion_transformer.transformer.layers.0.self_attn.to_qkv.weight"] = Filled(new TensorShape(3 * Hidden, InDim), DType.F16, 1f),
+            ["diffusion_transformer.transformer.layers.0.pre_norm.gamma"] = Filled(new TensorShape(InDim), DType.F16, 1f),
+            ["diffusion_transformer.transformer.layers.0.ff.ff.0.proj.bias"] = Filled(new TensorShape(InDim), DType.F16, 1f),
+            ["diffusion_transformer.timestep_features.weight"] = Filled(new TensorShape(128, 1), DType.F16, 1f),
+        };
+        using MiniMaxMusic3FlowWeights weights = MiniMaxMusic3FlowCheckpoint.Open(WriteSafetensors("comfy16.safetensors", comfy));
+        Assert.Equal(DType.F32, weights.Transformer["transformer_blocks.0.norm1.weight"].DType);
+        Assert.Equal(DType.F32, weights.Transformer["transformer_blocks.0.ff_in.bias"].DType);
+        Assert.Equal(DType.F32, weights.Transformer["time_proj.weight"].DType);
+        Assert.Equal(DType.F16, weights.Transformer["transformer_blocks.0.attn.to_q.weight"].DType);
+    }
+
+    [Fact]
     public void Open_ComfyDit_Int8_ConvRot_Dequantizes_Through_The_Companion_Fold()
     {
         const int hidden = 64;
