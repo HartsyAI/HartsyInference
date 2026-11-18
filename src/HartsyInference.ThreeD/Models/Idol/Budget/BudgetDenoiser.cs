@@ -4,6 +4,21 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Idol.Budget;
 
+/// <summary>The embedded token sequence of one latent on one layout (<see cref="BudgetDenoiser.Prepare"/>); <c>[tokens × width]</c> floats, or Idol's dense <c>[8192 × width]</c> embedding at the dense layout.</summary>
+public sealed class BudgetTokens
+{
+    internal BudgetTokens(float[] values, BudgetLayout layout)
+    {
+        Values = values;
+        Layout = layout;
+    }
+
+    internal float[] Values { get; }
+
+    /// <summary>The layout the sequence was built for.</summary>
+    public BudgetLayout Layout { get; }
+}
+
 /// <summary>Budget3D on Idol (upstream <c>Budget3DModel</c>): the denoiser run on an adaptive number of latent tokens. A <see cref="BudgetLayout"/> chooses which regions keep one token per Sobol point and which are merged into
 /// 16³ cells or 8³ cubes; the trunk (Idol's own noise refiner and 24 joint blocks, <see cref="IdolDenoiser.ForwardTokens"/>) runs on the shorter sequence, and token-local refiners expand every merged token's single velocity back
 /// into one velocity per Sobol point, so the output is always the full <c>[1, 8192, 16]</c> latent velocity Idol's decoders expect. The dense layout takes Idol's own path. Borrows the trunk and the weights.</summary>
@@ -41,9 +56,9 @@ public sealed class BudgetDenoiser : IDisposable
     public IEnumerable<Tensor> EnumerateWeights()
         => _cellMixer.EnumerateWeights().Concat(_cubeMixer.EnumerateWeights()).Concat(_ipe.EnumerateWeights()).Concat(_cellRefiner.EnumerateWeights()).Concat(_cubeRefiner.EnumerateWeights());
 
-    /// <summary>The velocity of <paramref name="latent"/> <c>[1, 8192, 16]</c> and <paramref name="camera"/> <c>[1, 1, 5]</c> at the model time <paramref name="t"/> (1000 times the flow time) on <paramref name="layout"/>,
-    /// conditioned on <paramref name="context"/> from <see cref="IdolDenoiser.EmbedContext"/>. The caller owns both results.</summary>
-    public (Tensor Latent, Tensor Camera) Forward(IBackend backend, Tensor latent, Tensor camera, float t, Tensor context, BudgetLayout layout)
+    /// <summary>The token sequence of <paramref name="latent"/> on <paramref name="layout"/>: the embedding, the scale mixers, the position encoding and the scale rows. It depends on the latent and the layout only, not on the
+    /// condition or the time step, so a guided step prepares it once and runs both passes from it.</summary>
+    public BudgetTokens Prepare(IBackend backend, Tensor latent, BudgetLayout layout)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
@@ -51,20 +66,47 @@ public sealed class BudgetDenoiser : IDisposable
         IdolConfig config = _adapters.Config;
         if (latent.Shape.Rank != 3 || latent.Shape[0] != 1 || latent.Shape[1] != BudgetOctree.Points || latent.Shape[2] != config.LatentChannels)
             throw new ArgumentException($"Budget3D takes a [1, {BudgetOctree.Points}, {config.LatentChannels}] latent; got {latent.Shape}.", nameof(latent));
-
         Tensor embedded = _trunk.EmbedLatent(backend, latent);
         if (layout.IsDense)
         {
-            (Tensor v, Tensor c, Tensor? unused) = _trunk.ForwardTokens(backend, embedded, camera, t, context, wantHidden: false);
+            // Idol's own path: nothing is shared between the passes, so the embedding is not copied to the host; each pass embeds the latent itself.
+            embedded.Dispose();
+            return new BudgetTokens([], layout);
+        }
+
+        return new BudgetTokens(BudgetTimer.Measure("embed tokens", () => EmbedTokens(backend, embedded, layout)), layout);
+    }
+
+    /// <summary>The velocity of <paramref name="latent"/> <c>[1, 8192, 16]</c> and <paramref name="camera"/> <c>[1, 1, 5]</c> at the model time <paramref name="t"/> (1000 times the flow time) on <paramref name="layout"/>,
+    /// conditioned on <paramref name="context"/> from <see cref="IdolDenoiser.EmbedContext"/>. The caller owns both results.</summary>
+    public (Tensor Latent, Tensor Camera) Forward(IBackend backend, Tensor latent, Tensor camera, float t, Tensor context, BudgetLayout layout)
+        => Forward(backend, Prepare(backend, latent, layout), latent, camera, t, context);
+
+    /// <summary>The same from tokens prepared by <see cref="Prepare"/> for this latent.</summary>
+    public (Tensor Latent, Tensor Camera) Forward(IBackend backend, BudgetTokens prepared, Tensor latent, Tensor camera, float t, Tensor context)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(prepared);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        IdolConfig config = _adapters.Config;
+        BudgetLayout layout = prepared.Layout;
+        if (!layout.IsDense && prepared.Values.Length != (long)layout.Tokens * config.ModelChannels)
+            throw new ArgumentException($"The prepared tokens hold {prepared.Values.Length} values; layout of {layout.Tokens} tokens needs {(long)layout.Tokens * config.ModelChannels}.", nameof(prepared));
+        if (latent.Shape.Rank != 3 || latent.Shape[0] != 1 || latent.Shape[1] != BudgetOctree.Points || latent.Shape[2] != config.LatentChannels)
+            throw new ArgumentException($"Budget3D takes a [1, {BudgetOctree.Points}, {config.LatentChannels}] latent; got {latent.Shape}.", nameof(latent));
+        if (layout.IsDense)
+        {
+            Tensor dense = _trunk.EmbedLatent(backend, latent);
+            (Tensor v, Tensor c, Tensor? unused) = _trunk.ForwardTokens(backend, dense, camera, t, context, wantHidden: false);
             unused?.Dispose();
             return (v, c);
         }
 
-        Tensor tokens = EmbedTokens(backend, embedded, layout);
-        (Tensor velocity, Tensor cameraVelocity, Tensor? hidden) = _trunk.ForwardTokens(backend, tokens, camera, t, context, wantHidden: true);
+        Tensor tokens = BudgetHost.Make(prepared.Values, 1, layout.Tokens, config.ModelChannels);
+        (Tensor velocity, Tensor cameraVelocity, Tensor? hidden) = BudgetTimer.Measure("trunk", () => { (Tensor v, Tensor c, Tensor? h) r = _trunk.ForwardTokens(backend, tokens, camera, t, context, wantHidden: true); if (BudgetTimer.Enabled) backend.Sync(); return r; });
         try
         {
-            Tensor expanded = Expand(backend, velocity.AsReadOnlySpan<float>(), hidden!.AsReadOnlySpan<float>(), latent.AsReadOnlySpan<float>(), t, layout, config);
+            Tensor expanded = BudgetTimer.Measure("expand", () => Expand(backend, velocity.AsReadOnlySpan<float>(), hidden!.AsReadOnlySpan<float>(), latent.AsReadOnlySpan<float>(), t, layout, config));
             return (expanded, cameraVelocity);
         }
         catch
@@ -81,7 +123,7 @@ public sealed class BudgetDenoiser : IDisposable
 
     // The token sequence [s = 4 | s = 2 | s = 1] of a layout from the dense embedding (consumed): every cell and cube gets its mixed feature, the layout picks the rows, and the merged tokens add their scale's
     // position encoding and every token its scale's embedding row.
-    private Tensor EmbedTokens(IBackend backend, Tensor dense, BudgetLayout layout)
+    private float[] EmbedTokens(IBackend backend, Tensor dense, BudgetLayout layout)
     {
         int d = _adapters.Config.ModelChannels;
         float[] octree = new float[BudgetOctree.Points * d];
@@ -119,7 +161,7 @@ public sealed class BudgetDenoiser : IDisposable
         AddScaleRow(tokens, 0, layout.CubeTokens, scaleRows.Slice(BudgetOctree.ScaleRow(4) * d, d), d);
         AddScaleRow(tokens, layout.CubeTokens, layout.CellTokens, scaleRows.Slice(BudgetOctree.ScaleRow(2) * d, d), d);
         AddScaleRow(tokens, layout.CubeTokens + layout.CellTokens, layout.PointTokens, scaleRows.Slice(BudgetOctree.ScaleRow(1) * d, d), d);
-        return BudgetHost.Make(tokens, 1, layout.Tokens, d);
+        return tokens;
     }
 
     private static float[] Gather(float[] table, int[] rows, int width)

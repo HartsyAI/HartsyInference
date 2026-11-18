@@ -58,7 +58,8 @@ public static class BudgetSampler
             using (IDisposable? scope = passScope?.Invoke(tModel))
             {
                 using Tensor zT = BudgetHostTensor(z, 1, BudgetOctree.Points, lc), camT = BudgetHostTensor(cam, 1, 1, cc);
-                (Tensor vp, Tensor cp) = model.Forward(backend, zT, camT, tModel, contextAt is not null ? contextAt(tModel) : positive, layout);
+                BudgetTokens prepared = model.Prepare(backend, zT, layout);   // once per step: both guidance passes share it
+                (Tensor vp, Tensor cp) = model.Forward(backend, prepared, zT, camT, tModel, contextAt is not null ? contextAt(tModel) : positive);
                 using (vp)
                 using (cp)
                 {
@@ -68,7 +69,7 @@ public static class BudgetSampler
 
                 if (guidance > 0f)
                 {
-                    (Tensor vn, Tensor cn) = model.Forward(backend, zT, camT, tModel, contextAt is not null ? contextAt(tModel) : negative!, layout);
+                    (Tensor vn, Tensor cn) = model.Forward(backend, prepared, zT, camT, tModel, contextAt is not null ? contextAt(tModel) : negative!);
                     using (vn)
                     using (cn)
                     {

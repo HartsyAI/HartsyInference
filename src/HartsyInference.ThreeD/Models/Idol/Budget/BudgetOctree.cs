@@ -125,24 +125,24 @@ public static class BudgetOctree
         float[] cell = new float[Cells], cube = new float[Cubes];
         int[] cubeCells = CubeToCells();
         // Population variance per channel, averaged over channels, in float32 like the reference's tensor ops.
-        for (int c = 0; c < Cells; c++)
-            cell[c] = Score(MeanVariance(latentInOctreeOrder, channels, [c * 2, c * 2 + 1]));
-        int[] points = new int[16];
-        for (int j = 0; j < Cubes; j++)
+        float[] z = latentInOctreeOrder.ToArray();
+        Parallel.For(0, Cells, c => cell[c] = Score(MeanVariance(z, channels, [c * 2, c * 2 + 1])));
+        Parallel.For(0, Cubes, j =>
         {
+            int[] points = new int[16];
             for (int o = 0; o < 8; o++)
             {
                 points[o * 2] = cubeCells[j * 8 + o] * 2;
                 points[o * 2 + 1] = cubeCells[j * 8 + o] * 2 + 1;
             }
 
-            cube[j] = Score(MeanVariance(latentInOctreeOrder, channels, points));
-        }
+            cube[j] = Score(MeanVariance(z, channels, points));
+        });
 
         return (cube, cell);
     }
 
-    private static float MeanVariance(ReadOnlySpan<float> z, int channels, int[] rows)
+    private static float MeanVariance(float[] z, int channels, int[] rows)
     {
         float total = 0f;
         for (int ch = 0; ch < channels; ch++)
