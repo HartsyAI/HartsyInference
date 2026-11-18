@@ -75,7 +75,7 @@ user stream. Prefill runs in chunks of 512. There is no explicit barge-in logic:
 | Config | `Qwen35HfConfig.FromTextConfig(root["lm"])` | `attn_output_gate` is not parsed |
 | Codec | `VibeVoiceAcousticTokenizerModel` (encoder, decoder, streaming cache) | key names only (below) |
 | Tokenizer | `HfTokenizerJson.LoadByteLevelBpe` | check `tokenizer.json` loads |
-| Head | `VibeVoiceDiffusionHead` is key-bound and `internal` | new shared layer stack, see the plan |
+| Head | `Audio/Layers/AdaLnSwiGluStack` + `ScalarEmbed` (shared with `VibeVoiceDiffusionHead`), `Models/Haru/HaruMeanFlowHead` | none |
 | DRY sampler | none in `src/` | new `ISamplerStep` |
 
 Codec key map (Haru to engine), implemented in `Audio/Models/Haru/HaruCodecWeights.cs` (a key outside it throws) with the
@@ -109,7 +109,12 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
   bytes, on 6.05 s of an 8 kHz phone recording resampled linearly to 24 kHz (a clip of the HartsyPhone eval set,
   `ae91bf895267.wav`, 145,234 samples, ends mid-frame): whole encode 1.1e-5 relative, whole decode of the upstream latents
   2.3e-6, three streamed encode frames 2.7e-6, three streamed decode frames 4.2e-6. 1 m 47 s on the CPU backend.
-- Not run: trunk, projectors, head and the full frame loop against the fixture; wideband speech; GPU.
+- 2026-11-17, MeanFlow head, CPU F32 (`HaruMeanFlowHeadTests`): latents from the tiny checkpoint's hidden states and noise,
+  un-normalized as the session does, 8.9e-7 relative to upstream. The same head with BF16 weights as stored stays within 1.2e-2
+  of the F32 head. `VibeVoiceDiffusionHead` now runs on the same stack and scalar embedder; its output bits on a tiny random
+  head are unchanged (`VibeVoiceDiffusionHeadGoldenTests`, pinned before the move, CPU F32).
+- Not run: trunk, projectors and the full frame loop against the fixture; the head on real weights; the moved VibeVoice head on
+  a GPU or in a real VibeVoice generation; wideband speech; GPU.
 
 Regression net rebuilt for shared code (all CPU): `VibeVoiceCodecStreamingTests` (whole vs streamed, pinned decode),
 `Qwen35HuggingFaceParityTests` (tiny Qwen3.5 trunk vs transformers, 2e-4; restored from `e9474bb06^`),
