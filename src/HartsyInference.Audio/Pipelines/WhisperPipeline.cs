@@ -27,9 +27,8 @@ namespace HartsyInference.Audio.Pipelines;
 /// <para>Greedy decoding only in v1. Beam search, temperature fallback, and long-form
 /// audio (sequential or chunked) land in subsequent passes; the encoder and decoder
 /// modules already expose the necessary state hooks. <see cref="SegmentAudio"/> gives
-/// SEGMENT-level timestamps from the model's native <c>&lt;|t|&gt;</c> tokens; true
-/// word-level alignment is not available because it needs cross-attention DTW and
-/// <c>WhisperDecoder</c> runs fused SDPA without surfacing attention weights.</para></summary>
+/// SEGMENT-level timestamps from the model's native <c>&lt;|t|&gt;</c> tokens, and
+/// <see cref="AlignWords"/> gives word-level times by cross-attention DTW.</para></summary>
 public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 {
     /// <summary>Whisper's input window in seconds; longer audio is not decoded past this point.</summary>
@@ -45,6 +44,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     private readonly MelSpectrogramExtractor _melExtractor;
     private readonly SafeTensorsLoader _loader;
     private readonly WhisperDecodeSuppression _suppression;
+    private readonly IReadOnlyList<WhisperAlignmentHead> _alignmentHeads;
     private int _disposed;
 
     /// <summary>Name of the loaded model (HF repo id).</summary>
@@ -60,7 +60,8 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         WhisperDecoder decoder,
         WhisperTokenizer tokenizer,
         SafeTensorsLoader loader,
-        WhisperDecodeSuppression suppression)
+        WhisperDecodeSuppression suppression,
+        IReadOnlyList<WhisperAlignmentHead> alignmentHeads)
     {
         ModelName = modelName;
         _cfg = cfg;
@@ -69,6 +70,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         _tokenizer = tokenizer;
         _loader = loader;
         _suppression = suppression;
+        _alignmentHeads = alignmentHeads;
         _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(cfg.NumMelBins));
     }
 
@@ -117,10 +119,12 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 
         WhisperTokenizer tokenizer = new(repoDir);
         RequireSameLayout(resolvedCfg, tokenizer, repoDir);
-        WhisperDecodeSuppression suppression = fetched.TryGetValue("generation_config.json", out string? generationConfig)
+        fetched.TryGetValue("generation_config.json", out string? generationConfig);
+        WhisperDecodeSuppression suppression = generationConfig is not null
             ? WhisperDecodeSuppression.Load(generationConfig)
             : WhisperDecodeSuppression.None;
-        return new WhisperPipeline(hfRepoId, resolvedCfg, encoder, decoder, tokenizer, loader, suppression);
+        IReadOnlyList<WhisperAlignmentHead> alignmentHeads = WhisperAlignmentHeads.Resolve(generationConfig, resolvedCfg);
+        return new WhisperPipeline(hfRepoId, resolvedCfg, encoder, decoder, tokenizer, loader, suppression, alignmentHeads);
     }
 
     /// <summary>Convenience: transcribe a WAV file. Auto-resamples to 16 kHz and
@@ -167,6 +171,63 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         (Tensor mel, double seconds) = PrepareMel(audio, sampleRate);
         timer?.Mark("mel");
         return ParseSegments(DecodeTokens(backend, mel, opts with { WithTimestamps = true }, timer), seconds);
+    }
+
+    /// <summary>Times every word of the clip by aligning the text to the audio through the decoder's cross-attention. With no <paramref name="knownText"/> the clip is transcribed first and that transcript is aligned; with it, the given text is aligned as it stands (a forced alignment, for lyrics or a script the caller already has). Covers the first 30 s of the clip, like <see cref="TranscribeAudio"/>; a text that does not fit the decoder's context throws. Returns an empty list when there is no text.</summary>
+    public IReadOnlyList<WhisperWord> AlignWords(IBackend backend, float[] audio, int sampleRate, string? knownText = null, WhisperOptions? options = null)
+    {
+        ThrowIfDisposed();
+        WhisperOptions opts = (options ?? new WhisperOptions()) with { WithTimestamps = false };
+        StageTimer? timer = StageTimer.Start(backend, "Whisper");
+        (Tensor mel, double seconds) = PrepareMel(audio, sampleRate);
+        timer?.Mark("mel");
+        Tensor encoded;
+        try
+        {
+            encoded = _encoder.Forward(backend, mel, timer);
+        }
+        finally { mel.Dispose(); }
+        timer?.Mark("encoder");
+
+        try
+        {
+            List<int> text;
+            if (knownText is null)
+            {
+                using WhisperDecoder.DecodeState state = _decoder.StartDecode(backend, encoded);
+                state.Timer = timer;
+                text = GreedyDecode(backend, state, opts, timer);
+            }
+            else
+            {
+                text = [.. _tokenizer.EncodeText(" " + knownText.Trim())];
+            }
+            text.RemoveAll(id => id >= _tokenizer.EotId);
+            return AlignTokens(backend, encoded, text, seconds, opts);
+        }
+        finally { encoded.Dispose(); }
+    }
+
+    /// <summary>Runs one teacher-forced decoder pass over <c>[prompt, text, end-of-text]</c> and reads the words' times off the alignment heads' attention.</summary>
+    private IReadOnlyList<WhisperWord> AlignTokens(IBackend backend, Tensor encoded, List<int> text, double audioSeconds, WhisperOptions opts)
+    {
+        if (text.Count == 0)
+        {
+            return [];
+        }
+        int[] prompt = _tokenizer.BuildPromptIds(opts.Language, opts.Translate, withTimestamps: false);
+        int[] sequence = [.. prompt, .. text, _tokenizer.EotId];
+        if (sequence.Length > _cfg.MaxTextPositions)
+        {
+            throw new ArgumentException($"The text takes {sequence.Length} decoder positions but the model holds {_cfg.MaxTextPositions}; align it in shorter parts.");
+        }
+
+        int frames = Math.Clamp((int)(audioSeconds * WhisperWordTimings.FramesPerSecond), 1, _cfg.MaxAudioPositions);
+        WhisperAttentionProbe probe = new(_alignmentHeads, frames);
+        using WhisperDecoder.DecodeState state = _decoder.StartDecode(backend, encoded);
+        _decoder.DecodeStep(backend, sequence, state, probe).Dispose();
+        IReadOnlyList<WhisperWordTokens> words = WhisperWordSplitter.Split(ids => _tokenizer.Decode(ids.Span), text.ToArray(), opts.Language);
+        return WhisperWordTimings.Compute(probe, prompt.Length, words);
     }
 
     /// <summary>Timestamped decode from a pre-computed mel; <paramref name="audioSeconds"/> only closes a span the

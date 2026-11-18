@@ -73,7 +73,7 @@ internal static class LongFormTranscription
             List<SttSegment> spans = decoded.Where(span => span.Start < pieceSeconds).ToList();
             if (spans.Count > 0)
             {
-                string spoken = string.Join(" ", spans.Select(span => span.Text.Trim())).Trim();
+                string spoken = SttSegment.Join(spans);
                 if (spoken.Length == 0)
                 {
                     empty++;

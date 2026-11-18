@@ -101,7 +101,7 @@ internal static class SttCatalog
                 pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual)), pipeline)
             {
                 MaxInputSeconds = WhisperPipeline.WindowSeconds,
-                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
+                Timed = (backend, audio, request) => TimedWhisper(pipeline, backend, audio, request),
             };
         },
     };
@@ -118,7 +118,7 @@ internal static class SttCatalog
                 pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual)), pipeline)
             {
                 MaxInputSeconds = WhisperPipeline.WindowSeconds,
-                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
+                Timed = (backend, audio, request) => TimedWhisper(pipeline, backend, audio, request),
             };
         },
     };
@@ -229,10 +229,32 @@ internal static class SttCatalog
                 MaxInputSeconds = WhisperPipeline.WindowSeconds,
                 // The stabilizer carries no timing of its own, so timestamps come from the underlying batch decode —
                 // which the streaming pipeline's own docs describe as the same result for a whole-clip call.
-                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
+                Timed = (backend, audio, request) => TimedWhisper(pipeline, backend, audio, request),
             };
         },
     };
+
+    /// <summary>The Whisper family's timed decode: one span per word, aligned through cross-attention, when the request asks for word timestamps (aligning its known text when it has one); otherwise the model's native phrase spans.</summary>
+    private static IReadOnlyList<SttSegment> TimedWhisper(WhisperPipeline pipeline, IBackend backend, float[] audio, AudioRequest request)
+    {
+        WhisperOptions options = ToWhisperOptions(request, pipeline.IsMultilingual);
+        if (request.WordTimestamps)
+        {
+            return ToSegments(pipeline.AlignWords(backend, audio, 16_000, request.AlignText, options));
+        }
+        return ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, options));
+    }
+
+    /// <summary>Projects Whisper's aligned words onto the engine-side segment type.</summary>
+    private static IReadOnlyList<SttSegment> ToSegments(IReadOnlyList<WhisperWord> words)
+    {
+        List<SttSegment> result = new List<SttSegment>(words.Count);
+        foreach (WhisperWord word in words)
+        {
+            result.Add(new SttSegment { Text = word.Text, Start = word.Start, End = word.End, IsWord = true });
+        }
+        return result;
+    }
 
     /// <summary>Projects Whisper's native timestamp spans onto the engine-side segment type.</summary>
     private static IReadOnlyList<SttSegment> ToSegments(IReadOnlyList<WhisperSegment> segments)

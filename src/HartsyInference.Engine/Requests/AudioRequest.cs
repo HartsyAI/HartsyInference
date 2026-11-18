@@ -18,6 +18,9 @@ public sealed record AudioRequest
     /// <summary>Request word-level start/end timestamps (and word segments) in the result.</summary>
     public bool WordTimestamps { get; init; }
 
+    /// <summary>The words actually spoken, when the caller already has them (lyrics, a script). With <see cref="WordTimestamps"/> the model times this text instead of transcribing; it fits one model window, so a longer clip is refused. Ignored without word timestamps.</summary>
+    public string? AlignText { get; init; }
+
     /// <summary>Request speaker diarization (who-spoke-when) in the result.</summary>
     public bool Diarization { get; init; }
 
