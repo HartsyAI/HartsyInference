@@ -15,6 +15,7 @@ namespace HartsyInference.ThreeD.Tests.Parity;
 /// own layout indices, from the saved latent, camera and image tokens. The CPU test runs the smallest budget (all tokens are 8³ cubes, so it covers the mixers, the position encoder and both refine stages); the CUDA test runs
 /// every budget, including the s = 2 and s = 1 tokens of the larger ones. Needs the Budget3D checkpoint (<c>HARTSY_IDOL_MODELS</c>, the folder that holds <c>budget3d-idol/</c>) and the dump folder (<c>HARTSY_IDOL_REF</c>).</summary>
 [Trait("Category", "Integration")]
+[Collection(Budget3DCudaCollection.Name)]
 public sealed class BudgetDenoiserParityTests
 {
     private const string ModelsEnv = "HARTSY_IDOL_MODELS";

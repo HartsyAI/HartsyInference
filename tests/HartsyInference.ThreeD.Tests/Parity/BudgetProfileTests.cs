@@ -12,6 +12,7 @@ namespace HartsyInference.ThreeD.Tests.Parity;
 
 /// <summary>Where a Budget3D forward spends its time on CUDA in the shipped precision (F16 blocks): the token embedding, the trunk, and the expansion, per budget. A measurement, not a gate; it prints the milliseconds of the second and third calls.</summary>
 [Trait("Category", "GpuIntegration")]
+[Collection(Budget3DCudaCollection.Name)]
 public sealed class BudgetProfileTests
 {
     private readonly ITestOutputHelper _output;
@@ -29,7 +30,7 @@ public sealed class BudgetProfileTests
         string layouts = Path.Combine(refDir ?? "", "b3d", "layouts.safetensors");
         if (!new[] { checkpoint, conditioning, inputs, layouts }.All(File.Exists) || !CudaContext.IsAvailable())
         {
-            _output.WriteLine("SKIPPED");
+            _output.WriteLine($"SKIPPED: needs the Budget3D checkpoint, the reference dumps and a CUDA card (missing: {string.Join(", ", new[] { checkpoint, conditioning, inputs, layouts }.Where(f => !File.Exists(f)).DefaultIfEmpty("CUDA"))})");
             return;
         }
 

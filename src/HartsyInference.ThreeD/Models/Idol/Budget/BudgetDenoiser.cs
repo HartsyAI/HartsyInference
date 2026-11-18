@@ -69,8 +69,9 @@ public sealed class BudgetDenoiser : IDisposable
         Tensor embedded = _trunk.EmbedLatent(backend, latent);
         if (layout.IsDense)
         {
-            using (embedded)
-                return new BudgetTokens(embedded.AsReadOnlySpan<float>().ToArray(), layout);
+            // Idol's own path: nothing is shared between the passes, so the embedding is not copied to the host; each pass embeds the latent itself.
+            embedded.Dispose();
+            return new BudgetTokens([], layout);
         }
 
         return new BudgetTokens(BudgetTimer.Measure("embed tokens", () => EmbedTokens(backend, embedded, layout)), layout);
@@ -89,15 +90,20 @@ public sealed class BudgetDenoiser : IDisposable
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         IdolConfig config = _adapters.Config;
         BudgetLayout layout = prepared.Layout;
-        Tensor tokens = BudgetHost.Make(prepared.Values, 1, layout.IsDense ? BudgetOctree.Points : layout.Tokens, config.ModelChannels);
+        if (!layout.IsDense && prepared.Values.Length != (long)layout.Tokens * config.ModelChannels)
+            throw new ArgumentException($"The prepared tokens hold {prepared.Values.Length} values; layout of {layout.Tokens} tokens needs {(long)layout.Tokens * config.ModelChannels}.", nameof(prepared));
+        if (latent.Shape.Rank != 3 || latent.Shape[0] != 1 || latent.Shape[1] != BudgetOctree.Points || latent.Shape[2] != config.LatentChannels)
+            throw new ArgumentException($"Budget3D takes a [1, {BudgetOctree.Points}, {config.LatentChannels}] latent; got {latent.Shape}.", nameof(latent));
         if (layout.IsDense)
         {
-            (Tensor v, Tensor c, Tensor? unused) = _trunk.ForwardTokens(backend, tokens, camera, t, context, wantHidden: false);
+            Tensor dense = _trunk.EmbedLatent(backend, latent);
+            (Tensor v, Tensor c, Tensor? unused) = _trunk.ForwardTokens(backend, dense, camera, t, context, wantHidden: false);
             unused?.Dispose();
             return (v, c);
         }
 
-        (Tensor velocity, Tensor cameraVelocity, Tensor? hidden) = BudgetTimer.Measure("trunk", () => { (Tensor v, Tensor c, Tensor? h) r = _trunk.ForwardTokens(backend, tokens, camera, t, context, wantHidden: true); backend.Sync(); return r; });
+        Tensor tokens = BudgetHost.Make(prepared.Values, 1, layout.Tokens, config.ModelChannels);
+        (Tensor velocity, Tensor cameraVelocity, Tensor? hidden) = BudgetTimer.Measure("trunk", () => { (Tensor v, Tensor c, Tensor? h) r = _trunk.ForwardTokens(backend, tokens, camera, t, context, wantHidden: true); if (BudgetTimer.Enabled) backend.Sync(); return r; });
         try
         {
             Tensor expanded = BudgetTimer.Measure("expand", () => Expand(backend, velocity.AsReadOnlySpan<float>(), hidden!.AsReadOnlySpan<float>(), latent.AsReadOnlySpan<float>(), t, layout, config));
