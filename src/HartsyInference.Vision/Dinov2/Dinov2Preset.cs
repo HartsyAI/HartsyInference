@@ -44,6 +44,13 @@ public sealed record Dinov2Preset
     /// presets; <see cref="Dinov2VisionEncoder"/> rejects them.</summary>
     public bool UsesRotaryPositionEmbedding { get; init; }
 
+    /// <summary>DINOv3 only: round the RoPE periods to bfloat16, as the HairDeck and TRELLIS.2 references do. False keeps them in
+    /// float32, as Hugging Face's <c>DINOv3ViTModel</c> does (Idol's reference).</summary>
+    public bool RoundRopePeriodsToBf16 { get; init; } = true;
+
+    /// <summary>DINOv3 only: the MLP is SwiGLU (<c>silu(gate_proj(x)) · up_proj(x)</c>, the ViT-H+) and not the plain GELU one. <c>Dinov3Layer</c> requires <c>mlp.gate_proj</c> in every layer when this is set and refuses a checkpoint that has it when it is not, so a preset and a file that disagree fail at load.</summary>
+    public bool GatedMlp { get; init; }
+
     /// <summary>LayerNorm epsilon (1e-6 for DINOv2; 1e-5 for the DINOv3 ViT-S/B/L checkpoints).</summary>
     public float LayerNormEps { get; init; } = 1e-6f;
 
@@ -135,6 +142,18 @@ public sealed record Dinov2Preset
         ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, LayerNormEps = 1e-5f,
     };
 
+    /// <summary><c>facebook/dinov3-vith16plus-pretrain-lvd1689m</c> — DINOv3 ViT-H+/16: SwiGLU MLP (<c>mlp.gate_proj</c>,
+    /// <c>up_proj</c>, <c>down_proj</c>, 5120 wide), 32 layers, 20 heads of 64. Idol conditions on 1024 px (64×64 patches, 4101
+    /// tokens with CLS and 4 storage tokens). <see cref="LayerNormEps"/> is the 1e-5 of the other DINOv3 ViTs and is the HF
+    /// <c>DINOv3ViTConfig</c> default, which the Idol conversion script leaves unchanged.</summary>
+    public static Dinov2Preset V3HugePlus16 => new()
+    {
+        Name = "facebook/dinov3-vith16plus-pretrain-lvd1689m",
+        HiddenSize = 1280, NumLayers = 32, NumHeads = 20, IntermediateSize = 5120,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, LayerNormEps = 1e-5f,
+        RoundRopePeriodsToBf16 = false, GatedMlp = true,
+    };
+
     /// <summary>The DINOv2 variant an HF-layout checkpoint was trained as, read from its width
     /// (<c>embeddings.cls_token</c>), layer count, register tokens and patch size. Throws for DINOv3 (16 px patches, RoPE
     /// the encoder lacks) and for any shape no released DINOv2 variant has.</summary>
@@ -173,10 +192,10 @@ public sealed record Dinov2Preset
             + "variant (Small 384×12, Base 768×12, Large 1024×24 with 0 or 4 registers, Giant 1536×40).");
     }
 
-    /// <summary>The DINOv3 ViT-S/B/L preset an HF-layout DINOv3 checkpoint was trained as, at <paramref name="imageSize"/>.
+    /// <summary>The DINOv3 ViT-S/B/L or ViT-H+ preset an HF-layout DINOv3 checkpoint was trained as, at <paramref name="imageSize"/>.
     /// This is the explicit DINOv3 selector: <see cref="FromWeights"/> never matches a DINOv3 file, so a caller opts in by
     /// calling this and <c>Dinov3VisionEncoder</c>. Width and depth pick the variant; the caller states the input size.
-    /// Throws for a gated (SwiGLU) MLP, which the encoder does not implement.</summary>
+    /// A gated (SwiGLU) MLP is accepted for the ViT-H+ only; the S/B/L presets are the plain GELU MLP.</summary>
     public static Dinov2Preset FromDinov3Weights(IReadOnlyDictionary<string, Tensor> weights, int imageSize, string prefix = "")
     {
         ArgumentNullException.ThrowIfNull(weights);
@@ -192,8 +211,7 @@ public sealed record Dinov2Preset
                 $"Not an HF-layout DINOv3 checkpoint: '{p}embeddings.cls_token', '{p}embeddings.patch_embeddings.weight', "
                 + $"'{p}embeddings.register_tokens' or '{p}layer.0.mlp.up_proj.weight' is missing.");
         }
-        if (weights.ContainsKey($"{p}layer.0.mlp.gate_proj.weight"))
-            throw new NotSupportedException("DINOv3 checkpoint with a gated (SwiGLU) MLP: the encoder implements the plain GELU MLP only.");
+        bool gated = weights.ContainsKey($"{p}layer.0.mlp.gate_proj.weight");
 
         int hidden = (int)cls.Shape[cls.Shape.Rank - 1];
         int patchSize = (int)patch.Shape[patch.Shape.Rank - 1];
@@ -204,15 +222,17 @@ public sealed record Dinov2Preset
         if (patchSize != 16 || registers != 4)
             throw new NotSupportedException($"DINOv3 checkpoint with {patchSize} px patches and {registers} storage tokens; expected 16 px and 4.");
 
-        Dinov2Preset? preset = (hidden, layers) switch
+        Dinov2Preset? preset = (hidden, layers, gated) switch
         {
-            (384, 12) => V3Small16,
-            (768, 12) => V3Base16,
-            (1024, 24) => V3Large16,
+            (384, 12, false) => V3Small16,
+            (768, 12, false) => V3Base16,
+            (1024, 24, false) => V3Large16,
+            (1280, 32, true) => V3HugePlus16,
             _ => null,
         };
         return (preset ?? throw new NotSupportedException(
-            $"DINOv3 checkpoint with width {hidden} and {layers} layers matches no supported variant (ViT-S 384×12, ViT-B 768×12, ViT-L 1024×24)."))
+            $"DINOv3 checkpoint with width {hidden}, {layers} layers and a {(gated ? "gated (SwiGLU)" : "plain")} MLP matches no supported variant "
+            + "(plain: ViT-S 384×12, ViT-B 768×12, ViT-L 1024×24; gated: ViT-H+ 1280×32)."))
             with { ImageSize = imageSize };
     }
 }

@@ -57,7 +57,7 @@ through the tied embedding, the audio latent through the head, un-normalized by 
 `start()` runs the prompt and emits frame 0; each `step(user frame k)` runs one position and returns frame k+1.
 
 The user latent is a sample: `mean + r * (0.5 / 0.8) * n`, one scalar `r ~ N(0, 1)` per row and `n ~ N(0, 1)` per element.
-PAD (248076) and EOP (248071) logits are recomputed in F32 from F32 embedding rows: the silent-or-speak decision is closer
+PAD (248076, `<|audio_pad|>`) and EOP (248071, `<|audio_end|>`) logits are recomputed in F32 from F32 embedding rows: the silent-or-speak decision is closer
 than BF16 resolves. Text sampling: temperature 0.7, top-k 25, DRY (multiplier 0.8, base 1.75, allowed length 1, lookback
 1024, max match 32, cap 32, PAD/EOP/EOS exempt), `eop_bias` added to the EOP logit, `speak_first` bans PAD/EOP/EOS for one
 frame, 27,000 frames at most.
@@ -71,15 +71,15 @@ user stream. Prefill runs in chunks of 512. There is no explicit barge-in logic:
 
 | Part | Engine owner | Gap |
 |---|---|---|
-| Trunk | `Qwen35Model.FromHuggingFace(w, cfg, cap, prefix "lm", lmHeadKey null)`; head falls back to `token_embd.weight` | none expected; embed table must stay F32/BF16/F16 |
-| Config | `Qwen35HfConfig.FromTextConfig(root["lm"])` | `attn_output_gate` is not parsed |
+| Trunk | `Qwen35Model.FromHuggingFace(w, cfg, cap, prefix "lm", lmHeadKey null)`; head falls back to `token_embd.weight` | none; the delta-rule scan needs equal key and value head widths (128 and 128 in the release); the embed table must stay F32/BF16/F16 |
+| Config | `Qwen35HfConfig.FromTextConfig(root["lm"])`, wrapped by `Models/Haru/HaruConfig` | `attn_output_gate` is not parsed by the engine; `HaruConfig` refuses false |
 | Codec | `VibeVoiceAcousticTokenizerModel` (encoder, decoder, streaming cache) | key names only (below) |
-| Tokenizer | `HfTokenizerJson.LoadByteLevelBpe` | check `tokenizer.json` loads |
-| Head | `VibeVoiceDiffusionHead` is key-bound and `internal` | new shared layer stack, see the plan |
-| DRY sampler | none in `src/` | new `ISamplerStep` |
+| Tokenizer | `HfTokenizerJson.LoadByteLevelBpe`, checked by `Models/Haru/HaruTokenizer` | none |
+| Head | `Audio/Layers/AdaLnSwiGluStack` + `ScalarEmbed` (shared with `VibeVoiceDiffusionHead`), `Models/Haru/HaruMeanFlowHead` | none |
+| DRY sampler | `LLM/Sampling/DryPenaltyStep` (new, shared), `SamplerChain.FromSteps` | none |
 
-Codec key map (Haru to engine; `tok.` is the caller's prefix). Verified on the tiny checkpoint below with no change to the
-shared classes:
+Codec key map (Haru to engine), implemented in `Audio/Models/Haru/HaruCodecWeights.cs` (a key outside it throws) with the
+config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no change to the shared classes:
 
 | Haru | Engine |
 |---|---|
@@ -95,20 +95,78 @@ shared classes:
 ## Evidence
 
 Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64, 4 layers, vocab 2048, latent 16, codec base
-1) from the unmodified upstream modules and writes fixtures under `tests/HartsyInference.Audio.Tests/Fixtures/Haru/`
+1, equal key and value head widths as in the release) from the unmodified upstream modules and writes fixtures under `tests/HartsyInference.Audio.Tests/Fixtures/Haru/`
 (upstream `7fe6b766`, transformers 5.22.2, torch 2.6.0, CPU F32, one thread).
 
-- 2026-11-17, codec, unmodified engine classes through the key map above, CPU F32: whole clip ending mid-frame
+- 2026-11-17, codec, unmodified engine classes built by `HaruCodec.Create`, CPU F32 (`HaruCodecReferenceTests`): whole clip ending mid-frame
   (5 x 3200 + 1234 samples) encode 9.1e-7 relative, whole decode 2.1e-6, three streamed encode frames 8.3e-7, three
   streamed decode frames 3.1e-6. Streaming and whole-clip agree in the engine on a separate synthetic codec
   (`VibeVoiceCodecStreamingTests`, bit-exact on CPU). This settles the codec questions: down/up index base is 0 with a
   separate stem, mid-frame padding matches, no shared-code change is needed.
-- Not run: trunk, projectors, head and the full frame loop against the fixture; any real-weight run.
+- 2026-11-17, released codec, real weights, CPU F32 (`HaruCodecRealWeightsTests`, opt-in through `HARU_CODEC_REAL_DIR`): the
+  `codec.*` byte range of `model.safetensors` @ `8d6e83bc` (1,374,784,002 B, which is 687,392,001 BF16 parameters; fetched by
+  HTTP range, the whole-file sha256 not checked) against the upstream PyTorch codec loaded `strict=True` from the same
+  bytes, on 6.05 s of an 8 kHz phone recording resampled linearly to 24 kHz (a clip of the HartsyPhone eval set,
+  `ae91bf895267.wav`, 145,234 samples, ends mid-frame): whole encode 1.1e-5 relative, whole decode of the upstream latents
+  2.3e-6, three streamed encode frames 2.7e-6, three streamed decode frames 4.2e-6. 1 m 47 s on the CPU backend.
+- 2026-11-17, MeanFlow head, CPU F32 (`HaruMeanFlowHeadTests`): latents from the tiny checkpoint's hidden states and noise,
+  un-normalized as the session does, 8.9e-7 relative to upstream. The same head with BF16 weights as stored stays within 1.2e-2
+  of the F32 head. `VibeVoiceDiffusionHead` now runs on the same stack and scalar embedder; its output bits on a tiny random
+  head are unchanged (`VibeVoiceDiffusionHeadGoldenTests`: bit-identical on the reference host, pinned before the move; the test
+  keeps the values with a 1e-6 tolerance so it holds on other CPUs). Other step counts and guidance weights match upstream to the same
+  bound (`haru_head_steps_expected.safetensors`, `tools/haru/head_steps_reference.py`).
+- 2026-11-17, language model, CPU F32 (`HaruLmReferenceTests`): the stream-summed input (text embedding plus both projected
+  latent streams, masks, `(raw + bias) * scale`), the trunk over the 22-position prompt in one call and then six single
+  positions: hidden states 3.8e-6 relative to upstream, text logits of the six steps 8.6e-7, the F32 PAD/EOP logits 7.0e-7.
+  The same fixture reran the codec (5e-7) and the head (6.1e-7).
+- 2026-11-17, released `tokenizer.json` (sha256 `06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523`,
+  `HaruTokenizerTests`, opt-in through `HARU_TOKENIZER_JSON`): the engine's loader reads it, `<|audio_pad|>` is 248076 and
+  `<|audio_end|>` is 248071 as the config says, and a mixed English and Japanese system prompt encodes to the same 18 ids as
+  the `tokenizers` library. The released config parses and passes `HaruConfig`'s checks.
+- 2026-11-17, DRY penalty (`DryPenaltyStepTests`): the penalties equal the upstream sampler's on eight fixed histories (random,
+  periodic with exempt gaps, longer than the window, allowed length 2, capped, one token, empty, only exempt tokens).
+- 2026-11-17, the conversation loop, CPU F32, greedy (`HaruSessionReferenceTests`): prompt build, 512-position prefill, six user
+  frames stepped, text and audio out, three runs (card and reference; empty prompt; speak-first with an EOP bias of 2). Every random
+  draw of the upstream run is recorded and replayed in order (the posterior of the reference and of each user frame, the head noise),
+  all draws are consumed, and **tokens and text are identical** in all three runs (7 frames each). Audio, un-clamped and speech-sized
+  (peak 0.49-0.58), matches to 3.2e-5, 1.0e-4 and 2.7e-4 relative to peak. That is float noise fed back through the language model: the
+  codec alone agrees to 5e-7. Reference preparation (silence trim, margin, last N seconds) is equal to upstream's, sample for sample.
+  The tiny codec's output heads are scaled by 1e-3 (encoder) and 1e-4 (decoder) in the fixture so its audio is not clamped.
+- 2026-11-17, **released weights**, CPU, the checkpoint verified against its pin (10,540,113,510 B, sha256 `ad2c3534...47c0fa`),
+  upstream run in PyTorch with the same BF16 weights widened to F32 per call (`tools/haru/real_reference.py`), engine run on its CPU
+  backend (`HaruRealWeightsTests`, opt-in through `HARU_REAL_DIR`; 1 m 24 s and 8 m 59 s):
+  - fixed inputs, a 14-position prompt then 4 single positions: hidden states 5.1e-5 relative, text logits 4.8e-5, F32 PAD/EOP logits
+    2.7e-5, MeanFlow head latents 9.5e-7;
+  - a conversation: character card, a voice clip and a user recording from the HartsyPhone eval set (8 kHz phone speech resampled
+    to 24 kHz), greedy, 16 frames, every random draw of the upstream run replayed (all 48 consumed): **tokens and text identical**
+    (PAD, PAD, EOP, "Hello", ",", then silence), audio 1.9e-3 relative to peak. The model starts to speak by itself on the recording.
+- Not run: a long generation (16 frames is 2.1 s; no Whisper check yet); any GPU run; the moved VibeVoice head on
+  a GPU or in a real VibeVoice generation; wideband speech; GPU.
 
 Regression net rebuilt for shared code (all CPU): `VibeVoiceCodecStreamingTests` (whole vs streamed, pinned decode),
 `Qwen35HuggingFaceParityTests` (tiny Qwen3.5 trunk vs transformers, 2e-4; restored from `e9474bb06^`),
 `SamplerChainGoldenTests` (pinned token digests of three configurations). Real-weight baselines (VibeVoice-1.5B speech
 through Whisper, Qwen3.5 GGUF greedy digest) need weights that are not on the dev box and are still to be taken.
+To rerun the real-weight codec check: fetch the `codec.*` range into a standalone safetensors file (`tools/haru/fetch_codec.py`), run the upstream codec
+on a clip (`tools/haru/codec_reference.py`) to write `codec_real_expected.safetensors`, then `HARU_CODEC_REAL_DIR=<dir> HARTSY_REQUIRE_REAL_WEIGHTS=1 dotnet test
+tests/HartsyInference.Audio.Tests -m:1 --filter FullyQualifiedName~HaruCodecRealWeights`.
+
+## Costs and traps
+
+- The tied head is BF16 `[248,320, 2,560]`. On the CPU backend `LinearTransB` widens a non-F32 weight to F32 on every call, about
+  2.5 GB of allocation per projection, so a CPU run must project only the rows it needs: `HaruLm.Logits` takes the last `rows`
+  rows of a hidden-state tensor, and the frame loop asks for one. PAD and EOP never go through the table; `StreamLogits` reads
+  their two rows directly.
+- `VibeVoiceAcousticTokenizerModel.Decode` tells channels-last `[B, T, D]` from channels-first `[B, D, T]` by `Shape[1] == VaeDim`. A
+  whole-clip decode of exactly `VaeDim` frames (64 frames, 8.53 s, on the release; 16 on the tiny fixture) is read the wrong way
+  with no error. The frame loop decodes one frame at a time (`Shape[1] == 1`), which is safe; a whole decode of that length must
+  pass channels-first. Not fixed here: the class is shared by every VibeVoice model.
+- `HaruLm` clamps its capacity to the model's `max_position_embeddings` and exposes the result as `Capacity`; the session reports
+  a conversation that reaches it as done rather than failing inside the trunk cache.
+- Where the session follows upstream on purpose: the DRY penalty is applied to the raw logits before the temperature divides them
+  (`_emit` before `sample_token`), with PAD, EOP and EOS exempt; an EOS the model samples after the first frame is ordinary text, as
+  upstream does not end the session on it. Where it differs: bytes of a half-finished character are given up when a gap starts or
+  after four tokens, instead of being carried across the gap (`HaruStreamDetokenizer`); `Step` refuses to run after the last frame.
 
 ## Doc debt found
 
@@ -121,6 +179,5 @@ dead voice-session links and the `RealtimeScheduling` entry in `docs/Agents/AGEN
 
 - Whether the full 110 codec tensors equal VibeVoice-1.5B's (two compared).
 - Q8_0 against Q4_K decode speed for the trunk on the 3060 (`AudioLmQuant.cs` claims Q8_0 takes a slow path).
-- Whether the engine's `tokenizer.json` loader reads Haru's tokenizer and special ids.
 - Whether `Qwen35Model` per-step decode of 4B on the 3060 meets the 133 ms frame with the codec; not measured.
 - Behaviour on narrowband phone audio, behind RNNoise, and without headphones: untested upstream.

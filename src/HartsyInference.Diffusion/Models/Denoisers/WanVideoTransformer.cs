@@ -62,14 +62,36 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     internal DType ForwardActivation(IBackend backend, int timestepGroups, bool imageContext, bool stepCache) =>
         imageContext || stepCache ? DType.F32 : BranchActivation(backend, timestepGroups == 1);
 
+    private readonly IDitOutputHead? _outputHead;
+
+    /// <summary>Replaces the norm, modulation and linear output projection with a head of the caller's own (a model that
+    /// predicts pixels instead of latent patches). Set at construction, so the weights the load reads and the weights
+    /// <see cref="EnumerateWeights"/> reports cannot drift apart: with a head, the checkpoint does not need
+    /// <c>proj_out.*</c> or <c>scale_shift_table</c>, and <see cref="Forward(IBackend, Tensor, Tensor, float[], DeviceFeatureCache?, CpForwardContext?)"/>
+    /// returns the head's output instead of <c>[1, outChannels, T, H, W]</c>. The head's upsampling must equal the patch size,
+    /// or the output would not be the input's size. Not combined with context parallelism or per-frame timesteps.</summary>
+    public IDitOutputHead? OutputHead
+    {
+        get => _outputHead;
+        init
+        {
+            if (value is not null && value.Upsample != _config.PatchSize)
+                throw new ArgumentException($"The head upsamples by {value.Upsample} but the patch size is {_config.PatchSize}; the output would not match the input's size.", nameof(value));
+            _outputHead = value;
+        }
+    }
+
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         // patch_embedding.weight [inner, in, pt, ph, pw] → [inner, patchVec] (contiguous).
         Tensor pw = w["patch_embedding.weight"];
         _patchW2d = WanDitOps.Reshape2d(pw, _config.InnerDim, _patchVec);
         w.TryGetValue("patch_embedding.bias", out _patchB);
-        _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
-        _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
+        if (OutputHead is null)
+        {
+            _projOutW = w["proj_out.weight"]; w.TryGetValue("proj_out.bias", out _projOutB);
+            _finalScaleShift = TensorCasts.LoadF32(w, "scale_shift_table");
+        }
         _timeEmb1W = w["condition_embedder.time_embedder.linear_1.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_1.bias", out _timeEmb1B);
         _timeEmb2W = w["condition_embedder.time_embedder.linear_2.weight"]; w.TryGetValue("condition_embedder.time_embedder.linear_2.bias", out _timeEmb2B);
         _timeProjW = w["condition_embedder.time_proj.weight"]; w.TryGetValue("condition_embedder.time_proj.bias", out _timeProjB);
@@ -101,6 +123,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
             _timeEmb1W, _timeEmb1B, _timeEmb2W, _timeEmb2B, _timeProjW, _timeProjB, _textW1, _textB1, _textW2, _textB2 })
             if (t is not null) yield return t;
         foreach (Tensor t in _imgEmbedder.EnumerateWeights()) yield return t;
+        if (OutputHead is not null)
+            foreach (Tensor t in OutputHead.EnumerateWeights()) yield return t;
     }
 
     /// <summary>Velocity prediction. <paramref name="latent"/> is <c>[1, inChannels, T, H, W]</c>; <paramref name="encoder"/> is raw umT5 features <c>[L, textDim]</c>. Returns <c>[1, outChannels, T, H, W]</c>.</summary>
@@ -138,6 +162,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         if (g != 1 && g != gt)
             throw new ArgumentException($"timesteps must have 1 or {gt} (latent frame groups) entries; got {g}.", nameof(timesteps));
         int tokensPerGroup = s / g;
+        if (OutputHead is not null && (cp is not null || g != 1))
+            throw new NotSupportedException("A custom output head takes one timestep for the clip and does not run under context parallelism.");
         if (cp is not null)
         {
             if (stepCache is not null)
@@ -247,6 +273,15 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
             cacheAnchor.Dispose();
         }
         timestepProj.Dispose();   // cos/sin/encoderProj live in the per-generation caches — not per-forward temporaries
+
+        if (OutputHead is { } head)
+        {
+            Tensor headOutput = head.Forward(backend, cur, temb, (gt, gh, gw));
+            cur.Dispose();
+            temb.Dispose();
+            WanVideoDebugDump.DumpOutput(headOutput);
+            return headOutput;
+        }
 
         Tensor projected = WanDitOps.FinalLayer(backend, cur, temb, _finalScaleShift!, _projOutW!, _projOutB, sEff, dim, _config.Eps, tokensPerGroup);
         cur.Dispose();
