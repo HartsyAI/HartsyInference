@@ -10,7 +10,7 @@ namespace HartsyInference.Audio.Models.Haru;
 /// The model stays one frame ahead, so the 133 ms frame is the only structural latency.</summary>
 /// <remarks>Frame t of the model comes from the hidden state of the previous position: its text token from the tied embedding, its audio
 /// latent from the MeanFlow head, decoded at once. A session borrows the model, head and codec and drives them from one thread.</remarks>
-internal sealed unsafe class HaruDuplexSession
+public sealed unsafe class HaruDuplexSession : IDisposable
 {
     private const int PrefillChunk = 512;
 
@@ -30,13 +30,16 @@ internal sealed unsafe class HaruDuplexSession
     private float[]? _latent;
     private int _token;
     private int _forceText;
+    private readonly Action? _release;
     private int _index;
+    private int _disposed;
     private bool _done;
 
     /// <summary>Creates a session; <paramref name="noise"/> defaults to a generator seeded with <see cref="HaruDuplexOptions.Seed"/>.</summary>
     internal HaruDuplexSession(HaruConfig config, HaruLm lm, HaruMeanFlowHead head, HaruCodecSession codec, HaruTextCodec text,
-        IBackend backend, HaruDuplexOptions options, IHaruNoise? noise = null)
+        IBackend backend, HaruDuplexOptions options, IHaruNoise? noise = null, Action? release = null)
     {
+        _release = release;
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _lm = lm ?? throw new ArgumentNullException(nameof(lm));
         _head = head ?? throw new ArgumentNullException(nameof(head));
@@ -54,14 +57,28 @@ internal sealed unsafe class HaruDuplexSession
     }
 
     /// <summary>Frames produced since <see cref="Start"/>.</summary>
-    internal int FramesProduced => _index;
+    public int FramesProduced => _index;
+
+    /// <summary>Releases the conversation so the pipeline can open another.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _release?.Invoke();
+        }
+    }
+
+    /// <summary>How many more <see cref="Step"/> calls the conversation can take: the frame limit and the model's position capacity, whichever
+    /// comes first. Meaningful after <see cref="Start"/>.</summary>
+    public int RemainingFrames => Math.Max(0, Math.Min(_options.MaxFrames - _index, _lm.Capacity - _lm.Position - 1));
 
     /// <summary>The longest voice reference this session keeps, in seconds.</summary>
     internal double ReferenceSeconds => _options.ReferenceSeconds;
 
     /// <summary>Runs the card and the voice reference (prepared mono 24 kHz audio, or empty) and returns the model's frame 0.</summary>
-    internal HaruFrame Start(string card, ReadOnlySpan<float> reference)
+    public HaruFrame Start(string card, ReadOnlySpan<float> reference)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         long started = Stopwatch.GetTimestamp();
         int limit = (int)(_options.ReferenceSeconds * _config.SampleRate);
         if (reference.Length > limit)
@@ -105,8 +122,9 @@ internal sealed unsafe class HaruDuplexSession
     }
 
     /// <summary>Consumes the user's next frame (3200 samples at 24 kHz) and returns the model's next frame.</summary>
-    internal HaruFrame Step(ReadOnlySpan<float> userFrame)
+    public HaruFrame Step(ReadOnlySpan<float> userFrame)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_latent is null || _sampler is null)
         {
             throw new InvalidOperationException("Call Start before Step.");

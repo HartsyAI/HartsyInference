@@ -3,7 +3,7 @@ using HartsyInference.LLM.Sampling;
 namespace HartsyInference.Audio.Models.Haru;
 
 /// <summary>How a conversation samples and starts. The defaults are the reference implementation's.</summary>
-internal sealed record HaruDuplexOptions
+public sealed record HaruDuplexOptions
 {
     /// <summary>Audio guidance weight, valid from 1 to 2.</summary>
     public float GuidanceScale { get; init; } = 1.5f;
