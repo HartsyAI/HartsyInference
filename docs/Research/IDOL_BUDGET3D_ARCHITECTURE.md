@@ -119,6 +119,6 @@ License (the original is gated; the Comfy repack redistributes it). FLUX.2 VAE: 
 ## Open questions
 
 - Whether the Comfy `flux2-vae.safetensors` is byte-identical in values to FLUX.2-klein-4B's `vae/`.
-- Splat rotation order: TRELLIS's own `save_ply` (microsoft/TRELLIS `193e0502`, `trellis/representations/gaussian/gaussian_model.py`) turns positions by `T = [[1,0,0],[0,0,-1],[0,1,0]]` and rotations as `R' = T · R(q)` on the matrix from `utils3d` (w-first, `EasternJournalist/utils3d` `eeafc278`), which is the left product `q_R ⊗ q`; Idol's PLY uses the same. The engine's TRELLIS and SAM 3D builders wrote the right product `q ⊗ q_R` until the fix of 2026-11-17, which now uses the left one for all three; SAM 3D's own `save_ply` writes no turn at all, so for it the criterion is that the ellipsoid equals the turned scene's (covariance `T·Σ·Tᵀ`), which only the left product gives (`GaussianSplatActivationsTests`).
+- Splat rotation order: resolved on 2026-11-17 (the TRELLIS and SAM 3D builders now use the left product `q_R ⊗ q`, as TRELLIS's `save_ply` and Idol do; see `GaussianSplatActivationsTests`). Remaining caveat: there is no render check of TRELLIS v1 or SAM 3D output.
 - The engine's image recipes pass FLUX.2 BatchNorm eps 1e-5 (`Flux2Recipe.cs`) against the diffusers config's 1e-4; not
   investigated here.
