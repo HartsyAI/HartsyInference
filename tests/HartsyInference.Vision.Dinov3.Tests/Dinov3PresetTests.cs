@@ -65,13 +65,54 @@ public sealed class Dinov3PresetTests
     }
 
     [Fact]
-    public void FromDinov3Weights_RejectsGatedMlp()
+    public void FromDinov3Weights_RejectsAGatedMlpOutsideTheHugePlus()
     {
         Dictionary<string, Tensor> weights = Dinov3Fixture.LargeHeaderOnly();
         try
         {
             weights["layer.0.mlp.gate_proj.weight"] = new Tensor(new TensorShape(4096, 1024), DType.F32);
-            Assert.Throws<NotSupportedException>(() => Dinov2Preset.FromDinov3Weights(weights, 448));
+            NotSupportedException error = Assert.Throws<NotSupportedException>(() => Dinov2Preset.FromDinov3Weights(weights, 448));
+            Assert.Contains("gated", error.Message);
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
+    public void FromDinov3Weights_RejectsAPlainMlpAtTheHugePlusWidth()
+    {
+        Dictionary<string, Tensor> weights = Dinov3Fixture.HugePlusHeaderOnly();
+        try
+        {
+            weights["layer.0.mlp.gate_proj.weight"].Dispose();
+            weights.Remove("layer.0.mlp.gate_proj.weight");
+            Assert.Throws<NotSupportedException>(() => Dinov2Preset.FromDinov3Weights(weights, 1024));
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
+    public void FromDinov3Weights_ReadsTheHugePlusFromAGatedHeader()
+    {
+        Dictionary<string, Tensor> weights = Dinov3Fixture.HugePlusHeaderOnly();
+        try
+        {
+            Dinov2Preset preset = Dinov2Preset.FromDinov3Weights(weights, 1024);
+
+            Assert.Equal("facebook/dinov3-vith16plus-pretrain-lvd1689m", preset.Name);
+            Assert.Equal(1280, preset.HiddenSize);
+            Assert.Equal(32, preset.NumLayers);
+            Assert.Equal(20, preset.NumHeads);
+            Assert.Equal(5120, preset.IntermediateSize);
+            Assert.Equal(1024, preset.ImageSize);
+            Assert.Equal(64, preset.PatchGrid);
+            Assert.Equal(4101, preset.SequenceLength);
+            Assert.Equal(1e-5f, preset.LayerNormEps);
         }
         finally
         {
