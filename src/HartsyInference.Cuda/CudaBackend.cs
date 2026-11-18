@@ -5674,8 +5674,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <inheritdoc/>
     public bool SupportsTokenMajorGqaAttention => true;
 
-    /// <summary>Token-major grouped-query SDPA. No kernel reads grouped K/V in this layout yet, so the call lowers to the
-    /// head-major sequence its callers used to issue themselves: permute in, repeat K/V heads, SDPA, permute out.</summary>
+    /// <summary>Token-major grouped-query SDPA. cuDNN reads grouped K/V in place; its compatibility row permutes into the dense
+    /// planner, which either serves grouped heads natively or explicitly repeats K/V for an equal-head kernel.</summary>
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
         => ExecuteTokenMajorGqaAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16)
@@ -5792,7 +5792,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
     }
 
-    /// <summary>Validates the canonical rank-4 MHA contract shared by every SDPA dispatch branch.</summary>
+    /// <summary>Validates the canonical rank-4 MHA/GQA contract shared by every SDPA dispatch branch.</summary>
     internal static void ValidateScaledDotProductAttentionContract(
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
@@ -5820,8 +5820,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             throw new ArgumentException($"SDPA output shape must equal Q; got output={output.Shape}, Q={query.Shape}.");
         if (key.Shape != value.Shape)
             throw new ArgumentException($"SDPA K/V shapes must match; got K={key.Shape}, V={value.Shape}.");
-        if (key.Shape[0] != b || key.Shape[1] != h || key.Shape[3] != d)
-            throw new ArgumentException($"SDPA K/V must match Q batch, heads, and head dimension; got Q={query.Shape}, K={key.Shape}.");
+        if (key.Shape[0] != b || key.Shape[1] <= 0 || key.Shape[1] > h || h % key.Shape[1] != 0 || key.Shape[3] != d)
+            throw new ArgumentException($"SDPA K/V must match Q batch and head dimension, with query heads divisible by K/V heads; got Q={query.Shape}, K={key.Shape}.");
 
         if (output.ElementCount > int.MaxValue || query.ElementCount > int.MaxValue
             || key.ElementCount > int.MaxValue || value.ElementCount > int.MaxValue)

@@ -6,9 +6,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-// The attention dispatch as capability rows (docs/ATTENTION_CONTRACT.md §6). Each entry point's rows run in the order its
-// old if-ladder tested them, each row's admission is that branch's predicate and its launch is that branch's body, so a
-// call takes the branch it took before; AttentionRouteGoldenTests pins the routes.
+// The attention dispatch as capability rows (docs/ATTENTION_CONTRACT.md §6). Rows retain the old if-ladder's priority
+// except where native execution replaces a declared compatibility lowering. Execution evidence records selected and nested routes.
 public sealed partial class CudaBackend
 {
     private AttentionKernelRow[]? _denseRows, _tokenMajorRows, _tokenMajorGqaRows, _flashRows, _flashDeviceRows;
@@ -101,7 +100,7 @@ public sealed partial class CudaBackend
     private const AttentionDTypes AnyFloat = AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16;
     private const AttentionMaskSupport AnyBias = AttentionMaskSupport.HeadSharedBias | AttentionMaskSupport.PerHeadBias;
 
-    // ── head-major ScaledDotProductAttention: S.1-S.16 (S.4, S.6-S.8 retired) ───────────────────────────────────────
+    // ── head-major ScaledDotProductAttention: S.1-S.19 (S.4, S.6-S.8 retired) ───────────────────────────────────────
 
     /// <summary>INT8 attention v2 on one route: the u8 PV row, then its F16-PV fallback.</summary>
     private AttentionKernelRow[] Int8V2Rows(AttentionRoute entry, AttentionLayouts layouts, string u8Branch, string f16Branch)
@@ -148,17 +147,18 @@ public sealed partial class CudaBackend
                         c.KeyTokens, c.QkHeadDim, HeadMajorStrides(h, sq, d), HeadMajorStrides(h, sq, d), HeadMajorStrides(h, skv, d),
                         HeadMajorStrides(h, skv, d));
                 }),
-            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView), "S.3",
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16,
+                CudnnSdpaRows.AnyView, gqa: true), "S.3",
                 (in AttentionCall c) => CudnnSdpaRows.Covers(in c) && CudnnReady(in c),
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
-            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, strided: false) with
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, gqa: true, strided: false) with
                 {
                     Saturates = true, Lowering = AttentionLowering.Cast,
                 }, "S.5",
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled && CudnnReady(in c),
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
-            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.bf16", E, AttentionDTypes.F32, HM, strided: false) with
+            new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.bf16", E, AttentionDTypes.F32, HM, gqa: true, strided: false) with
                 {
                     UsesQueryKey = AttentionFormats.Bf16, UsesProbValue = AttentionFormats.Bf16, NarrowsF32To = AttentionFormats.Bf16,
                     Lowering = AttentionLowering.Cast,
@@ -166,6 +166,12 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
                     && Bf16CastFits(in c) && CudnnReady(in c, CudnnSdpa.SdpaDtype.BF16),
                 (in AttentionCall c) => TryCudnnSdpa(in c, CudnnSdpa.SdpaDtype.BF16)),
+            new DelegateAttentionRow(Cap("widen.dense", E, AnyFloat, AnyFloat, HM) with
+                {
+                    Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.WidenKv,
+                }, null,
+                static (in AttentionCall c) => c.KvHeads < c.Heads,
+                (in AttentionCall c) => { DenseViaWidenedKv(in c); return true; }),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
@@ -257,6 +263,28 @@ public sealed partial class CudaBackend
     /// <summary>Free device memory the attention rows budget against.</summary>
     private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
 
+    /// <summary>The compatibility lowering for a grouped call no native dense row completed: repeat K/V to the query head count,
+    /// then re-enter dense planning with the original mask, scale and numerical permissions.</summary>
+    private void DenseViaWidenedKv(in AttentionCall c)
+    {
+        Tensor key = c.Key.Storage, value = c.Value.Storage;
+        TensorShape widenedShape = new(c.Batch, c.Heads, c.KeyTokens, c.QkHeadDim);
+        Tensor widenedKey = new(widenedShape, key.DType), widenedValue = new(widenedShape, value.DType);
+        try
+        {
+            StridedCopies.RepeatInterleave(this, widenedKey, key, 1, c.KvGroup);
+            StridedCopies.RepeatInterleave(this, widenedValue, value, 1, c.KvGroup);
+            ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(c.Output.Storage, c.Query.Storage, widenedKey, widenedValue,
+                c.Mask.Bias, c.Scale, allowF16: false) with { Numerics = c.Numerics });
+            t_attentionRoute = AttentionRouteText.Nested("S.19/", t_attentionRoute);
+        }
+        finally
+        {
+            widenedKey.Dispose();
+            widenedValue.Dispose();
+        }
+    }
+
     // ── token-major ScaledDotProductAttentionTokenMajor: M.1-M.3, and the grouped-query lowering ────────────────────
 
     private AttentionKernelRow[] BuildTokenMajorRows()
@@ -298,7 +326,8 @@ public sealed partial class CudaBackend
 
     private AttentionKernelRow[] BuildTokenMajorGqaRows() =>
     [
-        // Grouped fp16/bf16 only; yields to INT8 v2, Sage and the F16 flash kernel, which take these calls after widening.
+        // Grouped fp16/bf16 in place. The permute row's dense planner tries native GQA before its widening can reach
+        // INT8 v2, Sage or the F16 flash kernel.
         new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.tokenmajor.gqa", AttentionRoute.TokenMajorGqa,
                 AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView, gqa: true), "G.1",
             (in AttentionCall c) => c.KvHeads < c.Heads && CudnnSdpaRows.Covers(in c)
@@ -309,9 +338,9 @@ public sealed partial class CudaBackend
                         && !FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim)))
                 && CudnnReady(in c),
             (in AttentionCall c) => RunCudnnTokenMajor(in c)),
-        new DelegateAttentionRow(Cap("permute.widen.dense", AttentionRoute.TokenMajorGqa, AnyFloat, AnyFloat, AttentionLayouts.TokenMajor) with
+        new DelegateAttentionRow(Cap("permute.dense", AttentionRoute.TokenMajorGqa, AnyFloat, AnyFloat, AttentionLayouts.TokenMajor) with
             {
-                MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute | AttentionLowering.WidenKv,
+                MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute,
             }, null,
             // It runs the head-major entry, which takes the masks that entry takes.
             static (in AttentionCall c) => c.Mask.Bias is not { } mask || HeadMajorMaskFits(mask, c.Batch, c.Heads, c.QueryTokens, c.KeyTokens),
@@ -350,65 +379,30 @@ public sealed partial class CudaBackend
         mask.DType == DType.F32 && mask.ElementCount <= int.MaxValue && sq * skv <= int.MaxValue
         && AttentionMaskLayout.Broadcasts(mask.Shape, batch, heads, sq, skv);
 
-    /// <summary>The sequence Krea2 issued before CUDA served this overload, in its order: permute Q, K and V, repeat K/V
-    /// heads when grouped (dropping the head-major copies), head-major SDPA, permute out.</summary>
-    private void GroupedTokenMajorViaHeadMajor(in AttentionCall c)
+    /// <summary>Grouped token-major attention permuted into the dense planner, which owns native GQA and any compatibility widening.</summary>
+    private void GroupedTokenMajorViaHeadMajor(in AttentionCall c) => TokenMajorViaHeadMajor(in c, "MG/");
+
+    /// <summary>Equal-head token-major attention as head-major SDPA (M.3).</summary>
+    private void TokenMajorViaHeadMajor(in AttentionCall c) => TokenMajorViaHeadMajor(in c, "M.3/");
+
+    /// <summary>Q/K/V permuted in without changing their head counts, the dense entry point, then the output permuted back.</summary>
+    private void TokenMajorViaHeadMajor(in AttentionCall c, string branch)
     {
         Tensor output = c.Output.Storage, query = c.Query.Storage, key = c.Key.Storage, value = c.Value.Storage;
         int heads = c.Heads, kvHeads = c.KvHeads, headDim = c.QkHeadDim, sq = c.QueryTokens, skv = c.KeyTokens;
-        TensorShape qMhShape = new(1, heads, sq, headDim), kvMhShape = new(1, kvHeads, skv, headDim);
-        Tensor? qMh = null, kMh = null, vMh = null, kRep = null, vRep = null, oMh = null;
-        try
-        {
-            qMh = new Tensor(qMhShape, query.DType);
-            Permute0213(qMh, query, sq, heads, headDim);
-            kMh = new Tensor(kvMhShape, key.DType);
-            Permute0213(kMh, key, skv, kvHeads, headDim);
-            vMh = new Tensor(kvMhShape, value.DType);
-            Permute0213(vMh, value, skv, kvHeads, headDim);
-            if (kvHeads != heads)
-            {
-                kRep = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
-                StridedCopies.RepeatInterleave(this, kRep, kMh, 1, heads / kvHeads);
-                vRep = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
-                StridedCopies.RepeatInterleave(this, vRep, vMh, 1, heads / kvHeads);
-                kMh.Dispose();
-                vMh.Dispose();
-            }
-            oMh = new Tensor(qMhShape, output.DType);
-            ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(oMh, qMh, kRep ?? kMh, vRep ?? vMh,
-                c.Mask.Bias, c.Scale, allowF16: false) with { Numerics = c.Numerics });
-            qMh.Dispose();
-            (kRep ?? kMh).Dispose();
-            (vRep ?? vMh).Dispose();
-            Permute0213(output, oMh, heads, sq, headDim);
-            t_attentionRoute = AttentionRouteText.Nested("MG/", t_attentionRoute);
-        }
-        finally
-        {
-            qMh?.Dispose(); kMh?.Dispose(); vMh?.Dispose(); kRep?.Dispose(); vRep?.Dispose(); oMh?.Dispose();
-        }
-    }
-
-    /// <summary>Token-major attention as head-major SDPA (M.3): Q/K/V permuted in, the head-major entry point, the output
-    /// permuted back, in the order the token-major entry always issued it.</summary>
-    private void TokenMajorViaHeadMajor(in AttentionCall c)
-    {
-        Tensor output = c.Output.Storage, query = c.Query.Storage, key = c.Key.Storage, value = c.Value.Storage;
-        int heads = c.Heads, headDim = c.QkHeadDim, sq = c.QueryTokens, skv = c.KeyTokens;
         Tensor qMh = new Tensor(new TensorShape(1, heads, sq, headDim), query.DType);
-        Tensor kMh = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
-        Tensor vMh = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
+        Tensor kMh = new Tensor(new TensorShape(1, kvHeads, skv, headDim), key.DType);
+        Tensor vMh = new Tensor(new TensorShape(1, kvHeads, skv, headDim), value.DType);
         Tensor oMh = new Tensor(new TensorShape(1, heads, sq, headDim), output.DType);
         try
         {
             Permute0213(qMh, query, sq, heads, headDim);
-            Permute0213(kMh, key, skv, heads, headDim);
-            Permute0213(vMh, value, skv, heads, headDim);
+            Permute0213(kMh, key, skv, kvHeads, headDim);
+            Permute0213(vMh, value, skv, kvHeads, headDim);
             ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(oMh, qMh, kMh, vMh,
                 c.Mask.Bias, c.Scale, allowF16: false) with { Numerics = c.Numerics });
             Permute0213(output, oMh, heads, sq, headDim);
-            t_attentionRoute = AttentionRouteText.Nested("M.3/", t_attentionRoute);
+            t_attentionRoute = AttentionRouteText.Nested(branch, t_attentionRoute);
         }
         finally
         {
