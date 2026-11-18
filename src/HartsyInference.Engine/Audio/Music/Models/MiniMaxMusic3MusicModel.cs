@@ -32,7 +32,14 @@ internal static class MiniMaxMusic3MusicModel
     private const string DefaultRepo = "MiniMaxAI/MiniMax-Music3";
     private const string Category = "music";
 
-    /// <summary>A user-selected checkpoint (<see cref="AudioModelSelector.LocalPath"/>, the Comfy-Org single-file DiT) is honored for the flow transformer + condition encoder — it participates in the cache key so switching checkpoints never serves the previous file's runner. The language model, depth decoder, vocoder, and tokenizer always come from the official repo (the DiT file does not carry them).</summary>
+    // Longest suffix first, so "q4_0" is not read as "q4".
+    private static readonly (string Suffix, string Mode)[] QuantSuffixes =
+    [
+        ("q8_0", "q8_0"), ("q8", "q8_0"), ("q6_k", "q6_k"), ("q6", "q6_k"), ("q5_k", "q5_k"), ("q5", "q5_k"),
+        ("q4_k", "q4_k"), ("q4_0", "q4_0"), ("q4", "q4_k"),
+    ];
+
+    /// <summary>A user-selected checkpoint (<see cref="AudioModelSelector.LocalPath"/>: any layout <see cref="MiniMaxMusic3FlowCheckpoint"/> reads) is honored for the flow transformer, and for the condition encoder when the file carries it — it participates in the cache key so switching checkpoints never serves the previous file's runner. The language model, depth decoder, vocoder, and tokenizer always come from the official repo (a DiT file does not carry them).</summary>
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
         ManagesOwnWeights = true,
@@ -49,16 +56,20 @@ internal static class MiniMaxMusic3MusicModel
         return id.Contains('/', StringComparison.Ordinal) ? id.Split(':')[0] : DefaultRepo;
     }
 
-    /// <summary>Maps a variant's precision suffix to a quant mode for the global language model: <c>-q8</c>/<c>:q8</c> → q8_0, <c>-q4</c>/<c>:q4</c> → q4_k, else null (the checkpoint's BF16).</summary>
-    private static string? ResolveQuant(string variant)
+    /// <summary>Maps a variant's precision suffix to a quant mode for the global language model: <c>-q8</c>/<c>:q8</c> → q8_0, <c>q6</c> → q6_k, <c>q5</c> → q5_k, <c>q4</c> → q4_k (<c>q4_0</c> stays q4_0), else null (the checkpoint's BF16).</summary>
+    internal static string? ResolveQuant(string variant)
     {
         string lower = (variant ?? string.Empty).Trim().ToLowerInvariant();
-        if (lower.EndsWith("q8", StringComparison.Ordinal) || lower.EndsWith("q8_0", StringComparison.Ordinal))
+        foreach ((string suffix, string mode) in QuantSuffixes)
         {
-            return "q8_0";
+            if (lower.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                return mode;
+            }
         }
-        return lower.EndsWith("q4", StringComparison.Ordinal) || lower.EndsWith("q4_k", StringComparison.Ordinal) ? "q4_k" : null;
+        return null;
     }
+
 
     private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string repo, string? quant, string? localPath, CancellationToken cancel)
     {
@@ -68,40 +79,28 @@ internal static class MiniMaxMusic3MusicModel
         (IReadOnlyDictionary<string, Tensor> depthWeights, IDisposable[] depthLoaders) =
             await AudioCheckpoints.LoadSubfolderAsync(repo, "rvq_depth_decoder", Category, cancel).ConfigureAwait(false);
 
-        // A user-selected checkpoint carries the flow DiT + condition encoder (the Comfy-Org single-file
-        // layout); anything else it might carry is not usable, so refuse loudly rather than silently
-        // generating with substituted weights.
+        // A user-selected checkpoint carries the flow DiT (and sometimes the condition encoder); a file that is
+        // neither is refused loudly rather than silently generating with substituted weights.
         IReadOnlyDictionary<string, Tensor> conditionWeights;
         IReadOnlyDictionary<string, Tensor> ditWeights;
-        IDisposable[] conditionLoaders;
+        IDisposable[] conditionLoaders = [];
         IDisposable[] ditLoaders;
-        if (!string.IsNullOrEmpty(localPath) && File.Exists(localPath))
+        if (!string.IsNullOrEmpty(localPath) && (File.Exists(localPath) || Directory.Exists(localPath)))
         {
-            SafeTensorsLoader ditFile = new SafeTensorsLoader();
-            try
+            MiniMaxMusic3FlowWeights flowFile = MiniMaxMusic3FlowCheckpoint.Open(localPath);
+            ditWeights = flowFile.Transformer;
+            ditLoaders = [flowFile];
+            if (flowFile.ConditionEncoder is { } selectedCondition)
             {
-                ditFile.Load(localPath);
-                if (!MiniMaxMusic3CheckpointConverter.IsComfyDit(ditFile.Descriptors))
-                {
-                    throw new NotSupportedException(
-                        $"'{Path.GetFileName(localPath)}' is not a MiniMax-Music-3 DiT checkpoint the engine can load. "
-                        + "Supported: the Comfy-Org single-file DiT (diffusion_models/minimax_music3_dit_*.safetensors). "
-                        + "Remove the file to use the official MiniMaxAI/MiniMax-Music3 weights instead.");
-                }
-                (Dictionary<string, Tensor> convertedDit, Dictionary<string, Tensor> convertedCondition) =
-                    MiniMaxMusic3CheckpointConverter.ConvertComfyDit(ditFile.GetAllTensors());
-                ditWeights = convertedDit;
-                conditionWeights = convertedCondition;
-                ditLoaders = [ditFile];
-                conditionLoaders = [];
-                Logs.Info($"[Audio][MiniMaxMusic3] Flow DiT + condition encoder from selected checkpoint "
-                    + $"'{Path.GetFileName(localPath)}'; language model, depth decoder, vocoder from {repo}.");
+                conditionWeights = selectedCondition;
             }
-            catch
+            else
             {
-                ditFile.Dispose();
-                throw;
+                (conditionWeights, conditionLoaders) =
+                    await AudioCheckpoints.LoadSubfolderAsync(repo, "condition_encoder", Category, cancel).ConfigureAwait(false);
             }
+            Logs.Info($"[Audio][MiniMaxMusic3] Flow DiT from selected checkpoint '{Path.GetFileName(localPath)}' ({flowFile.Layout}); "
+                + $"{(flowFile.ConditionEncoder is null ? "condition encoder, " : "")}language model, depth decoder, vocoder from {repo}.");
         }
         else
         {
