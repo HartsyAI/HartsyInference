@@ -123,11 +123,88 @@ public sealed class IdolDenoiser : IDisposable
         if (context.Shape.Rank != 3 || context.Shape[0] != 1 || context.Shape[2] != d)
             throw new ArgumentException($"Idol's context is [1, L, {d}] from EmbedContext; got {context.Shape}.");
 
-        using Tensor timeEmbedding = TimeEmbedding(backend, t);
-        using Tensor timeModulation = TimeModulation(backend, timeEmbedding);
-
         Tensor hx = Embed(backend, latent);
         tap?.Invoke("embedded_tokens", hx);
+        (Tensor velocity, Tensor cameraVelocity, Tensor? hidden) = RunTrunk(backend, hx, camera, t, context, wantHidden: false, tap);
+        hidden?.Dispose();
+        return (velocity, cameraVelocity);
+    }
+
+    /// <summary>The token embedding of a latent <c>[1, 8192, 16]</c>: <c>input_layer(z)</c> plus the fixed position embedding of the Sobol tokens, <c>[1, 8192, C]</c>. A sparse model replaces the token set and
+    /// runs <see cref="ForwardTokens"/> on its own; the caller owns the result.</summary>
+    public Tensor EmbedLatent(IBackend backend, Tensor latent)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        if (latent.Shape.Rank != 3 || latent.Shape[0] != 1 || latent.Shape[1] != _config.Tokens || latent.Shape[2] != _config.LatentChannels)
+            throw new ArgumentException($"Idol embeds a [1, {_config.Tokens}, {_config.LatentChannels}] latent; got {latent.Shape}.");
+        return Embed(backend, latent);
+    }
+
+    /// <summary>The velocity of a token sequence <paramref name="tokens"/> <c>[1, N, C]</c> of any length (Idol's 8192, or a Budget3D layout's fewer), already embedded: the noise refiner, the joint blocks over
+    /// <c>[tokens | image | camera]</c>, and the output heads. Returns the velocity of each token <c>[1, N, 16]</c>, the camera velocity <c>[1, 1, 5]</c> and, with <paramref name="wantHidden"/>, the modulated
+    /// output-head features of each token <c>[1, N, C]</c> that a sparse model's refiners are conditioned on. Consumes <paramref name="tokens"/>; the caller owns the results.</summary>
+    public (Tensor Velocity, Tensor Camera, Tensor? Hidden) ForwardTokens(IBackend backend, Tensor tokens, Tensor camera, float t, Tensor context, bool wantHidden)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        int d = _config.ModelChannels;
+        if (tokens.Shape.Rank != 3 || tokens.Shape[0] != 1 || tokens.Shape[1] < 1 || tokens.Shape[2] != d)
+        {
+            Tensor bad = tokens;
+            string shape = bad.Shape.ToString();
+            bad.Dispose();
+            throw new ArgumentException($"Idol's token sequence is [1, N, {d}]; got {shape}.");
+        }
+
+        if (camera.Shape.Rank != 3 || camera.Shape[0] != 1 || camera.Shape[1] != 1 || camera.Shape[2] != _config.CameraChannels)
+        {
+            tokens.Dispose();
+            throw new ArgumentException($"Idol's camera is [1, 1, {_config.CameraChannels}]; got {camera.Shape}.");
+        }
+
+        if (context.Shape.Rank != 3 || context.Shape[0] != 1 || context.Shape[2] != d)
+        {
+            tokens.Dispose();
+            throw new ArgumentException($"Idol's context is [1, L, {d}] from EmbedContext; got {context.Shape}.");
+        }
+
+        return RunTrunk(backend, tokens, camera, t, context, wantHidden, tap: null);
+    }
+
+    // The noise refiner, the joint blocks and the heads over an already embedded token sequence (consumed).
+    private (Tensor Velocity, Tensor Camera, Tensor? Hidden) RunTrunk(IBackend backend, Tensor hx, Tensor camera, float t, Tensor context, bool wantHidden, Action<string, Tensor>? tap)
+    {
+        int d = _config.ModelChannels, n = (int)hx.Shape[1];
+        Tensor timeEmbedding, timeModulation;
+        try
+        {
+            timeEmbedding = TimeEmbedding(backend, t);
+        }
+        catch
+        {
+            hx.Dispose();
+            throw;
+        }
+
+        try
+        {
+            timeModulation = TimeModulation(backend, timeEmbedding);
+        }
+        catch
+        {
+            hx.Dispose();
+            timeEmbedding.Dispose();
+            throw;
+        }
+
+        using (timeEmbedding)
+        using (timeModulation)
+            return RunBlocks(backend, hx, camera, context, timeEmbedding, timeModulation, d, n, wantHidden, tap);
+    }
+
+    private (Tensor Velocity, Tensor Camera, Tensor? Hidden) RunBlocks(IBackend backend, Tensor hx, Tensor camera, Tensor context, Tensor timeEmbedding, Tensor timeModulation, int d, int n, bool wantHidden, Action<string, Tensor>? tap)
+    {
         for (int i = 0; i < _noiseRefiner.Length; i++)
         {
             Tensor next;
@@ -177,7 +254,7 @@ public sealed class IdolDenoiser : IDisposable
         tap?.Invoke("after_block23", h);
         try
         {
-            return Head(backend, h, timeEmbedding, n, total);
+            return Head(backend, h, timeEmbedding, n, total, wantHidden);
         }
         finally
         {
@@ -223,7 +300,7 @@ public sealed class IdolDenoiser : IDisposable
     }
 
     // The output head: an affine-free LayerNorm per stream, (shift, scale) = shift_table + the time embedding, then the two projections.
-    private (Tensor Latent, Tensor Camera) Head(IBackend backend, Tensor h, Tensor timeEmbedding, int latentTokens, int total)
+    private (Tensor Latent, Tensor Camera, Tensor? Hidden) Head(IBackend backend, Tensor h, Tensor timeEmbedding, int latentTokens, int total, bool wantHidden)
     {
         int d = _config.ModelChannels;
         using Tensor embedding = timeEmbedding.Reshape(new TensorShape(1, 1, d));
@@ -236,24 +313,37 @@ public sealed class IdolDenoiser : IDisposable
         backend.SliceRows(shift, shiftScale, 0);
         backend.SliceRows(scale, shiftScale, 1);
 
-        Tensor Stream(int rowOffset, int tokens, string outLayer, long outChannels)
+        Tensor Stream(int rowOffset, int tokens, string outLayer, long outChannels, bool keep, out Tensor? kept)
         {
             using Tensor rows = new(new TensorShape(1, tokens, d), DType.F32);
             backend.SliceRows(rows, h, rowOffset);
-            using Tensor modulated = new(rows.Shape, DType.F32);
-            backend.NormModulate(NormModulateCall.Rows(modulated, rows, NormKind.LayerNorm, FinalNormEps)
-                .WithModulation(ModulationSpec.Broadcast(rows, scale, shift, ScaleMode.OnePlus)));
-            return Linear(backend, modulated, outLayer, outChannels);
+            Tensor modulated = new(rows.Shape, DType.F32);
+            try
+            {
+                backend.NormModulate(NormModulateCall.Rows(modulated, rows, NormKind.LayerNorm, FinalNormEps)
+                    .WithModulation(ModulationSpec.Broadcast(rows, scale, shift, ScaleMode.OnePlus)));
+                Tensor projected = Linear(backend, modulated, outLayer, outChannels);
+                kept = keep ? modulated : null;
+                if (!keep)
+                    modulated.Dispose();
+                return projected;
+            }
+            catch
+            {
+                modulated.Dispose();
+                throw;
+            }
         }
 
-        Tensor latent = Stream(0, latentTokens, "out_layer", _config.LatentChannels);
+        Tensor latent = Stream(0, latentTokens, "out_layer", _config.LatentChannels, wantHidden, out Tensor? hidden);
         try
         {
-            return (latent, Stream(total - 1, 1, "cam_out_layer", _config.CameraChannels));
+            return (latent, Stream(total - 1, 1, "cam_out_layer", _config.CameraChannels, keep: false, out _), hidden);
         }
         catch
         {
             latent.Dispose();
+            hidden?.Dispose();
             throw;
         }
     }
