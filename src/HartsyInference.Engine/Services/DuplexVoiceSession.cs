@@ -23,10 +23,12 @@ public sealed record DuplexVoiceOptions
 /// <param name="Audio">The model's samples for this frame, mono, at the session's rate.</param>
 /// <param name="Text">The text the model spoke in this frame, usually empty.</param>
 /// <param name="ComputeSeconds">Compute time of the frame.</param>
-/// <param name="Late">The frame arrived after the moment a listener holding <see cref="DuplexVoiceOptions.LeadFrames"/> would have needed it.</param>
+/// <param name="Late">The frame finished after the moment a listener holding <see cref="DuplexVoiceOptions.LeadFrames"/> frames would have needed it.</param>
 public readonly record struct DuplexVoiceFrame(int Index, float[] Audio, string Text, double ComputeSeconds, bool Late);
 
-/// <summary>What the pacer saw.</summary>
+/// <summary>What the pacer saw. <c>LateFrames</c> are frames that finished after a listener with the configured lead would have needed them; <c>Rebases</c> are
+/// stalls of more than the lead plus two frames, after which the clock restarted; <c>DroppedUserSamples</c> is audio refused by a full buffer plus audio the pacer
+/// trimmed; <c>DroppedReplyFrames</c> is frames the output queue dropped because the reader fell behind.</summary>
 public sealed record DuplexVoiceStats(long Frames, long LateFrames, long Rebases, long SilenceFrames, long DroppedUserSamples, long DroppedReplyFrames,
     double MedianComputeMs, double P99ComputeMs, double MaxComputeMs, int LeadFrames, double FrameMs);
 
@@ -49,10 +51,10 @@ public sealed class DuplexVoiceSession : IDisposable
     private readonly float[]? _pending;
     private int _pendingCount;
     private readonly float[] _resampled;
-    private long _frames, _late, _rebases, _silence, _droppedReply;
+    private long _frames, _late, _rebases, _silence, _droppedReply, _trimmedUser;
     private double _maxComputeSeconds;
     private readonly List<double> _computeSeconds = [];
-    private int _started, _disposed;
+    private int _started, _disposed, _sessionDisposed;
 
     /// <summary>Wraps a session that has not been started: <see cref="Start"/> runs its prompt.</summary>
     public DuplexVoiceSession(IDuplexSpeechSession session, DuplexVoiceOptions? options = null)
@@ -66,13 +68,17 @@ public sealed class DuplexVoiceSession : IDisposable
         _frameSamples = session.FrameSamples;
         _tickNs = (long)(1_000_000_000.0 * _frameSamples / session.SampleRate);
         _input = new SpscRing<float>(NextPowerOfTwo(_frameSamples * (_options.LeadFrames + 4)));
-        _output = Channel.CreateBounded<DuplexVoiceFrame>(new BoundedChannelOptions(Math.Max(16, _options.LeadFrames * 4))
+        _output = Channel.CreateBounded(new BoundedChannelOptions(Math.Max(16, _options.LeadFrames * 4))
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = true,
-        });
+        }, (DuplexVoiceFrame _) => Interlocked.Increment(ref _droppedReply));
         int inRate = _options.InputSampleRate;
+        if (inRate < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "The input sample rate cannot be negative.");
+        }
         if (inRate > 0 && inRate != session.SampleRate)
         {
             if (inRate % 50 != 0)
@@ -116,8 +122,8 @@ public sealed class DuplexVoiceSession : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Adds the user's microphone audio (mono, at <see cref="DuplexVoiceOptions.InputSampleRate"/>), any amount at a time, from one thread. More
-    /// than the lead holds is dropped (oldest first would break the speech; the newest is kept out and counted).</summary>
+    /// <summary>Adds the user's microphone audio (mono, at <see cref="DuplexVoiceOptions.InputSampleRate"/>), any amount at a time, from one thread. What the
+    /// buffer cannot hold is refused and counted; the pacer also trims, oldest first, what piles up beyond the lead (see <see cref="DuplexVoiceStats.DroppedUserSamples"/>).</summary>
     public void PushUserAudio(ReadOnlySpan<float> samples)
     {
         if (_resampler is null)
@@ -151,13 +157,14 @@ public sealed class DuplexVoiceSession : IDisposable
         Array.Sort(sorted);
         double At(double fraction) => sorted.Length == 0 ? 0 : sorted[(int)((sorted.Length - 1) * fraction)] * 1000;
         return new DuplexVoiceStats(Volatile.Read(ref _frames), Volatile.Read(ref _late), Volatile.Read(ref _rebases), Volatile.Read(ref _silence),
-            _input.DroppedSamples, Volatile.Read(ref _droppedReply), At(0.5), At(0.99), Volatile.Read(ref _maxComputeSeconds) * 1000, _options.LeadFrames, FrameMs);
+            _input.DroppedSamples + Volatile.Read(ref _trimmedUser), Volatile.Read(ref _droppedReply), At(0.5), At(0.99), Volatile.Read(ref _maxComputeSeconds) * 1000, _options.LeadFrames, FrameMs);
     }
 
     private void Run()
     {
         CancellationToken stop = _stop.Token;
         float[] user = new float[_frameSamples];
+        float[] scratch = new float[_frameSamples];
         long origin = MonotonicClock.NowNs();
         long next = origin + _tickNs;
         int lead = _options.LeadFrames;
@@ -191,17 +198,26 @@ public sealed class DuplexVoiceSession : IDisposable
                         Interlocked.Increment(ref _silence);
                     }
                 }
-                // Keep the delay bounded: what piled up beyond the lead while a frame was late is not replayed.
-                if (_input.Available > _frameSamples * (lead + 1))
+                // Keep the delay bounded: of what piled up beyond the lead while a frame was late, the oldest is not replayed. The newest lead's
+                // worth stays, so speech that arrived on time is not thrown away with it.
+                int excess = _input.Available - _frameSamples * (lead + 1);
+                while (excess > 0)
                 {
-                    _input.DiscardAll();
+                    int dropped = _input.Read(scratch.AsSpan(0, Math.Min(excess, scratch.Length)));
+                    if (dropped == 0)
+                    {
+                        break;
+                    }
+                    Interlocked.Add(ref _trimmedUser, dropped);
+                    excess -= dropped;
                 }
 
                 long started = MonotonicClock.NowNs();
                 DuplexFrame frame = _session.Step(user);
                 long finished = MonotonicClock.NowNs();
                 int index = (int)Volatile.Read(ref _frames) + 1;
-                // Frame k is due, for a listener that waited `lead` frames, at origin + (lead + 1 + k) ticks; it started at origin + (k + 1) ticks.
+                // Frame k is scheduled at origin + k ticks (frame 1 at the first tick). A listener that waited `lead` frames plays it at
+                // origin + (lead + 1 + k) ticks, so a frame that finishes later than that is late for that listener.
                 long due = origin + (lead + 1L + index) * _tickNs;
                 bool late = finished > due;
                 if (late)
@@ -214,9 +230,10 @@ public sealed class DuplexVoiceSession : IDisposable
                 Interlocked.Increment(ref _frames);
 
                 next += _tickNs;
-                if (finished - next > lead * _tickNs)
+                if (finished - next > (lead + 2L) * _tickNs)
                 {
-                    // Behind by more than the lead: take a fresh tick instead of running frames back to back to catch up.
+                    // Behind by more than the lead plus two frames (a late frame is only late; this is a stall): take a fresh tick instead of
+                    // running frames back to back to catch up.
                     next = finished + _tickNs;
                     Interlocked.Increment(ref _rebases);
                     origin = next - (index + 1L) * _tickNs;
@@ -231,9 +248,28 @@ public sealed class DuplexVoiceSession : IDisposable
         {
             Logs.Warning($"[Duplex] The conversation stopped: {ex.Message}");
             _output.Writer.TryComplete(ex);
+            FinishAfterDispose();
             return;
         }
         _output.Writer.TryComplete();
+        FinishAfterDispose();
+    }
+
+    /// <summary>When <see cref="Dispose"/> gave up waiting for a step that was still running, the pacer releases the session as it leaves.</summary>
+    private void FinishAfterDispose()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            DisposeSession();
+        }
+    }
+
+    private void DisposeSession()
+    {
+        if (Interlocked.Exchange(ref _sessionDisposed, 1) == 0)
+        {
+            _session.Dispose();
+        }
     }
 
     private void Record(double seconds)
@@ -251,13 +287,8 @@ public sealed class DuplexVoiceSession : IDisposable
         }
     }
 
-    private void Publish(DuplexVoiceFrame frame)
-    {
-        if (!_output.Writer.TryWrite(frame))
-        {
-            Interlocked.Increment(ref _droppedReply);
-        }
-    }
+    /// <summary>Queues a frame. The channel drops its oldest frame when a reader has stalled (counted by the drop callback, not here).</summary>
+    private void Publish(DuplexVoiceFrame frame) => _output.Writer.TryWrite(frame);
 
     private static int NextPowerOfTwo(int value)
     {
@@ -277,12 +308,20 @@ public sealed class DuplexVoiceSession : IDisposable
             return;
         }
         _stop.Cancel();
+        bool stopped = true;
         if (Volatile.Read(ref _started) != 0 && Thread.CurrentThread != _thread)
         {
-            _thread.Join(TimeSpan.FromSeconds(5));
+            stopped = _thread.Join(TimeSpan.FromSeconds(5));
         }
         _output.Writer.TryComplete();
-        _session.Dispose();
-        _stop.Dispose();
+        if (stopped)
+        {
+            DisposeSession();
+            _stop.Dispose();
+        }
+        else
+        {
+            Logs.Warning("[Duplex] A step was still running after 5 s; the pacer releases the conversation when it finishes.");
+        }
     }
 }

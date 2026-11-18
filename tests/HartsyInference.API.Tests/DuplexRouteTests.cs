@@ -188,10 +188,109 @@ public sealed class DuplexRouteTests : IAsyncLifetime
         Assert.Equal(Frame, _duplex.HeardSnapshot().SelectMany(f => f).Count(v => v == 0.25f));
     }
 
+    [Theory]
+    [InlineData(11025)]
+    [InlineData(-16000)]
+    public async Task ABadInputRate_IsRefusedBeforeTheModelIsOpened_SoTheNextConversationStillOpens(int rate)
+    {
+        using (ClientWebSocket bad = await ConnectAsync())
+        {
+            await SendTextAsync(bad, new { model = "haru", modelPath = _modelPath, inputSampleRate = rate });
+            (WebSocketMessageType type, byte[] data) = await ReceiveAsync(bad);
+            Assert.Equal(WebSocketMessageType.Text, type);
+            Assert.Contains("inputSampleRate", Json(data).GetProperty("message").GetString());
+        }
+        Assert.Equal(0, _duplex.Opens);
+
+        using ClientWebSocket good = await ConnectAsync();
+        await SendTextAsync(good, new { model = "haru", modelPath = _modelPath, inputSampleRate = 16000 });
+        (_, byte[] ready) = await ReceiveAsync(good);
+        Assert.Equal("ready", Json(ready).GetProperty("type").GetString());
+        Assert.Equal(1, _duplex.Opens);
+    }
+
+    [Fact]
+    public async Task WhenTheModelEndsTheConversation_TheClientGetsTheFinalStatsAndACleanClose()
+    {
+        _duplex.DoneAfter = 3;
+        using ClientWebSocket socket = await ConnectAsync();
+        await SendTextAsync(socket, new { model = "haru", modelPath = _modelPath, leadFrames = 8 });
+        JsonElement last = default;
+        WebSocketReceiveResult? closed = null;
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+        byte[] buffer = new byte[8192];
+        while (closed is null)
+        {
+            using MemoryStream message = new();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(buffer, cts.Token);
+                message.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                closed = result;
+            }
+            else if (result.MessageType == WebSocketMessageType.Text)
+            {
+                last = Json(message.ToArray());
+            }
+        }
+        Assert.Equal(WebSocketCloseStatus.NormalClosure, closed.CloseStatus);
+        Assert.Equal("stats", last.GetProperty("type").GetString());
+        Assert.True(last.GetProperty("final").GetBoolean());
+        Assert.Equal(3, last.GetProperty("stats").GetProperty("frames").GetInt64());
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", cts.Token);
+        await Task.Delay(100);
+        Assert.True(_duplex.Disposed);
+    }
+
+    [Fact]
+    public async Task WhenTheModelFails_TheClientGetsAnErrorEventAndAServerErrorClose()
+    {
+        _duplex.ThrowAtStep = 2;
+        using ClientWebSocket socket = await ConnectAsync();
+        await SendTextAsync(socket, new { model = "haru", modelPath = _modelPath, leadFrames = 8 });
+        string? error = null;
+        WebSocketReceiveResult? closed = null;
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(15));
+        byte[] buffer = new byte[8192];
+        while (closed is null)
+        {
+            using MemoryStream message = new();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(buffer, cts.Token);
+                message.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                closed = result;
+            }
+            else if (result.MessageType == WebSocketMessageType.Text && Json(message.ToArray()) is { } json && json.GetProperty("type").GetString() == "error")
+            {
+                error = json.GetProperty("message").GetString();
+            }
+        }
+        Assert.Equal("the model broke", error);
+        Assert.Equal(WebSocketCloseStatus.InternalServerError, closed.CloseStatus);
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", cts.Token);
+        await Task.Delay(100);
+        Assert.True(_duplex.Disposed);
+    }
+
     internal sealed class FakeDuplex
     {
         public DuplexSpeechRequest? Request { get; set; }
         public bool Disposed { get; set; }
+        public int Opens { get; set; }
+        public bool Open { get; set; }
+        public int DoneAfter { get; set; } = int.MaxValue;
+        public int ThrowAtStep { get; set; }
         public List<float[]> Heard { get; } = [];
 
         public float[][] HeardSnapshot()
@@ -219,12 +318,20 @@ public sealed class DuplexRouteTests : IAsyncLifetime
                 owner.Heard.Add(userFrame.ToArray());
             }
             _steps++;
+            if (_steps == owner.ThrowAtStep)
+            {
+                throw new InvalidOperationException("the model broke");
+            }
             float[] reply = new float[Frame];
             Array.Fill(reply, 0.1f * _steps);
-            return new DuplexFrame(reply, _steps == 3 ? "three" : "", _steps, 0, false);
+            return new DuplexFrame(reply, _steps == 3 ? "three" : "", _steps, 0, _steps >= owner.DoneAfter);
         }
 
-        public void Dispose() => owner.Disposed = true;
+        public void Dispose()
+        {
+            owner.Disposed = true;
+            owner.Open = false;
+        }
     }
 
     public class FakeSpeech : DispatchProxy
@@ -235,6 +342,13 @@ public sealed class DuplexRouteTests : IAsyncLifetime
         {
             if (method?.Name == "OpenDuplexAsync")
             {
+                // The real model refuses a second conversation while one is open.
+                if (Owner.Open)
+                {
+                    throw new InvalidOperationException("A conversation is already open on this model.");
+                }
+                Owner.Open = true;
+                Owner.Opens++;
                 Owner.Request = (DuplexSpeechRequest)args![1]!;
                 return Task.FromResult<IDuplexSpeechSession>(new FakeSession(Owner));
             }

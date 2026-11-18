@@ -205,4 +205,45 @@ public sealed class DuplexVoiceSessionTests
         Assert.True(heard.Take(3).SelectMany(f => f).Max(Math.Abs) > 0.1f);
         Assert.All(heard[5], v => Assert.Equal(0f, v));
     }
+
+    [Fact]
+    public async Task AReaderThatFallsBehind_LosesTheOldestFrames_AndTheyAreCounted()
+    {
+        using DuplexVoiceSession session = new(new FakeSession(), new DuplexVoiceOptions { LeadFrames = 0 });
+        session.Start();
+        await Task.Delay(700); // about 35 frames against a queue of 16, with nobody reading
+        DuplexVoiceStats stats = session.Stats();
+        Assert.True(stats.DroppedReplyFrames > 5, $"dropped {stats.DroppedReplyFrames}");
+        DuplexVoiceFrame oldest = await session.Frames.ReadAsync();
+        Assert.True(oldest.Index > 0, "the queue should have lost frame 0");
+    }
+
+    [Fact]
+    public async Task AudioThatPilesUpBeyondTheLead_IsTrimmedOldestFirst_AndCounted()
+    {
+        FakeSession fake = new();
+        using DuplexVoiceSession session = new(fake, new DuplexVoiceOptions { LeadFrames = 1 });
+        // Five frames of a ramp before the clock starts: one is read at the first tick, and of the other four only the newest two (the lead plus the frame
+        // being read) are kept.
+        float[] ramp = Enumerable.Range(0, Frame * 5).Select(i => (i + 1) * 1e-4f).ToArray();
+        session.PushUserAudio(ramp);
+        session.Start();
+        await ReadAsync(session, 4, TimeSpan.FromSeconds(10));
+
+        float[][] heard;
+        lock (fake.Heard)
+        {
+            heard = [.. fake.Heard];
+        }
+        Assert.Equal(ramp[..Frame], heard[0]);
+        Assert.Equal(ramp[(Frame * 3)..(Frame * 4)], heard[1]);
+        Assert.Equal(ramp[(Frame * 4)..], heard[2]);
+        Assert.True(session.Stats().DroppedUserSamples >= Frame * 2);
+    }
+
+    [Fact]
+    public void ANegativeInputRate_IsRejected()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DuplexVoiceSession(new FakeSession(), new DuplexVoiceOptions { InputSampleRate = -16000 }));
+    }
 }

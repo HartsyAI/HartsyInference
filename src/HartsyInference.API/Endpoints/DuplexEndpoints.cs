@@ -24,7 +24,9 @@ namespace HartsyInference.API.Endpoints;
 /// ends it when the model reaches its frame limit.</para>
 /// <para><b>Real time.</b> The server ticks once per frame whatever the client does, so the client should play frames at a steady rate after holding
 /// <c>leadFrames</c> of them: a frame that computes late still arrives in time while it is within the lead. There is no echo cancellation: use headphones.
-/// The conversation holds its device for its whole life.</para></remarks>
+/// The conversation holds the model for its whole life (a second one is refused until it ends) but only the open runs in the long-running
+/// queue: once it is open it no longer holds a slot, so other long-running jobs can start on the same device while it talks, and a busy device is what makes
+/// frames late. Text messages other than <c>{"type":"close"}</c> are ignored.</para></remarks>
 public static class DuplexEndpoints
 {
     private const string Route = "/v1/native/duplex/ws";
@@ -53,13 +55,23 @@ public static class DuplexEndpoints
         CancellationToken aborted = ctx.RequestAborted;
         JsonSerializerOptions json = SseHelpers.ResolveJsonOptions(ctx);
         DuplexVoiceSession? voice = null;
+        WebSocketCloseStatus status = WebSocketCloseStatus.NormalClosure;
         try
         {
             NativeDuplexOpenRequest open = await ReadOpenAsync(socket, json, aborted);
             bool pcm16 = ParseFormat(open.Format);
             ModelSpec spec = ModelResolver.Resolve(open.Model, open.ModelPath, Modality.Speech);
             IDuplexSpeechSession session = await queue.EnqueueAsync(() => engine.Speech.OpenDuplexAsync(spec, open.Request, aborted), aborted);
-            voice = new DuplexVoiceSession(session, new DuplexVoiceOptions { LeadFrames = open.LeadFrames, InputSampleRate = open.InputSampleRate });
+            try
+            {
+                voice = new DuplexVoiceSession(session, new DuplexVoiceOptions { LeadFrames = open.LeadFrames, InputSampleRate = open.InputSampleRate });
+            }
+            catch
+            {
+                // The model allows one conversation at a time: a session that never reached the wrapper would hold it until the process ends.
+                session.Dispose();
+                throw;
+            }
             await Task.Run(voice.Start, aborted);
             await SendJsonAsync(socket, json, new
             {
@@ -74,10 +86,37 @@ public static class DuplexEndpoints
             using CancellationTokenSource done = CancellationTokenSource.CreateLinkedTokenSource(aborted);
             Task receive = ReceiveAsync(socket, voice, pcm16, done.Token);
             Task send = SendAsync(socket, voice, json, pcm16, done.Token);
-            await Task.WhenAny(receive, send);
-            await done.CancelAsync();
-            await Task.WhenAll(Swallow(receive), Swallow(send));
+            Task first = await Task.WhenAny(receive, send);
+            if (first == receive)
+            {
+                // The client ended it: the sender is waiting on the frame queue, and cancelling that does not touch the socket.
+                await done.CancelAsync();
+                await Swallow(send);
+                await Swallow(receive);
+            }
+            else
+            {
+                // The model ended it (its frame limit), the pacer stopped with an error, or a send failed. The receiver is waiting on the socket, and
+                // cancelling that would abort the connection and lose the last messages, so it is left to finish when the client answers the close.
+                Exception? failure = send.IsFaulted ? send.Exception!.GetBaseException() : null;
+                if (failure is not null && failure is not (WebSocketException or OperationCanceledException or ObjectDisposedException))
+                {
+                    Logs.Warning($"[Duplex] A conversation ended with an error: {failure.Message}");
+                    await SendJsonAsync(socket, json, new { type = "error", message = failure.Message }, CancellationToken.None);
+                    status = WebSocketCloseStatus.InternalServerError;
+                }
+            }
             await SendJsonAsync(socket, json, new { type = "stats", final = true, stats = voice.Stats() }, CancellationToken.None);
+            if (first != receive)
+            {
+                await CloseOutputAsync(socket, status);
+                // Give the client a moment to answer with its own close frame; after that the read is cancelled (which ends the connection).
+                if (await Task.WhenAny(receive, Task.Delay(TimeSpan.FromSeconds(5))) != receive)
+                {
+                    await done.CancelAsync();
+                }
+                await Swallow(receive);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -87,6 +126,7 @@ public static class DuplexEndpoints
         {
             Logs.Warning($"[Duplex] A conversation ended with an error: {ex.Message}");
             await SendJsonAsync(socket, json, new { type = "error", message = ex.Message }, CancellationToken.None);
+            status = WebSocketCloseStatus.InternalServerError;
         }
         catch (WebSocketException)
         {
@@ -95,7 +135,7 @@ public static class DuplexEndpoints
         finally
         {
             voice?.Dispose();
-            await CloseAsync(socket);
+            await CloseAsync(socket, status);
         }
     }
 
@@ -127,6 +167,10 @@ public static class DuplexEndpoints
         if (open.LeadFrames is < 0 or > 8)
         {
             throw new ArgumentOutOfRangeException(nameof(open), "leadFrames is 0 to 8.");
+        }
+        if (open.InputSampleRate < 0 || open.InputSampleRate % 50 != 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(open), "inputSampleRate is 0 (the model's own) or a rate that divides by 50, such as 8000, 16000, 44100 or 48000.");
         }
         return open;
     }
@@ -237,14 +281,30 @@ public static class DuplexEndpoints
         }
     }
 
-    private static async Task CloseAsync(WebSocket socket)
+    private static async Task CloseOutputAsync(WebSocket socket, WebSocketCloseStatus status)
     {
         try
         {
             if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
                 using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
-                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "conversation ended", timeout.Token);
+                await socket.CloseOutputAsync(status, "conversation ended", timeout.Token);
+            }
+        }
+        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
+        {
+            // Already closed from the other side.
+        }
+    }
+
+    private static async Task CloseAsync(WebSocket socket, WebSocketCloseStatus status)
+    {
+        try
+        {
+            if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived or WebSocketState.CloseSent)
+            {
+                using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(5));
+                await socket.CloseAsync(status, "conversation ended", timeout.Token);
             }
         }
         catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
