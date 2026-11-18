@@ -19,12 +19,13 @@ internal sealed class MiniMaxMusic3FlowWeights : IDisposable
         Layout = layout;
         // A tensor the converter returned that is not one of the file's own was allocated here (a split, a cast, a dequant).
         HashSet<Tensor> borrowed = new HashSet<Tensor>(source.Weights.Values, ReferenceEqualityComparer.Instance as IEqualityComparer<Tensor>);
+        HashSet<Tensor> seen = new HashSet<Tensor>(ReferenceEqualityComparer.Instance as IEqualityComparer<Tensor>);
         _owned = [];
         foreach (IReadOnlyDictionary<string, Tensor>? weights in new[] { transformer, conditionEncoder })
         {
             foreach (Tensor tensor in weights?.Values ?? Enumerable.Empty<Tensor>())
             {
-                if (!borrowed.Contains(tensor) && !_owned.Contains(tensor))
+                if (!borrowed.Contains(tensor) && seen.Add(tensor))
                 {
                     _owned.Add(tensor);
                 }

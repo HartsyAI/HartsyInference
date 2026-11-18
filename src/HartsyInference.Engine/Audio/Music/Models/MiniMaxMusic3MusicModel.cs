@@ -70,7 +70,6 @@ internal static class MiniMaxMusic3MusicModel
         return null;
     }
 
-
     private static async Task<IMusicRunner> LoadAsync(MusicLoadContext context, string repo, string? quant, string? localPath, CancellationToken cancel)
     {
         string tokenizerPath = await AudioModelCache.GetAsync(repo, "tokenizer/tokenizer.json", Category, ct: cancel).ConfigureAwait(false);
@@ -96,8 +95,17 @@ internal static class MiniMaxMusic3MusicModel
             }
             else
             {
-                (conditionWeights, conditionLoaders) =
-                    await AudioCheckpoints.LoadSubfolderAsync(repo, "condition_encoder", Category, cancel).ConfigureAwait(false);
+                try
+                {
+                    (conditionWeights, conditionLoaders) =
+                        await AudioCheckpoints.LoadSubfolderAsync(repo, "condition_encoder", Category, cancel).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // The selected file stays mapped until the runner owns it; a failed repo fetch must not strand it.
+                    flowFile.Dispose();
+                    throw;
+                }
             }
             Logs.Info($"[Audio][MiniMaxMusic3] Flow DiT from selected checkpoint '{Path.GetFileName(localPath)}' ({flowFile.Layout}); "
                 + $"{(flowFile.ConditionEncoder is null ? "condition encoder, " : "")}language model, depth decoder, vocoder from {repo}.");
