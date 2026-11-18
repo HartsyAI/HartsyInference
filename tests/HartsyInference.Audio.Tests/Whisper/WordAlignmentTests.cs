@@ -189,24 +189,44 @@ public sealed unsafe class WordAlignmentTests
     }
 
     [Fact]
-    public void Probe_RecordsASoftmaxOverTheCroppedFrames()
+    public void Probe_MeanAttentionPeaksWhereARowReads_AndEachFrameIsZeroMeanAcrossRows()
     {
         WhisperAttentionProbe probe = PeakedProbe(rows: 6, framesPerRow: 10, frames: 50);
 
-        ReadOnlySpan<float> weights = probe.HeadWeights(0);
+        ReadOnlySpan<float> mean = probe.MeanAttention;
 
-        Assert.Equal(6 * 50, weights.Length);
-        for (int r = 0; r < 6; r++)
+        Assert.Equal(6 * 50, mean.Length);
+        // Row 2 reads frames 10-19, so it stands above its own reading of frame 45 after the per-frame normalization.
+        Assert.True(mean[2 * 50 + 15] > mean[2 * 50 + 45] + 1f);
+        for (int f = 0; f < 50; f++)
         {
             float sum = 0f;
-            for (int f = 0; f < 50; f++)
+            for (int r = 0; r < 6; r++)
             {
-                sum += weights[r * 50 + f];
+                sum += mean[r * 50 + f];
             }
-            Assert.Equal(1f, sum, 4);
+            // The median filter moves a column's sum only a little, so it stays near zero.
+            Assert.InRange(sum, -1f, 1f);
         }
-        // Row 2 reads frames 10-19 (the keys marked 1) far more than frame 45.
-        Assert.True(weights[2 * 50 + 15] > 50f * weights[2 * 50 + 45]);
+    }
+
+    [Fact]
+    public void Probe_RefusesAMeanBeforeEveryHeadWasCaptured()
+    {
+        WhisperAttentionProbe probe = new([new WhisperAlignmentHead(0, 0), new WhisperAlignmentHead(1, 0)], 50);
+
+        Assert.Throws<InvalidOperationException>(() => probe.MeanAttention.ToArray());
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("  \n\t ", null)]
+    [InlineData("hold on\nlet go", "hold on let go")]
+    [InlineData("  a\t\tb   c\r\n\r\nd ", "a b c d")]
+    public void KnownText_IsCollapsedToSingleSpaces_OrDroppedWhenBlank(string? text, string? expected)
+    {
+        Assert.Equal(expected, WhisperWordSplitter.NormalizeKnownText(text));
     }
 
     [Fact]

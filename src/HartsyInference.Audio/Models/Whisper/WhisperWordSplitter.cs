@@ -10,6 +10,16 @@ internal static class WhisperWordSplitter
     /// <summary>Languages whose words are not separated by spaces.</summary>
     private static readonly HashSet<string> Unspaced = new HashSet<string>(StringComparer.Ordinal) { "zh", "ja", "th", "lo", "my", "yue" };
 
+    /// <summary>Known text ready to tokenize: every run of whitespace (newlines, tabs, repeated spaces) becomes one space and the ends are trimmed, so a line break cannot fuse the last word of a line to the first of the next. Null when nothing but whitespace is left.</summary>
+    internal static string? NormalizeKnownText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+        return string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    }
+
     /// <summary>Splits <paramref name="tokens"/>, the text tokens of one transcript with no special tokens among them, into words; <paramref name="decode"/> turns a run of token ids into text. <paramref name="language"/> picks the space-free rule; null counts as spaced.</summary>
     internal static IReadOnlyList<WhisperWordTokens> Split(Func<ReadOnlyMemory<int>, string> decode, ReadOnlyMemory<int> tokens, string? language)
     {

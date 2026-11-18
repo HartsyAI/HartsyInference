@@ -26,22 +26,28 @@ public static class WhisperAlignmentHeads
             return Default(cfg);
         }
         List<WhisperAlignmentHead> heads = new List<WhisperAlignmentHead>();
+        int dropped = 0;
         foreach (JsonElement pair in listed.EnumerateArray())
         {
-            if (pair.ValueKind != JsonValueKind.Array || pair.GetArrayLength() != 2
-                || !pair[0].TryGetInt32(out int layer) || !pair[1].TryGetInt32(out int head))
-            {
-                continue;
-            }
-            if (layer >= 0 && layer < cfg.DecoderLayers && head >= 0 && head < cfg.NumHeads)
+            if (pair.ValueKind == JsonValueKind.Array && pair.GetArrayLength() == 2
+                && pair[0].TryGetInt32(out int layer) && pair[1].TryGetInt32(out int head)
+                && layer >= 0 && layer < cfg.DecoderLayers && head >= 0 && head < cfg.NumHeads)
             {
                 heads.Add(new WhisperAlignmentHead(layer, head));
+            }
+            else
+            {
+                dropped++;
             }
         }
         if (heads.Count == 0)
         {
-            Logs.Warning("[Audio][STT] generation_config.json lists no usable alignment head; using every head of the upper decoder layers.");
+            Logs.Warning("[Audio][STT] generation_config.json lists no usable alignment head (a distilled model keeps its teacher's); using every head of the upper decoder layers.");
             return Default(cfg);
+        }
+        if (dropped > 0)
+        {
+            Logs.Warning($"[Audio][STT] {dropped} alignment head(s) in generation_config.json do not fit this model's {cfg.DecoderLayers} layers x {cfg.NumHeads} heads and were ignored.");
         }
         return heads;
     }

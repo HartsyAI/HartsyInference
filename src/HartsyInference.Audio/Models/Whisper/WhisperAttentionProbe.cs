@@ -1,23 +1,28 @@
 using System.Numerics;
+using HartsyInference.Audio.Dsp.Alignment;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
 
-/// <summary>Collects the decoder's cross-attention weights for a set of alignment heads during one decoder pass. The decoder runs fused attention that never surfaces its weights, so the probe recomputes them from the query and the cached encoder keys for the heads it was asked to watch.</summary>
+/// <summary>Collects the decoder's cross-attention for a set of alignment heads during one decoder pass and keeps their mean. The decoder runs fused attention that never surfaces its weights, so the probe recomputes them from the query and the cached encoder keys for the heads it was asked to watch. Each head is folded into one running sum as it is captured, so the memory held is one matrix however many heads are watched.</summary>
 public sealed class WhisperAttentionProbe
 {
-    private readonly IReadOnlyList<WhisperAlignmentHead> _heads;
-    private readonly float[]?[] _weights;
+    /// <summary>The median window along time, in frames.</summary>
+    private const int SmoothingWidth = 7;
 
-    /// <summary>The heads watched, in the order <see cref="HeadWeights"/> indexes them.</summary>
+    private readonly IReadOnlyList<WhisperAlignmentHead> _heads;
+    private float[]? _sum;
+    private int _captured;
+
+    /// <summary>The heads watched.</summary>
     public IReadOnlyList<WhisperAlignmentHead> Heads => _heads;
 
     /// <summary>Audio frames each row spans: encoder positions at 50 per second, cut to the audio's own length before the softmax.</summary>
     public int Frames { get; }
 
-    /// <summary>Decoder positions captured so far, the rows of every head's weights.</summary>
+    /// <summary>Decoder positions captured, the rows of <see cref="MeanAttention"/>.</summary>
     public int Rows { get; private set; }
 
     /// <summary>Watches <paramref name="heads"/> over the first <paramref name="frames"/> encoder positions.</summary>
@@ -31,12 +36,26 @@ public sealed class WhisperAttentionProbe
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(frames);
         _heads = heads;
         Frames = frames;
-        _weights = new float[heads.Count][];
     }
 
-    /// <summary>The softmaxed attention of watched head <paramref name="index"/> as a row-major <c>[Rows, Frames]</c> matrix.</summary>
-    public ReadOnlySpan<float> HeadWeights(int index)
-        => _weights[index] ?? throw new InvalidOperationException("The decoder has not run with this probe yet.");
+    /// <summary>The mean over the watched heads of each head's attention, as a row-major <c>[Rows, Frames]</c> matrix: every head's softmax is normalized to zero mean and unit variance across the rows of each frame (so a frame every token attends to alike carries no signal), then median-filtered along time, as OpenAI's Whisper word timestamps do.</summary>
+    public ReadOnlySpan<float> MeanAttention
+    {
+        get
+        {
+            if (_sum is null || _captured != _heads.Count)
+            {
+                throw new InvalidOperationException($"The decoder has captured {_captured} of {_heads.Count} watched heads.");
+            }
+            float[] mean = new float[_sum.Length];
+            float inverse = 1f / _heads.Count;
+            for (int i = 0; i < mean.Length; i++)
+            {
+                mean[i] = _sum[i] * inverse;
+            }
+            return mean;
+        }
+    }
 
     /// <summary>Whether any watched head lives in decoder layer <paramref name="layer"/>.</summary>
     internal bool WantsLayer(int layer)
@@ -66,23 +85,23 @@ public sealed class WhisperAttentionProbe
             throw new InvalidOperationException($"A probe records one decoder pass: it saw {Rows} rows, then {rows}.");
         }
         Rows = rows;
+        _sum ??= new float[rows * Frames];
 
         float[] keys = new float[heads * encoderFrames * headDim];
         backend.ReadResidentInto(encoderKeys, keys);
         float[] queries = new float[heads * rows * headDim];
         new ReadOnlySpan<float>((void*)queryHeadMajor.DataPointer, queries.Length).CopyTo(queries);
 
-        for (int w = 0; w < _heads.Count; w++)
+        float[] weights = new float[rows * Frames];
+        int frames = Frames;
+        foreach (WhisperAlignmentHead watched in _heads)
         {
-            if (_heads[w].Layer != layer)
+            if (watched.Layer != layer)
             {
                 continue;
             }
-            int head = _heads[w].Head;
-            float[] weights = new float[rows * Frames];
-            int headKeysOffset = head * encoderFrames * headDim;
-            int headQueriesOffset = head * rows * headDim;
-            int frames = Frames;
+            int headKeysOffset = watched.Head * encoderFrames * headDim;
+            int headQueriesOffset = watched.Head * rows * headDim;
             CpuParallel.For(rows, (long)rows * frames * headDim, r =>
             {
                 ReadOnlySpan<float> query = queries.AsSpan(headQueriesOffset + r * headDim, headDim);
@@ -93,7 +112,38 @@ public sealed class WhisperAttentionProbe
                 }
                 Softmax(row);
             });
-            _weights[w] = weights;
+            NormalizeColumns(weights, rows, frames);
+            MedianFilter.Rows(weights, rows, frames, SmoothingWidth);
+            for (int i = 0; i < weights.Length; i++)
+            {
+                _sum[i] += weights[i];
+            }
+            _captured++;
+        }
+    }
+
+    /// <summary>Gives each column of the row-major <c>[rows, cols]</c> matrix zero mean and unit variance across its rows; a flat column becomes zero.</summary>
+    private static void NormalizeColumns(Span<float> data, int rows, int cols)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            double mean = 0d;
+            for (int r = 0; r < rows; r++)
+            {
+                mean += data[r * cols + c];
+            }
+            mean /= rows;
+            double variance = 0d;
+            for (int r = 0; r < rows; r++)
+            {
+                double delta = data[r * cols + c] - mean;
+                variance += delta * delta;
+            }
+            double deviation = Math.Sqrt(variance / rows);
+            for (int r = 0; r < rows; r++)
+            {
+                data[r * cols + c] = deviation > 1e-9 ? (float)((data[r * cols + c] - mean) / deviation) : 0f;
+            }
         }
     }
 

@@ -90,7 +90,11 @@ internal static class LongFormTranscription
             if (text.Length > 0)
             {
                 texts.Add(text);
-                segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
+                // A whole-window phrase is not a word, so a word request leaves the window out of Words (its text stays).
+                if (!request.WordTimestamps)
+                {
+                    segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
+                }
             }
             else
             {

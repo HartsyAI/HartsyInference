@@ -173,7 +173,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         return ParseSegments(DecodeTokens(backend, mel, opts with { WithTimestamps = true }, timer), seconds);
     }
 
-    /// <summary>Times every word of the clip by aligning the text to the audio through the decoder's cross-attention. With no <paramref name="knownText"/> the clip is transcribed first and that transcript is aligned; with it, the given text is aligned as it stands (a forced alignment, for lyrics or a script the caller already has). Covers the first 30 s of the clip, like <see cref="TranscribeAudio"/>; a text that does not fit the decoder's context throws. Returns an empty list when there is no text.</summary>
+    /// <summary>Times every word of the clip by aligning the text to the audio through the decoder's cross-attention. With no <paramref name="knownText"/> (null, empty or whitespace) the clip is transcribed first and that transcript is aligned; with it, the given text is aligned as it stands (a forced alignment, for lyrics or a script the caller already has). Covers the first 30 s of the clip, like <see cref="TranscribeAudio"/>; a text that does not fit the decoder's context throws. Returns an empty list when there is no text.</summary>
     public IReadOnlyList<WhisperWord> AlignWords(IBackend backend, float[] audio, int sampleRate, string? knownText = null, WhisperOptions? options = null)
     {
         ThrowIfDisposed();
@@ -192,7 +192,8 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         try
         {
             List<int> text;
-            if (knownText is null)
+            string? known = WhisperWordSplitter.NormalizeKnownText(knownText);
+            if (known is null)
             {
                 using WhisperDecoder.DecodeState state = _decoder.StartDecode(backend, encoded);
                 state.Timer = timer;
@@ -200,7 +201,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             }
             else
             {
-                text = [.. _tokenizer.EncodeText(" " + knownText.Trim())];
+                text = [.. _tokenizer.EncodeText(" " + known)];
             }
             text.RemoveAll(id => id >= _tokenizer.EotId);
             return AlignTokens(backend, encoded, text, seconds, opts);
