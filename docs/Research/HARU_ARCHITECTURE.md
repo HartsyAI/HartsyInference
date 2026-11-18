@@ -142,6 +142,16 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
 - 2026-11-17, mixed precisions (`q8-ff6`, `q8-ff5`, `q8-ff4`: Q8_0 attention and delta-rule, K-quant feed-forward), same clip, 25 s tail: all three replies unintelligible
   ("Hm", mixed-language fragments, repetition). Only Q8_0 for every matrix (and native) keeps the conversation; the variants were removed.
 
+- 2026-11-17, K-quant diagnostics on the released weights (opt-in `HaruQuantErrorDiagnostic`: `HARU_REAL_DIR`, `HARU_DIAG=1`, `2` or `3`, and `HARU_CACHE_DIR` for 3):
+  - **Per-tensor re-quantization error** (layers 0 to 3, 15, 30 and 31, all ten matrix classes): relative RMS 0.0055 at Q8_0, 0.0225 at Q6_K, 0.079 at Q4_K, the same on every tensor
+    (max absolute error 0.02 to 0.1 at Q8_0, 0.1 to 0.7 at Q6_K). No outlier tensor; Q6_K at four times Q8_0's error is what 6-bit weights with 16-element scales give.
+  - **CUDA linear against a matmul over the dequantized weight** (`HARU_DIAG=2`, one and 16 rows, four tensors): 0.2 to 0.4% relative error for Q8_0, Q6_K, Q5_K and Q4_K alike
+    (the activation quantization of the integer kernels), so the K-quant kernels agree with the format and no kernel fault shows.
+  - **Prefill sensitivity** (`HARU_DIAG=3`, the 41-position prompt, the Q8_0 model as reference, some tensors swapped to Q6_K): hidden-state relative error of the last row
+    2.7% for attention and delta-rule projections, 2.0% down, 1.6% gate, 1.3% up (they add in quadrature); by layers 0 to 7 0.8%, 8 to 15 0.6%, 16 to 23 1.5%, 24 to 31 3.4%;
+    every matrix 4.3%, with the F32 PAD logit 36.06 to 36.68 and the EOP logit 33.53 to 34.00. The error is spread over the model, with the last quarter of the layers
+    contributing most; there is no single sensitive tensor to leave out, and every mixed file tried (see above) was unintelligible, so the catalog has no policy other than Q8_0.
+
 - 2026-11-17, the live route on the real model (`/v1/native/duplex/ws`, `haru:q8`, RTX 3060, a scripted client sending the 8 kHz recording in 20 ms chunks in real time,
   `leadFrames` 2, the reply played back through a simulated speaker that holds two frames):
   - A 45 s conversation (the 14 s question, then silence): coherent English answer ("A, lemon tart. ... C, strawberry tart ..."), the Whisper transcript of the received audio
@@ -227,8 +237,8 @@ dead voice-session links and the `RealtimeScheduling` entry in `docs/Agents/AGEN
 ## Open questions
 
 - Whether the full 110 codec tensors equal VibeVoice-1.5B's (two compared).
-- Why the K-quants lose the conversation (see Evidence, 2026-11-17 GPU) is open: this PR does not rule out a quantizer or kernel fault. A comparison of the
-  CUDA K-quant linear with a matmul over the dequantized weight, and a per-tensor sweep, follow in a separate PR.
+- Why the model does not tolerate about 4% hidden-state error from Q6_K in generation, while Q8_0 (0.5% weight error) does, is not explained; no tensor or kernel to
+  exclude was found (see Evidence, K-quant diagnostics). A longer-horizon sensitivity test (generation, not a prefill) would tell whether a mixed file exists.
 - Tail latency on the 3060: a frame is over the 133 ms budget about 7% of the time under contention (see Evidence, per-stage profile); a live session needs an output buffer of two to three frames or a quieter card.
 - Whether a mixed file (Q8_0 attention, Q6_K/Q5_K/Q4_K feed-forward) keeps the conversation: it does not (tried 2026-11-17, all three replies unintelligible), so the K-quants fail is in the feed-forward matrices too, not only the attention.
 - Native BF16 on a GPU (its evidence so far is 16-frame token parity on the CPU, no GPU run) and on a larger card such as a 4090: not measured. The Q8_0 frame time on the 3060 is in Evidence.
