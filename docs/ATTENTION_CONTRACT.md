@@ -1,7 +1,7 @@
 # Attention contract
 
 The semantics every attention kernel, planner row and model-side layer in this engine implements. It is normative:
-`AttentionHostReference` (`src/HartsyInference.Core/Backends/Attention/`, the default `IBackend.Attention`) is its
+`AttentionHostReference` (`src/HartsyInference.Core/Backends/Attention/`, invoked explicitly by the caller) is its
 executable form, and a kernel that disagrees with it beyond the tolerance of the precision it was permitted is wrong,
 whatever any model's output looks like. Code comments point here instead of restating it.
 
@@ -157,6 +157,11 @@ Failures are classed:
 | Unsupported | no row covers the call | raised at planning, before any work |
 | Recoverable | a plan build refused, an engine configuration rejected, a workspace too small | the next row runs; no state changed |
 | Sticky | an illegal address, a launch failure, anything raised after output writes began | the context is poisoned and nothing retries |
+
+No admitted row raises `AttentionUnsupportedException`; if every admitted row declines, the planner raises
+`AttentionRecoverableException` instead. Any execution exception is sticky and propagates unchanged rather than being
+converted into a decline. CUDA and Vulkan have no host-reference rows. Host execution is the caller's explicit choice
+through `AttentionHostReference.Run`; a backend without rows refuses `IBackend.Attention`.
 
 A failure while a stream is capturing is never recorded as a permanent property of a head dim or a kernel.
 

@@ -3,9 +3,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends.Attention;
 
-/// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype: the default
-/// <see cref="IBackend.Attention"/> for a backend without kernel rows. It reads tensors through
-/// <see cref="Tensor.DataPointer"/> and never calls a legacy entry point, so it cannot recurse into a backend's wrappers.</summary>
+/// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype. Callers choose
+/// this path explicitly; <see cref="IBackend.Attention"/> refuses a backend without kernel rows. The reference reads
+/// tensors through <see cref="Tensor.DataPointer"/> and never calls a legacy entry point, so it cannot recurse.</summary>
 public static class AttentionHostReference
 {
     /// <summary>Runs <paramref name="call"/>. Device positions need a backend to read them and are refused.</summary>

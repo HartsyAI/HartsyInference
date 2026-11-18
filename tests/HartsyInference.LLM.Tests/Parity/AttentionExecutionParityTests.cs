@@ -111,6 +111,14 @@ public sealed class AttentionExecutionParityTests
     public void VulkanMalformedLegacyAndDirectCallsLeaveOutputUntouched() =>
         MalformedCallsLeaveOutputUntouched(new VulkanBackend());
 
+    [CudaFact]
+    public void CudaUnsupportedFlashRefusesHostFallback() =>
+        UnsupportedFlashRefusesHostFallback(new CudaBackend(0, CudaPtxDirectory.Resolve()), "cuda", headDim: 1025, softcap: 0f);
+
+    [VulkanFact]
+    public void VulkanUnsupportedFlashRefusesHostFallback() =>
+        UnsupportedFlashRefusesHostFallback(new VulkanBackend(), "vulkan", headDim: 64, softcap: 1f);
+
     private static void Dense(IBackend backend, string site)
     {
         using (backend)
@@ -217,6 +225,32 @@ public sealed class AttentionExecutionParityTests
             {
                 backend.FreeDevicePos(devicePos);
             }
+        }
+    }
+
+    private static void UnsupportedFlashRefusesHostFallback(IBackend backend, string site, int headDim, float softcap)
+    {
+        using (backend)
+        {
+            using Tensor q = new(new TensorShape(1, 1, 1, headDim), DType.F32);
+            using Tensor k = new(q.Shape, DType.F32);
+            using Tensor v = new(q.Shape, DType.F32);
+            using Tensor output = new(q.Shape, DType.F32);
+            Fill(q, 0.01f);
+            Fill(k, -0.02f);
+            Fill(v, 0.1f);
+            output.AsSpan<float>().Fill(7f);
+            AttentionCall call = AttentionCall.FromFlashAttention(output, q, k, v, 1, false, 0, 0.5f, softcap, null, 0, null);
+
+            using AttentionEvidenceSession evidence = AttentionEvidence.Begin(8);
+            Assert.Null(backend.PlanAttention(in call).Row);
+            Assert.Throws<AttentionUnsupportedException>(() => backend.FlashAttention(output, q, k, v, 1, 1, false, 0, 0.5f, softcap));
+            Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+            Assert.DoesNotContain(evidence.Snapshot(), e => e.Site == site && e.Kind == AttentionEvidenceKind.Execution);
+            Assert.All(output.AsReadOnlySpan<float>().ToArray(), value => Assert.Equal(7f, value));
+
+            AttentionHostReference.Run(in call);
+            Assert.All(output.AsReadOnlySpan<float>().ToArray(), value => Assert.NotEqual(7f, value));
         }
     }
 

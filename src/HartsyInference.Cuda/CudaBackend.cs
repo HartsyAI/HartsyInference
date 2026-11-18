@@ -1253,7 +1253,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>cuDNN fused attention is on: requested, and cuDNN is available. The first call resolves cuDNN, fetching it if needed.</summary>
     private bool SdpaCudnnOn => _sdpaCudnnRequested && CudnnRuntime.EnsureAvailable() && CudnnRuntime.SupportsSdpa;
     private readonly bool _flashF16;        // numerics.flashF16: the engine's F16 flash kernel at head dim 256
-    private volatile bool _flashF16Dead;    // set on the first launch failure; the session keeps cuDNN after that
 
     /// <summary>Routes F16/BF16 NCHW convolutions through cuDNN conv-forward engines instead of the im2col→cuBLAS GEMM path.</summary>
     /// <remarks>Standard-profile default ON; numerics.convCudnn=false disables. Failures self-disable for the session and fall back to im2col.</remarks>
@@ -5707,18 +5706,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         new((ulong)(heads * rows * d), (ulong)(rows * d), (ulong)d);
 
     /// <summary>Whether the F16 flash kernel takes this call: all-F16 operands, no mask, a head dim cuDNN serves
-    /// slowly, the PTX loaded, the knob on and no earlier failure this session.</summary>
+    /// slowly, the PTX loaded and the knob on.</summary>
     private bool FlashF16Eligible(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask, long d)
     {
-        if (!_flashF16 || _flashF16Dead || mask is not null || d != 256) return false;
+        if (!_flashF16 || mask is not null || d != 256) return false;
         if (query.DType != DType.F16 || key.DType != DType.F16 || value.DType != DType.F16 || output.DType != DType.F16)
             return false;
         EnsureKernels();
         return _kernels!.HasFlashAttnF16;
     }
 
-    /// <summary>Runs the F16 flash kernel over strided operands. A launch failure logs once, disables the kernel for the
-    /// session and returns false so the caller's cuDNN path serves the call.</summary>
+    /// <summary>Runs the F16 flash kernel over strided operands. False is a pre-launch shape or alignment decline;
+    /// allocation and launch failures propagate without retrying another row.</summary>
     private bool TryFlashF16(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
     {
@@ -5741,12 +5740,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             cached = true;
             Interlocked.Increment(ref _flashF16ExecutionCount);
             return true;
-        }
-        catch (Exception error) when (error is not OutOfMemoryException and not OutOfVramException)
-        {
-            _flashF16Dead = true;
-            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] F16 flash attention failed at D={d} ({error.Message}); using cuDNN for the rest of the session.");
-            return false;
         }
         finally
         {

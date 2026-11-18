@@ -22,16 +22,22 @@ public static class AttentionPlanner
     }
 
     /// <summary>Runs the first row that covers, admits and completes the call; returns it (allocation-free).</summary>
-    /// <exception cref="AttentionUnsupportedException">No row served the call.</exception>
+    /// <exception cref="AttentionUnsupportedException">No row covers and admits the call.</exception>
+    /// <exception cref="AttentionRecoverableException">Every admitted row declined without changing visible state.</exception>
     public static AttentionKernelRow Run(IReadOnlyList<AttentionKernelRow> rows, in AttentionCall call)
     {
+        bool declined = false;
         for (int i = 0; i < rows.Count; i++)
         {
             AttentionKernelRow row = rows[i];
             if (row.Capability.Excludes(in call) != AttentionExclusion.None || !row.Admits(in call)) continue;
             if (row.Run(in call)) return row;
+            declined = true;
         }
-        throw new AttentionUnsupportedException($"No attention row served this call: {Explain(rows, in call)}");
+        string explanation = Explain(rows, in call);
+        if (declined)
+            throw new AttentionRecoverableException($"Every admitted attention row declined without serving this call: {explanation}");
+        throw new AttentionUnsupportedException($"No attention row covers and admits this call: {explanation}");
     }
 
     /// <summary>Every row's verdict after a failed <see cref="Run"/>: what excluded it, or that it was not admitted or declined.</summary>

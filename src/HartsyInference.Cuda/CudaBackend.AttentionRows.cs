@@ -416,7 +416,7 @@ public sealed partial class CudaBackend
         }
     }
 
-    // ── FlashAttention: F.1-F.7 ──────────────────────────────────────────────────────────────────────────────────
+    // ── FlashAttention: F.2-F.7 ──────────────────────────────────────────────────────────────────────────────────
 
     private AttentionKernelRow[] BuildFlashRows()
     {
@@ -425,16 +425,6 @@ public sealed partial class CudaBackend
         const AttentionMaskSupport CW = AttentionMaskSupport.Causal | AttentionMaskSupport.Window;
         return
         [
-            new DelegateAttentionRow(Cap("host.reference", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 1025, Gqa = true, Masks = CW, LogitTerms = true, Lowering = AttentionLowering.HostReference,
-                }, "F.1",
-                static (in AttentionCall c) => !(c.QkHeadDim > 0 && c.QkHeadDim <= 1024),
-                static (in AttentionCall c) =>
-                {
-                    AttentionHostReference.Run(in c);
-                    return true;
-                }),
             // Causal prefill keeps 64: LLM prefill below that head dim has not been measured on cuDNN.
             new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {

@@ -82,7 +82,26 @@ public sealed class AttentionPlannerContractTests
     }
 
     [Fact]
-    public void AThrownExecutionFailureDoesNotRetryAnotherRow()
+    public void ExhaustedRecoverableDeclinesAreDistinctFromUnsupported()
+    {
+        using Operands operands = new();
+        AttentionCall call = operands.Call;
+        AttentionKernelRow[] rows =
+        [
+            new DelegateAttentionRow(Capability("workspace"), null, static (in AttentionCall _) => true,
+                static (in AttentionCall _) => false),
+            new DelegateAttentionRow(Capability("capture"), null, static (in AttentionCall _) => true,
+                static (in AttentionCall _) => false),
+        ];
+
+        AttentionRecoverableException error = Assert.Throws<AttentionRecoverableException>(() => AttentionPlanner.Run(rows, in call));
+        Assert.Contains("workspace (declined)", error.Message);
+        Assert.Contains("capture (declined)", error.Message);
+        Assert.All(operands.Output.AsReadOnlySpan<float>().ToArray(), value => Assert.Equal(7, value));
+    }
+
+    [Fact]
+    public void AThrownExecutionFailureIsStickyAndDoesNotRetryAnotherRow()
     {
         using Operands operands = new();
         AttentionCall call = operands.Call;

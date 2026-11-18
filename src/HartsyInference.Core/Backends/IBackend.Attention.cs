@@ -7,19 +7,17 @@ namespace HartsyInference.Core.Backends;
 
 // Attention: the AttentionCall contract and its planner, the legacy SDPA and Flash entries, video sparse attention,
 // neighborhood and deformable attention, KV append, and the single-latent sparse-attention, indexer and
-// hyper-connection primitives. Backends without a kernel inherit the host-reference or throwing defaults.
+// hyper-connection primitives. Backends without a kernel refuse attention; host execution is an explicit caller choice.
 public partial interface IBackend
 {
     /// <summary>Runs one attention call (docs/ATTENTION_CONTRACT.md). A backend with kernel rows overrides this with its
-    /// planner; the default computes the contract on the host and never calls the legacy entry points, so it cannot recurse.</summary>
-    void Attention(in AttentionCall call)
-    {
-        AttentionPlanLog.HostReference(GetType().Name);
-        AttentionHostReference.Run(in call);
-    }
+    /// planner; the default refuses the call. Call <see cref="AttentionHostReference.Run"/> explicitly for host execution.</summary>
+    void Attention(in AttentionCall call) => throw new AttentionUnsupportedException(
+        $"{GetType().Name} declares no attention rows. Call AttentionHostReference.Run explicitly for host execution.");
 
     /// <summary>The kernel <see cref="Attention"/> would run for <paramref name="call"/> and why; launches nothing.</summary>
-    AttentionPlan PlanAttention(in AttentionCall call) => new(null, null, "host reference: this backend declares no attention rows", null);
+    AttentionPlan PlanAttention(in AttentionCall call) => new(null, null,
+        "no attention rows; call AttentionHostReference.Run explicitly for host execution", null);
 
     /// <summary>Whether the backend's token-major INT8 attention v2 row would take an unmasked, equal-head, aligned call of this
     /// shape now (CUDA's M.4); an attention layer keeps such a call token-major instead of permuting it for SageAttention.</summary>

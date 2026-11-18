@@ -218,7 +218,7 @@ public sealed partial class VulkanBackend
         ];
     }
 
-    // ── FlashAttention: C.1-C.5 ───────────────────────────────────────────────────────────────────────────────────
+    // ── FlashAttention: C.2-C.5 ───────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Whether a device row computes the call: the sdpa_flash kernels (C.2-C.4) or the wide row (C.5).</summary>
     private bool FlashOnDevice(in AttentionCall c) => FlashKernelOnDevice(in c) || FlashWideAdmits(in c);
@@ -232,17 +232,6 @@ public sealed partial class VulkanBackend
         const AttentionLayouts HM = AttentionLayouts.HeadMajor;
         return
         [
-            // Any dtype: the host reference reads every storage format the contract names.
-            new DelegateAttentionRow(Cap("host.reference", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
-                {
-                    Gqa = true, Masks = RowCausalWindow, LogitTerms = true, Lowering = AttentionLowering.HostReference,
-                }, "C.1",
-                (in AttentionCall c) => !FlashOnDevice(in c),
-                static (in AttentionCall c) =>
-                {
-                    AttentionHostReference.Run(in c);
-                    return true;
-                }),
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = RowCausalWindow, MinQueryTokens = 64,
