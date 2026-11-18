@@ -92,7 +92,7 @@ public static class Program
                 .WithExample("speak", "\"Hello world\"", "-m", "en_US-lessac-medium");
             config.AddCommand<DuplexCommand>("duplex")
                 .WithDescription("Answer a recording of the user with a full-duplex speech-to-speech model (Haru-4B).")
-                .WithExample("duplex", "user.wav", "-m", "haru:q4", "--reference", "voice.wav", "--stereo");
+                .WithExample("duplex", "user.wav", "-m", "haru:q8", "--reference", "voice.wav", "--tail-seconds", "20", "--stereo");
             config.AddCommand<WakeTrainCommand>("wake-train")
                 .WithDescription("Train a new wake word from its text using the engine's own TTS voices.")
                 .WithExample("wake-train", "\"hey hartsy\"", "--negative-audio", "~/recordings");

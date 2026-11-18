@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Sampling;
 
@@ -34,6 +35,8 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     private int _index;
     private int _disposed;
     private bool _done;
+    private bool _timed;
+    private float[]? _logits;
 
     /// <summary>Creates a session; <paramref name="noise"/> defaults to a generator seeded with <see cref="HaruDuplexOptions.Seed"/>.</summary>
     internal HaruDuplexSession(HaruConfig config, HaruLm lm, HaruMeanFlowHead head, HaruCodecSession codec, HaruTextCodec text,
@@ -56,6 +59,9 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         _bannedTokens = config.EosTokenId is int eos ? [config.PadTokenId, config.EopTokenId, eos] : _silentTokens;
     }
 
+    /// <summary>Wall time per stage of the frames <see cref="Step"/> computed (the prompt's frame 0 is not timed).</summary>
+    public HaruStageTimer Stages { get; } = new();
+
     /// <summary>Frames produced since <see cref="Start"/>.</summary>
     public int FramesProduced => _index;
 
@@ -64,6 +70,10 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            if (Stages.Summary(0).Frames > 0)
+            {
+                Logs.Info($"[Audio][Haru] Per frame, median/max: {Stages.Describe((double)_config.FrameSamples / _config.SampleRate)}.");
+            }
             _release?.Invoke();
         }
     }
@@ -113,6 +123,7 @@ public sealed unsafe class HaruDuplexSession : IDisposable
                 last?.Dispose();
                 last = LastRow(hidden, rows);
             }
+            _timed = false;
             return Emit(last!, started);
         }
         finally
@@ -138,10 +149,15 @@ public sealed unsafe class HaruDuplexSession : IDisposable
             throw new ArgumentException($"A user frame is {_config.FrameSamples} samples, got {userFrame.Length}.", nameof(userFrame));
         }
         long started = Stopwatch.GetTimestamp();
+        _timed = true;
+        Stages.Begin();
         float[] userLatent = _codec.Sample(_codec.EncodeFrame(userFrame), _noise);
+        Stages.Lap(0);
         using Tensor embeds = _lm.Embed(_backend, [_token], _latent, [], userLatent, []);
+        Stages.Lap(1);
         using Tensor hidden = _lm.Forward(_backend, embeds, 1);
         using Tensor row = LastRow(hidden, 1);
+        Stages.Lap(2);
         return Emit(row, started);
     }
 
@@ -149,6 +165,10 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     {
         float[] logits = TextLogits(row);
         int token = _sampler!.Next(logits, _history);
+        if (_timed)
+        {
+            Stages.Lap(3);
+        }
 
         int d = _config.LatentDim;
         float[] draws = new float[d];
@@ -163,10 +183,19 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         {
             latent[i] = _lm.Unscale(latent[i]);
         }
+        if (_timed)
+        {
+            Stages.Lap(4);
+        }
         float[] audio = _codec.DecodeFrame(latent);
         for (int i = 0; i < audio.Length; i++)
         {
             audio[i] = Math.Clamp(audio[i], -1f, 1f);
+        }
+        if (_timed)
+        {
+            Stages.Lap(5);
+            Stages.Frame(Stopwatch.GetElapsedTime(started).TotalSeconds);
         }
 
         _token = token;
@@ -183,7 +212,10 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     private float[] TextLogits(Tensor row)
     {
         using Tensor all = _lm.Logits(_backend, row, 1);
-        float[] logits = new ReadOnlySpan<float>((void*)all.DataPointer, _lm.VocabSize).ToArray();
+        // One buffer for the life of the session: a fresh 1 MB array every frame lands on the large object heap and brought a full collection every
+        // 18 frames or so.
+        float[] logits = _logits ??= new float[_lm.VocabSize];
+        new ReadOnlySpan<float>((void*)all.DataPointer, _lm.VocabSize).CopyTo(logits);
         Span<float> exact = stackalloc float[2];
         _lm.StreamLogits(row, 0, _silentTokens, exact);
         logits[_config.PadTokenId] = exact[0];

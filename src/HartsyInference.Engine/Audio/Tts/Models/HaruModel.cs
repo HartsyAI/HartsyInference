@@ -15,7 +15,7 @@ namespace HartsyInference.Engine.Audio;
 /// recorded consent and real-time voice conversion.
 ///
 /// <para>The variant picks the precision of the language model's matrices: native (BF16, 10.5 GB for the whole checkpoint), or <c>q8</c>,
-/// <c>q6</c>, <c>q5</c> or <c>q4</c>, converted once into a disk cache. On a 12 GB card use <c>q4</c> or <c>q8</c>.</para></summary>
+/// <c>q6</c>, <c>q5</c> or <c>q4</c>, converted once into a disk cache. <c>q8</c> fits a 12 GB card (8.1 GB peak measured on an RTX 3060).</para></summary>
 internal static class HaruModel
 {
     internal const string Repo = "higurashi-ai/Haru-4B";
@@ -50,7 +50,7 @@ internal static class HaruModel
         string name = CatalogIds.Contains(variant, StringComparer.OrdinalIgnoreCase) ? "" : variant;
         return HaruWeights.TryParsePrecision(name, out HaruPrecision precision)
             ? precision
-            : throw new ArgumentException($"Unknown Haru precision '{variant}'; expected native, q8, q6, q5 or q4 (for example 'haru:q4').", nameof(variant));
+            : throw new ArgumentException($"Unknown Haru precision '{variant}'; expected native, q8, q6, q5 or q4 (for example 'haru:q8').", nameof(variant));
     }
 
     private static async Task<ITtsRunner> LoadAsync(TtsLoadContext context, string variant, CancellationToken cancel)

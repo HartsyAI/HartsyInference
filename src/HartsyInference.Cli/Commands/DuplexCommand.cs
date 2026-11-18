@@ -17,9 +17,9 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         [Description("Audio of the user (any rate, mixed down to mono).")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id with an optional precision, e.g. haru:q4.</summary>
+        /// <summary>Model id with an optional precision, e.g. haru:q8.</summary>
         [CommandOption("-m|--model")]
-        [Description("Full-duplex model, optionally 'id:precision' (haru, haru:q8, haru:q4). A 12 GB card needs q8 or q4.")]
+        [Description("Full-duplex model, optionally 'id:precision' (haru, haru:q8). q8 fits a 12 GB card.")]
         public string Model { get; init; } = "haru";
 
         /// <summary>Compute backend selector.</summary>
@@ -54,7 +54,7 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
 
         /// <summary>Frames of silence after the recording, so the model can finish.</summary>
         [CommandOption("--tail-seconds")]
-        [Description("Seconds of silence appended after the recording so the model can finish speaking (default 0).")]
+        [Description("Seconds of silence appended after the recording so the model can finish speaking (default 0; a 14 s question needed about 20).")]
         public double TailSeconds { get; init; }
 
         /// <summary>Audio guidance.</summary>

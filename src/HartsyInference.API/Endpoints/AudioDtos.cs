@@ -19,7 +19,7 @@ public sealed class NativeSpeechRequest : NativeArtifactRequest
 /// recording and the voice reference travel as base64 inside the JSON body.</summary>
 public sealed class NativeDuplexRespondRequest : NativeArtifactRequest
 {
-    /// <summary>Catalog id with an optional precision (<c>haru</c>, <c>haru:q4</c>), local path, or HuggingFace repo id.</summary>
+    /// <summary>Catalog id with an optional precision (<c>haru</c>, <c>haru:q8</c>), local path, or HuggingFace repo id.</summary>
     public required string Model { get; set; }
 
     /// <summary>Explicit checkpoint path override; wins over catalog/HF resolution. Must be an absolute path.</summary>
