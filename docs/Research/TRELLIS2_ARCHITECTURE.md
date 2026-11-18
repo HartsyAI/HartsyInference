@@ -26,7 +26,7 @@ Texture sampling and baking also read `JeffreyXiang/FlexGEMM` commit `6dd94a859c
 | Stage | Upstream | This port |
 |---|---|---|
 | Preprocess | `preprocess_image`: long edge to at most 1024 (LANCZOS), RMBG-2.0 matte unless the image has non-opaque alpha, crop the square around alpha above 0.8, RGB times alpha | `Trellis2ImagePreprocessor`; the matte comes from `IForegroundMatter` (BiRefNet-matting stand-in) |
-| Conditioning | DINOv3 ViT-L/16 at 512 (and 1024), all tokens after the last block, `F.layer_norm`, no DINOv3 final norm; negative cond is zeros | `Trellis2ImageConditioner` over `Dinov3VisionEncoder.EncodeBlocks`; 1029 / 4101 tokens |
+| Conditioning | DINOv3 ViT-L/16 at 512 (and 1024), all tokens after the last block, `F.layer_norm`, no DINOv3 final norm; negative cond is zeros | `Dinov3ImageConditioner` over `Dinov3VisionEncoder.EncodeBlocks`; 1029 / 4101 tokens |
 | Structure flow | `SparseStructureFlowModel`, dense 16^3 x 8, width 1536, 30 blocks, 12 heads, RoPE, shared adaLN | `Trellis2SparseStructureFlow` |
 | Structure decode | `ss_dec_conv3d_16l8` to a 64^3 logit grid, `> 0`, max-pool to 32^3 for the 512 type and the cascades, `argwhere` | v1 `SparseStructureDecoder` (same checkpoint, same key map), `Trellis2Cascade.OccupiedVoxels` |
 | Shape flow | `SLatFlowModel` 512 (grid 32) and 1024 (grid 64), one token per voxel, RoPE on integer coordinates | `Trellis2SlatFlow` |

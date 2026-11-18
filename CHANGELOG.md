@@ -3,6 +3,18 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.440
+
+- Added Idol, Idol-turbo and Budget3D: one picture of an object to up to a million 3D Gaussians (a PLY), with `hartsy 3d <image> -m idol`,
+  `idol-turbo` (5 guidance-free steps), `budget3d-idol` and `budget3d-idol-turbo` (a token budget, `--budget 0.0625` to `1`, API
+  `MeshRequest.TokenBudget`); also `--splats`, `--guidance` and `--framing`. DINOv3 ViT-H+ and a shared head norm, flow sampler and splat
+  activations came with it. The files are Comfy-Org's Idol repack, akhaliq's turbo LoRAs and BudgetAny's checkpoints.
+
+## alpha.439
+
+- Hunyuan3D Paint lets a side picture paint the surfaces the front picture sees only obliquely, so the front
+  picture's collar is no longer baked onto the side of a head, cut off in a straight line where the collar ends.
+
 ## alpha.438
 
 - Hunyuan3D Paint keeps the front picture where it and a side picture both see a surface squarely, instead of blending

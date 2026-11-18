@@ -15,6 +15,7 @@ using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using HartsyInference.ThreeD.Tests.TrellisV2;
 using Xunit;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Tests.Pixal3D;
 
@@ -364,7 +365,7 @@ public sealed class Pixal3DTexturePipelineTests
     private sealed class StubStructure(Rig rig) : IPixal3DStructureStage
     {
         public int[] Sample(
-            IBackend backend, Pixal3DCondition cond, Pixal3DCondition negCond, int seed, Trellis2SamplerParams parameters, int outputResolution,
+            IBackend backend, Pixal3DCondition cond, Pixal3DCondition negCond, int seed, FlowSamplerParams parameters, int outputResolution,
             Action<int>? onStep)
         {
             rig.Calls.Add($"structure@{outputResolution} steps={parameters.Steps} seed={seed}");
@@ -380,7 +381,7 @@ public sealed class Pixal3DTexturePipelineTests
     {
         public SparseTensor Sample(
             IBackend backend, Trellis2ShapeFlowKind kind, int[] coords, int gridResolution, Pixal3DCondition cond, Pixal3DCondition negCond,
-            int seed, Trellis2SamplerParams parameters, Action<int>? onStep)
+            int seed, FlowSamplerParams parameters, Action<int>? onStep)
         {
             rig.Calls.Add($"shape {kind} grid={gridResolution} seed={seed} steps={parameters.Steps}");
             rig.Tensors.Add(negCond.Global);
@@ -440,7 +441,7 @@ public sealed class Pixal3DTexturePipelineTests
     private sealed class StubTextureFlow(Rig rig) : IPixal3DTextureFlowStage
     {
         public SparseTensor Sample(
-            IBackend backend, SparseTensor shape, Pixal3DCondition cond, Pixal3DCondition negCond, int seed, Trellis2SamplerParams parameters,
+            IBackend backend, SparseTensor shape, Pixal3DCondition cond, Pixal3DCondition negCond, int seed, FlowSamplerParams parameters,
             Action<int>? onStep)
         {
             rig.Calls.Add($"texture voxels={shape.Count} seed={seed} steps={parameters.Steps}");

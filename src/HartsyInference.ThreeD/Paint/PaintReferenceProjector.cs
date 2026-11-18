@@ -127,10 +127,12 @@ public static class PaintReferenceProjector
 
     /// <summary>Bakes several pictures of the subject, each through its own camera, as <see cref="ApplyToTexels(PaintReferenceProjection, PaintViewRenderer,
     /// PaintTexelSurface, float[], bool[], byte[], byte[], int, int, double, CancellationToken)"/> bakes one. Where several pictures see a texel they are
-    /// laid over each other in rank: the first picture (the caller's own, before any drawn side) first, then the others by how squarely the surface faces
-    /// their cameras. Each takes its facing weight of what the pictures above it left uncovered, so a later picture shows only where the earlier ones fade
-    /// out, and the stack replaces the views by the share it covers. Blending two pictures where both are at full weight laid their differently drawn
-    /// features over each other (a cheek at 45 degrees took half the front picture's face and half a side drawing's). Returns how many texels took a picture.</summary>
+    /// laid over each other in rank, each taking its facing weight of what the pictures above it left uncovered, and the stack replaces the views by the
+    /// share it covers. The first picture (the caller's own, before any drawn side) leads wherever it faces its camera at least <see cref="FirstPictureLeads"/>;
+    /// on surfaces it sees more obliquely the pictures go by facing, squarest first, with a short blend between the two orders over
+    /// <see cref="FirstPictureLeadBand"/>. Blending two pictures where both are at full weight laid their differently drawn features over each other (a cheek
+    /// at 45 degrees took half the front picture's face and half a side drawing's); letting the front lead everywhere it reached put the front picture's fur
+    /// collar on a head's side, cut off where the collar ends, where a side picture sees the head squarely. Returns how many texels took a picture.</summary>
     public static int ApplyToTexels(IReadOnlyList<PaintReferencePicture> pictures, PaintViewRenderer renderer, PaintTexelSurface surface, float[] texture, bool[] known,
         double depthThreshold, CancellationToken cancellationToken = default)
     {
@@ -157,24 +159,23 @@ public static class PaintReferenceProjector
         Parallel.For(0, surface.Count, new ParallelOptions { CancellationToken = cancellationToken }, i =>
         {
             int n = cameras.Length;
-            Span<float> colours = stackalloc float[n * 3], weights = stackalloc float[n], ranks = stackalloc float[n], colour = stackalloc float[3];
+            Span<float> colours = stackalloc float[n * 3], weights = stackalloc float[n], facings = stackalloc float[n], colour = stackalloc float[3],
+                other = stackalloc float[3];
             Span<int> order = stackalloc int[n];
             int contributors = 0;
+            float firstFacing = -1f;
             for (int k = 0; k < n; k++)
             {
                 if (!cameras[k].Sample(surface.Positions, i, depthThreshold, colours.Slice(contributors * 3, 3), out float w, out float facing))
                     continue;
                 weights[contributors] = w;
-                // The first picture outranks every other; the rest go by facing (at most 1).
-                ranks[contributors] = k == 0 ? 2f : facing;
-                order[contributors] = contributors;
+                facings[contributors] = facing;
+                if (k == 0)
+                    firstFacing = facing;
                 contributors++;
             }
             if (contributors == 0)
                 return;
-            for (int a = 1; a < contributors; a++)
-                for (int b = a; b > 0 && ranks[order[b]] > ranks[order[b - 1]]; b--)
-                    (order[b], order[b - 1]) = (order[b - 1], order[b]);
             float weight;
             if (contributors == 1)
             {
@@ -184,22 +185,16 @@ public static class PaintReferenceProjector
             }
             else
             {
-                float uncovered = 1f;
-                colour.Clear();
-                for (int r = 0; r < contributors; r++)
+                // How far the first picture leads: fully where it faces its camera squarely enough, not at all below the band.
+                float lead = firstFacing < 0f ? 0f : Math.Clamp((firstFacing - (FirstPictureLeads - FirstPictureLeadBand)) / FirstPictureLeadBand, 0f, 1f);
+                weight = Stack(colours, weights, facings, order, contributors, lead > 0f, colour);
+                if (lead < 1f)
                 {
-                    int s = order[r];
-                    float share = weights[s] * uncovered;
+                    float byFacing = Stack(colours, weights, facings, order, contributors, false, other);
                     for (int c = 0; c < 3; c++)
-                        colour[c] += share * colours[s * 3 + c];
-                    uncovered *= 1f - weights[s];
+                        colour[c] = lead * colour[c] + (1f - lead) * other[c];
+                    weight = lead * weight + (1f - lead) * byFacing;
                 }
-                weight = 1f - uncovered;
-                if (weight > 0f)
-                    for (int c = 0; c < 3; c++)
-                        colour[c] /= weight;
-                else
-                    colours.Slice(order[0] * 3, 3).CopyTo(colour);
             }
             int texel = surface.Texels[i];
             if (!known[texel])
@@ -210,6 +205,44 @@ public static class PaintReferenceProjector
             Interlocked.Increment(ref written);
         });
         return written;
+    }
+
+    /// <summary>In the multi-picture <see cref="ApplyToTexels(IReadOnlyList{PaintReferencePicture}, PaintViewRenderer, PaintTexelSurface, float[], bool[], double, CancellationToken)"/>,
+    /// the first picture leads on surfaces facing its camera at least this squarely (smoothed cosine; about 57 degrees off its axis), which keeps a face's cheeks
+    /// on the front picture.</summary>
+    public const float FirstPictureLeads = 0.55f;
+
+    /// <summary>The facing band below <see cref="FirstPictureLeads"/> over which the first picture's lead fades into the order by facing.</summary>
+    public const float FirstPictureLeadBand = 0.1f;
+
+    // Lays the sampled pictures over each other, each taking its weight of what the ones above left uncovered: the first sampled picture first when
+    // firstLeads (it is the caller's first picture whenever that one was sampled), the rest by facing, squarest first. Writes the colour and returns the
+    // share covered.
+    private static float Stack(Span<float> colours, Span<float> weights, Span<float> facings, Span<int> order, int count, bool firstLeads, Span<float> colour)
+    {
+        for (int r = 0; r < count; r++)
+            order[r] = r;
+        int start = firstLeads ? 1 : 0;
+        for (int a = start + 1; a < count; a++)
+            for (int b = a; b > start && facings[order[b]] > facings[order[b - 1]]; b--)
+                (order[b], order[b - 1]) = (order[b - 1], order[b]);
+        float uncovered = 1f;
+        colour.Clear();
+        for (int r = 0; r < count; r++)
+        {
+            int s = order[r];
+            float share = weights[s] * uncovered;
+            for (int c = 0; c < 3; c++)
+                colour[c] += share * colours[s * 3 + c];
+            uncovered *= 1f - weights[s];
+        }
+        float covered = 1f - uncovered;
+        if (covered > 0f)
+            for (int c = 0; c < 3; c++)
+                colour[c] /= covered;
+        else
+            colours.Slice(order[0] * 3, 3).CopyTo(colour);
+        return covered;
     }
 
     // One picture's camera for the texel bake: the depth buffer and facing from that camera, the picture's subject masks and its placement.

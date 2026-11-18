@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Layers;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
@@ -17,8 +18,8 @@ internal sealed class Trellis2FlowBlock : IDisposable
     private const float NormEps = 1e-6f;
 
     private readonly int _width, _heads, _headDim, _mlpHidden;
-    private readonly float _scale, _headNormEps;
-    private readonly Tensor _ones;
+    private readonly float _scale;
+    private readonly HeadRmsNorm _headNorm;
     private readonly Tensor _modulation;
     private readonly Tensor _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B;
     private readonly Tensor _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB, _mlp0W, _mlp0B, _mlp2W, _mlp2B;
@@ -35,10 +36,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
         _headDim = config.HeadDim;
         _mlpHidden = config.MlpHidden;
         _scale = 1f / MathF.Sqrt(_headDim);
-        // F.normalize clamps the norm at 1e-12, which is 1e-24 / D on the mean square, so a zero head stays zero.
-        _headNormEps = 1e-24f / _headDim;
-        _ones = new Tensor(new TensorShape(_headDim), DType.F32);
-        _ones.AsSpan<float>().Fill(1f);
+        _headNorm = new HeadRmsNorm(_headDim);
         _modulation = weights[p + "modulation"].Reshape(new TensorShape(1, 6L * _width));
         _qkvW = weights[p + "self_attn.to_qkv.weight"];
         _qkvB = weights[p + "self_attn.to_qkv.bias"];
@@ -80,7 +78,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
     {
         Tensor?[] all =
         [
-            _ones, _modulation, _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B, _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB,
+            _headNorm.Ones, _modulation, _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B, _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB,
             _mlp0W, _mlp0B, _mlp2W, _mlp2B, _projW, _projB, _selfQGamma, _selfKGamma, _crossQGamma, _crossKGamma,
         ];
         foreach (Tensor? t in all)
@@ -124,7 +122,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
-        _ones.Dispose();
+        _headNorm.Dispose();
     }
 
     private Tensor[] SplitModulation(IBackend backend, Tensor sharedMod)
@@ -259,19 +257,9 @@ internal sealed class Trellis2FlowBlock : IDisposable
         return o;
     }
 
-    /// <summary>Per-head <c>F.normalize(x) · gamma · sqrt(D)</c> as RMS norm times <c>gamma [H, D]</c>; consumes <paramref name="heads"/>; a null gamma means no norm.</summary>
+    /// <summary>Per-head <c>F.normalize(x) · gamma · sqrt(D)</c> with <c>gamma [H, D]</c>; consumes <paramref name="heads"/>; a null gamma means no norm.</summary>
     private Tensor HeadNorm(IBackend backend, Tensor heads, Tensor? gamma)
-    {
-        if (gamma is null)
-            return heads;
-        Tensor rms = new(heads.Shape, DType.F32);
-        backend.RmsNorm(rms, heads, _ones, _headNormEps);
-        heads.Dispose();
-        Tensor o = new(rms.Shape, DType.F32);
-        backend.AffineBroadcastLastDim(o, rms, gamma, null);
-        rms.Dispose();
-        return o;
-    }
+        => gamma is null ? heads : _headNorm.Apply(backend, heads, gamma);
 
     /// <summary>Attention over head-major operands, returned flat as <c>[1, tokens, C]</c>; consumes q, k and v.</summary>
     private Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int tokens)

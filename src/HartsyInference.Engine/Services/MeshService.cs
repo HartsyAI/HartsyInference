@@ -9,6 +9,7 @@ using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.CoLa3D;
+using HartsyInference.ThreeD.Models.Idol;
 using HartsyInference.ThreeD.Models.HairDeck;
 using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Omni;
@@ -41,6 +42,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
     private readonly SemaphoreSlim _sam3dGate = new(1, 1);
+    private readonly SemaphoreSlim _idolGate = new(1, 1);
     private int _disposals;
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -293,6 +295,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             return GeneratePixal3DAsync(spec, request, progress, cancel);
         if (id == MeshModelIds.Sam3dObjects)
             return GenerateSam3dAsync(spec, request, progress, cancel);
+        if (MeshModelIds.IsIdol(id))
+            return GenerateIdolAsync(spec, request, progress, cancel, id);
         return Task.Run(
             () =>
             {
@@ -987,6 +991,69 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             cancel);
     }
 
+    /// <summary>
+    /// Idol: image to Gaussian splats. Each stage (DINOv3 and the VAE, the denoiser, the two decoders) loads its weights from the model folder, runs and releases them, so nothing stays loaded between
+    /// requests and the pipeline fits a 12 GB card; requests run one at a time. The image's alpha plane is its matte; an image without one is matted by the engine's BiRefNet.
+    /// </summary>
+    private Task<MeshResult> GenerateIdolAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel, string modelId)
+    {
+        string directory = spec.LocalPath ?? throw new FileNotFoundException($"No model folder found for '{modelId}'. Download the catalog assets (`hartsy pull {modelId}`) or supply the model directory as the local path.");
+        IdolOptions options = IdolRequestMapper.ToOptions(request, modelId);
+        IReadOnlyList<string> missing = IdolImageTo3DPipeline.MissingFiles(directory, options.Turbo, options.Budget3D);
+        if (missing.Count > 0)
+            throw new FileNotFoundException($"'{directory}' lacks {modelId} files: {string.Join(", ", missing)}.");
+        ImageData image = request.Image!;
+        int steps = options.Steps == 0 ? (options.Turbo ? IdolTurboAdapters.DefaultSteps : IdolSampler.DefaultSteps) : options.Steps;
+        int disposalsWhenQueued = Volatile.Read(ref _disposals);
+
+        return Task.Run(
+            async () =>
+            {
+                await _idolGate.WaitAsync(cancel).ConfigureAwait(false);
+                try
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    if (Volatile.Read(ref _disposals) != disposalsWhenQueued)
+                        throw new ModelUnloadedException("The service was disposed while this Idol request was queued; retry the request.");
+                    IdolImageTo3DPipeline pipeline = new(_engine.Backend, directory, MeshPreparationInternalMatter(), LoadFlux2Vae);
+                    HartsyInference.ThreeD.Geometry.GaussianSplatCloud splats = pipeline.Generate(
+                        image.Rgb, image.Alpha, image.Width, image.Height, options,
+                        (phase, stage, step, total) =>
+                        {
+                            cancel.ThrowIfCancellationRequested();
+                            int index = (int)phase;
+                            progress?.Report(MeshProgress.Plain(phase == IdolStage.Denoising ? step : phase < IdolStage.Denoising ? 0 : steps, steps, stage, step, total, index, 4));
+                        },
+                        line => Logs.Info($"[{modelId}] {line}"),
+                        cancel);
+                    Logs.Info($"[{modelId}] {splats.Count} splats");
+                    return new MeshResult { Data = PlyWriter.WriteSplats(splats), Format = "ply" };
+                }
+                finally
+                {
+                    _idolGate.Release();
+                }
+            },
+            cancel);
+    }
+
+    /// <summary>The engine's shared matting model for images without alpha, or null when its checkpoint is not installed.</summary>
+    private HartsyInference.ThreeD.Pipelines.Stages.IForegroundMatter? MeshPreparationInternalMatter()
+        => _engine.MeshPreparationInternal.SharedMatter is { IsAvailable: true } matter ? matter : null;
+
+    /// <summary>Opens the FLUX.2 VAE file as the encoder Idol's conditioner needs.</summary>
+    private static Flux2VaeEncoderHandle LoadFlux2Vae(string path)
+    {
+        Features.Flux2VaeComponents vae = Features.Flux2VaeComponents.Load(path, "idol");
+        if (vae.Encoder is null)
+        {
+            vae.Dispose();
+            throw new FileNotFoundException($"'{path}' has no VAE encoder; Idol needs the full FLUX.2 VAE file.");
+        }
+
+        return new Flux2VaeEncoderHandle(vae.Encoder, vae.BnMean, vae.BnVar, vae);
+    }
+
     /// <summary>Runs one generation on <paramref name="runtime"/>, one at a time per loaded model; a queued request gives up when its own cancellation fires.</summary>
     private static MeshResult RunGated<TPipeline>(
         MatterGatedRuntime<TPipeline> runtime, string label, CancellationToken cancel, Func<TPipeline, byte[]> generate) where TPipeline : IDisposable
@@ -1313,6 +1380,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         // A SAM 3D run builds its pipeline on the engine's backend: count the disposal (a request queued before it is then rejected, one queued after it runs) and wait for the run in
         // progress, which can take minutes, as a HairDeck disposal does.
         Interlocked.Increment(ref _disposals);
+        _idolGate.Wait();
+        _idolGate.Release();
         _sam3dGate.Wait();
         _sam3dGate.Release();
 

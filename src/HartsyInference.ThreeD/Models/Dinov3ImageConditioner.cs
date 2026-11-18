@@ -5,15 +5,16 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Dinov2;
 using HartsyInference.Vision.Dinov3;
 
-namespace HartsyInference.ThreeD.Models.TrellisV2;
+namespace HartsyInference.ThreeD.Models;
 
 /// <summary>
-/// Upstream <c>DinoV3FeatureExtractor</c>: Lanczos-resize the prepared RGB square to the conditioning resolution, normalize with
-/// ImageNet statistics, run DINOv3 ViT-L/16, and apply a non-affine <c>F.layer_norm</c> (eps 1e-5) to the token sequence after the
-/// last block, without DINOv3's own final norm. The tokens are the class token, the four register tokens and every patch, so a
-/// 512 px input gives 1029 tokens and a 1024 px input 4101.
+/// The DINOv3 image conditioner of the image-to-3D models: Lanczos-resize the prepared RGB square to the conditioning resolution,
+/// normalize with ImageNet statistics, run a DINOv3 ViT/16, and apply a non-affine <c>F.layer_norm</c> (eps 1e-5) to the token sequence.
+/// TRELLIS.2 and Pixal3D (upstream <c>DinoV3FeatureExtractor</c>, ViT-L) normalise the output of the last block without DINOv3's own final
+/// norm; Idol (ViT-H+) takes Hugging Face's <c>last_hidden_state</c>, which includes it (<c>finalNorm</c>). The tokens are the class token,
+/// the four register tokens and every patch, so a 512 px input gives 1029 tokens and a 1024 px input 4101.
 /// </summary>
-public sealed class Trellis2ImageConditioner : IDisposable
+public sealed class Dinov3ImageConditioner : IDisposable
 {
     /// <summary>Epsilon of the final <c>F.layer_norm</c>.</summary>
     public const float NormEps = 1e-5f;
@@ -27,14 +28,14 @@ public sealed class Trellis2ImageConditioner : IDisposable
 
     /// <param name="encoder">A DINOv3 encoder with weights loaded; borrowed.</param>
     /// <param name="loader">Released with this conditioner; null when the caller owns the weights.</param>
-    public Trellis2ImageConditioner(Dinov3VisionEncoder encoder, IDisposable? loader = null)
+    public Dinov3ImageConditioner(Dinov3VisionEncoder encoder, IDisposable? loader = null)
     {
         _encoder = encoder ?? throw new ArgumentNullException(nameof(encoder));
         _loader = loader;
     }
 
-    /// <summary>Loads an HF-layout DINOv3 ViT-L/16 checkpoint.</summary>
-    public static Trellis2ImageConditioner Load(string safetensorsPath)
+    /// <summary>Loads an HF-layout DINOv3 checkpoint (ViT-S/B/L, or the SwiGLU ViT-H+) for inputs of <paramref name="resolution"/> pixels.</summary>
+    public static Dinov3ImageConditioner Load(string safetensorsPath, int resolution = 512)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(safetensorsPath);
         SafeTensorsLoader loader = new();
@@ -42,10 +43,10 @@ public sealed class Trellis2ImageConditioner : IDisposable
         {
             loader.Load(safetensorsPath);
             Dictionary<string, Tensor> weights = loader.GetAllTensors();
-            Dinov2Preset preset = Dinov2Preset.FromDinov3Weights(weights, 512);
+            Dinov2Preset preset = Dinov2Preset.FromDinov3Weights(weights, resolution);
             Dinov3VisionEncoder encoder = new(preset);
             encoder.LoadWeights(weights);
-            return new Trellis2ImageConditioner(encoder, loader);
+            return new Dinov3ImageConditioner(encoder, loader);
         }
         catch
         {
@@ -60,15 +61,16 @@ public sealed class Trellis2ImageConditioner : IDisposable
     /// <summary>Tokens for an input of <paramref name="resolution"/> pixels: class, register and patch tokens.</summary>
     public int TokenCount(int resolution) => 1 + _encoder.Preset.NumRegisterTokens + (resolution / 16) * (resolution / 16);
 
-    /// <summary>Conditioning tokens <c>[1, TokenCount, 1024]</c> for the RGB24 square <paramref name="rgb"/>; the caller owns the result.</summary>
-    public Tensor Encode(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height, int resolution)
+    /// <summary>Conditioning tokens <c>[1, TokenCount, hidden]</c> for the RGB24 square <paramref name="rgb"/>; the caller owns the result.
+    /// <paramref name="finalNorm"/> applies DINOv3's own final LayerNorm before the non-affine one.</summary>
+    public Tensor Encode(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height, int resolution, bool finalNorm = false)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         if (resolution <= 0 || resolution % 16 != 0)
             throw new ArgumentOutOfRangeException(nameof(resolution), resolution, "The conditioning resolution must be a positive multiple of 16.");
         using Tensor pixels = Pixels(rgb, width, height, resolution);
-        using Tensor tokens = _encoder.EncodeBlocks(backend, pixels, _encoder.Preset.NumLayers - 1);
+        using Tensor tokens = finalNorm ? _encoder.Encode(backend, pixels) : _encoder.EncodeBlocks(backend, pixels, _encoder.Preset.NumLayers - 1);
         Tensor cond = new(tokens.Shape, DType.F32);
         backend.LayerNormNoAffine(cond, tokens, NormEps);
         return cond;

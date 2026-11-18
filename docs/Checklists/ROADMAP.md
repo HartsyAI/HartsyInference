@@ -229,7 +229,7 @@ with its first consumer and is removed here once it ships.
   - Settle append/eviction, positions across chunks, masks, timestep validity and request isolation.
   - Gate it on cached-vs-uncached parity.
 - [ ] A Jina-CLIP-v2 tower (XLM-R with RoPE, 250k Unigram tokenizer) for NewBie.
-- [ ] DINOv3 on the ViT RoPE block: TRELLIS.2, Pixal3D, Idol and sam-3d-body.
+- [ ] DINOv3 on the ViT RoPE block: TRELLIS.2, Pixal3D and sam-3d-body (Idol's ViT-H+ is done).
 - [ ] Comfy `comfy_quant` w4a8/w6a8 as W4A16/W6A16 first, plus AWQ `pre_quant_scale` folding: Qwen3.8-27B, the
   Ming-Image text encoder, MiniMax-H3.
 - [ ] A BailingMoeV2 safetensors config factory for `GenericTransformer` + `MoeFeedForward` (the Ming-Image text
