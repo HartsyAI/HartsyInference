@@ -19,11 +19,40 @@ public sealed class IdolTurboAdapters : IDisposable
     public const int DefaultSteps = 5;
 
     private readonly LoraStack _stack = new();
-    private readonly LoraFile _slowFile;
-    private readonly LoraFile _fastFile;
+    /// <summary>The scale of an embedded expert: LoRA alpha 128 over rank 32.</summary>
+    public const float EmbeddedScale = 4f;
+
+    private readonly LoraFile? _slowFile;
+    private readonly LoraFile? _fastFile;
     private readonly AdjunctGate _slow = new();
     private readonly AdjunctGate _fast = new();
     private bool _disposed;
+
+    private readonly List<Tensor> _aliases = [];
+
+    // Embedded experts: one adjunct per block matrix with a slow and a fast term at scale alpha / rank = 128 / 32.
+    private IdolTurboAdapters(IdolWeights weights)
+    {
+        _slowFile = null;
+        _fastFile = null;
+        Dictionary<string, Tensor> carried = new(weights.Tensors, StringComparer.Ordinal);
+        foreach ((string module, IdolWeights.PhaseFactors f) in weights.Experts!)
+        {
+            LowRankAdjunct adjunct = new()
+            {
+                Terms =
+                [
+                    new LowRankAdjunctTerm { Down = f.SlowA, Up = f.SlowB, Scale = EmbeddedScale, Gate = _slow },
+                    new LowRankAdjunctTerm { Down = f.FastA, Up = f.FastB, Scale = EmbeddedScale, Gate = _fast },
+                ],
+            };
+            Tensor alias = weights[module + ".weight"].WithLowRankAdjunct(adjunct);
+            _aliases.Add(alias);
+            carried[module + ".weight"] = alias;
+        }
+
+        Weights = IdolWeights.FromTensors(weights.Config, carried);
+    }
 
     private IdolTurboAdapters(LoraFile slow, LoraFile fast, IdolWeights weights, Core.Backends.IBackend backend)
     {
@@ -54,6 +83,16 @@ public sealed class IdolTurboAdapters : IDisposable
 
     /// <summary>The base weights with both experts attached to their block matrices; borrowed tensors, so it needs no disposal of its own and must not outlive the weights it was built over.</summary>
     public IdolWeights Weights { get; private set; } = null!;
+
+    /// <summary>Attaches the phase experts a checkpoint embeds in its block matrices (Budget3D-Idol-Turbo): the factors as they are, at LoRA alpha 128 over rank 32, a scale of 4.</summary>
+    /// <exception cref="HartsyInferenceException">The checkpoint embeds no experts.</exception>
+    public static IdolTurboAdapters AttachEmbedded(IdolWeights weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        if (weights.Experts is null)
+            throw new HartsyInferenceException("The checkpoint embeds no phase experts (slow_A, slow_B, fast_A, fast_B).");
+        return new IdolTurboAdapters(weights);
+    }
 
     /// <summary>Opens the files and attaches both experts to <paramref name="weights"/>' block matrices.</summary>
     /// <param name="slowPath">The Comfy-format slow expert (<c>idol_turbo_slow_comfy.safetensors</c>).</param>
@@ -131,7 +170,9 @@ public sealed class IdolTurboAdapters : IDisposable
             return;
         _disposed = true;
         _stack.Dispose();
-        _slowFile.Dispose();
-        _fastFile.Dispose();
+        foreach (Tensor alias in _aliases)
+            alias.Dispose();
+        _slowFile?.Dispose();
+        _fastFile?.Dispose();
     }
 }

@@ -999,7 +999,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     {
         string directory = spec.LocalPath ?? throw new FileNotFoundException($"No model folder found for '{modelId}'. Download the catalog assets (`hartsy pull {modelId}`) or supply the model directory as the local path.");
         IdolOptions options = IdolRequestMapper.ToOptions(request, modelId);
-        IReadOnlyList<string> missing = IdolImageTo3DPipeline.MissingFiles(directory, options.Turbo);
+        IReadOnlyList<string> missing = IdolImageTo3DPipeline.MissingFiles(directory, options.Turbo, options.Budget3D);
         if (missing.Count > 0)
             throw new FileNotFoundException($"'{directory}' lacks {modelId} files: {string.Join(", ", missing)}.");
         ImageData image = request.Image!;

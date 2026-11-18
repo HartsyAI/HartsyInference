@@ -95,6 +95,28 @@ internal static class MeshModelProfiles
                 },
                 new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
                 note: "Idol with its guidance and most of its steps distilled into two phase LoRAs: 5 steps and no blank pass, so the denoiser runs 5 forwards instead of 100. Same preparation, decoders and PLY as idol; Guidance does not apply."),
+            Profile(MeshModelIds.BudgetIdol, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("50", 0, 1000, "Euler steps of the denoiser; each runs the transformer twice (with and without the image) on the budget's tokens unless Guidance is 0."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Budget3D-Idol weights, BudgetAny, a fine-tune of Idol; Budget3D code MIT); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                note: "Idol on an adaptive number of latent tokens: TokenBudget 1 is Idol's dense layout, smaller budgets merge the quiet regions of the object into larger tokens and expand them back with small refiners. Same preparation, decoders and PLY as idol."),
+            Profile(MeshModelIds.BudgetIdolTurbo, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("5", 0, 1000, "Euler steps; each runs the transformer once on the budget's tokens, with the slow phase expert while the shifted time is 0.5 or more and the fast one below it."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Budget3D-Idol-Turbo weights, BudgetAny, a fine-tune of Idol-turbo; Budget3D code MIT); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                note: "Budget3D-Idol with the idol-turbo phase experts inside its checkpoint: 5 guidance-free steps on TokenBudget of the latent tokens, the layout rebuilt at every step. Guidance does not apply."),
             Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
                 [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
@@ -213,7 +235,7 @@ internal static class MeshModelProfiles
             Id = id,
             Input = input,
             Outputs = outputs,
-            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), GuidanceField(id), SplatCountField(id), FramingField(id), .. OutputFields(outputs)],
+            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), GuidanceField(id), SplatCountField(id), FramingField(id), TokenBudgetField(id), .. OutputFields(outputs)],
             Licence = licence,
             Cost = cost,
             PeakGiB = peak,
@@ -263,9 +285,13 @@ internal static class MeshModelProfiles
         ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (geometry-only GLB; the mesh decoder's vertex colours are noisy and not written) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
         : Rejected(nameof(MeshRequest.Mesh));
 
-    private static MeshFieldSpec GuidanceField(string id) => id == MeshModelIds.Idol
+    private static MeshFieldSpec GuidanceField(string id) => id is MeshModelIds.Idol or MeshModelIds.BudgetIdol
         ? Used(nameof(MeshRequest.Guidance), "3", 0, 20, null, "Classifier-free guidance strength w of the sampler: (1 + w)·v(image) - w·v(blank); 0 runs one pass per step instead of two.")
         : Rejected(nameof(MeshRequest.Guidance));
+
+    private static MeshFieldSpec TokenBudgetField(string id) => MeshModelIds.IsBudget3D(id)
+        ? Used(nameof(MeshRequest.TokenBudget), "1", 0.0625, 1, "of the latent tokens", "The fraction of Idol's 8192 latent tokens the denoiser runs on, snapped to a count the octree can realise (512, or 519 to 8192). 1 is Idol's own dense layout; 0.5 about halves the work of a step, 0.0625 is 512 tokens. The layout follows the content: detailed regions keep their tokens.")
+        : Rejected(nameof(MeshRequest.TokenBudget));
 
     private static MeshFieldSpec SplatCountField(string id) => MeshModelIds.IsIdol(id)
         ? Used(nameof(MeshRequest.SplatCount), "262144", 32768, 1048576, "splats", "Gaussians in the result, a multiple of 32 (32 per anchor point); 0 takes 262,144. The decoders' cost grows with it.")

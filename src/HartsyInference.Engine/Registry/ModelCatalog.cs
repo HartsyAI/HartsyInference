@@ -448,6 +448,38 @@ public static class ModelCatalog
         ],
     };
 
+    /// <summary>Budget3D-Idol (<c>BudgetAny/Budget3D-Idol</c>, Apache-2.0, code MIT): Idol's denoiser fine-tuned to run on an adaptive number of its 8192 latent tokens, so a token budget trades detail for speed. The released file is a full
+    /// float32 denoiser (the backbone was fine-tuned too) with the 82 adapter tensors, not an adapter on Idol's file; it uses Idol's encoders and decoders, so the entry lists those at the same folder and hashes as <c>idol</c>
+    /// (a model that has them downloads only this 1.5 GB file) and places the checkpoint in <c>diffusion_models/</c>. Revision 2dd6d83c57e7853234dbbb24c54b78edc842d074; an asset carries no revision field, so a changed file fails the hash
+    /// check. The hash is the repository's LFS oid.</summary>
+    private static CatalogEntry Budget3DIdol() => new CatalogEntry
+    {
+        Id = "budget3d-idol", Modality = Modality.Mesh, DisplayName = "Budget3D-Idol (image to Gaussian splats at a token budget)",
+        Architecture = "Idol (DINOv3 ViT-H+/16 + FLUX.2 VAE, 370M rectified-flow transformer, octree and Gaussian decoders) fine-tuned for adaptive token counts: Sobol octree, scale mixers, integrated position encoding, refine stages",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "BudgetAny/Budget3D-Idol",
+        Assets =
+        [
+            new ModelAsset { Repo = "BudgetAny/Budget3D-Idol", RepoPath = "budget3d_idol.safetensors", TargetSubdir = "3D/idol", TargetName = "diffusion_models/budget3d_idol.safetensors",
+                Role = "denoiser (Budget3D-Idol)", Sha256 = "8d87669ab02823d6fde862b4f1a0be6628f862ec16bbdb263a0838b5bbc4c1fe" },
+            .. Idol().Assets!.Where(a => a.Role != "denoiser"),
+        ],
+    };
+
+    /// <summary>Budget3D-Idol-Turbo (<c>BudgetAny/Budget3D-Idol-Turbo</c>, Apache-2.0, code MIT): Budget3D-Idol with idol-turbo's slow and fast phase experts inside the checkpoint (each block matrix as <c>.base</c> plus <c>slow_A</c>, <c>slow_B</c>,
+    /// <c>fast_A</c>, <c>fast_B</c> at LoRA alpha 128 over rank 32), so 5 guidance-free steps run on a token budget. Revision ba76450efdc888310741659665ec72b8c7d0ebc0; the hash is the repository's LFS oid. Same shared files as <c>idol</c>.</summary>
+    private static CatalogEntry Budget3DIdolTurbo() => new CatalogEntry
+    {
+        Id = "budget3d-idol-turbo", Modality = Modality.Mesh, DisplayName = "Budget3D-Idol-Turbo (image to Gaussian splats, 5 steps at a token budget)",
+        Architecture = "Budget3D-Idol with slow and fast rank-32 phase experts embedded in its block matrices",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "BudgetAny/Budget3D-Idol-Turbo",
+        Assets =
+        [
+            new ModelAsset { Repo = "BudgetAny/Budget3D-Idol-Turbo", RepoPath = "budget3d_idol_turbo.safetensors", TargetSubdir = "3D/idol", TargetName = "diffusion_models/budget3d_idol_turbo.safetensors",
+                Role = "denoiser (Budget3D-Idol-Turbo)", Sha256 = "4f0c31ed6979f80478ce75e5002c81353604bf8560d392fc4ea06687be193c05" },
+            .. Idol().Assets!.Where(a => a.Role != "denoiser"),
+        ],
+    };
+
     /// <summary>SAM 3D Objects (facebookresearch/sam-3d-objects), image plus object mask to Gaussian splats with a pose: a mixture-of-transformers structure flow conditioned on two DINOv2 towers and a
     /// pointmap, a sparse SLAT flow, and the Gaussian decoder, with MoGe estimating the pointmap. Meta's checkpoints are gated and pickled; this entry names the ungated third-party safetensors conversion
     /// <c>apozz/sam-3d-objects-safetensors</c> (revision cbb995af47eae6c30d2f2a087f5195be2365a2e2; an asset carries no revision field, so a changed file fails
@@ -2988,6 +3020,8 @@ public static class ModelCatalog
             Pixal3D(),
             Idol(),
             IdolTurbo(),
+            Budget3DIdol(),
+            Budget3DIdolTurbo(),
             Sam3dObjects(),
             HairDeck(),
 

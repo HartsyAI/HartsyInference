@@ -42,6 +42,148 @@ public sealed class BudgetDenoiserParityTests
         Run(backend, cuda: true, [0.0625, 0.1, 0.25, 0.5, 1.0], peakLimit: 5e-3, rmsLimit: 2e-3);
     }
 
+    /// <summary>Budget3D-Idol-Turbo: its checkpoint embeds the phase experts in the block matrices (<c>.base</c> plus <c>slow_A</c>, <c>slow_B</c>, <c>fast_A</c>, <c>fast_B</c> at scale 4); one forward per budget at the slow (t=800) and
+    /// fast (t=200) expert against the reference, with the image stream embedded under the expert of the phase.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void TurboEveryBudgetAndPhase_MatchesTheReferenceOnCuda()
+    {
+        string? models = Environment.GetEnvironmentVariable(ModelsEnv);
+        string? refDir = Environment.GetEnvironmentVariable(ReferenceEnv);
+        string checkpoint = Path.Combine(models ?? "", "budget3d-idol-turbo", "budget3d_idol_turbo.safetensors");
+        string conditioning = Path.Combine(refDir ?? "", "cond", "conditioning.safetensors");
+        string inputs = Path.Combine(refDir ?? "", "den", "denoiser_inputs.safetensors");
+        string layouts = Path.Combine(refDir ?? "", "b3d", "layouts.safetensors");
+        string reference = Path.Combine(refDir ?? "", "b3d", "budget3d-idol-turbo.safetensors");
+        string[] missing = new[] { checkpoint, conditioning, inputs, layouts, reference }.Where(p => !File.Exists(p)).ToArray();
+        if (missing.Length > 0 || !CudaContext.IsAvailable())
+        {
+            string message = missing.Length > 0 ? $"required real-weight asset(s) missing: {string.Join(", ", missing)}" : "CUDA unavailable";
+            if (missing.Length > 0 && Environment.GetEnvironmentVariable(RequireEnv) == "1")
+                throw new InvalidOperationException($"{RequireEnv}=1 but {message}.");
+            _output.WriteLine($"SKIPPED: {message}");
+            return;
+        }
+
+        using CudaBackend backend = new(0, PtxDir());
+        using IdolWeights weights = IdolWeights.Load(checkpoint);
+        using BudgetAdapterWeights adapters = BudgetAdapterWeights.Load(checkpoint);
+        using IdolTurboAdapters turbo = IdolTurboAdapters.AttachEmbedded(weights);
+        using IdolDenoiser trunk = new(turbo.Weights);
+        using BudgetDenoiser model = new(trunk, adapters);
+        using SafeTensorsLoader condLoader = new(), inputLoader = new(), layoutLoader = new(), refLoader = new();
+        condLoader.Load(conditioning);
+        inputLoader.Load(inputs);
+        layoutLoader.Load(layouts);
+        refLoader.Load(reference);
+        Dictionary<string, Tensor> cond = condLoader.GetAllTensors(), input = inputLoader.GetAllTensors(), layout = layoutLoader.GetAllTensors(), want = refLoader.GetAllTensors();
+        backend.PreloadWeights(trunk.EnumerateWeights());
+        backend.PreloadWeights(model.EnumerateWeights());
+        List<string> failures = [];
+        try
+        {
+            using PhaseContexts contexts = turbo.EmbedContexts(backend, trunk, cond["feature1"], cond["feature2"]);
+            foreach (double budget in new[] { 0.0625, 0.25, 1.0 })
+            {
+                string key = ("b" + budget.ToString("0.####", CultureInfo.InvariantCulture)).Replace(".", "p");
+                long[] k = layout[$"{key}_k4k2"].AsReadOnlySpan<long>().ToArray();
+                BudgetLayout shape = BudgetLayout.FromIndices(Ints(layout[$"{key}_idx4"]), Ints(layout[$"{key}_idx2"]), Ints(layout[$"{key}_idx1"]), (int)k[0], (int)k[1]);
+                foreach ((string phase, float t) in new[] { ("slow", 800f), ("fast", 200f) })
+                {
+                    using IDisposable scope = turbo.Phase(t);
+                    (Tensor velocity, Tensor camera) = model.Forward(backend, input["latent"], input["camera"], t, contexts.At(t), shape);
+                    using (velocity)
+                    using (camera)
+                    {
+                        backend.Sync();
+                        Report($"turbo {phase} budget {budget} ({shape.Tokens} tokens) v_latent", velocity, want[$"{key}_{phase}_v_latent"], 2e-2, 3e-3, failures);
+                        Report($"turbo {phase} budget {budget} ({shape.Tokens} tokens) v_camera", camera, want[$"{key}_{phase}_v_camera"], 2e-2, 3e-3, failures);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            backend.Sync();
+            backend.FreeWeights(trunk.EnumerateWeights());
+            backend.FreeWeights(model.EnumerateWeights());
+        }
+
+        Assert.True(failures.Count == 0, string.Join("; ", failures));
+    }
+
+    /// <summary>The whole sampler against the reference's (<c>dump_idol_sampler.py</c>): Budget3D-Idol for 6 steps with guidance 3 and Budget3D-Idol-Turbo for 5 guidance-free steps, both at budget 0.5 from the reference's own noise,
+    /// on CUDA with float32 blocks. The final latent and camera are compared by relative RMS, and the final layout's indices exactly where the run keeps the reference's layout.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "GpuIntegration")]
+    public void TheSamplerAtHalfBudget_MatchesTheReferenceOnCuda(bool turboModel)
+    {
+        string? models = Environment.GetEnvironmentVariable(ModelsEnv);
+        string? refDir = Environment.GetEnvironmentVariable(ReferenceEnv);
+        string checkpoint = Path.Combine(models ?? "", turboModel ? "budget3d-idol-turbo" : "budget3d-idol", turboModel ? "budget3d_idol_turbo.safetensors" : "budget3d_idol.safetensors");
+        string conditioning = Path.Combine(refDir ?? "", "cond", "conditioning.safetensors");
+        string inputs = Path.Combine(refDir ?? "", "den", "denoiser_inputs.safetensors");
+        string reference = Path.Combine(refDir ?? "", "samp", turboModel ? "sampler-budget3d-idol-turbo.safetensors" : "sampler-budget3d-idol.safetensors");
+        string[] missing = new[] { checkpoint, conditioning, inputs, reference }.Where(p => !File.Exists(p)).ToArray();
+        if (missing.Length > 0 || !CudaContext.IsAvailable())
+        {
+            string message = missing.Length > 0 ? $"required real-weight asset(s) missing: {string.Join(", ", missing)}" : "CUDA unavailable";
+            if (missing.Length > 0 && Environment.GetEnvironmentVariable(RequireEnv) == "1")
+                throw new InvalidOperationException($"{RequireEnv}=1 but {message}.");
+            _output.WriteLine($"SKIPPED: {message}");
+            return;
+        }
+
+        using CudaBackend backend = new(0, PtxDir());
+        using IdolWeights weights = IdolWeights.Load(checkpoint);
+        using BudgetAdapterWeights adapters = BudgetAdapterWeights.Load(checkpoint);
+        using IdolTurboAdapters? turbo = turboModel ? IdolTurboAdapters.AttachEmbedded(weights) : null;
+        using IdolDenoiser trunk = new(turbo?.Weights ?? weights);
+        using BudgetDenoiser model = new(trunk, adapters);
+        using SafeTensorsLoader condLoader = new(), inputLoader = new(), refLoader = new();
+        condLoader.Load(conditioning);
+        inputLoader.Load(inputs);
+        refLoader.Load(reference);
+        Dictionary<string, Tensor> cond = condLoader.GetAllTensors(), input = inputLoader.GetAllTensors(), want = refLoader.GetAllTensors();
+        backend.PreloadWeights(trunk.EnumerateWeights());
+        backend.PreloadWeights(model.EnumerateWeights());
+        List<string> failures = [];
+        try
+        {
+            using Tensor? positive = turbo is null ? trunk.EmbedContext(backend, cond["feature1"], cond["feature2"]) : null;
+            using PhaseContexts? phases = turbo?.EmbedContexts(backend, trunk, cond["feature1"], cond["feature2"]);
+            using Tensor zero1 = new(cond["feature1"].Shape, DType.F32), zero2 = new(cond["feature2"].Shape, DType.F32);
+            using Tensor? blank = turbo is null ? trunk.EmbedContext(backend, zero1, zero2) : null;
+            (Tensor latent, Tensor camera, BudgetLayout layout) = BudgetSampler.Sample(backend, model, positive ?? phases!.Slow, blank, input["latent"], input["camera"], BudgetLayout.SnapTokens(0.5 * 8192),
+                steps: turboModel ? 5 : 6, guidance: turboModel ? 0f : 3f, rescaleT: 3.0, relayoutEvery: turboModel ? 1 : BudgetSampler.BaseRelayoutEvery, relayoutUntil: turboModel ? -1 : BudgetSampler.BaseRelayoutUntil,
+                passScope: turbo is null ? null : turbo.Phase, contextAt: phases is null ? null : phases.At);
+            using (latent)
+            using (camera)
+            {
+                backend.Sync();
+                long[] k = want["k4k2"].AsReadOnlySpan<long>().ToArray();
+                bool sameLayout = layout.K4 == k[0] && layout.K2 == k[1] && layout.Pairs.SequenceEqual(Ints(want["idx1"])) && layout.Cells.SequenceEqual(Ints(want["idx2"])) && layout.Cubes.SequenceEqual(Ints(want["idx4"]));
+                _output.WriteLine($"final layout: {layout.Tokens} tokens, k4 {layout.K4}, k2 {layout.K2}; the reference's k4 {k[0]}, k2 {k[1]}; {(sameLayout ? "identical indices" : "the indices differ")}");
+                Report($"{(turboModel ? "turbo 5-step" : "6-step guided")} latent", latent, want["latent"], double.PositiveInfinity, turboModel ? 5e-2 : 2e-2, failures);
+                Report($"{(turboModel ? "turbo 5-step" : "6-step guided")} camera", camera, want["camera"], double.PositiveInfinity, turboModel ? 5e-2 : 2e-2, failures);
+                // The base model's layout is refreshed twice and frozen, so it must be the reference's. The turbo rebuilds it from the running estimate at every step, which can swap cells whose scores
+                // tie within float32 rounding of each other (the counts k4 and k2 are always the budget's); there only the counts are required.
+                if (layout.K4 != k[0] || layout.K2 != k[1] || (!sameLayout && !turboModel))
+                    failures.Add("the final layout differs from the reference's");
+            }
+        }
+        finally
+        {
+            backend.Sync();
+            backend.FreeWeights(trunk.EnumerateWeights());
+            backend.FreeWeights(model.EnumerateWeights());
+        }
+
+        Assert.True(failures.Count == 0, string.Join("; ", failures));
+    }
+
     private void Run(IBackend backend, bool cuda, double[] budgets, double peakLimit, double rmsLimit)
     {
         string? models = Environment.GetEnvironmentVariable(ModelsEnv);

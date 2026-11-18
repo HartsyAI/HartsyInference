@@ -101,6 +101,64 @@ public sealed class IdolRequestMapperTests
         Assert.Equal(2, IdolImageTo3DPipeline.MissingFiles(Path.Combine(Path.GetTempPath(), "no-such-idol"), turbo: true).Except(IdolImageTo3DPipeline.RequiredFiles).Count());
     }
 
+    [Theory]
+    [InlineData(MeshModelIds.BudgetIdol, false)]
+    [InlineData(MeshModelIds.BudgetIdolTurbo, true)]
+    public void ABudget3DRequestCarriesTheBudgetAndTheVariantFlags(string id, bool turbo)
+    {
+        IdolOptions options = IdolRequestMapper.ToOptions(Request() with { TokenBudget = 0.25, Seed = 3 }, id);
+
+        Assert.True(options.Budget3D);
+        Assert.Equal(turbo, options.Turbo);
+        Assert.Equal(0.25, options.TokenBudget);
+        Assert.Equal(0.0, IdolRequestMapper.ToOptions(Request(), id).TokenBudget);   // null takes the pipeline's 1
+        Assert.False(IdolRequestMapper.ToOptions(Request(), MeshModelIds.Idol).Budget3D);
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(0.05)]
+    [InlineData(1.01)]
+    [InlineData(double.NaN)]
+    public void ATokenBudgetOutsideTheRangeIsRejected(double budget)
+        => Assert.Equal(nameof(MeshRequest.TokenBudget), MeshFieldTag.FieldOf(Assert.Throws<ArgumentOutOfRangeException>(() => IdolRequestMapper.Validate(Request() with { TokenBudget = budget }, MeshModelIds.BudgetIdol))));
+
+    [Theory]
+    [InlineData(MeshModelIds.Idol)]
+    [InlineData(MeshModelIds.IdolTurbo)]
+    [InlineData("trellis2")]
+    public void OnlyTheBudget3DModelsTakeATokenBudget(string id)
+    {
+        Assert.Equal(nameof(MeshRequest.TokenBudget), MeshFieldTag.FieldOf(Assert.Throws<NotSupportedException>(() => IdolRequestMapper.RejectForOtherModels(Request() with { TokenBudget = 0.5 }, id))));
+        IdolRequestMapper.RejectForOtherModels(Request() with { TokenBudget = 0.5 }, MeshModelIds.BudgetIdol);
+        IdolRequestMapper.RejectForOtherModels(Request() with { TokenBudget = 0.5 }, MeshModelIds.BudgetIdolTurbo);
+    }
+
+    [Fact]
+    public void TheBudget3DProfilesAndCatalogEntriesShareIdolsEncodersAndAddTheirCheckpoint()
+    {
+        foreach ((string id, string file) in new[] { (MeshModelIds.BudgetIdol, IdolImageTo3DPipeline.Budget3DFile), (MeshModelIds.BudgetIdolTurbo, IdolImageTo3DPipeline.Budget3DTurboFile) })
+        {
+            MeshModelProfile profile = MeshModelProfiles.Find(id)!;
+            MeshFieldSpec budget = profile.Fields.Single(f => f.Name == nameof(MeshRequest.TokenBudget));
+            Assert.Equal(MeshFieldAccess.Used, budget.Access);
+            Assert.Equal(0.0625, budget.Min);
+            Assert.Equal(1, budget.Max);
+            Assert.Equal(MeshOutputKinds.Splats, profile.Outputs);
+
+            string[] files = [.. HartsyInference.Engine.Registry.ModelCatalog.Find(id)!.Assets!.Select(a => a.TargetName ?? a.FileName)];
+            Assert.Contains(file, files);
+            Assert.DoesNotContain(IdolImageTo3DPipeline.DenoiserFile, files);   // the Budget3D checkpoint is the denoiser
+            Assert.Contains(IdolImageTo3DPipeline.DinoFile, files);
+            Assert.Contains(IdolImageTo3DPipeline.DecoderFile, files);
+            Assert.DoesNotContain(IdolImageTo3DPipeline.TurboSlowFile, files);   // the turbo's experts are inside its file
+            Assert.Equal(file, IdolImageTo3DPipeline.Required(MeshModelIds.IsIdolTurbo(id), budget3D: true)[0]);
+        }
+
+        Assert.Equal("5", MeshModelProfiles.Find(MeshModelIds.BudgetIdolTurbo)!.Fields.Single(f => f.Name == nameof(MeshRequest.Steps)).Default);
+        Assert.Equal(MeshFieldAccess.Rejected, MeshModelProfiles.Find(MeshModelIds.IdolTurbo)!.Fields.Single(f => f.Name == nameof(MeshRequest.TokenBudget)).Access);
+    }
+
     [Fact]
     public void OtherModelsRejectIdolsFields()
     {

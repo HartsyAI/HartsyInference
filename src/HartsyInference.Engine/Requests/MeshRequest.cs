@@ -67,6 +67,9 @@ public sealed record MeshRequest
     /// <summary>Idol: classifier-free guidance strength <c>w</c> of the sampler (<c>(1 + w)·v(cond) − w·v(zeros)</c>); null takes the model's 3, 0 runs the conditional pass alone. Other models reject a value.</summary>
     public double? Guidance { get; init; }
 
+    /// <summary>Budget3D: the fraction of Idol's 8192 latent tokens the denoiser runs on, 0.0625 to 1 (1 is Idol's dense layout, smaller is faster and coarser); null takes 1. Snapped to a token count the octree can realise. Other models reject a value.</summary>
+    public double? TokenBudget { get; init; }
+
     /// <summary>Idol: Gaussians to write, 32,768 to 1,048,576 in multiples of 32; 0 takes 262,144. Other models reject a value.</summary>
     public int SplatCount { get; init; }
 
