@@ -42,6 +42,21 @@ public sealed class BudgetDenoiserParityTests
         Run(backend, cuda: true, [0.0625, 0.1, 0.25, 0.5, 1.0], peakLimit: 5e-3, rmsLimit: 2e-3);
     }
 
+    /// <summary>The shipped precision of the Budget3D-Idol denoiser: block matrices and attention in F16 on CUDA, against the float32 reference at every budget.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void EveryBudget_WithF16BlocksOnCuda_StaysCloseToTheFloat32Reference()
+    {
+        if (!CudaContext.IsAvailable())
+        {
+            _output.WriteLine("SKIPPED: CUDA unavailable");
+            return;
+        }
+
+        using CudaBackend backend = new(0, PtxDir());
+        Run(backend, cuda: true, [0.0625, 0.1, 0.25, 0.5, 1.0], peakLimit: 3e-2, rmsLimit: 6e-3, blockDType: DType.F16);
+    }
+
     /// <summary>Budget3D-Idol-Turbo: its checkpoint embeds the phase experts in the block matrices (<c>.base</c> plus <c>slow_A</c>, <c>slow_B</c>, <c>fast_A</c>, <c>fast_B</c> at scale 4); one forward per budget at the slow (t=800) and
     /// fast (t=200) expert against the reference, with the image stream embedded under the expert of the phase.</summary>
     [Fact]
@@ -184,7 +199,7 @@ public sealed class BudgetDenoiserParityTests
         Assert.True(failures.Count == 0, string.Join("; ", failures));
     }
 
-    private void Run(IBackend backend, bool cuda, double[] budgets, double peakLimit, double rmsLimit)
+    private void Run(IBackend backend, bool cuda, double[] budgets, double peakLimit, double rmsLimit, DType? blockDType = null)
     {
         string? models = Environment.GetEnvironmentVariable(ModelsEnv);
         string? refDir = Environment.GetEnvironmentVariable(ReferenceEnv);
@@ -203,7 +218,7 @@ public sealed class BudgetDenoiserParityTests
             return;
         }
 
-        using IdolWeights weights = IdolWeights.Load(checkpoint);
+        using IdolWeights weights = IdolWeights.Load(checkpoint, linearDType: blockDType);
         using BudgetAdapterWeights adapters = BudgetAdapterWeights.Load(checkpoint);
         using IdolDenoiser trunk = new(weights);
         using BudgetDenoiser model = new(trunk, adapters);
