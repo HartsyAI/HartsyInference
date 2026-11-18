@@ -53,9 +53,9 @@ public static unsafe class TrellisGaussianRepresentation
                 for (int c = 0; c < 3; c++) scl[s * 3 + c] = GaussianSplatActivations.LogScale(row[rScl + g * 3 + c], scaleBias, MinKernel);
                 // opacity: logit = _opacity + bias.
                 op[s] = row[rOp + g] + opacityBias;
-                // rotation: (_rotation + [1,0,0,0]) rotated by q_R (y-up transform).
+                // rotation: (_rotation + [1,0,0,0]) turned with the positions: q_R ⊗ q, the covariance of the same splat in the y-up frame.
                 float qw = row[rRot + g * 4 + 0] * rotationScale + 1f, qx = row[rRot + g * 4 + 1] * rotationScale, qy = row[rRot + g * 4 + 2] * rotationScale, qz = row[rRot + g * 4 + 3] * rotationScale;
-                (rot[s * 4 + 0], rot[s * 4 + 1], rot[s * 4 + 2], rot[s * 4 + 3]) = GaussianSplatActivations.TurnToYUpAfter(qw, qx, qy, qz);
+                (rot[s * 4 + 0], rot[s * 4 + 1], rot[s * 4 + 2], rot[s * 4 + 3]) = GaussianSplatActivations.TurnToYUp(qw, qx, qy, qz);
             }
         }
 

@@ -54,35 +54,81 @@ public sealed class GaussianSplatActivationsTests
         Assert.Equal(c * qx + c * qw, rx, 5);
         Assert.Equal(c * qy - c * qz, ry, 5);
         Assert.Equal(c * qz + c * qy, rz, 5);
-
-        // The other order differs in the y and z mixing only, and the two agree for a rotation about x.
-        (float aw, float ax, float ay, float az) = GaussianSplatActivations.TurnToYUpAfter(qw, qx, qy, qz);
-        Assert.Equal(rw, aw);
-        Assert.Equal(rx, ax);
-        Assert.Equal(c * qy + c * qz, ay, 5);
-        Assert.Equal(c * qz - c * qy, az, 5);
-        Assert.Equal(GaussianSplatActivations.TurnToYUp(0.6f, 0.8f, 0f, 0f), GaussianSplatActivations.TurnToYUpAfter(0.6f, 0.8f, 0f, 0f));
     }
 
+    /// <summary>The criterion that does not depend on any upstream's code: a splat is an ellipsoid with covariance <c>R·S²·Rᵀ</c>, and turning the scene with the positions <c>(x, y, z) → (x, −z, y)</c>
+    /// must give the covariance <c>T·Σ·Tᵀ</c>. Only the left product <c>q_R ⊗ q</c> (matrices <c>T·R</c>) does; the right one (<c>R·T</c>) tilts the ellipsoid about the wrong axes unless <c>q</c> is about x.</summary>
     [Fact]
-    public void TurnToYUpAfter_ComposesTheQuarterTurnAfterTheSplatsOwnRotation()
+    public void TheTurnedRotationGivesTheCovarianceOfTheTurnedScene()
     {
-        // Identity turns to the turn itself.
-        (float w, float x, float y, float z) = GaussianSplatActivations.TurnToYUpAfter(1f, 0f, 0f, 0f);
-        Assert.Equal(Math.Sqrt(0.5), w, 6);
-        Assert.Equal(Math.Sqrt(0.5), x, 6);
-        Assert.Equal(0f, y);
-        Assert.Equal(0f, z);
+        double[,] t = { { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 } };
+        Random rng = new(11);
+        double worstLeft = 0, worstRight = 0;
+        for (int trial = 0; trial < 50; trial++)
+        {
+            double[] q = [rng.NextDouble() * 2 - 1, rng.NextDouble() * 2 - 1, rng.NextDouble() * 2 - 1, rng.NextDouble() * 2 - 1];
+            double n = Math.Sqrt(q.Sum(v => v * v));
+            q = [.. q.Select(v => v / n)];
+            double[] scale = [0.2 + rng.NextDouble(), 0.2 + rng.NextDouble(), 0.2 + rng.NextDouble()];
+            double[,] sigma = Covariance(q, scale);
+            double[,] want = Multiply(Multiply(t, sigma), Transpose(t));
 
-        // A half turn about y is where the two orders of the product part: q ⊗ q_R = (0, 0, c, -c), while q_R ⊗ q would be (0, 0, c, c).
-        (float rw, float rx, float ry, float rz) = GaussianSplatActivations.TurnToYUpAfter(0f, 0f, 1f, 0f);
-        Assert.Equal(0f, rw, 6);
-        Assert.Equal(0f, rx, 6);
-        Assert.Equal(Math.Sqrt(0.5), ry, 6);
-        Assert.Equal(-Math.Sqrt(0.5), rz, 6);
+            (float w, float x, float y, float z) = GaussianSplatActivations.TurnToYUp((float)q[0], (float)q[1], (float)q[2], (float)q[3]);
+            worstLeft = Math.Max(worstLeft, MaxDifference(Covariance([w, x, y, z], scale), want));
 
-        // The product keeps a unit quaternion unit.
-        (float uw, float ux, float uy, float uz) = GaussianSplatActivations.TurnToYUpAfter(0.5f, 0.5f, 0.5f, 0.5f);
-        Assert.Equal(1.0, uw * (double)uw + ux * (double)ux + uy * (double)uy + uz * (double)uz, 5);
+            // The other order, written out: R_q · T as a rotation.
+            double[,] right = Multiply(RotationMatrix(q), t);
+            double[,] rightSigma = new double[3, 3];
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++)
+                    for (int k = 0; k < 3; k++)
+                        rightSigma[i, j] += right[i, k] * scale[k] * scale[k] * right[j, k];
+            worstRight = Math.Max(worstRight, MaxDifference(rightSigma, want));
+        }
+
+        Assert.True(worstLeft < 1e-5, $"the left product differs from the turned covariance by {worstLeft:E2}");
+        Assert.True(worstRight > 1e-2, $"the right product should not match, but is within {worstRight:E2}");
+    }
+
+    private static double[,] RotationMatrix(double[] q)
+    {
+        double w = q[0], x = q[1], y = q[2], z = q[3];
+        return new[,]
+        {
+            { 1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y) },
+            { 2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x) },
+            { 2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y) },
+        };
+    }
+
+    private static double[,] Covariance(double[] q, double[] scale)
+    {
+        double[,] r = RotationMatrix(q), sigma = new double[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                for (int k = 0; k < 3; k++)
+                    sigma[i, j] += r[i, k] * scale[k] * scale[k] * r[j, k];
+        return sigma;
+    }
+
+    private static double[,] Transpose(double[,] m) => new[,] { { m[0, 0], m[1, 0], m[2, 0] }, { m[0, 1], m[1, 1], m[2, 1] }, { m[0, 2], m[1, 2], m[2, 2] } };
+
+    private static double[,] Multiply(double[,] a, double[,] b)
+    {
+        double[,] c = new double[3, 3];
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                for (int k = 0; k < 3; k++)
+                    c[i, j] += a[i, k] * b[k, j];
+        return c;
+    }
+
+    private static double MaxDifference(double[,] a, double[,] b)
+    {
+        double worst = 0;
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                worst = Math.Max(worst, Math.Abs(a[i, j] - b[i, j]));
+        return worst;
     }
 }
