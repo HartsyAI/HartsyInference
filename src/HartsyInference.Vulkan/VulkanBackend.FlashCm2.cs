@@ -32,12 +32,14 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int headDim, float scale, bool allowF16 = false) =>
-        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16));
+        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16,
+            batch: 1));
 
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int kvHeads, int headDim, float scale, bool allowF16 = false) =>
-        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16));
+        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16,
+            batch: 1));
 
     private void ExecuteTokenMajorAttention(in AttentionCall call)
     {

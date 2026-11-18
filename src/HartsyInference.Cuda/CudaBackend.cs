@@ -8010,7 +8010,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 Route = AttentionRoute.Flash,
                 Positions = AttentionPositions.Host(call.ValidKvLength, call.Positions.QueryOffset),
-                Numerics = AttentionNumerics.Exact,
             };
             ExecuteFlashAttention(in host, legacyKvGroup);
             t_attentionRoute = AttentionRouteText.Nested("V.0/", t_attentionRoute);

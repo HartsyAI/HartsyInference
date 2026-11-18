@@ -26,7 +26,7 @@ public sealed partial class CudaBackend
         RunValidatedAttentionRows(rows, in prepared);
     }
 
-    /// <summary><see cref="RunAttentionRows"/> for a call the caller has already passed through <see cref="AttentionCallValidation"/>.</summary>
+    /// <summary><see cref="RunAttentionRows"/> for a call already validated and position-normalized by <see cref="AttentionExecution.Prepare"/>.</summary>
     private void RunValidatedAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
         if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
