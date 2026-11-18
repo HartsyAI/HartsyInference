@@ -3,6 +3,13 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.442
+
+- Added support for Haru-4B, a full-duplex speech-to-speech model that listens and speaks at once: `hartsy duplex <recording> -m haru:q8`
+  answers a recording (`--reference` for a voice, `--card` for a character, `--tail-seconds` to let it finish), `POST /v1/native/duplex/respond`
+  does the same over HTTP, and `GET /v1/native/duplex/ws` is a live WebSocket conversation held to real time. It runs on CUDA, with `q8` fitting
+  a 12 GB card; the other quantizations load but do not answer intelligibly. A base model: no instructions or tools, and no echo cancellation.
+
 ## alpha.441
 
 - Added word-level timestamps to Whisper (and distil-whisper): `WordTimestamps` now returns one span per word, and
