@@ -66,11 +66,12 @@ internal static class HaruCodec
         Create(ConfigFrom(codecConfig), weights);
 
     /// <summary><see cref="Create(JsonElement, IReadOnlyDictionary{string, Tensor})"/> from a config already read.</summary>
-    internal static VibeVoiceAcousticTokenizerModel Create(VibeVoiceTokenizerConfig config, IReadOnlyDictionary<string, Tensor> weights)
+    internal static VibeVoiceAcousticTokenizerModel Create(VibeVoiceTokenizerConfig config, IReadOnlyDictionary<string, Tensor> weights,
+        bool keepStoredWeight = false)
     {
         VibeVoiceAcousticTokenizerModel model = new(config, HaruCodecWeights.Prefix);
         Dictionary<string, Tensor> remapped = HaruCodecWeights.Remap(weights);
-        model.LoadWeights(remapped);
+        model.LoadWeights(remapped, keepStoredWeight: keepStoredWeight);
         // The shared loaders read only the keys they expect, so a tensor outside the configured layout (an extra stage, block or down/up
         // layer) would load silently. Every remapped tensor must be one the model took.
         int used = model.EnumerateWeights().Count();

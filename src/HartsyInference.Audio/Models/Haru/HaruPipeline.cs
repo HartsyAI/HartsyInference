@@ -98,7 +98,7 @@ public sealed class HaruPipeline : IDisposable
         {
             head = new HaruMeanFlowHead(config.Head);
             head.LoadWeights(weights);
-            VibeVoiceAcousticTokenizerModel codecModel = HaruCodec.Create(config.Codec, weights);
+            VibeVoiceAcousticTokenizerModel codecModel = HaruCodec.Create(config.Codec, weights, keepStoredWeight: backend.Device.IsCuda);
             codec = new HaruCodecSession(codecModel, backend, config.LatentDim, config.Codec.FixStd);
             HaruPipeline pipeline = new(config, lm, head, codec, codecModel, text, backend, owner);
             pipeline.Preload();

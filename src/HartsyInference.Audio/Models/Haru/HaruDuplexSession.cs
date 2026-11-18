@@ -71,7 +71,7 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         {
             if (Stages.Summary(0).Frames > 0)
             {
-                Logs.Info($"[Audio][Haru] Per frame, median/max: {Stages.Describe()} (a frame is {_config.FrameSamples * 1000 / _config.SampleRate} ms).");
+                Logs.Info($"[Audio][Haru] Per frame, median/max: {Stages.Describe((double)_config.FrameSamples / _config.SampleRate)}.");
             }
             _release?.Invoke();
         }
@@ -194,6 +194,7 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         if (_timed)
         {
             Stages.Lap(5);
+            Stages.Frame(Stopwatch.GetElapsedTime(started).TotalSeconds);
         }
 
         _token = token;
