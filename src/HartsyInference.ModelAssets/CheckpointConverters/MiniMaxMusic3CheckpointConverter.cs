@@ -50,6 +50,7 @@ public static class MiniMaxMusic3CheckpointConverter
                 throw new NotSupportedException($"Unrecognized MiniMax-Music-3 DiT key '{key}' — refusing a partial conversion.");
             }
         }
+        WidenVectorsToF32(transformer);
         return (transformer, conditionEncoder.Count == 0 ? null : conditionEncoder);
     }
 
@@ -165,7 +166,20 @@ public static class MiniMaxMusic3CheckpointConverter
                     throw new NotSupportedException($"Unrecognized MiniMax-Music-3 Comfy DiT layer key '{key}' — refusing a partial conversion.");
             }
         }
+        WidenVectorsToF32(transformer);
         return (transformer, conditionEncoder);
+    }
+
+    /// <summary>Norm scales and biases back to F32 — the precision the official weights ship them in. An F16 vector (fp16 and GGUF builds store them so) corrupts the DiT once its weights are resident on the device.</summary>
+    private static void WidenVectorsToF32(Dictionary<string, Tensor> weights)
+    {
+        foreach ((string key, Tensor tensor) in weights.ToList())
+        {
+            if (tensor.Shape.Rank == 1)
+            {
+                weights[key] = CastToF32IfNeeded(tensor);
+            }
+        }
     }
 
     private static Tensor CastToF32IfNeeded(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);

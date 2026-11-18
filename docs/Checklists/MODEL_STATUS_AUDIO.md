@@ -372,6 +372,13 @@ forward. Parity is byte-identical across that change.
 
 Stage timing is emitted at `Info`; the CLI defaults to `Warning`, so use `diagnostics.logLevel=Info` to see it.
 
+**User-selected flow transformer** (`--model-path`, a host's `localPath`): the layout is read from tensor names, not the
+file name. Loaded: the official diffusers `transformer` (file, shards, index or folder), the Hartsy repack (the same
+tensors merged into one fp32 file, no condition encoder), a Comfy-Org DiT (fp32, fp16, int8 ConvRot), and a GGUF whose
+tensors keep the diffusers names. Refused by name: the condition encoder alone and fused-QKV `blk.N.attn_qkv` GGUFs made
+for native C++ runtimes. Real-weight runs so far: the Hartsy fp32 file at `:q8` on the 3060. Int8 ConvRot is covered by a
+synthetic round trip only.
+
 **Performance grind plan: `MINIMAX_MUSIC3_PERF.md`** (phases, hardware protocol, out-of-scope list).
 
 **Versus the reference** (4090, 15.0 s of audio = 375 frames = 3 windows, identical prompt/seed/steps, generation

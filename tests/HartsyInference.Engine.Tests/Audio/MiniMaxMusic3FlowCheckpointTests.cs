@@ -49,6 +49,9 @@ public sealed class MiniMaxMusic3FlowCheckpointTests : IDisposable
         using MiniMaxMusic3FlowWeights weights = MiniMaxMusic3FlowCheckpoint.Open(path);
         Assert.Equal(DType.F32, weights.Transformer["time_proj.weight"].DType);
         Assert.Equal(DType.F16, weights.Transformer["transformer_blocks.0.attn.to_q.weight"].DType);
+        // F16 norm scales and biases corrupt the DiT once its weights are resident on the device.
+        Assert.Equal(DType.F32, weights.Transformer["transformer_blocks.0.norm1.weight"].DType);
+        Assert.Equal(DType.F32, weights.Transformer["transformer_blocks.0.ff_in.bias"].DType);
     }
 
     [Fact]
@@ -161,6 +164,7 @@ public sealed class MiniMaxMusic3FlowCheckpointTests : IDisposable
         Assert.Equal(new TensorShape(Hidden, InDim), query.Shape);
         Assert.Equal(new TensorShape(Hidden, InDim, 1), weights.Transformer["preprocess_conv.weight"].Shape);
         Assert.Equal(DType.F32, weights.Transformer["time_proj.weight"].DType);
+        Assert.Equal(DType.F32, weights.Transformer["transformer_blocks.0.norm1.bias"].DType);
     }
 
     [Fact]
