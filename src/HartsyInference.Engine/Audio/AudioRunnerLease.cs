@@ -43,7 +43,7 @@ internal abstract class AudioRunnerLease : IDisposable
         bool held = Monitor.TryEnter(CallLock, wait);
         try
         {
-            Close(RevokedReason);
+            Close(RevokedReason, held);
         }
         finally
         {
@@ -75,13 +75,30 @@ internal abstract class AudioRunnerLease : IDisposable
         }
     }
 
-    /// <summary>Signals the close and releases the pin once, so a revocation racing a Dispose does not release it twice.</summary>
-    private void Close(string reason)
+    /// <summary>Runs once, under <see cref="CallLock"/>, when the lease closes by Dispose or revocation and before its pin is released:
+    /// the place for a lease to close what it owns beyond the pin. Not run when a revocation gave up waiting for a call still in flight.</summary>
+    protected virtual void OnClosed()
+    {
+    }
+
+    /// <summary>Signals the close, runs <see cref="OnClosed"/> when the call lock is held, and releases the pin once, so a revocation
+    /// racing a Dispose does not release it twice.</summary>
+    private void Close(string reason, bool holdsLock)
     {
         Signal(reason);
         if (Interlocked.Exchange(ref _pinReleased, 1) == 0)
         {
-            _pin.Dispose();
+            try
+            {
+                if (holdsLock)
+                {
+                    OnClosed();
+                }
+            }
+            finally
+            {
+                _pin.Dispose();
+            }
         }
     }
 
@@ -92,7 +109,7 @@ internal abstract class AudioRunnerLease : IDisposable
         Signal(reason);
         lock (CallLock)
         {
-            Close(reason);
+            Close(reason, holdsLock: true);
         }
         _runtime.Unregister(this);
     }
