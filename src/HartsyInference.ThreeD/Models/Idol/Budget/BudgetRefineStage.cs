@@ -148,7 +148,7 @@ internal sealed class BudgetRefineStage
         float[] Modulated(int shift, int scale)
         {
             float[] m = new float[tokens * w];
-            for (int i = 0; i < tokens; i++)
+            Parallel.For(0, tokens, i =>
             {
                 int g = i / n / condRepeat;
                 float mean = 0f;
@@ -165,7 +165,7 @@ internal sealed class BudgetRefineStage
                 float inv = 1f / MathF.Sqrt(variance / w + NormEps);
                 for (int c = 0; c < w; c++)
                     m[i * w + c] = (h[i * w + c] - mean) * inv * (1f + ada[g * 6 * w + scale * w + c]) + ada[g * 6 * w + shift * w + c];
-            }
+            });
 
             return m;
         }
@@ -174,7 +174,7 @@ internal sealed class BudgetRefineStage
         float[] attended;
         using (Tensor norm1 = BudgetHost.Make(Modulated(0, 1), 1, tokens, w))
         using (Tensor qkvT = BudgetHost.Linear(backend, norm1, _w[$"{p}.qkv.weight"], _w[$"{p}.qkv.bias"]))
-            attended = Attend(qkvT.AsReadOnlySpan<float>(), rows, n, heads, hd);
+            attended = Attend(qkvT.AsReadOnlySpan<float>().ToArray(), rows, n, heads, hd);
         using (Tensor attT = BudgetHost.Make(attended, 1, tokens, w))
         using (Tensor projT = BudgetHost.Linear(backend, attT, _w[$"{p}.proj.weight"], _w[$"{p}.proj.bias"]))
         {
@@ -204,13 +204,14 @@ internal sealed class BudgetRefineStage
     }
 
     // Softmax attention over each parent's n children, per head: qkv is [tokens, 3 · heads · hd] split as (which, head, hd); the heads come back concatenated.
-    private static float[] Attend(ReadOnlySpan<float> qkv, int rows, int n, int heads, int hd)
+    private static float[] Attend(float[] qkv, int rows, int n, int heads, int hd)
     {
         int w = heads * hd, stride = 3 * w;
         float scale = 1f / MathF.Sqrt(hd);
         float[] output = new float[rows * n * w];
-        float[] scores = new float[n];
-        for (int r = 0; r < rows; r++)
+        Parallel.For(0, rows, r =>
+        {
+            float[] scores = new float[n];
             for (int head = 0; head < heads; head++)
                 for (int i = 0; i < n; i++)
                 {
@@ -241,6 +242,7 @@ internal sealed class BudgetRefineStage
                         output[(r * n + i) * w + head * hd + d] = acc;
                     }
                 }
+        });
 
         return output;
     }

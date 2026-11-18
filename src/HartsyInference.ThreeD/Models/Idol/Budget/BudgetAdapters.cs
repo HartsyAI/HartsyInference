@@ -84,12 +84,13 @@ internal sealed class BudgetScaleMixer
         int rows = parents * _n, bott = BudgetAdapterWeights.MixerBottleneck;
         ReadOnlySpan<float> pos = _w[$"{_prefix}.pos"].AsReadOnlySpan<float>();
         float[] shifted = new float[rows * d];
-        for (int r = 0; r < rows; r++)
+        float[] posArray = pos.ToArray(), childArray = children.ToArray();
+        Parallel.For(0, rows, r =>
         {
             int slot = r % _n;
             for (int c = 0; c < d; c++)
-                shifted[r * d + c] = children[r * d + c] + pos[slot * d + c];
-        }
+                shifted[r * d + c] = childArray[r * d + c] + posArray[slot * d + c];
+        });
 
         float[] activated;
         using (Tensor input = BudgetHost.Make(shifted, 1, rows, d))
@@ -99,16 +100,18 @@ internal sealed class BudgetScaleMixer
 
         // einsum("...sc,cts->...tc", h, spatial_w) + spatial_b: for every parent and channel a small [n × n] product over the children.
         ReadOnlySpan<float> w = _w[$"{_prefix}.spatial_w"].AsReadOnlySpan<float>(), b = _w[$"{_prefix}.spatial_b"].AsReadOnlySpan<float>();
-        float[] mixed = new float[parents * _n * bott];
-        for (int p = 0; p < parents; p++)
+        float[] mixed = new float[parents * _n * bott], wArray = w.ToArray(), bArray = b.ToArray();
+        Parallel.For(0, parents, p =>
+        {
             for (int t = 0; t < _n; t++)
                 for (int c = 0; c < bott; c++)
                 {
                     float acc = 0f;
                     for (int s = 0; s < _n; s++)
-                        acc += activated[(p * _n + s) * bott + c] * w[(c * _n + t) * _n + s];
-                    mixed[(p * _n + t) * bott + c] = acc + b[t * bott + c];
+                        acc += activated[(p * _n + s) * bott + c] * wArray[(c * _n + t) * _n + s];
+                    mixed[(p * _n + t) * bott + c] = acc + bArray[t * bott + c];
                 }
+        });
 
         float[] correction;
         using (Tensor mixedTensor = BudgetHost.Make(mixed, 1, parents * _n, bott))
@@ -118,14 +121,16 @@ internal sealed class BudgetScaleMixer
             correction = up.AsReadOnlySpan<float>().ToArray();
 
         float[] result = new float[parents * d];
-        for (int p = 0; p < parents; p++)
+        Parallel.For(0, parents, p =>
+        {
             for (int c = 0; c < d; c++)
             {
                 float mean = 0f;
                 for (int s = 0; s < _n; s++)
-                    mean += children[(p * _n + s) * d + c];
+                    mean += childArray[(p * _n + s) * d + c];
                 result[p * d + c] = mean / _n + correction[p * d + c];
             }
+        });
 
         return result;
     }
@@ -165,10 +170,12 @@ internal sealed class BudgetIpe
 
         float[] features = new float[count * 12 * octaves];
         float pi = (float)Math.PI;
-        for (int i = 0; i < count; i++)
+        float[] centreArray = centres.ToArray();
+        Parallel.For(0, count, i =>
+        {
             for (int axis = 0; axis < 3; axis++)
             {
-                float mu = (2f * centres[i * 3 + axis] - 1f) * pi;
+                float mu = (2f * centreArray[i * 3 + axis] - 1f) * pi;
                 for (int k = 0; k < octaves; k++)
                 {
                     float angle = mu * omega[k], sin = MathF.Sin(angle), cos = MathF.Cos(angle);
@@ -179,6 +186,7 @@ internal sealed class BudgetIpe
                     features[o + 3 * octaves + k] = cos * excess[k];
                 }
             }
+        });
 
         using Tensor input = BudgetHost.Make(features, 1, count, 12 * octaves);
         using Tensor hidden = BudgetHost.Linear(backend, input, _w["bp_ipe.mlp.0.weight"], _w["bp_ipe.mlp.0.bias"]);
