@@ -99,6 +99,13 @@ config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no 
 - Contract: `ISpeechService.OpenDuplexAsync` and `RespondAsync` as default interface members; `IDuplexSpeechSession` (`Start`, `Step`) over a lease that takes the call lock and the device gate per frame and pins the model. One conversation per loaded model.
 - Precisions: `HaruWeights` converts only the language model's attention, delta-rule and feed-forward matrices (Q8_0, Q6_K, or Q4_K/Q5_K for the feed-forward with Q6_K for the rest); the tied embedding table, head, projectors and codec stay as stored. Cache: `CacheRoot/tts/_gguf-cache/higurashi-ai_Haru-4B-<precision>-v1.gguf`.
 - Consumers: `hartsy duplex <recording> -m haru:q8 --reference voice.wav --card "..." --stereo`, `POST /v1/native/duplex/respond` (base64 clips in JSON, long-running queue).
+- Live: `GET /v1/native/duplex/ws` (WebSocket). The first message is text, a JSON `NativeDuplexOpenRequest` (`model`, `request`, `inputSampleRate`, `leadFrames`, `format`);
+  the server replies `{"type":"ready",...}`, then the client sends binary microphone audio (16-bit PCM or float32 little-endian, mono, any message length) and the server sends one
+  binary message per model frame plus text events (`text`, `stats`, `error`); `{"type":"close"}` or closing the socket ends it. `DuplexVoiceSession` (Engine, new) ticks once per
+  frame length on a dedicated thread, takes what the user said (a quarter frame of grace for a chunk in flight, then silence), runs one step and queues the reply; a late frame stays
+  inside the lead, and past it the pacer rebases and drops the piled-up user audio instead of bursting. The lead (`leadFrames`, default 2, 0 to 8) is the number of frames a
+  listener holds before it plays: each is one frame of delay. No echo cancellation (headphones); the route sits behind the same API key as the others (send it as a header: a browser
+  WebSocket cannot); the conversation holds its device for its whole life.
 
 ## Evidence
 
@@ -134,6 +141,16 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
   process was also using (stage medians were 1.5 to 2 times those of an idle card, where the whole frame is 67 to 73 ms median).
 - 2026-11-17, mixed precisions (`q8-ff6`, `q8-ff5`, `q8-ff4`: Q8_0 attention and delta-rule, K-quant feed-forward), same clip, 25 s tail: all three replies unintelligible
   ("Hm", mixed-language fragments, repetition). Only Q8_0 for every matrix (and native) keeps the conversation; the variants were removed.
+
+- 2026-11-17, the live route on the real model (`/v1/native/duplex/ws`, `haru:q8`, RTX 3060, a scripted client sending the 8 kHz recording in 20 ms chunks in real time,
+  `leadFrames` 2, the reply played back through a simulated speaker that holds two frames):
+  - A 45 s conversation (the 14 s question, then silence): coherent English answer ("A, lemon tart. ... C, strawberry tart ..."), the Whisper transcript of the received audio
+    agrees with the model's text events; 337 frames, 0 late, 0 rebases, 0 dropped input samples; compute per frame median 65 ms, p99 99 ms, max 157 ms on a quiet card.
+  - A 5-minute conversation (the question repeated with gaps; 2,250 frames, card at 2 to 10% utilisation before the start): server side **0 late frames, 0 rebases, 0 dropped
+    user samples or reply frames**, compute median 67 ms, p99 96 ms, max 213 ms (inside the 400 ms a two-frame lead allows); the client's own playout simulation counted 2 of
+    2,250 frames late, the worst by 141 ms (the client and the server shared the machine). The text turned repetitive late in the run ("strawberry, strawberry cake"): the
+    model, not the pacing.
+  - Not measured: lead 0 on the same run (the p99 of 96 ms says few frames, but not none, would miss a 133 ms slot), a 10-minute run, a remote client, narrowband microphones.
 
 - 2026-11-17, released codec, real weights, CPU F32 (`HaruCodecRealWeightsTests`, opt-in through `HARU_CODEC_REAL_DIR`): the
   `codec.*` byte range of `model.safetensors` @ `8d6e83bc` (1,374,784,002 B, which is 687,392,001 BF16 parameters; fetched by
