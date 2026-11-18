@@ -9,6 +9,11 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   the wrong side of each splat's own rotation, so splats rotated about y or z came out tilted about the wrong axes. Their positions
   and scales were right. A splat's ellipsoid now equals the turned scene's, checked against the covariance (`T·Σ·Tᵀ`).
 
+## alpha.441
+
+- Added word-level timestamps to Whisper (and distil-whisper): `WordTimestamps` now returns one span per word, and
+  `AudioRequest.AlignText` times a script or lyrics you already have instead of transcribing.
+
 ## alpha.440
 
 - Added Idol, Idol-turbo and Budget3D: one picture of an object to up to a million 3D Gaussians (a PLY), with `hartsy 3d <image> -m idol`,
