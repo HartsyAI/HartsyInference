@@ -241,7 +241,9 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) => !FlashOnDevice(in c),
                 static (in AttentionCall c) =>
                 {
-                    AttentionPlanLog.HostReference("vulkan", "Flash with softcap, causal sinks, ALiBi or a head dim past the flash tile");
+                    AttentionPlanLog.HostReference("vulkan", c.Logits.AlibiSlopes is not null ? "Flash with ALiBi"
+                        : c.Logits.Softcap != 0f ? "Flash with softcap" : c.Logits.Sinks is not null ? "Flash with sinks outside the wide row"
+                        : "Flash at a head dim past the flash tile");
                     AttentionHostReference.Run(in c);
                     return true;
                 }),
