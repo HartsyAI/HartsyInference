@@ -27,7 +27,7 @@ internal static class AttentionExecution
     }
 
     private static AttentionCall Normalize(in AttentionCall call) =>
-        call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !call.Positions.Bounded
+        call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !call.Positions.Bounded && call.SequenceLengths is null
             ? call with { Positions = call.Positions with { KvLength = call.KeyTokens, Bounded = true } }
             : call;
 }

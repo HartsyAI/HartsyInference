@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -59,6 +60,25 @@ public sealed class AttentionSequenceLengthsCallTests
         // Sequence 1 holds two rows: under the causal rule its first query row sits below position zero.
         Assert.True(float.IsNegativeInfinity(lse[(1 * Heads + 0) * Rows + 0]));
         Assert.True(float.IsFinite(lse[(1 * Heads + 0) * Rows + 1]));
+    }
+
+    /// <summary>The CPU backend has no kernel for it either: it runs the contract reference, and says so.</summary>
+    [Fact]
+    public void TheCpuBackendRunsTheCallOnTheContractReference()
+    {
+        using Operands operands = new(), expected = new();
+        int[] lengths = [7, 2];
+        AttentionCall reference = expected.Call(lengths);
+        AttentionHostReference.Run(in reference);
+
+        using CpuBackend backend = new();
+        AttentionCall call = operands.Call(lengths);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(8);
+        backend.Attention(in call);
+        Assert.Contains(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Execution && e.Implementation == "cpu.host.reference");
+        Assert.True(expected.Output.AsReadOnlySpan<float>().SequenceEqual(operands.Output.AsReadOnlySpan<float>()));
+        Assert.True(expected.Lse.AsReadOnlySpan<float>().SequenceEqual(operands.Lse.AsReadOnlySpan<float>()));
+        Assert.StartsWith("cpu.host.reference", backend.PlanAttention(in call).Reason);
     }
 
     [Fact]
