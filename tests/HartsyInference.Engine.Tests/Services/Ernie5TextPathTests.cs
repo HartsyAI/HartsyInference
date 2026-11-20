@@ -134,6 +134,10 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.True(run.Device.IsCpu);
         Assert.Equal(continuousBatching, run.Scheduled);
         Assert.InRange(run.Result.CompletionTokens, 1, 4);
+        // Both paths time the request: the scheduler reports the same prefill/decode split the pipeline does.
+        Assert.True(run.Result.PrefillMilliseconds > 0, $"Prefill time was {run.Result.PrefillMilliseconds} ms.");
+        // Every generated token is added in a decode round, so a request with a completion token has decode time.
+        Assert.True(run.Result.DecodeMilliseconds > 0, $"Decode time was {run.Result.DecodeMilliseconds} ms.");
     }
 
     [Fact]
@@ -177,6 +181,21 @@ public sealed class Ernie5TextPathTests : IDisposable
         // "Hello" is five byte tokens after the one prefix token.
         Assert.Equal(6, run.Result.PromptTokens);
         Assert.InRange(run.Result.CompletionTokens, 1, 4);
+    }
+
+    /// <summary>The scheduler prefills as the pipeline does (one projected row, the same first token), so a greedy request gives the same text on both.</summary>
+    [Fact]
+    public async Task Continuous_batching_generates_what_the_pipeline_generates()
+    {
+        string checkpoint = WriteCheckpoint("service-parity");
+        ServiceRun pipeline = await GenerateThroughService(checkpoint, "cpu", continuousBatching: false);
+        ServiceRun scheduled = await GenerateThroughService(checkpoint, "cpu", continuousBatching: true);
+
+        Assert.False(pipeline.Scheduled);
+        Assert.True(scheduled.Scheduled);
+        Assert.Equal(pipeline.Result.Text, scheduled.Result.Text);
+        Assert.Equal(pipeline.Result.CompletionTokens, scheduled.Result.CompletionTokens);
+        Assert.Equal(pipeline.Result.PromptTokens, scheduled.Result.PromptTokens);
     }
 
     /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
