@@ -91,7 +91,9 @@ cannot pass by staying inside a broad numerical tolerance.
   be disguised as a successfully executed zero-case test.
 - A recoverable decline means no externally visible state/output changed; then another admitted row may run.
   A launch failure or exception after writes began propagates, with no retry into a different implementation.
-- GPU attention never silently falls back to host execution. CUDA and Vulkan refuse calls no device row serves;
+- GPU attention never silently falls back to host execution. A call no device row serves is refused unless the
+  backend declares a host-reference row for it, named in the plan and the evidence and warned once; Vulkan Flash
+  declares one (a migration gap, not a conformant GPU implementation) and CUDA declares none.
   `AttentionHostReference.Run` is the explicit host-execution path, and a backend without rows refuses
   `IBackend.Attention`. Exhausted recoverable declines raise `AttentionRecoverableException`, not an unsupported error.
 - Knob compatibility, explicit legacy numerical-permission adapters, workspace/capture refusal and device/page
@@ -105,7 +107,7 @@ Source admission is not runtime conformance. The following are review pointers, 
 |---|---|---|
 | CPU selection | `CpuBackend.AttentionRows.cs`, `AttentionKernels.cs`, `FlashAttentionKernels.cs` | Dense SIMD handles plain MHA; grouped/view calls can use the reference. A read-only PR 03 diagnostic reproduced NaN for an all-negative-infinite dense row, violating M03. Fix requires semantic follow-up, not a mechanical move. |
 | CUDA admission | `CudaBackend.AttentionRows.cs`, `CudnnSdpaPolicy.cs` | Native rows, explicit lowerings, free-memory routing and approximate-format knobs still need the PR 04 matrix. Flash beyond head dim 1024 is explicitly unsupported. |
-| Vulkan admission | `VulkanBackend.AttentionRows.cs`, `VulkanBackend.cs`, `VulkanBackend.FlashWide.cs` | Scalar/tiled/CM2 support differs by dtype, dimension, view and mask. Flash calls outside native scalar/wide admission are explicitly unsupported; noncausal-window differences remain open. |
+| Vulkan admission | `VulkanBackend.AttentionRows.cs`, `VulkanBackend.cs`, `VulkanBackend.FlashWide.cs` | Scalar/tiled/CM2 support differs by dtype, dimension, view and mask. Flash calls outside native scalar/wide admission run the declared host-reference row (C.1): softcap, causal sinks, ALiBi and wide head dims have no device kernel yet. Noncausal-window differences remain open. |
 | Excluded rows, ordering and non-finite normalization | PR 02 [semantic progress](../benchmarks/attention/reports/pr02-semantic-progress.md) | 3060 route-forced cases are scoped evidence; do not generalize cuDNN 9.21 results to every version or to all common cases. |
 | Kitchen and real generation | PR 01 [local status](../benchmarks/attention/reports/README.md), [GPU assignment](../benchmarks/attention/gpu-agent-handoff.md) | Hardware report and baseline/workload freeze remain pending; no Bfix, final parity or primary speed claim follows from this matrix. |
 

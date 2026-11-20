@@ -23,10 +23,10 @@ public static class AttentionPlanLog
             Logs.Debug($"Attention {key}: {new AttentionPlan(row, row.Variant(in call), "ran", null).Describe()}");
     }
 
-    /// <summary>Warns once per backend type that its attention runs on the host because it declares no kernel rows.</summary>
-    public static void HostReference(string backend)
+    /// <summary>Warns once per backend that a declared host-reference row served a call no device kernel covers.</summary>
+    public static void HostReference(string backend, string gap)
     {
         if (Seen.TryAdd("host-reference " + backend, 0))
-            Logs.Warning($"{backend} declares no attention rows: attention runs on the host reference.");
+            Logs.Warning($"{backend} attention: {gap} has no device kernel and runs on the declared host-reference row.");
     }
 }

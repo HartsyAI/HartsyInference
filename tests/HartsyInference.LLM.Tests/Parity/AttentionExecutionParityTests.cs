@@ -115,9 +115,33 @@ public sealed class AttentionExecutionParityTests
     public void CudaUnsupportedFlashRefusesHostFallback() =>
         UnsupportedFlashRefusesHostFallback(new CudaBackend(0, CudaPtxDirectory.Resolve()), "cuda", headDim: 1025, softcap: 0f);
 
+    /// <summary>Softcap has no Vulkan kernel: the declared host row serves it, named in the plan and the evidence.</summary>
     [VulkanFact]
-    public void VulkanUnsupportedFlashRefusesHostFallback() =>
-        UnsupportedFlashRefusesHostFallback(new VulkanBackend(), "vulkan", headDim: 64, softcap: 1f);
+    public void VulkanFlashLogitTermsRunTheDeclaredHostRow()
+    {
+        using VulkanBackend backend = new();
+        using Tensor q = new(new TensorShape(1, 2, 3, 64), DType.F32);
+        using Tensor k = new(new TensorShape(1, 1, 3, 64), DType.F32);
+        using Tensor v = new(k.Shape, DType.F32);
+        using Tensor output = new(q.Shape, DType.F32);
+        using Tensor expected = new(q.Shape, DType.F32);
+        Fill(q, 0.01f);
+        Fill(k, -0.02f);
+        Fill(v, 0.1f);
+        AttentionCall call = AttentionCall.FromFlashAttention(output, q, k, v, 3, true, 0, 0.5f, 50f, null, 0, null);
+        AttentionCall reference = AttentionCall.FromFlashAttention(expected, q, k, v, 3, true, 0, 0.5f, 50f, null, 0, null);
+        AttentionHostReference.Run(in reference);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(8);
+        Assert.Equal("host.reference", backend.PlanAttention(in call).Row?.Capability.Id);
+        backend.FlashAttention(output, q, k, v, 3, 2, causal: true, qOffset: 0, 0.5f, softcap: 50f);
+        backend.Sync();
+
+        AttentionEvidenceEvent execution = Assert.Single(evidence.Snapshot(), e => e.Site == "vulkan" && e.Kind == AttentionEvidenceKind.Execution);
+        Assert.Equal("host.reference", execution.Implementation);
+        Assert.Equal(AttentionLowering.HostReference, execution.DeclaredLowering);
+        Assert.True(output.AsReadOnlySpan<float>().SequenceEqual(expected.AsReadOnlySpan<float>()));
+    }
 
     private static void Dense(IBackend backend, string site)
     {
