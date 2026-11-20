@@ -307,6 +307,69 @@ public sealed class Int8AttentionRotationTests
     }
 
     [Fact]
+    public void EachKeyValueHeadGetsItsOwnRepresentativeKeyAndItsQueryHeadsReadIt()
+    {
+        const int dim = 64, keys = 300, heads = 4, kvHeads = 2;
+        // The two KV heads share nothing: each has its own large common component.
+        float[] first = Random(new Random(21), dim, 40f), second = Random(new Random(22), dim, 40f);
+        using Case grouped = new(heads, kvHeads, 5, keys, dim, (_, k) =>
+        {
+            for (int i = 0; i < k.Length; i++) k[i] += (i < keys * dim ? first : second)[i % dim];
+        });
+        Int8AttentionV2Options anchored = new() { KeyCenter = Int8KeyCenter.RepresentativeKey };
+        Int8AttentionV2Operands operands = Int8AttentionV2Reference.Quantize(in grouped.Call, anchored);
+        ReadOnlySpan<float> stored = grouped.Key.AsReadOnlySpan<float>();
+        for (int kh = 0; kh < kvHeads; kh++)
+        {
+            int anchor = operands.RepresentativeKeys[kh];
+            Assert.True(anchor >= 0, $"KV head {kh} found no representative key.");
+            // What was subtracted from this head's keys is this head's own row.
+            Assert.True(operands.KeyMeans.AsSpan(kh * dim, dim).SequenceEqual(stored.Slice((kh * keys + anchor) * dim, dim)),
+                $"KV head {kh} was centered on something other than its row {anchor}.");
+        }
+        Assert.False(operands.KeyMeans.AsSpan(0, dim).SequenceEqual(operands.KeyMeans.AsSpan(dim, dim)));
+        // Query heads 0 and 1 read KV head 0, heads 2 and 3 read KV head 1: with the wrong head's row the result is far off.
+        Assert.True(grouped.Nrmse(anchored) < 0.03);
+    }
+
+    [Fact]
+    public void SuppliedScalesCarryTheRepresentativeKeyAndQuantizeToTheSameBytes()
+    {
+        using Case shifted = new(4, 2, 5, 300, 128, (_, k) =>
+        {
+            for (int i = 0; i < k.Length; i++) k[i] += 30f;
+        });
+        Int8AttentionV2Options options = new() { KeyCenter = Int8KeyCenter.RepresentativeKey, Rotation = Int8Rotation.Pinned };
+        Int8AttentionV2Operands computed = Int8AttentionV2Reference.Quantize(in shifted.Call, options);
+        // A GPU's scales and means are replayed through the same pass to compare bytes.
+        Int8AttentionV2Operands replayed = Int8AttentionV2Reference.Quantize(in shifted.Call, options, default, computed);
+        Assert.Equal(computed.RepresentativeKeys, replayed.RepresentativeKeys);
+        Assert.All(replayed.RepresentativeKeys, anchor => Assert.True(anchor >= 0));
+        Assert.Equal(computed.Queries, replayed.Queries);
+        Assert.Equal(computed.Keys, replayed.Keys);
+        Assert.Equal(computed.Values, replayed.Values);
+    }
+
+    [Fact]
+    public void ScalesTakenWithAnotherRotationOrKeyCenterAreRefused()
+    {
+        using Case plain = new(4, 2, 5, 300, 128, static (_, _) => { });
+        Int8AttentionV2Options rotated = new() { Rotation = Int8Rotation.Pinned };
+        Int8AttentionV2Operands unrotated = Int8AttentionV2Reference.Quantize(in plain.Call, new Int8AttentionV2Options());
+        Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.Quantize(in plain.Call, rotated, default, unrotated));
+        Int8AttentionV2Options anchored = new() { KeyCenter = Int8KeyCenter.RepresentativeKey };
+        Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.Quantize(in plain.Call, anchored, default, unrotated));
+    }
+
+    [Fact]
+    public void ARepresentativeKeyWithSmoothingOffIsRefused()
+    {
+        using Case plain = new(4, 2, 3, 300, 64, static (_, _) => { });
+        Int8AttentionV2Options options = new() { SmoothKeys = false, KeyCenter = Int8KeyCenter.RepresentativeKey };
+        Assert.Throws<ArgumentException>(() => Int8AttentionV2Reference.Quantize(in plain.Call, options));
+    }
+
+    [Fact]
     public void RotationAndTheRepresentativeKeyAreOffUnlessAsked()
     {
         using Case plain = new(4, 2, 3, 300, 64, static (_, _) => { });

@@ -90,7 +90,8 @@ public static class Int8AttentionRotation
             case Int8Rotation.None:
                 return;
             case Int8Rotation.H4:
-                RequireLength(row, row.Length - row.Length % 4, rotation);
+                if (row.Length == 0 || row.Length % 4 != 0)
+                    throw new ArgumentException($"{rotation} runs over whole groups of four channels, not {row.Length}.", nameof(row));
                 FourPoint(row);
                 return;
             case Int8Rotation.H64:
@@ -115,8 +116,8 @@ public static class Int8AttentionRotation
 
     private static void RequireLength(Span<float> row, int length, Int8Rotation rotation)
     {
-        if (row.Length != length || length == 0)
-            throw new ArgumentException($"{rotation} does not run over a row of {row.Length} channels.", nameof(row));
+        if (row.Length != length)
+            throw new ArgumentException($"{rotation} runs over {length} channels, not {row.Length}.", nameof(row));
     }
 
     /// <summary>The 4-point stage on every four channels, halving included: the whole of <see cref="Int8Rotation.H4"/>

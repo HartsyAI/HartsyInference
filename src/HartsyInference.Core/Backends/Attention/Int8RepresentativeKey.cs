@@ -52,6 +52,14 @@ public static class Int8RepresentativeKey
                 }
         float energy = Reduce(lanes);
 
+        // Each channel's sum over the samples, taken once in sample order: the same F32 sum every candidate needs.
+        Span<float> sums = stackalloc float[paddedHeadDim];
+        for (int c = 0; c < paddedHeadDim; c++)
+        {
+            float sum = 0f;
+            foreach (int row in rows) sum += keys[row * paddedHeadDim + c];
+            sums[c] = sum;
+        }
         int best = 0;
         float bestDistance = float.PositiveInfinity;
         for (int a = 0; a < Samples; a++)
@@ -60,9 +68,7 @@ public static class Int8RepresentativeKey
             for (int lane = 0; lane < Threads; lane++)
                 for (int c = lane; c < paddedHeadDim; c += Threads)
                 {
-                    float sum = 0f;
-                    foreach (int row in rows) sum += keys[row * paddedHeadDim + c];
-                    float d = Samples * keys[rows[a] * paddedHeadDim + c] - sum;
+                    float d = Samples * keys[rows[a] * paddedHeadDim + c] - sums[c];
                     lanes[lane] += d * d;
                 }
             float distance = Reduce(lanes);

@@ -190,7 +190,9 @@ public static class Int8AttentionV2Reference
         for (int i = 0; i < options.KeySegmentStarts.Count; i++)
             if (options.KeySegmentStarts[i] <= (i == 0 ? 0 : options.KeySegmentStarts[i - 1]))
                 throw new ArgumentException("Key segment starts must be positive and ascending.", nameof(options));
-        if (options.KeyCenter == Int8KeyCenter.RepresentativeKey && options.SmoothKeys && options.KeySegmentStarts.Count > 0)
+        if (options.KeyCenter == Int8KeyCenter.RepresentativeKey && !options.SmoothKeys)
+            throw new ArgumentException("A representative key is a way of smoothing keys; SmoothKeys is off.", nameof(options));
+        if (options.KeyCenter == Int8KeyCenter.RepresentativeKey && options.KeySegmentStarts.Count > 0)
             throw new ArgumentException("A representative key centers one key segment; key segment starts were given.", nameof(options));
         Int8AttentionRotation.Resolve(options.Rotation, PaddedHeadDim(call.QkHeadDim), Math.Max(1, call.ValidKvLength));
     }
@@ -244,6 +246,13 @@ public static class Int8AttentionV2Reference
             || from.KeyScales.Length != to.KeyScales.Length || from.ValueScales.Length != to.ValueScales.Length
             || !from.Rows.AsSpan().SequenceEqual(to.Rows))
             throw new ArgumentException("The supplied scales belong to another call, rows or variant.", nameof(from));
+        // Scales taken from rows rotated or centered another way fit in length and quantize to different bytes.
+        if (from.Rotation != to.Rotation || from.Options.SmoothKeys != to.Options.SmoothKeys
+            || (to.Options.SmoothKeys && from.Options.KeyCenter != to.Options.KeyCenter))
+            throw new ArgumentException(
+                $"The supplied scales were taken with rotation {from.Rotation} and key center "
+                + $"{(from.Options.SmoothKeys ? from.Options.KeyCenter.ToString() : "none")}; this call uses {to.Rotation} and "
+                + $"{(to.Options.SmoothKeys ? to.Options.KeyCenter.ToString() : "none")}.", nameof(from));
         (string, float[])[] supplied = [("Q", from.QueryScales), ("K", from.KeyScales), ("V", from.ValueScales)];
         foreach ((string name, float[] values) in supplied)
             for (int i = 0; i < values.Length; i++)
@@ -251,7 +260,11 @@ public static class Int8AttentionV2Reference
                     throw new ArgumentException($"Supplied {name} scale {i} is {values[i]}; a stats pass scale is NaN, "
                         + "+∞ or at least the smallest normal float.", nameof(from));
         from.QueryScales.CopyTo(to.QueryScales, 0);
-        if (to.Options.SmoothKeys) from.KeyMeans.CopyTo(to.KeyMeans, 0);
+        if (to.Options.SmoothKeys)
+        {
+            from.KeyMeans.CopyTo(to.KeyMeans, 0);
+            from.RepresentativeKeys.CopyTo(to.RepresentativeKeys, 0);
+        }
         from.KeyScales.CopyTo(to.KeyScales, 0);
         from.ValueScales.CopyTo(to.ValueScales, 0);
     }
