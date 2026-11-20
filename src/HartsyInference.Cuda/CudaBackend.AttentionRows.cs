@@ -275,7 +275,9 @@ public sealed partial class CudaBackend
     /// token-major grouped row yields to and <c>widen.preferred</c> widens for, so the two cannot disagree.</summary>
     private bool WidenedTakesEqualHeadKernel(in AttentionCall c) =>
         Int8V2TakesWidened(in c)
-        || SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim)
+        // Sage computes QK in INT8: a call that refuses INT8 would be widened only for the inner plan to exclude Sage.
+        || ((c.Numerics.Refused & AttentionFormats.Int8) == 0 && SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage,
+            c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim))
         || FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim);
 
     /// <summary>The widening lowering for a grouped call: repeat K/V to the query head count, then re-enter dense planning
