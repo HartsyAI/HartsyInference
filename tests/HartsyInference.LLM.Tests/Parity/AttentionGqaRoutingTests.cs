@@ -25,7 +25,7 @@ public sealed class AttentionGqaRoutingTests
         using Tensor output = new(query.Shape, DType.F16);
         Fill(query, 0);
         Fill(key, 0);
-        FillValues(value);
+        FillValues(value, tokenMajor: false);
 
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
         backend.ScaledDotProductAttention(output, query, key, value, null, 1);
@@ -37,7 +37,7 @@ public sealed class AttentionGqaRoutingTests
         Assert.Equal(KvHeads, execution.KvHeads);
         Assert.Equal(AttentionLowering.None, execution.DeclaredLowering);
         Assert.DoesNotContain(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Repeat);
-        AssertGroupedValues(output);
+        AssertGroupedValues(output, tokenMajor: false);
     }
 
     [CudaFact]
@@ -51,7 +51,7 @@ public sealed class AttentionGqaRoutingTests
         using Tensor output = new(query.Shape, DType.F32);
         Fill(query, 0);
         Fill(key, 0);
-        FillValues(value);
+        FillValues(value, tokenMajor: false);
 
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
         backend.ScaledDotProductAttention(output, query, key, value, null, 1);
@@ -65,7 +65,7 @@ public sealed class AttentionGqaRoutingTests
             e => e.Kind == AttentionEvidenceKind.Execution && e.Implementation == "materialized");
         Assert.Equal(Heads, nested.KvHeads);
         Assert.Equal(2, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Repeat));
-        AssertGroupedValues(output);
+        AssertGroupedValues(output, tokenMajor: false);
     }
 
     [CudaFact]
@@ -79,7 +79,7 @@ public sealed class AttentionGqaRoutingTests
         using Tensor output = new(query.Shape, DType.F16);
         Fill(query, 0);
         Fill(key, 0);
-        FillValues(value);
+        FillValues(value, tokenMajor: true);
 
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
         backend.ScaledDotProductAttentionTokenMajor(output, query, key, value, null, Heads, KvHeads, HeadDim, 1);
@@ -91,7 +91,7 @@ public sealed class AttentionGqaRoutingTests
         Assert.Equal(KvHeads, execution.KvHeads);
         Assert.Equal(AttentionLowering.None, execution.DeclaredLowering);
         Assert.DoesNotContain(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Repeat);
-        AssertGroupedValues(output);
+        AssertGroupedValues(output, tokenMajor: true);
     }
 
     /// <summary>A grouped call keeps the kernel its widened form has always run on: Sage above its measured crossover and
@@ -155,7 +155,7 @@ public sealed class AttentionGqaRoutingTests
         using Tensor output = new(qShape, DType.F32);
         Fill(query, 0);
         Fill(key, 0);
-        FillValues(value);
+        FillValues(value, tokenMajor);
 
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
         if (tokenMajor) backend.ScaledDotProductAttentionTokenMajor(output, query, key, value, null, Heads, KvHeads, HeadDim, 1);
@@ -166,7 +166,71 @@ public sealed class AttentionGqaRoutingTests
         Assert.NotEmpty(executions);
         Assert.All(executions, e => Assert.Equal(KvHeads, e.KvHeads));
         Assert.DoesNotContain(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Repeat);
-        AssertGroupedValues(output, 1e-3f);
+        AssertGroupedValues(output, tokenMajor, 1e-3f);
+    }
+
+    /// <summary>Random operands and a per-head bias, in a batch of two where the entry takes one: each grouped route computes
+    /// the host reference's result, so scale, bias and every key's contribution are checked, not only the head mapping.</summary>
+    [CudaTheory]
+    [InlineData("cudnn.f16", true, false)]
+    [InlineData("widen.dense", false, false)]
+    [InlineData("permute.dense", false, true)]
+    public void CudaGroupedRoutesMatchTheHostReference(string implementation, bool half, bool tokenMajor)
+    {
+        const int queryTokens = 5, keyTokens = 8;   // cuDNN reads a per-head bias only where the key count is a multiple of 4
+        int batch = tokenMajor ? 1 : 2;
+        DType dtype = half ? DType.F16 : DType.F32;
+        using IDisposable policy = Policy(cudnn: half).Push();
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        TensorShape qShape = tokenMajor ? new(batch, queryTokens, Heads, HeadDim) : new(batch, Heads, queryTokens, HeadDim);
+        TensorShape kvShape = tokenMajor ? new(batch, keyTokens, KvHeads, HeadDim) : new(batch, KvHeads, keyTokens, HeadDim);
+        Random random = new(23);
+        using Tensor query = RandomTensor(qShape, dtype, random);
+        using Tensor key = RandomTensor(kvShape, dtype, random);
+        using Tensor value = RandomTensor(kvShape, dtype, random);
+        using Tensor bias = RandomTensor(new TensorShape(batch, Heads, queryTokens, keyTokens), DType.F32, random);
+        using Tensor output = new(qShape, dtype);
+        using Tensor expected = new(qShape, dtype);
+        const float scale = 0.31f;
+        AttentionCall reference = tokenMajor
+            ? AttentionCall.FromTokenMajor(expected, query, key, value, bias, Heads, KvHeads, HeadDim, scale, allowF16: false)
+            : AttentionCall.FromScaledDotProductAttention(expected, query, key, value, bias, scale, allowF16: false);
+        AttentionHostReference.Run(in reference);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        if (tokenMajor) backend.ScaledDotProductAttentionTokenMajor(output, query, key, value, bias, Heads, KvHeads, HeadDim, scale);
+        else backend.ScaledDotProductAttention(output, query, key, value, bias, scale);
+        backend.Sync();
+
+        Assert.Contains(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Execution && e.Implementation == implementation);
+        Assert.Equal(half ? 0 : 2, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Repeat));
+        float tolerance = half ? 5e-3f : 1e-4f;
+        for (int i = 0; i < output.ElementCount; i++)
+            Assert.InRange(Math.Abs(Read(output, i) - Read(expected, i)), 0, tolerance);
+    }
+
+    /// <summary>The dense validator accepts grouped K/V, so the capability flag is what keeps a grouped call off the
+    /// equal-head kernels: whatever the knobs, the row planned for one declares grouped support.</summary>
+    [CudaTheory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    public void CudaPlansOnlyGroupedRowsForAGroupedDenseCall(bool cudnn, bool forceTiled)
+    {
+        using IDisposable policy = KnobProfile.Create("gqa-planning-guard").With(EngineKnobs.SdpaCudnn, cudnn)
+            .With(EngineKnobs.SdpaForceTiled, forceTiled).Push();
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        foreach (DType dtype in (DType[])[DType.F32, DType.F16, DType.BF16])
+        {
+            using Tensor query = new(new TensorShape(1, Heads, 64, 128), dtype);
+            using Tensor key = new(new TensorShape(1, KvHeads, 64, 128), dtype);
+            using Tensor value = new(key.Shape, dtype);
+            using Tensor output = new(query.Shape, dtype);
+            AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, query, key, value, null, 0.1f, allowF16: false);
+            AttentionKernelRow? row = backend.PlanAttention(in call).Row;
+            Assert.NotNull(row);
+            Assert.True(row.Capability.Gqa, $"{dtype}: planned {row.Capability.Id}, which reads K/V with the query's head count.");
+        }
     }
 
     private static KnobProfile Policy(bool cudnn) => KnobProfile.Create("gqa-routing-tests")
@@ -174,9 +238,8 @@ public sealed class AttentionGqaRoutingTests
         .With(EngineKnobs.FlashF16, false).With(EngineKnobs.SdpaForceTiled, false)
         .With(EngineKnobs.SdpaNoTf32, true);
 
-    private static void FillValues(Tensor value)
+    private static void FillValues(Tensor value, bool tokenMajor)
     {
-        bool tokenMajor = value.Shape[2] == KvHeads;
         for (int token = 0; token < KeyTokens; token++)
             for (int head = 0; head < KvHeads; head++)
                 for (int channel = 0; channel < HeadDim; channel++)
@@ -186,9 +249,8 @@ public sealed class AttentionGqaRoutingTests
                 }
     }
 
-    private static void AssertGroupedValues(Tensor output, float tolerance = 2e-5f)
+    private static void AssertGroupedValues(Tensor output, bool tokenMajor, float tolerance = 2e-5f)
     {
-        bool tokenMajor = output.Shape[2] == Heads;
         for (int token = 0; token < QueryTokens; token++)
             for (int head = 0; head < Heads; head++)
                 for (int channel = 0; channel < HeadDim; channel++)
@@ -197,6 +259,13 @@ public sealed class AttentionGqaRoutingTests
                     float expected = 7 + head / (Heads / KvHeads) * 6;
                     Assert.InRange(Math.Abs(Read(output, offset * HeadDim + channel) - expected), 0, tolerance * expected);
                 }
+    }
+
+    private static Tensor RandomTensor(TensorShape shape, DType dtype, Random random)
+    {
+        Tensor tensor = new(shape, dtype);
+        for (int i = 0; i < tensor.ElementCount; i++) Write(tensor, i, (float)(random.NextDouble() - 0.5));
+        return tensor;
     }
 
     private static void Fill(Tensor tensor, float value)

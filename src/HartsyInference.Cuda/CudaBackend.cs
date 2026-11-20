@@ -5724,7 +5724,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool TryFlashF16(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
     {
-        // An oversized grid is this call's limit, not a kernel failure, so it must not disable the kernel for the session.
+        // An oversized grid is this call's limit, not a kernel failure: a pre-launch decline, and the next row runs.
         if (!CudaKernels.GridYzFits(heads, batch)) return false;
         using OpScope _op = EnterOp();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;

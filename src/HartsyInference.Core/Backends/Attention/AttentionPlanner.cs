@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using System.Text;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Core.Backends.Attention;
 
@@ -6,6 +9,8 @@ namespace HartsyInference.Core.Backends.Attention;
 /// and whose runtime admission passes is the plan, and a recoverable decline at run time falls to the next.</summary>
 public static class AttentionPlanner
 {
+    private static readonly ConcurrentDictionary<string, byte> ReportedFailures = new(StringComparer.Ordinal);
+
     /// <summary>The row <see cref="Run"/> would try first, without launching anything.</summary>
     public static AttentionPlan Plan(IReadOnlyList<AttentionKernelRow> rows, in AttentionCall call)
     {
@@ -31,13 +36,31 @@ public static class AttentionPlanner
         {
             AttentionKernelRow row = rows[i];
             if (row.Capability.Excludes(in call) != AttentionExclusion.None || !row.Admits(in call)) continue;
-            if (row.Run(in call)) return row;
+            try
+            {
+                if (row.Run(in call)) return row;
+            }
+            catch (Exception error) when (NameFailedRow(row, error))
+            {
+                throw;
+            }
             declined = true;
         }
         string explanation = Explain(rows, in call);
         if (declined)
             throw new AttentionRecoverableException($"Every admitted attention row declined without serving this call: {explanation}");
         throw new AttentionUnsupportedException($"No attention row covers and admits this call: {explanation}");
+    }
+
+    /// <summary>Logs, once per row and exception type, which row a sticky failure came from; the exception propagates
+    /// unchanged (always false, so the filter never catches). Out-of-memory is the caller's to retry and is not reported.</summary>
+    private static bool NameFailedRow(AttentionKernelRow row, Exception error)
+    {
+        if (error is OutOfMemoryException or OutOfVramException) return false;
+        string id = row.Capability.Id;
+        if (ReportedFailures.TryAdd(id + " " + error.GetType().Name, 0))
+            Logs.Warning($"Attention row {id} failed and nothing retries it ({error.GetType().Name}: {error.Message}).");
+        return false;
     }
 
     /// <summary>Every row's verdict after a failed <see cref="Run"/>: what excluded it, or that it was not admitted or declined.</summary>
