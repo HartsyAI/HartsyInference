@@ -55,6 +55,17 @@ and the host reference refuses it, because each would take the page buffer for a
 `IBackend.AdmitsPagedAttention` first and, when the answer is no, gathers the rows into a contiguous buffer and issues
 a dense call: the gather is the caller's, recorded as `PrefixGather`, never a backend's silent choice.
 
+A call may give **a length per sequence** (`AttentionCall.SequenceLengths`) in place of one shared `kvLen`: sequence
+`b` attends the first `lengths[b]` rows of its keys, with a length below zero read as zero and one above `Skv` as `Skv`,
+and the rows past that are never read. It is then one call per sequence. Under the causal rule the `Sq` query rows are
+the sequence's last positions, so row `j` sits at `lengths[b] − Sq + j`; a row below position zero attends nothing.
+Without the causal rule every row attends all `lengths[b]` keys. Such a call leaves the shared positions unset and
+carries no other position-dependent or additive term: a window, a block size, a bias, a softcap, sinks and ALiBi are
+refused, and so are paged keys and values. A call may also name an **LSE output** (`AttentionCall.Lse`, F32
+`[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
+excludes the call and a backend without such a row refuses it. The host reference runs both. No GPU row declares
+either yet.
+
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
 of bounds, and the kernel sets a device status word. The next host synchronization point that owns the call (the end
 of a step or of a graph replay) reads it and raises. An out-of-range position is never a successful result.

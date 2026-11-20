@@ -13,7 +13,8 @@ public static class AttentionHostReference
     public static void Run(in AttentionCall call) => Run(in call, default);
 
     /// <summary>Runs <paramref name="call"/> and, when <paramref name="lse"/> is not empty, writes each row's natural-log LSE
-    /// (§3; −∞ for a fully excluded row) into it as <c>[B, Hq, Sq]</c>.</summary>
+    /// (§3; −∞ for a fully excluded row) into it as <c>[B, Hq, Sq]</c>. A call that names its own LSE output
+    /// (<see cref="AttentionCall.Lse"/>) has it written there, and takes no second one here.</summary>
     /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
     public static unsafe void Run(in AttentionCall call, Span<float> lse)
     {
@@ -22,9 +23,19 @@ public static class AttentionHostReference
         AttentionCallValidation.Validate(in call);
         if (call.KvPages is not null)
             throw new AttentionUnsupportedException("The host reference reads contiguous keys and values; gather a paged call's rows first.");
+        if (call.Lse is { } named)
+        {
+            if (!lse.IsEmpty) throw new ArgumentException("The call names its LSE output; pass no second one.", nameof(lse));
+            lse = named.AsSpan<float>();
+        }
         if (!lse.IsEmpty && lse.Length != (long)call.Batch * call.Heads * call.QueryTokens)
             throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {(long)call.Batch * call.Heads * call.QueryTokens}.",
                 nameof(lse));
+        if (call.SequenceLengths is { } lengths)
+        {
+            RunSequences(in call, lengths, lse);
+            return;
+        }
         AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
         int dqk = call.QkHeadDim, dv = call.ValueHeadDim, group = call.KvGroup;
         int kvLen = call.ValidKvLength;
@@ -45,6 +56,48 @@ public static class AttentionHostReference
             ArrayPool<double>.Shared.Return(acc);
         }
     }
+
+    /// <summary>A call with a length per sequence is one call per sequence (§2): its own queries, its own keys with its own
+    /// valid length, and its own position. Under the causal rule the query rows are the sequence's last ones, so row
+    /// <c>j</c> sits at <c>length − Sq + j</c>; a row below position zero attends nothing, and so does every row of an empty
+    /// sequence. Such rows are written as zeros with an LSE of −∞. Everything is checked before anything is written.</summary>
+    private static void RunSequences(in AttentionCall call, int[] lengths, Span<float> lse)
+    {
+        foreach (AttentionOperand x in (ReadOnlySpan<AttentionOperand>)[call.Query, call.Key, call.Value, call.Output])
+            if (x.DType != DType.F32 && x.DType != DType.F16 && x.DType != DType.BF16)
+                throw new AttentionUnsupportedException($"The host reference reads and writes F32, F16 and BF16, not {x.DType}.");
+        int heads = call.Heads, rows = call.QueryTokens, capacity = call.KeyTokens, dv = call.ValueHeadDim;
+        bool causal = call.Mask.Causal;
+        AttentionOperand output = call.Output;
+        float[] sequenceLse = lse.IsEmpty ? [] : new float[heads * rows];
+        for (int b = 0; b < call.Batch; b++)
+        {
+            int length = Math.Clamp(lengths[b], 0, capacity);
+            int first = causal ? Math.Clamp(rows - length, 0, rows) : length == 0 ? rows : 0;
+            for (int h = 0; h < heads; h++)
+                for (int r = 0; r < first; r++)
+                {
+                    for (int c = 0; c < dv; c++) Write(in output, b, h, r, c, 0f);
+                    if (!lse.IsEmpty) lse[(b * heads + h) * rows + r] = float.NegativeInfinity;
+                }
+            int live = rows - first;
+            if (live == 0) continue;
+            AttentionCall one = call with
+            {
+                Query = Sequence(call.Query, b, first, live), Key = Sequence(call.Key, b, 0, capacity), Value = Sequence(call.Value, b, 0, capacity),
+                Output = Sequence(output, b, first, live),
+                Positions = AttentionPositions.Host(length, causal ? length - rows + first : 0), SequenceLengths = null, Lse = null,
+            };
+            Span<float> callLse = lse.IsEmpty ? default : sequenceLse.AsSpan(0, heads * live);
+            Run(in one, callLse);
+            if (lse.IsEmpty) continue;
+            for (int h = 0; h < heads; h++) callLse.Slice(h * live, live).CopyTo(lse.Slice((b * heads + h) * rows + first, live));
+        }
+    }
+
+    /// <summary>Sequence <paramref name="b"/> of an operand, from token <paramref name="firstToken"/>.</summary>
+    private static AttentionOperand Sequence(AttentionOperand x, int b, int firstToken, int tokens) =>
+        x with { Batch = 1, Tokens = tokens, Offset = x.Offset + b * x.BatchStride + firstToken * x.TokenStride };
 
     private static unsafe void Compute(in AttentionCall call, AttentionOperand q, AttentionOperand k, AttentionOperand v,
         AttentionOperand o, int dqk, int dv, int group, int kvLen, in AttentionMask mask, BiasView bias, float* sinks, float* slopes,
