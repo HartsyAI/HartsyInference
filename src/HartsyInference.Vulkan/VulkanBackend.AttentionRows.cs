@@ -88,6 +88,11 @@ public sealed partial class VulkanBackend
     private AttentionPreparationCost ScalarFlashPreparation(in AttentionCall c) => new(Cast: AttentionPreparationCost.CastsTo(in c,
         AttentionDtype(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage)));
 
+    /// <summary>The cooperative-matrix kernel computes in F16: each operand in another type is cast to it and the output is
+    /// cast back. As for the scalar kernel, a weight served from the weight-cast cache is not cast again.</summary>
+    private static AttentionPreparationCost Cm2FlashPreparation(in AttentionCall c) =>
+        new(Cast: AttentionPreparationCost.CastsTo(in c, DType.F16));
+
     /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
     private bool TokenMajorCm2Admits(in AttentionCall c)
     {
@@ -146,7 +151,7 @@ public sealed partial class VulkanBackend
                         skv, headDim, new AttnStrides((uint)headDim, qHead, qHead * (uint)hq), new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
                         new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new AttnStrides((uint)headDim, qHead, qHead * (uint)hq));
                     return true;
-                }),
+                }, static (in AttentionCall c) => Cm2FlashPreparation(in c)),
             new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast, Saturates = true,
@@ -210,10 +215,11 @@ public sealed partial class VulkanBackend
                         new AttnStrides(qRow, (uint)c.QkHeadDim, 0), new AttnStrides(kvRow, (uint)c.QkHeadDim, 0),
                         new AttnStrides(kvRow, (uint)c.QkHeadDim, 0), new AttnStrides(qRow, (uint)c.QkHeadDim, 0));
                     return true;
-                }),
+                }, static (in AttentionCall c) => Cm2FlashPreparation(in c)),
             new DelegateAttentionRow(Cap("permute.dense", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
-                    MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute,
+                    // BF16 has no permute kernel: such operands are cast to F32 first and the output back.
+                    MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute | AttentionLowering.Cast,
                 }, null,
                 static (in AttentionCall c) => true,
                 (in AttentionCall c) =>

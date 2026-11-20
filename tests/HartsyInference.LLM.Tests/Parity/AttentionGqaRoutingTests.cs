@@ -90,6 +90,12 @@ public sealed class AttentionGqaRoutingTests
         Assert.Equal(Heads, execution.Heads);
         Assert.Equal(KvHeads, execution.KvHeads);
         Assert.Equal(AttentionLowering.None, execution.DeclaredLowering);
+        // The row states that it prepares nothing, which is what was recorded.
+        AttentionCall call = AttentionCall.FromTokenMajor(output, query, key, value, null, Heads, KvHeads, HeadDim, 1f, allowF16: false);
+        AttentionPlan plan = backend.PlanAttention(in call);
+        Assert.Equal("cudnn.tokenmajor.gqa", plan.RowId);
+        Assert.Equal(0, plan.Preparation!.Value.Total);
+        Assert.DoesNotContain(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Cast);
         Assert.DoesNotContain(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Repeat);
         AssertGroupedValues(output, tokenMajor: true);
     }
