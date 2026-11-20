@@ -7837,13 +7837,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 int chunk = (kvLen + splits - 1) / splits;
                 splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
                 long n = baseBlocks;
-                ulong pM = 0, pL = 0, pAcc = 0;
+                DecodePartials partials = default;
                 try
                 {
-                    pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
-                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.split.partials", n * splits * (d + 2) * sizeof(float), count: 3);
+                    partials = RentDecodePartials(n, splits, d, "cuda.flash.split.partials");
+                    ulong pM = partials.M, pL = partials.L, pAcc = partials.Acc;
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle,
                         softcap: softcap, slidingWindow: slidingWindow, f16Kv: f16Kv);
@@ -7851,7 +7849,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
                 finally
                 {
-                    GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
+                    ReturnDecodePartials(in partials);
                 }
             }
             else if (f16Kv)
@@ -8101,13 +8099,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 t_attentionRoute = "V.3";
                 long n = baseBlocks;
-                ulong pM = 0, pL = 0, pAcc = 0;
+                DecodePartials partials = default;
                 try
                 {
-                    pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
-                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.split.partials", n * splits * (d + 2) * sizeof(float), count: 3);
+                    partials = RentDecodePartials(n, splits, d, "cuda.flash.split.partials");
+                    ulong pM = partials.M, pL = partials.L, pAcc = partials.Acc;
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow,
                         f16Kv: devF16Kv);
@@ -8120,7 +8116,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
                 finally
                 {
-                    GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
+                    ReturnDecodePartials(in partials);
                 }
             }
             else
@@ -9052,6 +9048,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         StepGraphInvalidateForActivationFree();
         ReleaseInt8V2Workspace();
+        _decodePartials.ReleaseCurrent();
     }
 
     private void StepGraphInvalidateForActivationFree()
@@ -9310,11 +9307,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             _ssmDeltaScratch = 0;
             _ssmDeltaScratchBytes = 0;
             ulong[] int8V2Workspaces = _int8V2Workspace.Detach();
+            ulong[] decodePartials = _decodePartials.Detach();
             if (state is not null)
             {
                 if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
                 foreach (ulong int8V2Workspace in int8V2Workspaces)
                     Attempt("INT8 attention v2 workspace", () => GpuTransferHelper.FreeDevice(state, int8V2Workspace));
+                foreach (ulong decodePartial in decodePartials)
+                    Attempt("decode partial workspace", () => GpuTransferHelper.FreeDevice(state, decodePartial));
                 if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
                 if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
                 Attempt("W8A8 caches", () => FreeW8A8Cache(state));

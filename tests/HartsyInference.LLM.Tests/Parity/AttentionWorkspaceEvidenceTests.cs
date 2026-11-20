@@ -60,7 +60,7 @@ public sealed class AttentionWorkspaceEvidenceTests
     }
 
     [CudaFact]
-    public void CudaSplitDecodeRecordsItsPartialBuffers()
+    public void CudaEagerSplitDecodeRecordsOnlyItsWorkspaceGrowth()
     {
         const int heads = 2, keyTokens = 128, headDim = 64;
         using IDisposable policy = KnobProfile.Create("workspace-evidence-decode").With(EngineKnobs.FlashSplitForce, true).Push();
@@ -72,17 +72,16 @@ public sealed class AttentionWorkspaceEvidenceTests
 
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
         backend.FlashAttention(output, query, key, value, keyTokens, 1, causal: true, qOffset: keyTokens - 1, 0.1f);
+        backend.FlashAttention(output, query, key, value, keyTokens, 1, causal: true, qOffset: keyTokens - 1, 0.1f);
         backend.Sync();
 
-        Assert.Equal("flash.decode", Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Execution).Implementation);
-        AttentionEvidenceEvent partials = Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Workspace);
-        Assert.StartsWith("cuda.flash.", partials.Site);
-        Assert.EndsWith(".partials", partials.Site);
-        Assert.Equal(3, partials.Count);
-        // m, l and acc per (head, split): a whole number of splits, more than one.
-        long perSplit = (long)heads * (headDim + 2) * sizeof(float);
-        Assert.Equal(0, partials.Bytes % perSplit);
-        Assert.True(partials.Bytes / perSplit > 1);
+        Assert.All(evidence.Snapshot().Where(e => e.Kind == AttentionEvidenceKind.Execution), e => Assert.Equal("flash.decode", e.Implementation));
+        // The partial states (m, l and acc per head and split) live in the persistent workspace: one growth, no per-call scratch.
+        AttentionEvidenceEvent growth = Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Workspace);
+        Assert.Equal("cuda.flash.partials.workspace.grow", growth.Site);
+        Assert.Equal(1, growth.Count);
+        Assert.True(growth.Bytes >= 2L * heads * (headDim + 2) * sizeof(float));
+        Assert.Equal(growth.Bytes, backend.DecodePartialsWorkspaceBytes);
     }
 
     private static Tensor Filled(TensorShape shape, DType dtype)
