@@ -3967,6 +3967,26 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     // ── Step-graph capture (CUDA-graph replay of a fixed per-step op sequence; see IBackend docs) ─────────
     private CudaGraph? _stepGraph;
     private bool _stepGraphCapturing;
+    // The caller-owned graph CaptureGraph is recording, if any.
+    private CudaGraph? _capturingGraph;
+
+    /// <summary>The graph being captured now: it leases any persistent workspace a captured call bakes into it.</summary>
+    private CudaGraph? CapturingGraph => _stepGraphCapturing ? _stepGraph : _capturingGraph;
+
+    /// <summary>Every persistent leased workspace of this backend: the one place a new one is added, so graph release,
+    /// the activations-freeing release and teardown cover it.</summary>
+    private HighWaterWorkspace[] Workspaces => [_int8V2Workspace];
+
+    /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing. While the
+    /// stream still captures (an abort or end-capture that failed) the leases stay: a free issued now would be recorded
+    /// into that capture. They lapse when the graph is collected or its leases are next released outside a capture.</summary>
+    private void ReleaseGraphLeases(CudaGraph graph)
+    {
+        // Called from catch and finally blocks: a failed query (a sticky context error) reads as still capturing, so the
+        // leases stay and the caller's own exception is the one that propagates.
+        if (CudaDriverApi.cuStreamIsCapturing(_stream.Handle, out int status) != 0 || status != 0) return;
+        foreach (HighWaterWorkspace workspace in Workspaces) workspace.Release(graph);
+    }
 
     public bool SupportsF16Activations => true;
 
@@ -4038,6 +4058,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GC.SuppressFinalize(_stepGraph);
         }
         _stepGraph.Reset();
+        ReleaseGraphLeases(_stepGraph);
         lock (_transferState.CaptureAllocs)
         {
             _transferState.CaptureAllocs.Clear();
@@ -4122,6 +4143,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 CudaDriverApi.cuDeviceGraphMemTrim(_context.DeviceHandle).ThrowOnError();
             }, ref failures);
         }
+        if (graph is not null)
+            AttemptCleanup("step graph workspace leases", () => ReleaseGraphLeases(graph), ref failures);
         if (failures is not null)
             throw new AggregateException("Step-graph reset completed, but one or more of its steps failed.", failures);
     }
@@ -8328,15 +8351,29 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // on EVERY replay (measured on gemma3: 1672 of the graph's 2264 nodes — ~2-3 ms/token of pure
         // memory-node overhead on sub-2B models). Arena buffers persist for the backend's lifetime, so
         // captured pointers stay valid across replays; overflow falls back to pool nodes (correct, slower).
-        if (EngineKnobs.GraphArena.Value)
+        _capturingGraph = graph;
+        try
         {
-            graph.ArenaBase = GpuTransferHelper.BeginGraphArena();
-            try { graph.Capture(recordWork); }
-            finally { GpuTransferHelper.EndGraphArena(); }
+            if (EngineKnobs.GraphArena.Value)
+            {
+                graph.ArenaBase = GpuTransferHelper.BeginGraphArena();
+                try { graph.Capture(recordWork); }
+                finally { GpuTransferHelper.EndGraphArena(); }
+            }
+            else
+            {
+                graph.Capture(recordWork);
+            }
         }
-        else
+        catch
         {
-            graph.Capture(recordWork);
+            // The caller never receives this graph, so nothing else would release what it leased.
+            ReleaseGraphLeases(graph);
+            throw;
+        }
+        finally
+        {
+            _capturingGraph = null;
         }
         return graph;
     }
@@ -8352,8 +8389,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         CudaGraph graph = (CudaGraph)graphHandle;
         using OpScope _op = EnterOp();
-        graph.Dispose();
-        GpuTransferHelper.FreeGraphArena(graph.ArenaBase);
+        try
+        {
+            graph.Dispose();
+        }
+        finally
+        {
+            // Nothing can launch a disposed graph, even one whose dispose failed part way, so its leases and arena go.
+            ReleaseGraphLeases(graph);
+            GpuTransferHelper.FreeGraphArena(graph.ArenaBase);
+        }
     }
 
     /// <summary>Validates FlashAttention geometry before either the CUDA kernel or CPU reference can index it.</summary>
@@ -9019,7 +9064,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     protected override void OnActivationsFreeing()
     {
         StepGraphInvalidateForActivationFree();
-        ReleaseInt8V2Workspace();
+        foreach (HighWaterWorkspace workspace in Workspaces) workspace.ReleaseCurrent();
     }
 
     private void StepGraphInvalidateForActivationFree()
@@ -9277,13 +9322,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ulong ssmScratch = _ssmDeltaScratch;
             _ssmDeltaScratch = 0;
             _ssmDeltaScratchBytes = 0;
-            ulong int8V2Workspace = _int8V2Workspace;
-            _int8V2Workspace = 0;
-            _int8V2WorkspaceBytes = 0;
+            ulong[] workspaceBuffers = [.. Workspaces.SelectMany(static workspace => workspace.Detach())];
             if (state is not null)
             {
                 if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
-                if (int8V2Workspace != 0) Attempt("INT8 attention v2 workspace", () => GpuTransferHelper.FreeDevice(state, int8V2Workspace));
+                foreach (ulong workspaceBuffer in workspaceBuffers)
+                    Attempt("persistent workspace", () => GpuTransferHelper.FreeDevice(state, workspaceBuffer));
                 if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
                 if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
                 Attempt("W8A8 caches", () => FreeW8A8Cache(state));

@@ -14,6 +14,7 @@
     <InternalsVisibleTo Include="HartsyInference.Cuda.Tests" />
     <InternalsVisibleTo Include="HartsyInference.Core.Tests" />
     <InternalsVisibleTo Include="HartsyInference.Engine.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
     <InternalsVisibleTo Include="HartsyInference.GpuBenchmarks" />
   </ItemGroup>
 
