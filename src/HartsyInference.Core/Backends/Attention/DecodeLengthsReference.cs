@@ -31,6 +31,8 @@ public static class DecodeLengthsReference
     /// <param name="lse">When not empty, receives the natural-log LSE of every row's scaled scores as <c>[B, H, S]</c>.</param>
     /// <param name="scale">The score multiplier; null is <c>D^-1/2</c>.</param>
     /// <exception cref="ArgumentException">An operand does not fit the call.</exception>
+    /// <exception cref="AttentionUnsupportedException">An operand is stored in a type the host reference does not read.</exception>
+    /// <remarks>The whole call is checked before anything is written, whatever the lengths are.</remarks>
     public static void Run(Tensor output, Tensor query, Tensor key, Tensor value, ReadOnlySpan<int> lengths, bool causal,
         Span<float> lse = default, float? scale = null)
     {
@@ -49,6 +51,17 @@ public static class DecodeLengthsReference
         if (!float.IsFinite(alpha)) throw new ArgumentException("The scale must be finite.", nameof(scale));
 
         long rowWidth = (long)heads * dim;
+        foreach (Tensor tensor in (ReadOnlySpan<Tensor>)[output, query, key, value])
+            if (tensor.DType != DType.F32 && tensor.DType != DType.F16 && tensor.DType != DType.BF16)
+                throw new AttentionUnsupportedException($"The decode reference reads and writes F32, F16 and BF16, not {tensor.DType}.");
+        // Only offsets and lengths differ from one sequence to the next, so the call over the whole batch stands for each.
+        AttentionCall whole = new()
+        {
+            Query = AttentionOperand.HeadMajor(query), Key = AttentionOperand.HeadMajor(key), Value = AttentionOperand.HeadMajor(value),
+            Output = new(output, AttentionLayout.TokenMajor, batch, heads, rows, dim, 0, rows * rowWidth, dim, rowWidth),
+            Scale = alpha, Mask = AttentionMask.FromFlash(causal, 0),
+        };
+        AttentionCallValidation.Validate(in whole);
         float[] sequenceLse = lse.IsEmpty ? [] : new float[heads * rows];
         for (int b = 0; b < batch; b++)
         {

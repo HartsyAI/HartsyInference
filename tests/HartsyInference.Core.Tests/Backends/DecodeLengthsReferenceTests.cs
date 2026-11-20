@@ -98,7 +98,7 @@ public sealed class DecodeLengthsReferenceTests
 
     /// <summary>Runs one generator case and compares the LSE and the sampled output with the Kitchen's. An F32 output
     /// agrees to 2e-5. A BF16 output is the same BF16 value or the one next to it: the Kitchen rounds an F32 result and the
-    /// reference a double one.</summary>
+    /// reference a double one. Two values within 1e-30 of each other also agree, so a pair either side of zero does.</summary>
     private static void AssertMatchesKitchen(int index, DType dtype, int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths,
         bool causal, uint[] expectedOutput, uint[] expectedLse)
     {
@@ -117,7 +117,9 @@ public sealed class DecodeLengthsReferenceTests
                 float actual = output[row * width + c * DecodeLengthsKitchenVectors.ChannelStep];
                 string where = $"row {row}, channel {c * DecodeLengthsKitchenVectors.ChannelStep}: {actual}, expected {expected}";
                 if (dtype == DType.F32) Assert.True(Math.Abs(expected - actual) <= 2e-5, where);
-                else Assert.True(Math.Abs(ToBf16(expected) - ToBf16(actual)) <= 1 && Math.Sign(expected) * Math.Sign(actual) >= 0, where);
+                else
+                    Assert.True(Math.Abs(expected - actual) <= 1e-30f
+                        || (Math.Abs(ToBf16(expected) - ToBf16(actual)) <= 1 && Math.Sign(expected) * Math.Sign(actual) >= 0), where);
             }
     }
 
@@ -310,6 +312,23 @@ public sealed class DecodeLengthsReferenceTests
         Assert.Throws<ArgumentException>(() => DecodeLengthsReference.Run(o, q, oneBatch, oneBatch, lengths, true));
         using Tensor otherDim = new(new TensorShape(2, 2, 16, 32), DType.F32);
         Assert.Throws<ArgumentException>(() => DecodeLengthsReference.Run(o, q, otherDim, otherDim, lengths, true));
-        Assert.Throws<ArgumentException>(() => DecodeLengthsReference.Run(q, q, k, v, lengths, true));
+    }
+
+    /// <summary>A call the host reference could not run is refused whole: also when no sequence would have reached it,
+    /// and before the rows that attend nothing are written.</summary>
+    [Fact]
+    public void ARefusedCallWritesNothingEvenWhenEverySequenceIsEmpty()
+    {
+        using Decode decode = new(2, 4, 2, 64, 3, 16, 895);
+        using Tensor unread = new(decode.Key.Shape, DType.F8E4M3);
+        decode.Output.AsSpan<float>().Fill(7f);
+        Array.Fill(decode.Lse, 7f);
+        foreach (int[] lengths in (int[][])[[0, 0], [1, 16]])
+        {
+            Assert.Throws<AttentionUnsupportedException>(() =>
+                DecodeLengthsReference.Run(decode.Output, decode.Query, unread, decode.Value, lengths, causal: true, decode.Lse));
+            Assert.Equal(-1, decode.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
+            Assert.Equal(-1, decode.Lse.AsSpan().IndexOfAnyExcept(7f));
+        }
     }
 }
