@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
@@ -10,6 +11,7 @@ public sealed partial class CudaBackend
 {
     private readonly HighWaterWorkspace _decodePartials = new(static bytes => GpuTransferHelper.AllocateDevice((nuint)bytes),
         GpuTransferHelper.FreeDevice);
+    private bool _decodePartialsGrowthWarned;
 
     /// <summary>Bytes the eager decode partial workspace holds now (its high-water mark since it was last released).</summary>
     internal long DecodePartialsWorkspaceBytes => _decodePartials.Bytes;
@@ -20,8 +22,10 @@ public sealed partial class CudaBackend
     /// <summary>Scratch for <paramref name="blocks"/> query blocks over <paramref name="splits"/> key splits at head dim
     /// <paramref name="d"/>. An eager call takes sections of one buffer kept at its high-water size, so a decode step
     /// allocates nothing once the buffer has grown. A call recorded into a graph allocates three buffers from the capture's
-    /// allocator, as before: a replay must not write into a buffer an eager call can replace.</summary>
-    private DecodePartials RentDecodePartials(long blocks, int splits, int d, string site)
+    /// allocator, as before: a replay must not write into a buffer an eager call can replace. That is also why no graph
+    /// ever leases this workspace and growth resets no step graph, unlike the INT8 v2 one. <paramref name="transientSite"/>
+    /// names the evidence event of the three-buffer path, which an eager call takes only when the workspace cannot grow.</summary>
+    private DecodePartials RentDecodePartials(long blocks, int splits, int d, string transientSite)
     {
         long scalarBytes = blocks * splits * sizeof(float);
         long accBytes = scalarBytes * d;
@@ -47,7 +51,7 @@ public sealed partial class CudaBackend
             GpuTransferHelper.FreeDevice(pAcc);
             throw;
         }
-        AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, site, 2 * scalarBytes + accBytes, count: 3);
+        AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, transientSite, 2 * scalarBytes + accBytes, count: 3);
         return new DecodePartials(pM, pL, pAcc, Transient: true);
     }
 
@@ -62,8 +66,13 @@ public sealed partial class CudaBackend
             if (buffer != 0) AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.partials.workspace.grow", bytes);
             return buffer;
         }
-        catch (OutOfVramException)
+        catch (OutOfVramException ex)
         {
+            if (!_decodePartialsGrowthWarned)
+            {
+                _decodePartialsGrowthWarned = true;
+                Logs.Warning($"[Cuda] the {bytes >> 10} KB decode partial workspace does not fit ({ex.Message}); decode steps allocate their partial buffers per call.");
+            }
             return 0;
         }
     }

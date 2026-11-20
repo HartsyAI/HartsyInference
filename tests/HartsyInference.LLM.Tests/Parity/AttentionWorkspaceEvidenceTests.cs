@@ -80,7 +80,9 @@ public sealed class AttentionWorkspaceEvidenceTests
         AttentionEvidenceEvent growth = Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Workspace);
         Assert.Equal("cuda.flash.partials.workspace.grow", growth.Site);
         Assert.Equal(1, growth.Count);
-        Assert.True(growth.Bytes >= 2L * heads * (headDim + 2) * sizeof(float));
+        // m and l in two 256-byte-aligned sections, then acc, for a whole number of key splits, more than one.
+        long Layout(int splits) => 2 * (((long)heads * splits * sizeof(float) + 255) & ~255L) + (long)heads * splits * headDim * sizeof(float);
+        Assert.Contains(growth.Bytes, Enumerable.Range(2, 63).Select(Layout));
         Assert.Equal(growth.Bytes, backend.DecodePartialsWorkspaceBytes);
     }
 

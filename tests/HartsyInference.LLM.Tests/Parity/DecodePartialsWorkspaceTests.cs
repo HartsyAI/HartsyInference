@@ -38,6 +38,28 @@ public sealed class DecodePartialsWorkspaceTests
         Assert.True(first.AsReadOnlySpan<float>().SequenceEqual(second.AsReadOnlySpan<float>()));
     }
 
+    /// <summary>The split path of a short query block (not the single-row grouped decode) takes the same workspace.</summary>
+    [CudaFact]
+    public void TheMultiRowSplitPathUsesTheWorkspaceToo()
+    {
+        const int rows = 4;
+        using IDisposable policy = Policy().With(EngineKnobs.SdpaCudnn, false).With(EngineKnobs.Fa2Prefill, false).Push();
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        using Operands operands = new(backend, ShortKeys, seed: 14, queryRows: rows);
+        using Tensor first = new(operands.Query.Shape, DType.F32);
+        using Tensor second = new(operands.Query.Shape, DType.F32);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        backend.FlashAttention(first, operands.Query, operands.Key, operands.Value, ShortKeys, 1, causal: true, qOffset: ShortKeys - rows, Scale);
+        backend.FlashAttention(second, operands.Query, operands.Key, operands.Value, ShortKeys, 1, causal: true, qOffset: ShortKeys - rows, Scale);
+        backend.Sync();
+
+        Assert.All(evidence.Snapshot().Where(e => e.Kind == AttentionEvidenceKind.Execution), e => Assert.Equal("F.5", e.Branch));
+        AttentionEvidenceEvent growth = Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Workspace);
+        Assert.Equal("cuda.flash.partials.workspace.grow", growth.Site);
+        Assert.True(first.AsReadOnlySpan<float>().SequenceEqual(second.AsReadOnlySpan<float>()));
+    }
+
     [CudaFact]
     public void ALargerBufferLeftByAnotherCallDoesNotChangeTheResult()
     {
@@ -113,11 +135,11 @@ public sealed class DecodePartialsWorkspaceTests
         public readonly Tensor Query, Key, Value;
         public readonly int Keys;
 
-        public Operands(CudaBackend backend, int keys, int seed)
+        public Operands(CudaBackend backend, int keys, int seed, int queryRows = 1)
         {
             Keys = keys;
             Random random = new(seed);
-            Query = Resident(backend, new TensorShape(1, Heads, 1, HeadDim), random);
+            Query = Resident(backend, new TensorShape(1, Heads, queryRows, HeadDim), random);
             Key = Resident(backend, new TensorShape(1, Heads, keys, HeadDim), random);
             Value = Resident(backend, new TensorShape(1, Heads, keys, HeadDim), random);
             backend.Sync();
