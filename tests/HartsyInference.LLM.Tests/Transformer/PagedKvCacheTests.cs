@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -6,7 +7,9 @@ using HartsyInference.LLM.Transformer;
 namespace HartsyInference.LLM.Tests.Transformer;
 
 /// <summary>The paged cache presents the same keys and values as a contiguous <see cref="FixedKvCache"/> fed the same
-/// appends, through prefill, decode, rollback, reset and a rewrite of the same position.</summary>
+/// appends, through prefill, decode, rollback, reset and a rewrite of the same position, and it copies each row out of its
+/// pages once instead of on every call.</summary>
+[Collection("AttentionSemantics")]
 public sealed class PagedKvCacheTests
 {
     private const int KvHeads = 2, PageSize = 4, MaxPages = 64, MaxTokens = PageSize * MaxPages;
@@ -157,5 +160,73 @@ public sealed class PagedKvCacheTests
         pair.Paged.AdvanceLength(1);
         pair.Fixed.AdvanceLength(1);
         for (int layer = 0; layer < HeadDims.Length; layer++) pair.AssertLayerMatches(layer, 6);
+    }
+
+    /// <summary>Bytes one row of every layer's keys and values takes.</summary>
+    private static long RowBytes => HeadDims.Sum(headDim => 2L * KvHeads * headDim * sizeof(float));
+
+    private static long GatheredBytes(AttentionEvidenceSession evidence, int from) =>
+        evidence.Snapshot().Skip(from).Where(e => e.Kind == AttentionEvidenceKind.PrefixGather).Sum(e => e.Bytes);
+
+    [Fact]
+    public void ADecodeStepCopiesOnlyItsNewRow()
+    {
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(5);
+        Assert.Equal(5 * RowBytes, GatheredBytes(evidence, 0));
+
+        int before = evidence.Snapshot().Length;
+        pair.Step(1);
+
+        // Six rows are valid and they fit the eight-row buffer: only the new row leaves the pages.
+        Assert.Equal(RowBytes, GatheredBytes(evidence, before));
+    }
+
+    [Fact]
+    public void GrowingTheBufferCopiesTheOldRowsOnceAndNotFromThePages()
+    {
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(8);
+        int before = evidence.Snapshot().Length;
+
+        // The ninth row needs a larger buffer: the eight held rows move across in one copy, then the new row is added.
+        pair.Step(1);
+
+        Assert.Equal(9 * RowBytes, GatheredBytes(evidence, before));
+        Assert.Equal(2 * HeadDims.Length, evidence.Snapshot().Skip(before).Count(e => e.Kind == AttentionEvidenceKind.PrefixGather));
+    }
+
+    [Fact]
+    public void ALongDecodeCopiesFarLessThanRebuildingEveryStep()
+    {
+        const int prompt = 16, steps = 200;
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(1 << 16);
+        pair.Step(prompt);
+        for (int step = 0; step < steps; step++) pair.Step(1);
+
+        // Rebuilding the prefix on every step copied every valid row each time.
+        long rebuilt = RowBytes * (prompt + Enumerable.Range(1, steps).Sum(step => (long)(prompt + step)));
+        // Now: each row once, plus the held rows whenever the buffer grows by a page.
+        long growthCopies = Enumerable.Range(1, steps).Where(step => (prompt + step - 1) % PageSize == 0).Sum(step => (long)(prompt + step - 1));
+        Assert.Equal(RowBytes * (prompt + steps + growthCopies), GatheredBytes(evidence, 0));
+        Assert.True(GatheredBytes(evidence, 0) * 3 < rebuilt);
+    }
+
+    [Fact]
+    public void ARollbackCopiesOnlyTheRowsWrittenAfterIt()
+    {
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(6);
+        pair.Step(1);
+        pair.Truncate(5);
+        int before = evidence.Snapshot().Length;
+
+        pair.Step(2);
+
+        Assert.Equal(2 * RowBytes, GatheredBytes(evidence, before));
     }
 }
