@@ -366,7 +366,11 @@ public sealed partial class CudaBackend
                         c.KeyTokens, c.QkHeadDim, tokenMajor, tokenMajor, tokenMajor, tokenMajor);
                 }),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.tokenmajor", E,
-                    AttentionDTypes.F16 | AttentionDTypes.BF16 | AttentionDTypes.F32, CudnnSdpaRows.AnyView) with { Saturates = true }, "M.2",
+                    AttentionDTypes.F16 | AttentionDTypes.BF16 | AttentionDTypes.F32, CudnnSdpaRows.AnyView) with
+                {
+                    // F32 operands are cast to the half type and the output back; half operands are read in place.
+                    Saturates = true, Lowering = AttentionLowering.Cast,
+                }, "M.2",
                 // The Sage detour is the permute row's; a view or batch that row cannot take stays on cuDNN.
                 (in AttentionCall c) => !(SageTokenMajorDetour && WholeSequence(in c) && SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage,
                         c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim))
@@ -394,7 +398,9 @@ public sealed partial class CudaBackend
             (in AttentionCall c) => c.KvHeads < c.Heads && CudnnSdpaRows.Covers(in c)
                 && (!WholeSequence(in c) || !WidenedTakesEqualHeadKernel(in c))
                 && CudnnReady(in c),
-            (in AttentionCall c) => RunCudnnTokenMajor(in c)),
+            (in AttentionCall c) => RunCudnnTokenMajor(in c),
+            // Half operands only, grouped in place: nothing is cast or repeated.
+            static (in AttentionCall _) => AttentionPreparationCost.None),
         new DelegateAttentionRow(Cap("permute.dense", AttentionRoute.TokenMajorGqa, AnyFloat, AnyFloat, AttentionLayouts.TokenMajor) with
             {
                 MaxBatch = 1, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Permute,
@@ -487,7 +493,9 @@ public sealed partial class CudaBackend
                 {
                     FlashAttentionDecodePaged(in c);
                     return true;
-                }),
+                },
+                // The kernel reads the page buffers in place through the table: nothing is gathered, cast or repeated.
+                static (in AttentionCall _) => AttentionPreparationCost.None),
             // Causal prefill keeps 64: LLM prefill below that head dim has not been measured on cuDNN.
             new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
@@ -519,6 +527,8 @@ public sealed partial class CudaBackend
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = CW, MinQueryTokens = Fa2MinQueryRows, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Saturates = true, CaptureSafe = true,
+                    // An F32 cache is copied to F16; an F16 cache is read in place and the cast then costs nothing.
+                    Lowering = AttentionLowering.Cast,
                 }, "F.3",
                 (in AttentionCall c) =>
                 {

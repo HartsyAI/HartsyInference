@@ -28,6 +28,10 @@ public sealed class AttentionPreparationEvidenceTests
 
     private static long Bytes(Tensor tensor) => tensor.DType.ComputeByteCount(tensor.ElementCount);
 
+    /// <summary>The lowering the row that ran <paramref name="implementation"/> declares.</summary>
+    private static AttentionLowering Declared(AttentionEvidenceEvent[] events, string implementation) =>
+        events.First(e => e.Kind == AttentionEvidenceKind.Execution && e.Implementation == implementation).DeclaredLowering;
+
     private static readonly AttentionEvidenceKind[] StatedKinds =
     [
         AttentionEvidenceKind.Cast, AttentionEvidenceKind.Repeat, AttentionEvidenceKind.Permute, AttentionEvidenceKind.MaterializeMask,
@@ -67,6 +71,7 @@ public sealed class AttentionPreparationEvidenceTests
         AttentionEvidenceEvent[] events = evidence.Snapshot();
 
         Assert.Equal("fa2.causal", Ran(events));
+        Assert.True(Declared(events, "fa2.causal").HasFlag(AttentionLowering.Cast));
         AssertStatedPreparationRan(backend, in call, events);
         // Keys and values each become a tight F16 copy of the valid rows.
         long copies = 2L * kvHeads * rows * dim * sizeof(ushort);
@@ -165,8 +170,8 @@ public sealed class AttentionPreparationEvidenceTests
         backend.Sync();
         AttentionEvidenceEvent[] events = evidence.Snapshot();
 
-        // The row declares no lowering, and casts its F32 operands all the same.
         Assert.Equal("cudnn.tokenmajor", Ran(events));
+        Assert.True(Declared(events, "cudnn.tokenmajor").HasFlag(AttentionLowering.Cast));
         AssertStatedPreparationRan(backend, in call, events);
         Assert.Equal((q.ElementCount + k.ElementCount + v.ElementCount) * sizeof(ushort) + Bytes(output),
             events.Where(e => e.Kind == AttentionEvidenceKind.Cast).Sum(e => e.Bytes));
@@ -286,6 +291,81 @@ public sealed class AttentionPreparationEvidenceTests
         AssertStatedPreparationRan(backend, in call, events);
         Assert.DoesNotContain(events, e => e.Kind == AttentionEvidenceKind.Cast);
         Assert.Equal(0, backend.PlanAttention(in call).Preparation!.Value.Total);
+    }
+
+    /// <summary>Head dim 64 with the F16 permission is the cooperative-matrix kernel's call where the device has it, and
+    /// the scalar kernel's elsewhere. Either row states what it casts.</summary>
+    [VulkanFact]
+    public void VulkanFlashOverF32WithTheF16PermissionStatesTheCastsItRecords()
+    {
+        using VulkanBackend backend = new();
+        using Tensor q = new(new TensorShape(1, 2, 6, 64), DType.F32);
+        using Tensor k = new(new TensorShape(1, 2, 9, 64), DType.F32);
+        using Tensor v = new(k.Shape, DType.F32);
+        using Tensor output = new(q.Shape, DType.F32);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, q, k, v, null, 0.2f, allowF16: true);
+        backend.Attention(in call);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        Assert.Contains(Ran(events), (string[])["cm2.flash", "flash.scalar"]);
+        AssertStatedPreparationRan(backend, in call, events);
+        if (Ran(events) != "cm2.flash") return;
+        AttentionEvidenceEvent inputs = Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.cm2.inputs"));
+        Assert.Equal((q.ElementCount + k.ElementCount + v.ElementCount) * sizeof(ushort), inputs.Bytes);
+        Assert.Equal(3, inputs.Count);
+        Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.cm2.output")).Bytes);
+    }
+
+    /// <summary>The cooperative-matrix kernel reads a mask row per query: a key-only mask is expanded, recorded and stated.
+    /// A device without that kernel serves the call another way, and this case then checks nothing.</summary>
+    [VulkanFact]
+    public void VulkanCm2FlashWithAKeyOnlyMaskStatesTheExpansionItRecords()
+    {
+        const int sq = 6, skv = 9;
+        using VulkanBackend backend = new();
+        using Tensor q = new(new TensorShape(1, 2, sq, 64), DType.F32);
+        using Tensor k = new(new TensorShape(1, 2, skv, 64), DType.F32);
+        using Tensor v = new(k.Shape, DType.F32);
+        using Tensor output = new(q.Shape, DType.F32);
+        using Tensor mask = new(new TensorShape(1, 1, 1, skv), DType.F32);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, q, k, v, mask, 0.2f, allowF16: true);
+        backend.Attention(in call);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        if (Ran(events) != "cm2.flash") return;
+        AssertStatedPreparationRan(backend, in call, events);
+        Assert.True(Declared(events, "cm2.flash").HasFlag(AttentionLowering.ExpandMask));
+        Assert.Equal((long)sq * skv * sizeof(float), Assert.Single(Of(events, AttentionEvidenceKind.ExpandMask, "vulkan.cm2.mask")).Bytes);
+        Assert.Equal((long)sq * skv * sizeof(float), backend.PlanAttention(in call).Preparation!.Value.ExpandMask);
+    }
+
+    [VulkanFact]
+    public void VulkanTokenMajorPermuteOverBf16DeclaresTheCastsItRecords()
+    {
+        const int heads = 2, dim = 32;
+        using VulkanBackend backend = new();
+        using Tensor q = new(new TensorShape(1, 6, heads, dim), DType.BF16);
+        using Tensor k = new(new TensorShape(1, 9, heads, dim), DType.BF16);
+        using Tensor v = new(k.Shape, DType.BF16);
+        using Tensor output = new(q.Shape, DType.BF16);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        AttentionCall call = AttentionCall.FromTokenMajor(output, q, k, v, null, heads, heads, dim, 0.2f, allowF16: false);
+        backend.Attention(in call);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        AttentionLowering declared = Declared(events, "permute.dense");
+        Assert.True(declared.HasFlag(AttentionLowering.Permute) && declared.HasFlag(AttentionLowering.Cast), declared.ToString());
+        AttentionEvidenceEvent inputs = Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.permute.bf16.inputs"));
+        Assert.Equal((q.ElementCount + k.ElementCount + v.ElementCount) * sizeof(float), inputs.Bytes);
+        Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.permute.bf16.output")).Bytes);
     }
 
     [VulkanFact]

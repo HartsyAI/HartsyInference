@@ -180,6 +180,33 @@ public sealed class PagedAttentionDecodeCudaTests
         rig.AssertGatheredRowsMatch(rig.B);
     }
 
+    /// <summary>The paged row states that it prepares nothing, and a paged decode records no gather, cast or repeat.</summary>
+    [CudaFact]
+    public void ThePagedRowStatesNoPreparationAndRecordsNone()
+    {
+        const int heads = 8, kvHeads = 2, headDim = 64;
+        using Rig rig = new(heads, kvHeads, headDim);
+        rig.Step(rig.A, 70);
+        Assert.True(rig.A.Paged.TryGetPages(0, 70, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages));
+        using Tensor query = new(new TensorShape(1, heads, 1, headDim), DType.F32);
+        using Tensor output = new(new TensorShape(1, heads, 1, headDim), DType.F32);
+        query.AsSpan<float>().Fill(0.05f);
+        AttentionCall call = AttentionCall.FromPagedFlashAttention(output, query, keyPages, valuePages, pages, kvLen: 70, causal: true,
+            qOffset: 69, scale: 0.125f, softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: null);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        rig.Backend.Attention(in call);
+        rig.Backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        Assert.Equal(1, Count(events, "flash.decode.paged"));
+        AttentionPlan plan = rig.Backend.PlanAttention(in call);
+        Assert.Equal("flash.decode.paged", plan.RowId);
+        Assert.Equal(0, plan.Preparation!.Value.Total);
+        Assert.DoesNotContain(events, e => e.Kind is AttentionEvidenceKind.PrefixGather or AttentionEvidenceKind.Cast or AttentionEvidenceKind.Repeat
+            or AttentionEvidenceKind.Permute);
+    }
+
     [CudaFact]
     public void ACallTheKernelDoesNotTakeIsGatheredAndStillMatches()
     {

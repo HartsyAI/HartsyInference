@@ -24,6 +24,7 @@ public sealed class PagedKvCache : IKvCache, IPagedAttentionKvSource
     private Tensor? _pageTableTensor;
     private int _highestPage;
     // Per layer: a paged read dropped the contiguous copy, and a contiguous read then needed it again (so it is kept).
+    // A kept copy holds that layer's rows a second time, outside the pool's budget, until the cache is reset or disposed.
     private readonly bool[] _copyDropped;
     private readonly bool[] _copyKept;
 
