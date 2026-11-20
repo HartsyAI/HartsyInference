@@ -58,6 +58,12 @@ public readonly record struct AttentionCall
     /// <summary>The legacy entry point the call is pinned to; <see cref="AttentionRoute.Auto"/> plans freely.</summary>
     public AttentionRoute Route { get; init; }
 
+    /// <summary>Set when the keys and values are paged: <see cref="Key"/> and <see cref="Value"/> are then a layer's page
+    /// buffers and a row is found through this table. Null for contiguous keys and values. Only a row that declares
+    /// <see cref="AttentionKernelCapability.PagedKv"/> reads such a call; every other row would take the page buffers for a
+    /// contiguous cache.</summary>
+    public AttentionKvPages? KvPages { get; init; }
+
     /// <summary>Batch.</summary>
     public int Batch => Query.Batch;
 
@@ -96,6 +102,7 @@ public readonly record struct AttentionCall
 
     private string? Gap(bool operands)
     {
+        if (KvPages is not null) return "paged keys and values";
         AttentionMask m = Mask;
         AttentionLayout layout = Route is AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa
             ? AttentionLayout.TokenMajor : AttentionLayout.HeadMajor;
@@ -195,6 +202,15 @@ public readonly record struct AttentionCall
             Scale = scale, Mask = AttentionMask.FromFlash(causal, slidingWindow), Positions = AttentionPositions.Host(kvLen, qOffset),
             Logits = new(softcap, sink, alibiSlopes), Route = AttentionRoute.Flash,
         };
+
+    /// <summary>A <see cref="FromFlashAttention"/> call whose keys and values are paged: <paramref name="keyPages"/> and
+    /// <paramref name="valuePages"/> are one layer's page buffers, and the first <paramref name="kvLen"/> rows of the sequence
+    /// are found through <paramref name="pages"/>.</summary>
+    public static AttentionCall FromPagedFlashAttention(Tensor output, Tensor query, Tensor keyPages, Tensor valuePages,
+        AttentionKvPages pages, int kvLen, bool causal, int qOffset, float scale, float softcap, Tensor? sink, int slidingWindow,
+        Tensor? alibiSlopes) =>
+        FromFlashAttention(output, query, keyPages, valuePages, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes)
+            with { KvPages = pages };
 
     /// <summary>A <c>FlashAttentionDev</c> call: as <see cref="FromFlashAttention"/>, positions read from
     /// <paramref name="devicePos"/> (the host values are the eager fallback's).</summary>

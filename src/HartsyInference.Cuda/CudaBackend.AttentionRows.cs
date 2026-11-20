@@ -47,8 +47,22 @@ public sealed partial class CudaBackend
     };
 
     /// <inheritdoc/>
+    public bool AdmitsPagedAttention(in AttentionCall call)
+    {
+        if (call.KvPages is null || call.Route != AttentionRoute.Flash) return false;
+        AttentionKernelRow row = FlashAttentionRows[0];
+        return row.Capability.PagedKv && row.Capability.Excludes(in call) == AttentionExclusion.None && row.Admits(in call);
+    }
+
+    /// <inheritdoc/>
     public void Attention(in AttentionCall call)
     {
+        // Paged keys and values go to the flash rows, where only the paged decode row covers them.
+        if (call.KvPages is not null && call.Route == AttentionRoute.Flash)
+        {
+            ExecuteFlashAttention(in call);
+            return;
+        }
         if (call.LegacyGap() is { } gap)
         {
             AttentionCall prepared = AttentionExecution.Prepare(in call);
@@ -432,6 +446,18 @@ public sealed partial class CudaBackend
         const AttentionMaskSupport CW = AttentionMaskSupport.Causal | AttentionMaskSupport.Window;
         return
         [
+            // First, and the only flash row that covers a paged call; AdmitsPagedAttention reads it from this slot.
+            new DelegateAttentionRow(Cap("flash.decode.paged", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+                {
+                    MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = CW, LogitTerms = true, MaxBatch = 1, MaxQueryTokens = 1,
+                    PagedKv = true,
+                }, "F.8",
+                (in AttentionCall c) => PagedDecodeAdmits(in c),
+                (in AttentionCall c) =>
+                {
+                    FlashAttentionDecodePaged(in c);
+                    return true;
+                }),
             // Causal prefill keeps 64: LLM prefill below that head dim has not been measured on cuDNN.
             new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {

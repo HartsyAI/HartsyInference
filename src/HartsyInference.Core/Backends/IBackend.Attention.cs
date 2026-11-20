@@ -27,6 +27,11 @@ public partial interface IBackend
         return new(null, null, "no attention rows; call AttentionHostReference.Run explicitly for host execution", null);
     }
 
+    /// <summary>Whether <see cref="Attention"/> would run <paramref name="call"/>, whose keys and values are paged
+    /// (<see cref="AttentionCall.KvPages"/>), on a kernel that follows the page table. False by default: the caller then
+    /// gathers the rows into a contiguous buffer and issues an ordinary call. It allocates nothing, so it is asked per call.</summary>
+    bool AdmitsPagedAttention(in AttentionCall call) => false;
+
     /// <summary>Whether the backend's token-major INT8 attention v2 row would take an unmasked, equal-head, aligned call of this
     /// shape now (CUDA's M.4); an attention layer keeps such a call token-major instead of permuting it for SageAttention.</summary>
     bool Int8AttentionV2TakesTokenMajor(int batch, int heads, int queryTokens, int keys, int headDim, DType dtype) => false;

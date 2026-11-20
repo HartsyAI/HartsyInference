@@ -44,6 +44,7 @@ internal static class AttentionCallValidation
             throw new ArgumentException($"Bias {bias.Shape} does not broadcast to [{q.Batch},{q.Heads},{q.Tokens},{k.Tokens}].");
         ValidatePerHead(call.Logits.Sinks, q.Heads, "Sinks");
         ValidatePerHead(call.Logits.AlibiSlopes, q.Heads, "ALiBi slopes");
+        if (call.KvPages is { } pages) ValidatePages(in call, pages);
 
         if (mask.Bias is { } unread && unread.DType != DType.F32)
             throw new AttentionUnsupportedException($"Attention reads F32 additive bias, not {unread.DType}.");
@@ -61,6 +62,26 @@ internal static class AttentionCallValidation
             && (s[rank - 2] == 1 || s[rank - 2] == query.Tokens)
             && (rank < 3 || s[rank - 3] == 1 || s[rank - 3] == query.Heads)
             && (rank < 4 || s[0] == 1 || s[0] == query.Batch);
+    }
+
+    /// <summary>A paged call names one sequence's pages inside plain head-major page buffers, states its valid key length on
+    /// the host, and lists only pages the buffers hold.</summary>
+    private static void ValidatePages(in AttentionCall call, AttentionKvPages pages)
+    {
+        AttentionOperand k = call.Key, v = call.Value;
+        if (pages.PageSize <= 0 || pages.Table.DType != DType.I32)
+            throw new ArgumentException($"A page table is I32 with a positive page size; got {pages.Table.DType}, page size {pages.PageSize}.");
+        if (k.Layout != AttentionLayout.HeadMajor || v.Layout != AttentionLayout.HeadMajor || !k.IsPlain || !v.IsPlain || k.Batch != 1)
+            throw new ArgumentException($"Paged keys and values are one sequence's plain head-major page buffers; got K={Describe(k)}, V={Describe(v)}.");
+        if (call.Positions.OnDevice || !call.Positions.Bounded)
+            throw new ArgumentException("A paged call states its valid key length on the host.");
+        int kvLen = call.Positions.KvLength;
+        int used = (kvLen + pages.PageSize - 1) / pages.PageSize;
+        if (used > pages.Pages)
+            throw new ArgumentException($"{kvLen} valid keys need {used} pages of {pages.PageSize} rows; the page table lists {pages.Pages}.");
+        int held = k.Tokens / pages.PageSize;
+        if ((uint)pages.HighestPage >= (uint)held)
+            throw new ArgumentException($"The page table reaches page {pages.HighestPage}; the page buffers hold pages 0 to {held - 1}.");
     }
 
     private static void ValidatePerHead(Tensor? tensor, int heads, string name)
