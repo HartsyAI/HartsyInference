@@ -59,6 +59,18 @@ by another backend:
 | Sinks or ALiBi slopes not exactly `[Hq]` F32 | CUDA rejected (`ArgumentException`); the host reference accepted extra values and treated a non-F32 tensor as unsupported. | `ArgumentException` everywhere. | The in-tree producers store exactly `Hq` F32 values: the GPT-OSS and Flint per-layer `self_attn.sinks` (converted to F32 on load, never sharded because tensor parallelism refuses sinks), the HCA and DSA sinks (checked to `h` on load), and the GPT-style and BERT ALiBi slopes, built with exactly `NumHeads` values (tensor parallelism refuses ALiBi too). |
 | Negative softcap, window, block size or host query offset | Rejected by the CUDA flash and CPU flash contracts only. | Rejected everywhere. | Values are invalid by the [attention contract](ATTENTION_CONTRACT.md). |
 
+## Behavior changes outside validation
+
+These calls still validate; what happens after validation changed.
+
+| Change | Previously | Now | Who can observe it |
+|---|---|---|---|
+| CUDA F16 flash kernel (`numerics.flashF16`, head dim 256) launch failure | Logged once, disabled the kernel for the session and ran the call on cuDNN. | The exception propagates and the request fails. `false` from the row means only a pre-launch shape or alignment decline. | A session whose `flash_attn_f16` launch fails. A failed launch leaves the CUDA context in an unknown state, so the retry was not reliable; `numerics.flashF16=0` selects cuDNN. |
+| Every admitted row declined | `AttentionUnsupportedException` (a `NotSupportedException`). | `AttentionRecoverableException` (an `InvalidOperationException`). No admitted row still raises `AttentionUnsupportedException`. | Code that catches `NotSupportedException` to fall back. No handler in `src/` sits on an attention path. |
+| `IBackend.Attention`, `PlanAttention` and the `FlashAttention` default on a backend without rows | Ran the host reference; planning returned a host-reference plan. | Validate, then refuse with `AttentionUnsupportedException`; planning validates and returns a plan with no row. `AttentionHostReference.Run` is the explicit host path. | An out-of-tree `IBackend` that relied on the defaults. CPU, CUDA and Vulkan override all three. |
+| CUDA Flash above head dim 1024 | Ran the host reference (row F.1). | Refused. | No in-tree model has a head dim that wide. |
+| Additive bias on CUDA's F16 materialized rows | The F32 bias was clamped to the F16 range, cast to F16 and added in F16, so a row masked on every key with a finite sentinel such as `-1e30` averaged its highest-scoring keys. | The F32 bias is added unclamped in F32 (`attention_softmax_f16`), as the host reference does: that row averages every key uniformly. Every other biased row now receives the bias at F32 precision instead of F16. | A caller that masks a whole row with a finite sentinel and reads that row. |
+
 ## Removal evidence
 
 Before an adapter may be removed or changed, the owning package audit records the caller, model/configuration path,
