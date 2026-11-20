@@ -158,10 +158,10 @@ Failures are classed:
 | Recoverable | a plan build refused, an engine configuration rejected, a workspace too small | the next row runs; no state changed |
 | Sticky | an illegal address, a launch failure, anything raised after output writes began | the context is poisoned and nothing retries |
 
-No admitted row raises `AttentionUnsupportedException`; if every admitted row declines, the planner raises
-`AttentionRecoverableException` instead. Any execution exception is sticky and propagates unchanged rather than being
-converted into a decline. A GPU backend runs the host reference only through a declared row: one named in the plan and
-the execution evidence, with `HostReference` lowering, that warns once. Vulkan declares one for `FlashAttention` (C.1);
+An admitted row must not raise `AttentionUnsupportedException`: it declines by returning false. If every admitted
+row declines, the planner raises `AttentionRecoverableException`. Any exception a row raises is sticky and propagates
+unchanged rather than being converted into a decline. A GPU backend runs the host reference only through a declared
+row: one named in the plan and the execution evidence, with `HostReference` lowering, that warns once per gap. Vulkan declares one for `FlashAttention` (C.1);
 CUDA declares none. Otherwise host execution is the caller's explicit choice through `AttentionHostReference.Run`, and
 a backend without rows refuses `IBackend.Attention`.
 
