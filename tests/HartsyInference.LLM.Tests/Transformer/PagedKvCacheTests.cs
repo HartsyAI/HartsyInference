@@ -18,17 +18,31 @@ public sealed class PagedKvCacheTests
     /// <summary>A paged cache and a contiguous reference driven with identical data.</summary>
     private sealed class Pair : IDisposable
     {
-        public readonly CpuBackend Backend = new();
+        public readonly CpuBackend Backend;
         public readonly PagedKvPool Pool;
         public readonly PagedKvCache Paged;
         public readonly FixedKvCache Fixed;
-        private readonly Random _random = new(1234);
+        private readonly Random _random;
+        private readonly bool _ownsPool;
 
         public Pair(int expectedTokens = 0, int maxPages = MaxPages)
         {
+            Backend = new CpuBackend();
             Pool = new PagedKvPool(HeadDims.Length, KvHeads, HeadDims, PageSize, maxPages);
+            _ownsPool = true;
+            _random = new Random(1234);
             Paged = new PagedKvCache(Pool, expectedTokens);
             Fixed = new FixedKvCache(HeadDims.Length, 1, KvHeads, HeadDims, PageSize * maxPages, DType.F32);
+        }
+
+        /// <summary>A second sequence in <paramref name="first"/>'s pool, fed different rows.</summary>
+        public Pair(Pair first, int seed)
+        {
+            Backend = first.Backend;
+            Pool = first.Pool;
+            _random = new Random(seed);
+            Paged = new PagedKvCache(Pool);
+            Fixed = new FixedKvCache(HeadDims.Length, 1, KvHeads, HeadDims, PageSize * Pool.MaxPages, DType.F32);
         }
 
         /// <summary>Appends <paramref name="tokens"/> new rows to one layer of both caches, without advancing.</summary>
@@ -69,6 +83,32 @@ public sealed class PagedKvCacheTests
             AssertSameRows(Paged.ValuePrefix(layer), Fixed.ValuePrefix(layer), validRows, HeadDims[layer], $"layer {layer} values");
         }
 
+        /// <summary>Reads every committed row of every layer straight from the pool, through the page table, and compares it
+        /// with the contiguous reference: what a reader that follows the table sees.</summary>
+        public void AssertPagesMatch()
+        {
+            for (int layer = 0; layer < HeadDims.Length; layer++)
+            {
+                AssertPages(Pool.KeyPages(layer), Fixed.KeyPrefix(layer), HeadDims[layer], $"layer {layer} key pages");
+                AssertPages(Pool.ValuePages(layer), Fixed.ValuePrefix(layer), HeadDims[layer], $"layer {layer} value pages");
+            }
+        }
+
+        private void AssertPages(Tensor pages, Tensor contiguous, int headDim, string what)
+        {
+            ReadOnlySpan<float> actual = pages.AsReadOnlySpan<float>(), expected = contiguous.AsReadOnlySpan<float>();
+            int poolRows = (int)pages.Shape[2], contiguousRows = (int)contiguous.Shape[2];
+            IReadOnlyList<int> table = Paged.PageTable;
+            for (int head = 0; head < KvHeads; head++)
+                for (int row = 0; row < Paged.CurrentLength; row++)
+                {
+                    int poolRow = Pool.FirstRow(table[row / PageSize]) + row % PageSize;
+                    Assert.True(
+                        actual.Slice((head * poolRows + poolRow) * headDim, headDim).SequenceEqual(expected.Slice((head * contiguousRows + row) * headDim, headDim)),
+                        $"{what}: head {head}, row {row} (pool row {poolRow}) differs.");
+                }
+        }
+
         private Tensor Rows(int headDim, int tokens)
         {
             Tensor tensor = new(new TensorShape(1, KvHeads, tokens, headDim), DType.F32);
@@ -81,9 +121,18 @@ public sealed class PagedKvCacheTests
         {
             Paged.Dispose();
             Fixed.Dispose();
+            if (!_ownsPool) return;
             Pool.Dispose();
             Backend.Dispose();
         }
+    }
+
+    /// <summary>True when the table is not the pages 0, 1, 2, ... in order, the one table a reader that ignored it would still get right.</summary>
+    private static bool IsScattered(IReadOnlyList<int> table)
+    {
+        for (int i = 0; i < table.Count; i++)
+            if (table[i] != i) return true;
+        return false;
     }
 
     private static void AssertSameRows(Tensor paged, Tensor contiguous, int validRows, int headDim, string what)
@@ -105,6 +154,82 @@ public sealed class PagedKvCacheTests
         pair.Step(10);
         for (int step = 0; step < 30; step++) pair.Step(1);
         Assert.Equal(40, pair.Paged.CurrentLength);
+    }
+
+    [Fact]
+    public void ThePagesHoldEveryRowThroughPrefillDecodeAndRollback()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        pair.AssertPagesMatch();
+        for (int step = 0; step < 9; step++) pair.Step(1);
+        pair.AssertPagesMatch();
+        pair.Truncate(6);
+        pair.Step(3);
+        pair.Step(1);
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void TheBuffersGrowWithThePagesHandedOutAndKeepTheirRows()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        // Three pages are in use; the buffers hold those and four pages of headroom, not the pool's 64.
+        Assert.Equal(7 * PageSize, pair.Pool.KeyPages(0).Shape[2]);
+        for (int step = 0; step < 30; step++) pair.Step(1);
+        // The eighth page regrew every layer's buffers, and the rows written before that moved with them.
+        Assert.Equal(12 * PageSize, pair.Pool.KeyPages(0).Shape[2]);
+        Assert.Equal(12 * PageSize, pair.Pool.ValuePages(2).Shape[2]);
+        pair.AssertPagesMatch();
+        pair.Step(MaxTokens - 40);
+        Assert.Equal(MaxTokens, pair.Pool.KeyPages(1).Shape[2]);
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void TwoSequencesInOnePoolKeepTheirOwnRows()
+    {
+        using Pair a = new();
+        using Pair b = new(a, seed: 77);
+        // Alternating growth interleaves the two sequences' pages in the pool.
+        a.Step(5);
+        b.Step(9);
+        for (int step = 0; step < 14; step++)
+        {
+            a.Step(1);
+            b.Step(1);
+        }
+        a.Step(7);
+        b.Step(6);
+        Assert.True(IsScattered(a.Paged.PageTable) && IsScattered(b.Paged.PageTable), "The sequences' pages were meant to interleave.");
+        Assert.Empty(a.Paged.PageTable.Intersect(b.Paged.PageTable));
+        a.AssertPagesMatch();
+        b.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void PagesASequenceGaveBackAreReusedWithoutLeakingItsRows()
+    {
+        using Pair a = new();
+        using Pair b = new(a, seed: 77);
+        a.Step(18);
+        int[] held = [.. a.Paged.PageTable];
+        // Rolling back frees the pages past the cut; the other sequence takes them and writes its own rows there.
+        a.Truncate(3);
+        b.Step(22);
+        Assert.NotEmpty(b.Paged.PageTable.Intersect(held.Skip(1)));
+        a.Step(11);
+        a.Step(1);
+        b.Step(1);
+        Assert.True(IsScattered(a.Paged.PageTable), "The regrown sequence was meant to take pages out of order.");
+        a.AssertPagesMatch();
+        b.AssertPagesMatch();
+        // A reset gives every page back; a new sequence on those pages still matches its own rows.
+        b.Reset();
+        b.Step(13);
+        a.AssertPagesMatch();
+        b.AssertPagesMatch();
     }
 
     [Fact]

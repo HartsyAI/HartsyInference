@@ -41,6 +41,11 @@ public sealed class PagedKvCache : IKvCache
     /// <summary>Pages currently held by this sequence (for observability/logging).</summary>
     public int PagesHeld { get { ThrowIfDisposed(); return _blockTable.Count; } }
 
+    /// <summary>The sequence's page table: entry <c>i</c> is the pool page that holds rows <c>[i × PageSize, (i + 1) × PageSize)</c>.
+    /// It changes when the sequence grows, rolls back or resets, and a page it no longer lists may already belong to another
+    /// sequence, so a reader takes it afresh for each use.</summary>
+    public IReadOnlyList<int> PageTable { get { ThrowIfDisposed(); return _blockTable; } }
+
     /// <param name="pool">The page pool this sequence draws from.</param>
     /// <param name="expectedTokens">The most tokens the sequence will hold (prompt plus generation), when the caller knows
     /// it. The contiguous prefix is then sized ahead in steps up to this bound, so it is not regrown every page; 0 keeps
@@ -76,37 +81,33 @@ public sealed class PagedKvCache : IKvCache
         if (_currentK[layer] > _currentLength) _currentK[layer] = _currentLength;
         if (_currentV[layer] > _currentLength) _currentV[layer] = _currentLength;
 
+        _pool.Prepare(backend, layer);
+        Tensor kPages = _pool.KeyPages(layer), vPages = _pool.ValuePages(layer);
         int pos = _currentLength;
         int remaining = tNew;
         int srcOffset = 0;
         while (remaining > 0)
         {
-            int pageSlot = pos / _pool.PageSize;
-            int withinPage = pos % _pool.PageSize;
-            int roomInPage = _pool.PageSize - withinPage;
-            int chunkLen = Math.Min(remaining, roomInPage);
-            int physicalPage = _blockTable[pageSlot];
-            Tensor kPage = _pool.KPage(layer, physicalPage);
-            Tensor vPage = _pool.VPage(layer, physicalPage);
-
+            // Rows that sit next to each other in the pool are written in one copy: a decode step's single row, and a
+            // prefill's whole run of pages when the pool handed them out in order.
+            int chunkLen = AdjacentRows(pos, remaining);
+            int poolRow = PoolRow(pos);
             if (chunkLen == tNew)
             {
-                // Common case (every decode step: tNew=1 always fits in one page-write, no slice needed).
-                backend.KvCacheAppend(kPage, newK, withinPage);
-                backend.KvCacheAppend(vPage, newV, withinPage);
+                backend.KvCacheAppend(kPages, newK, poolRow);
+                backend.KvCacheAppend(vPages, newV, poolRow);
             }
             else
             {
-                // Multi-page-spanning append (prefill: tNew = prompt length). Slice the chunk destined for
-                // THIS page out of newK/newV first.
+                // The appended rows land in more than one place in the pool: slice out the rows for this run.
                 Tensor kChunk = new(new TensorShape(1, _pool.NumKvHeads, chunkLen, headDim), DType.F32);
                 Tensor vChunk = new(new TensorShape(1, _pool.NumKvHeads, chunkLen, headDim), DType.F32);
                 try
                 {
                     StridedCopies.SliceAxis(backend, kChunk, newK, 2, srcOffset, chunkLen);
                     StridedCopies.SliceAxis(backend, vChunk, newV, 2, srcOffset, chunkLen);
-                    backend.KvCacheAppend(kPage, kChunk, withinPage);
-                    backend.KvCacheAppend(vPage, vChunk, withinPage);
+                    backend.KvCacheAppend(kPages, kChunk, poolRow);
+                    backend.KvCacheAppend(vPages, vChunk, poolRow);
                 }
                 finally
                 {
@@ -121,6 +122,23 @@ public sealed class PagedKvCache : IKvCache
         }
         AppendToPrefix(backend, layer, isKey: true, newK, _currentLength, tNew);
         AppendToPrefix(backend, layer, isKey: false, newV, _currentLength, tNew);
+    }
+
+    /// <summary>The row of the pool's per-layer buffers that holds the sequence's row <paramref name="pos"/>.</summary>
+    private int PoolRow(int pos) => _pool.FirstRow(_blockTable[pos / _pool.PageSize]) + pos % _pool.PageSize;
+
+    /// <summary>How many of the <paramref name="wanted"/> rows from <paramref name="pos"/> on sit next to each other in the
+    /// pool: the rest of that row's page, plus each following page whose pool page is the next one.</summary>
+    private int AdjacentRows(int pos, int wanted)
+    {
+        int slot = pos / _pool.PageSize;
+        int rows = _pool.PageSize - pos % _pool.PageSize;
+        while (rows < wanted && slot + 1 < _blockTable.Count && _blockTable[slot + 1] == _blockTable[slot] + 1)
+        {
+            rows += _pool.PageSize;
+            slot++;
+        }
+        return Math.Min(rows, wanted);
     }
 
     private int RoundUpToPage(int rows) => ((Math.Max(rows, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
@@ -232,29 +250,20 @@ public sealed class PagedKvCache : IKvCache
         int target = Math.Min(_written[layer], len);
         int pos = Math.Min(currentRows[layer], target);
         copiedRows += target - pos;
+        Tensor pages = isKey ? _pool.KeyPages(layer) : _pool.ValuePages(layer);
         while (pos < target)
         {
-            int withinPage = pos % _pool.PageSize;
-            int chunk = Math.Min(target - pos, _pool.PageSize - withinPage);
-            int physicalPage = _blockTable[pos / _pool.PageSize];
-            Tensor page = isKey ? _pool.KPage(layer, physicalPage) : _pool.VPage(layer, physicalPage);
-            if (chunk == _pool.PageSize)
+            // One copy per run of rows that sit next to each other in the pool.
+            int chunk = AdjacentRows(pos, target - pos);
+            Tensor sliced = new(new TensorShape(1, _pool.NumKvHeads, chunk, headDim), DType.F32);
+            try
             {
-                // A whole page: every slot is wanted, so it copies as it is.
-                backend.KvCacheAppend(scratch, page, pos);
+                StridedCopies.SliceAxis(backend, sliced, pages, 2, PoolRow(pos), chunk);
+                backend.KvCacheAppend(scratch, sliced, pos);
             }
-            else
+            finally
             {
-                Tensor sliced = new(new TensorShape(1, _pool.NumKvHeads, chunk, headDim), DType.F32);
-                try
-                {
-                    StridedCopies.SliceAxis(backend, sliced, page, 2, withinPage, chunk);
-                    backend.KvCacheAppend(scratch, sliced, pos);
-                }
-                finally
-                {
-                    sliced.Dispose();
-                }
+                sliced.Dispose();
             }
             pos += chunk;
         }
