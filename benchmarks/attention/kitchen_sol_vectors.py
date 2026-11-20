@@ -116,7 +116,7 @@ def main():
         lines.append("    ];")
         lines.append("")
     lines[-1] = "}"
-    Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\r\n")
+    Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     print(f"wrote {args.out}: {sum(1 for _ in cases())} cases", file=sys.stderr)
 
 

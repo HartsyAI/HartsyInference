@@ -20,14 +20,15 @@ public sealed record SolAttentionOptions
     /// <summary>Query blocks <c>[Start, End)</c> that read every key block exactly.</summary>
     public (int Start, int End) SinkQueries { get; init; }
 
-    /// <summary>An additive natural-log bias per key, F32 <c>[T]</c> or <c>[B, T]</c>; negative infinity masks a key. It
-    /// applies only where the key's block is read exactly: a block that is pooled ignores it, so biased keys belong
-    /// under <see cref="SinkBlocks"/>.</summary>
+    /// <summary>An additive natural-log bias per key, F32 <c>[T]</c> or <c>[B, T]</c>: finite, or negative infinity to mask
+    /// a key. It applies only where the key's block is read exactly: a block that is pooled ignores it, so biased keys
+    /// belong under <see cref="SinkBlocks"/>.</summary>
     public Tensor? KeyBias { get; init; }
 
     /// <summary>When above zero, the fraction of non-sink key blocks each query block routes by rank, in place of the
-    /// <see cref="Tau"/> threshold; below one.</summary>
-    public float TopKRatio { get; init; }
+    /// <see cref="Tau"/> threshold; below one. A double, as the pinned definition takes it: the budget rounds
+    /// <c>ratio × blocks</c> to even, and 0.7 × 5 is a midpoint in double and not in single precision.</summary>
+    public double TopKRatio { get; init; }
 
     /// <summary>Whether key blocks that are not read exactly still take part, each as one pooled term. Off, the softmax
     /// runs over the exactly read keys only.</summary>
@@ -66,12 +67,13 @@ public static class SolAttentionReference
     public static int Blocks(int tokens) => (tokens + Block - 1) / Block;
 
     /// <summary>Key blocks a query block routes by rank among <paramref name="blocks"/> blocks of which
-    /// <paramref name="sinkBlocks"/> are sinks: <c>round(ratio × non-sink blocks)</c> to nearest even, at least one, and
-    /// always leaving one non-sink block unrouted; zero when at most one block is not a sink.</summary>
-    public static int TopKBudget(float ratio, int blocks, int sinkBlocks)
+    /// <paramref name="sinkBlocks"/> are sinks: <c>round(ratio × non-sink blocks)</c> to nearest even in double
+    /// precision, at least one, and always leaving one non-sink block unrouted; zero when at most one block is not a
+    /// sink.</summary>
+    public static int TopKBudget(double ratio, int blocks, int sinkBlocks)
     {
         int eligible = blocks - sinkBlocks;
-        int wanted = Math.Max(1, (int)Math.Round((double)ratio * eligible, MidpointRounding.ToEven));
+        int wanted = Math.Max(1, (int)Math.Round(ratio * eligible, MidpointRounding.ToEven));
         return Math.Max(0, Math.Min(eligible - 1, wanted));
     }
 
@@ -93,7 +95,7 @@ public static class SolAttentionReference
         bool deadRows = options.BlockLengths is not null;
         int sinkStart = Math.Min(options.SinkBlocks.Start, blocks), sinkEnd = Math.Min(options.SinkBlocks.End, blocks);
         int sinkQueryStart = Math.Min(options.SinkQueries.Start, blocks), sinkQueryEnd = Math.Min(options.SinkQueries.End, blocks);
-        int budget = options.TopKRatio > 0f ? TopKBudget(options.TopKRatio, blocks, Math.Max(0, sinkEnd - sinkStart)) : -1;
+        int budget = options.TopKRatio > 0 ? TopKBudget(options.TopKRatio, blocks, Math.Max(0, sinkEnd - sinkStart)) : -1;
 
         ReadOnlySpan<float> q = query.AsReadOnlySpan<float>(), k = key.AsReadOnlySpan<float>(), v = value.AsReadOnlySpan<float>();
         ReadOnlySpan<float> bias = options.KeyBias is null ? default : options.KeyBias.AsReadOnlySpan<float>();
@@ -161,6 +163,8 @@ public static class SolAttentionReference
                         float threshold = float.PositiveInfinity;
                         if (budget > 0)
                         {
+                            // Sinks rank as negative infinity. The budget is below the number of non-sink blocks, so the
+                            // budget-th largest score is always a non-sink block's and the sinks never set the threshold.
                             for (int n = 0; n < blocks; n++) ranked[n] = n >= sinkStart && n < sinkEnd ? float.NegativeInfinity : scores[n];
                             Array.Sort(ranked);
                             threshold = ranked[blocks - budget];
@@ -306,7 +310,7 @@ public static class SolAttentionReference
         if (query.ElementCount == 0) throw new ArgumentException($"Sol-Attn needs positive extents; got {query.Shape}.", nameof(query));
         if (options.Scale is { } scale && !float.IsFinite(scale)) throw new ArgumentException("The scale must be finite.", nameof(options));
         if (float.IsNaN(options.Tau)) throw new ArgumentException("Tau is not a number.", nameof(options));
-        if (options.TopKRatio is < 0f or >= 1f || float.IsNaN(options.TopKRatio))
+        if (options.TopKRatio is < 0 or >= 1 || double.IsNaN(options.TopKRatio))
             throw new ArgumentException($"The top-k ratio is 0 (off) or inside (0, 1); got {options.TopKRatio}.", nameof(options));
         foreach ((int start, int end) in (ReadOnlySpan<(int, int)>)[options.SinkBlocks, options.SinkQueries])
             if (start < 0 || end < start)
@@ -319,6 +323,9 @@ public static class SolAttentionReference
             bool perBatch = bias.Shape.Rank == 2 && (bias.Shape[0] == 1 || bias.Shape[0] == batch) && bias.Shape[1] == tokens;
             if (bias.DType != DType.F32 || !(perKey || perBatch))
                 throw new ArgumentException($"A key bias is F32 [T] or [B, T]; got {bias.DType} {bias.Shape}.", nameof(options));
+            foreach (float entry in bias.AsReadOnlySpan<float>())
+                if (float.IsNaN(entry) || float.IsPositiveInfinity(entry))
+                    throw new ArgumentException($"A key bias entry is finite or negative infinity; got {entry}.", nameof(options));
         }
         if (options.CoarseGate is { } gate && (gate.DType != DType.F32 || gate.Shape != query.Shape))
             throw new ArgumentException($"A coarse gate is F32 in the operands' shape; got {gate.DType} {gate.Shape}.", nameof(options));

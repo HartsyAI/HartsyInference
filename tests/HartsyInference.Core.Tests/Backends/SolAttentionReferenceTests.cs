@@ -152,7 +152,7 @@ public sealed class SolAttentionReferenceTests
     public void TopKRoutingMatchesTheKitchen()
     {
         using Operands operands = new(1, 448, 2, 404);
-        operands.Run(new SolAttentionOptions { TopKRatio = 0.4f });
+        operands.Run(new SolAttentionOptions { TopKRatio = 0.4 });
         AssertMatchesKitchen(operands, SolAttentionKitchenVectors.TopKRows, SolAttentionKitchenVectors.TopK, "top-k");
     }
 
@@ -176,7 +176,7 @@ public sealed class SolAttentionReferenceTests
     public void TopKWithSinksMatchesTheKitchen()
     {
         using Operands operands = new(1, 448, 1, 707);
-        operands.Run(new SolAttentionOptions { TopKRatio = 0.3f, SinkBlocks = (1, 3) });
+        operands.Run(new SolAttentionOptions { TopKRatio = 0.3, SinkBlocks = (1, 3) });
         AssertMatchesKitchen(operands, SolAttentionKitchenVectors.TopKWithSinksRows, SolAttentionKitchenVectors.TopKWithSinks, "top-k with sinks");
     }
 
@@ -216,7 +216,7 @@ public sealed class SolAttentionReferenceTests
     {
         using Operands operands = new(1, 256, 2, 1111);
         using Tensor gate = operands.Gate();
-        operands.Run(new SolAttentionOptions { TopKRatio = 0.5f, Tail = false, CoarseGate = gate });
+        operands.Run(new SolAttentionOptions { TopKRatio = 0.5, Tail = false, CoarseGate = gate });
         AssertMatchesKitchen(operands, SolAttentionKitchenVectors.CoarseGateRows, SolAttentionKitchenVectors.CoarseGate, "coarse gate");
     }
 
@@ -286,7 +286,7 @@ public sealed class SolAttentionReferenceTests
         float[] dense = Dense(operands, 1f / MathF.Sqrt(Dim));
         operands.Run(new SolAttentionOptions { Tau = 9f });
         AssertClose(dense, operands.Output.AsReadOnlySpan<float>(), 2e-3, "one block, tau");
-        operands.Run(new SolAttentionOptions { TopKRatio = 0.5f });
+        operands.Run(new SolAttentionOptions { TopKRatio = 0.5 });
         AssertClose(dense, operands.Output.AsReadOnlySpan<float>(), 2e-3, "one block, top-k");
     }
 
@@ -308,15 +308,18 @@ public sealed class SolAttentionReferenceTests
     }
 
     [Theory]
-    [InlineData(0.4f, 7, 0, 3)]
-    [InlineData(0.3f, 7, 2, 2)]
-    [InlineData(0.5f, 5, 0, 2)]
-    [InlineData(0.5f, 7, 0, 4)]
-    [InlineData(0.9f, 4, 0, 3)]
-    [InlineData(0.01f, 8, 0, 1)]
-    [InlineData(0.5f, 1, 0, 0)]
-    [InlineData(0.5f, 3, 2, 0)]
-    public void TheTopKBudgetRoundsToEvenKeepsOneBlockPooledAndIgnoresSinks(float ratio, int blocks, int sinks, int expected) =>
+    [InlineData(0.4, 7, 0, 3)]
+    [InlineData(0.3, 7, 2, 2)]
+    [InlineData(0.5, 5, 0, 2)]
+    [InlineData(0.5, 7, 0, 4)]
+    [InlineData(0.9, 4, 0, 3)]
+    [InlineData(0.01, 8, 0, 1)]
+    [InlineData(0.5, 1, 0, 0)]
+    [InlineData(0.5, 3, 2, 0)]
+    // Midpoints in double precision that a single-precision ratio would miss: 0.7 x 5 = 3.5 and 0.1 x 25 = 2.5.
+    [InlineData(0.7, 5, 0, 4)]
+    [InlineData(0.1, 25, 0, 2)]
+    public void TheTopKBudgetRoundsToEvenKeepsOneBlockPooledAndIgnoresSinks(double ratio, int blocks, int sinks, int expected) =>
         Assert.Equal(expected, SolAttentionReference.TopKBudget(ratio, blocks, sinks));
 
     [Fact]
@@ -324,13 +327,14 @@ public sealed class SolAttentionReferenceTests
     {
         const int tokens = 448, blocks = 7;
         using Operands operands = new(1, tokens, 1, 1616);
-        bool[] routed = operands.Run(new SolAttentionOptions { TopKRatio = 0.4f });
-        int budget = SolAttentionReference.TopKBudget(0.4f, blocks, 0);
+        bool[] routed = operands.Run(new SolAttentionOptions { TopKRatio = 0.4 });
+        int budget = SolAttentionReference.TopKBudget(0.4, blocks, 0);
         for (int qb = 0; qb < blocks; qb++)
         {
             int read = Enumerable.Range(0, blocks).Count(n => routed[qb * blocks + n]);
             int neighbours = Enumerable.Range(0, blocks).Count(n => Math.Abs(qb - n) <= 1);
-            // The ranked blocks and the neighbours can overlap, so the count sits between the larger and the sum.
+            // The ranked blocks and the neighbours can overlap, so the count sits between the larger and the sum. The upper
+            // bound holds for these scores, which have no tie at the boundary; a tied group is kept whole and could pass it.
             Assert.InRange(read, Math.Max(budget, neighbours), budget + neighbours);
         }
     }
@@ -378,7 +382,18 @@ public sealed class SolAttentionReferenceTests
         Assert.Throws<ArgumentException>(() => SolAttentionReference.Run(operands.Output, operands.Query, other, operands.Value, new SolAttentionOptions()));
         Assert.Throws<ArgumentException>(() => SolAttentionReference.Run(operands.Output, half, operands.Key, operands.Value, new SolAttentionOptions()));
         Assert.Throws<ArgumentException>(() => SolAttentionReference.Run(operands.Query, operands.Query, operands.Key, operands.Value, new SolAttentionOptions()));
-        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { TopKRatio = 1f }));
+        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { TopKRatio = 1 }));
+        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { Tau = float.NaN }));
+        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { Scale = float.PositiveInfinity }));
+        Assert.Throws<ArgumentException>(() => SolAttentionReference.Run(operands.Output, operands.Query, operands.Key, operands.Value,
+            new SolAttentionOptions(), new bool[3]));
+        using Tensor twoBatches = new(new TensorShape(2, 128), DType.F32);
+        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { KeyBias = twoBatches }));
+        using Tensor notANumber = new(new TensorShape(128), DType.F32);
+        notANumber.AsSpan<float>()[5] = float.NaN;
+        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { KeyBias = notANumber }));
+        notANumber.AsSpan<float>()[5] = float.PositiveInfinity;
+        Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { KeyBias = notANumber }));
         Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { SinkBlocks = (2, 1) }));
         Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { BlockLengths = [64] }));
         Assert.Throws<ArgumentException>(() => operands.Run(new SolAttentionOptions { KeyBias = other }));
