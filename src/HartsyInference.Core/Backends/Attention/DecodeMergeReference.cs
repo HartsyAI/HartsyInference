@@ -13,7 +13,9 @@ namespace HartsyInference.Core.Backends.Attention;
 /// <para>With <c>m = max(lse, max step score)</c>, the prefix weighs <c>exp(lse − m)</c>, a step row <c>exp(score − m)</c>,
 /// and the merged row is the weighted sum of the prefix output and the step values over the sum of the weights. That is
 /// the softmax over prefix and step keys together, with the prefix counted once.</para>
-/// <para>F32 throughout, plain loops, no approximation: a GPU port is compared with it.</para>
+/// <para>F32 throughout, plain loops, no approximation: a GPU port is compared with it. The values of Q, K and V are
+/// not checked: a step score of positive infinity or NaN makes its row NaN, and one that overflows to negative infinity
+/// weighs nothing, as a masked row does.</para>
 /// </remarks>
 public static class DecodeMergeReference
 {
@@ -32,12 +34,17 @@ public static class DecodeMergeReference
 
     /// <summary><see cref="TreeMerge"/> under <see cref="CausalStepMask"/>: every row attends the step rows up to itself.</summary>
     public static void StepMerge(Tensor merged, Tensor prefixOutput, ReadOnlySpan<float> prefixLse, Tensor query, Tensor key, Tensor value,
-        float? scale = null) =>
+        float? scale = null)
+    {
+        if (query.Shape.Rank != 4 || query.Shape[2] is < 1 or > MaxRows)
+            throw new ArgumentException($"A step merge takes Q [B, H, S, D] with 1 to {MaxRows} rows; got {query.Shape}.", nameof(query));
         TreeMerge(merged, prefixOutput, prefixLse, query, key, value, CausalStepMask((int)query.Shape[2]), scale);
+    }
 
     /// <summary>Folds a step's own rows into a prefix-only result.</summary>
     /// <param name="merged">Output, F32 <c>[B, S, H × D]</c>; may be <paramref name="prefixOutput"/> itself.</param>
-    /// <param name="prefixOutput">The step's rows attended over the committed prefix only, F32 <c>[B, S, H × D]</c>.</param>
+    /// <param name="prefixOutput">The step's rows attended over the committed prefix only, F32 <c>[B, S, H × D]</c>. A row
+    /// whose LSE is negative infinity is not read.</param>
     /// <param name="prefixLse">The natural-log LSE of those rows' scaled scores, <c>[B, H, S]</c>; negative infinity for a
     /// row whose prefix was empty.</param>
     /// <param name="query">The step's queries, F32 <c>[B, H, S, D]</c>.</param>
@@ -86,8 +93,11 @@ public static class DecodeMergeReference
                         o.Slice(outAt, dim).Clear();
                         continue;
                     }
-                    float prefixWeight = MathF.Exp(lse - max), total = prefixWeight;
-                    for (int d = 0; d < dim; d++) row[d] = prefix[outAt + d] * prefixWeight;
+                    // An empty prefix weighs nothing and its output is not read: whatever a decode left there stays out.
+                    float prefixWeight = float.IsNegativeInfinity(lse) ? 0f : MathF.Exp(lse - max), total = prefixWeight;
+                    if (prefixWeight == 0f) Array.Clear(row);
+                    else
+                        for (int d = 0; d < dim; d++) row[d] = prefix[outAt + d] * prefixWeight;
                     for (int t = 0; t < rows; t++)
                     {
                         if (float.IsNegativeInfinity(scores[t])) continue;

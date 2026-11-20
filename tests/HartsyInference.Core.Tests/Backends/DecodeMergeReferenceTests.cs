@@ -230,6 +230,20 @@ public sealed class DecodeMergeReferenceTests
     }
 
     [Fact]
+    public void TheOutputOfAnEmptyPrefixIsNotRead()
+    {
+        using Step step = new(2, 4, 2, 64, 4, 12, 715);
+        step.DecodePrefix([0, 12]);
+        step.StepMerge();
+        float[] expected = step.Merged.AsReadOnlySpan<float>().ToArray();
+        // Batch 0 has no prefix: whatever a decode left in its rows, the merge is over the step alone.
+        step.Prefix.AsSpan<float>().Slice(0, 4 * 4 * 64).Fill(float.NaN);
+        step.StepMerge();
+        Assert.True(expected.AsSpan().SequenceEqual(step.Merged.AsReadOnlySpan<float>()));
+        Assert.DoesNotContain(step.Merged.AsReadOnlySpan<float>().ToArray(), float.IsNaN);
+    }
+
+    [Fact]
     public void ARowWhoseMaskIsEmptyKeepsItsPrefixOutputBitForBit()
     {
         using Step step = new(1, 4, 2, 64, 5, 30, 720);
@@ -336,5 +350,9 @@ public sealed class DecodeMergeReferenceTests
         using Step tooLong = new(1, 1, 1, 8, 33, 4, 770);
         Assert.Throws<ArgumentException>(() =>
             DecodeMergeReference.TreeMerge(tooLong.Merged, tooLong.Prefix, tooLong.Lse, tooLong.Query, tooLong.Key, tooLong.Value, new int[33]));
+        // The step merge refuses the same calls the same way, before it builds its mask.
+        Assert.Throws<ArgumentException>(() =>
+            DecodeMergeReference.StepMerge(tooLong.Merged, tooLong.Prefix, tooLong.Lse, tooLong.Query, tooLong.Key, tooLong.Value));
+        Assert.Throws<ArgumentException>(() => DecodeMergeReference.StepMerge(merged, prefix, lse, merged, k, v));
     }
 }
