@@ -324,7 +324,8 @@ public sealed class PagedKvCache : IKvCache, IPagedAttentionKvSource
         int target = Math.Min(_written[layer], len);
         int pos = Math.Min(currentRows[layer], target);
         copiedRows += target - pos;
-        Tensor pages = isKey ? _pool.KeyPages(layer) : _pool.ValuePages(layer);
+        // Taken only when there are rows to copy: a layer that has written nothing has no pages yet.
+        Tensor? pages = pos < target ? (isKey ? _pool.KeyPages(layer) : _pool.ValuePages(layer)) : null;
         while (pos < target)
         {
             // One copy per run of rows that sit next to each other in the pool.
@@ -332,7 +333,7 @@ public sealed class PagedKvCache : IKvCache, IPagedAttentionKvSource
             Tensor sliced = new(new TensorShape(1, _pool.NumKvHeads, chunk, headDim), DType.F32);
             try
             {
-                StridedCopies.SliceAxis(backend, sliced, pages, 2, PoolRow(pos), chunk);
+                StridedCopies.SliceAxis(backend, sliced, pages!, 2, PoolRow(pos), chunk);
                 backend.KvCacheAppend(scratch, sliced, pos);
             }
             finally

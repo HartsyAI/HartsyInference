@@ -188,6 +188,16 @@ public sealed class PagedKvCacheTests
     }
 
     [Fact]
+    public void APrefixReadOfALayerThatWroteNothingReturnsAnEmptyPrefix()
+    {
+        using Pair pair = new();
+        // Only layer 0 appends; layers 1 and 2 have no pages in the pool yet.
+        pair.Append(0, 3);
+        Assert.Equal(PageSize, pair.Paged.KeyPrefix(1).Shape[2]);
+        Assert.Equal(PageSize, pair.Paged.ValuePrefix(2).Shape[2]);
+    }
+
+    [Fact]
     public void TwoSequencesInOnePoolKeepTheirOwnRows()
     {
         using Pair a = new();
