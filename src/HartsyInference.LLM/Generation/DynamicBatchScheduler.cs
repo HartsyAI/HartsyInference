@@ -85,6 +85,12 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         /// <summary>Pages this sequence reserved at admission; returned to <see cref="_reservedPages"/> when it leaves the active set.</summary>
         public int ReservedPages;
 
+        /// <summary>Started just before this sequence's prefill, as <see cref="TextGenerationPipeline"/> starts its own: time queued before admission is not in it.</summary>
+        public required System.Diagnostics.Stopwatch Clock;
+
+        /// <summary>The clock's reading when the first token was sampled.</summary>
+        public double PrefillMilliseconds;
+
         public void Dispose()
         {
             Cache.Dispose();
@@ -605,9 +611,12 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             List<int> generated = new(req.MaxTokens);
             SamplerChain sampler = SamplerChain.FromOptions(req.Sampling, _tokenizer, vocab);
             int next;
+            // The same split TextGenerationPipeline reports: prefill ends when the first logits row is sampled.
+            System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
             using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0), cache))
             using (Tensor logits = _model.ProjectLogits(hidden, promptIds.Length))
                 next = sampler.Next(LastRow(logits, promptIds.Length, vocab), generated);
+            double prefillMs = clock.Elapsed.TotalMilliseconds;
 
             // Fired once the prompt is in the cache, as TextGenerationPipeline does: the caller reads the prompt length from it.
             req.OnPrefillCompleted?.Invoke(promptIds.Length);
@@ -637,6 +646,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             {
                 Pending = pending, PromptIds = promptIds, Cache = cache, Sampler = sampler,
                 Stops = stops, Generated = generated, Next = next, GraphSession = session,
+                Clock = clock, PrefillMilliseconds = prefillMs,
             };
         }
         catch
@@ -696,13 +706,17 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Next = next;
     }
 
-    /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).</summary>
+    /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).
+    /// Decode time is this request's wall time from its first token to here, so it includes the rounds it shared with other sequences and any prefill of a
+    /// request admitted meanwhile.</summary>
     private GenerationResult BuildResult(ActiveSeq seq, bool stopped) => new()
     {
         TokenIds = seq.Generated,
         Text = _tokenizer.Decode(seq.Generated),
         PromptTokens = seq.PromptIds.Length,
         StoppedOnStopToken = stopped,
+        PrefillMilliseconds = seq.PrefillMilliseconds,
+        DecodeMilliseconds = seq.Clock.Elapsed.TotalMilliseconds - seq.PrefillMilliseconds,
     };
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);

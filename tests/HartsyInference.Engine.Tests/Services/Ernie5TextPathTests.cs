@@ -134,6 +134,9 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.True(run.Device.IsCpu);
         Assert.Equal(continuousBatching, run.Scheduled);
         Assert.InRange(run.Result.CompletionTokens, 1, 4);
+        // Both paths time the request: the scheduler reports the same prefill/decode split the pipeline does.
+        Assert.True(run.Result.PrefillMilliseconds > 0, $"Prefill time was {run.Result.PrefillMilliseconds} ms.");
+        Assert.True(run.Result.DecodeMilliseconds > 0, $"Decode time was {run.Result.DecodeMilliseconds} ms.");
     }
 
     [Fact]
