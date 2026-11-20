@@ -264,8 +264,8 @@ public sealed partial class VulkanBackend
                     }
                     return true;
                 },
-                static (in AttentionCall c) => new AttentionPreparationCost(HostReference: AttentionPreparationCost.Bytes(c.Query)
-                    + AttentionPreparationCost.Bytes(c.Key) + AttentionPreparationCost.Bytes(c.Value) + AttentionPreparationCost.Bytes(c.Output)
+                static (in AttentionCall c) => new AttentionPreparationCost(HostReference: TensorBytes(c.Query.Storage) + TensorBytes(c.Key.Storage)
+                    + TensorBytes(c.Value.Storage) + TensorBytes(c.Output.Storage)
                     + TensorBytes(c.Mask.Bias) + TensorBytes(c.Logits.Sinks) + TensorBytes(c.Logits.AlibiSlopes))),
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
