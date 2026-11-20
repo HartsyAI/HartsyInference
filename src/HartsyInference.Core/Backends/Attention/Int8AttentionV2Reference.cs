@@ -73,12 +73,27 @@ public static class Int8AttentionV2Reference
                 }
                 Span<float> means = ops.KeyMeans.AsSpan(kvh * segments * dp, segments * dp);
                 if (scales is null && options.SmoothKeys)
-                    for (int s = 0; s < segments; s++)
-                        SegmentMean(k, dp, bounds[s], bounds[s + 1], means.Slice(s * dp, dp));
+                {
+                    if (options.KeyCenter == Int8KeyCenter.RepresentativeKey)
+                    {
+                        // The center is one of the head's own rows; with none, it stays zero and nothing is subtracted.
+                        int anchor = kvLen > 0 ? Int8RepresentativeKey.Detect(k, kvLen, dp) : -1;
+                        ops.RepresentativeKeys[kvh] = anchor;
+                        if (anchor >= 0) k.AsSpan(anchor * dp, dp).CopyTo(means);
+                    }
+                    else
+                    {
+                        for (int s = 0; s < segments; s++)
+                            SegmentMean(k, dp, bounds[s], bounds[s + 1], means.Slice(s * dp, dp));
+                    }
+                }
                 if (options.SmoothKeys)
                     for (int s = 0; s < segments; s++)
                         for (int j = bounds[s]; j < bounds[s + 1]; j++)
                             for (int c = 0; c < dp; c++) k[j * dp + c] -= means[s * dp + c];
+                // After the centering, as the pinned kernel does it; the scales come from the rotated rows.
+                if (ops.Rotation != Int8Rotation.None)
+                    for (int j = 0; j < kvLen; j++) Int8AttentionRotation.Apply(k.AsSpan(j * dp, dp), ops.Rotation);
                 QuantizeKeys(ops, kvh, k, scales is null);
                 QuantizeValues(ops, kvh, v, scales is null);
             }
@@ -93,16 +108,18 @@ public static class Int8AttentionV2Reference
                 {
                     int at = (b * call.Heads + h) * nRows + ri;
                     ReadRow(call.Query, b, h, ops.Rows[ri], q);
+                    // q · center is taken from the row as given: the center is not rotated either.
+                    if (options.SmoothKeys)
+                        for (int s = 0; s < segments; s++)
+                        {
+                            float dot = 0f;
+                            for (int c = 0; c < dp; c++) dot = MathF.FusedMultiplyAdd(q[c], means[s * dp + c], dot);
+                            ops.QueryMeanDots[at * segments + s] = dot;
+                        }
+                    Int8AttentionRotation.Apply(q, ops.Rotation);
                     if (scales is null) ops.QueryScales[at] = Scale(AbsMax(q), 127f);
                     float inv = 1f / ops.QueryScales[at];
                     for (int c = 0; c < dp; c++) ops.Queries[at * dp + c] = ToS8(q[c] * inv);
-                    if (!options.SmoothKeys) continue;
-                    for (int s = 0; s < segments; s++)
-                    {
-                        float dot = 0f;
-                        for (int c = 0; c < dp; c++) dot = MathF.FusedMultiplyAdd(q[c], means[s * dp + c], dot);
-                        ops.QueryMeanDots[at * segments + s] = dot;
-                    }
                 }
             }
         return ops;
@@ -173,6 +190,9 @@ public static class Int8AttentionV2Reference
         for (int i = 0; i < options.KeySegmentStarts.Count; i++)
             if (options.KeySegmentStarts[i] <= (i == 0 ? 0 : options.KeySegmentStarts[i - 1]))
                 throw new ArgumentException("Key segment starts must be positive and ascending.", nameof(options));
+        if (options.KeyCenter == Int8KeyCenter.RepresentativeKey && options.SmoothKeys && options.KeySegmentStarts.Count > 0)
+            throw new ArgumentException("A representative key centers one key segment; key segment starts were given.", nameof(options));
+        Int8AttentionRotation.Resolve(options.Rotation, PaddedHeadDim(call.QkHeadDim), Math.Max(1, call.ValidKvLength));
     }
 
     private static void Check(in AttentionCall call)

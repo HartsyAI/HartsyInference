@@ -12,6 +12,17 @@ public enum Int8KeyScaleGrouping
     PerKey,
 }
 
+/// <summary>What is subtracted from a head's keys before they are quantized, when keys are smoothed.</summary>
+public enum Int8KeyCenter
+{
+    /// <summary>Each key segment's channel mean.</summary>
+    SegmentMean,
+
+    /// <summary>One of the head's own key rows (<see cref="Int8RepresentativeKey"/>), or nothing when no row qualifies.
+    /// One segment only.</summary>
+    RepresentativeKey,
+}
+
 /// <summary>The formats P and V take in the PV product.</summary>
 public enum Int8ProbabilityFormat
 {
@@ -57,8 +68,15 @@ public sealed record Int8AttentionV2Options
     /// <summary>Subtract each key segment's channel mean before K is quantized.</summary>
     public bool SmoothKeys { get; init; } = true;
 
+    /// <summary>What smoothing subtracts from the keys. Either way the reference keeps <c>q · center</c> and adds it back
+    /// to each score, so sinks, biases and the LSE see the unsmoothed score.</summary>
+    public Int8KeyCenter KeyCenter { get; init; } = Int8KeyCenter.SegmentMean;
+
     /// <summary>Starts of the key segments after the first, ascending; each is smoothed with its own mean.</summary>
     public IReadOnlyList<int> KeySegmentStarts { get; init; } = [];
+
+    /// <summary>The transform applied to each Q row and each smoothed K row before quantization.</summary>
+    public Int8Rotation Rotation { get; init; } = Int8Rotation.None;
 
     /// <summary>One V channel scale per key tile instead of one per sequence, applied at each tile's drain.</summary>
     public bool ValueScalesPerTile { get; init; }
