@@ -80,6 +80,14 @@ public sealed partial class VulkanBackend
         return AttentionExecution.PlanValidated(RowsFor(prepared.Route), in prepared);
     }
 
+    /// <summary>Bytes of a whole tensor, 0 for none: what the host-reference row's record and its statement both count.</summary>
+    private static long TensorBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
+
+    /// <summary>The scalar flash kernel computes in one type: each operand in another is cast to it and the output is cast
+    /// back. An operand served from the weight-cast cache is not cast again; this states the activation case.</summary>
+    private AttentionPreparationCost ScalarFlashPreparation(in AttentionCall c) => new(Cast: AttentionPreparationCost.CastsTo(in c,
+        AttentionDtype(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage)));
+
     /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
     private bool TokenMajorCm2Admits(in AttentionCall c)
     {
@@ -150,7 +158,7 @@ public sealed partial class VulkanBackend
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         causal: false, qOffset: 0, slidingWindow: 0, skv: c.KeyTokens, kvGroup: c.Heads / c.KvHeads);
                     return true;
-                }),
+                }, (in AttentionCall c) => ScalarFlashPreparation(in c)),
             // Behind A.2, which steps aside for the calls this row admits (TiledF32Admits), so the knob decides those calls.
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
@@ -249,15 +257,16 @@ public sealed partial class VulkanBackend
                     {
                         // The whole tensor crosses to the host, whatever part of it a view addresses; the reference also
                         // reads the bias, the sinks and the ALiBi slopes there.
-                        long bytes = HostBytes(c.Query.Storage) + HostBytes(c.Key.Storage) + HostBytes(c.Value.Storage) + HostBytes(c.Output.Storage)
-                            + HostBytes(c.Mask.Bias) + HostBytes(c.Logits.Sinks) + HostBytes(c.Logits.AlibiSlopes);
+                        long bytes = TensorBytes(c.Query.Storage) + TensorBytes(c.Key.Storage) + TensorBytes(c.Value.Storage) + TensorBytes(c.Output.Storage)
+                            + TensorBytes(c.Mask.Bias) + TensorBytes(c.Logits.Sinks) + TensorBytes(c.Logits.AlibiSlopes);
                         int tensors = 4 + (c.Mask.Bias is null ? 0 : 1) + (c.Logits.Sinks is null ? 0 : 1) + (c.Logits.AlibiSlopes is null ? 0 : 1);
                         AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference", bytes, tensors);
                     }
                     return true;
-
-                    static long HostBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
-                }),
+                },
+                static (in AttentionCall c) => new AttentionPreparationCost(HostReference: TensorBytes(c.Query.Storage) + TensorBytes(c.Key.Storage)
+                    + TensorBytes(c.Value.Storage) + TensorBytes(c.Output.Storage)
+                    + TensorBytes(c.Mask.Bias) + TensorBytes(c.Logits.Sinks) + TensorBytes(c.Logits.AlibiSlopes))),
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = RowCausalWindow, MinQueryTokens = 64,
@@ -296,7 +305,7 @@ public sealed partial class VulkanBackend
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, mask: null, c.Scale, c.Mask.Causal,
                         c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, skv: c.Positions.KvLength, c.KvGroup);
                     return true;
-                }),
+                }, (in AttentionCall c) => ScalarFlashPreparation(in c)),
             new DelegateAttentionRow(Cap("flash.wide", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     MaxHeadDim = FlashWideMaxHeadDim, Gqa = true, LogitTerms = true,

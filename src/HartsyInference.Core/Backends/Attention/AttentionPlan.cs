@@ -3,7 +3,14 @@ using System.Text;
 namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>A planner's choice, its reason, and the rows ahead of it that declined.</summary>
-public readonly record struct AttentionPlan(AttentionKernelRow? Row, string? Variant, string Reason, string? Declined)
+/// <param name="Preparation">What the chosen row expects to prepare for the call; null when it has not stated it.</param>
+/// <param name="Cheaper">A later row that covers and admits the call and states less preparation than the chosen one, with
+/// its statement. Reported only: the chosen row is the first that covers and admits, whatever this says. Statements count
+/// what each row really copies, so two rows can differ for reasons other than the call: one casts a cache's whole
+/// capacity where another casts only its valid rows. Null also when the chosen row is unstated: there is then nothing to
+/// compare a later row with.</param>
+public readonly record struct AttentionPlan(AttentionKernelRow? Row, string? Variant, string Reason, string? Declined,
+    AttentionPreparationCost? Preparation = null, string? Cheaper = null)
 {
     /// <summary>Row id, or "none".</summary>
     public string RowId => Row?.Capability.Id ?? "none";
@@ -20,6 +27,8 @@ public readonly record struct AttentionPlan(AttentionKernelRow? Row, string? Var
         if (c.Saturates) sb.Append(" saturates");
         if (c.Lowering != AttentionLowering.None) sb.Append(" lowering=").Append(c.Lowering);
         sb.Append(c.CaptureSafe ? " capture-safe" : " not-capture-safe");
+        sb.Append(" prepares ").Append(Preparation is { } cost ? cost.ToString() : "unstated");
+        if (Cheaper is not null) sb.Append(" (less preparation: ").Append(Cheaper).Append(')');
         if (Declined is not null) sb.Append(" after ").Append(Declined);
         return sb.ToString();
     }
