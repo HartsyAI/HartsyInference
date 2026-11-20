@@ -3979,10 +3979,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing. While the
     /// stream still captures (an abort or end-capture that failed) the leases stay: a free issued now would be recorded
-    /// into that capture. They lapse when the graph is collected or the workspace next releases.</summary>
+    /// into that capture. They lapse when the graph is collected or its leases are next released outside a capture.</summary>
     private void ReleaseGraphLeases(CudaGraph graph)
     {
-        if (StreamIsCapturing()) return;
+        // Called from catch and finally blocks: a failed query (a sticky context error) reads as still capturing, so the
+        // leases stay and the caller's own exception is the one that propagates.
+        if (CudaDriverApi.cuStreamIsCapturing(_stream.Handle, out int status) != 0 || status != 0) return;
         foreach (HighWaterWorkspace workspace in Workspaces) workspace.Release(graph);
     }
 
