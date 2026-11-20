@@ -20,6 +20,8 @@ public static class AttentionHostReference
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The host reference cannot read device positions.");
         AttentionCallValidation.Validate(in call);
+        if (call.KvPages is not null)
+            throw new AttentionUnsupportedException("The host reference reads contiguous keys and values; gather a paged call's rows first.");
         if (!lse.IsEmpty && lse.Length != (long)call.Batch * call.Heads * call.QueryTokens)
             throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {(long)call.Batch * call.Heads * call.QueryTokens}.",
                 nameof(lse));

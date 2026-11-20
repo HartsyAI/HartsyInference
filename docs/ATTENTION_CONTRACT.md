@@ -46,6 +46,15 @@ computed from the valid lengths, never from `Skv`, a capacity or a bucket size.
 KV storage is either **dense** (one contiguous `Skv` per sequence plus `kvLen`) or **paged** (a page table, a page
 size and `kvLen`); the two are distinct representations, not one with a flag.
 
+A paged call (`AttentionCall.KvPages`) passes one layer's page buffers as its key and value operands, `[1, Hkv, pages ×
+pageSize, D]`, and an I32 page table: row `r` of the sequence is buffer row `table[r / pageSize] × pageSize + r mod
+pageSize`. It holds one sequence and states `kvLen` on the host. The owner replaces the table tensor whenever the table
+changes and states its highest page, so the call is checked against the buffers without reading the table back. Only a
+row that declares `PagedKv` reads such a call. Every other row excludes it, a backend without such a row refuses it,
+and the host reference refuses it, because each would take the page buffer for a contiguous cache. A caller asks
+`IBackend.AdmitsPagedAttention` first and, when the answer is no, gathers the rows into a contiguous buffer and issues
+a dense call: the gather is the caller's, recorded as `PrefixGather`, never a backend's silent choice.
+
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
 of bounds, and the kernel sets a device status word. The next host synchronization point that owns the call (the end
 of a step or of a graph replay) reads it and raises. An out-of-range position is never a successful result.

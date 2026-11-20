@@ -140,6 +140,10 @@ public sealed record AttentionKernelCapability
     /// <summary>Reads positions from a device buffer.</summary>
     public bool DevicePositions { get; init; }
 
+    /// <summary>The row reads keys and values through a page table (<see cref="AttentionCall.KvPages"/>), and only such
+    /// calls. A row without it excludes a paged call, whose key operand is a page buffer and not a contiguous cache.</summary>
+    public bool PagedKv { get; init; }
+
     /// <summary>The row's author intends a captured graph to replay the call: no host sync, free-memory read or plan build,
     /// and scratch only from the capture-aware device allocator. A declaration only: the planner does not consult it, nothing
     /// checks a row against it, and nothing keeps a row without it out of a capture. Scratch is recorded as
@@ -173,6 +177,7 @@ public sealed record AttentionKernelCapability
     public AttentionExclusion Excludes(in AttentionCall call)
     {
         if (call.Route != AttentionRoute.Auto && call.Route != Entry) return AttentionExclusion.Entry;
+        if ((call.KvPages is not null) != PagedKv) return AttentionExclusion.PagedKv;
         if (!Has(QueryTypes, call.Query.DType) || !Has(QueryTypes, call.Output.DType)) return AttentionExclusion.QueryType;
         if (!Has(KvTypes, call.Key.DType) || !Has(KvTypes, call.Value.DType)) return AttentionExclusion.KvType;
         if (NarrowsF32To != AttentionFormats.None && !call.Numerics.Permits(NarrowsF32To, NarrowsF32To)
@@ -276,4 +281,7 @@ public enum AttentionExclusion
 
     /// <summary>A narrowing the call does not permit.</summary>
     Numerics,
+
+    /// <summary>The call's keys and values are paged and the row reads contiguous ones, or the reverse.</summary>
+    PagedKv,
 }

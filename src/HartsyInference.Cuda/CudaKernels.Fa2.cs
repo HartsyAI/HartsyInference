@@ -3,7 +3,7 @@ namespace HartsyInference.Cuda;
 // Causal grouped-query FlashAttention-2 for LLM prefill (Kernels/lm/flash_attn_causal_f16.cu): F16 tensor cores, F32 accumulation.
 public sealed partial class CudaKernels
 {
-    private CudaModule? _fa2Module, _decodeGqaModule, _kvScatterF16Module, _normFastModule;
+    private CudaModule? _fa2Module, _decodeGqaModule, _decodeGqaPagedModule, _kvScatterF16Module, _normFastModule;
     private readonly nint[] _normFast = new nint[6], _addNormFast = new nint[6];   // index log2(K): K = 2, 4, 8, 16, 32 -> 1..5
 
     /// <summary>Test hook: route the RMSNorm Q8 launchers to the reference kernels even when the fast ones loaded.</summary>
@@ -20,6 +20,12 @@ public sealed partial class CudaKernels
 
     /// <summary>True when flash_attn_decode_gqa.ptx loaded.</summary>
     public bool HasDecodeGqa => _decF32D128 != 0 && _decF32D64 != 0 && _decF16D128 != 0 && _decF16D64 != 0;
+
+    private nint _decPagedD128, _decPagedD64;
+
+    /// <summary>True when flash_attn_decode_gqa_paged.ptx loaded: the grouped-query decode kernel that follows a page table.
+    /// A build without the file leaves this false, and a paged call is then gathered into a contiguous buffer.</summary>
+    public bool HasDecodeGqaPaged => _decPagedD128 != 0 && _decPagedD64 != 0;
 
     /// <summary>Head dimension and query-head group the grouped-query decode kernel is built for.</summary>
     public static bool DecodeGqaSupports(int d, int group) => (d == 128 || d == 64) && group >= 1 && group <= 16;
@@ -73,6 +79,13 @@ public sealed partial class CudaKernels
             _decF32D64 = _decodeGqaModule.GetFunction("lm_fa_decode_gqa_f32_d64");
             _decF16D128 = _decodeGqaModule.GetFunction("lm_fa_decode_gqa_f16_d128");
             _decF16D64 = _decodeGqaModule.GetFunction("lm_fa_decode_gqa_f16_d64");
+        }
+        string paged = Ptx("flash_attn_decode_gqa_paged");
+        if (CanLoad(paged))
+        {
+            _decodeGqaPagedModule = LoadOwnedModule(paged);
+            _decPagedD128 = _decodeGqaPagedModule.GetFunction("lm_fa_decode_gqa_paged_f32_d128");
+            _decPagedD64 = _decodeGqaPagedModule.GetFunction("lm_fa_decode_gqa_paged_f32_d64");
         }
     }
 
@@ -135,6 +148,28 @@ public sealed partial class CudaKernels
         a[0] = &mA; a[1] = &lA; a[2] = &accA; a[3] = &qA; a[4] = &hqA; a[5] = &hkvA; a[6] = &lkA; a[7] = &kvLenA; a[8] = &groupA;
         a[9] = &offA; a[10] = &scaleA; a[11] = &capA; a[12] = &winA; a[13] = &gA; a[14] = &chunkA; a[15] = &posA; a[16] = &kA; a[17] = &vA;
         CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, (uint)b, 256, 1, 1, (uint)DecodeSharedBytes(d, kvGroup, f16Kv), stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary><see cref="LaunchFlashDecodeGqa"/> for one sequence whose F32 keys and values are rows of page buffers:
+    /// row <c>r</c> is buffer row <c>(pageTable[r >> pageShift] << pageShift) + (r mod pageSize)</c>.</summary>
+    /// <param name="poolRows">Rows of each head in the page buffers.</param>
+    /// <param name="pageTable">Device pointer to the sequence's I32 page table.</param>
+    /// <param name="pageShift">log2 of the page size.</param>
+    public unsafe void LaunchFlashDecodeGqaPaged(ulong partialM, ulong partialL, ulong partialAcc, ulong q, ulong k, ulong v, int hq, int d,
+        int hkv, int poolRows, int kvLen, int kvGroup, int qOffset, float scale, float softcap, int window, int splits, int chunk,
+        ulong pageTable, int pageShift, nint stream)
+    {
+        nint fn = d == 128 ? _decPagedD128 : _decPagedD64;
+        if (fn == 0 || !DecodeGqaSupports(d, kvGroup)) throw new InvalidOperationException($"flash_attn_decode_gqa_paged has no kernel for head dim {d}, group {kvGroup}.");
+        ulong mA = partialM, lA = partialL, accA = partialAcc, qA = q, tableA = pageTable, kA = k, vA = v;
+        int hqA = hq, hkvA = hkv, lkA = poolRows, kvLenA = kvLen, groupA = kvGroup, offA = qOffset, winA = window, gA = splits, chunkA = chunk;
+        int shiftA = pageShift;
+        float scaleA = scale, capA = softcap;
+        void** a = stackalloc void*[19];
+        a[0] = &mA; a[1] = &lA; a[2] = &accA; a[3] = &qA; a[4] = &hqA; a[5] = &hkvA; a[6] = &lkA; a[7] = &kvLenA; a[8] = &groupA;
+        a[9] = &offA; a[10] = &scaleA; a[11] = &capA; a[12] = &winA; a[13] = &gA; a[14] = &chunkA; a[15] = &tableA; a[16] = &shiftA;
+        a[17] = &kA; a[18] = &vA;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, 1, 256, 1, 1, (uint)DecodeSharedBytes(d, kvGroup, f16Kv: false), stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Fused graph-decode QKV epilogue writing an F16 key/value cache (q stays F32).</summary>

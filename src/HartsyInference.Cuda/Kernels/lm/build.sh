@@ -11,6 +11,7 @@ KERNELS=(
     "flash_attn_f32_split"
     "flash_attn_causal_f16"
     "flash_attn_decode_gqa"
+    "flash_attn_decode_gqa_paged"
     "kv_scatter_f16"
     "lm_sample_topk"
     "lm_norm_q8_fast"

@@ -1,16 +1,18 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
 /// <summary>Block/page-based KV cache for ONE sequence, backed by a shared <see cref="PagedKvPool"/>: unlike <see cref="FixedKvCache"/> (one contiguous per-layer buffer sized to a worst-case max sequence length, hard-restricted to a single sequence per instance), this allocates fixed-size pages from the pool on demand as the sequence grows and returns them on <see cref="Dispose"/>/<see cref="Reset"/>, so VRAM isn't reserved per-sequence for a worst case and a finished sequence's pages are immediately reusable.</summary>
 /// <remarks>
-/// <para><b>Design: "physically paged, logically contiguous."</b> Each layer keeps a contiguous copy of its keys and of its values beside the pages, and <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> return it after copying in only the rows that layer wrote since the last call. A write at a position (a decode step, a rollback, a retried round) marks the copy stale from that position on. The copy is as large as the valid prefix, so a pooled sequence holds its keys and values twice; the pool budget counts the pages only. Reading the pages directly from the attention kernels would remove the copy.</para>
+/// <para><b>Design: "physically paged, contiguous on request."</b> The pages hold every row. A layer also keeps a contiguous copy of its keys and of its values while something reads it: <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> return it after copying in only the rows that layer wrote since the last call, and a write at a position (a decode step, a rollback, a retried round) marks it stale from that position on. While the copy exists a pooled sequence holds those rows twice; the pool budget counts the pages only.</para>
+/// <para><b>Reading the pages directly.</b> As an <see cref="IPagedAttentionKvSource"/> the cache hands an attention call its page buffers and page table. A layer that a call has read that way drops its contiguous copy (<see cref="PagesServed"/>) and stops maintaining it; a later <see cref="KeyPrefix"/> rebuilds it from the pages. A layer whose copy had to be rebuilt after being dropped is read both ways, so from then on it keeps the copy, and each contiguous read copies in only the rows written since the last one.</para>
 /// <para><b>Backend capture:</b> <see cref="IKvCache.KeyPrefix"/>/<see cref="IKvCache.ValuePrefix"/> don't receive an <see cref="IBackend"/> parameter (matching the existing interface), but gathering pages requires issuing backend calls, so this cache captures the <see cref="IBackend"/> passed to the most recent <see cref="AppendStep"/> and reuses it for the gather; every caller in this codebase uses exactly one backend instance per session, so this holds in practice without a wider interface change.</para>
 /// </remarks>
-public sealed class PagedKvCache : IKvCache
+public sealed class PagedKvCache : IKvCache, IPagedAttentionKvSource
 {
     private readonly PagedKvPool _pool;
     private readonly List<int> _blockTable = [];
@@ -18,6 +20,12 @@ public sealed class PagedKvCache : IKvCache
     private int _physicallyWritten;  // tokens actually present in pages; >= _currentLength, catches up to it via AdvanceLength
     private IBackend? _lastBackend;
     private int _disposed;
+    // The page table as a tensor, for a call that reads the pages; rebuilt after the table changes.
+    private Tensor? _pageTableTensor;
+    private int _highestPage;
+    // Per layer: a paged read dropped the contiguous copy, and a contiguous read then needed it again (so it is kept).
+    private readonly bool[] _copyDropped;
+    private readonly bool[] _copyKept;
 
     private readonly Tensor?[] _scratchK;
     private readonly Tensor?[] _scratchV;
@@ -60,9 +68,77 @@ public sealed class PagedKvCache : IKvCache
         _written = new int[pool.NumLayers];
         _currentK = new int[pool.NumLayers];
         _currentV = new int[pool.NumLayers];
+        _copyDropped = new bool[pool.NumLayers];
+        _copyKept = new bool[pool.NumLayers];
     }
 
     public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
+    {
+        AppendKvPages(backend, layer, newK, newV);
+        AppendKvContiguous(backend, layer, newK, newV);
+    }
+
+    /// <inheritdoc/>
+    public void AppendKvContiguous(IBackend backend, int layer, Tensor k, Tensor v)
+    {
+        ThrowIfDisposed();
+        int tNew = (int)k.Shape[2];
+        AppendToPrefix(backend, layer, isKey: true, k, _currentLength, tNew);
+        AppendToPrefix(backend, layer, isKey: false, v, _currentLength, tNew);
+    }
+
+    /// <inheritdoc/>
+    public bool TryGetPages(int layer, int rows, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages)
+    {
+        ThrowIfDisposed();
+        // A layer that has not written every row the call reads would be read past its own rows.
+        if (rows <= 0 || _written[layer] < rows)
+        {
+            keyPages = valuePages = null!;
+            pages = default;
+            return false;
+        }
+        if (_pageTableTensor is null)
+        {
+            Tensor table = new(new TensorShape(_blockTable.Count), DType.I32);
+            Span<int> entries = table.AsSpan<int>();
+            int highest = 0;
+            for (int i = 0; i < entries.Length; i++)
+            {
+                entries[i] = _blockTable[i];
+                highest = Math.Max(highest, _blockTable[i]);
+            }
+            _pageTableTensor = table;
+            _highestPage = highest;
+        }
+        keyPages = _pool.KeyPages(layer);
+        valuePages = _pool.ValuePages(layer);
+        pages = new AttentionKvPages(_pageTableTensor, _pool.PageSize, _highestPage);
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public void PagesServed(int layer)
+    {
+        ThrowIfDisposed();
+        // A layer read both ways keeps its copy: dropping it again would rebuild all of it at the next contiguous read.
+        if (_copyKept[layer]) return;
+        _copyDropped[layer] = true;
+        _scratchK[layer]?.Dispose();
+        _scratchV[layer]?.Dispose();
+        _scratchK[layer] = _scratchV[layer] = null;
+        _currentK[layer] = _currentV[layer] = 0;
+    }
+
+    /// <summary>The page table changed: a call must not read the tensor built from the old one.</summary>
+    private void PageTableChanged()
+    {
+        _pageTableTensor?.Dispose();
+        _pageTableTensor = null;
+    }
+
+    /// <inheritdoc/>
+    public void AppendKvPages(IBackend backend, int layer, Tensor newK, Tensor newV)
     {
         ThrowIfDisposed();
         _lastBackend = backend;
@@ -120,8 +196,6 @@ public sealed class PagedKvCache : IKvCache
             srcOffset += chunkLen;
             remaining -= chunkLen;
         }
-        AppendToPrefix(backend, layer, isKey: true, newK, _currentLength, tNew);
-        AppendToPrefix(backend, layer, isKey: false, newV, _currentLength, tNew);
     }
 
     /// <summary>The row of the pool's per-layer buffers that holds the sequence's row <paramref name="pos"/>.</summary>
@@ -240,6 +314,7 @@ public sealed class PagedKvCache : IKvCache
         IBackend backend = _lastBackend;
         int len = _physicallyWritten;
         int headDim = _pool.HeadDimPerLayer[layer];
+        if (_copyDropped[layer]) _copyKept[layer] = true;
         Tensor?[] scratchArr = isKey ? _scratchK : _scratchV;
         int[] currentRows = isKey ? _currentK : _currentV;
         Tensor? scratch = scratchArr[layer];
@@ -292,6 +367,7 @@ public sealed class PagedKvCache : IKvCache
         while (_blockTable.Count < pagesNeeded)
         {
             _blockTable.Add(_pool.AllocatePage());
+            PageTableChanged();
         }
     }
 
@@ -312,6 +388,7 @@ public sealed class PagedKvCache : IKvCache
         {
             _pool.FreePage(_blockTable[^1]);
             _blockTable.RemoveAt(_blockTable.Count - 1);
+            PageTableChanged();
         }
         _physicallyWritten = newLength;
         _currentLength = newLength;
@@ -325,9 +402,13 @@ public sealed class PagedKvCache : IKvCache
         ThrowIfDisposed();
         foreach (int page in _blockTable) _pool.FreePage(page);
         _blockTable.Clear();
+        PageTableChanged();
         _currentLength = 0;
         _physicallyWritten = 0;
         ForgetRowsFrom(0);
+        // The next sequence shows for itself how its layers are read.
+        Array.Clear(_copyDropped);
+        Array.Clear(_copyKept);
     }
 
     /// <summary>Rows at and past <paramref name="length"/> no longer exist: no layer has written them and no prefix holds them.</summary>
@@ -351,6 +432,7 @@ public sealed class PagedKvCache : IKvCache
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (int page in _blockTable) _pool.FreePage(page);
         _blockTable.Clear();
+        _pageTableTensor?.Dispose();
         foreach (Tensor? t in _scratchK) t?.Dispose();
         foreach (Tensor? t in _scratchV) t?.Dispose();
     }

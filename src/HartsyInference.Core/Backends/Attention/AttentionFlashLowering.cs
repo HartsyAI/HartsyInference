@@ -16,6 +16,7 @@ public static class AttentionFlashLowering
     public static string? Gap(in AttentionCall call)
     {
         if (call.Route != AttentionRoute.Auto) return "a pinned route";
+        if (call.KvPages is not null) return "paged keys and values";
         if (call.Mask.Any) return "a mask";
         if (call.Positions.OnDevice) return "device positions";
         if (call.Logits.AlibiSlopes is not null) return "ALiBi";
