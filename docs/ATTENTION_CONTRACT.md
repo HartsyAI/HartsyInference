@@ -238,7 +238,13 @@ The planner reproduces these until the row that owns each is rewritten.
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.
 - CUDA's materialized F32→F16 cast does not saturate; cuDNN's does.
-- CUDA chooses between the materialized and tiled paths, the tile height, and cuDNN or FA2 prefill from free VRAM. The tile holds about a
+- CUDA causal prefill over an F32 KV cache runs the engine's causal kernel (`fa2.causal`) wherever it is eligible: head
+  dim 64 or 128, at least 16 query rows, no softcap, sinks or ALiBi, `numerics.fa2Prefill` on. It applies the causal rule
+  and the sliding window inside the kernel, so those calls build no `[Sq, Skv]` mask. cuDNN with a materialized mask
+  (`cudnn.causal`) keeps the rest when the mask and casts fit in half of free VRAM. Both compute QK in F16. On an RTX 3060
+  the engine's kernel measured 1.9x to 4.8x faster per call than cuDNN with its mask from 512 to 8192 tokens; other cards
+  are not measured. An F16 KV cache (the CUDA default for text models) never took the cuDNN row.
+- CUDA chooses between the materialized and tiled paths and the tile height from free VRAM. The tile holds about a
   quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
   does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back after a run of calls that fit at it), because `cuMemGetInfo` reads far too low on a card a process has filled past about
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.

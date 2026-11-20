@@ -432,29 +432,10 @@ public sealed partial class CudaBackend
         const AttentionMaskSupport CW = AttentionMaskSupport.Causal | AttentionMaskSupport.Window;
         return
         [
-            // Causal prefill keeps 64: LLM prefill below that head dim has not been measured on cuDNN.
-            new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
-                {
-                    MinHeadDim = 64, MaxHeadDim = 256, Gqa = true, Masks = CW, MinQueryTokens = 2, UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Saturates = true,
-                    Lowering = AttentionLowering.Cast | AttentionLowering.MaterializeMask,
-                }, "F.2",
-                (in AttentionCall c) =>
-                {
-                    Tensor key = c.Key.Storage, value = c.Value.Storage;
-                    bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-                    int kvLen = c.Positions.KvLength, d = c.QkHeadDim;
-                    return c.Mask.Causal && c.QueryTokens > 1 && c.Batch == 1 && c.KeyTokens == kvLen
-                        && c.Logits.Softcap == 0f && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null
-                        && c.Query.DType == DType.F32 && c.Output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
-                        && _kernels is not null && _kernels.HasCausalMaskKernel
-                        && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d)
-                        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.For(DType.F32, c.Heads, c.KvHeads, d, new CudnnBias(1, 1, c.QueryTokens)),
-                            Environment.TickCount64)
-                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d) && SdpaCudnnOn;
-                },
-                (in AttentionCall c) => TryCausalPrefillSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Heads, c.KvHeads,
-                    c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale)),
+            // The engine's causal kernel goes first: it applies the causal rule and the window inside the kernel, so an
+            // eligible prefill builds no [Sq, Skv] mask, and it measured faster than cuDNN with one at every shape tried
+            // (RTX 3060; see docs/ATTENTION_CONTRACT.md). cuDNN keeps the calls it does not take: head dims other than 64
+            // and 128, fewer than 16 query rows, or numerics.fa2Prefill off.
             new DelegateAttentionRow(Cap("fa2.causal", E, AttentionDTypes.F32, AttentionDTypes.F32 | AttentionDTypes.F16, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = CW, MinQueryTokens = Fa2MinQueryRows, UsesQueryKey = AttentionFormats.F16,
@@ -480,6 +461,30 @@ public sealed partial class CudaBackend
                         c.QkHeadDim, c.Positions.KvLength, kvGroup <= 0 ? 1 : kvGroup, c.Positions.QueryOffset, c.Scale, c.Mask.LegacySlidingWindow, f16Kv);
                     return true;
                 }),
+            // cuDNN's fused engine with the causal rule as a materialized bias. It keeps 64 as its floor: LLM prefill below
+            // that head dim has not been measured on cuDNN.
+            new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+                {
+                    MinHeadDim = 64, MaxHeadDim = 256, Gqa = true, Masks = CW, MinQueryTokens = 2, UsesQueryKey = AttentionFormats.F16,
+                    UsesProbValue = AttentionFormats.F16, Saturates = true,
+                    Lowering = AttentionLowering.Cast | AttentionLowering.MaterializeMask,
+                }, "F.2",
+                (in AttentionCall c) =>
+                {
+                    Tensor key = c.Key.Storage, value = c.Value.Storage;
+                    bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
+                    int kvLen = c.Positions.KvLength, d = c.QkHeadDim;
+                    return c.Mask.Causal && c.QueryTokens > 1 && c.Batch == 1 && c.KeyTokens == kvLen
+                        && c.Logits.Softcap == 0f && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null
+                        && c.Query.DType == DType.F32 && c.Output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
+                        && _kernels is not null && _kernels.HasCausalMaskKernel
+                        && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d)
+                        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.For(DType.F32, c.Heads, c.KvHeads, d, new CudnnBias(1, 1, c.QueryTokens)),
+                            Environment.TickCount64)
+                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d) && SdpaCudnnOn;
+                },
+                (in AttentionCall c) => TryCausalPrefillSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Heads, c.KvHeads,
+                    c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale)),
             new DelegateAttentionRow(Cap("flash.decode", E, AttentionDTypes.F32, AttentionDTypes.F32 | AttentionDTypes.F16, HM) with
                 {
                     MaxHeadDim = 1024, Gqa = true, Masks = CW, LogitTerms = true, CaptureSafe = true,
