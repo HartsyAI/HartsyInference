@@ -149,6 +149,30 @@ public sealed class AttentionPreparationEvidenceTests
     }
 
     [CudaFact]
+    public void CudaTokenMajorCudnnOverF32StatesAndRecordsItsCasts()
+    {
+        const int heads = 2, sq = 6, skv = 9, dim = 64;
+        using IDisposable policy = Policy(cudnn: true).Push();
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        using Tensor q = new(new TensorShape(1, sq, heads, dim), DType.F32);
+        using Tensor k = new(new TensorShape(1, skv, heads, dim), DType.F32);
+        using Tensor v = new(k.Shape, DType.F32);
+        using Tensor output = new(q.Shape, DType.F32);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        AttentionCall call = AttentionCall.FromTokenMajor(output, q, k, v, null, heads, heads, dim, 0.125f, allowF16: true);
+        backend.Attention(in call);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        // The row declares no lowering, and casts its F32 operands all the same.
+        Assert.Equal("cudnn.tokenmajor", Ran(events));
+        AssertStatedPreparationRan(backend, in call, events);
+        Assert.Equal((q.ElementCount + k.ElementCount + v.ElementCount) * sizeof(ushort) + Bytes(output),
+            events.Where(e => e.Kind == AttentionEvidenceKind.Cast).Sum(e => e.Bytes));
+    }
+
+    [CudaFact]
     public void AnUnpinnedCallStagedIntoTheFlashEntryRecordsItsCopies()
     {
         const int heads = 4, sq = 1, skv = 10, dim = 32;

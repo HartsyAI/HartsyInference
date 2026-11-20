@@ -11,7 +11,8 @@ public static class AttentionPlanner
 {
     private static readonly ConcurrentDictionary<string, byte> ReportedFailures = new(StringComparer.Ordinal);
 
-    /// <summary>The row <see cref="Run"/> would try first, without launching anything.</summary>
+    /// <summary>The row <see cref="Run"/> would try first, without launching anything. A diagnostic: it asks every later
+    /// row for its admission and its statement, which <see cref="Run"/> never does, so it stays off the per-call path.</summary>
     public static AttentionPlan Plan(IReadOnlyList<AttentionKernelRow> rows, in AttentionCall call)
     {
         StringBuilder? declined = null;

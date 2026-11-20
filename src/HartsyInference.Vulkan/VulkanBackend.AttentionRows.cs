@@ -80,6 +80,7 @@ public sealed partial class VulkanBackend
         return AttentionExecution.PlanValidated(RowsFor(prepared.Route), in prepared);
     }
 
+    /// <summary>Bytes of a whole tensor, 0 for none: what the host-reference row's record and its statement both count.</summary>
     private static long TensorBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
 
     /// <summary>The scalar flash kernel computes in one type: each operand in another is cast to it and the output is cast
@@ -256,14 +257,12 @@ public sealed partial class VulkanBackend
                     {
                         // The whole tensor crosses to the host, whatever part of it a view addresses; the reference also
                         // reads the bias, the sinks and the ALiBi slopes there.
-                        long bytes = HostBytes(c.Query.Storage) + HostBytes(c.Key.Storage) + HostBytes(c.Value.Storage) + HostBytes(c.Output.Storage)
-                            + HostBytes(c.Mask.Bias) + HostBytes(c.Logits.Sinks) + HostBytes(c.Logits.AlibiSlopes);
+                        long bytes = TensorBytes(c.Query.Storage) + TensorBytes(c.Key.Storage) + TensorBytes(c.Value.Storage) + TensorBytes(c.Output.Storage)
+                            + TensorBytes(c.Mask.Bias) + TensorBytes(c.Logits.Sinks) + TensorBytes(c.Logits.AlibiSlopes);
                         int tensors = 4 + (c.Mask.Bias is null ? 0 : 1) + (c.Logits.Sinks is null ? 0 : 1) + (c.Logits.AlibiSlopes is null ? 0 : 1);
                         AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference", bytes, tensors);
                     }
                     return true;
-
-                    static long HostBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
                 },
                 static (in AttentionCall c) => new AttentionPreparationCost(HostReference: AttentionPreparationCost.Bytes(c.Query)
                     + AttentionPreparationCost.Bytes(c.Key) + AttentionPreparationCost.Bytes(c.Value) + AttentionPreparationCost.Bytes(c.Output)

@@ -33,26 +33,44 @@ public sealed class AttentionPreparationPlanTests
             Layouts = AttentionLayouts.HeadMajor, Lowering = lowering,
         }, null, (in AttentionCall _) => admits, static (in AttentionCall _) => true, preparation);
 
+    private static readonly AttentionCostFunc Nothing = static (in AttentionCall _) => AttentionPreparationCost.None;
+
     [Fact]
-    public void ARowWithNoLoweringStatesNoPreparation()
+    public void ARowThatStatesNoPreparationReportsZero()
     {
         using Operands operands = new();
         AttentionCall call = operands.Call;
-        AttentionPlan plan = AttentionPlanner.Plan([Row("native", AttentionLowering.None, null)], in call);
+        AttentionPlan plan = AttentionPlanner.Plan([Row("native", AttentionLowering.None, Nothing)], in call);
         Assert.Equal("native", plan.RowId);
         Assert.Equal(AttentionPreparationCost.None, plan.Preparation);
         Assert.Null(plan.Cheaper);
         Assert.Contains("prepares 0 B", plan.Describe());
     }
 
-    [Fact]
-    public void ARowThatDeclaresALoweringAndStatesNothingIsUnstated()
+    [Theory]
+    [InlineData(AttentionLowering.None)]
+    [InlineData(AttentionLowering.Cast)]
+    public void ARowGivenNoStatementIsUnstatedWhateverItDeclares(AttentionLowering declared)
     {
         using Operands operands = new();
         AttentionCall call = operands.Call;
-        AttentionPlan plan = AttentionPlanner.Plan([Row("casts", AttentionLowering.Cast, null)], in call);
+        AttentionPlan plan = AttentionPlanner.Plan([Row("row", declared, null)], in call);
         Assert.Null(plan.Preparation);
         Assert.Contains("prepares unstated", plan.Describe());
+    }
+
+    [Fact]
+    public void ARowThatDeclaresNoLoweringAndStatesNothingIsNeverReportedAsCheaper()
+    {
+        using Operands operands = new();
+        AttentionCall call = operands.Call;
+        // A row can cast or quantize without declaring it, so no declaration is not a statement of zero.
+        AttentionKernelRow[] rows =
+        [
+            Row("casts", AttentionLowering.Cast, static (in AttentionCall _) => new AttentionPreparationCost(Cast: 960)),
+            Row("undeclared", AttentionLowering.None, null),
+        ];
+        Assert.Null(AttentionPlanner.Plan(rows, in call).Cheaper);
     }
 
     [Fact]
@@ -64,7 +82,7 @@ public sealed class AttentionPreparationPlanTests
         [
             Row("casts", AttentionLowering.Cast, static (in AttentionCall _) => new AttentionPreparationCost(Cast: 960)),
             Row("masks", AttentionLowering.MaterializeMask, static (in AttentionCall _) => new AttentionPreparationCost(MaterializeMask: 60)),
-            Row("native", AttentionLowering.None, null),
+            Row("native", AttentionLowering.None, Nothing),
         ];
         AttentionPlan plan = AttentionPlanner.Plan(rows, in call);
         Assert.Equal("casts", plan.RowId);
@@ -84,7 +102,7 @@ public sealed class AttentionPreparationPlanTests
         [
             Row("casts", AttentionLowering.Cast, static (in AttentionCall _) => new AttentionPreparationCost(Cast: 960)),
             Row("unstated", AttentionLowering.Permute, null),
-            Row("refused", AttentionLowering.None, null, admits: false),
+            Row("refused", AttentionLowering.None, Nothing, admits: false),
             Row("more", AttentionLowering.Cast, static (in AttentionCall _) => new AttentionPreparationCost(Cast: 2000)),
         ];
         Assert.Null(AttentionPlanner.Plan(rows, in call).Cheaper);

@@ -5,7 +5,9 @@ namespace HartsyInference.Core.Backends.Attention;
 /// <summary>A planner's choice, its reason, and the rows ahead of it that declined.</summary>
 /// <param name="Preparation">What the chosen row expects to prepare for the call; null when it has not stated it.</param>
 /// <param name="Cheaper">A later row that covers and admits the call and states less preparation than the chosen one, with
-/// its statement. Reported only: the chosen row is the first that covers and admits, whatever this says.</param>
+/// its statement. Reported only: the chosen row is the first that covers and admits, whatever this says. Statements count
+/// what each row really copies, so two rows can differ for reasons other than the call: one casts a cache's whole
+/// capacity where another casts only its valid rows.</param>
 public readonly record struct AttentionPlan(AttentionKernelRow? Row, string? Variant, string Reason, string? Declined,
     AttentionPreparationCost? Preparation = null, string? Cheaper = null)
 {

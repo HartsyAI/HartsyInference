@@ -17,7 +17,7 @@ public abstract class AttentionKernelRow
     public virtual string? Variant(in AttentionCall call) => null;
 
     /// <summary>The preparation the row expects to run for <paramref name="call"/>, or null when the row has not stated
-    /// it. A row that declares no lowering states none by default; one that declares a lowering must say how much.</summary>
-    public virtual AttentionPreparationCost? Preparation(in AttentionCall call) =>
-        Capability.Lowering == AttentionLowering.None ? AttentionPreparationCost.None : null;
+    /// it. Null is the default, whatever the row declares: several rows that declare no lowering still cast or quantize,
+    /// so a row that prepares nothing says so with <see cref="AttentionPreparationCost.None"/> once that has been checked.</summary>
+    public virtual AttentionPreparationCost? Preparation(in AttentionCall call) => null;
 }

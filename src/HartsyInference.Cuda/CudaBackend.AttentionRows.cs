@@ -158,7 +158,7 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16,
                 CudnnSdpaRows.AnyView, gqa: true), "S.3",
                 (in AttentionCall c) => CudnnSdpaRows.Covers(in c) && CudnnReady(in c),
-                (in AttentionCall c) => TryCudnnSdpa(in c)),
+                (in AttentionCall c) => TryCudnnSdpa(in c), static (in AttentionCall _) => AttentionPreparationCost.None),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, gqa: true, strided: false) with
                 {
                     Saturates = true, Lowering = AttentionLowering.Cast,
@@ -245,8 +245,9 @@ public sealed partial class CudaBackend
 
     /// <summary>The materialized rows: BF16 operands are computed in F32 and an unmasked F32 call in F16 where that is
     /// allowed, each with a cast of Q, K, V and of the output back; the score matrix is built in the compute type; a
-    /// key-only mask is expanded to one row per query. A BF16 call whose scores exceed half of free memory runs
-    /// query-tiled instead and builds no full matrix; this states the common case.</summary>
+    /// key-only mask is expanded to one row per query. An unmasked BF16 call runs query-tiled instead, and builds no full
+    /// matrix, when its scores exceed half of free memory or <c>numerics.sdpaForceTiled</c> is set; this states the other
+    /// case and so overstates that one by the score matrix.</summary>
     private static AttentionPreparationCost MaterializedPreparation(in AttentionCall c, bool allowF16)
     {
         DType stored = c.Query.DType;
@@ -352,7 +353,8 @@ public sealed partial class CudaBackend
                     && (CudnnSdpaRows.HalfOperands(in c)
                         || (c.Query.DType == DType.F32 && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled))
                     && CudnnReady(in c),
-                (in AttentionCall c) => RunCudnnTokenMajor(in c)),
+                (in AttentionCall c) => RunCudnnTokenMajor(in c),
+                static (in AttentionCall c) => c.Query.DType == DType.F32 ? CudnnCastPreparation(in c) : AttentionPreparationCost.None),
             new DelegateAttentionRow(Cap("permute.dense", E, AnyFloat, AnyFloat, TM) with
                 {
                     MaxBatch = 1, Masks = AnyBias, Lowering = AttentionLowering.Permute,
@@ -518,7 +520,7 @@ public sealed partial class CudaBackend
                     FlashAttentionDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, c.KvGroup,
                         c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, c.Logits.Sinks, c.Mask.LegacySlidingWindow, c.Logits.AlibiSlopes);
                     return true;
-                }),
+                }, static (in AttentionCall _) => AttentionPreparationCost.None),
         ];
     }
 
