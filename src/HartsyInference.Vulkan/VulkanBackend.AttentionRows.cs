@@ -89,9 +89,20 @@ public sealed partial class VulkanBackend
         AttentionDtype(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage)));
 
     /// <summary>The cooperative-matrix kernel computes in F16: each operand in another type is cast to it and the output is
-    /// cast back. As for the scalar kernel, a weight served from the weight-cast cache is not cast again.</summary>
-    private static AttentionPreparationCost Cm2FlashPreparation(in AttentionCall c) =>
-        new(Cast: AttentionPreparationCost.CastsTo(in c, DType.F16));
+    /// cast back. The casts saturate, which keeps them out of the weight-cast cache, so each is made on every call. A
+    /// key-only mask is expanded to one row per query when there is more than one, as <see cref="WithRowsForCm2"/> does.</summary>
+    private static AttentionPreparationCost Cm2FlashPreparation(in AttentionCall c, int batch)
+    {
+        long expanded = 0;
+        if (c.Mask.Bias is { } mask && c.QueryTokens > 1
+            && AttentionMaskLayout.Of(mask, batch, c.Heads, c.QueryTokens, c.KeyTokens).RowStride == 0)
+        {
+            int rank = mask.Shape.Rank;
+            long maskHeads = rank >= 3 ? mask.Shape[rank - 3] : 1, maskBatch = rank == 4 ? mask.Shape[0] : 1;
+            expanded = maskBatch * maskHeads * c.QueryTokens * c.KeyTokens * sizeof(float);
+        }
+        return new(Cast: AttentionPreparationCost.CastsTo(in c, DType.F16), ExpandMask: expanded);
+    }
 
     /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
     private bool TokenMajorCm2Admits(in AttentionCall c)
@@ -135,7 +146,7 @@ public sealed partial class VulkanBackend
             new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
+                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast | AttentionLowering.ExpandMask, Saturates = true,
                 }, "A.1",
                 (in AttentionCall c) =>
                 {
@@ -151,7 +162,7 @@ public sealed partial class VulkanBackend
                         skv, headDim, new AttnStrides((uint)headDim, qHead, qHead * (uint)hq), new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
                         new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new AttnStrides((uint)headDim, qHead, qHead * (uint)hq));
                     return true;
-                }, static (in AttentionCall c) => Cm2FlashPreparation(in c)),
+                }, static (in AttentionCall c) => Cm2FlashPreparation(in c, c.Batch)),
             new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast, Saturates = true,
@@ -204,7 +215,7 @@ public sealed partial class VulkanBackend
             new DelegateAttentionRow(Cap("cm2.flash", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
                     MaxBatch = 1, MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
-                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
+                    UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast | AttentionLowering.ExpandMask, Saturates = true,
                 }, "B.1",
                 (in AttentionCall c) => TokenMajorCm2Admits(in c),
                 (in AttentionCall c) =>
@@ -215,7 +226,7 @@ public sealed partial class VulkanBackend
                         new AttnStrides(qRow, (uint)c.QkHeadDim, 0), new AttnStrides(kvRow, (uint)c.QkHeadDim, 0),
                         new AttnStrides(kvRow, (uint)c.QkHeadDim, 0), new AttnStrides(qRow, (uint)c.QkHeadDim, 0));
                     return true;
-                }, static (in AttentionCall c) => Cm2FlashPreparation(in c)),
+                }, static (in AttentionCall c) => Cm2FlashPreparation(in c, batch: 1)),
             new DelegateAttentionRow(Cap("permute.dense", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
                 {
                     // BF16 has no permute kernel: such operands are cast to F32 first and the output back.

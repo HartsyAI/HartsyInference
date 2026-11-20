@@ -319,6 +319,32 @@ public sealed class AttentionPreparationEvidenceTests
         Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.cm2.output")).Bytes);
     }
 
+    /// <summary>The cooperative-matrix kernel reads a mask row per query: a key-only mask is expanded, recorded and stated.
+    /// A device without that kernel serves the call another way, and this case then checks nothing.</summary>
+    [VulkanFact]
+    public void VulkanCm2FlashWithAKeyOnlyMaskStatesTheExpansionItRecords()
+    {
+        const int sq = 6, skv = 9;
+        using VulkanBackend backend = new();
+        using Tensor q = new(new TensorShape(1, 2, sq, 64), DType.F32);
+        using Tensor k = new(new TensorShape(1, 2, skv, 64), DType.F32);
+        using Tensor v = new(k.Shape, DType.F32);
+        using Tensor output = new(q.Shape, DType.F32);
+        using Tensor mask = new(new TensorShape(1, 1, 1, skv), DType.F32);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, q, k, v, mask, 0.2f, allowF16: true);
+        backend.Attention(in call);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        if (Ran(events) != "cm2.flash") return;
+        AssertStatedPreparationRan(backend, in call, events);
+        Assert.True(Declared(events, "cm2.flash").HasFlag(AttentionLowering.ExpandMask));
+        Assert.Equal((long)sq * skv * sizeof(float), Assert.Single(Of(events, AttentionEvidenceKind.ExpandMask, "vulkan.cm2.mask")).Bytes);
+        Assert.Equal((long)sq * skv * sizeof(float), backend.PlanAttention(in call).Preparation!.Value.ExpandMask);
+    }
+
     [VulkanFact]
     public void VulkanTokenMajorPermuteOverBf16DeclaresTheCastsItRecords()
     {
