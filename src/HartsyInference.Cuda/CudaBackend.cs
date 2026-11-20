@@ -3977,11 +3977,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// the activations-freeing release and teardown cover it.</summary>
     private HighWaterWorkspace[] Workspaces => [_int8V2Workspace];
 
-    /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing. A buffer
-    /// freed here must not be recorded into an open capture.</summary>
+    /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing. While the
+    /// stream still captures (an abort or end-capture that failed) the leases stay: a free issued now would be recorded
+    /// into that capture. They lapse when the graph is collected or the workspace next releases.</summary>
     private void ReleaseGraphLeases(CudaGraph graph)
     {
-        System.Diagnostics.Debug.Assert(!StreamIsCapturing(), "A graph's workspace leases are released outside any capture.");
+        if (StreamIsCapturing()) return;
         foreach (HighWaterWorkspace workspace in Workspaces) workspace.Release(graph);
     }
 
