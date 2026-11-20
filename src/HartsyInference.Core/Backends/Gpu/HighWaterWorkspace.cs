@@ -9,6 +9,9 @@ namespace HartsyInference.Core.Backends.Gpu;
 /// that uses the buffer during its capture takes a lease (<see cref="Use"/> with a lessee); growth and release then retire
 /// a leased buffer instead of freeing it, and it is freed when its last lessee calls <see cref="Release"/>. A buffer no
 /// graph leases is freed before its replacement is allocated, so growth near the memory limit needs only the new size.
+/// <para>A lease holds its lessee weakly, so it does not keep an abandoned graph alive. A lessee that was collected
+/// without releasing can never replay, and its lease lapses the next time the workspace grows or releases; the buffer is
+/// freed then, under the owner's lock, never from a finalizer.</para>
 /// The owner serializes every call (a backend's op lock); only <see cref="Bytes"/> may be read without it.
 /// </remarks>
 internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulong> free)
@@ -17,7 +20,35 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
     {
         public readonly ulong Pointer = pointer;
         public readonly long Bytes = bytes;
-        public readonly HashSet<object> Lessees = new(ReferenceEqualityComparer.Instance);
+        private readonly List<WeakReference<object>> _lessees = [];
+
+        /// <summary>Live lessees, after dropping the ones that were collected.</summary>
+        public int Leases
+        {
+            get
+            {
+                _lessees.RemoveAll(static lease => !lease.TryGetTarget(out _));
+                return _lessees.Count;
+            }
+        }
+
+        public void Lease(object lessee)
+        {
+            if (IndexOf(lessee) < 0) _lessees.Add(new WeakReference<object>(lessee));
+        }
+
+        public void Release(object lessee)
+        {
+            int index = IndexOf(lessee);
+            if (index >= 0) _lessees.RemoveAt(index);
+        }
+
+        private int IndexOf(object lessee)
+        {
+            for (int i = 0; i < _lessees.Count; i++)
+                if (_lessees[i].TryGetTarget(out object? held) && ReferenceEquals(held, lessee)) return i;
+            return -1;
+        }
     }
 
     private readonly List<Block> _retired = [];
@@ -28,9 +59,10 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
     public long Bytes => Volatile.Read(ref _bytes);
 
     /// <summary>The smallest size that did not fit since <see cref="ReleaseCurrent"/> last ran; such a size is not retried.</summary>
-    public long GrowthFailedAt { get; set; } = long.MaxValue;
+    public long GrowthFailedAt { get; internal set; } = long.MaxValue;
 
-    /// <summary>Bytes of retired buffers that live graphs still lease.</summary>
+    /// <summary>Bytes of retired buffers kept for a lessee. A buffer whose lessee was collected still counts until the
+    /// workspace next grows or releases.</summary>
     public long RetainedBytes
     {
         get
@@ -41,13 +73,16 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
         }
     }
 
+    /// <summary>Live graphs that lease the current buffer.</summary>
+    public int CurrentLeases => _current?.Leases ?? 0;
+
     /// <summary>The current buffer when it holds at least <paramref name="bytes"/>, else 0. A non-null
     /// <paramref name="lessee"/> (the graph being captured) takes a lease on the buffer it is handed.</summary>
     public ulong Use(long bytes, object? lessee)
     {
         Block? current = _current;
         if (current is null || bytes > current.Bytes) return 0;
-        if (lessee is not null) current.Lessees.Add(lessee);
+        if (lessee is not null) current.Lease(lessee);
         return current.Pointer;
     }
 
@@ -58,8 +93,9 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bytes);
         if (bytes >= GrowthFailedAt) return 0;
+        FreeUnleasedRetired();
         Block? old = _current;
-        bool keepOld = old is { Lessees.Count: > 0 };
+        bool keepOld = old is { Leases: > 0 };
         if (old is not null && !keepOld)
         {
             // Free first: old and new together are what fails near the memory limit.
@@ -82,17 +118,12 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
     }
 
     /// <summary>Drops every lease <paramref name="lessee"/> holds (its graph was disposed, reset or never finished
-    /// capturing) and frees each retired buffer that leaves without a lessee.</summary>
+    /// capturing) and frees each retired buffer left without a lessee.</summary>
     public void Release(object lessee)
     {
-        _current?.Lessees.Remove(lessee);
-        for (int i = _retired.Count - 1; i >= 0; i--)
-        {
-            Block block = _retired[i];
-            if (!block.Lessees.Remove(lessee) || block.Lessees.Count > 0) continue;
-            _retired.RemoveAt(i);
-            free(block.Pointer);
-        }
+        _current?.Release(lessee);
+        foreach (Block block in _retired) block.Release(lessee);
+        FreeUnleasedRetired();
     }
 
     /// <summary>Gives the current buffer back (activations are being freed) and lets a size that did not fit try again.
@@ -101,10 +132,12 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
     {
         GrowthFailedAt = long.MaxValue;
         Block? old = _current;
-        if (old is null) return;
-        SetCurrent(null);
-        if (old.Lessees.Count > 0) _retired.Add(old);
-        else free(old.Pointer);
+        if (old is not null)
+        {
+            SetCurrent(null);
+            _retired.Add(old);
+        }
+        FreeUnleasedRetired();
     }
 
     /// <summary>Forgets every buffer, leased or not, and returns their pointers for the owner to free at teardown.</summary>
@@ -116,6 +149,17 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
         _retired.Clear();
         SetCurrent(null);
         return [.. pointers];
+    }
+
+    private void FreeUnleasedRetired()
+    {
+        for (int i = _retired.Count - 1; i >= 0; i--)
+        {
+            Block block = _retired[i];
+            if (block.Leases > 0) continue;
+            _retired.RemoveAt(i);
+            free(block.Pointer);
+        }
     }
 
     private void SetCurrent(Block? block)

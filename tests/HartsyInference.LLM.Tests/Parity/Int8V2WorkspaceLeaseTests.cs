@@ -74,13 +74,39 @@ public sealed class Int8V2WorkspaceLeaseTests
         backend.Sync();
         Assert.True(backend.StepGraphReady);
         Assert.Equal(2, backend.Int8AttentionV2ExecutionCount);
+        Assert.Equal(1, backend.Int8V2WorkspaceLeases);
 
         backend.ScaledDotProductAttention(grown, large.Query, large.Key, large.Value, null, Scale);
         backend.Sync();
 
         Assert.False(backend.StepGraphReady);
         Assert.Equal(0, backend.Int8V2WorkspaceRetainedBytes);
+        Assert.Equal(0, backend.Int8V2WorkspaceLeases);
         Assert.Equal(3, backend.Int8AttentionV2ExecutionCount);
+    }
+
+    [CudaFact]
+    public void ACaptureThatFailsReleasesWhatItLeased()
+    {
+        using IDisposable policy = Policy().Push();
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        using Operands small = new(backend, SmallTokens, seed: 12), large = new(backend, LargeTokens, seed: 13);
+        using Tensor warm = new(small.Query.Shape, DType.F32);
+        using Tensor captured = new(small.Query.Shape, DType.F32);
+        using Tensor grown = new(large.Query.Shape, DType.F32);
+        backend.ScaledDotProductAttention(warm, small.Query, small.Key, small.Value, null, Scale);
+        backend.Sync();
+
+        Assert.Throws<InvalidOperationException>(() => backend.CaptureGraph(() =>
+        {
+            backend.ScaledDotProductAttention(captured, small.Query, small.Key, small.Value, null, Scale);
+            throw new InvalidOperationException("recording failed after an INT8 v2 call was captured");
+        }));
+
+        Assert.Equal(0, backend.Int8V2WorkspaceLeases);
+        backend.ScaledDotProductAttention(grown, large.Query, large.Key, large.Value, null, Scale);
+        backend.Sync();
+        Assert.Equal(0, backend.Int8V2WorkspaceRetainedBytes);
     }
 
     private static KnobProfile Policy() => KnobProfile.Create("int8v2-workspace-lease")

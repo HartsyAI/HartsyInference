@@ -3973,8 +3973,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The graph being captured now: it leases any persistent workspace a captured call bakes into it.</summary>
     private CudaGraph? CapturingGraph => _stepGraphCapturing ? _stepGraph : _capturingGraph;
 
-    /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing.</summary>
-    private void ReleaseGraphLeases(CudaGraph graph) => _int8V2Workspace.Release(graph);
+    /// <summary>Every persistent leased workspace of this backend: the one place a new one is added, so graph release,
+    /// the activations-freeing release and teardown cover it.</summary>
+    private HighWaterWorkspace[] Workspaces => [_int8V2Workspace];
+
+    /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing. A buffer
+    /// freed here must not be recorded into an open capture.</summary>
+    private void ReleaseGraphLeases(CudaGraph graph)
+    {
+        System.Diagnostics.Debug.Assert(!StreamIsCapturing(), "A graph's workspace leases are released outside any capture.");
+        foreach (HighWaterWorkspace workspace in Workspaces) workspace.Release(graph);
+    }
 
     public bool SupportsF16Activations => true;
 
@@ -8383,9 +8392,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
         finally
         {
+            // Nothing can launch a disposed graph, even one whose dispose failed part way, so its leases and arena go.
             ReleaseGraphLeases(graph);
+            GpuTransferHelper.FreeGraphArena(graph.ArenaBase);
         }
-        GpuTransferHelper.FreeGraphArena(graph.ArenaBase);
     }
 
     /// <summary>Validates FlashAttention geometry before either the CUDA kernel or CPU reference can index it.</summary>
@@ -9051,7 +9061,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     protected override void OnActivationsFreeing()
     {
         StepGraphInvalidateForActivationFree();
-        ReleaseInt8V2Workspace();
+        foreach (HighWaterWorkspace workspace in Workspaces) workspace.ReleaseCurrent();
     }
 
     private void StepGraphInvalidateForActivationFree()
@@ -9309,12 +9319,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ulong ssmScratch = _ssmDeltaScratch;
             _ssmDeltaScratch = 0;
             _ssmDeltaScratchBytes = 0;
-            ulong[] int8V2Workspaces = _int8V2Workspace.Detach();
+            ulong[] workspaceBuffers = [.. Workspaces.SelectMany(static workspace => workspace.Detach())];
             if (state is not null)
             {
                 if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
-                foreach (ulong int8V2Workspace in int8V2Workspaces)
-                    Attempt("INT8 attention v2 workspace", () => GpuTransferHelper.FreeDevice(state, int8V2Workspace));
+                foreach (ulong workspaceBuffer in workspaceBuffers)
+                    Attempt("persistent workspace", () => GpuTransferHelper.FreeDevice(state, workspaceBuffer));
                 if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
                 if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
                 Attempt("W8A8 caches", () => FreeW8A8Cache(state));

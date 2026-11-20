@@ -88,6 +88,35 @@ public sealed class HighWaterWorkspaceTests
     }
 
     [Fact]
+    public void ALeaseDoesNotKeepItsGraphAliveAndLapsesWhenTheGraphIsCollected()
+    {
+        FakeDevice device = new();
+        HighWaterWorkspace workspace = device.Workspace();
+        ulong captured = workspace.Grow(256);
+        WeakReference graph = LeaseFromAnAbandonedGraph(workspace);
+        Assert.Equal(1, workspace.CurrentLeases);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.False(graph.IsAlive);
+        Assert.Equal(0, workspace.CurrentLeases);
+        // Nothing can replay the collected graph, so growth frees its buffer first, as for an unleased one.
+        workspace.Grow(1024);
+        Assert.DoesNotContain(captured, device.Live);
+        Assert.Equal(["alloc 256", "free", "alloc 1024"], device.Log);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference LeaseFromAnAbandonedGraph(HighWaterWorkspace workspace)
+    {
+        object graph = new();
+        workspace.Use(256, graph);
+        return new WeakReference(graph);
+    }
+
+    [Fact]
     public void ABufferTwoGraphsUsedIsFreedAfterBothRelease()
     {
         FakeDevice device = new();
