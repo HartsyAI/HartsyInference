@@ -1992,6 +1992,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype, saturate: true);
         (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype, saturate: true);
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype, saturate: true);
+        RecordAttentionCasts("vulkan.flash", dtype, query, qOwned, key, kOwned, value, vOwned, output);
 
         VulkanBuffer? maskBuf = null;
         AttentionMaskLayout maskLayout = default;
@@ -2155,6 +2156,21 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return group;
     }
 
+    /// <summary>Records the operand casts an attention path just made and the cast of its output back to the output's type.
+    /// <see cref="CastIfNeeded"/> hands back an owned buffer only when it cast, so an operand already in the compute type,
+    /// or served from the weight-cast cache, is not counted.</summary>
+    private static void RecordAttentionCasts(string site, DType compute, Tensor query, VulkanBuffer? qOwned, Tensor key, VulkanBuffer? kOwned,
+        Tensor value, VulkanBuffer? vOwned, Tensor output)
+    {
+        if (!AttentionEvidence.Enabled) return;
+        int casts = (qOwned is null ? 0 : 1) + (kOwned is null ? 0 : 1) + (vOwned is null ? 0 : 1);
+        if (casts > 0)
+            AttentionEvidence.Observed(AttentionEvidenceKind.Cast, site + ".inputs", ((qOwned is null ? 0 : query.ElementCount)
+                + (kOwned is null ? 0 : key.ElementCount) + (vOwned is null ? 0 : value.ElementCount)) * compute.SizeInBytes, casts);
+        if (output.DType != compute)
+            AttentionEvidence.Observed(AttentionEvidenceKind.Cast, site + ".output", output.DType.ComputeByteCount(output.ElementCount));
+    }
+
     /// <summary>A key-only mask with its row repeated for every query, as <c>[1|B, 1|H, Sq, Skv]</c>: the layout the cm2 kernel
     /// and the naive path's mask_add read.</summary>
     private static unsafe Tensor ExpandKeyOnlyMask(Tensor mask, long sq, long skv)
@@ -2196,6 +2212,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype, saturate: true);
         (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype, saturate: true);
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype, saturate: true);
+        RecordAttentionCasts("vulkan.naive", dtype, query, qOwned, key, kOwned, value, vOwned, output);
 
         // Mask is always FP32 in the model code (CLIP causal mask). Keep it as F32 — the mask_add
         // kernel widens the score before adding regardless of score dtype.
@@ -2206,6 +2223,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         AttentionMaskLayout maskLayout = default;
         using Tensor? expandedMask = mask is not null && Sq > 1 && AttentionMaskLayout.Of(mask, B, H, Sq, Skv).RowStride == 0
             ? ExpandKeyOnlyMask(mask, Sq, Skv) : null;
+        if (expandedMask is not null) AttentionEvidence.Payload(AttentionEvidenceKind.ExpandMask, "vulkan.naive.mask", expandedMask);
         mask = expandedMask ?? mask;
         if (mask is not null)
         {
@@ -2237,6 +2255,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer scoresBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
         VulkanBuffer probsBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
         AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.naive.scores", 2 * (long)scoresElems * dtype.SizeInBytes, count: 2);
+        AttentionEvidence.Observed(AttentionEvidenceKind.MaterializeScores, "vulkan.naive.scores", (long)scoresElems * dtype.SizeInBytes);
 
         // Output buffer (dtype)
         ulong outElems = (ulong)(B * H * Sq * D);

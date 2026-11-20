@@ -245,7 +245,13 @@ public sealed partial class VulkanBackend
                         : c.Logits.Softcap != 0f ? "Flash with softcap" : c.Logits.Sinks is not null ? "Flash with sinks outside the wide row"
                         : "Flash at a head dim past the flash tile");
                     AttentionHostReference.Run(in c);
+                    if (AttentionEvidence.Enabled)
+                        AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference",
+                            HostBytes(c.Query) + HostBytes(c.Key) + HostBytes(c.Value) + HostBytes(c.Output), count: 4);
                     return true;
+
+                    // The whole tensor crosses to the host, whatever part of it the view addresses.
+                    static long HostBytes(in AttentionOperand operand) => operand.Storage.DType.ComputeByteCount(operand.Storage.ElementCount);
                 }),
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {

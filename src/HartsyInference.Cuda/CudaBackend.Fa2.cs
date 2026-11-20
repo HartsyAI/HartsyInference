@@ -35,6 +35,7 @@ public sealed partial class CudaBackend
                 kTmp = GpuTransferHelper.AllocateDevice(bytes);
                 vTmp = GpuTransferHelper.AllocateDevice(bytes);
                 AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.fa2.kv.f16", 2 * (long)bytes, count: 2);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.fa2.kv.f16", 2 * (long)bytes, count: 2);
                 _kernels!.LaunchKvToF16(kTmp, vTmp, pK, pV, b * hkv, kvLen, keyStride, d, _stream.Handle);
                 kUse = kTmp;
                 vUse = vTmp;
