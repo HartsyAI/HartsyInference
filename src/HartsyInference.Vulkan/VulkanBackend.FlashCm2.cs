@@ -106,11 +106,23 @@ public sealed partial class VulkanBackend
             // The permutes have no BF16 kernel, and BF16 has more range than F16: permute F32 copies and compute in F32.
             Tensor q32 = F32Copy(query), k32 = F32Copy(key), v32 = F32Copy(value);
             Tensor o32 = output.DType == DType.F32 ? output : new Tensor(output.Shape, DType.F32);
+            if (AttentionEvidence.Enabled)
+            {
+                bool q = !ReferenceEquals(q32, query), k = !ReferenceEquals(k32, key), v = !ReferenceEquals(v32, value);
+                long elements = (q ? query.ElementCount : 0) + (k ? key.ElementCount : 0) + (v ? value.ElementCount : 0);
+                if (elements > 0)
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "vulkan.permute.bf16.inputs", elements * sizeof(float),
+                        (q ? 1 : 0) + (k ? 1 : 0) + (v ? 1 : 0));
+            }
             try
             {
                 AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale,
                     numerics with { LegacyAssertedBounded = false });
-                if (!ReferenceEquals(o32, output)) CastToBf16(output, o32);
+                if (!ReferenceEquals(o32, output))
+                {
+                    CastToBf16(output, o32);
+                    AttentionEvidence.Payload(AttentionEvidenceKind.Cast, "vulkan.permute.bf16.output", output);
+                }
             }
             finally
             {
@@ -169,6 +181,7 @@ public sealed partial class VulkanBackend
         int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os)
     {
         using Tensor? expanded = WithRowsForCm2(mask, batch, hq, sq, skv);
+        if (expanded is not null) AttentionEvidence.Payload(AttentionEvidenceKind.ExpandMask, "vulkan.cm2.mask", expanded);
         mask = expanded ?? mask;
         Span<byte> pc = stackalloc byte[(mask is null ? 17 : 20) * 4];
         WriteFlashCm2Common(pc, hq, hkv, sq, skv, scale, qs, ks, vs, os);
@@ -221,10 +234,7 @@ public sealed partial class VulkanBackend
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16, saturate: true);
         VulkanBuffer? maskBuf = mask is null ? null : GetBuffer(mask);
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * DType.F16.SizeInBytes));
-        int casts = (qOwned is null ? 0 : 1) + (kOwned is null ? 0 : 1) + (vOwned is null ? 0 : 1);
-        if (casts > 0)
-            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.cm2.casts", ((qOwned is null ? 0 : query.ElementCount)
-                + (kOwned is null ? 0 : key.ElementCount) + (vOwned is null ? 0 : value.ElementCount)) * DType.F16.SizeInBytes, casts);
+        RecordAttentionCasts("vulkan.cm2", DType.F16, query, qOwned, key, kOwned, value, vOwned, workspaceSite: "vulkan.cm2.casts");
         try
         {
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
@@ -240,6 +250,7 @@ public sealed partial class VulkanBackend
                 : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, (uint)((sq + FlashCm2QueryTile - 1) / FlashCm2QueryTile), (uint)hq, (uint)batch);
             CacheOutputCastingFrom(output, outBuf, DType.F16, "sdpa_flash_cm2");
+            RecordAttentionOutputCast("vulkan.cm2", DType.F16, output);
         }
         catch (Exception ex)
         {

@@ -120,6 +120,7 @@ public sealed partial class AttentionLayer
         to.Fill(float.NegativeInfinity);
         long rowCount = from.Length / width;
         for (long r = 0; r < rowCount; r++) from.Slice((int)(r * width), (int)width).CopyTo(to.Slice((int)(r * keyRows), (int)width));
+        AttentionEvidence.Payload(AttentionEvidenceKind.ExpandMask, "attention.kv.bias", widened);
         return widened;
     }
 
