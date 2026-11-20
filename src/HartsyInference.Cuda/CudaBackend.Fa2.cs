@@ -71,13 +71,11 @@ public sealed partial class CudaBackend
         int chunk = (keySpan + splits - 1) / splits;
         splits = (keySpan + chunk - 1) / chunk;
         long n = (long)b * hq;
-        ulong pM = 0, pL = 0, pAcc = 0;
+        DecodePartials partials = default;
         try
         {
-            pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-            pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-            pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
-            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.decode.partials", n * splits * (d + 2) * sizeof(float), count: 3);
+            partials = RentDecodePartials(n, splits, d, "cuda.flash.decode.partials");
+            ulong pM = partials.M, pL = partials.L, pAcc = partials.Acc;
             _kernels!.LaunchFlashDecodeGqa(pM, pL, pAcc, pQ, pK, pV, b, hq, d, hkv, keyStride, kvLen, kvGroup, qOffset, scale, softcap, window,
                 splits, chunk, devicePos, f16Kv, _stream.Handle);
             if (sidecar.Xq != 0)
@@ -87,9 +85,7 @@ public sealed partial class CudaBackend
         }
         finally
         {
-            GpuTransferHelper.FreeDevice(pM);
-            GpuTransferHelper.FreeDevice(pL);
-            GpuTransferHelper.FreeDevice(pAcc);
+            ReturnDecodePartials(in partials);
         }
     }
 

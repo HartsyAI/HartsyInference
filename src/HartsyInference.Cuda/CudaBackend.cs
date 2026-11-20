@@ -3975,7 +3975,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Every persistent leased workspace of this backend: the one place a new one is added, so graph release,
     /// the activations-freeing release and teardown cover it.</summary>
-    private HighWaterWorkspace[] Workspaces => [_int8V2Workspace];
+    private HighWaterWorkspace[] Workspaces => [_int8V2Workspace, _decodePartials];
 
     /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing. While the
     /// stream still captures (an abort or end-capture that failed) the leases stay: a free issued now would be recorded
@@ -7849,13 +7849,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 int chunk = (kvLen + splits - 1) / splits;
                 splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
                 long n = baseBlocks;
-                ulong pM = 0, pL = 0, pAcc = 0;
+                DecodePartials partials = default;
                 try
                 {
-                    pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
-                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.split.partials", n * splits * (d + 2) * sizeof(float), count: 3);
+                    partials = RentDecodePartials(n, splits, d, "cuda.flash.split.partials");
+                    ulong pM = partials.M, pL = partials.L, pAcc = partials.Acc;
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle,
                         softcap: softcap, slidingWindow: slidingWindow, f16Kv: f16Kv);
@@ -7863,7 +7861,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
                 finally
                 {
-                    GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
+                    ReturnDecodePartials(in partials);
                 }
             }
             else if (f16Kv)
@@ -8113,13 +8111,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             {
                 t_attentionRoute = "V.3";
                 long n = baseBlocks;
-                ulong pM = 0, pL = 0, pAcc = 0;
+                DecodePartials partials = default;
                 try
                 {
-                    pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
-                    pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
-                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.split.partials", n * splits * (d + 2) * sizeof(float), count: 3);
+                    partials = RentDecodePartials(n, splits, d, "cuda.flash.split.partials");
+                    ulong pM = partials.M, pL = partials.L, pAcc = partials.Acc;
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow,
                         f16Kv: devF16Kv);
@@ -8132,7 +8128,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
                 finally
                 {
-                    GpuTransferHelper.FreeDevice(pM); GpuTransferHelper.FreeDevice(pL); GpuTransferHelper.FreeDevice(pAcc);
+                    ReturnDecodePartials(in partials);
                 }
             }
             else
