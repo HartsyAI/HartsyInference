@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -39,10 +40,23 @@ public sealed class WanVideoRecipe : IVideoRecipe
     private readonly string _familyId;
 
     /// <summary>Binds the recipe to one Wan family id. The catalog slug "wan" derives the config from the weights; a compat-class id ("wan-22-5b" / "wan-21-1_3b" / "wan-21-14b") selects the matching preset instead.</summary>
-    public WanVideoRecipe(string familyId = "wan") => _familyId = familyId;
+    public WanVideoRecipe(string familyId = "wan")
+    {
+        _familyId = familyId;
+        // The guide states on-screen text for Wan 2.1 only, so the ids that can carry 2.2 weights do not claim it.
+        Prompt = new()
+        {
+            Kind = "video", Encoders = ["t5"], Format = "text", Negative = "separate",
+            Supports = familyId is Wan21_1_3BCompatClassId or Wan21_14BCompatClassId ? ["text-rendering"] : [],
+            Guide = "docs/prompting/wan.md",
+        };
+    }
 
     /// <inheritdoc/>
     public string Name => _familyId;
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; }
 
 
     /// <inheritdoc/>

@@ -9,6 +9,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Lance (image) recipe — ByteDance's 3B unified multimodal model, which ships as a FOLDER checkpoint (model.safetensors or shards + llm_config.json + the Qwen2 tokenizer files). The Wan2.2 48-channel VAE (<see cref="SideModels.Wan22Vae"/>) resolves as a side model. Lifted from the SwarmUI backend's <c>LanceLoader</c> (image half only; the video variant is a separate family) and driven through <see cref="LanceImageRecipePipeline"/>.</summary>
@@ -17,6 +18,12 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "lance-image";
 
+    /// <inheritdoc/>
+    /// <remarks>No guide covers Lance.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Img2img only, deliberately: LanceImagePipeline throws on a mask because the Wan2.2 VAE's 16x

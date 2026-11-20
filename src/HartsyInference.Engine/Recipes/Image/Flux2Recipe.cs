@@ -16,6 +16,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -29,6 +30,12 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "flux2";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Negative = "none",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/flux-2.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Flux.2's BN-style latent normalization is applied at the pipeline boundary; the encode-side inverse already lives in Flux2Pipeline.

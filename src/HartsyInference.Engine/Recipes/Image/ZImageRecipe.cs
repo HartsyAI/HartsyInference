@@ -14,6 +14,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -22,6 +23,20 @@ public sealed class ZImageRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "zimage";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Supports = ["text-rendering"],
+        Guide = "docs/prompting/z-image.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(ZImageVariants.Base) ? Prompt! with { Negative = "separate" }
+        : variant.Is(ZImageVariants.Turbo) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Z-Image shares the Flux VAE; the encoder is constructed alongside the decoder and ZImagePipeline implements the masked path.</remarks>

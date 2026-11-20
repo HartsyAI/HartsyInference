@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -32,6 +33,13 @@ public sealed class Flux3Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => "flux3";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Negative = "none",
+        Supports = ["boxes", "text-rendering"], Boxes = "yxyx-1000", Guide = "docs/prompting/flux-3.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Regional prompts become the model's own layout table (<see cref="LayoutPromptBuilder"/>) rather than an

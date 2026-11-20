@@ -14,6 +14,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -29,6 +30,12 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "ernie-image";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Supports = ["regions", "text-rendering"],
+        Guide = "docs/prompting/ernie-image.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>ERNIE-Image shares the Flux.2 VAE; the encoder half is built alongside the decoder.

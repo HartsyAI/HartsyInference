@@ -16,6 +16,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -24,6 +25,13 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "flux1";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip", "t5"], Format = "text", Negative = "none",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/flux-1.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Wiring the VAE encoder also makes FLUX.1 Fill reachable: <see cref="FluxPipeline"/> requires a mask for
