@@ -1,6 +1,8 @@
 // Materialized attention softmax. Add the public F32 bias without narrowing or clamping it.
-// All -infinity rows produce zero probabilities; NaN and +infinity scores propagate NaN. Finite rows reproduce the
-// legacy softmax_f32/_f16 arithmetic bit for bit (same block size, reduction order, ex2.approx and rcp.approx).
+// All -infinity rows produce zero probabilities; NaN and +infinity scores propagate NaN. On finite rows the softmax
+// itself reproduces the legacy softmax_f32/_f16 arithmetic bit for bit (same block size, reduction order, ex2.approx
+// and rcp.approx). A biased F16 row does not reproduce the old add-then-softmax pipeline, which clamped the bias to
+// the F16 range and added it in F16.
 // One 256-thread block per row; dynamic shared memory is blockDim.x * sizeof(float).
 // Build: ./build.sh (pinned NVRTC, sm_80 baseline and sm_75 floor).
 #include <cuda_fp16.h>
