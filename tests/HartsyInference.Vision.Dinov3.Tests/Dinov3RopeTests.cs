@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Dinov3;
+using HartsyInference.Vision.Dinov2;
 using Xunit;
 
 namespace HartsyInference.Vision.Dinov3.Tests;
@@ -20,6 +21,29 @@ public sealed unsafe class Dinov3RopeTests
             double exact = Math.Pow(100.0, 2.0 * k / 32.0);
             Assert.True(Math.Abs(periods[k] - exact) <= exact / 128.0, $"period {k}: {periods[k]} vs {exact}");
         }
+    }
+
+    [Fact]
+    public void Periods_CanStayInFloat32_AsHuggingFaceKeepsThem()
+    {
+        float[] rounded = Dinov3RopeTables.Periods(64), exact = Dinov3RopeTables.Periods(64, roundToBf16: false);
+
+        for (int k = 0; k < 16; k++)
+        {
+            Assert.Equal((float)Math.Pow(100.0, 2.0 * k / 32.0), exact[k], 3);
+            Assert.Equal(Dinov3RopeTables.RoundToBf16(exact[k]), rounded[k]);
+        }
+
+        Assert.Contains(Enumerable.Range(0, 16), k => rounded[k] != exact[k]);
+    }
+
+    [Fact]
+    public void OnlyTheHugePlusPresetKeepsFloat32Periods()
+    {
+        Assert.False(Dinov2Preset.V3HugePlus16.RoundRopePeriodsToBf16);
+        Assert.True(Dinov2Preset.V3Large16.RoundRopePeriodsToBf16);
+        Assert.True(Dinov2Preset.V3Base16.RoundRopePeriodsToBf16);
+        Assert.True(Dinov2Preset.V3Small16.RoundRopePeriodsToBf16);
     }
 
     [Theory]

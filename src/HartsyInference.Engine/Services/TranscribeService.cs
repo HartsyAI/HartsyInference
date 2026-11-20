@@ -7,7 +7,10 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock; a lease hands the same resident runner to a caller that passes PCM and gates the device itself. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
+/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the
+/// shared audio device under the generation lock; a lease hands the same resident runner to a caller that passes PCM
+/// and gates the device itself. Whisper times words by cross-attention alignment (see <see cref="BuildWords"/>) and
+/// diarization comes from <see cref="SpeakerDiarizer"/>.</summary>
 public sealed class TranscribeService : ITranscribeService
 {
     private readonly InferenceEngine _engine;
@@ -39,6 +42,12 @@ public sealed class TranscribeService : ITranscribeService
             IReadOnlyList<SpeechWindow> windows = LongFormTranscription.Plan(audio, descriptor.InputSampleRate, runner.MaxInputSeconds);
             long started = Environment.TickCount64;
             bool timed = request.WordTimestamps || request.Diarization;
+            if (request.WordTimestamps && !string.IsNullOrWhiteSpace(request.AlignText) && windows.Count > 1)
+            {
+                throw new ArgumentException(
+                    $"Known text is aligned within one {runner.MaxInputSeconds:0}-second window, but the clip needs {windows.Count}.",
+                    nameof(request));
+            }
 
             IReadOnlyList<SttSegment>? segments = null;
             string text;
@@ -63,7 +72,7 @@ public sealed class TranscribeService : ITranscribeService
                 ct.ThrowIfCancellationRequested();
 
                 // A timestamped decode already produced the text; re-running the plain decode would double the cost.
-                text = segments is { Count: > 0 } ? string.Join(" ", segments.Select(segment => segment.Text))
+                text = segments is { Count: > 0 } ? SttSegment.Join(segments)
                     : runner.Transcribe(backend, audio, request);
             }
             ct.ThrowIfCancellationRequested();
@@ -145,7 +154,7 @@ public sealed class TranscribeService : ITranscribeService
         }
         else if (segments.Count == 0)
         {
-            Logs.Warning($"[Audio][STT] '{repo}' produced no well-formed timestamp pair — returning Words = null.");
+            Logs.Warning($"[Audio][STT] '{repo}' produced no timed span (no speech, or no well-formed timestamp pair) — returning Words = null.");
         }
     }
 
@@ -164,7 +173,10 @@ public sealed class TranscribeService : ITranscribeService
         return (descriptor, descriptor.ResolveRepo(selector.Variant));
     }
 
-    /// <summary>Projects the model's timestamp spans onto <see cref="WordSegment"/>s. <b>These are segment-level, not word-level:</b> Whisper's <c>&lt;|t|&gt;</c> tokens delimit phrases, and true word alignment would need cross-attention DTW, which the decoder does not expose — so <see cref="WordSegment.Word"/> carries the whole span's text. Speaker indices are filled from the diarized span with the largest time overlap.</summary>
+    /// <summary>Projects the model's timed spans onto <see cref="WordSegment"/>s. A Whisper-family model returns true
+    /// words; a model with only phrase timestamps would carry the whole span's text in
+    /// <see cref="WordSegment.Word"/>. Speaker indices are filled from the diarized span with the largest time
+    /// overlap.</summary>
     private static IReadOnlyList<WordSegment>? BuildWords(IReadOnlyList<SttSegment>? segments,
         IReadOnlyList<DiarizedSegment>? speakers)
     {
@@ -177,7 +189,7 @@ public sealed class TranscribeService : ITranscribeService
         {
             words.Add(new WordSegment
             {
-                Word = segment.Text,
+                Word = segment.Text.Trim(),
                 Start = segment.Start,
                 End = segment.End,
                 Speaker = SpeakerFor(segment, speakers),

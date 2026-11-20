@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -18,6 +19,6 @@ public interface ITrellis2ShapeFlowStage
         Tensor cond,
         Tensor negCond,
         int seed,
-        Trellis2SamplerParams parameters,
+        FlowSamplerParams parameters,
         Action<int>? onStep);
 }

@@ -277,6 +277,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> SpeechAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
+        if (parameters.GetBool("duplex", false))
+            return await DuplexDispatch.RunAsync(engine, spec, parameters, cancel).ConfigureAwait(false);
         double speed = parameters.GetFloat("speed", 1f);
         SpeechRequest request = new SpeechRequest
         {
@@ -860,6 +862,10 @@ public static class GenerationDispatch
             GridResolution = grid,
             Seed = parameters.GetInt("seed", -1),
             FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
+            Guidance = parameters.GetDoubleOrNull("guidance"),
+            TokenBudget = parameters.GetDoubleOrNull("budget"),
+            SplatCount = parameters.GetInt("splats", 0),
+            Framing = ParseMeshFraming(parameters.GetStringOrNull("framing")),
             Samples = parameters.GetInt("samples", 1),
             Rigged = parameters.GetBool("rigged", false),
             Colors = parameters.GetBool("no-colors", false) ? false : null,
@@ -1713,6 +1719,15 @@ public static class GenerationDispatch
         text is null ? MeshQuality.Default
         : Enum.TryParse(text, ignoreCase: true, out MeshQuality quality) && Enum.IsDefined(quality) ? quality
         : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
+
+    /// <summary>The Idol framing named on the command line: <c>object</c> (the default) or <c>photo</c>.</summary>
+    internal static MeshFraming ParseMeshFraming(string? text) => string.IsNullOrWhiteSpace(text) ? MeshFraming.Object
+        : text.Trim().ToLowerInvariant() switch
+        {
+            "object" => MeshFraming.Object,
+            "photo" => MeshFraming.Photo,
+            _ => throw new ArgumentException($"--framing is object or photo; got '{text}'."),
+        };
 
     /// <summary>The <c>--preprocess</c> value: none (the default) or auto.</summary>
     internal static MeshPreprocess ParseMeshPreprocess(string? text) => string.IsNullOrWhiteSpace(text) ? MeshPreprocess.None

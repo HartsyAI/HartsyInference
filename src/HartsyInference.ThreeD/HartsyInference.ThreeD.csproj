@@ -18,4 +18,9 @@
     <InternalsVisibleTo Include="HartsyInference.ThreeD.Tests" />
   </ItemGroup>
 
+  <!-- Idol's token positions: a 98,304-byte slice of speridlabs/idol's denoiser.safetensors (Apache-2.0), see IdolWeights. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Models\Idol\Resources\pos_pe_f32_1x8192x3.bin" LogicalName="idol/pos_pe_f32_1x8192x3.bin" />
+  </ItemGroup>
+
 </Project>

@@ -25,13 +25,24 @@ public sealed partial class CudaBackend
     /// <summary>Bytes the INT8 v2 workspace holds now (its high-water mark since it was last released).</summary>
     internal long Int8V2WorkspaceBytes => _int8V2Workspace.Bytes;
 
-    /// <summary>Bytes of earlier INT8 v2 workspaces kept alive because a captured graph still replays into them.</summary>
+    /// <summary>Bytes of earlier INT8 v2 workspaces kept alive because a captured graph still replays into them. Takes the
+    /// op lock: only the workspace's size may be read without it.</summary>
     internal long Int8V2WorkspaceRetainedBytes
     {
         get
         {
             using OpScope _op = EnterOp();
             return _int8V2Workspace.RetainedBytes;
+        }
+    }
+
+    /// <summary>Live graphs that lease the current INT8 v2 workspace.</summary>
+    internal int Int8V2WorkspaceLeases
+    {
+        get
+        {
+            using OpScope _op = EnterOp();
+            return _int8V2Workspace.CurrentLeases;
         }
     }
 
@@ -174,7 +185,4 @@ public sealed partial class CudaBackend
         }
     }
 
-    /// <summary>Returns the workspace to the stream-ordered pool when activations are freed, and lets a size that did not fit try
-    /// again; the next call grows it again. A buffer a captured graph leases stays until that graph goes.</summary>
-    private void ReleaseInt8V2Workspace() => _int8V2Workspace.ReleaseCurrent();
 }

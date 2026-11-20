@@ -28,6 +28,10 @@ internal sealed class TtsModelDescriptor
     /// <summary>True when the requested VOICE selects which weights to load (Piper ships one .onnx per voice), so the voice must take part in the cache key and be passed as the load variant. False for models whose single checkpoint carries every voice.</summary>
     internal bool VoiceSelectsWeights { get; init; }
 
+    /// <summary>True when the model listens and speaks at once (<c>ISpeechService.OpenDuplexAsync</c>) instead of reading text aloud, so a
+    /// request for a conversation is refused before any other model is downloaded or loaded for it.</summary>
+    internal bool IsDuplex { get; init; }
+
     /// <summary>True when the model can synthesize long text chunk by chunk (see <c>SpeechRequest.ChunkWords</c>).</summary>
     internal bool SupportsChunking { get; init; }
 

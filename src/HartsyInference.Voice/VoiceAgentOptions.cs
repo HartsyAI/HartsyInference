@@ -1,12 +1,13 @@
 using HartsyInference.Engine.Requests;
+using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Voice;
 
 /// <summary>Models, devices and conversation settings for a <see cref="VoiceModelSet"/> and the
 /// <see cref="VoiceAgentSession"/>s it serves.</summary>
-/// <remarks>The model and device fields (<see cref="SttModel"/>, <see cref="TtsModel"/>, <see cref="AudioDevice"/>,
-/// <see cref="Denoise"/>, <see cref="CpuThreadCap"/>) are applied when the model set loads; a session built on that
-/// set must carry the same values. Every other field is per session.</remarks>
+/// <remarks>The model and device fields (<see cref="SttModel"/>, <see cref="TtsModel"/>, <see cref="Language"/>,
+/// <see cref="AudioDevice"/>, <see cref="Denoise"/>, <see cref="CpuThreadCap"/>) are applied when the model set loads; a
+/// session built on that set must carry the same values. Every other field is per session.</remarks>
 public sealed record VoiceAgentOptions
 {
     /// <summary>The instruction every conversation starts with when none is given.</summary>
@@ -14,6 +15,8 @@ public sealed record VoiceAgentOptions
         "You are a helpful assistant speaking with a caller on the phone. Answer in one or two short sentences of "
         + "plain spoken English, with no lists, markdown, emoji or links. Use a tool when the caller asks for something "
         + "a tool can do.";
+
+    private readonly string _language = "en";
 
     /// <summary>Language model handed to the <c>ITextService</c>: a catalog id, local path or repository id.</summary>
     public string LlmModel { get; init; } = "qwen3";
@@ -29,6 +32,15 @@ public sealed record VoiceAgentOptions
 
     /// <summary>Speech synthesizer and its voice.</summary>
     public string TtsModel { get; init; } = "kokoro:af_heart";
+
+    /// <summary>Language the recognizer hears, one of Whisper's language codes. A locale such as <c>en-US</c> or <c>EN</c> is
+    /// stored as <c>en</c>. English-only checkpoints ignore it; a multilingual one needs it, because with no language it answers
+    /// with hallucinated loops. The synthesizer's language is its voice's.</summary>
+    public string Language
+    {
+        get => _language;
+        init => _language = WhisperTokenizer.NormalizeLanguageCode(value);
+    }
 
     /// <summary>Rate of the audio <see cref="VoiceAgentSession.ReadOutbound(Span{float})"/> returns.</summary>
     public int OutboundSampleRate { get; init; } = 16_000;
@@ -57,6 +69,13 @@ public sealed record VoiceAgentOptions
     /// beside them are absent; it never falls back to raw audio. Default true: adds 640 samples (40 ms) of
     /// algorithmic delay ahead of endpointing and barge-in detection.</summary>
     public bool Denoise { get; init; } = true;
+
+    /// <summary>Recognize and report only: each utterance raises <see cref="VoiceAgentEventKind.UserTranscript"/> and the session
+    /// calls neither the language model nor the synthesizer for it, so a host can use the call as a command channel. A DTMF key
+    /// is reported the same way, as <c>[DTMF n]</c>. The state reads <see cref="VoiceAgentState.Thinking"/> while an utterance is
+    /// recognized. <see cref="VoiceAgentSession.SubmitUserTextAsync"/> is refused (nothing would answer it). The model set still
+    /// loads its synthesizer, and <see cref="VoiceAgentSession.SpeakAsync"/> still works. Default false.</summary>
+    public bool TranscribeOnly { get; init; }
 
     /// <summary>First message of every conversation.</summary>
     public string SystemPrompt { get; init; } = DefaultSystemPrompt;
@@ -139,6 +158,8 @@ public sealed record VoiceAgentOptions
         ArgumentException.ThrowIfNullOrWhiteSpace(AudioDevice);
         ArgumentException.ThrowIfNullOrWhiteSpace(SttModel);
         ArgumentException.ThrowIfNullOrWhiteSpace(TtsModel);
+        Require(Language is not null && WhisperTokenizer.Languages.Contains(Language), nameof(Language), Language ?? "",
+            "must be one of Whisper's language codes, such as \"en\"");
         ArgumentNullException.ThrowIfNull(SystemPrompt);
         Require(OutboundSampleRate is >= 8_000 and <= 48_000, nameof(OutboundSampleRate), OutboundSampleRate, "must be 8000-48000 Hz");
         // The VAD pads a segment by 30 ms and scores 32 ms chunks, so a shorter hangover would end a turn inside

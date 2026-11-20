@@ -26,6 +26,7 @@ File.Delete(Path.Combine(outDir, "times.txt"));
 Stopwatch t0 = Stopwatch.StartNew();
 using CudaBackend backend = new(0, ptx);
 using Trellis2ImageTo3DPipeline pipeline = Trellis2ImageTo3DPipeline.LoadFromPath(backend, folder);
+using HartsyInference.ThreeD.Sampling;
 Stage.Out = outDir; Stage.Backend = backend;
 
 void Swap(string field, Func<object, object> wrap)
@@ -68,7 +69,7 @@ static class Stage
 
 sealed class ShapeSpy(ITrellis2ShapeFlowStage inner) : ITrellis2ShapeFlowStage
 {
-    public SparseTensor Sample(IBackend b, Trellis2ShapeFlowKind kind, int[] coords, int grid, Tensor cond, Tensor neg, int seed, Trellis2SamplerParams p, Action<int>? onStep)
+    public SparseTensor Sample(IBackend b, Trellis2ShapeFlowKind kind, int[] coords, int grid, Tensor cond, Tensor neg, int seed, FlowSamplerParams p, Action<int>? onStep)
     {
         Stopwatch sw = Stopwatch.StartNew();
         SparseTensor r = inner.Sample(b, kind, coords, grid, cond, neg, seed, p, onStep);
@@ -115,7 +116,7 @@ sealed class MesherSpy(IDualGridMesher inner) : IDualGridMesher
 sealed class TexFlowSpy(ITrellis2TextureFlowStage inner) : ITrellis2TextureFlowStage
 {
     public bool Supports(Trellis2ShapeFlowKind kind) => inner.Supports(kind);
-    public SparseTensor Sample(IBackend b, Trellis2ShapeFlowKind kind, SparseTensor shape, Tensor cond, Tensor neg, int seed, Trellis2SamplerParams p, Action<int>? onStep)
+    public SparseTensor Sample(IBackend b, Trellis2ShapeFlowKind kind, SparseTensor shape, Tensor cond, Tensor neg, int seed, FlowSamplerParams p, Action<int>? onStep)
     {
         Stopwatch sw = Stopwatch.StartNew();
         SparseTensor r = inner.Sample(b, kind, shape, cond, neg, seed, p, onStep);

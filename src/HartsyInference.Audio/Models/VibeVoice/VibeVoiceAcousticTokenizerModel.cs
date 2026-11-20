@@ -39,11 +39,13 @@ internal sealed unsafe class VibeVoiceAcousticTokenizerModel
 
     /// <summary><paramref name="decodeOnly"/> skips the encoder, for a checkpoint that genuinely ships no encoder weights (e.g. VibeVoice-Realtime-0.5B, which only ever decodes precomputed/cached latents).</summary>
     /// <remarks><see cref="Encode"/> throws if called on an instance loaded this way.</remarks>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool decodeOnly = false)
+    /// <param name="keepStoredWeight">Keeps the convolution and feed-forward weights in their stored dtype instead of widening them to F32; for a
+    /// backend that casts half-precision convolution weights on the device (CUDA), where it halves the codec's memory and gives the same values.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool decodeOnly = false, bool keepStoredWeight = false)
     {
-        if (!decodeOnly) _encoder.LoadWeights(w);
+        if (!decodeOnly) _encoder.LoadWeights(w, keepStoredWeight);
         _hasEncoder = !decodeOnly;
-        _decoder.LoadWeights(w);
+        _decoder.LoadWeights(w, keepStoredWeight);
     }
 
     /// <summary>Encodes PCM <c>[batch, 1, T_pcm]</c> into a channel-last latent mean tensor <c>[batch, T_pcm / 3200, vae_dim]</c>; streams when <paramref name="cache"/> is non-null.</summary>
