@@ -33,6 +33,21 @@ internal static class VcCatalog
     private const string RmvpeRepo = "lj1995/VoiceConversionWebUI";
     private const string RmvpeSourceFile = "rmvpe.pt";
 
+    // Both encoders, already converted and hash-pinned, on the RVC v2 card on Hartsy (model 5c3d5f76, its pitch extractor
+    // d741037e). They are fetched from there first, so no pickle is parsed; the Hugging Face pickles stay the fallback.
+    internal const string ContentVecHartsyUrl = "https://hartsy.ai/download/5c3d5f76-c23d-4ce2-8dbf-c2d04ecb58e8?type=model";
+    internal const string ContentVecHartsySha256 = "cb33f3c7e881e20eb5aab17b051a219a533422c715b054cad5812611b3f3000c";
+    internal const string RmvpeHartsyUrl = "https://hartsy.ai/download/d741037e-4e02-4737-851d-69ea28b7165c?type=companion";
+    internal const string RmvpeHartsySha256 = "351c98642793a80325565d477799968747db36b7580dc5b15ff36aa935e2014e";
+
+    private static readonly Lazy<HttpClient> HartsyHttp = new(() =>
+    {
+        // No credentials: the download links are public, and a Hugging Face token never goes to another host.
+        HttpClient http = new() { Timeout = TimeSpan.FromMinutes(30) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("HartsyInference/1.0");
+        return http;
+    });
+
     // RVC voice models ship as native PyTorch .pth (the training output); a .safetensors a power user dropped in is
     // also accepted. Search order per variant name.
     private static readonly string[] RvcExtensions = ["", ".safetensors", ".pth", ".pt"];
@@ -130,6 +145,10 @@ internal static class VcCatalog
         {
             return;
         }
+        if (await TryFromHartsyAsync(HartsyHttp.Value, ContentVecHartsyUrl, ContentVecHartsySha256, contentVecPath, ContentVecFile, cancel).ConfigureAwait(false))
+        {
+            return;
+        }
         Logs.Info($"[Audio][RVC] ContentVec encoder missing — fetching {ContentVecRepo} and converting to {ContentVecFile}...");
         string binPath = await AudioModelCache.GetAsync(ContentVecRepo, ContentVecSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
         // Straight passthrough — ContentVec's keys already match the engine's Hubert layout.
@@ -145,11 +164,34 @@ internal static class VcCatalog
         {
             return;
         }
+        if (await TryFromHartsyAsync(HartsyHttp.Value, RmvpeHartsyUrl, RmvpeHartsySha256, rmvpePath, RmvpeFile, cancel).ConfigureAwait(false))
+        {
+            return;
+        }
         Logs.Info($"[Audio][RVC] RMVPE pitch extractor missing — fetching {RmvpeRepo} and converting to {RmvpeFile}...");
         string ptPath = await AudioModelCache.GetAsync(RmvpeRepo, RmvpeSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
         PickleCheckpointRepacker.Repack(ptPath, rmvpePath,
             metadata: ComponentMetadata("rvc", "pitch-estimator", ptPath, RmvpeRepo));
         Logs.Info($"[Audio][RVC] {RmvpeFile} ready.");
+    }
+
+    /// <summary>Fetches an encoder already converted to safetensors from its Hartsy card, checked against its pinned SHA-256. False
+    /// when the site cannot be reached, answers an error or serves other bytes: nothing is left behind, and the caller converts
+    /// the upstream pickle instead. A cancelled run is not a failure to fall back from.</summary>
+    internal static async Task<bool> TryFromHartsyAsync(HttpClient http, string url, string sha256, string destination, string label, CancellationToken cancel)
+    {
+        Logs.Info($"[Audio][RVC] {label} missing — fetching it from Hartsy...");
+        try
+        {
+            await AssetUrlDownload.DownloadAsync(http, url, label, destination, null, sha256, cancel).ConfigureAwait(false);
+            Logs.Info($"[Audio][RVC] {label} ready (from Hartsy).");
+            return true;
+        }
+        catch (Exception ex) when ((ex is HttpRequestException or InvalidOperationException or IOException or TaskCanceledException) && !cancel.IsCancellationRequested)
+        {
+            Logs.Warning($"[Audio][RVC] Could not fetch {label} from Hartsy ({ex.Message}); converting the upstream file instead.");
+            return false;
+        }
     }
 
     /// <summary>Picks the RVC config from the first upsample-kernel width: the ConvTranspose1d kernel is 24 for 48 kHz and 16 for 40 kHz. weight-norm models store <c>weight_v</c>; pre-fused models store <c>weight</c>.</summary>
