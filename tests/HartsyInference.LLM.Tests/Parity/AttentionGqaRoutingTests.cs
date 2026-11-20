@@ -169,6 +169,32 @@ public sealed class AttentionGqaRoutingTests
         AssertGroupedValues(output, tokenMajor, 1e-3f);
     }
 
+    /// <summary>Sage computes QK in INT8, so a grouped call that refuses INT8 is not widened for it: native cuDNN GQA runs.</summary>
+    [CudaFact]
+    public void CudaGroupedCallThatRefusesInt8IsNotWidenedForSage()
+    {
+        const int tokens = 64, headDim = 128;
+        using IDisposable policy = KnobProfile.Create("gqa-refused-int8").With(EngineKnobs.SdpaCudnn, true)
+            .With(EngineKnobs.SageAttn, true).With(EngineKnobs.SageF16MinSkv, tokens).With(EngineKnobs.FlashF16, false).Push();
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        Random random = new(5);
+        using Tensor query = RandomTensor(new TensorShape(1, Heads, tokens, headDim), DType.F16, random);
+        using Tensor key = RandomTensor(new TensorShape(1, KvHeads, tokens, headDim), DType.F16, random);
+        using Tensor value = RandomTensor(key.Shape, DType.F16, random);
+        using Tensor output = new(query.Shape, DType.F16);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, query, key, value, null, 0.1f, allowF16: false)
+            with { Numerics = new AttentionNumerics { Refused = AttentionFormats.Int8 } };
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        backend.Attention(in call);
+        backend.Sync();
+
+        AttentionEvidenceEvent execution = Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Execution);
+        Assert.Equal("cudnn.f16", execution.Implementation);
+        Assert.Equal(KvHeads, execution.KvHeads);
+        Assert.DoesNotContain(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Repeat);
+    }
+
     /// <summary>Random operands and a per-head bias, in a batch of two where the entry takes one: each grouped route computes
     /// the host reference's result, so scale, bias and every key's contribution are checked, not only the head mapping.</summary>
     [CudaTheory]
