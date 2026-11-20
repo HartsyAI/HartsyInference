@@ -240,7 +240,7 @@ public sealed class Ernie5RealCheckpointTests
 
     // With the layer dump on, records every token fed to the model in order (prompt, then each decode input) and the argmax after the
     // last one as tokens.json beside the dumps, so compare.py can check the reference ran on the same sequence and chose the same token.
-    private static void WriteFedTokens(List<int> fed, int argmaxAfterLast, List<(int Position, int Argmax, float Margin)> choices)
+    private static void WriteFedTokens(List<int> fed, int argmaxAfterLast, List<(int Position, int Argmax, float Margin)>? choices = null)
     {
         string? dumpDir = Ernie5LayerDump.DirectoryFromEnvironment();
         if (dumpDir is null) return;
@@ -250,7 +250,7 @@ public sealed class Ernie5RealCheckpointTests
             {
                 ["tokens"] = fed,
                 ["argmax_after_last"] = argmaxAfterLast,
-                ["choices"] = choices.Select(c => new Dictionary<string, object> { ["position"] = c.Position, ["argmax"] = c.Argmax, ["margin"] = c.Margin }).ToList(),
+                ["choices"] = (choices ?? []).Select(c => new Dictionary<string, object> { ["position"] = c.Position, ["argmax"] = c.Argmax, ["margin"] = c.Margin }).ToList(),
             }));
     }
 

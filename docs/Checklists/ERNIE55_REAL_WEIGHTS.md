@@ -179,14 +179,17 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 - Four-stage run (2026-11-20, 4 x RTX PRO 6000, EU-RO-1, every weight preloaded): decode 0.21 to 0.24 s per token (mean per run) at reference and at
   production precision; a 2,300-token prefill 127 to 131 s (about 2.4 s per layer, 5.7 s for every seventh); load 2,146 to 2,162 s, the
   four stages one after another at about 128 MB/s each. No per-op profile and no Python speed baseline exist for this run.
-  - Load: each upload staged its mapped bytes through one reader. The stage preload now reads each layer's weights ahead with
+  - Load: each upload reads its mapped bytes on one thread (`MappedUploadStaging`, or a copy straight from the mapping for a
+    contiguous group). The stage preload now reads each layer's weights ahead with
     `numerics.moeExpertPrefetchThreads` readers (`Ernie5Model.PreloadGroups`). Not measured on the volume.
-  - Decode and prefill run the host-routed per-expert MoE loop (512 experts, 10 per token) and keep the residual stream on the host, so
-    every op uploads and downloads its operands. The hyper-connection projection ran as a scalar host dot, 86 times per token; it is now
+  - Decode and prefill run the host-routed per-expert MoE loop (512 experts, 10 per token; split-feature routing, the learned routed
+    scale and the SiTU gate each keep the block off the device-routed paths, `MoeFeedForward.DeviceRoutedShapeOk`). The residual stream
+    is a host array, so each sublayer's input and output and each hyper-connection op (mixes, collapse, expand) cross to the device and
+    back; inside the MoE block only the router scores come to the host. The hyper-connection projection ran as a scalar host dot, 86 times per token; it is now
     vectorized (`HostMath`). A local one-token microbenchmark (8-core desktop, AVX2) went from 0.44 ms to 0.04 ms per call; the pod's
     time per token was not remeasured. A device-resident stream and a device-routed expert path for split-feature routing and SiTU are
     open.
-  - Greedy decode at production precision after the synthetic 2,300-id prompt (`1000 + 37 i mod 90000`, mostly `<ERNIE_mask:N>` ids)
+  - Greedy decode at production precision after the synthetic 2,300-id prompt (`1000 + 37 i mod 90000`: 2,294 ordinary vocabulary ids in no meaningful order and 6 `<ERNIE_mask:N>` ids)
     repeats tab, `}`, tab (1400, 1308, 1400). The prefill argmax, 1423, is the same at both precisions, and the last-position argmax
     matched the reference on the same prompt with the 8-token feed. No reference-precision greedy run and no reference logits exist for
     the generated positions, so this is not confirmed as model behaviour: run the reference over the prompt plus the generated ids with

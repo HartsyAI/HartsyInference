@@ -343,21 +343,28 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
     /// <summary>Uploads <paramref name="groups"/> to <paramref name="backend"/> in order while up to <paramref name="readers"/> threads read
     /// their mapped bytes ahead of the uploads (<see cref="MappedTensorPrefetch"/>), and returns the bytes read ahead. Each group is uploaded
     /// once its own bytes are read, as one device allocation when <paramref name="grouped"/>.</summary>
-    /// <remarks>An upload stages a mapped weight through one reader, which a network volume serves at about a sixth of what it gives
-    /// sixteen: the real checkpoint's 288 GB loaded at 134 MB/s. One call reads ahead at most its own groups (one layer's weights), so the
-    /// page cache holds a layer, not a stage. Zero readers, or weights with no file extent, upload exactly as before.</remarks>
+    /// <remarks>An upload reads a mapped weight on one thread, which a network volume serves far slower than several. One call reads ahead
+    /// at most its own groups (one layer's weights), so the page cache holds a layer, not a stage. The readers' process-wide gate is released
+    /// before the last upload. Zero readers, or weights with no file extent, upload as without the read-ahead.</remarks>
     internal static long PreloadGroups(IBackend backend, IReadOnlyList<IReadOnlyList<Tensor>> groups, int readers, bool grouped)
     {
         List<Tensor> all = [.. groups.SelectMany(g => g)];
         using MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin(all, readers);
+        long read = 0;
         int next = 0;
-        foreach (IReadOnlyList<Tensor> group in groups)
+        for (int g = 0; g < groups.Count; g++)
         {
+            IReadOnlyList<Tensor> group = groups[g];
             for (int end = next + group.Count; next < end; next++) batch.WaitFor(next);
+            if (g == groups.Count - 1)
+            {
+                read = batch.Finish();
+                batch.Dispose();
+            }
             if (grouped) backend.PreloadWeightGroups([group]);
             else backend.PreloadWeights(group);
         }
-        return batch.Finish();
+        return read;
     }
 
     /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB, kept

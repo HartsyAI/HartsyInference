@@ -46,8 +46,7 @@ internal static class HostMath
 
     /// <summary>One dot product in a fixed order: four accumulators of <see cref="Vector{T}"/> lanes, then the scalar tail.</summary>
     /// <remarks>The order depends only on <paramref name="n"/> and the machine's vector width, so one machine gives one value for the same
-    /// inputs however the caller splits its outputs. A one-token hyper-connection projection is a single block of these on one thread
-    /// (24 dots of 16,384 values for ERNIE-5.5), where a scalar loop is bound by its one add per value.</remarks>
+    /// inputs however the caller splits its outputs.</remarks>
     private static unsafe float Dot(float* a, float* b, int n)
     {
         int i = 0, width = Vector<float>.Count, step = width * 4;
