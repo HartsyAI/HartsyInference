@@ -153,6 +153,7 @@ public sealed partial class CudaBackend
         try
         {
             _int8V2Workspace = GpuTransferHelper.AllocateDevice((nuint)bytes);
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.int8v2.workspace.grow", bytes);
         }
         catch (OutOfVramException ex)
         {

@@ -221,6 +221,10 @@ public sealed partial class VulkanBackend
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16, saturate: true);
         VulkanBuffer? maskBuf = mask is null ? null : GetBuffer(mask);
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * DType.F16.SizeInBytes));
+        int casts = (qOwned is null ? 0 : 1) + (kOwned is null ? 0 : 1) + (vOwned is null ? 0 : 1);
+        if (casts > 0)
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.cm2.casts", ((qOwned is null ? 0 : query.ElementCount)
+                + (kOwned is null ? 0 : key.ElementCount) + (vOwned is null ? 0 : value.ElementCount)) * DType.F16.SizeInBytes, casts);
         try
         {
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
