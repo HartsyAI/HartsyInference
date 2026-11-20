@@ -85,13 +85,24 @@ public static class AudioModelCache
         string revision = "main",
         IProgress<long>? progress = null,
         CancellationToken ct = default)
+        => (await GetWithOriginAsync(hfRepoId, filename, category, revision, progress, ct).ConfigureAwait(false)).Path;
+
+    /// <summary><see cref="GetAsync"/>, also saying whether the file came from a download: this call's, or one it joined. False
+    /// for a file found on disk, including one a stand-in link put there during this call.</summary>
+    private static async Task<(string Path, bool Downloaded)> GetWithOriginAsync(
+        string hfRepoId,
+        string filename,
+        string category,
+        string revision,
+        IProgress<long>? progress,
+        CancellationToken ct)
     {
         string repoDir = GetRepoDirectory(hfRepoId, category);
         string localPath = Path.Combine(repoDir, filename);
-        if (IsUsableFile(localPath)) return localPath;
+        if (IsUsableFile(localPath)) return (localPath, false);
         // A converted checkpoint installed since the last scan may stand in for this file.
         AudioStandIns.Resync(CacheRoot);
-        if (IsUsableFile(localPath)) return localPath;
+        if (IsUsableFile(localPath)) return (localPath, false);
 
         // Coalesce concurrent requests for the same file so we don't double-download.
         Task<string> downloadTask;
@@ -110,7 +121,7 @@ public static class AudioModelCache
 
         try
         {
-            return await downloadTask.ConfigureAwait(false);
+            return (await downloadTask.ConfigureAwait(false), true);
         }
         finally
         {
@@ -227,20 +238,20 @@ public static class AudioModelCache
     {
         try
         {
-            // Whether the file was on disk before this call: only such a file can be a stand-in. Whatever this call downloads came
-            // from upstream and is always held to its pin.
-            string? onDisk = TryGetLocal(hfRepoId, file.Name, category);
-            string path = onDisk ?? await GetAsync(hfRepoId, file.Name, category, revision, progress: null, ct).ConfigureAwait(false);
-            if (file.Sha256 is not null && PinApplies(wasOnDisk: onDisk is not null, CacheRoot, path))
+            // Only a file found on disk can be a stand-in. The download step says whether it downloaded, so a stand-in linked in while
+            // this call ran counts as on disk, and whatever came from upstream is always held to its pin.
+            (string path, bool downloaded) = await GetWithOriginAsync(hfRepoId, file.Name, category, revision, progress: null, ct).ConfigureAwait(false);
+            if (file.Sha256 is not null && PinApplies(wasOnDisk: !downloaded, CacheRoot, path))
             {
                 try
                 {
                     VerifySha256(path, file.Sha256);
                 }
-                catch (HartsyInference.Core.Exceptions.HartsyInferenceException) when (onDisk is null)
+                catch (HartsyInference.Core.Exceptions.HartsyInferenceException) when (downloaded)
                 {
                     // A download that fails its pin is removed, so it is neither used nor taken for a cached file on the next run.
-                    TryDeleteFile(path);
+                    Logs.Warning($"[AudioCache] '{path}' failed its pinned hash and is removed.");
+                    TryDelete(path);
                     throw;
                 }
             }
@@ -257,18 +268,6 @@ public static class AudioModelCache
     /// file has a rewritten header, so it cannot match; it was checked against its card's own hash when it was installed. Only a file
     /// that was already on disk can be such a repack: a file just downloaded came from upstream, whatever its header says.</summary>
     internal static bool PinApplies(bool wasOnDisk, string root, string path) => !(wasOnDisk && AudioStandIns.StandsIn(root, path));
-
-    private static void TryDeleteFile(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            Logs.Warning($"[AudioCache] Could not remove '{path}', which failed its pinned hash: {ex.Message}");
-        }
-    }
 
     /// <summary>Throws if <paramref name="filePath"/>'s SHA-256 does not match the pinned
     /// <paramref name="expectedHex"/> (case-insensitive). Used to verify a repacked single-file
