@@ -53,6 +53,22 @@ public sealed class PagedKvCacheTests
             Fixed.AppendStep(Backend, layer, k, v);
         }
 
+        /// <summary>One step in which every layer appends to its pages and is read through them, as a backend with a
+        /// paged kernel reads it: nothing goes into the contiguous copy, and the length advances.</summary>
+        public void PagedStep(int tokens)
+        {
+            for (int layer = 0; layer < HeadDims.Length; layer++)
+            {
+                using Tensor k = Rows(HeadDims[layer], tokens), v = Rows(HeadDims[layer], tokens);
+                Paged.AppendKvPages(Backend, layer, k, v);
+                Fixed.AppendStep(Backend, layer, k, v);
+                Assert.True(Paged.TryGetPages(layer, Paged.CurrentLength + tokens, out _, out _, out _));
+                Paged.PagesServed(layer);
+            }
+            Paged.AdvanceLength(tokens);
+            Fixed.AdvanceLength(tokens);
+        }
+
         /// <summary>One model step: every layer appends, attends over its prefix (checked here), then the length advances.</summary>
         public void Step(int tokens)
         {
@@ -333,6 +349,55 @@ public sealed class PagedKvCacheTests
 
         // Six rows are valid and they fit the eight-row buffer: only the new row leaves the pages.
         Assert.Equal(RowBytes, GatheredBytes(evidence, before));
+    }
+
+    [Fact]
+    public void ALayerReadThroughItsPagesCopiesNothing()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        for (int step = 0; step < 12; step++) pair.PagedStep(1);
+        Assert.Equal(0, GatheredBytes(evidence, 0));
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void ALayerReadBothWaysRebuildsItsCopyOnceThenAddsOnlyNewRows()
+    {
+        // A token bound sizes the copy once, so no regrowth is counted below.
+        using Pair pair = new(expectedTokens: 64);
+        pair.Step(10);
+        // Reading through the pages drops the contiguous copy.
+        for (int step = 0; step < 5; step++) pair.PagedStep(1);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+
+        // The first contiguous read after that rebuilds all 15 rows from the pages, plus the row this step appends.
+        pair.Step(1);
+        Assert.Equal(16 * RowBytes, GatheredBytes(evidence, 0));
+
+        // From here the layers are read both ways: paged reads no longer drop the copy, and a contiguous read copies in
+        // only the rows written since the last one.
+        int before = evidence.Snapshot().Length;
+        for (int step = 0; step < 3; step++) pair.PagedStep(1);
+        Assert.Equal(0, GatheredBytes(evidence, before));
+        pair.Step(1);
+        Assert.Equal(4 * RowBytes, GatheredBytes(evidence, before));
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void PagesAreNotHandedOutForRowsTheLayerHasNotWritten()
+    {
+        using Pair pair = new();
+        Assert.False(pair.Paged.TryGetPages(0, 1, out _, out _, out _));
+        pair.Append(0, 3);
+        Assert.True(pair.Paged.TryGetPages(0, 3, out _, out _, out AttentionKvPages pages));
+        Assert.Equal(PageSize, pages.PageSize);
+        Assert.Equal(1, pages.Pages);
+        // Layer 1 wrote nothing this step, and layer 0 wrote three rows, not four.
+        Assert.False(pair.Paged.TryGetPages(1, 3, out _, out _, out _));
+        Assert.False(pair.Paged.TryGetPages(0, 4, out _, out _, out _));
     }
 
     [Fact]

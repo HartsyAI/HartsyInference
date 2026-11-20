@@ -150,6 +150,24 @@ public sealed class AttentionPagedCallTests
     }
 
     [Fact]
+    public void PageBuffersThatDoNotHoldWholePagesAreMalformed()
+    {
+        using Operands operands = new();
+        // The buffers hold 24 rows: not a whole number of five-row pages.
+        AttentionCall call = operands.Call(new AttentionKvPages(operands.Table, 5, 3));
+        using IBackend backend = new CpuBackend();
+        Assert.Throws<ArgumentException>(() => backend.Attention(in call));
+        operands.AssertNothingWritten();
+    }
+
+    [Fact]
+    public void TheCpuBackendHasNoPagedAttention()
+    {
+        using IBackend backend = new CpuBackend();
+        Assert.False(backend.HasPagedAttention);
+    }
+
+    [Fact]
     public void APagedCallStatesItsKeyLengthOnTheHost()
     {
         using Operands operands = new();

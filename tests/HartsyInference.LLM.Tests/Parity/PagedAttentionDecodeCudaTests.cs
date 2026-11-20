@@ -211,7 +211,7 @@ public sealed class PagedAttentionDecodeCudaTests
         const int heads = 8, kvHeads = 2, headDim = 64;
         using Rig rig = new(heads, kvHeads, headDim, backend: new VulkanBackend());
         rig.Step(rig.A, 70);
-        Assert.True(rig.A.Paged.TryGetPages(0, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages));
+        Assert.True(rig.A.Paged.TryGetPages(0, 70, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages));
         using Tensor query = new(new TensorShape(1, heads, 1, headDim), DType.F32);
         using Tensor output = new(new TensorShape(1, heads, 1, headDim), DType.F32);
         output.AsSpan<float>().Fill(-7f);
@@ -242,6 +242,34 @@ public sealed class PagedAttentionDecodeCudaTests
         Assert.Equal(0, Count(events, "flash.decode.paged"));
         Assert.Equal(2 * rounds * Layers * 2, events.Count(e => e.Kind == AttentionEvidenceKind.PrefixGather));
         rig.AssertGatheredRowsMatch(rig.A);
+        rig.AssertGatheredRowsMatch(rig.B);
+    }
+
+    /// <summary>A multi-row call between decode steps reads the contiguous copy. It is rebuilt from the pages once; after
+    /// that the copy is kept, and each such call copies in only the rows written since the last one.</summary>
+    [CudaFact]
+    public void ALayerReadBothWaysRebuildsItsCopyOnceThenAddsOnlyNewRows()
+    {
+        const int heads = 8, kvHeads = 2, headDim = 64;
+        const long rowBytes = Layers * 2L * kvHeads * headDim * sizeof(float);
+        using Rig rig = new(heads, kvHeads, headDim);
+        // Sequence B has a token bound, so its copy is sized once and no regrowth is counted below.
+        rig.Step(rig.B, 70);
+        for (int step = 0; step < 10; step++) rig.Step(rig.B, 1);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(8192);
+        static long Gathered(AttentionEvidenceSession session, int from) =>
+            session.Snapshot().Skip(from).Where(e => e.Kind == AttentionEvidenceKind.PrefixGather).Sum(e => e.Bytes);
+        // 80 rows sit in the pages only; this 20-row call rebuilds the copy with them and its own rows.
+        rig.Step(rig.B, 20);
+        Assert.Equal(100 * rowBytes, Gathered(evidence, 0));
+
+        int before = evidence.Snapshot().Length;
+        for (int step = 0; step < 6; step++) rig.Step(rig.B, 1);
+        Assert.Equal(0, Gathered(evidence, before));
+        Assert.Equal(6 * Layers, Count(evidence.Snapshot().Skip(before).ToArray(), "flash.decode.paged"));
+        rig.Step(rig.B, 20);
+        Assert.Equal(26 * rowBytes, Gathered(evidence, before));
         rig.AssertGatheredRowsMatch(rig.B);
     }
 

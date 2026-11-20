@@ -11,6 +11,10 @@ namespace HartsyInference.Cuda;
 public sealed partial class CudaBackend
 {
     private AttentionKernelRow[]? _denseRows, _tokenMajorRows, _tokenMajorGqaRows, _flashRows, _flashDeviceRows;
+    private AttentionKernelRow? _pagedFlashRow;
+
+    /// <summary>The flash row that reads paged keys and values, found by its capability and not by its place in the list.</summary>
+    private AttentionKernelRow PagedFlashRow => _pagedFlashRow ??= FlashAttentionRows.First(static row => row.Capability.PagedKv);
 
     private AttentionKernelRow[] DenseAttentionRows => _denseRows ??= BuildDenseRows();
     private AttentionKernelRow[] TokenMajorAttentionRows => _tokenMajorRows ??= BuildTokenMajorRows();
@@ -47,11 +51,14 @@ public sealed partial class CudaBackend
     };
 
     /// <inheritdoc/>
+    public bool HasPagedAttention => _kernels is { HasDecodeGqaPaged: true };
+
+    /// <inheritdoc/>
     public bool AdmitsPagedAttention(in AttentionCall call)
     {
         if (call.KvPages is null || call.Route != AttentionRoute.Flash) return false;
-        AttentionKernelRow row = FlashAttentionRows[0];
-        return row.Capability.PagedKv && row.Capability.Excludes(in call) == AttentionExclusion.None && row.Admits(in call);
+        AttentionKernelRow row = PagedFlashRow;
+        return row.Capability.Excludes(in call) == AttentionExclusion.None && row.Admits(in call);
     }
 
     /// <inheritdoc/>
@@ -446,7 +453,7 @@ public sealed partial class CudaBackend
         const AttentionMaskSupport CW = AttentionMaskSupport.Causal | AttentionMaskSupport.Window;
         return
         [
-            // First, and the only flash row that covers a paged call; AdmitsPagedAttention reads it from this slot.
+            // The only flash row that covers a paged call. Every other row excludes one, so its place in the list is free.
             new DelegateAttentionRow(Cap("flash.decode.paged", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = CW, LogitTerms = true, MaxBatch = 1, MaxQueryTokens = 1,

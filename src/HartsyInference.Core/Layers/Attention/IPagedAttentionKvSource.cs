@@ -18,11 +18,13 @@ public interface IPagedAttentionKvSource : IAttentionKvSource
     /// that is about to read them.</summary>
     void AppendKvContiguous(IBackend backend, int layer, Tensor k, Tensor v);
 
-    /// <summary>The page buffers and page table that hold <paramref name="layer"/>'s rows, for one call; false when the
-    /// layer has written nothing. The tensors are the source's and are valid until its next append, rollback or reset.</summary>
-    bool TryGetPages(int layer, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages);
+    /// <summary>The page buffers and page table that hold the first <paramref name="rows"/> rows of <paramref name="layer"/>,
+    /// for one call; false when the layer has not written that many. The tensors are the source's and are valid until its
+    /// next append, rollback or reset.</summary>
+    bool TryGetPages(int layer, int rows, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages);
 
     /// <summary>A call just read <paramref name="layer"/> through its pages. The source may release that layer's contiguous
-    /// buffers; a later buffer read rebuilds them from the pages.</summary>
+    /// buffers; a later buffer read rebuilds them from the pages. A source keeps the buffers of a layer that is read both
+    /// ways, so the rebuild is paid once and not on every such read.</summary>
     void PagesServed(int layer);
 }

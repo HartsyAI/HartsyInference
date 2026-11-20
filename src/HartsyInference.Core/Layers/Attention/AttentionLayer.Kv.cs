@@ -39,7 +39,7 @@ public sealed partial class AttentionLayer
                     if (paged is null) source.AppendKv(backend, layer, kMh, vMh);
                     else paged.AppendKvPages(backend, layer, kMh, vMh);
                 }
-                if (paged is not null)
+                if (paged is not null && backend.HasPagedAttention)
                 {
                     attn = new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
                     if (AttendPaged(backend, attn, qMh, paged, kvLayer, in call))
@@ -49,9 +49,9 @@ public sealed partial class AttentionLayer
                         if (ownV) { vMh!.Dispose(); ownV = false; }
                         return attn;
                     }
-                    // Lowered: the call reads the contiguous buffers, so the rows just appended go into them too.
-                    if (kMh is not null) paged.AppendKvContiguous(backend, layer, kMh, vMh!);
                 }
+                // Lowered: the call reads the contiguous buffers, so the rows just appended go into them too.
+                if (paged is not null && kMh is not null) paged.AppendKvContiguous(backend, layer, kMh, vMh!);
                 if (kMh is not null)
                 {
                     if (ownK) { kMh.Dispose(); ownK = false; }
@@ -91,7 +91,8 @@ public sealed partial class AttentionLayer
     /// backend has a kernel that follows the page table for this call; false, with nothing written, when it does not.</summary>
     private bool AttendPaged(IBackend backend, Tensor attn, Tensor qMh, IPagedAttentionKvSource paged, int kvLayer, in KvAttentionCall call)
     {
-        if (call.Bias is not null || !paged.TryGetPages(kvLayer, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages))
+        if (call.Bias is not null
+            || !paged.TryGetPages(kvLayer, call.KvLength, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages))
             return false;
         CheckKvOperands(qMh, keyPages);
         AttentionCall flash = AttentionCall.FromPagedFlashAttention(attn, qMh, keyPages, valuePages, pages, call.KvLength, !call.Bidirectional,

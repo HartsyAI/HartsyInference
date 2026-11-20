@@ -79,6 +79,9 @@ internal static class AttentionCallValidation
         int used = (kvLen + pages.PageSize - 1) / pages.PageSize;
         if (used > pages.Pages)
             throw new ArgumentException($"{kvLen} valid keys need {used} pages of {pages.PageSize} rows; the page table lists {pages.Pages}.");
+        if (k.Tokens % pages.PageSize != 0)
+            throw new ArgumentException($"Page buffers of {k.Tokens} rows do not hold whole pages of {pages.PageSize}.");
+        // The value operand has the key operand's rows (checked above), so one bound covers both.
         int held = k.Tokens / pages.PageSize;
         if ((uint)pages.HighestPage >= (uint)held)
             throw new ArgumentException($"The page table reaches page {pages.HighestPage}; the page buffers hold pages 0 to {held - 1}.");
