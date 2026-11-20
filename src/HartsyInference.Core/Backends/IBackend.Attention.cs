@@ -19,7 +19,8 @@ public partial interface IBackend
             $"{GetType().Name} declares no attention rows. Call AttentionHostReference.Run explicitly for host execution.");
     }
 
-    /// <summary>The kernel <see cref="Attention"/> would run for <paramref name="call"/> and why; launches nothing.</summary>
+    /// <summary>The kernel <see cref="Attention"/> would run for <paramref name="call"/> and why; launches nothing. Planning
+    /// validates the call, so a malformed one throws here as it would in <see cref="Attention"/>.</summary>
     AttentionPlan PlanAttention(in AttentionCall call)
     {
         AttentionCallValidation.Validate(in call);
