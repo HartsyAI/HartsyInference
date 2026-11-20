@@ -63,6 +63,29 @@ public sealed class AudioStandInPinTests : IDisposable
         Assert.False(AudioStandIns.StandsIn(_root, path));
     }
 
+    /// <summary>The file's own header is only trusted for a file that was on disk before the fetch: one just downloaded came from
+    /// upstream, so a header claiming to stand in cannot exempt it from its pin.</summary>
+    [Fact]
+    public void OnlyAFileAlreadyOnDiskCanSkipItsPin()
+    {
+        string path = Path.Combine(_root, "tts", "higurashi-ai--Haru-4B", "model.safetensors");
+        WriteSafetensors(path, "tts/higurashi-ai--Haru-4B/model.safetensors");
+        Assert.False(AudioModelCache.PinApplies(wasOnDisk: true, _root, path));
+        Assert.True(AudioModelCache.PinApplies(wasOnDisk: false, _root, path));
+
+        string upstream = Path.Combine(_root, "tts", "acme--m", "model.safetensors");
+        WriteSafetensors(upstream, standsInFor: null);
+        Assert.True(AudioModelCache.PinApplies(wasOnDisk: true, _root, upstream));
+    }
+
+    [Fact]
+    public void OnWindowsADeclarationDifferingOnlyInCaseNamesTheSameFile()
+    {
+        string path = Path.Combine(_root, "tts", "higurashi-ai--Haru-4B", "model.safetensors");
+        WriteSafetensors(path, "tts/Higurashi-AI--Haru-4B/model.safetensors");
+        Assert.Equal(OperatingSystem.IsWindows(), AudioStandIns.StandsIn(_root, path));
+    }
+
     [Fact]
     public void AFileThatIsNotSafetensorsIsNeverAStandIn()
     {

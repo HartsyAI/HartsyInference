@@ -110,7 +110,8 @@ public static partial class AudioStandIns
         string relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path)).Replace('\\', '/');
         lock (_lock)
         {
-            return Declared(Path.GetFullPath(path)).Contains(relative, StringComparer.Ordinal);
+            // Paths are compared as the file system compares them: a declaration differing only in case names the same file on Windows.
+            return Declared(Path.GetFullPath(path)).Contains(relative, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         }
     }
 

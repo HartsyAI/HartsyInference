@@ -227,12 +227,22 @@ public static class AudioModelCache
     {
         try
         {
-            string path = await GetAsync(hfRepoId, file.Name, category, revision, progress: null, ct).ConfigureAwait(false);
-            // A pin is the upstream file's hash. A Hartsy repack standing in for that file has a rewritten header, so it cannot
-            // match; it was checked against its card's own hash when it was installed.
-            if (file.Sha256 is not null && !AudioStandIns.StandsIn(CacheRoot, path))
+            // Whether the file was on disk before this call: only such a file can be a stand-in. Whatever this call downloads came
+            // from upstream and is always held to its pin.
+            string? onDisk = TryGetLocal(hfRepoId, file.Name, category);
+            string path = onDisk ?? await GetAsync(hfRepoId, file.Name, category, revision, progress: null, ct).ConfigureAwait(false);
+            if (file.Sha256 is not null && PinApplies(wasOnDisk: onDisk is not null, CacheRoot, path))
             {
-                VerifySha256(path, file.Sha256);
+                try
+                {
+                    VerifySha256(path, file.Sha256);
+                }
+                catch (HartsyInference.Core.Exceptions.HartsyInferenceException) when (onDisk is null)
+                {
+                    // A download that fails its pin is removed, so it is neither used nor taken for a cached file on the next run.
+                    TryDeleteFile(path);
+                    throw;
+                }
             }
             return path;
         }
@@ -240,6 +250,23 @@ public static class AudioModelCache
         {
             Logs.Debug($"[AudioCache] Optional file '{file.Name}' not available in '{hfRepoId}': {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>Whether a pinned file must match its pin. A pin is the upstream file's hash, and a Hartsy repack standing in for that
+    /// file has a rewritten header, so it cannot match; it was checked against its card's own hash when it was installed. Only a file
+    /// that was already on disk can be such a repack: a file just downloaded came from upstream, whatever its header says.</summary>
+    internal static bool PinApplies(bool wasOnDisk, string root, string path) => !(wasOnDisk && AudioStandIns.StandsIn(root, path));
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Logs.Warning($"[AudioCache] Could not remove '{path}', which failed its pinned hash: {ex.Message}");
         }
     }
 
