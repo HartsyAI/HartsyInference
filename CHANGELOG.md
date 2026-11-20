@@ -142,7 +142,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   key, and some CUDA rows returned the mean of V.
 - **Changed: grouped-query attention no longer repeats K and V** where a kernel reads them grouped: cuDNN on CUDA, every Vulkan dense
   and token-major row, and the CPU SIMD kernel. Calls Sage, INT8 attention v2 or the F16 flash kernel took keep those kernels.
-- **Changed: attention calls are validated in one place on every backend.** An output that aliases an input, negative strides, and sinks
+- **Changed: attention calls are validated in one place on every backend.** An output tensor that is also an input, negative strides, and sinks
   or ALiBi slopes that are not one F32 value per query head are rejected everywhere. `docs/ATTENTION_COMPATIBILITY.md` lists each change.
 - **Changed: unsupported GPU attention fails instead of running on the host.** CUDA refuses Flash attention above head dim 1024, a failed
   F16 flash launch is reported instead of retried on cuDNN, and a backend without attention kernels refuses `IBackend.Attention`.
