@@ -153,8 +153,8 @@ public sealed class PagedKvCache : IKvCache
         long copiedRows = tNew;
         if (pos == 0 && grow)
         {
-            // Nothing to keep: the new rows, padded to a whole page, are the buffer. Built as an op's output, it is
-            // never uploaded from the host.
+            // Nothing to keep: the new rows, padded out to the capacity, are the buffer. Built as an op's output, only the
+            // padding rows are uploaded from the host, not the whole buffer.
             scratch?.Dispose();
             scratch = new Tensor(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
             scratchArr[layer] = scratch;
@@ -172,9 +172,9 @@ public sealed class PagedKvCache : IKvCache
         {
             if (grow)
             {
-                scratch = GrowPrefix(backend, scratch, pos, capacity, headDim);
+                scratch = GrowPrefix(backend, scratch, pos, capacity, headDim, out int movedRows);
                 scratchArr[layer] = scratch;
-                copiedRows += pos;
+                copiedRows += movedRows;
             }
             backend.KvCacheAppend(scratch!, rows, pos);
         }
@@ -184,13 +184,19 @@ public sealed class PagedKvCache : IKvCache
     }
 
     /// <summary>A buffer of <paramref name="capacity"/> rows that starts with the <paramref name="keepRows"/> rows
-    /// <paramref name="old"/> holds. It is a concatenation's output, so the rows move on the device and nothing is uploaded.</summary>
-    private Tensor GrowPrefix(IBackend backend, Tensor? old, int keepRows, int capacity, int headDim)
+    /// <paramref name="old"/> holds. It is a concatenation's output: the old buffer's rows move on the device and only the
+    /// padding rows are uploaded. With nothing to keep, the buffer is returned unwritten and its first device use uploads
+    /// it whole; that is the order where a prefix is read before anything was appended to it.</summary>
+    /// <param name="movedRows">Rows the concatenation moved: all of <paramref name="old"/>, which can be more than
+    /// <paramref name="keepRows"/> when it was sized ahead.</param>
+    private Tensor GrowPrefix(IBackend backend, Tensor? old, int keepRows, int capacity, int headDim, out int movedRows)
     {
         Tensor grown = new(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
+        movedRows = 0;
         if (old is not null && keepRows > 0)
         {
-            using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - (int)old.Shape[2], headDim), DType.F32);
+            movedRows = (int)old.Shape[2];
+            using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - movedRows, headDim), DType.F32);
             backend.Concat(grown, [old, pad], 2);
         }
         old?.Dispose();
@@ -217,8 +223,8 @@ public sealed class PagedKvCache : IKvCache
         // then read) the append has already added this step's rows and there is nothing left to copy here.
         if (scratch is null || scratch.Shape[2] < len)
         {
-            if (scratch is not null) copiedRows += currentRows[layer];
-            scratch = GrowPrefix(backend, scratch, currentRows[layer], PrefixCapacity(len), headDim);
+            scratch = GrowPrefix(backend, scratch, currentRows[layer], PrefixCapacity(len), headDim, out int movedRows);
+            copiedRows += movedRows;
             scratchArr[layer] = scratch;
         }
 
@@ -291,7 +297,8 @@ public sealed class PagedKvCache : IKvCache
         ForgetRowsFrom(newLength);
     }
 
-    /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike <see cref="FixedKvCache.Reset"/> (which just zeroes a counter over its still-owned fixed buffer), this actually frees VRAM back to the shared pool for reuse by other sequences.</summary>
+    /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike <see cref="FixedKvCache.Reset"/> (which just zeroes a counter over its still-owned fixed buffer), this actually frees VRAM back to the shared pool for reuse by other sequences.
+    /// The contiguous prefix buffers are kept for the next sequence this cache holds; they are outside the pool's budget and are freed on <see cref="Dispose"/>.</summary>
     public void Reset()
     {
         ThrowIfDisposed();

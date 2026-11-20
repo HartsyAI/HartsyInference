@@ -124,6 +124,18 @@ public sealed class PagedKvCacheTests
     }
 
     [Fact]
+    public void APrefillLongerThanThePrefixKeptAcrossAResetMatchesAContiguousCache()
+    {
+        using Pair pair = new();
+        pair.Step(5);
+        pair.Reset();
+        // The eight-row prefix survives the reset; this prefill starts at row 0 and needs a larger one.
+        pair.Step(21);
+        pair.Step(1);
+        Assert.Equal(22, pair.Paged.CurrentLength);
+    }
+
+    [Fact]
     public void RewritingTheSamePositionReplacesWhatWasThere()
     {
         using Pair pair = new();
