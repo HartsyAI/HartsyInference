@@ -136,6 +136,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Changed: ERNIE-5.5 load reads ahead in parallel, the hyper-connection projection is vectorized, and decode parity checks every
+  position's argmax (CPU-tested; no speed measured on hardware).** The stage preload reads each layer's mapped weights ahead of their uploads
+  with `numerics.moeExpertPrefetchThreads` readers (the real checkpoint loaded through one reader at about 134 MB/s). `HostMath.Linear`
+  runs a fixed-order vector dot (a windowed weight still gives the whole product's bits), which the hyper-connection mixes call 86 times
+  per ERNIE token. `reference.py --logits` writes `choices.json` (argmax and top-2 lead per position), the real-weight harness writes
+  its own choices to `tokens.json`, and `compare.py` compares them per position (`--choice-margin` for near ties).
+
 - **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text and images (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run), from its `tiktoken.model` with the built-in XTML chat template when `tokenizer.json` is
   absent. Images on the last user turn go through the MoonViT-V2 tower and are spliced at the checkpoint's media placeholder. The tower loads on the

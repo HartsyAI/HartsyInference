@@ -1,3 +1,4 @@
+using System.Numerics;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
@@ -7,7 +8,7 @@ namespace HartsyInference.LLM.Transformer;
 internal static class HostMath
 {
     /// <summary><c>y[t,o] = sum_i x[t,i] * w[o,i]</c> for <paramref name="rows"/> rows.</summary>
-    /// <remarks>Each output element is one sequential dot product, so running them across cores changes the speed and nothing else.</remarks>
+    /// <remarks>Each output element is one <see cref="Dot"/>, whose summation order is fixed, so running them across cores changes the speed and nothing else.</remarks>
     public static float[] Linear(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int outDim)
     {
         if (x.Length != (long)rows * inDim || w.Length != (long)outDim * inDim) throw new ArgumentException("Linear operands do not match the stated shape.");
@@ -17,7 +18,7 @@ internal static class HostMath
     }
 
     /// <summary>The same product for <paramref name="chunkRows"/> weight rows only, written to columns <c>[firstRow, firstRow + chunkRows)</c> of each <paramref name="y"/> row of width <paramref name="outDim"/>.</summary>
-    /// <remarks>Lets a weight be streamed through a small window; every element is the same sequential dot, so the result equals the whole-matrix product bit for bit.</remarks>
+    /// <remarks>Lets a weight be streamed through a small window; every element is the same <see cref="Dot"/>, so the result equals the whole-matrix product bit for bit.</remarks>
     public static unsafe void LinearInto(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int chunkRows, float[] y, int outDim, int firstRow)
     {
         if (x.Length != (long)rows * inDim || w.Length != (long)chunkRows * inDim) throw new ArgumentException("Linear operands do not match the stated shape.");
@@ -37,12 +38,34 @@ internal static class HostMath
                 {
                     int t = index / chunkRows, o = index % chunkRows;
                     float* xr = xs + (long)t * inDim, wr = ws + (long)o * inDim;
-                    float sum = 0f;
-                    for (int i = 0; i < inDim; i++) sum += xr[i] * wr[i];
-                    ys[(long)t * outDim + firstRow + o] = sum;
+                    ys[(long)t * outDim + firstRow + o] = Dot(xr, wr, inDim);
                 }
             });
         }
+    }
+
+    /// <summary>One dot product in a fixed order: four accumulators of <see cref="Vector{T}"/> lanes, then the scalar tail.</summary>
+    /// <remarks>The order depends only on <paramref name="n"/> and the machine's vector width, so one machine gives one value for the same
+    /// inputs however the caller splits its outputs. A one-token hyper-connection projection is a single block of these on one thread
+    /// (24 dots of 16,384 values for ERNIE-5.5), where a scalar loop is bound by its one add per value.</remarks>
+    private static unsafe float Dot(float* a, float* b, int n)
+    {
+        int i = 0, width = Vector<float>.Count, step = width * 4;
+        float sum = 0f;
+        if (Vector.IsHardwareAccelerated && n >= step)
+        {
+            Vector<float> s0 = Vector<float>.Zero, s1 = s0, s2 = s0, s3 = s0;
+            for (; i <= n - step; i += step)
+            {
+                s0 += Vector.Load(a + i) * Vector.Load(b + i);
+                s1 += Vector.Load(a + i + width) * Vector.Load(b + i + width);
+                s2 += Vector.Load(a + i + 2 * width) * Vector.Load(b + i + 2 * width);
+                s3 += Vector.Load(a + i + 3 * width) * Vector.Load(b + i + 3 * width);
+            }
+            sum = Vector.Sum((s0 + s1) + (s2 + s3));
+        }
+        for (; i < n; i++) sum += a[i] * b[i];
+        return sum;
     }
 
     /// <summary>In-place RMS norm per row of width <paramref name="dim"/>: <c>w * x * rsqrt(mean(x^2) + eps)</c>.</summary>
