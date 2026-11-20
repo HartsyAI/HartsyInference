@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -11,9 +12,8 @@ namespace HartsyInference.Cuda;
 // INT8 attention v2 rows (S.17/S.18, M.4/M.5): admission, the persistent workspace and the three launches.
 public sealed partial class CudaBackend
 {
-    private ulong _int8V2Workspace;
-    private long _int8V2WorkspaceBytes;
-    private long _int8V2GrowthFailedAt = long.MaxValue;
+    private readonly HighWaterWorkspace _int8V2Workspace = new(static bytes => GpuTransferHelper.AllocateDevice((nuint)bytes),
+        GpuTransferHelper.FreeDevice);
     private long _int8V2ExecutionCount;
 
     /// <summary>Number of INT8 attention v2 executions this session.</summary>
@@ -23,7 +23,17 @@ public sealed partial class CudaBackend
     internal int Int8V2BlockRows => Int8V2BlockRowsOverride is 64 or 128 ? Int8V2BlockRowsOverride : 64;
 
     /// <summary>Bytes the INT8 v2 workspace holds now (its high-water mark since it was last released).</summary>
-    internal long Int8V2WorkspaceBytes => _int8V2WorkspaceBytes;
+    internal long Int8V2WorkspaceBytes => _int8V2Workspace.Bytes;
+
+    /// <summary>Bytes of earlier INT8 v2 workspaces kept alive because a captured graph still replays into them.</summary>
+    internal long Int8V2WorkspaceRetainedBytes
+    {
+        get
+        {
+            using OpScope _op = EnterOp();
+            return _int8V2Workspace.RetainedBytes;
+        }
+    }
 
     /// <summary>The shape checks every INT8 v2 decision shares: the knob, F16 or F32, head dim 128, both sequences at the engage
     /// length, and a grid and counter slot per (batch, head).</summary>
@@ -66,7 +76,7 @@ public sealed partial class CudaBackend
         if (!Int8V2ShapeEligible(batch, heads, queryTokens, keys, headDim, headDim, dtype) || !Int8V2KernelsLoaded()) return false;
         long bytes = new Int8AttentionV2Layout(batch, heads, queryTokens, keys, CurrentInt8V2Pv()).Bytes;
         // A capture cannot grow the workspace, and a size that failed to allocate is not retried: such a call takes the next row.
-        return bytes <= _int8V2WorkspaceBytes || (!StreamIsCapturing() && bytes < _int8V2GrowthFailedAt);
+        return bytes <= _int8V2Workspace.Bytes || (!StreamIsCapturing() && bytes < _int8V2Workspace.GrowthFailedAt);
     }
 
     /// <summary>The PV format the knobs pick.</summary>
@@ -142,42 +152,29 @@ public sealed partial class CudaBackend
 
     /// <summary>The workspace grown to at least <paramref name="bytes"/>, or 0 (the call takes the next row) while the stream
     /// captures and it is smaller, or when that size did not fit in VRAM since activations were last freed. A capture never
-    /// allocates it, and a captured graph must never hold a pointer a later growth frees. Ops are serialized (EnterOp).</summary>
+    /// allocates it. A graph that captures a call leases the buffer it baked, so a later growth or release keeps that buffer
+    /// until the graph is disposed or reset; the step graph is reset before growth instead, so its buffer is freed first.
+    /// Ops are serialized (EnterOp).</summary>
     private ulong EnsureInt8V2Workspace(long bytes)
     {
-        if (bytes <= _int8V2WorkspaceBytes) return _int8V2Workspace;
-        if (StreamIsCapturing() || bytes >= _int8V2GrowthFailedAt) return 0;
+        ulong workspace = _int8V2Workspace.Use(bytes, CapturingGraph);
+        if (workspace != 0) return workspace;
+        if (StreamIsCapturing() || bytes >= _int8V2Workspace.GrowthFailedAt) return 0;
         StepGraphInvalidateForActivationFree();
-        // Free first: old and new together would need both at peak, which is what fails near the VRAM limit.
-        FreeInt8V2Workspace();
         try
         {
-            _int8V2Workspace = GpuTransferHelper.AllocateDevice((nuint)bytes);
+            workspace = _int8V2Workspace.Grow(bytes);
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.int8v2.workspace.grow", bytes);
+            return workspace;
         }
         catch (OutOfVramException ex)
         {
-            _int8V2GrowthFailedAt = bytes;
             Logs.Warning($"[INT8 attention v2] its {bytes >> 20} MB workspace does not fit ({ex.Message}); such calls take the next row.");
             return 0;
         }
-        _int8V2WorkspaceBytes = bytes;
-        return _int8V2Workspace;
     }
 
     /// <summary>Returns the workspace to the stream-ordered pool when activations are freed, and lets a size that did not fit try
-    /// again; the next call grows it again.</summary>
-    private void ReleaseInt8V2Workspace()
-    {
-        _int8V2GrowthFailedAt = long.MaxValue;
-        FreeInt8V2Workspace();
-    }
-
-    private void FreeInt8V2Workspace()
-    {
-        ulong buffer = _int8V2Workspace;
-        _int8V2Workspace = 0;
-        _int8V2WorkspaceBytes = 0;
-        if (buffer != 0) GpuTransferHelper.FreeDevice(buffer);
-    }
+    /// again; the next call grows it again. A buffer a captured graph leases stays until that graph goes.</summary>
+    private void ReleaseInt8V2Workspace() => _int8V2Workspace.ReleaseCurrent();
 }

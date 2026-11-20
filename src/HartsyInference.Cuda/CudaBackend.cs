@@ -3967,6 +3967,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     // ── Step-graph capture (CUDA-graph replay of a fixed per-step op sequence; see IBackend docs) ─────────
     private CudaGraph? _stepGraph;
     private bool _stepGraphCapturing;
+    // The caller-owned graph CaptureGraph is recording, if any.
+    private CudaGraph? _capturingGraph;
+
+    /// <summary>The graph being captured now: it leases any persistent workspace a captured call bakes into it.</summary>
+    private CudaGraph? CapturingGraph => _stepGraphCapturing ? _stepGraph : _capturingGraph;
+
+    /// <summary>Drops the workspace leases of a graph that was disposed, reset or never finished capturing.</summary>
+    private void ReleaseGraphLeases(CudaGraph graph) => _int8V2Workspace.Release(graph);
 
     public bool SupportsF16Activations => true;
 
@@ -4038,6 +4046,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GC.SuppressFinalize(_stepGraph);
         }
         _stepGraph.Reset();
+        ReleaseGraphLeases(_stepGraph);
         lock (_transferState.CaptureAllocs)
         {
             _transferState.CaptureAllocs.Clear();
@@ -4122,6 +4131,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 CudaDriverApi.cuDeviceGraphMemTrim(_context.DeviceHandle).ThrowOnError();
             }, ref failures);
         }
+        if (graph is not null)
+            AttemptCleanup("step graph workspace leases", () => ReleaseGraphLeases(graph), ref failures);
         if (failures is not null)
             throw new AggregateException("Step-graph reset completed, but one or more of its steps failed.", failures);
     }
@@ -8328,15 +8339,29 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // on EVERY replay (measured on gemma3: 1672 of the graph's 2264 nodes — ~2-3 ms/token of pure
         // memory-node overhead on sub-2B models). Arena buffers persist for the backend's lifetime, so
         // captured pointers stay valid across replays; overflow falls back to pool nodes (correct, slower).
-        if (EngineKnobs.GraphArena.Value)
+        _capturingGraph = graph;
+        try
         {
-            graph.ArenaBase = GpuTransferHelper.BeginGraphArena();
-            try { graph.Capture(recordWork); }
-            finally { GpuTransferHelper.EndGraphArena(); }
+            if (EngineKnobs.GraphArena.Value)
+            {
+                graph.ArenaBase = GpuTransferHelper.BeginGraphArena();
+                try { graph.Capture(recordWork); }
+                finally { GpuTransferHelper.EndGraphArena(); }
+            }
+            else
+            {
+                graph.Capture(recordWork);
+            }
         }
-        else
+        catch
         {
-            graph.Capture(recordWork);
+            // The caller never receives this graph, so nothing else would release what it leased.
+            ReleaseGraphLeases(graph);
+            throw;
+        }
+        finally
+        {
+            _capturingGraph = null;
         }
         return graph;
     }
@@ -8352,7 +8377,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         CudaGraph graph = (CudaGraph)graphHandle;
         using OpScope _op = EnterOp();
-        graph.Dispose();
+        try
+        {
+            graph.Dispose();
+        }
+        finally
+        {
+            ReleaseGraphLeases(graph);
+        }
         GpuTransferHelper.FreeGraphArena(graph.ArenaBase);
     }
 
@@ -9277,13 +9309,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ulong ssmScratch = _ssmDeltaScratch;
             _ssmDeltaScratch = 0;
             _ssmDeltaScratchBytes = 0;
-            ulong int8V2Workspace = _int8V2Workspace;
-            _int8V2Workspace = 0;
-            _int8V2WorkspaceBytes = 0;
+            ulong[] int8V2Workspaces = _int8V2Workspace.Detach();
             if (state is not null)
             {
                 if (dp4aScratch != 0) Attempt("dp4a scratch", () => GpuTransferHelper.FreeDevice(state, dp4aScratch));
-                if (int8V2Workspace != 0) Attempt("INT8 attention v2 workspace", () => GpuTransferHelper.FreeDevice(state, int8V2Workspace));
+                foreach (ulong int8V2Workspace in int8V2Workspaces)
+                    Attempt("INT8 attention v2 workspace", () => GpuTransferHelper.FreeDevice(state, int8V2Workspace));
                 if (argmaxScratch != 0) Attempt("argmax scratch", () => GpuTransferHelper.FreeDevice(state, argmaxScratch));
                 if (ssmScratch != 0) Attempt("SSM delta scratch", () => GpuTransferHelper.FreeDevice(state, ssmScratch));
                 Attempt("W8A8 caches", () => FreeW8A8Cache(state));

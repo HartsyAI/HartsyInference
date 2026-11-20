@@ -11,7 +11,7 @@ public sealed partial class CudaBackend
     internal int Int8V2BlockRowsOverride { get; set; }
 
     /// <summary>Test hook: the smallest workspace size that ran out of VRAM since activations were last freed.</summary>
-    internal long Int8V2GrowthFailedAtForTest { get => _int8V2GrowthFailedAt; set => _int8V2GrowthFailedAt = value; }
+    internal long Int8V2GrowthFailedAtForTest { get => _int8V2Workspace.GrowthFailedAt; set => _int8V2Workspace.GrowthFailedAt = value; }
 
     /// <summary>Test hook: each loaded INT8 v2 entry's registers and local bytes as the driver compiled it for this card.</summary>
     internal (string Name, int Registers, int LocalBytes)[] Int8V2EntryResourcesForTest()
