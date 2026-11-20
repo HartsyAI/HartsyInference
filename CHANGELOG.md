@@ -136,6 +136,18 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Fixed: CUDA attention applies the logit softcap before ALiBi**, as the CPU does. The two were added in the wrong order, so a model
+  using both got different outputs on CUDA.
+- **Fixed: a fully masked attention row is zero.** The CPU dense kernel returned NaN for a row masked with negative infinity on every
+  key, and some CUDA rows returned the mean of V.
+- **Changed: grouped-query attention no longer repeats K and V** where a kernel reads them grouped: cuDNN on CUDA, every Vulkan dense
+  and token-major row, and the CPU SIMD kernel. Calls Sage, INT8 attention v2 or the F16 flash kernel took keep those kernels.
+- **Changed: attention calls are validated in one place on every backend.** An output that aliases an input, negative strides, and sinks
+  or ALiBi slopes that are not one F32 value per query head are rejected everywhere. `docs/ATTENTION_COMPATIBILITY.md` lists each change.
+- **Changed: unsupported GPU attention fails instead of running on the host.** CUDA refuses Flash attention above head dim 1024, a failed
+  F16 flash launch is reported instead of retried on cuDNN, and a backend without attention kernels refuses `IBackend.Attention`.
+  Vulkan still runs softcap, causal-sink and ALiBi attention on the host through a named row that warns once.
+
 - **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text and images (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run), from its `tiktoken.model` with the built-in XTML chat template when `tokenizer.json` is
   absent. Images on the last user turn go through the MoonViT-V2 tower and are spliced at the checkpoint's media placeholder. The tower loads on the
