@@ -31,6 +31,7 @@ internal static class MeshRequestValidator
         if (id != MeshModelIds.Trellis2 && id != MeshModelIds.Pixal3D)
             Trellis2RequestMapper.RejectForOtherModels(request, id);
         Pixal3DRequestMapper.RejectForOtherModels(request, id);
+        IdolRequestMapper.RejectForOtherModels(request, id);
         if (MeshModelIds.SceneMesh.Contains(id))
         {
             ValidateScene(id, request);
@@ -91,6 +92,15 @@ internal static class MeshRequestValidator
         else if (id == MeshModelIds.Sam3dObjects)
         {
             Sam3dObjectsRequestMapper.Validate(request);
+        }
+        else if (MeshModelIds.IsIdol(id))
+        {
+            IdolRequestMapper.Validate(request, id);
+            if (!MeshPreparationService.HasUsableAlpha(request.Image) && !matterAvailable)
+            {
+                throw new NotSupportedException("Idol needs the foreground cut out: send an image with alpha, or install the BiRefNet matting checkpoint (Vision/BiRefNet-matting/model.safetensors).")
+                    .ForField(nameof(MeshRequest.Image));
+            }
         }
         else if (id == "triposr")
         {

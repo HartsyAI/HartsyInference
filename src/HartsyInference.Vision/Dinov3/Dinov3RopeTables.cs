@@ -12,12 +12,13 @@ internal static class Dinov3RopeTables
     private const double RopeBase = 100.0;
     private const float TwoPi = 6.2831855f;
 
-    /// <summary>Builds <c>[batch, prefix + gridH·gridW, headDim]</c> cos and sin tables; the caller disposes both.</summary>
-    public static unsafe (Tensor Cos, Tensor Sin) Build(int batch, int prefix, int gridH, int gridW, int headDim)
+    /// <summary>Builds <c>[batch, prefix + gridH·gridW, headDim]</c> cos and sin tables; the caller disposes both.
+    /// <paramref name="roundPeriodsToBf16"/> follows the reference the checkpoint is compared with, see <see cref="Periods"/>.</summary>
+    public static unsafe (Tensor Cos, Tensor Sin) Build(int batch, int prefix, int gridH, int gridW, int headDim, bool roundPeriodsToBf16 = true)
     {
         int tokens = prefix + gridH * gridW;
         int half = headDim / 2, quarter = headDim / 4;
-        float[] periods = Periods(headDim);
+        float[] periods = Periods(headDim, roundPeriodsToBf16);
         float[] coordH = AxisCoords(gridH), coordW = AxisCoords(gridW);
 
         Tensor cos = new(new TensorShape(batch, tokens, headDim), DType.F32);
@@ -51,14 +52,18 @@ internal static class Dinov3RopeTables
         return (cos, sin);
     }
 
-    /// <summary>Frequencies <c>base^(2k / (headDim/2))</c>, k in [0, headDim/4), in float32 and rounded to bfloat16 as the
-    /// reference HairDeck loader does (the checkpoint carries no periods of its own).</summary>
-    public static float[] Periods(int headDim)
+    /// <summary>Frequencies <c>base^(2k / (headDim/2))</c>, k in [0, headDim/4), in float32 (the checkpoint carries no periods of
+    /// its own). Rounded to bfloat16 by default, as the reference HairDeck loader does; Hugging Face's <c>DINOv3ViTModel</c> keeps
+    /// <c>inv_freq</c> in float32 even when its weights load as bfloat16, so a checkpoint compared with it takes <paramref name="roundToBf16"/> false.</summary>
+    public static float[] Periods(int headDim, bool roundToBf16 = true)
     {
         int quarter = headDim / 4;
         float[] periods = new float[quarter];
         for (int k = 0; k < quarter; k++)
-            periods[k] = RoundToBf16(MathF.Pow((float)RopeBase, 2f * k / (headDim / 2f)));
+        {
+            float period = MathF.Pow((float)RopeBase, 2f * k / (headDim / 2f));
+            periods[k] = roundToBf16 ? RoundToBf16(period) : period;
+        }
         return periods;
     }
 

@@ -69,6 +69,7 @@ Desktop.ini
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioS2/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioDrama3/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/Haru/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MuseSpark/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Flint/*.safetensors
@@ -95,6 +96,8 @@ Desktop.ini
 *.pth
 *.onnx
 *.bin
+# Idol's 98 KB token positions, an embedded resource of the ThreeD package
+!src/HartsyInference.ThreeD/Models/Idol/Resources/*.bin
 
 ## Generated output images (entire Output/ tree, including date-stamped subfolders and reference images)
 /Output/

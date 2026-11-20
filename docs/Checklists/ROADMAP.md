@@ -97,7 +97,7 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] SSM recurrence profiling and long-context/quantized quality checks; per-architecture gaps are in LLM status.
 - [ ] Voice session (`HartsyInference.Voice`) follow-ups: partial transcripts need a streaming recognizer
   (`PartialTranscripts` is rejected until then); after a barge-in the history keeps the generated text rather than
-  what the caller heard. Design in [voice session](../Research/VOICE_AGENT_SESSION.md).
+  what the caller heard.
 - [x] KV reuse across turns (`perf/llm-voice-prefix-reuse`, #217): opt-in prefix-KV reuse in
   `TextGenerationPipeline`/`TextService` (`TextRequest.PrefixCacheKey`, `RetainedSequence`/`RetainedSequenceStore`),
   wired into the voice session per call plus a call-start priming request. 4090 VRAM also addressed
@@ -229,7 +229,7 @@ with its first consumer and is removed here once it ships.
   - Settle append/eviction, positions across chunks, masks, timestep validity and request isolation.
   - Gate it on cached-vs-uncached parity.
 - [ ] A Jina-CLIP-v2 tower (XLM-R with RoPE, 250k Unigram tokenizer) for NewBie.
-- [ ] DINOv3 on the ViT RoPE block: TRELLIS.2, Pixal3D, Idol and sam-3d-body.
+- [ ] DINOv3 on the ViT RoPE block: TRELLIS.2, Pixal3D and sam-3d-body (Idol's ViT-H+ is done).
 - [ ] Comfy `comfy_quant` w4a8/w6a8 as W4A16/W6A16 first, plus AWQ `pre_quant_scale` folding: Qwen3.8-27B, the
   Ming-Image text encoder, MiniMax-H3.
 - [ ] A BailingMoeV2 safetensors config factory for `GenericTransformer` + `MoeFeedForward` (the Ming-Image text

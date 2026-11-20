@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -32,7 +33,7 @@ public sealed class Trellis2StructureStage : ITrellis2StructureStage, IDisposabl
 
     /// <inheritdoc/>
     public int[] Sample(
-        IBackend backend, Tensor cond, Tensor negCond, int seed, Trellis2SamplerParams parameters, int outputResolution, Action<int>? onStep)
+        IBackend backend, Tensor cond, Tensor negCond, int seed, FlowSamplerParams parameters, int outputResolution, Action<int>? onStep)
     {
         ArgumentNullException.ThrowIfNull(backend);
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(_flowPath);
@@ -43,7 +44,7 @@ public sealed class Trellis2StructureStage : ITrellis2StructureStage, IDisposabl
         backend.PreloadWeights(flow.EnumerateWeights());
         try
         {
-            latent = Trellis2FlowSampler.Sample(
+            latent = RectifiedFlowSampler.Sample(
                 backend, noise, parameters, (x, tModel, conditional) => flow.Forward(backend, x, tModel, conditional ? cond : negCond), onStep);
         }
         finally

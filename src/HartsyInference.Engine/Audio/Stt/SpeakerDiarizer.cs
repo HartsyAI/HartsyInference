@@ -37,6 +37,12 @@ internal sealed class SpeakerDiarizer : IDisposable
     /// <summary>Spans shorter than this carry too few fbank frames for a stable embedding and are dropped.</summary>
     private const double MinSpanSeconds = 0.4;
 
+    /// <summary>A pause longer than this ends a run of words that are embedded together.</summary>
+    private const double WordRunGapSeconds = 0.5;
+
+    /// <summary>A run of words is closed once it spans this long, so a speaker turn is not buried in one embedding.</summary>
+    private const double WordRunMaxSeconds = 2.0;
+
     /// <summary>Upper bound on distinct speakers; clustering keeps merging past the threshold to reach it.</summary>
     private const int MaxSpeakers = 8;
 
@@ -136,6 +142,10 @@ internal sealed class SpeakerDiarizer : IDisposable
         List<SttSegment> spans = [];
         if (segments is { Count: > 0 })
         {
+            if (segments[0].IsWord)
+            {
+                segments = GroupWords(segments);
+            }
             foreach (SttSegment segment in segments)
             {
                 if (segment.End - segment.Start >= MinSpanSeconds && segment.Start < totalSeconds)
@@ -156,6 +166,26 @@ internal sealed class SpeakerDiarizer : IDisposable
             spans.Add(new SttSegment { Text = string.Empty, Start = start, End = Math.Min(start + window, totalSeconds) });
         }
         return spans;
+    }
+
+    /// <summary>Joins consecutive words into runs that end at a pause or after <see cref="WordRunMaxSeconds"/>: one
+    /// word is too short for a stable speaker embedding.</summary>
+    private static List<SttSegment> GroupWords(IReadOnlyList<SttSegment> words)
+    {
+        List<SttSegment> runs = [];
+        int first = 0;
+        for (int k = 1; k <= words.Count; k++)
+        {
+            bool closes = k == words.Count || words[k].Start - words[k - 1].End > WordRunGapSeconds
+                || words[k - 1].End - words[first].Start >= WordRunMaxSeconds;
+            if (closes)
+            {
+                string text = SttSegment.Join(words.Skip(first).Take(k - first).ToList());
+                runs.Add(new SttSegment { Text = text, Start = words[first].Start, End = words[k - 1].End });
+                first = k;
+            }
+        }
+        return runs;
     }
 
     /// <summary>Joins consecutive spans into groups spanning at most a time limit, so a joined span never stretches across a long gap.</summary>

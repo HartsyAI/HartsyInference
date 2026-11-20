@@ -59,6 +59,9 @@ public enum LoraFormat
     /// projections (<c>attn.wq</c>, <c>attn.gate</c>), which the Wan rename table would otherwise leave unmatched.</summary>
     Krea2,
 
+    /// <summary>Idol's denoiser (<c>blocks.N.attn.qkv.lora_down.weight</c>, <c>noise_refiner.N.mlp.mlp.0…</c>, bare or under <c>diffusion_model.</c>): the Comfy-format idol-turbo slow and fast phase experts. Recognized by the <c>mlp.mlp.N</c> MLP spelling no other family uses.</summary>
+    Idol,
+
     /// <summary>Kohya/musubi-tuner <c>lora_unet_&lt;module path with '.' written as '_'&gt;</c> keys no specific kohya layout claims (Krea 2: <c>lora_unet_blocks_0_attn_wq</c>). The module names are resolved against the target model's own weight names when the LoRA is applied, as ComfyUI does, so any DiT works without a per-family table. Detected after every other format.</summary>
     KohyaGeneric,
 }

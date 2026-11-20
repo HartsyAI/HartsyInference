@@ -404,6 +404,82 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>Idol (Sperid Labs, <c>speridlabs/idol</c>), one picture of an object to up to a million 3D Gaussians: DINOv3 ViT-H+/16 and the FLUX.2 VAE encode the picture, a 370 M rectified-flow transformer denoises an
+    /// 8192-token latent (50 guided steps), and an octree decoder and a Gaussian decoder place and shape the splats. The files are Comfy-Org's ungated repack <c>Comfy-Org/Idol</c> (revision
+    /// e907d8dca6c465735eaf4ce9b3a3c2c6401d5705; an asset carries no revision field, so a changed file fails the hash check); the hashes are the repository's LFS oids, checked against the downloaded bytes. They keep
+    /// Comfy's folders (<c>diffusion_models</c>, <c>clip_vision</c>, <c>vae</c>) under <c>3D/idol</c>. Idol's token positions (<c>pos_pe</c>, 98 KB) are in no repack and ship inside the engine. Licences: Idol weights
+    /// and code Apache-2.0; DINOv3 under the DINOv3 License (Meta, custom; the original repository is gated, this file is Comfy-Org's redistribution of it); the FLUX.2 VAE Apache-2.0 (FLUX.2-klein-4B); BiRefNet-matting MIT.</summary>
+    private static CatalogEntry Idol() => new CatalogEntry
+    {
+        Id = "idol", Modality = Modality.Mesh, DisplayName = "Idol (image to Gaussian splats)",
+        Architecture = "DINOv3 ViT-H+/16 + FLUX.2 VAE conditioning, 370M rectified-flow transformer with learned RoPE, octree and Gaussian decoders",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "Comfy-Org/Idol",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "diffusion_models/idol_fp16.safetensors", TargetSubdir = "3D/idol", TargetName = "diffusion_models/idol_fp16.safetensors",
+                Role = "denoiser", Sha256 = "9abf6a99fc6bdad701901b12de8fe1b256f02cae4948f7489d25d86b11b52a93" },
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "clip_vision/dino_v3_vit_h_bf16.safetensors", TargetSubdir = "3D/idol", TargetName = "clip_vision/dino_v3_vit_h_bf16.safetensors",
+                Role = "image encoder (DINOv3 ViT-H+/16)", Sha256 = "a29ef35101a16966972a0d50732a6f3a608ff7cfffb2afa9bbe9007cb842cc53" },
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "vae/flux2-vae.safetensors", TargetSubdir = "3D/idol", TargetName = "vae/flux2-vae.safetensors",
+                Role = "image encoder (FLUX.2 VAE)", Sha256 = "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3" },
+            new() { Repo = "Comfy-Org/Idol", RepoPath = "vae/idol_decoder_fp16.safetensors", TargetSubdir = "3D/idol", TargetName = "vae/idol_decoder_fp16.safetensors",
+                Role = "octree and Gaussian decoders", Sha256 = "6a146a1e6b2653f74422f7ea835eb8715c547c7de8fc4545051f15c247ae54a9" },
+            new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
+                Role = "matting (optional)", Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+        },
+    };
+
+    /// <summary>Idol-turbo (<c>akhaliq/idol-turbo</c>, Apache-2.0): Idol's denoiser distilled into two rank-32 phase LoRAs (slow while the shifted time is 0.5 or more, fast below), so 5 guidance-free steps replace 50 guided ones.
+    /// It runs the base Idol files, so the entry lists them at the same folder and with the same hashes as <c>idol</c> (a model that has them already downloads only the two LoRAs, 59 MB each) and adds the Comfy-format
+    /// LoRAs, which are pre-scaled for strength 1.0, in <c>loras/</c> (revision 45cdd41f1f4d6d70496daa7d619f57ad79307a37; an asset carries no revision field, so a changed file fails the hash check). The hashes are the repository's LFS
+    /// oids, equal to the sha256 of the downloaded bytes.</summary>
+    private static CatalogEntry IdolTurbo() => new CatalogEntry
+    {
+        Id = "idol-turbo", Modality = Modality.Mesh, DisplayName = "Idol-turbo (image to Gaussian splats, 5 steps)",
+        Architecture = "Idol (DINOv3 ViT-H+/16 + FLUX.2 VAE, 370M rectified-flow transformer, octree and Gaussian decoders) with slow and fast rank-32 phase LoRAs",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "Comfy-Org/Idol",
+        Assets =
+        [
+            .. Idol().Assets!,
+            new ModelAsset { Repo = "akhaliq/idol-turbo", RepoPath = "loras/idol_turbo_slow_comfy.safetensors", TargetSubdir = "3D/idol", TargetName = "loras/idol_turbo_slow_comfy.safetensors",
+                Role = "slow phase LoRA (high-noise steps)", Sha256 = "4b27bbbf87d002762d8d0c840fdbf8b48d740c9fac2ba34d4e607196861f843f" },
+            new ModelAsset { Repo = "akhaliq/idol-turbo", RepoPath = "loras/idol_turbo_fast_comfy.safetensors", TargetSubdir = "3D/idol", TargetName = "loras/idol_turbo_fast_comfy.safetensors",
+                Role = "fast phase LoRA (low-noise steps)", Sha256 = "1111341fbe27c2e80534fcac236a12c4484b334c407d993d601e9a86f9b36e8a" },
+        ],
+    };
+
+    /// <summary>Budget3D-Idol (<c>BudgetAny/Budget3D-Idol</c>, Apache-2.0, code MIT): Idol's denoiser fine-tuned to run on an adaptive number of its 8192 latent tokens, so a token budget trades detail for speed. The released file is a full
+    /// float32 denoiser (the backbone was fine-tuned too) with the 82 adapter tensors, not an adapter on Idol's file; it uses Idol's encoders and decoders, so the entry lists those at the same folder and hashes as <c>idol</c>
+    /// (a model that has them downloads only this 1.5 GB file) and places the checkpoint in <c>diffusion_models/</c>. Revision 2dd6d83c57e7853234dbbb24c54b78edc842d074; an asset carries no revision field, so a changed file fails the hash
+    /// check. The hash is the repository's LFS oid.</summary>
+    private static CatalogEntry Budget3DIdol() => new CatalogEntry
+    {
+        Id = "budget3d-idol", Modality = Modality.Mesh, DisplayName = "Budget3D-Idol (image to Gaussian splats at a token budget)",
+        Architecture = "Idol (DINOv3 ViT-H+/16 + FLUX.2 VAE, 370M rectified-flow transformer, octree and Gaussian decoders) fine-tuned for adaptive token counts: Sobol octree, scale mixers, integrated position encoding, refine stages",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "BudgetAny/Budget3D-Idol",
+        Assets =
+        [
+            new ModelAsset { Repo = "BudgetAny/Budget3D-Idol", RepoPath = "budget3d_idol.safetensors", TargetSubdir = "3D/idol", TargetName = "diffusion_models/budget3d_idol.safetensors",
+                Role = "denoiser (Budget3D-Idol)", Sha256 = "8d87669ab02823d6fde862b4f1a0be6628f862ec16bbdb263a0838b5bbc4c1fe" },
+            .. Idol().Assets!.Where(a => a.Role != "denoiser"),
+        ],
+    };
+
+    /// <summary>Budget3D-Idol-Turbo (<c>BudgetAny/Budget3D-Idol-Turbo</c>, Apache-2.0, code MIT): Budget3D-Idol with idol-turbo's slow and fast phase experts inside the checkpoint (each block matrix as <c>.base</c> plus <c>slow_A</c>, <c>slow_B</c>,
+    /// <c>fast_A</c>, <c>fast_B</c> at LoRA alpha 128 over rank 32), so 5 guidance-free steps run on a token budget. Revision ba76450efdc888310741659665ec72b8c7d0ebc0; the hash is the repository's LFS oid. Same shared files as <c>idol</c>.</summary>
+    private static CatalogEntry Budget3DIdolTurbo() => new CatalogEntry
+    {
+        Id = "budget3d-idol-turbo", Modality = Modality.Mesh, DisplayName = "Budget3D-Idol-Turbo (image to Gaussian splats, 5 steps at a token budget)",
+        Architecture = "Budget3D-Idol with slow and fast rank-32 phase experts embedded in its block matrices",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "BudgetAny/Budget3D-Idol-Turbo",
+        Assets =
+        [
+            new ModelAsset { Repo = "BudgetAny/Budget3D-Idol-Turbo", RepoPath = "budget3d_idol_turbo.safetensors", TargetSubdir = "3D/idol", TargetName = "diffusion_models/budget3d_idol_turbo.safetensors",
+                Role = "denoiser (Budget3D-Idol-Turbo)", Sha256 = "4f0c31ed6979f80478ce75e5002c81353604bf8560d392fc4ea06687be193c05" },
+            .. Idol().Assets!.Where(a => a.Role != "denoiser"),
+        ],
+    };
+
     /// <summary>SAM 3D Objects (facebookresearch/sam-3d-objects), image plus object mask to Gaussian splats with a pose: a mixture-of-transformers structure flow conditioned on two DINOv2 towers and a
     /// pointmap, a sparse SLAT flow, and the Gaussian decoder, with MoGe estimating the pointmap. Meta's checkpoints are gated and pickled; this entry names the ungated third-party safetensors conversion
     /// <c>apozz/sam-3d-objects-safetensors</c> (revision cbb995af47eae6c30d2f2a087f5195be2365a2e2; an asset carries no revision field, so a changed file fails
@@ -1947,6 +2023,23 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Haru-4B (higurashi-ai/Haru-4B @ 8d6e83bc): full-duplex speech-to-speech. A Qwen3.5-4B trunk reads the user's audio and its own
+                // text and audio every 133 ms; the VibeVoice acoustic codec and a one-step MeanFlow head carry the audio. Pretrained base
+                // model: no instructions, no tools. Weights and code Apache-2.0; the codec is the MIT VibeVoice tokenizer, whose card forbids
+                // voice impersonation without recorded consent and real-time voice conversion. `hartsy duplex -m haru:q8` answers a recording
+                // (`:q8`, `:q6`, `:q5`, `:q4` convert the language model once into a disk cache; native BF16 is 10.5 GB). Matches the upstream PyTorch
+                // model on the CPU backend with the released weights; Q8_0 on the 3060 answers coherently (Whisper-checked), the K-quants did not.
+                Id = "haru", Modality = tts, DisplayName = "Haru-4B", Architecture = "Qwen3.5-4B + VibeVoice codec + MeanFlow head (full duplex)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "higurashi-ai/Haru-4B", RepoPath = "config.json", TargetSubdir = "Audio/Haru", Role = "config", Sha256 = "ff29b2dab25780d33fe1ea8efc3d1364d31e7bef95b0b08514b935305ba2f427" },
+                    new() { Repo = "higurashi-ai/Haru-4B", RepoPath = "tokenizer.json", TargetSubdir = "Audio/Haru", Role = "tokenizer", Sha256 = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523" },
+                    new() { Repo = "higurashi-ai/Haru-4B", RepoPath = "model.safetensors", TargetSubdir = "Audio/Haru", Role = "weights", Sha256 = "ad2c3534ef6bd88525e22e5da3ac4fb739368406bf3b1c852cbafbade647c0fa" },
+                },
+            },
+            new CatalogEntry
+            {
                 // Breeze TTS 2 (BreezeBlue): T5Gemma2 text encoder + Qwen3 backbone + depth decoder + Qwen3-TTS-Tokenizer-12Hz
                 // vocoder. Voice clone / design / direction. Research and non-commercial weights.
                 Id = "breeze", Modality = tts, DisplayName = "Breeze TTS 2", Architecture = "T5Gemma2 + Qwen3 backbone + depth decoder", Status = st,
@@ -2925,6 +3018,10 @@ public static class ModelCatalog
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
             Trellis2(),
             Pixal3D(),
+            Idol(),
+            IdolTurbo(),
+            Budget3DIdol(),
+            Budget3DIdolTurbo(),
             Sam3dObjects(),
             HairDeck(),
 

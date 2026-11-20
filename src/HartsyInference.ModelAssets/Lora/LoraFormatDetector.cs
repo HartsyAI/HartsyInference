@@ -32,6 +32,7 @@ public static class LoraFormatDetector
         bool hasFibo2 = false;
         bool hasAnima = false;
         bool hasKrea2 = false;
+        bool hasIdol = false;
         bool hasKohyaGeneric = false;
 
         foreach (string key in descriptors.Keys)
@@ -60,6 +61,12 @@ public static class LoraFormatDetector
             if (HasLoraSuffix(key) && AnimaLoraMapper.IsDistinctive(key))
             {
                 hasAnima = true;
+            }
+            // Idol's block modules. Bare `blocks.N.attn.qkv.lora_down.weight` roots would otherwise reach the bare-checkpoint arm below,
+            // whose PEFT-only suffix list does not even carry the kohya matrices these files use.
+            if (HasLoraSuffix(key) && IdolLoraMapper.IsDistinctive(key))
+            {
+                hasIdol = true;
             }
             // Krea 2 under its ComfyUI / ai-toolkit wrapper. Its `diffusion_model.blocks.N.` roots would otherwise be claimed by the
             // Wan arm, whose rename table has no attn.wq / attn.gate, so every module would match 0 weights and the LoRA would be refused.
@@ -185,6 +192,7 @@ public static class LoraFormatDetector
         if (hasMossImage) return LoraFormat.MossImage;
         if (hasFibo2) return LoraFormat.Fibo2;
         if (hasAnima) return LoraFormat.Anima;
+        if (hasIdol) return LoraFormat.Idol;
         if (hasKrea2) return LoraFormat.Krea2;
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;

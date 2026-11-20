@@ -1,9 +1,9 @@
 using System.Text.Json;
 
-namespace HartsyInference.ThreeD.Models.TrellisV2;
+namespace HartsyInference.ThreeD.Sampling;
 
 /// <summary>Parameters of one <c>FlowEulerGuidanceIntervalSampler</c> run: the pipeline <c>params</c> plus the sampler <c>sigma_min</c>.</summary>
-public sealed record Trellis2SamplerParams
+public sealed record FlowSamplerParams
 {
     /// <summary>Euler steps (<c>steps</c>).</summary>
     public required int Steps { get; init; }
@@ -41,14 +41,14 @@ public sealed record Trellis2SamplerParams
     }
 
     /// <summary>Reads a sampler node of <c>pipeline.json</c>: <c>args.sigma_min</c> and <c>params</c>.</summary>
-    internal static Trellis2SamplerParams FromNode(JsonElement node)
+    internal static FlowSamplerParams FromNode(JsonElement node)
     {
         string name = node.GetProperty("name").GetString() ?? string.Empty;
         if (name != "FlowEulerGuidanceIntervalSampler")
             throw new NotSupportedException($"Sampler '{name}' is not implemented; only FlowEulerGuidanceIntervalSampler is.");
         JsonElement p = node.GetProperty("params");
         JsonElement interval = p.GetProperty("guidance_interval");
-        Trellis2SamplerParams result = new()
+        FlowSamplerParams result = new()
         {
             Steps = p.GetProperty("steps").GetInt32(),
             GuidanceStrength = (float)p.GetProperty("guidance_strength").GetDouble(),

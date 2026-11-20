@@ -109,7 +109,8 @@ internal static class MiniMaxMusic3WeightPolicy
         IReadOnlyDictionary<string, Tensor> weights, string repo, string? quant, out IDisposable? owned)
     {
         owned = null;
-        if (CsmWeightCache.ResolveQuant(quant) is null)
+        // Nothing to narrow in an fp16/bf16 or already-quantized transformer: a cache would only copy it.
+        if (CsmWeightCache.ResolveQuant(quant) is null || !weights.Any(entry => NarrowsToBf16(entry.Key, entry.Value)))
         {
             return weights;
         }

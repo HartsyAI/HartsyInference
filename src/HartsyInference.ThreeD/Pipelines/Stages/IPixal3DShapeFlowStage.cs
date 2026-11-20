@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Sparse;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -18,6 +19,6 @@ public interface IPixal3DShapeFlowStage
         Pixal3DCondition cond,
         Pixal3DCondition negCond,
         int seed,
-        Trellis2SamplerParams parameters,
+        FlowSamplerParams parameters,
         Action<int>? onStep);
 }

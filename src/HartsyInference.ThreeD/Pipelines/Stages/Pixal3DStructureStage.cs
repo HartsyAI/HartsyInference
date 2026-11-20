@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -41,7 +42,7 @@ public sealed class Pixal3DStructureStage : IPixal3DStructureStage, IDisposable
         Pixal3DCondition cond,
         Pixal3DCondition negCond,
         int seed,
-        Trellis2SamplerParams parameters,
+        FlowSamplerParams parameters,
         int outputResolution,
         Action<int>? onStep)
     {
@@ -59,7 +60,7 @@ public sealed class Pixal3DStructureStage : IPixal3DStructureStage, IDisposable
         backend.PreloadWeights(flow.EnumerateWeights());
         try
         {
-            latent = Trellis2FlowSampler.Sample(
+            latent = RectifiedFlowSampler.Sample(
                 backend,
                 noise,
                 parameters,

@@ -181,6 +181,7 @@ public static class ModelIdentityCatalog
             // Neither has a HuggingFace license id, so both are "other".
             Audio("fishaudio", "fishaudio_tts", "Fish Audio S2 Pro", "Fish Audio", "other", "tts", "fishaudio/s2-pro"),
             Audio("fishaudio-drama3", "fishaudio_drama3_tts", "Fish Audio Drama 3", "Fish Audio", "other", "tts", "fishaudio/drama-3"),
+            Audio("haru", "haru_duplex", "Haru-4B", "higurashi.ai", "apache-2.0", "tts", "higurashi-ai/Haru-4B"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),
             // Breeze TTS 2 and IndexTTS 2 ship under their own model licenses, which have no HuggingFace license id, so
             // both are "other". IndexTTS 2 names no upstream repo: 2.0 and 2.5 are separate releases, so each repack
