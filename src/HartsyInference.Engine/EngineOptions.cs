@@ -36,7 +36,7 @@ public sealed class EngineOptions
 
     /// <summary>VRAM budget (bytes) for each loaded chat model's KV pool. <see cref="HartsyInference.LLM.Transformer.PagedKvPool.PageCountForBudget"/> converts this
     /// into a page COUNT sized to the model's actual KV dimensions (numLayers × numKvHeads × headDim, F32, K+V),
-    /// allocated up front — a fixed page count is unsafe across model shapes. On the scheduled route a request waits its turn while the pool
+    /// held as pages are handed out — a fixed page count is unsafe across model shapes. On the scheduled route a request waits its turn while the pool
     /// cannot hold it; a request larger than the whole pool is refused with 400, and a full waiting queue answers 429 with Retry-After.
     /// Default 512 MB is a conservative single-GPU-dev starting point.</summary>
     public long KvPoolBytesBudget { get; set; } = 512L * 1024 * 1024;
