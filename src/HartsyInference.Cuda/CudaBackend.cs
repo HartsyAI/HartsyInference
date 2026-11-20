@@ -5997,7 +5997,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
                 if (bf16) _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
                 else _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
-                AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cudnn.output", output.ElementCount * sizeof(float));
+                AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cudnn.output", (long)outBytes);
 
                 // F16 saturates, so a value past 65504 reaches the fused softmax as the limit, not infinity; BF16 keeps F32's range.
                 void CastIn(ulong cast, ulong source, long count)

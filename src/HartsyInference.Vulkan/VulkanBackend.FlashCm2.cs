@@ -108,10 +108,11 @@ public sealed partial class VulkanBackend
             Tensor o32 = output.DType == DType.F32 ? output : new Tensor(output.Shape, DType.F32);
             if (AttentionEvidence.Enabled)
             {
-                int casts = (ReferenceEquals(q32, query) ? 0 : 1) + (ReferenceEquals(k32, key) ? 0 : 1) + (ReferenceEquals(v32, value) ? 0 : 1);
-                if (casts > 0)
-                    AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "vulkan.permute.bf16.inputs", ((ReferenceEquals(q32, query) ? 0 : query.ElementCount)
-                        + (ReferenceEquals(k32, key) ? 0 : key.ElementCount) + (ReferenceEquals(v32, value) ? 0 : value.ElementCount)) * sizeof(float), casts);
+                bool q = !ReferenceEquals(q32, query), k = !ReferenceEquals(k32, key), v = !ReferenceEquals(v32, value);
+                long elements = (q ? query.ElementCount : 0) + (k ? key.ElementCount : 0) + (v ? value.ElementCount : 0);
+                if (elements > 0)
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "vulkan.permute.bf16.inputs", elements * sizeof(float),
+                        (q ? 1 : 0) + (k ? 1 : 0) + (v ? 1 : 0));
             }
             try
             {
@@ -233,11 +234,7 @@ public sealed partial class VulkanBackend
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16, saturate: true);
         VulkanBuffer? maskBuf = mask is null ? null : GetBuffer(mask);
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * DType.F16.SizeInBytes));
-        int casts = (qOwned is null ? 0 : 1) + (kOwned is null ? 0 : 1) + (vOwned is null ? 0 : 1);
-        if (casts > 0)
-            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.cm2.casts", ((qOwned is null ? 0 : query.ElementCount)
-                + (kOwned is null ? 0 : key.ElementCount) + (vOwned is null ? 0 : value.ElementCount)) * DType.F16.SizeInBytes, casts);
-        RecordAttentionCasts("vulkan.cm2", DType.F16, query, qOwned, key, kOwned, value, vOwned, output);
+        RecordAttentionCasts("vulkan.cm2", DType.F16, query, qOwned, key, kOwned, value, vOwned, workspaceSite: "vulkan.cm2.casts");
         try
         {
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
@@ -253,6 +250,7 @@ public sealed partial class VulkanBackend
                 : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, (uint)((sq + FlashCm2QueryTile - 1) / FlashCm2QueryTile), (uint)hq, (uint)batch);
             CacheOutputCastingFrom(output, outBuf, DType.F16, "sdpa_flash_cm2");
+            RecordAttentionOutputCast("vulkan.cm2", DType.F16, output);
         }
         catch (Exception ex)
         {

@@ -80,6 +80,8 @@ public sealed partial class VulkanBackend
         return AttentionExecution.PlanValidated(RowsFor(prepared.Route), in prepared);
     }
 
+    private static long TensorBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
+
     /// <summary>The scalar flash kernel computes in one type: each operand in another is cast to it and the output is cast
     /// back. An operand served from the weight-cast cache is not cast again; this states the activation case.</summary>
     private AttentionPreparationCost ScalarFlashPreparation(in AttentionCall c) => new(Cast: AttentionPreparationCost.CastsTo(in c,
@@ -251,15 +253,21 @@ public sealed partial class VulkanBackend
                         : "Flash at a head dim past the flash tile");
                     AttentionHostReference.Run(in c);
                     if (AttentionEvidence.Enabled)
-                        AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference",
-                            HostBytes(c.Query) + HostBytes(c.Key) + HostBytes(c.Value) + HostBytes(c.Output), count: 4);
+                    {
+                        // The whole tensor crosses to the host, whatever part of it a view addresses; the reference also
+                        // reads the bias, the sinks and the ALiBi slopes there.
+                        long bytes = HostBytes(c.Query.Storage) + HostBytes(c.Key.Storage) + HostBytes(c.Value.Storage) + HostBytes(c.Output.Storage)
+                            + HostBytes(c.Mask.Bias) + HostBytes(c.Logits.Sinks) + HostBytes(c.Logits.AlibiSlopes);
+                        int tensors = 4 + (c.Mask.Bias is null ? 0 : 1) + (c.Logits.Sinks is null ? 0 : 1) + (c.Logits.AlibiSlopes is null ? 0 : 1);
+                        AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference", bytes, tensors);
+                    }
                     return true;
 
-                    // The whole tensor crosses to the host, whatever part of it the view addresses.
-                    static long HostBytes(in AttentionOperand operand) => operand.Storage.DType.ComputeByteCount(operand.Storage.ElementCount);
+                    static long HostBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
                 },
                 static (in AttentionCall c) => new AttentionPreparationCost(HostReference: AttentionPreparationCost.Bytes(c.Query)
-                    + AttentionPreparationCost.Bytes(c.Key) + AttentionPreparationCost.Bytes(c.Value) + AttentionPreparationCost.Bytes(c.Output))),
+                    + AttentionPreparationCost.Bytes(c.Key) + AttentionPreparationCost.Bytes(c.Value) + AttentionPreparationCost.Bytes(c.Output)
+                    + TensorBytes(c.Mask.Bias) + TensorBytes(c.Logits.Sinks) + TensorBytes(c.Logits.AlibiSlopes))),
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = RowCausalWindow, MinQueryTokens = 64,
