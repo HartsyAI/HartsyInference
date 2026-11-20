@@ -113,6 +113,24 @@ public sealed class PromptProfileMetadataTests
     }
 
     [Fact]
+    public void AnEmptyEncoderListIsAProblemBecauseItWouldWriteAnEmptyHeaderValue()
+    {
+        Assert.Contains("encoders is empty; leave it unset when the encoders are not established.", (_ideogram with { Encoders = [] }).Problems());
+    }
+
+    [Theory]
+    [InlineData("docs/prompting/ideogram-4.md", true)]
+    [InlineData("docs/prompting/hunyuan-video-1_5.md", true)]
+    [InlineData("ideogram-4.md", false)]
+    [InlineData("docs/prompting/Ideogram.md", false)]
+    [InlineData("docs/prompting/x.txt", false)]
+    [InlineData("", false)]
+    public void TheGuideMustBeADocsPromptingMarkdownPath(string guide, bool valid)
+    {
+        Assert.Equal(valid, (_ideogram with { Guide = guide }).Problems().Count == 0);
+    }
+
+    [Fact]
     public void ANonPositiveTokenLimitIsAProblem()
     {
         Assert.Contains("maxTokens must be positive.", (_ideogram with { MaxTokens = 0 }).Problems());

@@ -19,17 +19,17 @@ public sealed class RecipePromptProfileTests
         Converters = { new JsonStringEnumConverter() },
     };
 
-    private static IEnumerable<(string Family, string Kind, IReadOnlyList<PromptProfile?> Profiles)> EveryRecipe()
+    private static IEnumerable<(string Family, string Kind, PromptWeightingMode Weighting, IReadOnlyList<PromptProfile?> Profiles)> EveryRecipe()
     {
         foreach (string name in RecipeRegistry.DefaultNames)
         {
             IArchitectureRecipe recipe = RecipeRegistry.Resolve(name)!;
-            yield return (name, "image", ProfilesOf(recipe.Prompt, recipe.Variants, recipe.PromptFor));
+            yield return (name, "image", recipe.PromptWeighting, ProfilesOf(recipe.Prompt, recipe.Variants, recipe.PromptFor));
         }
         foreach (string name in VideoRecipeRegistry.DefaultNames)
         {
             IVideoRecipe recipe = VideoRecipeRegistry.Resolve(name)!;
-            yield return (name, "video", ProfilesOf(recipe.Prompt, recipe.Variants, recipe.PromptFor));
+            yield return (name, "video", recipe.PromptWeighting, ProfilesOf(recipe.Prompt, recipe.Variants, recipe.PromptFor));
         }
     }
 
@@ -50,7 +50,7 @@ public sealed class RecipePromptProfileTests
     [Fact]
     public void EveryRecipeAndVariantDeclaresAValidProfileOfItsOwnKind()
     {
-        foreach ((string family, string kind, IReadOnlyList<PromptProfile?> profiles) in EveryRecipe())
+        foreach ((string family, string kind, _, IReadOnlyList<PromptProfile?> profiles) in EveryRecipe())
         {
             foreach (PromptProfile? profile in profiles)
             {
@@ -62,22 +62,13 @@ public sealed class RecipePromptProfileTests
     }
 
     [Fact]
-    public void ClaimingWeightsRequiresTheEngineToApplyThem()
+    public void ClaimingWeightsRequiresTheEngineToApplyThemOnEveryVariant()
     {
-        foreach (string name in RecipeRegistry.DefaultNames)
+        foreach ((string family, _, PromptWeightingMode weighting, IReadOnlyList<PromptProfile?> profiles) in EveryRecipe())
         {
-            IArchitectureRecipe recipe = RecipeRegistry.Resolve(name)!;
-            if (recipe.Prompt?.Supports?.Contains("weights") == true)
+            if (profiles.Any(profile => profile?.Supports?.Contains("weights") == true))
             {
-                Assert.NotEqual(PromptWeightingMode.None, recipe.PromptWeighting);
-            }
-        }
-        foreach (string name in VideoRecipeRegistry.DefaultNames)
-        {
-            IVideoRecipe recipe = VideoRecipeRegistry.Resolve(name)!;
-            if (recipe.Prompt?.Supports?.Contains("weights") == true)
-            {
-                Assert.NotEqual(PromptWeightingMode.None, recipe.PromptWeighting);
+                Assert.True(weighting != PromptWeightingMode.None, $"{family} claims weights but its pipeline strips them.");
             }
         }
     }
@@ -85,7 +76,7 @@ public sealed class RecipePromptProfileTests
     [Fact]
     public void ABoxFormIsDeclaredOnlyWithBoxSupport()
     {
-        foreach ((string family, _, IReadOnlyList<PromptProfile?> profiles) in EveryRecipe())
+        foreach ((string family, _, _, IReadOnlyList<PromptProfile?> profiles) in EveryRecipe())
         {
             foreach (PromptProfile? profile in profiles.Where(p => p?.Boxes is not null))
             {
@@ -227,7 +218,46 @@ public sealed class RecipePromptProfileTests
 
             Assert.Equal([PromptProfile.EncoderKey], prompt.ToModelSpecKeys().Keys);
         }
-        Assert.Equal("none", RecipePrompts.Find("flux2")!.Negative);
+        Assert.Null(RecipePrompts.Find("flux2")!.Negative);
+    }
+
+    [Fact]
+    public void FluxSaysNoNegativeOnlyForTheBuildsTheGuideCovers()
+    {
+        Assert.Equal("none", NegativeOf("flux2", "klein-4b"));
+        Assert.Equal("none", NegativeOf("flux2", "klein-9b"));
+        Assert.Null(NegativeOf("flux2", "dev"));
+        Assert.Null(RecipePrompts.Find("flux2")!.Negative);
+        Assert.Equal("none", NegativeOf("flux3", "distilled"));
+        Assert.Null(NegativeOf("flux3", "base"));
+        Assert.Null(RecipePrompts.Find("flux3")!.Negative);
+    }
+
+    [Fact]
+    public void FluxKleinClaimsNoBoxesBecauseTheGuideAppliesThemToKleinOnlyByInference()
+    {
+        foreach (string variant in new[] { "base", "distilled" })
+        {
+            PromptProfile prompt = Catalog().DescribeFamily(Modality.Image, "flux3", variant).Prompt!;
+
+            Assert.Null(prompt.Boxes);
+            Assert.DoesNotContain("boxes", prompt.Supports!);
+        }
+    }
+
+    [Fact]
+    public void ACheckpointThatOnlyDefaultedToAVariantAnswersWithTheFamilyLevelProfile()
+    {
+        ModelSpec unnamed = new() { Requested = "zimage", Modality = Modality.Image };
+        ModelSpec named = new() { Requested = "zimage", Modality = Modality.Image, Variant = "turbo" };
+
+        PromptProfile fromDefault = Catalog().Describe(unnamed).Prompt!;
+        PromptProfile fromEvidence = Catalog().Describe(named).Prompt!;
+
+        Assert.Null(fromDefault.Negative);
+        Assert.Equal("text-rendering", Assert.Single(fromDefault.Supports!));
+        Assert.Equal("none", fromEvidence.Negative);
+        Assert.Equal("separate", Describe(Modality.Image, "zimage").Prompt!.Negative);
     }
 
     [Fact]
@@ -288,13 +318,16 @@ public sealed class RecipePromptProfileTests
     [Fact]
     public void AFamilyFoundByEngineIdSuppliesItsFamilyLevelProfile()
     {
-        Assert.Equal("yxyx-1000", RecipePrompts.Find("flux3")!.Boxes);
+        Assert.Equal("yxyx-1000", RecipePrompts.Find("ideogram4")!.Boxes);
         Assert.Equal("video", RecipePrompts.Find("ltx-2")!.Kind);
         Assert.Null(RecipePrompts.Find("kokoro"));
         Assert.Null(RecipePrompts.Find(" "));
     }
 
     private static string LtxVideo2VariantsId() => Recipes.Video.LtxVideo2Variants.DistilledFamilyId;
+
+    private static string? NegativeOf(string family, string variant) =>
+        Catalog().DescribeFamily(Modality.Image, family, variant).Prompt!.Negative;
 
     private static RecipeCatalog Catalog() => new();
 

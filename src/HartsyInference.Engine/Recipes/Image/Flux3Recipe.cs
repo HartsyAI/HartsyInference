@@ -35,11 +35,16 @@ public sealed class Flux3Recipe : IArchitectureRecipe
     public string Name => "flux3";
 
     /// <inheritdoc/>
+    /// <remarks>The guide documents the <c>yxyx-1000</c> layout form for FLUX 3 Image, the API flagship, and applies it to Klein only
+    /// as an inference, so neither Klein build claims boxes. It gives no negative guidance for Base, so only the distilled build says none.</remarks>
     public PromptProfile? Prompt { get; } = new()
     {
-        Kind = "image", Encoders = ["vlm"], Format = "text", Negative = "none",
-        Supports = ["boxes", "text-rendering"], Boxes = "yxyx-1000", Guide = "docs/prompting/flux-3.md",
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["text-rendering"], Guide = "docs/prompting/flux-3.md",
     };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(Flux3Variants.Distilled) ? Prompt! with { Negative = "none" } : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Regional prompts become the model's own layout table (<see cref="LayoutPromptBuilder"/>) rather than an

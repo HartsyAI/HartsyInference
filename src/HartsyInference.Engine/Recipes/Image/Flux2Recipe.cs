@@ -33,13 +33,18 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public PromptProfile? Prompt { get; } = new()
     {
-        Kind = "image", Encoders = ["llm"], Format = "text", Negative = "none",
+        Kind = "image", Encoders = ["llm"], Format = "text",
         Supports = ["regions", "text-rendering"], Guide = "docs/prompting/flux-2.md",
     };
 
     /// <inheritdoc/>
+    /// <remarks>The guide's negative evidence is the diffusers Klein pipeline, which passes an empty negative, and the Klein builds are
+    /// the engine's guidance-free ones. It states nothing for Dev, nor for a Base Klein run with guidance, so only Klein 4B and 9B say none.</remarks>
     public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
-        Flux2Variants.IsIrisZ(variant) ? Prompt!.ArchitectureOnly() : Prompt;
+        variant is null ? Prompt
+        : Flux2Variants.IsIrisZ(variant) ? Prompt!.ArchitectureOnly()
+        : variant.Is(Flux2Variants.Klein4B) || variant.Is(Flux2Variants.Klein9B) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Flux.2's BN-style latent normalization is applied at the pipeline boundary; the encode-side inverse already lives in Flux2Pipeline.

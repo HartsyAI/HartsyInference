@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace HartsyInference.ModelAssets.Metadata;
 
@@ -12,6 +13,8 @@ namespace HartsyInference.ModelAssets.Metadata;
 /// which SwarmUI keeps with the rest of the model's metadata.</para></summary>
 public sealed record PromptProfile
 {
+    private static readonly Regex _guidePath = new(@"^docs/prompting/[a-z0-9][a-z0-9_.-]*\.md$", RegexOptions.CultureInvariant);
+
     private const string KeyPrefix = "modelspec.prompt_";
 
     /// <summary>Header key for <see cref="Format"/>.</summary>
@@ -104,6 +107,10 @@ public sealed record PromptProfile
         List<string> problems = [];
         Expect(Kind, PromptVocabulary.Kinds, "kind", problems);
         ExpectAll(Encoders, PromptVocabulary.Encoders, "encoders", problems);
+        if (Encoders is { Count: 0 })
+        {
+            problems.Add("encoders is empty; leave it unset when the encoders are not established.");
+        }
         Expect(Format, PromptVocabulary.Formats, "format", problems);
         Expect(Negative, PromptVocabulary.Negatives, "negative", problems);
         ExpectAll(Supports, PromptVocabulary.Supports, "supports", problems);
@@ -125,9 +132,9 @@ public sealed record PromptProfile
         {
             problems.Add("maxTokens must be positive.");
         }
-        if (Guide is not null && string.IsNullOrWhiteSpace(Guide))
+        if (Guide is not null && !_guidePath.IsMatch(Guide))
         {
-            problems.Add("guide is blank.");
+            problems.Add($"guide '{Guide}' is not 'docs/prompting/<name>.md'.");
         }
         return problems;
     }
