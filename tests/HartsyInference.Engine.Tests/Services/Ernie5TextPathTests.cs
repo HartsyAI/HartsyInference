@@ -136,7 +136,9 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.InRange(run.Result.CompletionTokens, 1, 4);
         // Both paths time the request: the scheduler reports the same prefill/decode split the pipeline does.
         Assert.True(run.Result.PrefillMilliseconds > 0, $"Prefill time was {run.Result.PrefillMilliseconds} ms.");
-        Assert.True(run.Result.DecodeMilliseconds > 0, $"Decode time was {run.Result.DecodeMilliseconds} ms.");
+        // Decode time runs from the first token to the last, so a request needs a second token to have any.
+        Assert.True(run.Result.CompletionTokens < 2 || run.Result.DecodeMilliseconds > 0,
+            $"Decode time was {run.Result.DecodeMilliseconds} ms for {run.Result.CompletionTokens} tokens.");
     }
 
     [Fact]
