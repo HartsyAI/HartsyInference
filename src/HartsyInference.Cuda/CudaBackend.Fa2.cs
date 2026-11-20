@@ -149,6 +149,87 @@ public sealed partial class CudaBackend
         }
     }
 
+    /// <summary>The most partial-state workspace a decode with sequence lengths may ask for. A step of many rows over many
+    /// sequences multiplies the states; past this the row declines and the call is refused, not run in pieces.</summary>
+    private const long DecodeLengthsWorkspaceLimit = 256L << 20;
+
+    /// <summary>The split geometry of a decode with sequence lengths: the contiguous decode's rule over the longest sequence.</summary>
+    private (int Splits, int Chunk) DecodeLengthsSplits(in AttentionCall c)
+    {
+        int span = 1;
+        foreach (int length in c.SequenceLengths!) span = Math.Max(span, Math.Min(length, c.KeyTokens));
+        long blocks = (long)c.Batch * c.QueryTokens * c.KvHeads;
+        int target = 2 * _context.MultiprocessorCount;
+        int splits = (int)Math.Clamp((target + blocks - 1) / blocks, 1, Math.Min(64, Math.Max(1, span / 64)));
+        int chunk = (span + splits - 1) / splits;
+        return ((span + chunk - 1) / chunk, chunk);
+    }
+
+    /// <summary>The lengths row's admission (F.9). It takes only a call with sequence lengths, so the single-length decode rows
+    /// keep every call they had: F32 head-major Q, K and V, the <c>[B, S, Hq × D]</c> output, grouped heads the decode kernel
+    /// is built for, and a workspace inside <see cref="DecodeLengthsWorkspaceLimit"/>.</summary>
+    private bool DecodeLengthsAdmits(in AttentionCall c)
+    {
+        if (c.SequenceLengths is null || _kernels is not { HasDecodeLengths: true }) return false;
+        int group = c.KvGroup <= 0 ? 1 : c.KvGroup;
+        long rows = (long)c.Batch * c.QueryTokens, outputRows = rows * c.Heads;
+        if (c.Query.Layout != AttentionLayout.HeadMajor || c.Key.Layout != AttentionLayout.HeadMajor || c.Value.Layout != AttentionLayout.HeadMajor
+            || c.Output.Layout != AttentionLayout.TokenMajor || c.ValueHeadDim != c.QkHeadDim || c.Heads != c.KvHeads * group
+            || !CudaKernels.DecodeGqaSupports(c.QkHeadDim, group) || !CudaKernels.GridYzFits(c.KvHeads, rows) || outputRows > int.MaxValue)
+            return false;
+        return outputRows * DecodeLengthsSplits(in c).Splits * (c.QkHeadDim + 2) * sizeof(float) <= DecodeLengthsWorkspaceLimit;
+    }
+
+    /// <summary>A decode whose sequences have their own key lengths, with the LSE when the call names one (F.9).</summary>
+    private unsafe void FlashAttentionDecodeLengths(in AttentionCall c)
+    {
+        Tensor output = c.Output.Storage, query = c.Query.Storage, key = c.Key.Storage, value = c.Value.Storage;
+        Tensor? lse = c.Lse;
+        int batch = c.Batch, rows = c.QueryTokens, hq = c.Heads, hkv = c.KvHeads, d = c.QkHeadDim, capacity = c.KeyTokens;
+        int group = c.KvGroup <= 0 ? 1 : c.KvGroup;
+        (int splits, int chunk) = DecodeLengthsSplits(in c);
+        using OpScope _op = EnterOp(nameof(FlashAttention));
+        EnsureKernels();
+        using Tensor lengths = new(new TensorShape(batch), DType.I32);
+        c.SequenceLengths.CopyTo(lengths.AsSpan<int>());
+        ulong pQ = 0, pK = 0, pV = 0, pLengths = 0, pOut = 0, pLse = 0;
+        bool cachedOutput = false, cachedLse = false;
+        DecodePartials partials = default;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            // The lengths are the host's and change every step: they are uploaded for the call.
+            pLengths = GpuTransferHelper.CopyToDevice(lengths);
+            AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "cuda.flash.decode.lengths", batch * sizeof(int));
+            nuint outBytes = GpuTransferHelper.ByteSize(output), lseBytes = lse is null ? 0 : GpuTransferHelper.ByteSize(lse);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            if (lse is not null) pLse = GpuTransferHelper.AllocateDevice(lseBytes);
+            partials = RentDecodePartials((long)batch * rows * hq, splits, d, "cuda.flash.decode.lengths.partials");
+            _kernels!.LaunchFlashDecodeLengths(partials.M, partials.L, partials.Acc, pQ, pK, pV, pLengths, batch, rows, hq, d, hkv, capacity, group,
+                c.Mask.Causal, c.Scale, splits, chunk, _stream.Handle);
+            _kernels.LaunchFlashDecodeLengthsCombine(pOut, pLse, partials.M, partials.L, partials.Acc, batch, rows, hq, d, splits, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+            if (lse is not null)
+            {
+                GpuTransferHelper.CacheActivation(lse, pLse, lseBytes);
+                cachedLse = true;
+            }
+        }
+        finally
+        {
+            ReturnDecodePartials(in partials);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedLse && pLse != 0) GpuTransferHelper.FreeDevice(pLse);
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            GpuTransferHelper.FreeDevice(pLengths);
+        }
+    }
+
     /// <summary>True for a key/value cache pair the fused graph-decode scatter kernels can write: both F32, or both F16 with the F16 twins loaded.</summary>
     private bool KvScatterCacheOk(Tensor kCache, Tensor vCache) =>
         kCache.DType == vCache.DType && (kCache.DType == DType.F32 || (kCache.DType == DType.F16 && _kernels is { HasKvScatterF16: true }));

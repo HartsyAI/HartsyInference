@@ -12,6 +12,7 @@ KERNELS=(
     "flash_attn_causal_f16"
     "flash_attn_decode_gqa"
     "flash_attn_decode_gqa_paged"
+    "flash_attn_decode_lengths"
     "kv_scatter_f16"
     "lm_sample_topk"
     "lm_norm_q8_fast"
