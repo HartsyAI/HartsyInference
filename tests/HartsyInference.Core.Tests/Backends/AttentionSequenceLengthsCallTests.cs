@@ -82,6 +82,18 @@ public sealed class AttentionSequenceLengthsCallTests
     }
 
     [Fact]
+    public void TheCallKeepsTheLengthsItWasBuiltWith()
+    {
+        using Operands operands = new(), expected = new();
+        int[] lengths = [7, 2];
+        AttentionCall call = operands.Call(lengths), reference = expected.Call([7, 2]);
+        lengths[0] = 1;
+        AttentionHostReference.Run(in call);
+        AttentionHostReference.Run(in reference);
+        Assert.True(expected.Output.AsReadOnlySpan<float>().SequenceEqual(operands.Output.AsReadOnlySpan<float>()));
+    }
+
+    [Fact]
     public void ACallThatNamesItsLseTakesNoSecondOne()
     {
         using Operands operands = new();
@@ -140,6 +152,7 @@ public sealed class AttentionSequenceLengthsCallTests
 
         Refused<ArgumentException>(call with { SequenceLengths = [7] });
         Refused<ArgumentException>(call with { Positions = AttentionPositions.Host(7, 4) });
+        Refused<ArgumentException>(call with { Positions = default(AttentionPositions) with { QueryOffset = 5 } });
         Refused<AttentionUnsupportedException>(call with { Mask = AttentionMask.FromFlash(true, 4) });
         Refused<AttentionUnsupportedException>(call with { Mask = call.Mask with { BlockSize = 2 } });
         Refused<AttentionUnsupportedException>(call with { Logits = new AttentionLogitTerms(30f, null, null) });

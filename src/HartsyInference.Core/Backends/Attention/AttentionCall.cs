@@ -226,7 +226,7 @@ public readonly record struct AttentionCall
 
     /// <summary>A decode over a cache whose sequences have their own lengths (<see cref="SequenceLengths"/>): head-major Q
     /// <c>[B, Hq, S, D]</c>, cache K and V <c>[B, Hkv, capacity, D]</c>, the output <c>[B, S, Hq × D]</c>, and each row's
-    /// LSE in <paramref name="lse"/> when one is given.</summary>
+    /// LSE in <paramref name="lse"/> when one is given. The lengths are copied, so the call keeps the ones it was built with.</summary>
     /// <exception cref="ArgumentException">The operands are not of those ranks, or the output does not hold whole rows.</exception>
     public static AttentionCall FromDecodeWithLengths(Tensor output, Tensor query, Tensor key, Tensor value, int[] lengths, bool causal,
         float scale, Tensor? lse = null)
@@ -237,7 +237,8 @@ public readonly record struct AttentionCall
         {
             Query = AttentionOperand.HeadMajor(query), Key = AttentionOperand.HeadMajor(key), Value = AttentionOperand.HeadMajor(value),
             Output = AttentionOperand.TokenMajor(output, (int)query.Shape[1], (int)value.Shape[3], (int)query.Shape[0]),
-            Scale = scale, Mask = AttentionMask.FromFlash(causal, 0), SequenceLengths = lengths, Lse = lse, Route = AttentionRoute.Flash,
+            Scale = scale, Mask = AttentionMask.FromFlash(causal, 0), SequenceLengths = (int[])lengths.Clone(), Lse = lse,
+            Route = AttentionRoute.Flash,
         };
     }
 

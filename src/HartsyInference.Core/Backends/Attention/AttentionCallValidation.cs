@@ -96,8 +96,8 @@ internal static class AttentionCallValidation
     {
         if (lengths.Length != call.Batch)
             throw new ArgumentException($"There are {lengths.Length} sequence lengths for a batch of {call.Batch}.");
-        if (call.Positions.Bounded || call.Positions.OnDevice)
-            throw new ArgumentException("A call with sequence lengths leaves its shared positions unset.");
+        if (call.Positions.Bounded || call.Positions.OnDevice || call.Positions.QueryOffset != 0)
+            throw new ArgumentException("A call with sequence lengths leaves its shared positions unset, the query offset included.");
         if (call.KvPages is not null) throw new AttentionUnsupportedException("Sequence lengths over paged keys and values are not defined.");
         AttentionMask mask = call.Mask;
         if (mask.WindowLeft is not null || mask.WindowRight is not null || mask.BlockSize > 0 || mask.Bias is not null || call.Logits.Any)

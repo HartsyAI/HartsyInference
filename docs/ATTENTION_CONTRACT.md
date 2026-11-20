@@ -63,8 +63,8 @@ Without the causal rule every row attends all `lengths[b]` keys. Such a call lea
 carries no other position-dependent or additive term: a window, a block size, a bias, a softcap, sinks and ALiBi are
 refused, and so are paged keys and values. A call may also name an **LSE output** (`AttentionCall.Lse`, F32
 `[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
-excludes the call and a backend without such a row refuses it. The host reference runs both. No GPU row declares
-either yet.
+excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
+takes such a call through it. No GPU row declares either yet.
 
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
 of bounds, and the kernel sets a device status word. The next host synchronization point that owns the call (the end
