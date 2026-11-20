@@ -618,9 +618,11 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             int next;
             // The same split TextGenerationPipeline reports: prefill ends when the first logits row is sampled.
             System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
-            using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0), cache))
-            using (Tensor logits = _model.ProjectLogits(hidden, promptIds.Length))
-                next = sampler.Next(LastRow(logits, promptIds.Length, vocab), generated);
+            // Logits for the last prompt position only, as TextGenerationPipeline asks for them: sampling reads one row, and
+            // projecting every row builds a [prompt, vocab] tensor (several GiB for a long prompt) that is then copied to the host.
+            using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0, LastRowOnly: true), cache))
+            using (Tensor logits = _model.ProjectLogits(hidden, 1))
+                next = sampler.Next(LastRow(logits, 1, vocab), generated);
             double prefillMs = clock.Elapsed.TotalMilliseconds;
 
             // Fired once the prompt is in the cache, as TextGenerationPipeline does: the caller reads the prompt length from it.
