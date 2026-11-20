@@ -5455,6 +5455,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     pMaskBroadcast = CudaMemory.Allocate((nuint)(maskBlocks * sq * skv * sizeof(float)));
                     pMaskOnes = CudaMemory.Allocate((nuint)(sq * sizeof(float)));
                     AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.materialized.mask", (maskBlocks * skv + 1) * sq * sizeof(float), count: 2);
+                    AttentionEvidence.Observed(AttentionEvidenceKind.ExpandMask, "cuda.materialized.mask", maskBlocks * sq * skv * sizeof(float));
                     CudaMemory.Fill32(pMaskOnes, 0x3F80_0000u, (nuint)sq);   // 1.0f
                     for (long blk = 0; blk < maskBlocks; blk++)
                     {
@@ -5485,6 +5486,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 pVCast = CudaMemory.Allocate((nuint)(value.ElementCount * 4));
                 _kernels!.LaunchCastBf16ToF32(pVCast, pV, (int)value.ElementCount, _stream.Handle);
                 pOutCast = CudaMemory.Allocate((nuint)(output.ElementCount * 4));
+                RecordMaterializedCasts(query, key, value, output, 4);
                 opQ = pQCast;
                 opK = pKCast;
                 opV = pVCast;
@@ -5508,6 +5510,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 pVCast = CudaMemory.Allocate((nuint)(value.ElementCount * 2));
                 CastAttentionOperandToF16(pVCast, pV, value.ElementCount);
                 pOutCast = CudaMemory.Allocate((nuint)(output.ElementCount * 2));
+                RecordMaterializedCasts(query, key, value, output, 2);
                 opQ = pQCast;
                 opK = pKCast;
                 opV = pVCast;
@@ -5525,6 +5528,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 {
                     SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.materialized.output", (long)outBytes);
                     GpuTransferHelper.CacheActivation(output, pOut, outBytes);
                     cachedOutput = true;
                     t_attentionRoute = "S.11";
@@ -5540,6 +5544,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint scoresBytes = (nuint)(totalHeads * sq * skv * elemSize);
             scoresBuf = CudaMemory.Allocate(scoresBytes);
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.materialized.scores", (long)scoresBytes);
+            AttentionEvidence.Observed(AttentionEvidenceKind.MaterializeScores, "cuda.materialized.scores", (long)scoresBytes);
 
             float alpha = scale;
             float beta = 0.0f;
@@ -5653,11 +5658,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (output.DType == DType.BF16 && pOutCast != 0)
             {
                 _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.materialized.output", (long)outBytes);
             }
             else if (opDtype == DType.F16 && output.DType == DType.F32 && pOutCast != 0)
             {
                 // F16 speed path produced an F16 result in pOutCast — cast it back to the F32 output tensor.
                 _kernels!.LaunchCastF16ToF32(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.materialized.output", (long)outBytes);
             }
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
@@ -5990,6 +5997,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
                 if (bf16) _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
                 else _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cudnn.output", (long)outBytes);
 
                 // F16 saturates, so a value past 65504 reaches the fused softmax as the limit, not infinity; BF16 keeps F32's range.
                 void CastIn(ulong cast, ulong source, long count)
@@ -6245,9 +6253,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             Widen(q32, ref pQ, query.ElementCount);
             Widen(k32, ref pK, key.ElementCount);
             Widen(v32, ref pV, value.ElementCount);
+            AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.tiled.inputs",
+                (query.ElementCount + key.ElementCount + value.ElementCount) * 4, count: 3);
             SdpaTiledF32Core(q32, k32, v32, o32, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
             if (bf16) _kernels!.LaunchCastF32ToBf16(pOut, o32, checked((int)output.ElementCount), _stream.Handle);
             else _kernels!.LaunchCastF32ToF16(pOut, o32, checked((int)output.ElementCount), _stream.Handle);
+            AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.tiled.output", (long)outBytes);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }
@@ -7886,6 +7897,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (pSink != 0) GpuTransferHelper.FreeDevice(pSink);
             if (pAlibi != 0) GpuTransferHelper.FreeDevice(pAlibi);
         }
+    }
+
+    /// <summary>The materialized row cast its three operands to a compute type of <paramref name="elementBytes"/> bytes and
+    /// allocated those copies and one for the output.</summary>
+    private static void RecordMaterializedCasts(Tensor query, Tensor key, Tensor value, Tensor output, int elementBytes)
+    {
+        if (!AttentionEvidence.Enabled) return;
+        long operands = query.ElementCount + key.ElementCount + value.ElementCount;
+        AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cuda.materialized.inputs", operands * elementBytes, count: 3);
+        AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.materialized.casts", (operands + output.ElementCount) * elementBytes, count: 4);
     }
 
     /// <summary>Allocates a fixed-capacity KV-cache buffer on device, registered resident, skipping the host-zeroed upload.</summary>

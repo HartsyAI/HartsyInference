@@ -45,12 +45,17 @@ public static class AttentionFlashLowering
         using Tensor k = Gather(backend, call.Key);
         using Tensor vNarrow = Gather(backend, call.Value);
         using Tensor? vWide = dv < d ? new Tensor(new TensorShape(b, hkv, skv, d), DType.F32) : null;
-        if (vWide is not null) backend.Pad(vWide, vNarrow, PadSpec.Axis(PadMode.Zero, 4, 3, 0, d - dv));
+        if (vWide is not null)
+        {
+            backend.Pad(vWide, vNarrow, PadSpec.Axis(PadMode.Zero, 4, 3, 0, d - dv));
+            AttentionEvidence.Payload(AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.pad", vWide);
+        }
         using Tensor o = new(new TensorShape(b, hq, sq, d), DType.F32);
         backend.FlashAttention(o, q, k, vWide ?? vNarrow, call.ValidKvLength, hq / hkv, causal: false, call.Positions.QueryOffset, call.Scale,
             call.Logits.Softcap, call.Logits.Sinks);
         StridedView kept = new([b, hq, sq, dv], [(long)hq * sq * d, (long)sq * d, d, 1]);
         backend.CopyStrided(call.Output.Storage, o, new StridedCopySpec(View(call.Output), kept));
+        AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.output", (long)b * hq * sq * dv * sizeof(float));
     }
 
     // The operand as a contiguous [B, H, S, D] tensor the caller disposes.
@@ -58,6 +63,7 @@ public static class AttentionFlashLowering
     {
         Tensor t = new(new TensorShape(op.Batch, op.Heads, op.Tokens, op.HeadDim), DType.F32);
         backend.CopyStrided(t, op.Storage, StridedCopySpec.Gather(View(op)));
+        AttentionEvidence.Payload(AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.gather", t);
         return t;
     }
 

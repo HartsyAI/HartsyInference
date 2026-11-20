@@ -179,14 +179,14 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f16", E, AttentionDTypes.F16 | AttentionDTypes.BF16,
                 CudnnSdpaRows.AnyView, gqa: true), "S.3",
                 (in AttentionCall c) => CudnnSdpaRows.Covers(in c) && CudnnReady(in c),
-                (in AttentionCall c) => TryCudnnSdpa(in c)),
+                (in AttentionCall c) => TryCudnnSdpa(in c), static (in AttentionCall _) => AttentionPreparationCost.None),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.sat", E, AttentionDTypes.F32, HM, gqa: true, strided: false) with
                 {
                     Saturates = true, Lowering = AttentionLowering.Cast,
                 }, "S.5",
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
                     && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled && CudnnReady(in c),
-                (in AttentionCall c) => TryCudnnSdpa(in c)),
+                (in AttentionCall c) => TryCudnnSdpa(in c), static (in AttentionCall c) => CudnnCastPreparation(in c)),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.bf16", E, AttentionDTypes.F32, HM, gqa: true, strided: false) with
                 {
                     UsesQueryKey = AttentionFormats.Bf16, UsesProbValue = AttentionFormats.Bf16, NarrowsF32To = AttentionFormats.Bf16,
@@ -194,7 +194,7 @@ public sealed partial class CudaBackend
                 }, "S.16",
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
                     && Bf16CastFits(in c) && CudnnReady(in c, CudnnSdpa.SdpaDtype.BF16),
-                (in AttentionCall c) => TryCudnnSdpa(in c, CudnnSdpa.SdpaDtype.BF16)),
+                (in AttentionCall c) => TryCudnnSdpa(in c, CudnnSdpa.SdpaDtype.BF16), static (in AttentionCall c) => CudnnCastPreparation(in c)),
             new DelegateAttentionRow(Cap("widen.dense", E, AnyFloat, AnyFloat, HM) with
                 {
                     Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.WidenKv,
@@ -222,7 +222,8 @@ public sealed partial class CudaBackend
                     UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats, Lowering = AttentionLowering.Cast,
                 }, "S.11",
                 static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c) && OneRowTiles(in c),
-                (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
+                (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; },
+                static (in AttentionCall c) => new AttentionPreparationCost(Cast: AttentionPreparationCost.CastsTo(in c, DType.F32))),
             // The F16-narrowing variant and the F32 one split on the per-call assertion (legacy flag or numerics.sdpaF16). A refusal
             // of F16 excludes the first by declaration and admits the second, so the knob cannot narrow a call that refuses it.
             new DelegateAttentionRow(Cap("materialized.f16", E, AnyFloat, AnyFloat, HM) with
@@ -235,7 +236,7 @@ public sealed partial class CudaBackend
                 {
                     SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, allowF16: true);
                     return true;
-                }),
+                }, (in AttentionCall c) => MaterializedPreparation(in c, allowF16: !_sdpaF16Disabled)),
             new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
                 {
                     Masks = AnyBias, UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
@@ -247,7 +248,7 @@ public sealed partial class CudaBackend
                 {
                     SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, allowF16: false);
                     return true;
-                }),
+                }, static (in AttentionCall c) => MaterializedPreparation(in c, allowF16: false)),
             new DelegateAttentionRow(Cap("refuse", E, AnyFloat, AnyFloat, HM) with { Masks = AnyBias }, null,
                 static (in AttentionCall c) => ScoresPastMaterialized(in c),
                 static (in AttentionCall c) => throw new AttentionUnsupportedException(
@@ -256,6 +257,27 @@ public sealed partial class CudaBackend
                     + "query-tiled only when it is unmasked or F32 with a key-only mask and one query row across its heads, "
                     + $"{(long)c.Batch * c.Heads * c.KeyTokens} score elements, fits too.")),
         ];
+    }
+
+    /// <summary>A cuDNN row that casts F32 operands: Q, K and V to a 16-bit type, and the 16-bit output back to F32.</summary>
+    private static AttentionPreparationCost CudnnCastPreparation(in AttentionCall c) => new(
+        Cast: (c.Query.Storage.ElementCount + c.Key.Storage.ElementCount + c.Value.Storage.ElementCount) * sizeof(ushort)
+            + AttentionPreparationCost.Bytes(c.Output));
+
+    /// <summary>The materialized rows: BF16 operands are computed in F32 and an unmasked F32 call in F16 where that is
+    /// allowed, each with a cast of Q, K, V and of the output back; the score matrix is built in the compute type; a
+    /// key-only mask is expanded to one row per query. An unmasked BF16 call runs query-tiled instead, and builds no full
+    /// matrix, when its scores exceed half of free memory or <c>numerics.sdpaForceTiled</c> is set; this states the other
+    /// case and so overstates that one by the score matrix.</summary>
+    private static AttentionPreparationCost MaterializedPreparation(in AttentionCall c, bool allowF16)
+    {
+        DType stored = c.Query.DType;
+        DType compute = stored == DType.BF16 ? DType.F32 : stored == DType.F32 && c.Mask.Bias is null && allowF16 ? DType.F16 : stored;
+        long scores = (long)c.Batch * c.Heads * c.QueryTokens * c.KeyTokens;
+        long expanded = c.Mask.Bias is { } mask && MaskIsKeyOnly(mask, c.QueryTokens)
+            ? mask.ElementCount / c.KeyTokens * c.QueryTokens * c.KeyTokens * sizeof(float) : 0;
+        return new AttentionPreparationCost(Cast: compute == stored ? 0 : AttentionPreparationCost.CastsTo(in c, compute),
+            ExpandMask: expanded, MaterializeScores: scores * compute.SizeInBytes);
     }
 
     /// <summary>The format the F32 SDPA GEMMs multiply in beyond F32: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
@@ -352,7 +374,8 @@ public sealed partial class CudaBackend
                     && (CudnnSdpaRows.HalfOperands(in c)
                         || (c.Query.DType == DType.F32 && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled))
                     && CudnnReady(in c),
-                (in AttentionCall c) => RunCudnnTokenMajor(in c)),
+                (in AttentionCall c) => RunCudnnTokenMajor(in c),
+                static (in AttentionCall c) => c.Query.DType == DType.F32 ? CudnnCastPreparation(in c) : AttentionPreparationCost.None),
             new DelegateAttentionRow(Cap("permute.dense", E, AnyFloat, AnyFloat, TM) with
                 {
                     MaxBatch = 1, Masks = AnyBias, Lowering = AttentionLowering.Permute,
@@ -487,7 +510,11 @@ public sealed partial class CudaBackend
                         && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d) && SdpaCudnnOn;
                 },
                 (in AttentionCall c) => TryCausalPrefillSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Heads, c.KvHeads,
-                    c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale)),
+                    c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale),
+                static (in AttentionCall c) => CudnnCastPreparation(in c) with
+                {
+                    MaterializeMask = (long)c.QueryTokens * c.Positions.KvLength * sizeof(float),
+                }),
             new DelegateAttentionRow(Cap("fa2.causal", E, AttentionDTypes.F32, AttentionDTypes.F32 | AttentionDTypes.F16, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = CW, MinQueryTokens = Fa2MinQueryRows, UsesQueryKey = AttentionFormats.F16,
@@ -512,7 +539,10 @@ public sealed partial class CudaBackend
                     FlashAttentionFa2(c.Output.Storage, c.Query.Storage, key, value, c.Batch, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens,
                         c.QkHeadDim, c.Positions.KvLength, kvGroup <= 0 ? 1 : kvGroup, c.Positions.QueryOffset, c.Scale, c.Mask.LegacySlidingWindow, f16Kv);
                     return true;
-                }),
+                },
+                // An F32 cache becomes a tight F16 copy of its valid keys and of its valid values; an F16 cache is read in place.
+                static (in AttentionCall c) => c.Key.DType == DType.F16 ? AttentionPreparationCost.None
+                    : new AttentionPreparationCost(Cast: 2L * c.Batch * c.KvHeads * c.Positions.KvLength * c.QkHeadDim * sizeof(ushort))),
             new DelegateAttentionRow(Cap("flash.decode", E, AttentionDTypes.F32, AttentionDTypes.F32 | AttentionDTypes.F16, HM) with
                 {
                     MaxHeadDim = 1024, Gqa = true, Masks = CW, LogitTerms = true, CaptureSafe = true,
@@ -523,7 +553,7 @@ public sealed partial class CudaBackend
                     FlashAttentionDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, c.KvGroup,
                         c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, c.Logits.Sinks, c.Mask.LegacySlidingWindow, c.Logits.AlibiSlopes);
                     return true;
-                }),
+                }, static (in AttentionCall _) => AttentionPreparationCost.None),
         ];
     }
 

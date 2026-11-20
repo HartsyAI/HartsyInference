@@ -20,7 +20,7 @@ public static class AttentionPlanLog
         string key = $"{backend} {call.Route} {call.Query.DType}/{call.Key.DType} h{call.Heads}/{call.KvHeads} d{call.QkHeadDim} "
             + $"sq<={Bucket(call.QueryTokens)} skv<={Bucket(call.KeyTokens)}{mask}";
         if (Seen.TryAdd(key, 0))
-            Logs.Debug($"Attention {key}: {new AttentionPlan(row, row.Variant(in call), "ran", null).Describe()}");
+            Logs.Debug($"Attention {key}: {new AttentionPlan(row, row.Variant(in call), "ran", null, row.Preparation(in call)).Describe()}");
     }
 
     /// <summary>Warns once per backend and gap that a declared host-reference row served a call no device kernel covers.</summary>

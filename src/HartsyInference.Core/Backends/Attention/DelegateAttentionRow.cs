@@ -3,12 +3,19 @@ namespace HartsyInference.Core.Backends.Attention;
 /// <summary>A row predicate or launch over one call.</summary>
 public delegate bool AttentionRowFunc(in AttentionCall call);
 
-/// <summary>A kernel row built from two delegates: runtime admission and the launch.</summary>
+/// <summary>States the preparation a row expects for a call.</summary>
+public delegate AttentionPreparationCost AttentionCostFunc(in AttentionCall call);
+
+/// <summary>A kernel row built from delegates: runtime admission, the launch, and optionally the preparation it expects.</summary>
 /// <param name="branch">The branch id this row reports (docs/ATTENTION_CONTRACT.md routes); null when the launch records
 /// its own variant (a row covering several dtype paths, or one that re-dispatches).</param>
+/// <param name="preparation">The row's statement of the preparation it runs for a call; null leaves the row unstated.</param>
 public sealed class DelegateAttentionRow(AttentionKernelCapability capability, string? branch, AttentionRowFunc admits,
-    AttentionRowFunc run) : AttentionKernelRow
+    AttentionRowFunc run, AttentionCostFunc? preparation = null) : AttentionKernelRow
 {
+    /// <inheritdoc/>
+    public override AttentionPreparationCost? Preparation(in AttentionCall call) => preparation?.Invoke(in call);
+
     /// <summary>The branch id, or null when the launch records it.</summary>
     public string? Branch { get; } = branch;
 
