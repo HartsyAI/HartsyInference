@@ -45,6 +45,8 @@ internal static class AttentionCallValidation
         ValidatePerHead(call.Logits.Sinks, q.Heads, "Sinks");
         ValidatePerHead(call.Logits.AlibiSlopes, q.Heads, "ALiBi slopes");
         if (call.KvPages is { } pages) ValidatePages(in call, pages);
+        if (call.SequenceLengths is { } lengths) ValidateSequenceLengths(in call, lengths);
+        if (call.Lse is { } lse) ValidateLse(in call, lse);
 
         if (mask.Bias is { } unread && unread.DType != DType.F32)
             throw new AttentionUnsupportedException($"Attention reads F32 additive bias, not {unread.DType}.");
@@ -85,6 +87,32 @@ internal static class AttentionCallValidation
         int held = k.Tokens / pages.PageSize;
         if ((uint)pages.HighestPage >= (uint)held)
             throw new ArgumentException($"The page table reaches page {pages.HighestPage}; the page buffers hold pages 0 to {held - 1}.");
+    }
+
+    /// <summary>A call with a length per sequence gives one per batch item and leaves the shared positions unset. Each
+    /// sequence takes its position from its own length, so the only position rule it carries is the causal one: a window, a
+    /// block size, a bias, a softcap, sinks and ALiBi are refused, as are paged keys and values.</summary>
+    private static void ValidateSequenceLengths(in AttentionCall call, int[] lengths)
+    {
+        if (lengths.Length != call.Batch)
+            throw new ArgumentException($"There are {lengths.Length} sequence lengths for a batch of {call.Batch}.");
+        if (call.Positions.Bounded || call.Positions.OnDevice || call.Positions.QueryOffset != 0)
+            throw new ArgumentException("A call with sequence lengths leaves its shared positions unset, the query offset included.");
+        if (call.KvPages is not null) throw new AttentionUnsupportedException("Sequence lengths over paged keys and values are not defined.");
+        AttentionMask mask = call.Mask;
+        if (mask.WindowLeft is not null || mask.WindowRight is not null || mask.BlockSize > 0 || mask.Bias is not null || call.Logits.Any)
+            throw new AttentionUnsupportedException(
+                "A call with sequence lengths takes the causal rule or no mask: no window, block size, bias, softcap, sinks or ALiBi.");
+    }
+
+    private static void ValidateLse(in AttentionCall call, Tensor lse)
+    {
+        TensorShape expected = new(call.Batch, call.Heads, call.QueryTokens);
+        if (lse.DType != DType.F32 || lse.Shape != expected)
+            throw new ArgumentException($"The LSE output is F32 [B, Hq, Sq] = {expected}; got {lse.DType} {lse.Shape}.");
+        if (ReferenceEquals(lse, call.Output.Storage) || ReferenceEquals(lse, call.Query.Storage) || ReferenceEquals(lse, call.Key.Storage)
+            || ReferenceEquals(lse, call.Value.Storage))
+            throw new ArgumentException("The LSE output must not alias an operand.", nameof(call));
     }
 
     private static void ValidatePerHead(Tensor? tensor, int heads, string name)

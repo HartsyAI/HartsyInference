@@ -144,6 +144,14 @@ public sealed record AttentionKernelCapability
     /// calls. A row without it excludes a paged call, whose key operand is a page buffer and not a contiguous cache.</summary>
     public bool PagedKv { get; init; }
 
+    /// <summary>The row takes a valid key length per sequence (<see cref="AttentionCall.SequenceLengths"/>). A row without it
+    /// excludes such a call: it would read one length for the whole batch.</summary>
+    public bool SequenceLengths { get; init; }
+
+    /// <summary>The row writes each row's LSE (<see cref="AttentionCall.Lse"/>). A row without it excludes a call that asks
+    /// for one.</summary>
+    public bool Lse { get; init; }
+
     /// <summary>The row's author intends a captured graph to replay the call: no host sync, free-memory read or plan build,
     /// and scratch only from the capture-aware device allocator. A declaration only: the planner does not consult it, nothing
     /// checks a row against it, and nothing keeps a row without it out of a capture. Scratch is recorded as
@@ -178,6 +186,8 @@ public sealed record AttentionKernelCapability
     {
         if (call.Route != AttentionRoute.Auto && call.Route != Entry) return AttentionExclusion.Entry;
         if ((call.KvPages is not null) != PagedKv) return AttentionExclusion.PagedKv;
+        if (call.SequenceLengths is not null && !SequenceLengths) return AttentionExclusion.SequenceLengths;
+        if (call.Lse is not null && !Lse) return AttentionExclusion.Lse;
         if (!Has(QueryTypes, call.Query.DType) || !Has(QueryTypes, call.Output.DType)) return AttentionExclusion.QueryType;
         if (!Has(KvTypes, call.Key.DType) || !Has(KvTypes, call.Value.DType)) return AttentionExclusion.KvType;
         if (NarrowsF32To != AttentionFormats.None && !call.Numerics.Permits(NarrowsF32To, NarrowsF32To)
@@ -284,4 +294,10 @@ public enum AttentionExclusion
 
     /// <summary>The call's keys and values are paged and the row reads contiguous ones, or the reverse.</summary>
     PagedKv,
+
+    /// <summary>The call gives a key length per sequence.</summary>
+    SequenceLengths,
+
+    /// <summary>The call asks for the LSE.</summary>
+    Lse,
 }

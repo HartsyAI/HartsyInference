@@ -7,9 +7,10 @@ namespace HartsyInference.Core.Backends.Attention;
 /// returned. Written from Comfy Kitchen's torch definition at the pinned commit (benchmarks/attention/protocol.json) and
 /// checked against its outputs.</summary>
 /// <remarks>
-/// <para>It is the contract's attention (docs/ATTENTION_CONTRACT.md) run once per sequence, and is computed that way,
-/// through <see cref="AttentionHostReference"/>: sequence <c>b</c> is one call over its own queries, its own cache with
-/// <c>lengths[b]</c> valid keys, and its own position.</para>
+/// <para>It is the contract's attention with a length per sequence (<see cref="AttentionCall.SequenceLengths"/>,
+/// docs/ATTENTION_CONTRACT.md §2), in the shapes a decode has, and <see cref="AttentionHostReference"/> computes it:
+/// sequence <c>b</c> is one call over its own queries, its own cache with <c>lengths[b]</c> valid keys, and its own
+/// position.</para>
 /// <para>Causal: the step's <c>S</c> rows are the last <c>S</c> slots of the sequence, so row <c>j</c> sits at position
 /// <c>lengths[b] − S + j</c> and attends the slots up to and including it. With one row that is plain decode. A row whose
 /// position is below zero attends nothing.</para>
@@ -50,56 +51,7 @@ public static class DecodeLengthsReference
         float alpha = scale ?? 1f / MathF.Sqrt(dim);
         if (!float.IsFinite(alpha)) throw new ArgumentException("The scale must be finite.", nameof(scale));
 
-        long rowWidth = (long)heads * dim;
-        foreach (Tensor tensor in (ReadOnlySpan<Tensor>)[output, query, key, value])
-            if (tensor.DType != DType.F32 && tensor.DType != DType.F16 && tensor.DType != DType.BF16)
-                throw new AttentionUnsupportedException($"The decode reference reads and writes F32, F16 and BF16, not {tensor.DType}.");
-        // Only offsets and lengths differ from one sequence to the next, so the call over the whole batch stands for each.
-        AttentionCall whole = new()
-        {
-            Query = AttentionOperand.HeadMajor(query), Key = AttentionOperand.HeadMajor(key), Value = AttentionOperand.HeadMajor(value),
-            Output = new(output, AttentionLayout.TokenMajor, batch, heads, rows, dim, 0, rows * rowWidth, dim, rowWidth),
-            Scale = alpha, Mask = AttentionMask.FromFlash(causal, 0),
-        };
-        AttentionCallValidation.Validate(in whole);
-        float[] sequenceLse = lse.IsEmpty ? [] : new float[heads * rows];
-        for (int b = 0; b < batch; b++)
-        {
-            int length = Math.Clamp(lengths[b], 0, capacity);
-            // The first row that attends anything: under the causal rule row j sits at position length − S + j.
-            int first = causal ? Math.Clamp(rows - length, 0, rows) : length == 0 ? rows : 0;
-            if (first > 0)
-            {
-                AttentionOperand empty = new(output, AttentionLayout.TokenMajor, 1, heads, first, dim, b * rows * rowWidth, rows * rowWidth, dim, rowWidth);
-                for (int h = 0; h < heads; h++)
-                    for (int r = 0; r < first; r++)
-                    {
-                        for (int c = 0; c < dim; c++) AttentionHostReference.Write(in empty, 0, h, r, c, 0f);
-                        if (!lse.IsEmpty) lse[(b * heads + h) * rows + r] = float.NegativeInfinity;
-                    }
-            }
-            int live = rows - first;
-            if (live == 0) continue;
-            AttentionCall call = new()
-            {
-                Query = new(query, AttentionLayout.HeadMajor, 1, heads, live, dim, ((long)b * heads * rows + first) * dim, (long)heads * rows * dim,
-                    (long)rows * dim, dim),
-                Key = Cache(key, b, kvHeads, capacity, dim),
-                Value = Cache(value, b, kvHeads, capacity, dim),
-                Output = new(output, AttentionLayout.TokenMajor, 1, heads, live, dim, ((long)b * rows + first) * rowWidth, rows * rowWidth, dim, rowWidth),
-                Scale = alpha,
-                Mask = AttentionMask.FromFlash(causal, 0),
-                Positions = AttentionPositions.Host(length, causal ? length - rows + first : 0),
-            };
-            Span<float> callLse = lse.IsEmpty ? default : sequenceLse.AsSpan(0, heads * live);
-            AttentionHostReference.Run(in call, callLse);
-            if (lse.IsEmpty) continue;
-            for (int h = 0; h < heads; h++)
-                callLse.Slice(h * live, live).CopyTo(lse.Slice((b * heads + h) * rows + first, live));
-        }
+        AttentionCall call = AttentionCall.FromDecodeWithLengths(output, query, key, value, lengths.ToArray(), causal, alpha);
+        AttentionHostReference.Run(in call, lse);
     }
-
-    private static AttentionOperand Cache(Tensor cache, int b, int kvHeads, int capacity, int dim) =>
-        new(cache, AttentionLayout.HeadMajor, 1, kvHeads, capacity, dim, (long)b * kvHeads * capacity * dim, (long)kvHeads * capacity * dim,
-            (long)capacity * dim, dim);
 }
