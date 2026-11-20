@@ -117,18 +117,18 @@ public sealed partial class CpuBackend : IBackend
         Attention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
     }
 
-    /// <summary>The SIMD kernel reads every operand as F32 <c>[B,H,S,D]</c> and K/V with Q's head count; anything else is
-    /// refused, not misread.</summary>
+    /// <summary>The SIMD kernel reads every operand as F32 <c>[B,H,S,D]</c>, K/V with a head count that divides Q's;
+    /// anything else is refused, not misread.</summary>
     private static void CheckDenseKernelOperands(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask)
     {
         if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32)
             throw new NotSupportedException(
                 $"CPU SDPA computes F32 operands; got Q={query.DType}, K={key.DType}, V={value.DType}, output={output.DType}.");
         if (query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4 || !output.Shape.Equals(query.Shape)
-            || key.Shape[0] != query.Shape[0] || key.Shape[1] != query.Shape[1] || key.Shape[3] != query.Shape[3]
+            || key.Shape[0] != query.Shape[0] || key.Shape[1] <= 0 || query.Shape[1] % key.Shape[1] != 0 || key.Shape[3] != query.Shape[3]
             || !value.Shape.Equals(key.Shape))
             throw new ArgumentException(
-                $"CPU SDPA needs [B,H,S,D] operands with K/V heads equal to Q's; got Q={query.Shape}, K={key.Shape}, V={value.Shape}, output={output.Shape}.");
+                $"CPU SDPA needs [B,H,S,D] operands with K/V heads dividing Q's; got Q={query.Shape}, K={key.Shape}, V={value.Shape}, output={output.Shape}.");
         if (mask is not null) _ = AttentionMaskLayout.Of(mask, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
     }
 

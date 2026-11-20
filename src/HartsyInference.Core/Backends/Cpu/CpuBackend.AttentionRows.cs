@@ -1,10 +1,12 @@
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu.Kernels;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends.Cpu;
 
-// The CPU's attention: the SIMD kernel for plain head-major calls, the flash kernel for the LLM entry, and the host
-// contract reference (strided operands, every mask component) for anything else. Legacy entries adapt to Attention.
+// The CPU's attention: the SIMD kernel for plain head-major calls (grouped K/V included), the flash kernel for the LLM
+// entry, and the host contract reference (strided operands, every mask component) for anything else. Legacy entries
+// adapt to Attention.
 public sealed partial class CpuBackend
 {
     /// <inheritdoc/>
@@ -45,13 +47,16 @@ public sealed partial class CpuBackend
     }
 
     /// <summary>The legacy entry that carries the whole call, or <see cref="AttentionRoute.Auto"/> for the host reference. The
-    /// SIMD kernel reads K/V with the query's head count, so grouped dense calls take the reference.</summary>
+    /// SIMD kernel reads grouped F32 K/V in place; a grouped call in another dtype takes the reference, which reads any.</summary>
     private static AttentionRoute LegacyRoute(in AttentionCall call) => call.LegacyGap() is not null ? AttentionRoute.Auto
         : call.Route switch
         {
-            AttentionRoute.Dense when call.KvHeads == call.Heads => AttentionRoute.Dense,
+            AttentionRoute.Dense when call.KvHeads == call.Heads || AllF32(in call) => AttentionRoute.Dense,
             AttentionRoute.Flash => AttentionRoute.Flash,
             AttentionRoute.FlashDevice => AttentionRoute.FlashDevice,
             _ => AttentionRoute.Auto,
         };
+
+    private static bool AllF32(in AttentionCall call) => call.Query.DType == DType.F32 && call.Key.DType == DType.F32
+        && call.Value.DType == DType.F32 && call.Output.DType == DType.F32;
 }

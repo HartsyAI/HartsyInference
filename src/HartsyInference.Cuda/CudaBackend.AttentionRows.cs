@@ -100,7 +100,7 @@ public sealed partial class CudaBackend
     private const AttentionDTypes AnyFloat = AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16;
     private const AttentionMaskSupport AnyBias = AttentionMaskSupport.HeadSharedBias | AttentionMaskSupport.PerHeadBias;
 
-    // ── head-major ScaledDotProductAttention: S.1-S.19 (S.4, S.6-S.8 retired) ───────────────────────────────────────
+    // ── head-major ScaledDotProductAttention: S.1-S.20 (S.4, S.6-S.8 retired) ───────────────────────────────────────
 
     /// <summary>INT8 attention v2 on one route: the u8 PV row, then its F16-PV fallback.</summary>
     private AttentionKernelRow[] Int8V2Rows(AttentionRoute entry, AttentionLayouts layouts, string u8Branch, string f16Branch)
@@ -127,6 +127,14 @@ public sealed partial class CudaBackend
         const AttentionDTypes Half = AttentionDTypes.F16 | AttentionDTypes.BF16;
         return
         [
+            // A grouped call whose widened form INT8 v2, Sage or the F16 flash kernel takes keeps that kernel, as it did when
+            // the caller widened. Native cuDNN GQA (S.3, S.5, S.16) takes every other grouped call.
+            new DelegateAttentionRow(Cap("widen.preferred", E, AnyFloat, AnyFloat, HM) with
+                {
+                    Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.WidenKv,
+                }, null,
+                (in AttentionCall c) => c.KvHeads < c.Heads && WidenedTakesEqualHeadKernel(in c),
+                (in AttentionCall c) => { DenseViaWidenedKv(in c, "S.20/"); return true; }),
             .. Int8V2Rows(E, HM, "S.17", "S.18"),
             new DelegateAttentionRow(Cap("sage.int8.f16", E, AttentionDTypes.F16, AttentionDTypes.F16, HM) with
                 {
@@ -171,7 +179,7 @@ public sealed partial class CudaBackend
                     Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.WidenKv,
                 }, null,
                 static (in AttentionCall c) => c.KvHeads < c.Heads,
-                (in AttentionCall c) => { DenseViaWidenedKv(in c); return true; }),
+                (in AttentionCall c) => { DenseViaWidenedKv(in c, "S.19/"); return true; }),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
@@ -263,9 +271,16 @@ public sealed partial class CudaBackend
     /// <summary>Free device memory the attention rows budget against.</summary>
     private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
 
-    /// <summary>The compatibility lowering for a grouped call no native dense row completed: repeat K/V to the query head count,
-    /// then re-enter dense planning with the original mask, scale and numerical permissions.</summary>
-    private void DenseViaWidenedKv(in AttentionCall c)
+    /// <summary>Whether the equal-head form of a grouped call runs on INT8 v2, Sage or the F16 flash kernel: the kernels the
+    /// token-major grouped row yields to and <c>widen.preferred</c> widens for, so the two cannot disagree.</summary>
+    private bool WidenedTakesEqualHeadKernel(in AttentionCall c) =>
+        Int8V2TakesWidened(in c)
+        || SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim)
+        || FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim);
+
+    /// <summary>The widening lowering for a grouped call: repeat K/V to the query head count, then re-enter dense planning
+    /// with the original mask, scale and numerical permissions.</summary>
+    private void DenseViaWidenedKv(in AttentionCall c, string branch)
     {
         Tensor key = c.Key.Storage, value = c.Value.Storage;
         TensorShape widenedShape = new(c.Batch, c.Heads, c.KeyTokens, c.QkHeadDim);
@@ -276,7 +291,7 @@ public sealed partial class CudaBackend
             StridedCopies.RepeatInterleave(this, widenedValue, value, 1, c.KvGroup);
             ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(c.Output.Storage, c.Query.Storage, widenedKey, widenedValue,
                 c.Mask.Bias, c.Scale, allowF16: false) with { Numerics = c.Numerics });
-            t_attentionRoute = AttentionRouteText.Nested("S.19/", t_attentionRoute);
+            t_attentionRoute = AttentionRouteText.Nested(branch, t_attentionRoute);
         }
         finally
         {
@@ -326,16 +341,12 @@ public sealed partial class CudaBackend
 
     private AttentionKernelRow[] BuildTokenMajorGqaRows() =>
     [
-        // Grouped fp16/bf16 in place. The permute row's dense planner tries native GQA before its widening can reach
-        // INT8 v2, Sage or the F16 flash kernel.
+        // Grouped fp16/bf16 in place. It yields a whole-sequence call INT8 v2, Sage or the F16 flash kernel takes once
+        // widened: the permute row's dense planner widens for exactly those (widen.preferred) and runs native GQA otherwise.
         new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.tokenmajor.gqa", AttentionRoute.TokenMajorGqa,
                 AttentionDTypes.F16 | AttentionDTypes.BF16, CudnnSdpaRows.AnyView, gqa: true), "G.1",
             (in AttentionCall c) => c.KvHeads < c.Heads && CudnnSdpaRows.Covers(in c)
-                && (!WholeSequence(in c)
-                    || (!Int8V2TakesWidened(in c)
-                        && !SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QueryTokens,
-                            c.KeyTokens, c.QkHeadDim)
-                        && !FlashF16Eligible(c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Output.Storage, c.Mask.Bias, c.QkHeadDim)))
+                && (!WholeSequence(in c) || !WidenedTakesEqualHeadKernel(in c))
                 && CudnnReady(in c),
             (in AttentionCall c) => RunCudnnTokenMajor(in c)),
         new DelegateAttentionRow(Cap("permute.dense", AttentionRoute.TokenMajorGqa, AnyFloat, AnyFloat, AttentionLayouts.TokenMajor) with
