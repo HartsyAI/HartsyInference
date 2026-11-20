@@ -140,7 +140,10 @@ public sealed record AttentionKernelCapability
     /// <summary>Reads positions from a device buffer.</summary>
     public bool DevicePositions { get; init; }
 
-    /// <summary>No allocation, sync, free-memory read or plan build on the call, so a step graph may capture it.</summary>
+    /// <summary>Declares that a captured graph replays the call: no host sync, free-memory read or plan build, and scratch
+    /// only from the capture-aware device allocator (the graph's arena or graph-owned nodes). A declaration, not yet enforced:
+    /// the planner does not consult it, and rows without it run inside captures today. Scratch is recorded as
+    /// <see cref="AttentionEvidenceKind.Workspace"/> evidence.</summary>
     public bool CaptureSafe { get; init; }
 
     /// <summary>Fewest query rows.</summary>

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -96,6 +97,7 @@ public sealed partial class VulkanBackend
         ulong floatBytes = sizeof(float);
         ulong partBytes = (ulong)batch * (ulong)hq * (ulong)splits * (ulong)(headDim + 2) * floatBytes;
         VulkanBuffer partBuf = _xfer.AllocateDevice(partBytes);
+        AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.flash.decode.partials", (long)partBytes);
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)batch * (ulong)hq * (ulong)headDim * floatBytes);
         try
         {

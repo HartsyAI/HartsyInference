@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
@@ -33,6 +34,7 @@ public sealed partial class CudaBackend
                 nuint bytes = (nuint)((long)b * hkv * kvLen * d * sizeof(ushort));
                 kTmp = GpuTransferHelper.AllocateDevice(bytes);
                 vTmp = GpuTransferHelper.AllocateDevice(bytes);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.fa2.kv.f16", 2 * (long)bytes, count: 2);
                 _kernels!.LaunchKvToF16(kTmp, vTmp, pK, pV, b * hkv, kvLen, keyStride, d, _stream.Handle);
                 kUse = kTmp;
                 vUse = vTmp;
@@ -75,6 +77,7 @@ public sealed partial class CudaBackend
             pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
             pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
             pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.decode.partials", n * splits * (d + 2) * sizeof(float), count: 3);
             _kernels!.LaunchFlashDecodeGqa(pM, pL, pAcc, pQ, pK, pV, b, hq, d, hkv, keyStride, kvLen, kvGroup, qOffset, scale, softcap, window,
                 splits, chunk, devicePos, f16Kv, _stream.Handle);
             if (sidecar.Xq != 0)

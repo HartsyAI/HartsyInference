@@ -4088,6 +4088,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (_stepGraph is null || !_stepGraph.IsReady)
             throw new InvalidOperationException("StepGraphLaunch called with no captured graph.");
         _stepGraph.Launch();
+        AttentionEvidence.Observed(AttentionEvidenceKind.GraphReplay, "cuda.stepgraph.replay");
     }
 
     /// <remarks>Capture state is cleared before any native call, and every step runs even when an earlier one fails:
@@ -5430,6 +5431,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     long maskBlocks = mask.ElementCount / skv;
                     pMaskBroadcast = CudaMemory.Allocate((nuint)(maskBlocks * sq * skv * sizeof(float)));
                     pMaskOnes = CudaMemory.Allocate((nuint)(sq * sizeof(float)));
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.materialized.mask", (maskBlocks * skv + 1) * sq * sizeof(float), count: 2);
                     CudaMemory.Fill32(pMaskOnes, 0x3F80_0000u, (nuint)sq);   // 1.0f
                     for (long blk = 0; blk < maskBlocks; blk++)
                     {
@@ -5514,6 +5516,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
             nuint scoresBytes = (nuint)(totalHeads * sq * skv * elemSize);
             scoresBuf = CudaMemory.Allocate(scoresBytes);
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.materialized.scores", (long)scoresBytes);
 
             float alpha = scale;
             float beta = 0.0f;
@@ -6119,6 +6122,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             using (NvtxRange _rv = NvtxRange.PushFine("Sage.VF16T"))
             {
                 pVt16 = GpuTransferHelper.AllocateDevice((nuint)((long)b * h * d * CudaKernels.SageSkvPad(skv) * sizeof(ushort)));
+                AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.sage.scratch",
+                    (long)b * h * (d * sizeof(float) + (sq + skv) * (d + sizeof(float)) + d * CudaKernels.SageSkvPad(skv) * sizeof(ushort)), count: 6);
                 _kernels!.LaunchSageVTranspose(pVt16, pV, (int)b, (int)h, (int)skv, (int)d, _stream.Handle);
             }
             using (NvtxRange _ra = NvtxRange.PushFine("Sage.Flash"))
@@ -6212,6 +6217,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             k32 = CudaMemory.Allocate((nuint)(key.ElementCount * 4));
             v32 = CudaMemory.Allocate((nuint)(value.ElementCount * 4));
             o32 = CudaMemory.Allocate((nuint)(output.ElementCount * 4));
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.tiled.widened",
+                (query.ElementCount + key.ElementCount + value.ElementCount + output.ElementCount) * 4, count: 4);
             Widen(q32, ref pQ, query.ElementCount);
             Widen(k32, ref pK, key.ElementCount);
             Widen(v32, ref pV, value.ElementCount);
@@ -6332,6 +6339,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
             }
 
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.tiled.scores", perRow * Br);
             lock (_sdpaTileCapGate)
                 _sdpaTileCap = NextTileCap(_sdpaTileCap, halved, perRow * Br, perRow, EngineKnobs.SdpaTile.Value is > 0);
             if (pBias != 0)
@@ -7823,6 +7831,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.split.partials", n * splits * (d + 2) * sizeof(float), count: 3);
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         kvGroup <= 0 ? 1 : kvGroup, causal, qOffset, scale, splits, chunk, _stream.Handle,
                         softcap: softcap, slidingWindow: slidingWindow, f16Kv: f16Kv);
@@ -8086,6 +8095,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     pM = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pL = GpuTransferHelper.AllocateDevice((nuint)(n * splits * sizeof(float)));
                     pAcc = GpuTransferHelper.AllocateDevice((nuint)(n * splits * d * sizeof(float)));
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.flash.split.partials", n * splits * (d + 2) * sizeof(float), count: 3);
                     _kernels!.LaunchFlashAttentionSplit(pM, pL, pAcc, pQ, pK, pV, b, hq, tq, d, hkv, lk, kvLen,
                         grp, causal, qOffset, scale, splits, chunk, _stream.Handle, devicePos, softcap, slidingWindow,
                         f16Kv: devF16Kv);

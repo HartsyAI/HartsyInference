@@ -2100,6 +2100,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // refresh (normal stream) must be complete before the captured buffer's dispatches read it.
         DrainStream();
         _stepGraph.Launch();
+        AttentionEvidence.Observed(AttentionEvidenceKind.GraphReplay, "vulkan.stepgraph.replay");
     }
 
     public void StepGraphReset()
@@ -2235,6 +2236,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         ulong scoresElems = (ulong)(totalHeads * Br * Skv);
         VulkanBuffer scoresBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
         VulkanBuffer probsBuf = _xfer.AllocateDevice(scoresElems * (ulong)dtype.SizeInBytes);
+        AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.naive.scores", 2 * (long)scoresElems * dtype.SizeInBytes, count: 2);
 
         // Output buffer (dtype)
         ulong outElems = (ulong)(B * H * Sq * D);
