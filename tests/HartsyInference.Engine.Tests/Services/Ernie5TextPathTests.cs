@@ -183,8 +183,6 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.InRange(run.Result.CompletionTokens, 1, 4);
     }
 
-    /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
-    /// the slot's backend runs on.</summary>
     /// <summary>The scheduler prefills as the pipeline does (one projected row, the same first token), so a greedy request gives the same text on both.</summary>
     [Fact]
     public async Task Continuous_batching_generates_what_the_pipeline_generates()
@@ -200,6 +198,8 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.Equal(pipeline.Result.PromptTokens, scheduled.Result.PromptTokens);
     }
 
+    /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
+    /// the slot's backend runs on.</summary>
     internal sealed record ServiceRun(TextResult Result, bool Scheduled, DeviceKind Device);
 
     /// <summary>Loads <paramref name="directory"/> through the engine's Text service on <paramref name="device"/> and generates up to four tokens,
