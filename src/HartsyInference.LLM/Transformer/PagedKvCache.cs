@@ -24,6 +24,8 @@ public sealed class PagedKvCache : IKvCache
     // Per layer: rows this layer has written to its pages, and how many leading rows of each contiguous prefix already
     // equal those pages. A prefix call copies only the rows past its watermark; a write at a position lowers it to there.
     private readonly int[] _written;
+    // Rows the prefix may be sized ahead to (the caller's token bound, page-rounded); 0 when no bound was given.
+    private readonly int _reserveRows;
     private readonly int[] _currentK;
     private readonly int[] _currentV;
 
@@ -39,9 +41,15 @@ public sealed class PagedKvCache : IKvCache
     /// <summary>Pages currently held by this sequence (for observability/logging).</summary>
     public int PagesHeld { get { ThrowIfDisposed(); return _blockTable.Count; } }
 
-    public PagedKvCache(PagedKvPool pool)
+    /// <param name="pool">The page pool this sequence draws from.</param>
+    /// <param name="expectedTokens">The most tokens the sequence will hold (prompt plus generation), when the caller knows
+    /// it. The contiguous prefix is then sized ahead in steps up to this bound, so it is not regrown every page; 0 keeps
+    /// it at the valid length rounded up to a page.</param>
+    public PagedKvCache(PagedKvPool pool, int expectedTokens = 0)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(expectedTokens);
         _pool = pool;
+        _reserveRows = expectedTokens == 0 ? 0 : RoundUpToPage(expectedTokens);
         _scratchK = new Tensor?[pool.NumLayers];
         _scratchV = new Tensor?[pool.NumLayers];
         _written = new int[pool.NumLayers];
@@ -115,9 +123,19 @@ public sealed class PagedKvCache : IKvCache
         AppendToPrefix(backend, layer, isKey: false, newV, _currentLength, tNew);
     }
 
-    /// <summary>Rows a prefix buffer holds for <paramref name="len"/> valid rows: the length rounded up to a page. Kernel
-    /// admission and plan keys read this row count, so it is the count the per-call rebuild produced.</summary>
-    private int PrefixCapacity(int len) => ((Math.Max(len, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
+    private int RoundUpToPage(int rows) => ((Math.Max(rows, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
+
+    /// <summary>Rows a new prefix buffer gets when it must hold <paramref name="len"/> valid rows. Without a token bound that
+    /// is the length rounded up to a page, the count the per-call rebuild produced. With one, the buffer is sized ahead
+    /// by an eighth of the length (at least 256 rows) and never past the bound, so a sequence regrows its prefix a
+    /// handful of times instead of once a page, and a prefill usually allocates it once.</summary>
+    private int PrefixCapacity(int len)
+    {
+        int needed = RoundUpToPage(len);
+        if (_reserveRows == 0) return needed;
+        int ahead = RoundUpToPage(len + Math.Max(256, len / 8));
+        return Math.Max(needed, Math.Min(_reserveRows, ahead));
+    }
 
     /// <summary>Adds the rows just written at <paramref name="pos"/> to the layer's contiguous prefix, straight from the
     /// appended tensor, when the prefix is current up to there. A prefix that is behind is left for the next prefix call,
@@ -128,10 +146,12 @@ public sealed class PagedKvCache : IKvCache
         int[] currentRows = isKey ? _currentK : _currentV;
         if (currentRows[layer] != pos) return;
         int headDim = _pool.HeadDimPerLayer[layer];
-        int capacity = PrefixCapacity(_physicallyWritten);
+        int len = _physicallyWritten;
         Tensor? scratch = scratchArr[layer];
+        bool grow = scratch is null || scratch.Shape[2] < len;
+        int capacity = grow ? PrefixCapacity(len) : (int)scratch!.Shape[2];
         long copiedRows = tNew;
-        if (pos == 0 && (scratch is null || scratch.Shape[2] < capacity))
+        if (pos == 0 && grow)
         {
             // Nothing to keep: the new rows, padded to a whole page, are the buffer. Built as an op's output, it is
             // never uploaded from the host.
@@ -150,13 +170,13 @@ public sealed class PagedKvCache : IKvCache
         }
         else
         {
-            if (scratch is null || scratch.Shape[2] < capacity)
+            if (grow)
             {
                 scratch = GrowPrefix(backend, scratch, pos, capacity, headDim);
                 scratchArr[layer] = scratch;
                 copiedRows += pos;
             }
-            backend.KvCacheAppend(scratch, rows, pos);
+            backend.KvCacheAppend(scratch!, rows, pos);
         }
         currentRows[layer] = pos + tNew;
         AttentionEvidence.Observed(AttentionEvidenceKind.PrefixGather, isKey ? "paged.keys" : "paged.values",

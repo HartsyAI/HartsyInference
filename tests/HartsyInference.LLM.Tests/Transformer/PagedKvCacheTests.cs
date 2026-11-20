@@ -19,12 +19,17 @@ public sealed class PagedKvCacheTests
     private sealed class Pair : IDisposable
     {
         public readonly CpuBackend Backend = new();
-        public readonly PagedKvPool Pool = new(HeadDims.Length, KvHeads, HeadDims, PageSize, MaxPages);
+        public readonly PagedKvPool Pool;
         public readonly PagedKvCache Paged;
-        public readonly FixedKvCache Fixed = new(HeadDims.Length, 1, KvHeads, HeadDims, MaxTokens, DType.F32);
+        public readonly FixedKvCache Fixed;
         private readonly Random _random = new(1234);
 
-        public Pair() => Paged = new PagedKvCache(Pool);
+        public Pair(int expectedTokens = 0, int maxPages = MaxPages)
+        {
+            Pool = new PagedKvPool(HeadDims.Length, KvHeads, HeadDims, PageSize, maxPages);
+            Paged = new PagedKvCache(Pool, expectedTokens);
+            Fixed = new FixedKvCache(HeadDims.Length, 1, KvHeads, HeadDims, PageSize * maxPages, DType.F32);
+        }
 
         /// <summary>Appends <paramref name="tokens"/> new rows to one layer of both caches, without advancing.</summary>
         public void Append(int layer, int tokens)
@@ -228,5 +233,55 @@ public sealed class PagedKvCacheTests
         pair.Step(2);
 
         Assert.Equal(2 * RowBytes, GatheredBytes(evidence, before));
+    }
+
+    [Fact]
+    public void AKnownTokenBoundSizesThePrefixOnceAndNeverRegrowsIt()
+    {
+        const int prompt = 10, steps = 30;
+        using Pair pair = new(expectedTokens: prompt + steps + 1);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(prompt);
+        long rows = pair.Paged.KeyPrefix(0).Shape[2];
+        for (int step = 0; step < steps; step++) pair.Step(1);
+
+        // 41 tokens round up to 44 rows, inside the 256-row look-ahead, so the first buffer already holds the whole sequence.
+        Assert.Equal(44, rows);
+        for (int layer = 0; layer < HeadDims.Length; layer++)
+        {
+            Assert.Equal(rows, pair.Paged.KeyPrefix(layer).Shape[2]);
+            Assert.Equal(rows, pair.Paged.ValuePrefix(layer).Shape[2]);
+        }
+        // Every row is copied once and nothing moves again.
+        Assert.Equal(RowBytes * (prompt + steps), GatheredBytes(evidence, 0));
+    }
+
+    [Fact]
+    public void ALongSequenceRegrowsItsPrefixAFewTimesWithinItsBound()
+    {
+        const int prompt = 4, steps = 700, bound = prompt + steps + 1;
+        using Pair pair = new(expectedTokens: bound, maxPages: 256);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(1 << 16);
+        pair.Step(prompt);
+        HashSet<long> capacities = [pair.Paged.KeyPrefix(0).Shape[2]];
+        for (int step = 0; step < steps; step++)
+        {
+            pair.Step(1);
+            capacities.Add(pair.Paged.KeyPrefix(0).Shape[2]);
+        }
+
+        // 256 rows ahead of the prompt, then 256 ahead of row 261, then the bound: three buffers for 704 rows.
+        Assert.Equal([260L, 520L, 708L], capacities.Order());
+        // Each row is written once, and the held rows move when the buffer grows: 260 of them, then 520.
+        Assert.Equal(RowBytes * (prompt + steps + 260 + 520), GatheredBytes(evidence, 0));
+    }
+
+    [Fact]
+    public void ASequenceThatOutgrowsItsBoundStillWorks()
+    {
+        using Pair pair = new(expectedTokens: 8);
+        pair.Step(6);
+        for (int step = 0; step < 20; step++) pair.Step(1);
+        Assert.Equal(26, pair.Paged.CurrentLength);
     }
 }

@@ -14,14 +14,17 @@ public sealed class PagedKvCacheCudaTests
     private const int Layers = 2, KvHeads = 2, HeadDim = 64, PageSize = 16, MaxPages = 32;
 
     [CudaTheory]
-    [InlineData("none")]
-    [InlineData("offload")]
-    [InlineData("free")]
-    public void ThePrefixMatchesAContiguousCacheAcrossActivationRelease(string release)
+    [InlineData("none", 0)]
+    [InlineData("offload", 0)]
+    [InlineData("free", 0)]
+    [InlineData("none", 101)]
+    [InlineData("offload", 101)]
+    [InlineData("free", 101)]
+    public void ThePrefixMatchesAContiguousCacheAcrossActivationRelease(string release, int expectedTokens)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         using PagedKvPool pool = new(Layers, KvHeads, HeadDim, PageSize, MaxPages);
-        using PagedKvCache paged = new(pool);
+        using PagedKvCache paged = new(pool, expectedTokens);
         using FixedKvCache contiguous = new(Layers, 1, KvHeads, HeadDim, PageSize * MaxPages, DType.F32);
         Random random = new(99);
         List<float[]>[] keys = [[], []], values = [[], []];
