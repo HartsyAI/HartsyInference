@@ -91,6 +91,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         /// <summary>The clock's reading when the first token was sampled.</summary>
         public double PrefillMilliseconds;
 
+        /// <summary>The clock's reading when this sequence's latest token was produced: the first token's, then the end of each decode round it fed.
+        /// Decode time ends here, not when the result is built, which is an admission pass later.</summary>
+        public double LastTokenMilliseconds;
+
         public void Dispose()
         {
             Cache.Dispose();
@@ -291,6 +295,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     Exception? injected = TestFaultInjector?.Invoke(feeders.Count);
                     if (injected is not null) throw injected;
                     await RunGpuWork(work).ConfigureAwait(false);
+                    foreach (ActiveSeq seq in feeders) seq.LastTokenMilliseconds = seq.Clock.Elapsed.TotalMilliseconds;
                 }
                 catch (Exception ex)
                 {
@@ -646,7 +651,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             {
                 Pending = pending, PromptIds = promptIds, Cache = cache, Sampler = sampler,
                 Stops = stops, Generated = generated, Next = next, GraphSession = session,
-                Clock = clock, PrefillMilliseconds = prefillMs,
+                Clock = clock, PrefillMilliseconds = prefillMs, LastTokenMilliseconds = prefillMs,
             };
         }
         catch
@@ -707,8 +712,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     }
 
     /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).
-    /// Decode time is this request's wall time from its first token to here, so it includes the rounds it shared with other sequences and any prefill of a
-    /// request admitted meanwhile.</summary>
+    /// Decode time is this request's wall time from its first token to its last, so it includes the rounds it shared with other sequences and the prefill of
+    /// any request admitted between them; a request that needed no decode round reports 0.</summary>
     private GenerationResult BuildResult(ActiveSeq seq, bool stopped) => new()
     {
         TokenIds = seq.Generated,
@@ -716,7 +721,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         PromptTokens = seq.PromptIds.Length,
         StoppedOnStopToken = stopped,
         PrefillMilliseconds = seq.PrefillMilliseconds,
-        DecodeMilliseconds = seq.Clock.Elapsed.TotalMilliseconds - seq.PrefillMilliseconds,
+        DecodeMilliseconds = seq.LastTokenMilliseconds - seq.PrefillMilliseconds,
     };
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
