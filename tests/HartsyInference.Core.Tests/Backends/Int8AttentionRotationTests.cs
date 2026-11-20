@@ -323,7 +323,8 @@ public sealed class Int8AttentionRotationTests
         {
             int anchor = operands.RepresentativeKeys[kh];
             Assert.True(anchor >= 0, $"KV head {kh} found no representative key.");
-            // What was subtracted from this head's keys is this head's own row.
+            // What was subtracted from this head's keys is this head's own row. Batch 1 and a head dim that is already
+            // a padded one: a larger batch or a padded head dim indexes the centers by batch and padded width.
             Assert.True(operands.KeyMeans.AsSpan(kh * dim, dim).SequenceEqual(stored.Slice((kh * keys + anchor) * dim, dim)),
                 $"KV head {kh} was centered on something other than its row {anchor}.");
         }
