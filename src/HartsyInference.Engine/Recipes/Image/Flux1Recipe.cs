@@ -34,6 +34,10 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     };
 
     /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(Flux1Variants.OneReward) ? Prompt!.ArchitectureOnly() : Prompt;
+
+    /// <inheritdoc/>
     /// <remarks>Wiring the VAE encoder also makes FLUX.1 Fill reachable: <see cref="FluxPipeline"/> requires a mask for
     /// checkpoints whose <c>x_embedder</c> is ≥384 channels, which could never arrive while img2img was unmapped.
     /// IpAdapter here means the image-PROMPT slot (FLUX.1 Redux via <c>redux.stylemodel</c>) — a real IP-Adapter

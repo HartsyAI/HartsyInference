@@ -111,12 +111,14 @@ public sealed class RecipePromptProfileTests
         PromptProfile ideogram = Describe(Modality.Image, "ideogram4").Prompt!;
         PromptProfile lance = Describe(Modality.Image, "lance-image").Prompt!;
         PromptProfile fibo = Describe(Modality.Image, "fibo2").Prompt!;
+        PromptProfile lumina = Describe(Modality.Image, "lumina2").Prompt!;
 
         Assert.Null(ideogram.Negative);
         Assert.Null(ideogram.Encoders);
         Assert.Null(lance.Format);
         Assert.Null(lance.Supports);
         Assert.Null(lance.Guide);
+        Assert.Null(lumina.Negative);
         Assert.Null(fibo.Boxes);
         Assert.DoesNotContain("boxes", fibo.Supports!);
     }
@@ -143,15 +145,89 @@ public sealed class RecipePromptProfileTests
 
         Assert.Equal("separate", dev.Negative);
         Assert.Null(distilled.Negative);
+        Assert.Null(RecipePrompts.Find("ltx-2")!.Negative);
+        Assert.Null(RecipePrompts.Find("ltx-2.5-distilled")!.Negative);
     }
 
     [Fact]
-    public void WanClaimsOnScreenTextOnlyForTheWan21Ids()
+    public void WanClaimsOnScreenTextOnlyForTheIdThatIsWan21Alone()
     {
-        Assert.Equal(["text-rendering"], Describe(Modality.Video, "wan-21-14b").Prompt!.Supports);
         Assert.Equal(["text-rendering"], Describe(Modality.Video, "wan-21-1_3b").Prompt!.Supports);
+        Assert.Empty(Describe(Modality.Video, "wan-21-14b").Prompt!.Supports!);
         Assert.Empty(Describe(Modality.Video, "wan-22-5b").Prompt!.Supports!);
         Assert.Empty(Describe(Modality.Video, "wan").Prompt!.Supports!);
+    }
+
+    [Theory]
+    [InlineData("animate", "wan-animate")]
+    [InlineData("animate2", "wan-animate-2")]
+    [InlineData("s2v", "wan-s2v")]
+    public void AWanVariantTheGuideDoesNotCoverAnswersTheSameWhicheverRouteNamesIt(string variant, string standalone)
+    {
+        PromptProfile viaVariant = Catalog().DescribeFamily(Modality.Video, "wan", variant).Prompt!;
+        PromptProfile viaRecipe = Describe(Modality.Video, standalone).Prompt!;
+
+        Assert.Equal(new PromptProfile { Kind = "video" }.ToModelSpecKeys(), viaVariant.ToModelSpecKeys());
+        Assert.Equal(viaRecipe.Kind, viaVariant.Kind);
+        Assert.Null(viaVariant.Supports);
+        Assert.Null(viaVariant.Guide);
+        Assert.Null(viaRecipe.Supports);
+        Assert.Null(viaRecipe.Guide);
+    }
+
+    [Theory]
+    [InlineData(Modality.Image, "flux2", "iris-z-small")]
+    [InlineData(Modality.Image, "flux2", "iris-z-big")]
+    [InlineData(Modality.Image, "flux1", "onereward")]
+    [InlineData(Modality.Image, "zimage", "nitrofusion2")]
+    [InlineData(Modality.Image, "mage-flow", "edit")]
+    [InlineData(Modality.Image, "mage-flow", "edit-turbo")]
+    [InlineData(Modality.Image, "boogu", "edit")]
+    [InlineData(Modality.Image, "boogu", "edit-turbo")]
+    public void AVariantNoGuideCoversKeepsOnlyWhatItsArchitectureFixes(Modality modality, string family, string variant)
+    {
+        PromptProfile prompt = Catalog().DescribeFamily(modality, family, variant).Prompt!;
+
+        Assert.NotNull(prompt.Encoders);
+        Assert.Null(prompt.Format);
+        Assert.Null(prompt.Negative);
+        Assert.Null(prompt.Supports);
+        Assert.Null(prompt.Boxes);
+        Assert.Null(prompt.Guide);
+    }
+
+    [Fact]
+    public void EveryImageAndVideoIdentityStampsOnlyWhatItsRecipeEstablishes()
+    {
+        List<string> missing = [];
+        foreach ((string id, ArtifactIdentity identity) in ModelIdentityCatalog.All)
+        {
+            if (identity.Tags.Count == 0 || identity.Tags[0] is not ("image" or "video"))
+            {
+                continue;
+            }
+            PromptProfile? prompt = RecipePrompts.Find(id);
+            if (prompt is null)
+            {
+                missing.Add(id);
+                continue;
+            }
+            Assert.Equal(identity.Tags[0], prompt.Kind);
+            Assert.Empty(prompt.Problems());
+        }
+        Assert.Empty(missing);
+    }
+
+    [Fact]
+    public void AFineTuneIdentityDoesNotInheritItsBaseModelsPromptFacts()
+    {
+        foreach (string id in new[] { "iris-z-small", "iris-z-big" })
+        {
+            PromptProfile prompt = RecipePrompts.Find(id)!;
+
+            Assert.Equal([PromptProfile.EncoderKey], prompt.ToModelSpecKeys().Keys);
+        }
+        Assert.Equal("none", RecipePrompts.Find("flux2")!.Negative);
     }
 
     [Fact]

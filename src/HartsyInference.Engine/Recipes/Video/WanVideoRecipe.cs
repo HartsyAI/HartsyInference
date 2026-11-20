@@ -43,11 +43,11 @@ public sealed class WanVideoRecipe : IVideoRecipe
     public WanVideoRecipe(string familyId = "wan")
     {
         _familyId = familyId;
-        // The guide states on-screen text for Wan 2.1 only, so the ids that can carry 2.2 weights do not claim it.
+        // The guide states on-screen text for Wan 2.1 only; wan-21-14b also carries 2.2 14B weights, so only the 1.3B id claims it.
         Prompt = new()
         {
             Kind = "video", Encoders = ["t5"], Format = "text", Negative = "separate",
-            Supports = familyId is Wan21_1_3BCompatClassId or Wan21_14BCompatClassId ? ["text-rendering"] : [],
+            Supports = familyId is Wan21_1_3BCompatClassId ? ["text-rendering"] : [],
             Guide = "docs/prompting/wan.md",
         };
     }
@@ -57,6 +57,13 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public PromptProfile? Prompt { get; }
+
+    /// <inheritdoc/>
+    /// <remarks>Animate and speech-to-video are not covered by the Wan guide, and the standalone recipes for them say so.</remarks>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && (variant.Is(WanVideoVariants.Animate) || variant.Is(WanVideoVariants.Animate2) || variant.Is(WanVideoVariants.S2V))
+            ? new PromptProfile { Kind = Prompt!.Kind }
+            : Prompt;
 
 
     /// <inheritdoc/>

@@ -42,8 +42,8 @@ public sealed record PromptProfile
     public string? Format { get; init; }
 
     /// <summary>How the model takes a negative prompt, one of <see cref="PromptVocabulary.Negatives"/>. <c>none</c> means
-    /// the model has no negative branch (distilled or embedded guidance); <c>separate</c> means a CFG negative branch
-    /// exists, whatever guidance a request then sets.</summary>
+    /// the source says the model takes no negative (no negative branch, distilled or embedded guidance, or no field to carry
+    /// one); <c>separate</c> means a CFG negative branch exists, whatever guidance a request then sets.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Negative { get; init; }
 
@@ -65,6 +65,10 @@ public sealed record PromptProfile
     /// (<c>docs/prompting/&lt;name&gt;.md</c>); null when no guide covers the model.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Guide { get; init; }
+
+    /// <summary>The facts the architecture alone fixes, for a fine-tune or variant no guide covers: its kind and encoders, and
+    /// nothing the guide says about the base model's prompt text.</summary>
+    public PromptProfile ArchitectureOnly() => new() { Kind = Kind, Encoders = Encoders };
 
     /// <summary>The flat <c>modelspec.prompt_*</c> header entries for the fields that are set. <see cref="Kind"/>,
     /// <see cref="MaxTokens"/> and <see cref="Guide"/> have no key: the header's tags already carry the category.</summary>

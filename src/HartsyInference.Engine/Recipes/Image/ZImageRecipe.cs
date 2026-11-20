@@ -36,6 +36,7 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         variant is null ? Prompt
         : variant.Is(ZImageVariants.Base) ? Prompt! with { Negative = "separate" }
         : variant.Is(ZImageVariants.Turbo) ? Prompt! with { Negative = "none" }
+        : variant.Is(ZImageVariants.NitroFusion2) ? Prompt!.ArchitectureOnly()
         : Prompt;
 
     /// <inheritdoc/>

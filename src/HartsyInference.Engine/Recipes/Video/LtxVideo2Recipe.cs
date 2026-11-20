@@ -75,7 +75,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public string Name => _distilled ? LtxVideo2Variants.DistilledFamilyId : "ltx-video-2";
 
     /// <inheritdoc/>
-    /// <remarks>The guide states a negative only for the dev build; a distilled one is expected to ignore it but that is not stated.</remarks>
+    /// <remarks>The guide states a negative only for the dev build. A file under a dev id may be distilled, so the variant-less answer leaves it unset.</remarks>
     public PromptProfile? Prompt { get; } = new()
     {
         Kind = "video", Encoders = ["llm"], Format = "text", Supports = [], Guide = "docs/prompting/ltx-video.md",
@@ -83,7 +83,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
     /// <inheritdoc/>
     public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
-        _distilled || variant?.Is(LtxVideo2Variants.Distilled) == true ? Prompt : Prompt! with { Negative = "separate" };
+        !_distilled && variant is not null && variant.Is(LtxVideo2Variants.Dev) ? Prompt! with { Negative = "separate" } : Prompt;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => _distilled

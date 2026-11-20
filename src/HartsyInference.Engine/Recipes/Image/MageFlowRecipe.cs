@@ -37,7 +37,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
         variant is null ? Prompt
         : variant.Is(MageFlowVariants.Base) ? Prompt! with { Negative = "separate" }
         : variant.Is(MageFlowVariants.Turbo) ? Prompt! with { Negative = "none" }
-        : variant.Is(MageFlowVariants.EditTurbo) ? Prompt! with { Negative = "none" }
+        : variant.Is(MageFlowVariants.Edit) || variant.Is(MageFlowVariants.EditTurbo) ? Prompt!.ArchitectureOnly()
         : Prompt;
     public bool Matches(string familyId) => string.Equals(familyId, "mage-flow", StringComparison.OrdinalIgnoreCase);
 

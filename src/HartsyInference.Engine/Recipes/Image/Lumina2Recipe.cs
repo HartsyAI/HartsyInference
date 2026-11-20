@@ -37,7 +37,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public PromptProfile? Prompt { get; } = new()
     {
-        Kind = "image", Encoders = ["llm"], Format = "text", Negative = "none", Supports = ["text-rendering"],
+        Kind = "image", Encoders = ["llm"], Format = "text", Supports = ["text-rendering"],
         Guide = "docs/prompting/lumina-2.md",
     };
 

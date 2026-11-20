@@ -40,7 +40,7 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
         variant is null ? Prompt
         : variant.Is(BooguImageVariants.Base) ? Prompt! with { Negative = "separate" }
         : variant.Is(BooguImageVariants.Turbo) ? Prompt! with { Negative = "none" }
-        : variant.Is(BooguImageVariants.EditTurbo) ? Prompt! with { Negative = "none" }
+        : variant.Is(BooguImageVariants.Edit) || variant.Is(BooguImageVariants.EditTurbo) ? Prompt!.ArchitectureOnly()
         : Prompt;
 
     /// <inheritdoc/>
