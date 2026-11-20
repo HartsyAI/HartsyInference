@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Transformer;
@@ -23,6 +24,12 @@ public sealed class PagedKvCacheCudaTests
     public void ThePrefixMatchesAContiguousCacheAcrossActivationRelease(string release, int expectedTokens)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        PrefixMatchesAContiguousCache(backend, release, expectedTokens);
+    }
+
+    /// <summary>The prefix check on any device backend; <see cref="PagedKvCacheVulkanTests"/> runs it on Vulkan.</summary>
+    internal static void PrefixMatchesAContiguousCache(IBackend backend, string release, int expectedTokens)
+    {
         using PagedKvPool pool = new(Layers, KvHeads, HeadDim, PageSize, MaxPages);
         using PagedKvCache paged = new(pool, expectedTokens);
         using FixedKvCache contiguous = new(Layers, 1, KvHeads, HeadDim, PageSize * MaxPages, DType.F32);
@@ -68,6 +75,12 @@ public sealed class PagedKvCacheCudaTests
     public void ThePagesOfTwoSequencesHoldTheirOwnRowsAcrossActivationRelease(string release)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        PagesOfTwoSequencesHoldTheirOwnRows(backend, release);
+    }
+
+    /// <summary>The page read-back check on any device backend; <see cref="PagedKvCacheVulkanTests"/> runs it on Vulkan.</summary>
+    internal static void PagesOfTwoSequencesHoldTheirOwnRows(IBackend backend, string release)
+    {
         using PagedKvPool pool = new(Layers, KvHeads, HeadDim, PageSize, MaxPages);
         using PagedKvCache a = new(pool), b = new(pool, 101);
         Random random = new(7);

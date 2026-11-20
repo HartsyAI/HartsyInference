@@ -215,7 +215,16 @@ public sealed class PagedKvCache : IKvCache
         {
             movedRows = (int)old.Shape[2];
             using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - movedRows, headDim), DType.F32);
-            backend.Concat(grown, [old, pad], 2);
+            try
+            {
+                backend.Concat(grown, [old, pad], 2);
+            }
+            catch
+            {
+                // The caller still holds the old buffer; only the new one is this method's to release.
+                grown.Dispose();
+                throw;
+            }
         }
         old?.Dispose();
         return grown;
@@ -267,6 +276,8 @@ public sealed class PagedKvCache : IKvCache
             }
             pos += chunk;
         }
+        // An append never moves a watermark past the rows its layer wrote, so catching up can only raise it.
+        System.Diagnostics.Debug.Assert(currentRows[layer] <= target, "A prefix watermark is ahead of the rows its layer wrote.");
         currentRows[layer] = target;
         if (copiedRows > 0)
             AttentionEvidence.Observed(AttentionEvidenceKind.PrefixGather, isKey ? "paged.keys" : "paged.values",
