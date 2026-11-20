@@ -96,6 +96,24 @@ public static partial class AudioStandIns
         return paths;
     }
 
+    /// <summary>True when <paramref name="path"/> is a Hartsy artifact that declares, in its own header, that it stands in for
+    /// that very path under <paramref name="root"/>: the file reached there through a stand-in link or was placed there as one.</summary>
+    /// <remarks>An upstream file's pinned hash cannot match such a file, since the conversion rewrote its header, so a caller that
+    /// checks pins asks this first. The artifact was checked against its own card's hash when it was installed. Any file that is
+    /// not a readable safetensors answers false.</remarks>
+    public static bool StandsIn(string root, string path)
+    {
+        if (!path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        {
+            return false;
+        }
+        string relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path)).Replace('\\', '/');
+        lock (_lock)
+        {
+            return Declared(Path.GetFullPath(path)).Contains(relative, StringComparer.Ordinal);
+        }
+    }
+
     private static int SyncLocked(string root)
     {
         if (!Directory.Exists(root))

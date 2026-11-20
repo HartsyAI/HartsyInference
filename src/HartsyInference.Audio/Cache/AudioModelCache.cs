@@ -228,7 +228,9 @@ public static class AudioModelCache
         try
         {
             string path = await GetAsync(hfRepoId, file.Name, category, revision, progress: null, ct).ConfigureAwait(false);
-            if (file.Sha256 is not null)
+            // A pin is the upstream file's hash. A Hartsy repack standing in for that file has a rewritten header, so it cannot
+            // match; it was checked against its card's own hash when it was installed.
+            if (file.Sha256 is not null && !AudioStandIns.StandsIn(CacheRoot, path))
             {
                 VerifySha256(path, file.Sha256);
             }
