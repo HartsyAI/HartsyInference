@@ -461,8 +461,9 @@ public sealed partial class CudaBackend
                         c.QkHeadDim, c.Positions.KvLength, kvGroup <= 0 ? 1 : kvGroup, c.Positions.QueryOffset, c.Scale, c.Mask.LegacySlidingWindow, f16Kv);
                     return true;
                 }),
-            // cuDNN's fused engine with the causal rule as a materialized bias. It keeps 64 as its floor: LLM prefill below
-            // that head dim has not been measured on cuDNN.
+            // cuDNN's fused engine with the causal rule as a materialized bias, for K/V tensors that hold exactly the valid
+            // keys (a capacity-sized KV cache never qualifies). It keeps 64 as its floor: below that head dim it has not
+            // been measured.
             new DelegateAttentionRow(Cap("cudnn.causal", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 256, Gqa = true, Masks = CW, MinQueryTokens = 2, UsesQueryKey = AttentionFormats.F16,
