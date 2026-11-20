@@ -160,8 +160,10 @@ Failures are classed:
 
 No admitted row raises `AttentionUnsupportedException`; if every admitted row declines, the planner raises
 `AttentionRecoverableException` instead. Any execution exception is sticky and propagates unchanged rather than being
-converted into a decline. CUDA and Vulkan have no host-reference rows. Host execution is the caller's explicit choice
-through `AttentionHostReference.Run`; a backend without rows refuses `IBackend.Attention`.
+converted into a decline. A GPU backend runs the host reference only through a declared row: one named in the plan and
+the execution evidence, with `HostReference` lowering, that warns once. Vulkan declares one for `FlashAttention` (C.1);
+CUDA declares none. Otherwise host execution is the caller's explicit choice through `AttentionHostReference.Run`, and
+a backend without rows refuses `IBackend.Attention`.
 
 A failure while a stream is capturing is never recorded as a permanent property of a head dim or a kernel.
 
@@ -246,6 +248,7 @@ The planner reproduces these until the row that owns each is rewritten.
   unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
 - Vulkan's scalar/tiled mask shaders carry batch/head/query bias strides; the naive path uses the same layout to
   offset each block and expands key-only masks. Source indexing is not a complete executed mask-conformance campaign.
-- Vulkan `FlashAttention` uses host reference when neither its scalar admission nor its restricted wide-sink row
-  admits the call. The wide row covers unmasked F32 sinks with optional softcap, no ALiBi, up to D1024; it is not a
-  general replacement for every logit-term/large-D call. CUDA Flash above D1024 still runs on the host.
+- Vulkan `FlashAttention` runs its declared host-reference row (C.1) when neither its scalar admission nor its
+  restricted wide-sink row admits the call: softcap, causal sinks, ALiBi, or a head dim past the flash tile. Gemma-2
+  (decoder and text encoder), GPT-OSS and ALiBi models take it. The wide row covers unmasked F32 sinks with optional
+  softcap, no ALiBi, up to D1024. CUDA refuses Flash above D1024.

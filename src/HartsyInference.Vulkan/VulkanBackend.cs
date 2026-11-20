@@ -2115,7 +2115,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _xfer.ReleaseStepGraphRetained();
     }
 
-    /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
+    /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Softcap, causal sinks, ALiBi (Gemma-2, GPT-OSS, MPT-class models) and head dims the shared-memory tile can't hold run the declared host-reference row C.1, which warns once and is named in the plan and the evidence.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
         => ExecuteFlashAttention(AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale,
             softcap, sink, slidingWindow, alibiSlopes), kvGroup);
@@ -2127,7 +2127,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         ArgumentOutOfRangeException.ThrowIfNegative(call.Mask.LegacySlidingWindow);
         if (call.ValidKvLength < 0 || call.ValidKvLength > key.Shape[2])
             throw new ArgumentOutOfRangeException("kvLen", $"kvLen {call.ValidKvLength} is outside the cache's {key.Shape[2]} rows.");
-        // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
+        // One op for the device rows, the cm2 attempt and its fallback alike; the declared host row (C.1) runs outside any.
         if (!FlashOnDevice(in call))
         {
             RunAttentionRows(FlashAttentionRows, in call);
