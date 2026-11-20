@@ -15,4 +15,9 @@ public abstract class AttentionKernelRow
 
     /// <summary>The variant a run took, when one row covers several (a materialized row's dtype path); null otherwise.</summary>
     public virtual string? Variant(in AttentionCall call) => null;
+
+    /// <summary>The preparation the row expects to run for <paramref name="call"/>, or null when the row has not stated
+    /// it. A row that declares no lowering states none by default; one that declares a lowering must say how much.</summary>
+    public virtual AttentionPreparationCost? Preparation(in AttentionCall call) =>
+        Capability.Lowering == AttentionLowering.None ? AttentionPreparationCost.None : null;
 }

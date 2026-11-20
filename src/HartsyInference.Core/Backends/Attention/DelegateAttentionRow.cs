@@ -6,9 +6,15 @@ public delegate bool AttentionRowFunc(in AttentionCall call);
 /// <summary>A kernel row built from two delegates: runtime admission and the launch.</summary>
 /// <param name="branch">The branch id this row reports (docs/ATTENTION_CONTRACT.md routes); null when the launch records
 /// its own variant (a row covering several dtype paths, or one that re-dispatches).</param>
+/// <summary>States the preparation a row expects for a call.</summary>
+public delegate AttentionPreparationCost AttentionCostFunc(in AttentionCall call);
+
 public sealed class DelegateAttentionRow(AttentionKernelCapability capability, string? branch, AttentionRowFunc admits,
-    AttentionRowFunc run) : AttentionKernelRow
+    AttentionRowFunc run, AttentionCostFunc? preparation = null) : AttentionKernelRow
 {
+    public override AttentionPreparationCost? Preparation(in AttentionCall call) =>
+        preparation is null ? base.Preparation(in call) : preparation(in call);
+
     /// <summary>The branch id, or null when the launch records it.</summary>
     public string? Branch { get; } = branch;
 

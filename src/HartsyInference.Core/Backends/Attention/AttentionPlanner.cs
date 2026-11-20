@@ -20,10 +20,34 @@ public static class AttentionPlanner
             AttentionExclusion ex = row.Capability.Excludes(in call);
             string? why = ex != AttentionExclusion.None ? ex.ToString() : row.Admits(in call) ? null : "not admitted";
             if (why is null)
-                return new(row, row.Variant(in call), "first row that covers and admits the call", declined?.ToString());
+            {
+                AttentionPreparationCost? cost = row.Preparation(in call);
+                return new(row, row.Variant(in call), "first row that covers and admits the call", declined?.ToString(), cost,
+                    cost is { } chosen ? Cheaper(rows, row, chosen.Total, in call) : null);
+            }
             (declined ??= new()).Append(declined.Length > 0 ? ", " : "").Append(row.Capability.Id).Append(" (").Append(why).Append(')');
         }
         return new(null, null, declined?.ToString() ?? "no rows", null);
+    }
+
+    /// <summary>The row after <paramref name="chosen"/> that covers and admits the call and states the least preparation
+    /// below <paramref name="chosenBytes"/>, as "id bytes"; null when none states less. A report, not a choice.</summary>
+    private static string? Cheaper(IReadOnlyList<AttentionKernelRow> rows, AttentionKernelRow chosen, long chosenBytes, in AttentionCall call)
+    {
+        AttentionKernelRow? best = null;
+        AttentionPreparationCost bestCost = default;
+        long bestBytes = chosenBytes;
+        bool after = false;
+        foreach (AttentionKernelRow row in rows)
+        {
+            if (ReferenceEquals(row, chosen)) { after = true; continue; }
+            if (!after || row.Capability.Excludes(in call) != AttentionExclusion.None || !row.Admits(in call)) continue;
+            if (row.Preparation(in call) is not { } cost || cost.Total >= bestBytes) continue;
+            best = row;
+            bestCost = cost;
+            bestBytes = cost.Total;
+        }
+        return best is null ? null : $"{best.Capability.Id} {bestCost}";
     }
 
     /// <summary>Runs the first row that covers, admits and completes the call; returns it (allocation-free).</summary>
