@@ -7738,7 +7738,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix).</summary>
     /// <remarks>Requires F32 and head dimension in [1, 1024]. The launcher pads small dimensions to a full warp
-    /// so the reduction's full-mask shuffle remains valid. Unsupported inputs fall back to the CPU reference.</remarks>
+    /// so the reduction's full-mask shuffle remains valid. A head dimension above 1024 is refused
+    /// (<see cref="AttentionUnsupportedException"/>); no row runs the host reference.</remarks>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
         => ExecuteFlashAttention(AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale,
             softcap, sink, slidingWindow, alibiSlopes), kvGroup);
