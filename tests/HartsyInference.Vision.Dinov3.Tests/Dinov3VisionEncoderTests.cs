@@ -133,6 +133,96 @@ public sealed class Dinov3VisionEncoderTests
     }
 
     [Fact]
+    public void AGatedPresetRefusesAPlainCheckpointAndAPlainPresetRefusesAGatedOne()
+    {
+        Dinov2Preset plain = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 1 };
+        Dinov2Preset gated = plain with { GatedMlp = true };
+        Dictionary<string, Tensor> plainWeights = Dinov3Fixture.Tiny(plain, seed: 31);
+        Dictionary<string, Tensor> gatedWeights = Dinov3Fixture.Tiny(gated, seed: 32, gated: true);
+        try
+        {
+            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(plainWeights));
+            Assert.Throws<NotSupportedException>(() => new Dinov3VisionEncoder(plain).LoadWeights(gatedWeights));
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(plainWeights);
+            Dinov3Fixture.Dispose(gatedWeights);
+        }
+    }
+
+    [Fact]
+    public void AGatedCheckpointMissingTheGateOfALaterLayerIsRefused()
+    {
+        Dinov2Preset gated = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 2, GatedMlp = true };
+        Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(gated, seed: 33, gated: true);
+        try
+        {
+            weights.Remove("layer.1.mlp.gate_proj.weight", out Tensor? gone);
+            gone?.Dispose();
+
+            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(weights));
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
+    public void GatedMlp_IsSiluOfGateTimesUp_ScaledByLayerScale()
+    {
+        Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64) with { NumLayers = 1, GatedMlp = true };
+        Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(preset, seed: 21, gated: true);
+        try
+        {
+            // A zero output projection silences attention, so block 0 is x + layer_scale2 * mlp(norm2(x)) and the MLP can be
+            // checked against a scalar transcription of silu(gate_proj(h)) * up_proj(h) -> down_proj.
+            weights["layer.0.attention.o_proj.weight"].AsSpan<float>().Clear();
+            weights["layer.0.attention.o_proj.bias"].AsSpan<float>().Clear();
+            Dinov3VisionEncoder encoder = Load(preset, weights);
+            using Tensor pixels = Pixels(1, 64, 64, seed: 22);
+            using Tensor x = encoder.EncodeBlocks(Backend, pixels, lastBlock: -1);
+            using Tensor y = encoder.EncodeBlocks(Backend, pixels, lastBlock: 0);
+
+            int h = 128, inter = 256, tokens = 21;
+            ReadOnlySpan<float> xs = x.AsReadOnlySpan<float>(), ys = y.AsReadOnlySpan<float>();
+            ReadOnlySpan<float> up = weights["layer.0.mlp.up_proj.weight"].AsReadOnlySpan<float>(), upB = weights["layer.0.mlp.up_proj.bias"].AsReadOnlySpan<float>();
+            ReadOnlySpan<float> gate = weights["layer.0.mlp.gate_proj.weight"].AsReadOnlySpan<float>(), gateB = weights["layer.0.mlp.gate_proj.bias"].AsReadOnlySpan<float>();
+            ReadOnlySpan<float> down = weights["layer.0.mlp.down_proj.weight"].AsReadOnlySpan<float>(), downB = weights["layer.0.mlp.down_proj.bias"].AsReadOnlySpan<float>();
+            ReadOnlySpan<float> ls = weights["layer.0.layer_scale2.lambda1"].AsReadOnlySpan<float>();
+            double[] n = new double[h], act = new double[inter];
+            for (int t = 0; t < tokens; t++)
+            {
+                double mean = 0, sq = 0;
+                for (int c = 0; c < h; c++) mean += xs[t * h + c];
+                mean /= h;
+                for (int c = 0; c < h; c++) sq += (xs[t * h + c] - mean) * (xs[t * h + c] - mean);
+                double inv = 1.0 / Math.Sqrt(sq / h + 1e-5);
+                for (int c = 0; c < h; c++) n[c] = (xs[t * h + c] - mean) * inv;   // unit weight, zero bias
+                for (int j = 0; j < inter; j++)
+                {
+                    double g = gateB[j], u = upB[j];
+                    for (int c = 0; c < h; c++) { g += gate[j * h + c] * n[c]; u += up[j * h + c] * n[c]; }
+                    act[j] = g / (1.0 + Math.Exp(-g)) * u;
+                }
+
+                for (int c = 0; c < h; c++)
+                {
+                    double o = downB[c];
+                    for (int j = 0; j < inter; j++) o += down[c * inter + j] * act[j];
+                    double expected = xs[t * h + c] + ls[c] * o;
+                    Assert.True(Math.Abs(expected - ys[t * h + c]) < 1e-4, $"token {t} channel {c}: {expected} vs {ys[t * h + c]}");
+                }
+            }
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
     public void Encode_RejectsSizesOffThePatchGrid()
     {
         Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64);

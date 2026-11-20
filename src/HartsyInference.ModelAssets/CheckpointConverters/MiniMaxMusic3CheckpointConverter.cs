@@ -8,8 +8,82 @@ public static class MiniMaxMusic3CheckpointConverter
 {
     /// <summary>True when the header is a Comfy-Org MiniMax-Music-3 DiT single file.</summary>
     public static bool IsComfyDit(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors) =>
-        descriptors.ContainsKey("diffusion_transformer.transformer.layers.0.self_attn.to_qkv.weight")
-        && descriptors.ContainsKey("cond_layer_logits");
+        MiniMaxMusic3DitLayouts.Detect(descriptors.Keys) == MiniMaxMusic3DitLayout.ComfyDit;
+
+    private static readonly string[] ConditionKeys = ["layer_weight_logits", "layer_scale", "proj.weight", "proj.bias"];
+
+    private static readonly string[] TopLevelDitKeys =
+    [
+        "preprocess_conv.weight", "postprocess_conv.weight", "time_proj.weight", "time_embed.linear_1.weight",
+        "time_embed.linear_1.bias", "time_embed.linear_2.weight", "time_embed.linear_2.bias", "proj_in.weight", "proj_out.weight",
+    ];
+
+    private static readonly string[] BlockKeys =
+    [
+        "norm1.weight", "norm1.bias", "norm2.weight", "norm2.bias", "attn.to_q.weight", "attn.to_k.weight", "attn.to_v.weight",
+        "attn.to_out.0.weight", "ff_in.weight", "ff_in.bias", "ff_out.weight", "ff_out.bias",
+    ];
+
+    /// <summary>Maps a diffusers-named flow transformer — the official <c>transformer/</c> weights, the Hartsy repack, a fp16/bf16 copy or a GGUF build that kept the names — into the engine's dictionaries. The condition encoder comes back only when the file carries it. Unknown keys throw, as in <see cref="ConvertComfyDit"/>.</summary>
+    /// <remarks>Host-read tensors widen to F32 (an F16 or BF16 view would silently misread as floats). A GGUF kernel-1 convolution arrives in ggml order <c>[1, in, out]</c> and is relabelled <c>[out, in, 1]</c>.</remarks>
+    public static (Dictionary<string, Tensor> Transformer, Dictionary<string, Tensor>? ConditionEncoder)
+        ConvertDiffusersDit(IReadOnlyDictionary<string, Tensor> raw)
+    {
+        Dictionary<string, Tensor> transformer = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+        Dictionary<string, Tensor> conditionEncoder = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+        foreach ((string key, Tensor source) in raw)
+        {
+            Tensor tensor = Dequantized(source);
+            if (Array.IndexOf(ConditionKeys, key) >= 0)
+            {
+                conditionEncoder[key] = CastToF32IfNeeded(tensor);
+            }
+            else if (key == "time_proj.weight")
+            {
+                transformer[key] = CastToF32IfNeeded(tensor);
+            }
+            else if (key is "preprocess_conv.weight" or "postprocess_conv.weight")
+            {
+                transformer[key] = KernelOneAsOutInOne(tensor);
+            }
+            else if (IsDiffusersDitKey(key))
+            {
+                transformer[key] = tensor;
+            }
+            else if (!key.EndsWith(".inv_freq", StringComparison.Ordinal))
+            {
+                throw new NotSupportedException($"Unrecognized MiniMax-Music-3 DiT key '{key}' — refusing a partial conversion.");
+            }
+        }
+        WidenVectorsToF32(transformer);
+        return (transformer, conditionEncoder.Count == 0 ? null : conditionEncoder);
+    }
+
+    private static bool IsDiffusersDitKey(string key)
+    {
+        if (Array.IndexOf(TopLevelDitKeys, key) >= 0)
+        {
+            return true;
+        }
+        const string blocks = "transformer_blocks.";
+        if (!key.StartsWith(blocks, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        int dot = key.IndexOf('.', blocks.Length);
+        return dot > blocks.Length && int.TryParse(key.AsSpan(blocks.Length, dot - blocks.Length), out _)
+            && Array.IndexOf(BlockKeys, key[(dot + 1)..]) >= 0;
+    }
+
+    /// <summary>A kernel-1 convolution stored in ggml order <c>[1, in, out]</c> viewed as <c>[out, in, 1]</c>; any other rank-3 shape is returned as is.</summary>
+    private static Tensor KernelOneAsOutInOne(Tensor kernel) =>
+        kernel.Shape.Rank == 3 && kernel.Shape[0] == 1 && kernel.Shape[2] != 1
+            ? kernel.Reshape(new TensorShape((int)kernel.Shape[2], (int)kernel.Shape[1], 1)) : kernel;
+
+    /// <summary>An int8 (ConvRot) weight widened to BF16 so the splits and the transformer see a dense matrix; any other tensor is returned as is.</summary>
+    private static Tensor Dequantized(Tensor tensor) =>
+        tensor.DType == DType.I8 && tensor.QuantInfo?.RowScale is { } rowScale
+            ? Int8ConvRotCodec.DequantToBf16(tensor, rowScale, tensor.QuantInfo.ConvRotGroupSize) : tensor;
 
     /// <summary>Maps the Comfy DiT file into the engine's transformer + condition-encoder dictionaries. Fused QKV rows split q-first (concat order proven by tensor diff against the official per-projection weights). Unmapped keys throw — a silently dropped weight is a wrong generation, not a warning.</summary>
     public static (Dictionary<string, Tensor> Transformer, Dictionary<string, Tensor> ConditionEncoder)
@@ -17,8 +91,9 @@ public static class MiniMaxMusic3CheckpointConverter
     {
         Dictionary<string, Tensor> transformer = new Dictionary<string, Tensor>(StringComparer.Ordinal);
         Dictionary<string, Tensor> conditionEncoder = new Dictionary<string, Tensor>(StringComparer.Ordinal);
-        foreach ((string key, Tensor tensor) in raw)
+        foreach ((string key, Tensor source) in raw)
         {
+            Tensor tensor = Dequantized(source);
             switch (key)
             {
                 // F32 casts: the condition encoder host-reads the logit/scale values via AsReadOnlySpan<float>
@@ -91,12 +166,29 @@ public static class MiniMaxMusic3CheckpointConverter
                 case "ff.ff.2.bias": transformer[$"{prefix}.ff_out.bias"] = tensor; break;
                 case "self_attn.to_qkv.weight":
                     SplitQkvRows(tensor, prefix, transformer);
+                    if (!ReferenceEquals(tensor, source))
+                    {
+                        tensor.Dispose();
+                    }
                     break;
                 default:
                     throw new NotSupportedException($"Unrecognized MiniMax-Music-3 Comfy DiT layer key '{key}' — refusing a partial conversion.");
             }
         }
+        WidenVectorsToF32(transformer);
         return (transformer, conditionEncoder);
+    }
+
+    /// <summary>Norm scales and biases back to F32 — the precision the official weights ship them in. An F16 vector (fp16 and GGUF builds store them so) corrupts the DiT once its weights are resident on the device.</summary>
+    private static void WidenVectorsToF32(Dictionary<string, Tensor> weights)
+    {
+        foreach ((string key, Tensor tensor) in weights.ToList())
+        {
+            if (tensor.Shape.Rank == 1)
+            {
+                weights[key] = CastToF32IfNeeded(tensor);
+            }
+        }
     }
 
     private static Tensor CastToF32IfNeeded(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);

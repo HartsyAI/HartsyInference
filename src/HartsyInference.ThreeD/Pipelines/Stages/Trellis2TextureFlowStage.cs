@@ -5,6 +5,7 @@ using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -48,7 +49,7 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
         Tensor cond,
         Tensor negCond,
         int seed,
-        Trellis2SamplerParams parameters,
+        FlowSamplerParams parameters,
         Action<int>? onStep)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -81,7 +82,7 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
         string path,
         SparseTensor shape,
         int seed,
-        Trellis2SamplerParams parameters,
+        FlowSamplerParams parameters,
         Action<int>? onStep,
         ReadOnlySpan<float> shapeMean,
         ReadOnlySpan<float> shapeStd,
@@ -127,7 +128,7 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
         };
         try
         {
-            latent = Trellis2FlowSampler.Sample(
+            latent = RectifiedFlowSampler.Sample(
                 backend,
                 noise,
                 parameters,

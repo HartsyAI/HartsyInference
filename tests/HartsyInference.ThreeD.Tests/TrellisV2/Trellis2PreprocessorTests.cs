@@ -5,6 +5,7 @@ using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using Xunit;
+using HartsyInference.ThreeD.Models;
 
 namespace HartsyInference.ThreeD.Tests.TrellisV2;
 
@@ -235,7 +236,7 @@ public sealed class Trellis2PreprocessorTests
         byte[] rgb = new byte[4 * 4 * 3];
         Array.Fill(rgb, (byte)255);
 
-        using HartsyInference.Core.Tensors.Tensor pixels = Trellis2ImageConditioner.Pixels(rgb, 4, 4, 16);
+        using HartsyInference.Core.Tensors.Tensor pixels = Dinov3ImageConditioner.Pixels(rgb, 4, 4, 16);
 
         Assert.Equal(new HartsyInference.Core.Tensors.TensorShape(1, 3, 16, 16), pixels.Shape);
         ReadOnlySpan<float> values = pixels.AsReadOnlySpan<float>();

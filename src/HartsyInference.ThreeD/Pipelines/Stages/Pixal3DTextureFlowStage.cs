@@ -3,6 +3,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Sparse;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -41,7 +42,7 @@ public sealed class Pixal3DTextureFlowStage : IPixal3DTextureFlowStage
         Pixal3DCondition cond,
         Pixal3DCondition negCond,
         int seed,
-        Trellis2SamplerParams parameters,
+        FlowSamplerParams parameters,
         Action<int>? onStep)
     {
         ArgumentNullException.ThrowIfNull(backend);

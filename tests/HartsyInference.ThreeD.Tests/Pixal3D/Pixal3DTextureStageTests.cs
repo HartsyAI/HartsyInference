@@ -9,6 +9,7 @@ using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using HartsyInference.ThreeD.Tests.TrellisV2;
 using Xunit;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Tests.Pixal3D;
 
@@ -28,7 +29,7 @@ public sealed class Pixal3DTextureStageTests : IDisposable
         "qk_rms_norm": true, "qk_rms_norm_cross": true}}
         """;
 
-    private static readonly Trellis2SamplerParams Params = new()
+    private static readonly FlowSamplerParams Params = new()
     {
         Steps = 2, GuidanceStrength = 3f, GuidanceRescale = 0.5f, IntervalLow = 0.0, IntervalHigh = 1.0, RescaleT = 3.0,
     };

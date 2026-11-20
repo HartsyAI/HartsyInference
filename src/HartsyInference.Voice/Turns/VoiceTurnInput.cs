@@ -2,7 +2,7 @@ using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Voice.Turns;
 
-/// <summary>What starts a turn: a closed utterance from the audio thread, a DTMF key, or text the host wants spoken.</summary>
+/// <summary>What starts a turn: a closed utterance from the audio thread, a DTMF key, text the host wants spoken, or a message the caller typed.</summary>
 internal sealed class VoiceTurnInput
 {
     private VoiceTurnInput(VoiceTurnKind kind, long receivedNs)
@@ -26,10 +26,10 @@ internal sealed class VoiceTurnInput
     /// <summary>Per-frame front-end timings since the previous endpoint.</summary>
     public LatencyHistogram.Summary FrameTimes { get; private init; }
 
-    /// <summary>The user message for a DTMF turn, or the text of a spoken prompt.</summary>
+    /// <summary>The user message for a DTMF or typed turn, or the text of a spoken prompt.</summary>
     public string? Text { get; private init; }
 
-    /// <summary>Completed when a spoken prompt has played or was interrupted.</summary>
+    /// <summary>Completed when a spoken prompt or a typed turn's reply has played or was interrupted.</summary>
     public TaskCompletionSource? Completion { get; private init; }
 
     /// <summary>A closed utterance.</summary>
@@ -43,6 +43,10 @@ internal sealed class VoiceTurnInput
     /// <summary>A key heard in the audio, carried to the model as the user message <c>[INBAND DTMF n]</c>.</summary>
     public static VoiceTurnInput InbandDtmf(char digit, long receivedNs) =>
         new(VoiceTurnKind.Dtmf, receivedNs) { Text = "[INBAND DTMF " + digit + "]" };
+
+    /// <summary>A message the caller typed, answered like a transcribed utterance.</summary>
+    public static VoiceTurnInput Typed(string text, TaskCompletionSource completion, long receivedNs) =>
+        new(VoiceTurnKind.Typed, receivedNs) { Text = text, Completion = completion };
 
     /// <summary>Text the agent says without asking the model.</summary>
     public static VoiceTurnInput Speak(string text, TaskCompletionSource completion, long receivedNs) =>

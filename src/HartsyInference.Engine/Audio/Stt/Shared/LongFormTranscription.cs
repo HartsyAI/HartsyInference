@@ -73,7 +73,7 @@ internal static class LongFormTranscription
             List<SttSegment> spans = decoded.Where(span => span.Start < pieceSeconds).ToList();
             if (spans.Count > 0)
             {
-                string spoken = string.Join(" ", spans.Select(span => span.Text.Trim())).Trim();
+                string spoken = SttSegment.Join(spans);
                 if (spoken.Length == 0)
                 {
                     empty++;
@@ -90,7 +90,11 @@ internal static class LongFormTranscription
             if (text.Length > 0)
             {
                 texts.Add(text);
-                segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
+                // A whole-window phrase is not a word, so a word request leaves the window out of Words (its text stays).
+                if (!request.WordTimestamps)
+                {
+                    segments.Add(new SttSegment { Text = text, Start = offset, End = offset + pieceSeconds });
+                }
             }
             else
             {
