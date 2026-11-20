@@ -88,17 +88,17 @@ internal sealed class VibeVoiceTokenizerEncoder
             kernelSize: 7, stride: 1, bias: config.ConvBias);
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool keepStoredWeight = false)
     {
         // SConv1d.LoadWeights already appends ".conv.conv.{weight,bias}" (outer
         // SConv1d.conv = NormConv1d, inner NormConv1d.conv = nn.Conv1d). We pass the
         // prefix for the SConv1d itself, not for its inner .conv attribute.
         for (int i = 0; i < _downsamples.Length; i++)
-            _downsamples[i].LoadWeights(w, $"{_prefix}.downsample_layers.{i}.0");
+            _downsamples[i].LoadWeights(w, $"{_prefix}.downsample_layers.{i}.0", keepStoredWeight);
         for (int i = 0; i < _stageBlocks.Length; i++)
             for (int j = 0; j < _stageBlocks[i].Length; j++)
-                _stageBlocks[i][j].LoadWeights(w);
-        _head.LoadWeights(w, $"{_prefix}.head");
+                _stageBlocks[i][j].LoadWeights(w, keepStoredWeight);
+        _head.LoadWeights(w, $"{_prefix}.head", keepStoredWeight);
         if (!_config.DisableLastNorm)
             _lastNormW = WhisperOps.EnsureF32(w[$"{_prefix}.norm.weight"]);
     }

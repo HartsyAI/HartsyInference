@@ -76,6 +76,14 @@ public sealed class SamplerChain
         return new SamplerChain(steps, options.Greedy, options.Seed);
     }
 
+    /// <summary>Builds a chain from <paramref name="steps"/> in the given order, for a caller whose steps are not all derivable from
+    /// <see cref="SamplingOptions"/> (a DRY penalty with a model-specific exempt set). Same draw and RNG as <see cref="FromOptions"/>.</summary>
+    public static SamplerChain FromSteps(IEnumerable<ISamplerStep> steps, bool greedy, ulong seed)
+    {
+        ArgumentNullException.ThrowIfNull(steps);
+        return new SamplerChain([.. steps], greedy, seed);
+    }
+
     /// <summary>Selects the next token id: argmax when greedy, otherwise the configured steps are applied and a multinomial draw is taken over the surviving probabilities.</summary>
     public int Next(Span<float> logits, IReadOnlyList<int> history)
     {

@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
@@ -10,5 +11,5 @@ public interface ITrellis2StructureStage
     /// <summary>Voxels <c>(0, x, y, z)</c> on a <paramref name="outputResolution"/> grid. The caller keeps ownership of both conditionings.</summary>
     /// <param name="onStep">Called after each sampler step; it may throw to cancel.</param>
     int[] Sample(
-        IBackend backend, Tensor cond, Tensor negCond, int seed, Trellis2SamplerParams parameters, int outputResolution, Action<int>? onStep);
+        IBackend backend, Tensor cond, Tensor negCond, int seed, FlowSamplerParams parameters, int outputResolution, Action<int>? onStep);
 }

@@ -10,9 +10,11 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Models;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
+using HartsyInference.ThreeD.Sampling;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
@@ -146,7 +148,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         List<IDisposable> owned = [];
         try
         {
-            Trellis2ConditionerStage conditioner = new(Trellis2ImageConditioner.Load(files.Dino));
+            Trellis2ConditionerStage conditioner = new(Dinov3ImageConditioner.Load(files.Dino));
             owned.Add(conditioner);
             Trellis2StructureStage structure = Trellis2StructureStage.Load(files.StructureFlow, files.StructureDecoder);
             owned.Add(structure);
@@ -277,9 +279,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         if (textured)
             RequireTexture(textureKind);
         int seed = options.Seed ?? SeedGenerator.RandomSeed();
-        Trellis2SamplerParams structureParams = WithSteps(_config.SparseStructureSampler, options.Steps);
-        Trellis2SamplerParams shapeParams = WithSteps(_config.ShapeSampler, options.Steps);
-        Trellis2SamplerParams? textureParams = textured ? WithSteps(_config.TextureSampler!, options.Steps) : null;
+        FlowSamplerParams structureParams = WithSteps(_config.SparseStructureSampler, options.Steps);
+        FlowSamplerParams shapeParams = WithSteps(_config.ShapeSampler, options.Steps);
+        FlowSamplerParams? textureParams = textured ? WithSteps(_config.TextureSampler!, options.Steps) : null;
 
         // Conditioning, structure, coarse shape, [upsample, fine shape,] decode, then the mesh, or for texture its flow, decode and bake.
         int total = 1 + structureParams.Steps + shapeParams.Steps * (cascade ? 2 : 1) + (cascade ? 1 : 0) + 1
@@ -487,7 +489,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         }
     }
 
-    private static Trellis2SamplerParams WithSteps(Trellis2SamplerParams parameters, int steps)
+    private static FlowSamplerParams WithSteps(FlowSamplerParams parameters, int steps)
         => steps > 0 ? parameters with { Steps = steps } : parameters;
 
     private Tensor Zeros(TensorShape shape)

@@ -285,6 +285,7 @@ public static class HartsyInferenceServiceExtensions
         });
 
         app.UseRateLimiter();
+        app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
 
         app.MapHealthEndpoints();
         app.MapSettingsEndpoints();
@@ -301,6 +302,7 @@ public static class HartsyInferenceServiceExtensions
         app.MapRestoreEndpoints();
         app.MapWorldEndpoints();
         app.MapRealtimeEndpoints();
+        app.MapDuplexEndpoints();
         app.MapCompatEndpoints();
 
         // Observability/discovery surface. Neither is a liveness/readiness probe, so both stay behind the same

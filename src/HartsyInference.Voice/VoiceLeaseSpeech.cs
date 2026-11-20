@@ -5,8 +5,8 @@ using HartsyInference.Voice.Audio;
 
 namespace HartsyInference.Voice;
 
-/// <summary>The engine's runner leases as the model set's speech models: 16 kHz utterances to the transcriber in
-/// English, sentences to the synthesizer in the configured voice.</summary>
+/// <summary>The engine's runner leases as the model set's speech models: 16 kHz utterances to the transcriber in the
+/// configured language, sentences to the synthesizer in the configured voice.</summary>
 /// <remarks>Any engine release (dispose, free memory, backend switch) revokes the leases, and the next call throws
 /// <see cref="ObjectDisposedException"/>; <see cref="Reopen"/> opens a fresh pair through the same service calls. Every
 /// member runs on the model set's GPU thread, so the lease fields need no synchronization.</remarks>
@@ -20,29 +20,32 @@ internal sealed class VoiceLeaseSpeech : IVoiceSpeech
     private readonly Func<CancellationToken, Task<ISynthesizerLease>> _openSynthesizer;
     private readonly Func<CancellationToken, Task<ITranscriberLease>> _openTranscriber;
     private readonly SpeechRequest _speech;
-    // English: an English-only checkpoint drops the language token itself, while an empty language on a multilingual
-    // one means no language token at all, which it answers with hallucinated loops.
-    private readonly AudioRequest _recognition = new() { Audio = NoClip, Language = "en" };
+    // Always a language: an English-only checkpoint drops the language token itself, while an empty language on a
+    // multilingual one means no language token at all, which it answers with hallucinated loops.
+    private readonly AudioRequest _recognition;
     private ISynthesizerLease? _tts;
     private ITranscriberLease? _stt;
     private int _sampleRate;
     private int _disposed;
 
     private VoiceLeaseSpeech(Func<CancellationToken, Task<ISynthesizerLease>> openSynthesizer,
-        Func<CancellationToken, Task<ITranscriberLease>> openTranscriber, string? voice)
+        Func<CancellationToken, Task<ITranscriberLease>> openTranscriber, string? voice, string language)
     {
         _openSynthesizer = openSynthesizer;
         _openTranscriber = openTranscriber;
         _speech = new SpeechRequest { Text = "", Voice = voice };
+        _recognition = new AudioRequest { Audio = NoClip, Language = language };
     }
 
-    /// <summary>Opens both leases. <paramref name="voice"/> is the synthesizer's voice, null for its default.</summary>
+    /// <summary>Opens both leases. <paramref name="voice"/> is the synthesizer's voice, null for its default;
+    /// <paramref name="language"/> is what the transcriber hears.</summary>
     public static async Task<VoiceLeaseSpeech> OpenAsync(Func<CancellationToken, Task<ISynthesizerLease>> openSynthesizer,
-        Func<CancellationToken, Task<ITranscriberLease>> openTranscriber, string? voice, CancellationToken cancel)
+        Func<CancellationToken, Task<ITranscriberLease>> openTranscriber, string? voice, string language, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(openSynthesizer);
         ArgumentNullException.ThrowIfNull(openTranscriber);
-        VoiceLeaseSpeech speech = new(openSynthesizer, openTranscriber, voice);
+        ArgumentException.ThrowIfNullOrWhiteSpace(language);
+        VoiceLeaseSpeech speech = new(openSynthesizer, openTranscriber, voice, language);
         try
         {
             await speech.OpenLeasesAsync(cancel).ConfigureAwait(false);

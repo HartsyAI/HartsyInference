@@ -3,6 +3,44 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.444
+
+- The voice session takes a typed message as a turn (`SubmitUserTextAsync`), can run transcribe-only for command use (`TranscribeOnly`), and hears a chosen language (`Language`).
+
+## alpha.443
+
+- MiniMax Music 3 loads the Hartsy repack the Audio Backend card installs and other flow-transformer files: the official diffusers
+  weights (file, shards or index), fp16 copies, Comfy-Org fp32/fp16/int8, and GGUF builds that keep the diffusers names.
+
+## alpha.442
+
+- Added support for Haru-4B, a full-duplex speech-to-speech model that listens and speaks at once: `hartsy duplex <recording> -m haru:q8`
+  answers a recording (`--reference` for a voice, `--card` for a character, `--tail-seconds` to let it finish), `POST /v1/native/duplex/respond`
+  does the same over HTTP, and `GET /v1/native/duplex/ws` is a live WebSocket conversation held to real time. It runs on CUDA, with `q8` fitting
+  a 12 GB card; the other quantizations load but do not answer intelligibly. A base model: no instructions or tools, and no echo cancellation.
+
+## alpha.441
+
+- Added word-level timestamps to Whisper (and distil-whisper): `WordTimestamps` now returns one span per word, and
+  `AudioRequest.AlignText` times a script or lyrics you already have instead of transcribing.
+
+## alpha.440
+
+- Added Idol, Idol-turbo and Budget3D: one picture of an object to up to a million 3D Gaussians (a PLY), with `hartsy 3d <image> -m idol`,
+  `idol-turbo` (5 guidance-free steps), `budget3d-idol` and `budget3d-idol-turbo` (a token budget, `--budget 0.0625` to `1`, API
+  `MeshRequest.TokenBudget`); also `--splats`, `--guidance` and `--framing`. DINOv3 ViT-H+ and a shared head norm, flow sampler and splat
+  activations came with it. The files are Comfy-Org's Idol repack, akhaliq's turbo LoRAs and BudgetAny's checkpoints.
+
+## alpha.439
+
+- Hunyuan3D Paint lets a side picture paint the surfaces the front picture sees only obliquely, so the front
+  picture's collar is no longer baked onto the side of a head, cut off in a straight line where the collar ends.
+
+## alpha.438
+
+- Hunyuan3D Paint keeps the front picture where it and a side picture both see a surface squarely, instead of blending
+  them, so a side picture no longer lays its own features over the face (a doubled ear and tusk on the Orc's cheeks).
+
 ## alpha.437
 
 - Added optional left, back and right pictures to image-to-3D (`MeshRequest.Views`, API `viewPngs`, CLI `--view`):

@@ -50,7 +50,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 |---|---|---|---|
 | Preprocess | `preprocess_image`: long edge at most 1024, RMBG-2.0 unless alpha, crop around alpha > 0.8 with 10 % margin, RGB over **black** | `Trellis2ImagePreprocessor` + `IForegroundMatter` / `Trellis2LazyMatter` | config change: the crop square is widened to `int(size * 1.1)` where TRELLIS.2 uses `int(size * 1)` (`Trellis2ImagePreprocessor.Prepare(..., cropScale)`); black background is the default in both |
 | Camera | `distance_from_fov`, FOV from MoGe-2 or `--fov` | none | new, small (formulas below); MoGe not ported |
-| Global tokens | DINOv3 ViT-L/16, all tokens after the last block, `F.layer_norm`, no final norm; keeps class + 4 register tokens | `Trellis2ImageConditioner.Encode` (same call returns every token) | 1:1; take the first 5 tokens |
+| Global tokens | DINOv3 ViT-L/16, all tokens after the last block, `F.layer_norm`, no final norm; keeps class + 4 register tokens | `Dinov3ImageConditioner.Encode` (same call returns every token) | 1:1; take the first 5 tokens |
 | Patch grid | the remaining tokens as `[h, w, 1024]`, `h = w = size / 16` | the same tokens, row-major | 1:1, needs a view |
 | NAF upsample | `valeoai/NAF`, `[1024, 32 or 64]^2` to `[1024, 512 or 1024]^2` guided by the RGB image | none | new: `Pixal3DNaf` (cell-window attention evaluated where sampled; see [NAF](#naf-the-natten-dependency)) |
 | Projection | `ProjGrid`: grid points, pinhole projection, `grid_sample` (bilinear, border padding, `align_corners=False`) | none (`TriplaneGridSample` is a different op) | new: 2D bilinear gather op plus the camera math |
@@ -61,7 +61,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 | Shape decode, mesh | `FlexiDualGridVaeDecoder`, `fill_holes`, dual-grid mesh | `ShapeVaeDecoder`, `DualGridMesherStage` | 1:1, same file (sha256 `e3b718d3...`) |
 | Texture flow | `imgshape2tex` flow, 64 input channels (shape latent concatenated), 1024 | none (the TRELLIS.2 texture path is being added by another session) | out of scope for shape-only; same block as the shape flow once proj is supported |
 | Texture decode, bake | `SparseUnetVaeDecoder`, `to_glb` with remesh and texture baking | none yet; [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md) covers the toolkit | later |
-| Samplers | `FlowEulerGuidanceIntervalSampler` | `Trellis2FlowSampler` | 1:1 (file identical to TRELLIS.2; `pipeline.json` sampler and normalization blocks equal the local TRELLIS.2 ones) |
+| Samplers | `FlowEulerGuidanceIntervalSampler` | `RectifiedFlowSampler` | 1:1 (file identical to TRELLIS.2; `pipeline.json` sampler and normalization blocks equal the local TRELLIS.2 ones) |
 
 ### Shared with the local files
 
@@ -184,7 +184,7 @@ Verified against upstream's own modules (`tests/python-reference/dump_pixal3d_na
 brute-force transcription of NATTEN's dilated definition because `natten` is not installable here): the query map and the upsampled features agree
 (worst absolute difference 1.1e-5, test bound 3e-5) at output sizes 32 and 48 with dilations 2 and 4 and with border sliding. The transcription is the author's
 reading of NATTEN, not NATTEN itself, so that one assumption (the border window rule) is not independently confirmed. Also unconfirmed: that upstream feeds NAF the
-PIL-Lanczos-resized image as `Trellis2ImageConditioner.Pixels(..., normalize: false)` produces it (the fixture feeds the image tensor directly). Memory: the query map is
+PIL-Lanczos-resized image as `Dinov3ImageConditioner.Pixels(..., normalize: false)` produces it (the fixture feeds the image tensor directly). Memory: the query map is
 256 · outputSize² floats on the host (1 GiB at 1024) and the encoder runs at the guide's resolution, so a 1024 guide peaks at a few GiB of backend memory during the conv stack.
 
 ## MoGe

@@ -1,12 +1,13 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ThreeD.Models;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
 /// <summary>
-/// Pixal3D's image conditioning for one flow stage: DINOv3 tokens from the shared <see cref="Trellis2ImageConditioner"/> (the same checkpoint and
+/// Pixal3D's image conditioning for one flow stage: DINOv3 tokens from the shared <see cref="Dinov3ImageConditioner"/> (the same checkpoint and
 /// the same tokens as TRELLIS.2), split into the global tokens and the patch map, which <see cref="Pixal3DProjection"/> samples at each voxel's
 /// projected position. With a <see cref="Pixal3DNaf"/> the sample is <c>[patch map ‖ NAF-upsampled map]</c>, as the shape and texture flows expect.
 /// The encoders' weights are resident on the backend only while they run.
@@ -16,12 +17,12 @@ public sealed class Pixal3DConditionerStage : IPixal3DConditioner, IDisposable
     /// <summary>Pixels per DINOv3 patch edge.</summary>
     private const int PatchSize = 16;
 
-    private readonly Trellis2ImageConditioner _conditioner;
+    private readonly Dinov3ImageConditioner _conditioner;
     private readonly Pixal3DNaf? _naf;
 
     /// <param name="conditioner">This stage owns it.</param>
     /// <param name="naf">The NAF upsampler the shape stages need; null serves the structure stage only. This stage owns it.</param>
-    public Pixal3DConditionerStage(Trellis2ImageConditioner conditioner, Pixal3DNaf? naf = null)
+    public Pixal3DConditionerStage(Dinov3ImageConditioner conditioner, Pixal3DNaf? naf = null)
     {
         _conditioner = conditioner ?? throw new ArgumentNullException(nameof(conditioner));
         _naf = naf;
@@ -101,7 +102,7 @@ public sealed class Pixal3DConditionerStage : IPixal3DConditioner, IDisposable
     private static Tensor NafQueryMap(IBackend backend, Pixal3DNaf naf, Trellis2PreparedImage image, int imageSize, int nafSize)
     {
         // The guide is the same Lanczos-resized image the encoder sees, before normalization.
-        using Tensor guide = Trellis2ImageConditioner.Pixels(image.Rgb, image.Width, image.Height, imageSize, normalize: false);
+        using Tensor guide = Dinov3ImageConditioner.Pixels(image.Rgb, image.Width, image.Height, imageSize, normalize: false);
         backend.PreloadWeights(naf.EnumerateWeights());
         try
         {
