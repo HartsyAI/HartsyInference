@@ -103,7 +103,8 @@ public sealed class PagedKvPool : IDisposable
     /// layer. The buffers are allocated on <paramref name="backend"/>'s device without an upload (rows no sequence has
     /// written are never read, so they start uninitialized), and when they must grow, the rows they already hold are
     /// copied on the device. Growth adds an eighth of headroom so a long decode regrows rarely. The append path calls
-    /// this, and the caller already serializes that path per device.</summary>
+    /// this. It replaces the layer's tensors without a lock, so one pool serves one scheduler, whose loop does all of its
+    /// device work.</summary>
     public void Prepare(IBackend backend, int layer)
     {
         ThrowIfDisposed();
@@ -113,6 +114,8 @@ public sealed class PagedKvPool : IDisposable
         if (held >= needed) return;
         int pages = (int)Math.Min(MaxPages, needed + Math.Max((long)needed / 8, 4));
         TensorShape shape = new(1, NumKvHeads, (long)pages * PageSize, HeadDimPerLayer[layer]);
+        // If the value regrow throws after the key regrow, the count below stays at the old size and the next call regrows
+        // both again from the rows they still hold: nothing is lost or misaddressed.
         _kPages[layer] = Regrown(backend, _kPages[layer], shape, held * PageSize);
         _vPages[layer] = Regrown(backend, _vPages[layer], shape, held * PageSize);
         _layerPages[layer] = pages;

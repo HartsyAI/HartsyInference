@@ -734,7 +734,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         return new Span<float>(p + (long)(t - 1) * vocab, vocab);
     }
 
-    /// <summary>Stops the background loop and fails every request it has not finished: queued requests fail at once, and active sequences fail when the loop exits. Each fails with <see cref="SchedulerStoppedException"/>, so no caller waits on a loop that will not run. Does NOT dispose the shared <see cref="PagedKvPool"/> (the caller owns it and may share it across schedulers/sessions).</summary>
+    /// <summary>Stops the background loop and fails every request it has not finished: queued requests fail at once, and active sequences fail when the loop exits. Each fails with <see cref="SchedulerStoppedException"/>, so no caller waits on a loop that will not run. Does NOT dispose the <see cref="PagedKvPool"/>: the caller owns it. A pool serves one scheduler at a time, since the pool regrows its buffers without a lock.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
