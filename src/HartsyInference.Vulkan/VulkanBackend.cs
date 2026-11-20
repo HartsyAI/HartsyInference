@@ -1992,7 +1992,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype, saturate: true);
         (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype, saturate: true);
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype, saturate: true);
-        RecordAttentionCasts("vulkan.flash", dtype, query, qOwned, key, kOwned, value, vOwned, output);
+        RecordAttentionCasts("vulkan.flash", dtype, query, qOwned, key, kOwned, value, vOwned);
 
         VulkanBuffer? maskBuf = null;
         AttentionMaskLayout maskLayout = default;
@@ -2040,6 +2040,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             Dispatch(k, bufs, pc, (uint)sq, (uint)hq, (uint)batch);
 
             CacheOutputCastingFrom(output, outBuf, dtype, "sdpa_flash");
+            RecordAttentionOutputCast("vulkan.flash", dtype, output);
         }
         catch (Exception ex)
         {
@@ -2156,19 +2157,27 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return group;
     }
 
-    /// <summary>Records the operand casts an attention path just made and the cast of its output back to the output's type.
-    /// <see cref="CastIfNeeded"/> hands back an owned buffer only when it cast, so an operand already in the compute type,
-    /// or served from the weight-cast cache, is not counted.</summary>
+    /// <summary>Records the operand casts an attention path just made, as <c>site.inputs</c>, and their buffers as a
+    /// workspace under <paramref name="workspaceSite"/> when one is given. An operand counts when
+    /// <see cref="CastIfNeeded"/> handed back a buffer the caller owns. One already in the compute type is not counted, and
+    /// neither is a weight whose cast lives in the weight-cast cache, on the call that fills the cache or after.</summary>
     private static void RecordAttentionCasts(string site, DType compute, Tensor query, VulkanBuffer? qOwned, Tensor key, VulkanBuffer? kOwned,
-        Tensor value, VulkanBuffer? vOwned, Tensor output)
+        Tensor value, VulkanBuffer? vOwned, string? workspaceSite = null)
     {
         if (!AttentionEvidence.Enabled) return;
         int casts = (qOwned is null ? 0 : 1) + (kOwned is null ? 0 : 1) + (vOwned is null ? 0 : 1);
-        if (casts > 0)
-            AttentionEvidence.Observed(AttentionEvidenceKind.Cast, site + ".inputs", ((qOwned is null ? 0 : query.ElementCount)
-                + (kOwned is null ? 0 : key.ElementCount) + (vOwned is null ? 0 : value.ElementCount)) * compute.SizeInBytes, casts);
-        if (output.DType != compute)
-            AttentionEvidence.Observed(AttentionEvidenceKind.Cast, site + ".output", output.DType.ComputeByteCount(output.ElementCount));
+        if (casts == 0) return;
+        long bytes = ((qOwned is null ? 0 : query.ElementCount) + (kOwned is null ? 0 : key.ElementCount)
+            + (vOwned is null ? 0 : value.ElementCount)) * compute.SizeInBytes;
+        if (workspaceSite is not null) AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, workspaceSite, bytes, casts);
+        AttentionEvidence.Observed(AttentionEvidenceKind.Cast, site + ".inputs", bytes, casts);
+    }
+
+    /// <summary>Records, as <c>site.output</c>, the cast of an attention output from the compute type back to its own;
+    /// called after <see cref="CacheOutputCastingFrom"/> has made it.</summary>
+    private static void RecordAttentionOutputCast(string site, DType compute, Tensor output)
+    {
+        if (output.DType != compute) AttentionEvidence.Payload(AttentionEvidenceKind.Cast, site + ".output", output);
     }
 
     /// <summary>A key-only mask with its row repeated for every query, as <c>[1|B, 1|H, Sq, Skv]</c>: the layout the cm2 kernel
@@ -2212,7 +2221,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         (VulkanBuffer qRes, VulkanBuffer? qOwned) = CastIfNeeded(query, qBuf, dtype, saturate: true);
         (VulkanBuffer kRes, VulkanBuffer? kOwned) = CastIfNeeded(key, kBuf, dtype, saturate: true);
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, vBuf, dtype, saturate: true);
-        RecordAttentionCasts("vulkan.naive", dtype, query, qOwned, key, kOwned, value, vOwned, output);
+        RecordAttentionCasts("vulkan.naive", dtype, query, qOwned, key, kOwned, value, vOwned);
 
         // Mask is always FP32 in the model code (CLIP causal mask). Keep it as F32 — the mask_add
         // kernel widens the score before adding regardless of score dtype.
@@ -2312,6 +2321,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             }
 
             CacheOutputCastingFrom(output, outBufLocal, dtype, "SDPA");
+            RecordAttentionOutputCast("vulkan.naive", dtype, output);
         }
         catch (Exception ex)
         {

@@ -111,7 +111,8 @@ public sealed class AttentionPreparationEvidenceTests
         AttentionEvidenceEvent[] events = evidence.Snapshot();
 
         Assert.Equal("cudnn.causal", Ran(events));
-        Assert.Single(Of(events, AttentionEvidenceKind.Cast, "cudnn.inputs"));
+        Assert.Equal((q.ElementCount + k.ElementCount + v.ElementCount) * sizeof(ushort),
+            Assert.Single(Of(events, AttentionEvidenceKind.Cast, "cudnn.inputs")).Bytes);
         Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.Cast, "cudnn.output")).Bytes);
     }
 
@@ -136,6 +137,51 @@ public sealed class AttentionPreparationEvidenceTests
         Assert.Equal(Bytes(q) + Bytes(k) + Bytes(v), Of(events, AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.gather").Sum(e => e.Bytes));
         Assert.Equal(3, Of(events, AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.gather").Length);
         Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.output")).Bytes);
+    }
+
+    [CudaFact]
+    public void AnUnpinnedCallWithANarrowerValueRecordsThePadItStages()
+    {
+        const int heads = 4, skv = 10, dim = 32, valueDim = 16;
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        using Tensor q = new(new TensorShape(1, heads, 1, dim), DType.F32);
+        using Tensor k = new(new TensorShape(1, 1, skv, dim), DType.F32);
+        using Tensor v = new(new TensorShape(1, 1, skv, valueDim), DType.F32);
+        using Tensor output = new(new TensorShape(1, heads, 1, valueDim), DType.F32);
+        AttentionCall call = AttentionCall.FromFlashAttention(output, q, k, v, skv, causal: false, qOffset: 0, scale: 0.2f, softcap: 0f,
+            sink: null, slidingWindow: 0, alibiSlopes: null) with { Route = AttentionRoute.Auto };
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        backend.Attention(in call);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        // The value is padded with zero columns to the key's width before the flash entry reads it.
+        Assert.Equal((long)skv * dim * sizeof(float), Assert.Single(Of(events, AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.pad")).Bytes);
+        Assert.Equal(Bytes(q) + Bytes(k) + Bytes(v), Of(events, AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.gather").Sum(e => e.Bytes));
+        Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.StagingCopy, "attention.flash.lowering.output")).Bytes);
+    }
+
+    [VulkanFact]
+    public void VulkanHostReferenceRowCountsTheSinksItReadsOnTheHost()
+    {
+        const int heads = 2;
+        using VulkanBackend backend = new();
+        using Tensor q = new(new TensorShape(1, heads, 1, 64), DType.F32);
+        using Tensor k = new(new TensorShape(1, 1, 3, 64), DType.F32);
+        using Tensor v = new(k.Shape, DType.F32);
+        using Tensor output = new(q.Shape, DType.F32);
+        using Tensor sinks = new(new TensorShape(heads), DType.F32);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        backend.FlashAttention(output, q, k, v, 3, 2, causal: true, qOffset: 2, 0.5f, softcap: 50f, sink: sinks);
+        backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+
+        Assert.Equal("host.reference", Ran(events));
+        AttentionEvidenceEvent host = Assert.Single(Of(events, AttentionEvidenceKind.HostReference, "vulkan.host.reference"));
+        Assert.Equal(Bytes(q) + Bytes(k) + Bytes(v) + Bytes(output) + Bytes(sinks), host.Bytes);
+        Assert.Equal(5, host.Count);
     }
 
     [VulkanFact]

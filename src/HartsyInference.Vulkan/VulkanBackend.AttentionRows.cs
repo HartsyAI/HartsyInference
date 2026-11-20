@@ -246,12 +246,17 @@ public sealed partial class VulkanBackend
                         : "Flash at a head dim past the flash tile");
                     AttentionHostReference.Run(in c);
                     if (AttentionEvidence.Enabled)
-                        AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference",
-                            HostBytes(c.Query) + HostBytes(c.Key) + HostBytes(c.Value) + HostBytes(c.Output), count: 4);
+                    {
+                        // The whole tensor crosses to the host, whatever part of it a view addresses; the reference also
+                        // reads the bias, the sinks and the ALiBi slopes there.
+                        long bytes = HostBytes(c.Query.Storage) + HostBytes(c.Key.Storage) + HostBytes(c.Value.Storage) + HostBytes(c.Output.Storage)
+                            + HostBytes(c.Mask.Bias) + HostBytes(c.Logits.Sinks) + HostBytes(c.Logits.AlibiSlopes);
+                        int tensors = 4 + (c.Mask.Bias is null ? 0 : 1) + (c.Logits.Sinks is null ? 0 : 1) + (c.Logits.AlibiSlopes is null ? 0 : 1);
+                        AttentionEvidence.Observed(AttentionEvidenceKind.HostReference, "vulkan.host.reference", bytes, tensors);
+                    }
                     return true;
 
-                    // The whole tensor crosses to the host, whatever part of it the view addresses.
-                    static long HostBytes(in AttentionOperand operand) => operand.Storage.DType.ComputeByteCount(operand.Storage.ElementCount);
+                    static long HostBytes(Tensor? tensor) => tensor is null ? 0 : tensor.DType.ComputeByteCount(tensor.ElementCount);
                 }),
             new DelegateAttentionRow(Cap("cm2.causal", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
