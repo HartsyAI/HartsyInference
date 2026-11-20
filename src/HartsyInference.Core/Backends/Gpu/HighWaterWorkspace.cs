@@ -34,7 +34,10 @@ internal sealed class HighWaterWorkspace(Func<long, ulong> allocate, Action<ulon
 
         public void Lease(object lessee)
         {
-            if (IndexOf(lessee) < 0) _lessees.Add(new WeakReference<object>(lessee));
+            if (IndexOf(lessee) >= 0) return;
+            // Drop collected lessees first, so graphs captured and abandoned without a growth cannot pile up here.
+            _lessees.RemoveAll(static lease => !lease.TryGetTarget(out _));
+            _lessees.Add(new WeakReference<object>(lessee));
         }
 
         public void Release(object lessee)
