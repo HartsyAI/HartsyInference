@@ -4,6 +4,7 @@ using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.Vulkan;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
@@ -32,7 +33,7 @@ public sealed class PagedAttentionDecodeCudaTests
 
     private sealed class Rig : IDisposable
     {
-        public readonly CudaBackend Backend = new(0, CudaPtxDirectory.Resolve());
+        public readonly IBackend Backend;
         public readonly PagedKvPool Pool;
         public readonly AttentionLayer Layer;
         public readonly Sequence A, B;
@@ -40,8 +41,9 @@ public sealed class PagedAttentionDecodeCudaTests
         private readonly Random _random = new(4242);
         private readonly string _release;
 
-        public Rig(int heads, int kvHeads, int headDim, string release = "none")
+        public Rig(int heads, int kvHeads, int headDim, string release = "none", IBackend? backend = null)
         {
+            Backend = backend ?? new CudaBackend(0, CudaPtxDirectory.Resolve());
             _heads = heads;
             _kvHeads = kvHeads;
             _headDim = headDim;
@@ -130,6 +132,7 @@ public sealed class PagedAttentionDecodeCudaTests
     [InlineData(8, 2, 64, "none", 0f, 0)]
     [InlineData(8, 2, 64, "offload", 0f, 0)]
     [InlineData(4, 4, 128, "none", 0f, 0)]
+    [InlineData(32, 8, 128, "none", 0f, 0)]
     [InlineData(6, 2, 128, "none", 0f, 0)]
     [InlineData(16, 1, 64, "none", 0f, 0)]
     [InlineData(8, 2, 128, "none", 30f, 0)]
@@ -198,6 +201,48 @@ public sealed class PagedAttentionDecodeCudaTests
         // Sinks are outside the paged kernel: every call reads the contiguous copy, which each step extends by its row.
         Assert.Equal(0, Count(events, "flash.decode.paged"));
         Assert.Equal(2 * 6 * Layers * 2, events.Count(e => e.Kind == AttentionEvidenceKind.PrefixGather));
+    }
+
+    /// <summary>Vulkan has no kernel that follows a page table: it says so, refuses the call if it is sent one anyway, and
+    /// writes nothing.</summary>
+    [VulkanFact]
+    public void VulkanDoesNotAdmitAPagedCallAndRefusesOne()
+    {
+        const int heads = 8, kvHeads = 2, headDim = 64;
+        using Rig rig = new(heads, kvHeads, headDim, backend: new VulkanBackend());
+        rig.Step(rig.A, 70);
+        Assert.True(rig.A.Paged.TryGetPages(0, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages));
+        using Tensor query = new(new TensorShape(1, heads, 1, headDim), DType.F32);
+        using Tensor output = new(new TensorShape(1, heads, 1, headDim), DType.F32);
+        output.AsSpan<float>().Fill(-7f);
+        AttentionCall call = AttentionCall.FromPagedFlashAttention(output, query, keyPages, valuePages, pages, kvLen: 70, causal: true,
+            qOffset: 69, scale: 0.125f, softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: null);
+        Assert.False(rig.Backend.AdmitsPagedAttention(in call));
+        Assert.Throws<AttentionUnsupportedException>(() => rig.Backend.Attention(in call));
+        Assert.All(output.AsReadOnlySpan<float>().ToArray(), value => Assert.Equal(-7f, value));
+    }
+
+    /// <summary>On Vulkan every call over a paged cache is gathered, decode included, and matches the contiguous cache.</summary>
+    [VulkanFact]
+    public void OnVulkanEveryCallIsGatheredAndMatchesAContiguousCache()
+    {
+        const int heads = 8, kvHeads = 2, headDim = 64, rounds = 12;
+        using Rig rig = new(heads, kvHeads, headDim, backend: new VulkanBackend());
+        rig.Step(rig.A, 70);
+        rig.Step(rig.B, 65);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        for (int round = 0; round < rounds; round++)
+        {
+            rig.Step(rig.A, 1);
+            rig.Step(rig.B, 1);
+        }
+        rig.Backend.Sync();
+        AttentionEvidenceEvent[] events = evidence.Snapshot();
+        Assert.Equal(0, Count(events, "flash.decode.paged"));
+        Assert.Equal(2 * rounds * Layers * 2, events.Count(e => e.Kind == AttentionEvidenceKind.PrefixGather));
+        rig.AssertGatheredRowsMatch(rig.A);
+        rig.AssertGatheredRowsMatch(rig.B);
     }
 
     [CudaFact]

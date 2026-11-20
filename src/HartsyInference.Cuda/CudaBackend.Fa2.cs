@@ -103,7 +103,7 @@ public sealed partial class CudaBackend
         if (c.KvPages is not { } pages) return false;
         int size = pages.PageSize, group = c.KvGroup <= 0 ? 1 : c.KvGroup;
         return size > 0 && (size & (size - 1)) == 0 && c.Batch == 1 && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null
-            && c.Mask.Bias is null && c.Positions.KvLength >= 64
+            && c.Mask.Bias is null && c.Mask.WindowRight is null && c.Mask.BlockSize == 0 && c.Positions.KvLength >= 64
             && c.Query.DType == DType.F32 && c.Output.DType == DType.F32 && c.Key.DType == DType.F32 && c.Value.DType == DType.F32
             && _kernels is { HasDecodeGqaPaged: true }
             && DecodeGqaEligible(1, c.QueryTokens, c.Mask.Causal, c.Heads, c.KvHeads, group, c.QkHeadDim);
