@@ -6,7 +6,8 @@ using HartsyInference.Cuda;
 namespace HartsyInference.LLM.Tests.Parity;
 
 /// <summary>Per-call attention scratch is recorded as <see cref="AttentionEvidenceKind.Workspace"/> evidence with its
-/// logical size: the baseline a shared high-water workspace has to bring to zero.</summary>
+/// logical size: the baseline a shared high-water workspace has to bring to zero. The events come from host code, so a
+/// captured graph records them once, at capture; each replay records only <see cref="AttentionEvidenceKind.GraphReplay"/>.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
 public sealed class AttentionWorkspaceEvidenceTests
@@ -42,7 +43,7 @@ public sealed class AttentionWorkspaceEvidenceTests
     {
         const int heads = 2, queryTokens = 3, keyTokens = 5, headDim = 64;
         using IDisposable policy = KnobProfile.Create("workspace-evidence-materialized").With(EngineKnobs.SdpaCudnn, false)
-            .With(EngineKnobs.SdpaForceTiled, false).Push();
+            .With(EngineKnobs.SdpaForceTiled, false).With(EngineKnobs.SdpaF16, false).Push();
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         using Tensor query = Filled(new TensorShape(1, heads, queryTokens, headDim), DType.F32);
         using Tensor key = Filled(new TensorShape(1, heads, keyTokens, headDim), DType.F32);
@@ -73,6 +74,7 @@ public sealed class AttentionWorkspaceEvidenceTests
         backend.FlashAttention(output, query, key, value, keyTokens, 1, causal: true, qOffset: keyTokens - 1, 0.1f);
         backend.Sync();
 
+        Assert.Equal("flash.decode", Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Execution).Implementation);
         AttentionEvidenceEvent partials = Assert.Single(evidence.Snapshot(), e => e.Kind == AttentionEvidenceKind.Workspace);
         Assert.StartsWith("cuda.flash.", partials.Site);
         Assert.EndsWith(".partials", partials.Site);
