@@ -1253,7 +1253,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>cuDNN fused attention is on: requested, and cuDNN is available. The first call resolves cuDNN, fetching it if needed.</summary>
     private bool SdpaCudnnOn => _sdpaCudnnRequested && CudnnRuntime.EnsureAvailable() && CudnnRuntime.SupportsSdpa;
     private readonly bool _flashF16;        // numerics.flashF16: the engine's F16 flash kernel at head dim 256
-    private volatile bool _flashF16Dead;    // set on the first launch failure; the session keeps cuDNN after that
 
     /// <summary>Routes F16/BF16 NCHW convolutions through cuDNN conv-forward engines instead of the im2col→cuBLAS GEMM path.</summary>
     /// <remarks>Standard-profile default ON; numerics.convCudnn=false disables. Failures self-disable for the session and fall back to im2col.</remarks>
@@ -5387,19 +5386,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Scaled dot-product attention via cuBLAS batched GEMM: softmax(Q @ K^T * scale) @ V.</summary>
     public unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
-        => ScaledDotProductAttention(output, query, key, value, mask, scale, AttentionNumerics.FromLegacy(allowF16));
+        => ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
 
-    // Carries the call's own numerics to the rows; the public overload grants only the legacy flag.
-    private unsafe void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        AttentionNumerics numerics)
+    private void ExecuteDenseAttention(in AttentionCall call)
     {
+        Tensor query = call.Query.Storage, key = call.Key.Storage;
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
-            ? $"SDPA {query.DType} q{query.Shape} k{key.Shape}{(mask is null ? "" : $" m{mask.Shape}")}{(numerics.LegacyAssertedBounded ? " f16ok" : "")}" : "SDPA");
-        ValidateScaledDotProductAttentionContract(output, query, key, value, mask, scale);
+            ? $"SDPA {query.DType} q{query.Shape} k{key.Shape}{(call.Mask.Bias is null ? "" : $" m{call.Mask.Bias.Shape}")}"
+                + $"{(call.Numerics.LegacyAssertedBounded ? " f16ok" : "")}" : "SDPA");
+        ValidateScaledDotProductAttentionContract(call.Output.Storage, query, key, call.Value.Storage, call.Mask.Bias, call.Scale);
         using OpScope _op = EnterOp();
         EnsureKernels();
-        RunAttentionRows(DenseAttentionRows,
-            AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, false) with { Numerics = numerics });
+        RunAttentionRows(DenseAttentionRows, in call);
     }
 
     /// <summary>The materialized cuBLAS path (S.11-S.15): the score matrix in memory, or for BF16 the query-tiled core when
@@ -5413,7 +5411,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long skv = key.Shape[2];
         long totalHeads = b * h;
 
-        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pMaskClamped = 0, pMaskCast = 0, pOut = 0, scoresBuf = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, scoresBuf = 0;
         ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0, pMaskBroadcast = 0, pMaskOnes = 0;
         bool cachedOutput = false;
         try
@@ -5421,17 +5419,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            long maskElemCount = 0;
             if (mask is not null)
             {
                 pMask = GpuTransferHelper.CopyToDevice(mask);
-                maskElemCount = mask.ElementCount;
                 if (MaskIsKeyOnly(mask, sq))
                 {
                     // This path indexes the mask per query row, so expand the stored [.., 1, Skv] into the
                     // [.., Sq, Skv] it stands for. Only small/medium shapes reach here — the large ones took the
                     // tiled branch above — so the expansion is bounded by the same budget as the score matrix.
-                    long maskBlocks = maskElemCount / skv;
+                    long maskBlocks = mask.ElementCount / skv;
                     pMaskBroadcast = CudaMemory.Allocate((nuint)(maskBlocks * sq * skv * sizeof(float)));
                     pMaskOnes = CudaMemory.Allocate((nuint)(sq * sizeof(float)));
                     CudaMemory.Fill32(pMaskOnes, 0x3F80_0000u, (nuint)sq);   // 1.0f
@@ -5442,7 +5438,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                             pMask + (ulong)(blk * skv * sizeof(float)),
                             pMaskOnes, sq, skv, skv, beta: 0f);
                     }
-                    maskElemCount = maskBlocks * sq * skv;
                 }
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
@@ -5516,22 +5511,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             t_attentionRoute = query.DType == DType.BF16 ? "S.12" : isF16 ? (query.DType == DType.F32 ? "S.13" : "S.15") : "S.14";
             int elemSize = opDtype.SizeInBytes;
             ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
-            int maskElemSize = sizeof(float);
-            if (mask is not null && isF16)
-            {
-                // Scores live in F16 on the native-F16/fallback path, while the public additive-mask contract is
-                // F32. Convert once rather than reinterpreting packed float bytes as half values. Clamp to half the
-                // F16 range so a finite sentinel such as -1e30 plus a score within that range stays finite in the F16
-                // add: a fully masked row averages its highest-scoring keys instead of reaching -Inf and NaN in softmax,
-                // and a masked entry in a partly masked row still gets zero weight.
-                pMaskClamped = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(float)));
-                _kernels!.LaunchClamp(
-                    pMaskClamped, opMask, -32_752f, 32_752f, (int)maskElemCount, _stream.Handle);
-                pMaskCast = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(ushort)));
-                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)maskElemCount, _stream.Handle);
-                opMask = pMaskCast;
-                maskElemSize = sizeof(ushort);
-            }
 
             nuint scoresBytes = (nuint)(totalHeads * sq * skv * elemSize);
             scoresBuf = CudaMemory.Allocate(scoresBytes);
@@ -5596,18 +5575,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         _ => throw new InvalidOperationException("Validated SDPA mask rank changed before dispatch."),
                     };
                     ulong scorePointer = scoresBuf + (ulong)(bh * strideScores * elemSize);
-                    ulong maskPointer = opMask + (ulong)(maskBlock * maskHeadStride * maskElemSize);
-                    if (isF16)
-                        _kernels!.LaunchAddF16(scorePointer, scorePointer, maskPointer, (int)maskHeadStride, _stream.Handle);
-                    else
-                        _kernels!.LaunchAdd(scorePointer, scorePointer, maskPointer, (int)maskHeadStride, _stream.Handle);
+                    ulong maskPointer = opMask + (ulong)(maskBlock * maskHeadStride * sizeof(float));
+                    // Fuse F32 bias addition into softmax: -infinity remains exclusion and finite bias
+                    // keeps its public precision even when the score/probability storage is F16.
+                    _kernels!.LaunchAttentionSoftmax(
+                        scorePointer, maskPointer, (int)skv, (int)sq, isF16, _stream.Handle);
                 }
             }
-
-            if (isF16)
-                _kernels!.LaunchSoftmaxF16(scoresBuf, (int)skv, (int)(totalHeads * sq), _stream.Handle);
             else
-                _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * sq), _stream.Handle);
+                _kernels!.LaunchAttentionSoftmax(
+                    scoresBuf, 0, (int)skv, (int)(totalHeads * sq), isF16, _stream.Handle);
 
             // attn_weights @ V, all heads in one strided-batched launch (see the QK^T comment above — same
             // per-call-launch-overhead problem, same fix).
@@ -5667,8 +5644,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.FreeDevice(pV);
             GpuTransferHelper.FreeDevice(pMask);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            if (pMaskCast != 0) CudaMemory.FreeAsync(pMaskCast, _stream.Handle);
-            if (pMaskClamped != 0) CudaMemory.FreeAsync(pMaskClamped, _stream.Handle);
             if (pMaskBroadcast != 0) CudaMemory.FreeAsync(pMaskBroadcast, _stream.Handle);
             if (pMaskOnes != 0) CudaMemory.FreeAsync(pMaskOnes, _stream.Handle);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
@@ -5685,37 +5660,34 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Token-major SDPA — see <see cref="IBackend.ScaledDotProductAttentionTokenMajor"/>. cuDNN reads the <c>[S, heads*headDim]</c> buffers through BSHD strides at no throughput cost, which is what lets the LTX-2 caller drop the permute pair around attention. Anything cuDNN declines (wrong head dim, mask shape, a dead session) is permuted into the head-major dispatch so correctness never depends on the fast path.</summary>
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale, bool allowF16 = false)
-        => ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, headDim, scale, AttentionNumerics.FromLegacy(allowF16));
+        => ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16));
 
-    private unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
-        Tensor? mask, int heads, int headDim, float scale, AttentionNumerics numerics)
+    private void ExecuteTokenMajorAttention(in AttentionCall call)
     {
-        ValidateTokenMajorAttentionContract(output, query, key, value, heads, headDim, scale);
-        long sq = TokenMajorRows(query), skv = TokenMajorRows(key), d = headDim;
+        Tensor query = call.Query.Storage, key = call.Key.Storage;
+        ValidateTokenMajorAttentionContract(call.Output.Storage, query, key, call.Value.Storage, call.Heads, call.QkHeadDim, call.Scale);
         using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
-            ? $"SDPA-TM {sq}x{skv}x{heads}x{headDim}" : "SDPA-TM");
-        RunAttentionRows(TokenMajorAttentionRows,
-            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, false) with { Numerics = numerics });
+            ? $"SDPA-TM {call.QueryTokens}x{call.KeyTokens}x{call.Heads}x{call.QkHeadDim}" : "SDPA-TM");
+        RunAttentionRows(TokenMajorAttentionRows, in call);
     }
 
     /// <inheritdoc/>
     public bool SupportsTokenMajorGqaAttention => true;
 
-    /// <summary>Token-major grouped-query SDPA. No kernel reads grouped K/V in this layout yet, so the call lowers to the
-    /// head-major sequence its callers used to issue themselves: permute in, repeat K/V heads, SDPA, permute out.</summary>
+    /// <summary>Token-major grouped-query SDPA. cuDNN reads grouped K/V in place; its compatibility row permutes into the dense
+    /// planner, which either serves grouped heads natively or explicitly repeats K/V for an equal-head kernel.</summary>
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
-        => ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, AttentionNumerics.FromLegacy(allowF16));
+        => ExecuteTokenMajorGqaAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16)
+            with { Route = AttentionRoute.TokenMajorGqa });
 
-    private unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
-        Tensor? mask, int heads, int kvHeads, int headDim, float scale, AttentionNumerics numerics)
+    private void ExecuteTokenMajorGqaAttention(in AttentionCall call)
     {
         // Equal heads too: Krea2's text-fusion blocks issued the head-major sequence, not the token-major cuDNN call.
         // The mask is checked when the rows are planned: the cuDNN row takes any bias the head-major entry takes, the widening row what that entry takes.
-        ValidateTokenMajorGqaAttentionContract(output, query, key, value, heads, kvHeads, headDim, scale);
-        RunAttentionRows(TokenMajorGqaAttentionRows,
-            AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, false)
-                with { Route = AttentionRoute.TokenMajorGqa, Numerics = numerics });
+        ValidateTokenMajorGqaAttentionContract(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage,
+            call.Heads, call.KvHeads, call.QkHeadDim, call.Scale);
+        RunAttentionRows(TokenMajorGqaAttentionRows, in call);
     }
 
     /// <summary>F32 → F16 for an attention operand: saturating at ±65504 as cuDNN's input cast does, so a value past the F16
@@ -5734,22 +5706,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         new((ulong)(heads * rows * d), (ulong)(rows * d), (ulong)d);
 
     /// <summary>Whether the F16 flash kernel takes this call: all-F16 operands, no mask, a head dim cuDNN serves
-    /// slowly, the PTX loaded, the knob on and no earlier failure this session.</summary>
+    /// slowly, the PTX loaded and the knob on.</summary>
     private bool FlashF16Eligible(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask, long d)
     {
-        if (!_flashF16 || _flashF16Dead || mask is not null || d != 256) return false;
+        if (!_flashF16 || mask is not null || d != 256) return false;
         if (query.DType != DType.F16 || key.DType != DType.F16 || value.DType != DType.F16 || output.DType != DType.F16)
             return false;
         EnsureKernels();
         return _kernels!.HasFlashAttnF16;
     }
 
-    /// <summary>Runs the F16 flash kernel over strided operands. A launch failure logs once, disables the kernel for the
-    /// session and returns false so the caller's cuDNN path serves the call.</summary>
+    /// <summary>Runs the F16 flash kernel over strided operands. False is a pre-launch shape or alignment decline;
+    /// allocation and launch failures propagate without retrying another row.</summary>
     private bool TryFlashF16(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
     {
-        // An oversized grid is this call's limit, not a kernel failure, so it must not disable the kernel for the session.
+        // An oversized grid is this call's limit, not a kernel failure: a pre-launch decline, and the next row runs.
         if (!CudaKernels.GridYzFits(heads, batch)) return false;
         using OpScope _op = EnterOp();
         ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
@@ -5768,12 +5740,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             cached = true;
             Interlocked.Increment(ref _flashF16ExecutionCount);
             return true;
-        }
-        catch (Exception error) when (error is not OutOfMemoryException and not OutOfVramException)
-        {
-            _flashF16Dead = true;
-            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] F16 flash attention failed at D={d} ({error.Message}); using cuDNN for the rest of the session.");
-            return false;
         }
         finally
         {
@@ -5826,7 +5792,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             throw new ArgumentException("SDPA tensors currently support at most Int32.MaxValue elements each.");
     }
 
-    /// <summary>Validates the canonical rank-4 MHA contract shared by every SDPA dispatch branch.</summary>
+    /// <summary>Validates the canonical rank-4 MHA/GQA contract shared by every SDPA dispatch branch.</summary>
     internal static void ValidateScaledDotProductAttentionContract(
         Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
@@ -5854,8 +5820,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             throw new ArgumentException($"SDPA output shape must equal Q; got output={output.Shape}, Q={query.Shape}.");
         if (key.Shape != value.Shape)
             throw new ArgumentException($"SDPA K/V shapes must match; got K={key.Shape}, V={value.Shape}.");
-        if (key.Shape[0] != b || key.Shape[1] != h || key.Shape[3] != d)
-            throw new ArgumentException($"SDPA K/V must match Q batch, heads, and head dimension; got Q={query.Shape}, K={key.Shape}.");
+        if (key.Shape[0] != b || key.Shape[1] <= 0 || key.Shape[1] > h || h % key.Shape[1] != 0 || key.Shape[3] != d)
+            throw new ArgumentException($"SDPA K/V must match Q batch and head dimension, with query heads divisible by K/V heads; got Q={query.Shape}, K={key.Shape}.");
 
         if (output.ElementCount > int.MaxValue || query.ElementCount > int.MaxValue
             || key.ElementCount > int.MaxValue || value.ElementCount > int.MaxValue)
@@ -6415,7 +6381,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
 
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
-                _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * curBr), _stream.Handle);
+                _kernels!.LaunchAttentionSoftmax(scoresBuf, 0, (int)skv, (int)(totalHeads * curBr), false, _stream.Handle);
 
                 // scores·V per head → out[q0:q0+curBr]
                 for (long bh = 0; bh < totalHeads; bh++)
@@ -7764,15 +7730,22 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>FlashAttention (online-softmax, GQA-aware, no materialized score matrix).</summary>
     /// <remarks>Requires F32 and head dimension in [1, 1024]. The launcher pads small dimensions to a full warp
-    /// so the reduction's full-mask shuffle remains valid. Unsupported inputs fall back to the CPU reference.</remarks>
+    /// so the reduction's full-mask shuffle remains valid. A head dimension above 1024 is refused
+    /// (<see cref="AttentionUnsupportedException"/>); no row runs the host reference.</remarks>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
+        => ExecuteFlashAttention(AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale,
+            softcap, sink, slidingWindow, alibiSlopes), kvGroup);
+
+    private void ExecuteFlashAttention(in AttentionCall call, int? legacyKvGroup = null)
     {
+        Tensor query = call.Query.Storage, key = call.Key.Storage;
         using NvtxRange _nvtxFa = NvtxRange.Push(NvtxRange.ProfileShapes
-            ? $"FlashAttention q{query.Shape} k{key.Shape} {key.DType} kv={kvLen}{(causal ? " causal" : "")}" : "FlashAttention");
-        ValidateFlashAttentionContract(
-            output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
-        RunAttentionRows(FlashAttentionRows,
-            AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes));
+            ? $"FlashAttention q{query.Shape} k{key.Shape} {key.DType} kv={call.ValidKvLength}{(call.Mask.Causal ? " causal" : "")}"
+                : "FlashAttention");
+        ValidateFlashAttentionContract(call.Output.Storage, query, key, call.Value.Storage, call.ValidKvLength, legacyKvGroup ?? call.KvGroup,
+            call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Logits.Softcap, call.Logits.Sinks,
+            call.Mask.LegacySlidingWindow, call.Logits.AlibiSlopes);
+        RunAttentionRows(FlashAttentionRows, in call);
     }
 
     /// <summary>The decode-shaped kernels (F.4-F.7): grouped decode, split-K, or the per-row kernel. Takes every
@@ -8014,23 +7987,32 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// kvLen early-exit in the kernel, so active parallelism grows with position.</remarks>
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
+        => ExecuteFlashDeviceAttention(AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale,
+            devicePos, softcap, slidingWindow), kvGroup);
+
+    private void ExecuteFlashDeviceAttention(in AttentionCall call, int? legacyKvGroup = null)
     {
         // Graph decode can keep kvLen/qOffset exclusively on-device. Unsupported storage modes fall back to
         // eager attention, whose validator requires meaningful host positions; the device path validates the
         // same buffer/layout/GQA contract without pretending the zero host placeholders are current positions.
+        Tensor query = call.Query.Storage, key = call.Key.Storage, value = call.Value.Storage;
         bool devF16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-        if (devicePos == 0 || query.DType != DType.F32 || output.DType != DType.F32
+        if (call.Positions.DeviceHandle == 0 || query.DType != DType.F32 || call.Output.DType != DType.F32
             || (!devF16Kv && (key.DType != DType.F32 || value.DType != DType.F32)))
         {
-            FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink: null, slidingWindow, alibiSlopes: null);
+            AttentionCall host = call with
+            {
+                Route = AttentionRoute.Flash,
+                Positions = AttentionPositions.Host(call.ValidKvLength, call.Positions.QueryOffset),
+            };
+            ExecuteFlashAttention(in host, legacyKvGroup);
             t_attentionRoute = AttentionRouteText.Nested("V.0/", t_attentionRoute);
             return;
         }
-        ValidateFlashAttentionContract(
-            output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
-            sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
-        RunAttentionRows(FlashAttentionDeviceRows,
-            AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow));
+        ValidateFlashAttentionContract(call.Output.Storage, query, key, value, call.ValidKvLength, legacyKvGroup ?? call.KvGroup,
+            call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Logits.Softcap, sink: null,
+            call.Mask.LegacySlidingWindow, alibiSlopes: null, positionOnDevice: true);
+        RunAttentionRows(FlashAttentionDeviceRows, in call);
     }
 
     /// <summary>The device-position kernels (V.2-V.5) for an F32-query call with a device position buffer.</summary>

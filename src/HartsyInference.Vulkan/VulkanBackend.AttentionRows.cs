@@ -24,10 +24,11 @@ public sealed partial class VulkanBackend
 
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
-        AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
+        AttentionCall prepared = AttentionExecution.Prepare(in call);
+        AttentionKernelRow row = AttentionExecution.RunValidated(rows, in prepared);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
-        AttentionEvidence.Executed("vulkan", row.Capability.Id, t_attentionRoute, in call, row.Capability.Lowering);
-        AttentionPlanLog.Ran("vulkan", row, in call);
+        AttentionEvidence.Executed("vulkan", row.Capability.Id, t_attentionRoute, in prepared, row.Capability.Lowering);
+        AttentionPlanLog.Ran("vulkan", row, in prepared);
     }
 
     private AttentionKernelRow[] RowsFor(AttentionRoute route) => route switch
@@ -40,40 +41,33 @@ public sealed partial class VulkanBackend
     };
 
     /// <inheritdoc/>
-    /// <remarks>Re-enters through the call's legacy entry point, which validates it and runs its rows; the entry points never
-    /// call this method, so the two cannot recurse.</remarks>
     public void Attention(in AttentionCall call)
     {
         if (call.LegacyGap() is { } gap)
         {
+            AttentionCall prepared = AttentionExecution.Prepare(in call);
             // An Auto call no legacy entry carries (the HCA and DSA single-query MQA calls) stages into the flash entry.
-            if (AttentionFlashLowering.Gap(in call) is null)
+            if (AttentionFlashLowering.Gap(in prepared) is null)
             {
-                AttentionFlashLowering.Run(this, in call);
+                AttentionFlashLowering.Run(this, in prepared);
                 return;
             }
             throw new AttentionUnsupportedException($"Vulkan attention serves a call its legacy entry point can carry; this one has {gap}.");
         }
-        Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
         switch (call.Route)
         {
             case AttentionRoute.Dense:
-                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics);
+                ExecuteDenseAttention(in call);
                 break;
             case AttentionRoute.TokenMajor:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale, call.Numerics);
-                break;
             case AttentionRoute.TokenMajorGqa:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
-                    call.Numerics);
+                ExecuteTokenMajorAttention(in call);
                 break;
             case AttentionRoute.Flash:
-                FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
-                    call.Logits.Softcap, call.Logits.Sinks, call.Mask.LegacySlidingWindow, call.Logits.AlibiSlopes);
+                ExecuteFlashAttention(in call);
                 break;
             case AttentionRoute.FlashDevice:
-                FlashAttentionDev(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
-                    call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
+                ExecuteFlashDeviceAttention(in call);
                 break;
         }
     }
@@ -81,12 +75,9 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
-        // The token-major entry serves grouped K/V on its own rows and records the call as token-major; the rows read the
-        // legacy kvLen, which a call without bounded positions leaves at 0 while Attention() passes all keys.
-        AttentionCall planned = call.Route == AttentionRoute.TokenMajorGqa ? call with { Route = AttentionRoute.TokenMajor } : call;
-        if (planned.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !planned.Positions.Bounded)
-            planned = planned with { Positions = planned.Positions with { KvLength = planned.KeyTokens, Bounded = true } };
-        return AttentionPlanner.Plan(RowsFor(planned.Route), in planned);
+        AttentionCall prepared = AttentionExecution.Prepare(in call);
+        if (prepared.Route == AttentionRoute.TokenMajorGqa) prepared = prepared with { Route = AttentionRoute.TokenMajor };
+        return AttentionExecution.PlanValidated(RowsFor(prepared.Route), in prepared);
     }
 
     /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
@@ -241,7 +232,8 @@ public sealed partial class VulkanBackend
         const AttentionLayouts HM = AttentionLayouts.HeadMajor;
         return
         [
-            // Any dtype: the host reference reads every storage format the contract names.
+            // The declared fallback (docs/ATTENTION_CONTRACT.md §6): no Vulkan kernel computes softcap, causal sinks or ALiBi,
+            // or a head dim past the flash tile. The row is named in the plan and the evidence and warns once.
             new DelegateAttentionRow(Cap("host.reference", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = RowCausalWindow, LogitTerms = true, Lowering = AttentionLowering.HostReference,
@@ -249,6 +241,9 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) => !FlashOnDevice(in c),
                 static (in AttentionCall c) =>
                 {
+                    AttentionPlanLog.HostReference("vulkan", c.Logits.AlibiSlopes is not null ? "Flash with ALiBi"
+                        : c.Logits.Softcap != 0f ? "Flash with softcap" : c.Logits.Sinks is not null ? "Flash with sinks outside the wide row"
+                        : "Flash at a head dim past the flash tile");
                     AttentionHostReference.Run(in c);
                     return true;
                 }),

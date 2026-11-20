@@ -1,5 +1,7 @@
 # PR 01 local evidence status
 
+Subsequent semantic work is tracked separately in the [PR 02 progress report](pr02-semantic-progress.md).
+
 The [RTX 4090 evidence review](pr01-4090-review.md) records the subsequently received remote report, unresolved
 correctness/path/measurement gates and the harness contract correction. It does not clear either PR for merge.
 
@@ -36,6 +38,7 @@ latency limit (77.9 seconds for matmul, 10,262 MB initially free). It was not an
 no speed result. Preserve that failure; the subsequent CPU run explicitly excludes GPU integration and benchmark
 categories and does not replace it with a passing GPU claim.
 
-Continue with the [4090 handoff](../vps-handoff.md). Do not begin PR 02 until the complete PR 01 exit evidence has
-been reviewed. Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
+Continue with the [4090 handoff](../vps-handoff.md). The user's subsequent authorization to start PR 02 is recorded
+in the [implementation queue](../proposed-queue.md); it does not certify the incomplete PR 01 evidence or create Bfix.
+Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
 identified by the report; retain it through the handoff and exit review.

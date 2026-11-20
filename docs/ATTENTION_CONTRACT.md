@@ -1,9 +1,13 @@
 # Attention contract
 
 The semantics every attention kernel, planner row and model-side layer in this engine implements. It is normative:
-`AttentionHostReference` (`src/HartsyInference.Core/Backends/Attention/`, the default `IBackend.Attention`) is its
+`AttentionHostReference` (`src/HartsyInference.Core/Backends/Attention/`, invoked explicitly by the caller) is its
 executable form, and a kernel that disagrees with it beyond the tolerance of the precision it was permitted is wrong,
 whatever any model's output looks like. Code comments point here instead of restating it.
+
+The [support and admission contract](ATTENTION_SUPPORT.md) distinguishes mandatory common cases, optional
+backend capabilities and current implementation gaps. Normative semantics do not assert that every feature is
+represented by the current API or already verified on every backend.
 
 ## 1. Operands and shapes
 
@@ -154,6 +158,13 @@ Failures are classed:
 | Recoverable | a plan build refused, an engine configuration rejected, a workspace too small | the next row runs; no state changed |
 | Sticky | an illegal address, a launch failure, anything raised after output writes began | the context is poisoned and nothing retries |
 
+An admitted row must not raise `AttentionUnsupportedException`: it declines by returning false. If every admitted
+row declines, the planner raises `AttentionRecoverableException`. Any exception a row raises is sticky and propagates
+unchanged rather than being converted into a decline. A GPU backend runs the host reference only through a declared
+row: one named in the plan and the execution evidence, with `HostReference` lowering, that warns once per gap. Vulkan declares one for `FlashAttention` (C.1);
+CUDA declares none. Otherwise host execution is the caller's explicit choice through `AttentionHostReference.Run`, and
+a backend without rows refuses `IBackend.Attention`.
+
 A failure while a stream is capturing is never recorded as a permanent property of a head dim or a kernel.
 
 ## 7. Ownership, capture and caching
@@ -194,7 +205,8 @@ unsmoothed one.
 
 The planner reproduces these until the row that owns each is rewritten.
 
-- A fully excluded row gives the mean of V on CUDA's cuDNN and materialized F32 paths, and zero on the flash kernels.
+- CPU dense SIMD softmax still produces NaN for a fully excluded row. PR 02's executed CUDA materialized and
+  cuDNN 9.21 controls return zero; that cohort-specific evidence does not verify every cuDNN release.
 - A sliding window without `Causal` keeps every later key on CUDA and excludes them on Vulkan.
 - CUDA's token-major permute fallback refuses key-only masks, masks with `B ≠ 1` and `B ≠ 1` operands; its cuDNN rows and its
   head-major entry accept them.
@@ -206,11 +218,18 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
+- CUDA's dense cuDNN rows read grouped K/V natively, and the generic layer preserves grouped heads through its head-major
+  transform. Two rows repeat K/V and re-enter dense planning with the original mask, scale and numerical permissions:
+  `widen.preferred`, ahead of cuDNN, for a grouped call whose equal-head form INT8 v2, Sage or the F16 flash kernel takes
+  (the routes those calls had when the caller widened), and `widen.dense`, after cuDNN, when no native row completes. The
+  grouped token-major row yields the same calls to its permute row, which uses that dense planner. Execution evidence
+  reports `WidenKv` and the repeats only when a widening row runs. Whether widening for Sage beats native grouped cuDNN
+  is unmeasured; calibrated routing decides it.
 - CUDA's INT8 attention v2 rows (S.17 and M.4; with `numerics.int8AttnV2F16Pv`, S.18 and M.5) run only with
   `numerics.int8AttnV2`: unmasked, equal heads, head dim 128, F16 or F32 views with 16-byte aligned rows and an output
   covering its tensor, both sequences at `numerics.int8AttnV2MinTokens`. They take F32 whatever `allowF16` says, the
-  grouped token-major row yields to them through its widening, and a layer keeps a call token-major for M.4 only when
-  the backend says M.4 takes it now (a capture its workspace does not fit goes to Sage). K is quantized per key: a scale
+  grouped token-major row yields to them through `widen.preferred`, and a layer keeps a call token-major for
+  M.4 only when the backend says M.4 takes it now (a capture its workspace does not fit goes to Sage). K is quantized per key: a scale
   shared by several keys lets one outlier key move the winner of a near-argmax row. u8 P rounds each key against its
   128-key tile's maximum, so a key below 1/510 of it is dropped, and a tile whose whole mass sits below that step loses
   it; the F16 PV keeps it. V scales default to one per channel per tile (`numerics.int8AttnV2VTile`), at or below the
@@ -223,10 +242,13 @@ The planner reproduces these until the row that owns each is rewritten.
   quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
   does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back after a run of calls that fit at it), because `cuMemGetInfo` reads far too low on a card a process has filled past about
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
-- CUDA's materialized row addresses at most 2^32 score elements (B·H·Sq·Skv; its softmax forms row offsets in 32 bits), and
-  so does each query tile. Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
+- CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
+  attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
+  Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
   unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
-- Vulkan's scalar kernel reads a per-head or per-batch mask as one `[Sq,Skv]` block, and its naive kernel mis-addresses
-  a per-batch one.
-- `FlashAttention` runs on the host on Vulkan when the call has a softcap, sinks, ALiBi or a head dim above 128, and on
-  CUDA when the head dim is above 1024.
+- Vulkan's scalar/tiled mask shaders carry batch/head/query bias strides; the naive path uses the same layout to
+  offset each block and expands key-only masks. Source indexing is not a complete executed mask-conformance campaign.
+- Vulkan `FlashAttention` runs its declared host-reference row (C.1) when neither its scalar admission nor its
+  restricted wide-sink row admits the call: softcap, causal sinks, ALiBi, or a head dim past the flash tile. Gemma-2
+  (decoder and text encoder), GPT-OSS and ALiBi models take it. The wide row covers unmasked F32 sinks with optional
+  softcap, no ALiBi, up to D1024. CUDA refuses Flash above D1024.

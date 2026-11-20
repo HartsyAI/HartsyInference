@@ -190,6 +190,6 @@ extern "C" __global__ void lm_flash_attn_f32_combine(
     if (tid < D)
     {
         size_t qBase = (size_t)idx * D;
-        out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
+        out[qBase + tid] = l > 0.0f ? acc / l : (isnan(l) ? l : 0.0f);
     }
 }

@@ -1,7 +1,9 @@
 # Proposed work after the PR 01 exit review
 
-Only PR 01 is authorized. None of this queue starts until its executed-route inventory, frozen workloads,
-numerical definitions, per-cohort Kitchen cells, timing validation, baselines and explicit exceptions pass review.
+The user subsequently authorized PR 02 alongside PR 01 review fixes, then PR 03 while the GPU agent tests the
+pinned PR 01/02 revisions. These remain separate stacked drafts; parallel work does not waive their exit gates
+or change the GPU agent's immutable pins. PR 01 still needs review of its
+executed routes, frozen workloads, numerical definitions, per-cohort Kitchen cells, timing, baselines and exceptions.
 Full Kitchen features and per-cell operation non-inferiority remain final CUDA **and** Vulkan gates. Infeasibility
 requires reassessment; do not weaken a gate after inspecting results.
 

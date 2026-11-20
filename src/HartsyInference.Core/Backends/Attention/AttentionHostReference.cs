@@ -3,9 +3,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends.Attention;
 
-/// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype: the default
-/// <see cref="IBackend.Attention"/> for a backend without kernel rows. It reads tensors through
-/// <see cref="Tensor.DataPointer"/> and never calls a legacy entry point, so it cannot recurse into a backend's wrappers.</summary>
+/// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype. Callers choose
+/// this path explicitly; <see cref="IBackend.Attention"/> refuses a backend without kernel rows. The reference reads
+/// tensors through <see cref="Tensor.DataPointer"/> and never calls a legacy entry point, so it cannot recurse.</summary>
 public static class AttentionHostReference
 {
     /// <summary>Runs <paramref name="call"/>. Device positions need a backend to read them and are refused.</summary>
@@ -19,7 +19,7 @@ public static class AttentionHostReference
     {
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The host reference cannot read device positions.");
-        Validate(in call);
+        AttentionCallValidation.Validate(in call);
         if (!lse.IsEmpty && lse.Length != (long)call.Batch * call.Heads * call.QueryTokens)
             throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {(long)call.Batch * call.Heads * call.QueryTokens}.",
                 nameof(lse));
@@ -89,46 +89,6 @@ public static class AttentionHostReference
                 }
             }
     }
-
-    /// <summary>The geometry the computation indexes by: shared heads that divide, matching extents, every operand inside
-    /// its tensor, a bias broadcastable on every axis.</summary>
-    /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
-    internal static void Validate(in AttentionCall call)
-    {
-        AttentionFormats refused = call.Numerics.Refused & AttentionNumerics.OperandFormats(in call);
-        if (refused != AttentionFormats.None)
-            throw new AttentionUnsupportedException($"The call refuses {refused}, and an operand or the output is stored in it.");
-        AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
-        if (q.Batch <= 0 || q.Heads <= 0 || q.Tokens <= 0 || q.HeadDim <= 0 || k.Heads <= 0 || k.Tokens <= 0 || v.HeadDim <= 0)
-            throw new ArgumentException($"Attention operands need positive extents; got Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}.");
-        if (q.Heads % k.Heads != 0)
-            throw new ArgumentException($"Query heads ({q.Heads}) must be a multiple of key/value heads ({k.Heads}).");
-        if (k.HeadDim != q.HeadDim || v.Heads != k.Heads || v.Tokens != k.Tokens || o.HeadDim != v.HeadDim
-            || o.Heads != q.Heads || o.Tokens != q.Tokens || k.Batch != q.Batch || v.Batch != q.Batch || o.Batch != q.Batch)
-            throw new ArgumentException(
-                $"Attention operands disagree: Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}, O={Describe(o)}.");
-        if (call.ValidKvLength < 0 || call.ValidKvLength > k.Tokens)
-            throw new ArgumentException($"Valid key length {call.ValidKvLength} is outside the key operand's {k.Tokens} rows.");
-        foreach (AttentionOperand x in (ReadOnlySpan<AttentionOperand>)[q, k, v, o])
-            if (x.Offset < 0 || x.Extent > x.Storage.ElementCount)
-                throw new ArgumentException($"Operand {Describe(x)} addresses past its {x.Storage.ElementCount}-element tensor.");
-        if (call.Mask.Bias is { } bias)
-        {
-            TensorShape s = bias.Shape;
-            int rank = s.Rank;
-            bool fits = rank is >= 2 and <= 4 && (s[rank - 1] == 1 || s[rank - 1] == k.Tokens) && (s[rank - 2] == 1 || s[rank - 2] == q.Tokens)
-                && (rank < 3 || s[rank - 3] == 1 || s[rank - 3] == q.Heads) && (rank < 4 || s[0] == 1 || s[0] == q.Batch);
-            if (!fits)
-                throw new ArgumentException($"Bias {s} does not broadcast to [{q.Batch},{q.Heads},{q.Tokens},{k.Tokens}].");
-        }
-        if (call.Logits.Sinks is { } sinks && sinks.ElementCount < q.Heads)
-            throw new ArgumentException($"Sinks hold {sinks.ElementCount} values for {q.Heads} heads.");
-        if (call.Logits.AlibiSlopes is { } slopes && slopes.ElementCount < q.Heads)
-            throw new ArgumentException($"ALiBi slopes hold {slopes.ElementCount} values for {q.Heads} heads.");
-    }
-
-    private static string Describe(in AttentionOperand x) =>
-        $"{x.Layout}[b{x.Batch} h{x.Heads} s{x.Tokens} d{x.HeadDim}] of {x.Storage.Shape}";
 
     private static bool Visible(in AttentionMask m, int qpos, int kpos)
     {

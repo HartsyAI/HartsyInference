@@ -76,7 +76,7 @@ public static class FlashAttentionKernels
                         for (int x = 0; x < d; x++) acc[x] = acc[x] * corr + p * vp[kBase + x];
                         m = newM;
                     }
-                    if (sp != null)
+                    if (sp != null && !float.IsNegativeInfinity(sp[h]))
                     {
                         float sv = sp[h];
                         float newM = MathF.Max(m, sv);
@@ -86,7 +86,7 @@ public static class FlashAttentionKernels
                         for (int x = 0; x < d; x++) acc[x] *= corr;
                         m = newM;
                     }
-                    float inv = l > 0f ? 1f / l : 0f;
+                    float inv = l > 0f ? 1f / l : float.IsNaN(l) ? float.NaN : 0f;
                     for (int x = 0; x < d; x++) op[qBase + x] = acc[x] * inv;
                 }
             }

@@ -751,22 +751,10 @@ public sealed partial class AttentionLayer
         backend.Permute0213(vMh, v, skv, kvHeads, d);
         if (ownsKv) v.Dispose();
         context.HeadMajorRotation?.RotateHeadMajor(backend, qMh, kMh, batch, heads, kvHeads, sq);
-        if (kvHeads != heads)
-        {
-            int group = heads / kvHeads;
-            Tensor kRep = new(new TensorShape(batch, heads, skv, d), kMh.DType);
-            StridedCopies.RepeatInterleave(backend, kRep, kMh, 1, group);
-            kMh.Dispose();
-            kMh = kRep;
-            Tensor vRep = new(new TensorShape(batch, heads, skv, d), vMh.DType);
-            StridedCopies.RepeatInterleave(backend, vRep, vMh, 1, group);
-            vMh.Dispose();
-            vMh = vRep;
-        }
         return RunHeadMajor(backend, qMh, kMh, vMh, sq, act, flatShape, in context);
     }
 
-    /// <summary>The head-major call over permuted, head-repeated operands, then the permute back to <paramref name="flatShape"/>.</summary>
+    /// <summary>The head-major call over permuted operands, then the permute back to <paramref name="flatShape"/>.</summary>
     private Tensor RunHeadMajor(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, int sq, DType act, TensorShape flatShape,
         in AttentionCallContext context)
     {

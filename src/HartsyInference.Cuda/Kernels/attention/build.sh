@@ -4,6 +4,7 @@ set -euo pipefail
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
+    "attention_softmax"
     "flash_attn_f16"
     "h3_vsa"
     "sage_attn_int8"

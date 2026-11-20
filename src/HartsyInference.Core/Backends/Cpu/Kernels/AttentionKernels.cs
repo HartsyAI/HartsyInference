@@ -37,7 +37,10 @@ public static class AttentionKernels
         long qHeadStride = Sq * D;
         long kvHeadStride = Skv * D;
         long qBatchStride = H * qHeadStride;
-        long kvBatchStride = H * kvHeadStride;
+        // Grouped-query K/V: query head h reads K/V head h / group, in place.
+        long kvHeads = key.Shape[1];
+        long group = H / kvHeads;
+        long kvBatchStride = kvHeads * kvHeadStride;
 
         // Fanned out over (batch, head, query slice). Each task owns a disjoint block of output rows, and the
         // scratch score row is allocated per task rather than shared — one buffer across workers was the only
@@ -67,8 +70,8 @@ public static class AttentionKernels
                 try
                 {
                     float* qHead = pQ + b * qBatchStride + h * qHeadStride;
-                    float* kHead = pK + b * kvBatchStride + h * kvHeadStride;
-                    float* vHead = pV + b * kvBatchStride + h * kvHeadStride;
+                    float* kHead = pK + b * kvBatchStride + h / group * kvHeadStride;
+                    float* vHead = pV + b * kvBatchStride + h / group * kvHeadStride;
                     float* oHead = pOut + b * qBatchStride + h * qHeadStride;
 
                     // Determine mask offset for this (b, h) pair. The mask rank decides how to broadcast:
@@ -231,6 +234,8 @@ public static class AttentionKernels
     }
 
     /// <summary>Applies numerically stable softmax in-place over a float buffer.</summary>
+    /// <remarks>A row whose every score is −∞ is fully excluded: its probabilities are zero, so the output row is zero
+    /// (docs/ATTENTION_CONTRACT.md §3) rather than the NaN that <c>−∞ − (−∞)</c> would give. A NaN score stays NaN.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static unsafe void SoftmaxInPlace(float* data, int count)
     {
@@ -242,6 +247,13 @@ public static class AttentionKernels
             {
                 maxVal = data[i];
             }
+        }
+
+        if (float.IsNegativeInfinity(maxVal))
+        {
+            for (int i = 0; i < count; i++)
+                data[i] = float.IsNaN(data[i]) ? float.NaN : 0f;
+            return;
         }
 
         // Compute exp(x - max) and sum
