@@ -285,6 +285,27 @@ public sealed class Int8AttentionRotationTests
             Assert.True(MathF.Abs(expected[i] - lse[i]) < 0.05f, $"row {i}: LSE {lse[i]} against {expected[i]}.");
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]
+    public void OperandsQuantizedOnceAttendTheSameEveryTimeTheyAreReused(int uses)
+    {
+        using Case reused = new(4, 2, 5, 300, 128, static (_, _) => { });
+        Int8AttentionV2Options options = new() { KeyCenter = Int8KeyCenter.RepresentativeKey, Rotation = Int8Rotation.Pinned };
+        Int8AttentionV2Reference.Run(in reused.Reference, options);
+        float[] fused = reused.Expected.AsReadOnlySpan<float>().ToArray();
+        // The prequantized form: quantize once, then attend from the stored bytes and scales as often as wanted.
+        Int8AttentionV2Operands operands = Int8AttentionV2Reference.Quantize(in reused.Call, options);
+        for (int use = 0; use < uses; use++)
+        {
+            reused.Output.AsSpan<float>().Clear();
+            Int8AttentionV2Reference.Attend(in reused.Call, operands);
+            Assert.True(reused.Output.AsReadOnlySpan<float>().SequenceEqual(fused), $"use {use + 1} of {uses} differs from the fused call.");
+        }
+    }
+
     [Fact]
     public void RotationAndTheRepresentativeKeyAreOffUnlessAsked()
     {
