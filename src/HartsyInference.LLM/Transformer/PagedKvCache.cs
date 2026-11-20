@@ -111,6 +111,70 @@ public sealed class PagedKvCache : IKvCache
             srcOffset += chunkLen;
             remaining -= chunkLen;
         }
+        AppendToPrefix(backend, layer, isKey: true, newK, _currentLength, tNew);
+        AppendToPrefix(backend, layer, isKey: false, newV, _currentLength, tNew);
+    }
+
+    /// <summary>Rows a prefix buffer holds for <paramref name="len"/> valid rows: the length rounded up to a page. Kernel
+    /// admission and plan keys read this row count, so it is the count the per-call rebuild produced.</summary>
+    private int PrefixCapacity(int len) => ((Math.Max(len, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
+
+    /// <summary>Adds the rows just written at <paramref name="pos"/> to the layer's contiguous prefix, straight from the
+    /// appended tensor, when the prefix is current up to there. A prefix that is behind is left for the next prefix call,
+    /// which catches up from the pages.</summary>
+    private void AppendToPrefix(IBackend backend, int layer, bool isKey, Tensor rows, int pos, int tNew)
+    {
+        Tensor?[] scratchArr = isKey ? _scratchK : _scratchV;
+        int[] currentRows = isKey ? _currentK : _currentV;
+        if (currentRows[layer] != pos) return;
+        int headDim = _pool.HeadDimPerLayer[layer];
+        int capacity = PrefixCapacity(_physicallyWritten);
+        Tensor? scratch = scratchArr[layer];
+        long copiedRows = tNew;
+        if (pos == 0 && (scratch is null || scratch.Shape[2] < capacity))
+        {
+            // Nothing to keep: the new rows, padded to a whole page, are the buffer. Built as an op's output, it is
+            // never uploaded from the host.
+            scratch?.Dispose();
+            scratch = new Tensor(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
+            scratchArr[layer] = scratch;
+            if (capacity == tNew)
+            {
+                backend.Concat(scratch, [rows], 2);
+            }
+            else
+            {
+                using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - tNew, headDim), DType.F32);
+                backend.Concat(scratch, [rows, pad], 2);
+            }
+        }
+        else
+        {
+            if (scratch is null || scratch.Shape[2] < capacity)
+            {
+                scratch = GrowPrefix(backend, scratch, pos, capacity, headDim);
+                scratchArr[layer] = scratch;
+                copiedRows += pos;
+            }
+            backend.KvCacheAppend(scratch, rows, pos);
+        }
+        currentRows[layer] = pos + tNew;
+        AttentionEvidence.Observed(AttentionEvidenceKind.PrefixGather, isKey ? "paged.keys" : "paged.values",
+            _pool.NumKvHeads * copiedRows * headDim * sizeof(float), layer: layer);
+    }
+
+    /// <summary>A buffer of <paramref name="capacity"/> rows that starts with the <paramref name="keepRows"/> rows
+    /// <paramref name="old"/> holds. It is a concatenation's output, so the rows move on the device and nothing is uploaded.</summary>
+    private Tensor GrowPrefix(IBackend backend, Tensor? old, int keepRows, int capacity, int headDim)
+    {
+        Tensor grown = new(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
+        if (old is not null && keepRows > 0)
+        {
+            using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - (int)old.Shape[2], headDim), DType.F32);
+            backend.Concat(grown, [old, pad], 2);
+        }
+        old?.Dispose();
+        return grown;
     }
 
     public Tensor KeyPrefix(int layer) { ThrowIfDisposed(); return Gather(layer, isKey: true); }
@@ -127,22 +191,14 @@ public sealed class PagedKvCache : IKvCache
         int[] currentRows = isKey ? _currentK : _currentV;
         Tensor? scratch = scratchArr[layer];
         long copiedRows = 0;
-        // Grow-only capacity, rounded up to a page (mirrors FixedKvCache's oversized-buffer-plus-explicit-valid-length
-        // pattern: the attention call passes the valid key count separately and never trusts this tensor's own shape for
-        // it). The row count is unchanged from when this buffer was rebuilt on every call, because kernel admission and
-        // plan keys read it. A larger buffer starts from the old one's rows, so growth does not send the copy back to
-        // the pages.
+        // Grow-only capacity (mirrors FixedKvCache's oversized-buffer-plus-explicit-valid-length pattern: the attention
+        // call passes the valid key count separately and never trusts this tensor's own shape for it). A larger buffer
+        // starts from the old one's rows, so growth does not send the copy back to the pages. In the usual order (append,
+        // then read) the append has already added this step's rows and there is nothing left to copy here.
         if (scratch is null || scratch.Shape[2] < len)
         {
-            int capacity = ((Math.Max(len, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
-            Tensor grown = new(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
-            if (scratch is not null && currentRows[layer] > 0)
-            {
-                backend.KvCacheAppend(grown, scratch, 0);
-                copiedRows += currentRows[layer];
-            }
-            scratch?.Dispose();
-            scratch = grown;
+            if (scratch is not null) copiedRows += currentRows[layer];
+            scratch = GrowPrefix(backend, scratch, currentRows[layer], PrefixCapacity(len), headDim);
             scratchArr[layer] = scratch;
         }
 
