@@ -13,13 +13,15 @@ findings I have not all re-read line by line. Line numbers are as of that commit
 
 Packages with no attention at all: Voice, World, WorldViewer, WorldViewer.Avalonia, API, Meta. Cli and Engine hold
 settings text and capability checks only. Most consumer attention already goes through `AttentionLayer` or
-`JointAttention` (LLM 9 files, Diffusion 63, Audio 41, ThreeD 14, Vision 15, Video 1, ModelAssets 1).
+`JointAttention`: about 9 files in LLM, 63 in Diffusion, 41 in Audio, 14 in ThreeD, 15 in Vision and one each in
+Video and ModelAssets. Those counts come from the first pass and I did not keep the search that produced them, so
+treat them as approximate.
 
 ## Plain attention on the host
 
 "Plain" means `softmax(q · k · scale + terms a standard entry takes) · V`.
 
-| Site | What it is | Status |
+| Site | What it is | Status at `f9a0cedeb` |
 |---|---|---|
 | Diffusion `Models/TextEncoders/GptOssEncoder.cs` | Causal or windowed, grouped heads, per-head sink; single-threaded | Migrated in draft #1005 (read by me) |
 | Diffusion `Models/Denoisers/DiTBlocks/WanAnimateFaceBlock.cs` | Frame-local cross-attention, 16 calls a step with CFG; single-threaded | Migrated in draft #1011 (read by me) |
@@ -29,11 +31,11 @@ settings text and capability checks only. Most consumer attention already goes t
 | Audio `Models/FishAudio/DacOps.cs` `RunTransformer` | Causal, window of 128 keys (512 in the encoder), host RoPE; single-threaded | Open (read by me). On CUDA the causal F32 route narrows to F16, a larger precision change than TF32 inside a codec, and no Fish Audio weights are on either test machine |
 | Audio `Models/BreezeTts/T5Gemma2TextEncoder.cs` `Encode` 87-112 | Two-sided window on some layers, grouped heads; single-threaded | Open. Needs a two-sided window, which is an additive bias today |
 | Audio `Models/ControlFoley/ControlFoleySwinStage.cs` `WindowAttention` 153-201 | Swin: learned relative-position bias and the shift mask, both additive; single-threaded | Open. Fits an additive-bias call after the window gather |
-| Audio `Models/IndexTts/IndexTtsConformerLayer.cs` `RelPosAttention` 100-157 | Positional terms indexed by the key alone, with no relative shift, so it reduces to `K' = K + P` and a per-key bias; single-threaded | Open. An earlier pass listed this as specialized; the second pass reads it as plain with an additive bias. Verify before acting |
+| Audio `Models/IndexTts/IndexTtsConformerLayer.cs` `RelPosAttention` 100-157 | Positional terms indexed by the key alone, with no relative shift, so the score is `q · (k + p)` plus `u · k + v · p`, a bias a head and key that no query row changes; single-threaded | Plain with an additive bias, confirmed by two further readings (an earlier pass had it as specialized). A migration is prepared on a branch and passes on the CPU backend; its GPU run and draft are pending |
 | Video `Tokenizers/CosmosDvModule.cs` `SpatialAttn` 120-147, `TemporalAttn` 168-195 | Single head; temporal is causal; single-threaded | Left on the host on purpose: the tokenizer is written for a deterministic F32 result |
-| LLM `Decision/Clef/ClefJointHead.cs` `Attention` | `nn.MultiheadAttention` mirror; already `Parallel.For` | Open, low value (read by me): small and already multi-threaded |
+| LLM `Decision/Clef/ClefJointHead.cs` `Attention` (from line 286) | `nn.MultiheadAttention` mirror; already `Parallel.For` | Open, low value (read by me): small and already multi-threaded |
 | ThreeD `Models/Idol/Budget/BudgetRefineStage.cs` `Attend` | Block-diagonal over 2 or 4 children a parent; `Parallel.For` | Leave (read by me): tiny fixed groups, linear cost |
-| Vision `Detection/Blocks/PsaAttention.cs` 111-166 | Q and K head dim differs from the V head dim; single-threaded | Open. Whether a standard entry takes different QK and V widths was not checked |
+| Vision `Detection/Blocks/PsaAttention.cs` 111-166 | V is twice as wide as Q and K (`_keyDim` is half `_headDim`); single-threaded | Open. A call as it stands is refused: the flash lowering refuses a value wider than the query and key (`AttentionFlashLowering.cs`), and the legacy CPU kernel reads one width for all three. The likely route is to zero-pad Q and K to the value width and pass the scale explicitly, which leaves every `q · k` unchanged |
 
 ## Specialized: not a standard call
 
@@ -51,7 +53,8 @@ These need terms no standard entry has, and are left alone.
 
 - LLM `Transformer/AttnRes/AttentionResidual.cs`: a learned mix over depth; its backend path already exists, and the
   host `MixReference` has no caller in `src/`.
-- LLM `Decision/Clef/ClefJointHead.cs` 122-156: pooling with one query per question over ragged, tiny groups.
+- LLM `Decision/Clef/ClefJointHead.cs` 122-156: pooling with one query per question over ragged, tiny groups. This is
+  a different function from the `Attention` method listed above.
 - ThreeD `Models/UniRig/UniRigSkinModel.cs` `ScoreChunk`, Audio `Models/Whisper/WhisperAttentionProbe.cs`: attention
   weights only, with no value mix.
 - Attentive-statistics pooling and layer-weight softmaxes (ECAPA encoders, Zonos, MERT, MiniMax Music, Wan S2V audio).
@@ -81,6 +84,9 @@ either machine: the 4090 host holds Wan Animate 2 checkpoints, and `WanAnimate2T
 
 ## Timing seen so far (smoke only, RTX 3060 box, attention alone)
 
+Each figure is the best of two to five runs in one process, not a campaign. The former loop does not scale exactly
+with the square of the frame count here, which a single process on a shared box does not explain further.
+
 | Site | Size | Former loop | Now, CPU | Now, CUDA |
 |---|---|---|---|---|
 | Wan Animate face adapter, one call | 21 frames of 1,560 tokens, 5 motion tokens | 2,050 ms | 571 ms | 108 ms |
@@ -88,3 +94,6 @@ either machine: the 4090 host holds Wan Animate 2 checkpoints, and `WanAnimate2T
 | ControlFoley style encoder, one layer | 1,500 frames | 3,994 ms | 92 ms | 8.1 ms |
 
 The IndexTTS perceiver and the GPT-SoVITS MRTE were a few milliseconds at their model sizes and stay there.
+
+The statuses in the first table are as of the commit in its header. When a draft named there merges or changes,
+this file needs the same update.
