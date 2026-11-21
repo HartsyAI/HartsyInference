@@ -16,6 +16,10 @@ real-weight converter**, *not* the DiT/backbone.
 
 ## Parity-debugging methodology
 
+Before trusting any test run on a GPU: a run whose test host crashed still ends in `Passed!`. See the entry on
+that under [Correctness & verification discipline](#correctness--verification-discipline); it applies to every
+backend and model.
+
 **The layer-by-layer bisect (the workhorse):**
 1. Build a Python reference (venv) that dumps: initial noise, text embeddings, per-step latents
    (binary + mean/std/min/max JSON), final latent. Run C# with Python's **saved** noise/embeddings —
@@ -949,16 +953,28 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   reusable command buffer + fence) was proven correct in isolation but did not fit the model's memory
   profile. Prove the mechanism separately from proving it helps.
 - **`dotnet test` prints `Passed!` after the test host crashes.** Open, cause not found. On the RTX 3060 the LLM
-  `GpuIntegration` lane twice ended after about 10 seconds with `Passed! - Failed: 0, Passed: 100, Skipped: 19,
-  Total: 119` where the build lists 345 tests (2026-11-21, about 2 of 25 runs, on two different branches). The
-  console also said `The active test run was aborted. Reason: Test host process crashed` and `Test Run Aborted.`,
-  further up, and the TRX summary's outcome was `Failed`. Nothing a grep for failed tests looks at says so. The
-  tests that had finished were the same set both times (the ERNIE-5, INT8 and block-op parity classes); none of
-  the attention parity classes had started. Just before the crash the log has `VulkanPipelineCache: failed to
-  persist cache ... being used by another process`, with several CUDA and Vulkan backends alive in the one
-  process. No dump was taken, so which call crashed is unknown; the next step is the lane under `--blame-crash`
-  until it recurs. **Until then, check a lane's total against `dotnet test --list-tests` and search its output for
-  `aborted`; a pass line alone is not a pass.**
+  GPU lane (`--filter Category=GpuIntegration -f net10.0`) twice ended after about 10 seconds with `Passed! -
+  Failed: 0, Passed: 100, Skipped: 19, Total: 119` where the same filter and framework list 345 tests (2026-11-21,
+  about 2 of 25 runs, on two different branches). Further up, the console also said `The active test run was
+  aborted. Reason: Test host process crashed` and `Test Run Aborted.`, and the TRX summary's outcome was `Failed`.
+  A search for failed tests finds none. The tests that had finished were the same set both times (the ERNIE-5,
+  INT8 and block-op parity classes); none of the attention parity classes had started.
+  - *Not the cause:* the log line just before it, `VulkanPipelineCache: failed to persist cache ... being used by
+    another process`. That write is inside a try that only logs (`VulkanPipelineCache.Persist`). It does show
+    several backends alive in the one process.
+  - *A lead, not verified:* six Vulkan types free native objects in a finalizer through a raw device handle
+    (`VulkanBuffer`, `VulkanMemoryBlock`, `VulkanCommandStream`, `VulkanPipelineCache`, `VulkanDevice`,
+    `VulkanInstance`), and finalizers run in no fixed order. One that runs after its device was destroyed, whether
+    the device was disposed or finalized first, is a native use-after-free, which ends the process with no managed
+    exception and would depend on GC timing. Every backend the tests I read create is disposed, so the candidate is
+    an object left alive past its device's disposal.
+  - *Next step:* the lane under `--blame` (its `Sequence_*.xml` names the test that was running) until it recurs,
+    then `--blame-crash` for the call, after checking that a dump tool is present on the machine.
+  - **Until then a pass line alone is not a pass.** Compare the total with `dotnet test --list-tests` under the
+    same `--filter` and one `--framework` (the repo builds two, and an unscoped listing doubles the count; a theory
+    whose data cannot be serialized lists as one entry and runs as several, so allow for that), and search the
+    output for `aborted`. Whether the exit code is non-zero on such a run is not yet confirmed here; if it is, that
+    is the simplest check of the three.
 
 ### GEMM acceleration: what was tried, and what holds
 
