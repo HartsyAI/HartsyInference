@@ -43,6 +43,14 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public void Attention(in AttentionCall call)
     {
+        // A length per sequence, or an LSE output, is no legacy entry's: the flash rows are planned directly, where only a
+        // row that declares it covers the call and the planner refuses what none takes. Only a call pinned to the flash
+        // route comes this way, which is how FromDecodeWithLengths builds one.
+        if ((call.SequenceLengths is not null || call.Lse is not null) && call.Route == AttentionRoute.Flash)
+        {
+            RunAttentionRows(FlashAttentionRows, in call);
+            return;
+        }
         if (call.LegacyGap() is { } gap)
         {
             AttentionCall prepared = AttentionExecution.Prepare(in call);
@@ -257,6 +265,21 @@ public sealed partial class VulkanBackend
         const AttentionLayouts HM = AttentionLayouts.HeadMajor;
         return
         [
+            // The only flash row that takes a key length per sequence, and it takes nothing else (its admission requires the
+            // lengths), so its place in the list is free and the single-length rows keep every call they had. The lengths are
+            // host values uploaded for the call.
+            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32, AttentionDTypes.F32, HM | AttentionLayouts.TokenMajor) with
+                {
+                    Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
+                }, "C.9",
+                (in AttentionCall c) => FlashDecodeLengthsAdmits(in c),
+                (in AttentionCall c) =>
+                {
+                    DispatchFlashDecodeLengths(in c);
+                    return true;
+                },
+                // Operands are read in place; the lengths upload is a staging copy, recorded as one.
+                static (in AttentionCall _) => AttentionPreparationCost.None),
             // The declared fallback (docs/ATTENTION_CONTRACT.md §6): no Vulkan kernel computes softcap, causal sinks or ALiBi,
             // or a head dim past the flash tile. The row is named in the plan and the evidence and warns once.
             new DelegateAttentionRow(Cap("host.reference", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
