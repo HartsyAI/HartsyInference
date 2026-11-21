@@ -6,12 +6,13 @@ using HartsyInference.Vulkan;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
-/// <summary>The speculative-decode merge on CUDA against <see cref="DecodeMergeReference"/>, and chained after the CUDA
-/// decode that leaves the prefix output and its LSE on the device. Tolerances were fixed before the kernel first ran:
-/// 2e-5 against the reference for one merge, 5e-5 for a decode and a merge chained against one causal decode.</summary>
+/// <summary>The speculative-decode merge on CUDA and on Vulkan against <see cref="DecodeMergeReference"/>, and on CUDA
+/// chained after the decode that leaves the prefix output and its LSE on the device. Tolerances were fixed before either
+/// kernel first ran: 2e-5 against the reference for one merge, 5e-5 for a decode and a merge chained against one causal
+/// decode.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
-public sealed class DecodeMergeCudaTests
+public sealed class DecodeMergeGpuTests
 {
     private static Tensor Random(TensorShape shape, int seed)
     {
@@ -87,9 +88,22 @@ public sealed class DecodeMergeCudaTests
 
     [CudaTheory]
     [MemberData(nameof(Shapes))]
-    public void TheKernelMatchesTheReferenceForAStepAndForATree(int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths)
+    public void TheCudaKernelMatchesTheReferenceForAStepAndForATree(int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        MatchesTheReference(backend, batch, heads, kvHeads, dim, rows, capacity, lengths);
+    }
+
+    [VulkanFact]
+    public void TheVulkanKernelMatchesTheReferenceForAStepAndForATree()
+    {
+        using VulkanBackend backend = new();
+        foreach (object[] shape in Shapes)
+            MatchesTheReference(backend, (int)shape[0], (int)shape[1], (int)shape[2], (int)shape[3], (int)shape[4], (int)shape[5], (int[])shape[6]);
+    }
+
+    private static void MatchesTheReference(IBackend backend, int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths)
+    {
         Assert.True(backend.HasDecodeMerge);
         using Step step = new(batch, heads, kvHeads, dim, rows, capacity, lengths);
         foreach (int[] mask in (int[][])[DecodeMergeReference.CausalStepMask(rows), TreeMask(rows)])
@@ -148,9 +162,21 @@ public sealed class DecodeMergeCudaTests
     }
 
     [CudaFact]
-    public void MergingInPlaceGivesTheSameResult()
+    public void OnCudaMergingInPlaceGivesTheSameResult()
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        MergingInPlaceGivesTheSameResult(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanMergingInPlaceGivesTheSameResult()
+    {
+        using VulkanBackend backend = new();
+        MergingInPlaceGivesTheSameResult(backend);
+    }
+
+    private static void MergingInPlaceGivesTheSameResult(IBackend backend)
+    {
         using Step step = new(2, 4, 2, 64, 5, 25, [25, 11]);
         int[] mask = DecodeMergeReference.CausalStepMask(5);
         step.Reference(mask);
@@ -164,10 +190,22 @@ public sealed class DecodeMergeCudaTests
     }
 
     [CudaFact]
-    public void AnEmptyPrefixAndAStepRowNoBitNamesAreNotRead()
+    public void OnCudaAnEmptyPrefixAndAStepRowNoBitNamesAreNotRead()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        AnEmptyPrefixAndAStepRowNoBitNamesAreNotRead(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanAnEmptyPrefixAndAStepRowNoBitNamesAreNotRead()
+    {
+        using VulkanBackend backend = new();
+        AnEmptyPrefixAndAStepRowNoBitNamesAreNotRead(backend);
+    }
+
+    private static void AnEmptyPrefixAndAStepRowNoBitNamesAreNotRead(IBackend backend)
     {
         const int heads = 4, rows = 4, dim = 64;
-        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         using Step step = new(2, heads, 2, dim, rows, 12, [0, 12]);
         // Step row 3 is named by no row: its keys and values may hold anything. Sequence 0 has no prefix: so may its prefix output.
         int[] mask = [0b0001, 0b0011, 0b0101, 0b0111];
@@ -185,10 +223,22 @@ public sealed class DecodeMergeCudaTests
     }
 
     [CudaFact]
-    public void ARowWithNoKeyAtAllIsZero()
+    public void OnCudaARowWithNoKeyAtAllIsZero()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        ARowWithNoKeyAtAllIsZero(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanARowWithNoKeyAtAllIsZero()
+    {
+        using VulkanBackend backend = new();
+        ARowWithNoKeyAtAllIsZero(backend);
+    }
+
+    private static void ARowWithNoKeyAtAllIsZero(IBackend backend)
     {
         const int heads = 4, rows = 3, dim = 64, width = heads * dim;
-        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         using Step step = new(1, heads, 2, dim, rows, 8, [0]);
         step.Merged.AsSpan<float>().Fill(7f);
         backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.Value, [0b001, 0, 0b101]);
@@ -200,9 +250,21 @@ public sealed class DecodeMergeCudaTests
     }
 
     [CudaFact]
-    public void AMalformedMergeIsRefusedBeforeAnythingIsWritten()
+    public void OnCudaAMalformedMergeIsRefusedBeforeAnythingIsWritten()
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        AMalformedMergeIsRefusedBeforeAnythingIsWritten(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanAMalformedMergeIsRefusedBeforeAnythingIsWritten()
+    {
+        using VulkanBackend backend = new();
+        AMalformedMergeIsRefusedBeforeAnythingIsWritten(backend);
+    }
+
+    private static void AMalformedMergeIsRefusedBeforeAnythingIsWritten(IBackend backend)
+    {
         using Step step = new(1, 4, 2, 64, 4, 12, [12]);
         int[] mask = DecodeMergeReference.CausalStepMask(4);
         step.Merged.AsSpan<float>().Fill(7f);
@@ -212,19 +274,6 @@ public sealed class DecodeMergeCudaTests
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.CacheValue, mask));
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Prefix, step.Query, step.Key, step.Value, mask));
         backend.Sync();
-        Assert.Equal(-1, step.Merged.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
-    }
-
-    [VulkanFact]
-    public void VulkanHasNoMergeAndSaysSo()
-    {
-        using VulkanBackend backend = new();
-        IBackend asBackend = backend;
-        Assert.False(asBackend.HasDecodeMerge);
-        using Step step = new(1, 4, 2, 64, 4, 12, [12]);
-        step.Merged.AsSpan<float>().Fill(7f);
-        Assert.Throws<NotSupportedException>(() =>
-            asBackend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.Value, DecodeMergeReference.CausalStepMask(4)));
         Assert.Equal(-1, step.Merged.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
     }
 }
