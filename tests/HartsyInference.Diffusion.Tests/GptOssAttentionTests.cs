@@ -83,7 +83,9 @@ public sealed class GptOssAttentionTests
     {
         foreach ((int batch, int heads, int kvHeads, int dim, int seqLen, int window, bool withSinks) in
             ((int, int, int, int, int, int, bool)[])[(1, 64, 8, 64, 96, 0, true), (1, 64, 8, 64, 96, 40, true), (2, 64, 8, 64, 48, 16, true),
-                (1, 64, 8, 64, 70, 128, true), (1, 8, 8, 64, 33, 0, false), (1, 16, 4, 64, 80, 24, false)])
+                (1, 64, 8, 64, 70, 128, true), (1, 8, 8, 64, 33, 0, false), (1, 16, 4, 64, 80, 24, false),
+                // The checkpoint's own window of 128 where it binds: the 143 tokens of the real Lens prompt, and past two windows.
+                (1, 64, 8, 64, 143, 128, true), (1, 64, 8, 64, 300, 128, true), (1, 64, 8, 64, 143, 0, true)])
         {
             using Tensor query = Random(new TensorShape(batch, heads, seqLen, dim), 71);
             using Tensor key = Random(new TensorShape(batch, kvHeads, seqLen, dim), 72);
