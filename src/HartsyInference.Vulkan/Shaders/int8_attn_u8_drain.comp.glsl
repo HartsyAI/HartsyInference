@@ -17,7 +17,9 @@
 // reference's bit for bit on any device, with one exception: where the reference itself passes through a subnormal
 // (a tile scale times a V scale below 2^-126, or a carried sum that small), a device that reads subnormals as zero
 // drops that tile's term. The term is at most 128 * 255 * 127 * 2^-126, about 2^-104, so only an output that is
-// itself that small can show it.
+// itself that small can show it, with one further case: a carried sum the reference holds as a subnormal still
+// decides an exact rounding tie of the next drain by its sign, and here it is zero, so that output may differ in its
+// last place. Nothing has been seen to hit it.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require

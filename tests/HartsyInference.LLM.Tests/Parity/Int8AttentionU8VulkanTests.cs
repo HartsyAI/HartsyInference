@@ -80,7 +80,8 @@ public sealed class Int8AttentionU8VulkanTests(ITestOutputHelper output)
             TileTrace = (batchHead, row, tile, tileMax, bytes, _, sum) =>
                 trace[(batchHead * c.Rows + row, tile)] = (tileMax, bytes.ToArray(), sum),
         };
-        Int8AttentionV2Reference.Run(in call, options);
+        Int8AttentionV2Operands operands = Int8AttentionV2Reference.Quantize(in call, options);
+        Int8AttentionV2Reference.Attend(in call, operands);
 
         string what = $"{c}";
         using VulkanBackend backend = new();
@@ -108,7 +109,14 @@ public sealed class Int8AttentionU8VulkanTests(ITestOutputHelper output)
             keyScales, bh, bkv, c.BlockKeys, c.Scale);
         using Tensor actual = new(new TensorShape(bh, c.Rows, c.HeadDim), DType.F32);
         backend.Int8AttentionU8Drain(actual, tileMax, tileSums, probabilities, valueBytes, valueScales, bh, bkv, c.BlockKeys, c.PerTile);
+        // The entry that runs both passes, which has to give the same bits.
+        using Tensor composed = new(actual.Shape, DType.F32);
+        backend.Int8AttentionU8(composed, queryBytes, queryScales, c.Smooth ? dots : null, keyBytes, keyScales, valueBytes,
+            valueScales, bh, bkv, c.BlockKeys, c.PerTile, c.Scale);
         backend.Sync();
+        ReadOnlySpan<float> two = actual.AsReadOnlySpan<float>(), one = composed.AsReadOnlySpan<float>();
+        for (int i = 0; i < two.Length; i++)
+            Assert.True(SameBits(two[i], one[i]), $"{c}: the composed entry gives {one[i]:R} at {i}, the two passes {two[i]:R}");
 
         // The first pass against the trace, so that a miss in the output can be placed.
         ReadOnlySpan<float> tm = tileMax.AsReadOnlySpan<float>();
@@ -145,6 +153,24 @@ public sealed class Int8AttentionU8VulkanTests(ITestOutputHelper output)
             if (SameBits(e[i], a[i])) continue;
             if (MathF.Abs(e[i]) < allowance && MathF.Abs(a[i]) < allowance)
             {
+                // The allowance is for one cause, so that cause has to be there: for this row and channel the
+                // reference formed a drain scale (tile scale times V scale) that is a subnormal float.
+                int row = i / c.HeadDim, channel = i % c.HeadDim, kvHead = row / c.Rows / c.Group;
+                bool subnormalScale = false, valid = false;
+                float m = 0f;
+                for (int t = 0; t < tiles && c.PerTile; t++)
+                {
+                    float tileM = trace[(row, t)].Max - Int8AttentionV2Reference.U8Offset, tileScale = 1f;
+                    if (!valid) (m, valid) = (tileM, true);
+                    else
+                    {
+                        if (tileM < m) tileScale = Int8AttentionExp2.Evaluate(-MathF.Abs(m - tileM));
+                        m = MathF.Max(m, tileM);
+                    }
+                    float scaled = tileScale * operands.ValueScales[(kvHead * tiles + t) * dp + channel];
+                    if (scaled != 0f && MathF.Abs(scaled) < 1.17549435e-38f) subnormalScale = true;
+                }
+                Assert.True(subnormalScale, $"{what}: output {i} differs below 2^-100 ({a[i]:R}, expected {e[i]:R}) with no subnormal drain scale in the reference");
                 tiny++;
                 continue;
             }
