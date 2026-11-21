@@ -272,7 +272,8 @@ public sealed partial class VulkanBackend
                 {
                     Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
                     // What the split shader is built for on this device, so a plan names the limit a call missed.
-                    MinHeadDim = (int)Vk.SubgroupSize, MaxHeadDim = (int)(Vk.SubgroupSize * FlashDecodeMaxDpl),
+                    MinHeadDim = (int)Vk.SubgroupSize,
+                    MaxHeadDim = Math.Min((int)(Vk.SubgroupSize * FlashDecodeLengthsMaxDpl), FlashDecodeLengthsMaxHeadDim),
                     MaxQueryTokens = ushort.MaxValue,
                 }, "C.9",
                 (in AttentionCall c) => FlashDecodeLengthsAdmits(in c),
