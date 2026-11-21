@@ -482,7 +482,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
                         {
                             long kOff = headOffset + (long)kPos * headDim;
                             float dot = 0f;
-                            for (int d = 0; d < headDim; d++) dot += qPtr[qOff + d] * kPtr[kOff + d];
+                            for (int d = headDim - 1; d >= 0; d--) dot += qPtr[qOff + d] * kPtr[kOff + d];   // control: reversed order
                             float logit = dot * scale + maskPtr[(long)qPos * seqLen + kPos];
                             logits[kPos] = logit;
                             if (logit > maxLogit) maxLogit = logit;
@@ -490,7 +490,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
 
                         // 2) Stabilized softmax.
                         float sumExp = 0f;
-                        for (int kPos = 0; kPos < seqLen; kPos++)
+                        for (int kPos = seqLen - 1; kPos >= 0; kPos--)   // control: reversed order
                         {
                             float e = MathF.Exp(logits[kPos] - maxLogit);
                             logits[kPos] = e;
@@ -504,7 +504,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
                         // 4) Weighted V combine.
                         long outOff = headOffset + (long)qPos * headDim;
                         for (int d = 0; d < headDim; d++) outPtr[outOff + d] = 0f;
-                        for (int kPos = 0; kPos < seqLen; kPos++)
+                        for (int kPos = seqLen - 1; kPos >= 0; kPos--)   // control: reversed order
                         {
                             float w = logits[kPos] * invDenom;
                             if (w == 0f) continue;
