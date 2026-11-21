@@ -110,12 +110,21 @@ total was compared with the project's `--list-tests` count, since a crashed test
 |---|---|---|---|---|
 | `HartsyInference.Audio.Tests` | 137 | 135 | 0 | 2 |
 | `HartsyInference.Diffusion.Tests` | 383 | 373 | 0 | 10 |
+| `HartsyInference.Core.Tests` | 466 | 466 | 0 | 0 |
+| `HartsyInference.Vision.Tests` | 69 | 65 | 0 | 4 |
+| `HartsyInference.ThreeD.Tests` | 1,434 | 1,412 | 0 | 31 |
+| `HartsyInference.LLM.Tests` (whole project, not only the GPU lane) | 749 | 715 | 0 | 34 |
 
 Expectation written before the runs: no failures. It held. A first pass at `24ff78dbb`, before those two merges, had 132
 and 374 listed with the same two and ten skips and no failures; a review pointed out that it left the migrated code out,
 and the table is the rerun. The skips are real-weight checks whose files are not on this box (word alignment in Audio;
-Sana WM and one LTX Video 2 VAE check in Diffusion), so those cases are unvalidated here, not passed. This is unit and
-parity coverage with synthetic weights; it is not a real generation, and it says nothing about the RTX 4090.
+Sana WM and one LTX Video 2 VAE check in Diffusion), so those cases are unvalidated here, not passed. The last four rows
+were run in a second sitting at the same commit, under the same expectation, and their skips are of the same kind:
+DINOv2 and BiRefNet in Vision; HairDeck, Hunyuan Paint, Pixal3D, P3-SAM, UniRig, X-Part and one Trellis 2 check in
+ThreeD; MOSS-VL and the Kimi tokenizer in LLM. ThreeD ran 1,443 cases where `--list-tests` printed 1,434: nine more than
+listed, which is not the short count a crashed host gives, and its result file ends `Completed` with none aborted; I did
+not find which theories account for the nine. This is unit and parity coverage with synthetic weights; it is not a real
+generation, and it says nothing about the RTX 4090.
 
 The statuses in the first table are as of the commit in its header. When a draft named there merges or changes,
 this file needs the same update.
