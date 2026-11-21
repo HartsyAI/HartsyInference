@@ -4,7 +4,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 public static class DeepSeekV41MoeExecutor
 {
     // Tokens run through one expert together. A stored-form weight is decoded once per call, so batching decodes each expert once per forward instead of once
-    // per token; the cap only bounds the scratch arrays. Every output element is the same sequential dot whatever the batch, so results are bit-identical.
+    // per token; the cap only bounds the scratch arrays. Every output element is the same fixed-order dot whatever the batch, so results are bit-identical.
     private const int BatchRows = 256;
 
     /// <summary>Computes <c>y[t] = sum_j w[t,j] * expert_{idx[t,j]}(x[t]) + shared(x[t])</c>.</summary>
