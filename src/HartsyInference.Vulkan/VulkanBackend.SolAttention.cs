@@ -16,7 +16,7 @@ public sealed partial class VulkanBackend
     /// <remarks>F32, in the reference's five stages. The routing stages are written to reproduce the reference's scores:
     /// their adds, subtracts and multiplies are exact and uncontracted where the driver keeps subnormal values, and a
     /// divide and a square root are exact only where the driver rounds them correctly; the Vulkan specification requires
-    /// neither. The coarse gate is not implemented: a
+    /// neither. The token pass and the coarse gate are ordinary F32 arithmetic. A
     /// call that asks for one is refused. Asking for the routing report reads it back, which waits for the device.</remarks>
     public void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default)
     {
@@ -27,7 +27,6 @@ public sealed partial class VulkanBackend
         long pairs = (long)batch * heads * blocks * blocks;
         if (!routed.IsEmpty && routed.Length != pairs)
             throw new ArgumentException($"The routing report holds {routed.Length} entries; [B, H, blocks, blocks] needs {pairs}.", nameof(routed));
-        if (options.CoarseGate is not null) throw new NotSupportedException("Vulkan Sol-Attn has no coarse gate; run SolAttentionReference for it.");
         // The shaders index with 32-bit unsigned arithmetic, so the operands' element count must fit one.
         if (dim > SolAttentionMaxHeadDim || tokens > ushort.MaxValue || heads > ushort.MaxValue || batch > ushort.MaxValue || pairs > int.MaxValue
             || query.ElementCount > uint.MaxValue)
@@ -60,6 +59,10 @@ public sealed partial class VulkanBackend
         ulong pairBytes = (ulong)pairs * floatBytes;
         // Allocated inside the try, so one that fails leaves none of the earlier ones behind.
         VulkanBuffer? keyMeans = null, valueSums = null, centroids = null, keyMean = null, variance = null, pooled = null, readsBuf = null, outBuf = null;
+        VulkanBuffer? coarseLogits = null, coarse = null;
+        Tensor? gate = options.CoarseGate;
+        // Buffers are always bound at the gate and coarse bindings; without a gate the lengths stand in and are not read.
+        VulkanBuffer gateBuf = gate is null ? lenBuf : GetBuffer(gate);
         bool readsCached = false, outputCached = false;
         try
         {
@@ -71,6 +74,12 @@ public sealed partial class VulkanBackend
             pooled = _xfer.AllocateDevice(pairBytes);
             readsBuf = _xfer.AllocateDevice(pairBytes);
             outBuf = _xfer.AllocateDevice((ulong)output.ElementCount * floatBytes);
+            if (gate is not null)
+            {
+                coarseLogits = _xfer.AllocateDevice(pairBytes);
+                coarse = _xfer.AllocateDevice(summaryBytes);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.sol.coarse", (long)(pairBytes + summaryBytes), count: 2);
+            }
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.sol.workspace", (long)(3 * summaryBytes + 2 * statBytes + 2 * pairBytes), count: 7);
             Span<byte> pc = stackalloc byte[10 * 4];
 
@@ -100,6 +109,18 @@ public sealed partial class VulkanBackend
             Span<ulong> routeBufs = stackalloc ulong[] { pooled.Handle, centroids.Handle, variance.Handle, readsBuf.Handle };
             Dispatch(GetKernel("sol_attn_route", storageBufferCount: 4, default), routeBufs, pc, (uint)blocks, (uint)heads, (uint)batch);
 
+            if (gate is not null)
+            {
+                BinaryWriteUInt(pc, 0, (uint)heads);
+                BinaryWriteUInt(pc, 4, (uint)dim);
+                BinaryWriteUInt(pc, 8, (uint)blocks);
+                BinaryWriteFloat(pc, 12, scale);
+                Span<ulong> logitBufs = stackalloc ulong[] { centroids.Handle, keyMeans.Handle, coarseLogits!.Handle };
+                Dispatch(GetKernel("sol_attn_coarse_logits", storageBufferCount: 3, default), logitBufs, pc[..16], (uint)blocks, (uint)heads, (uint)batch);
+                Span<ulong> coarseBufs = stackalloc ulong[] { coarseLogits.Handle, valueSums.Handle, lenBuf.Handle, coarse!.Handle };
+                Dispatch(GetKernel("sol_attn_coarse", storageBufferCount: 4, default), coarseBufs, pc[..12], (uint)blocks, (uint)heads, (uint)batch);
+            }
+
             BinaryWriteUInt(pc, 0, (uint)tokens);
             BinaryWriteUInt(pc, 4, (uint)heads);
             BinaryWriteUInt(pc, 8, (uint)dim);
@@ -108,12 +129,13 @@ public sealed partial class VulkanBackend
             BinaryWriteUInt(pc, 20, options.Tail ? 1u : 0u);
             BinaryWriteUInt(pc, 24, biasStride);
             BinaryWriteUInt(pc, 28, bias is null ? 0u : 1u);
+            BinaryWriteUInt(pc, 32, gate is null ? 0u : 1u);
             Span<ulong> attendBufs = stackalloc ulong[]
             {
                 qBuf.Handle, kBuf.Handle, vBuf.Handle, keyMean.Handle, pooled.Handle, valueSums.Handle, readsBuf.Handle, lenBuf.Handle,
-                biasBuf.Handle, outBuf.Handle,
+                biasBuf.Handle, outBuf.Handle, gateBuf.Handle, (coarse ?? lenBuf).Handle,
             };
-            Dispatch(GetKernel("sol_attn_attend", storageBufferCount: 10, default), attendBufs, pc[..32], (uint)tokens, (uint)heads, (uint)batch);
+            Dispatch(GetKernel("sol_attn_attend", storageBufferCount: 12, default), attendBufs, pc[..36], (uint)tokens, (uint)heads, (uint)batch);
 
             CacheOutput(output, outBuf);
             outputCached = true;
@@ -128,7 +150,7 @@ public sealed partial class VulkanBackend
         }
         finally
         {
-            foreach (VulkanBuffer? buffer in (ReadOnlySpan<VulkanBuffer?>)[keyMeans, valueSums, centroids, keyMean, variance, pooled])
+            foreach (VulkanBuffer? buffer in (ReadOnlySpan<VulkanBuffer?>)[keyMeans, valueSums, centroids, keyMean, variance, pooled, coarseLogits, coarse])
                 if (buffer is not null) _xfer.FreeDevice(buffer);
         }
         if (routed.IsEmpty) return;

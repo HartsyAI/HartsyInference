@@ -263,6 +263,8 @@ compile_one "sol_attn_key_stats" -- ""
 compile_one "sol_attn_pooled" -- ""
 compile_one "sol_attn_route" -- ""
 compile_one "sol_attn_attend" -- ""
+compile_one "sol_attn_coarse_logits" -- ""
+compile_one "sol_attn_coarse" -- ""
 
 # sdpa_flash_wide: F32 unmasked FlashAttention with sinks or a soft-cap and head dims up to 1024 (AttentionFlashLowering).
 compile_one "sdpa_flash_wide" -- ""

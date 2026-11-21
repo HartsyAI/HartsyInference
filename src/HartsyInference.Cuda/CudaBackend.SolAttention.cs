@@ -21,9 +21,8 @@ public sealed partial class CudaBackend
 
     /// <inheritdoc/>
     /// <remarks>F32, in the reference's five stages. The routing stages compute the reference's scores bit for bit, so the
-    /// routing is the reference's; the token pass is ordinary F32 arithmetic. The coarse gate is not implemented: a call
-    /// that asks for one is refused. Asking for the routing report reads it back from the device, which waits for the
-    /// stream.</remarks>
+    /// routing is the reference's; the token pass and the coarse gate are ordinary F32 arithmetic. Asking for the routing
+    /// report reads it back from the device, which waits for the stream.</remarks>
     public unsafe void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -37,7 +36,6 @@ public sealed partial class CudaBackend
         EnsureKernels();
         if (_kernels is not { HasSolAttention: true })
             throw new NotSupportedException("SolAttention is not available: sol_attn_f32.ptx is not in the Ptx folder.");
-        if (options.CoarseGate is not null) throw new NotSupportedException("CUDA Sol-Attn has no coarse gate; run SolAttentionReference for it.");
         if (dim > SolAttentionMaxHeadDim || !CudaKernels.GridYzFits(heads, batch) || pairs > int.MaxValue)
             throw new NotSupportedException($"CUDA Sol-Attn takes a head dim up to {SolAttentionMaxHeadDim} and a grid of heads x batch; got {query.Shape}.");
 
@@ -56,6 +54,8 @@ public sealed partial class CudaBackend
         nuint pooledBytes = (nuint)(pairs * sizeof(float)), readBytes = (nuint)pairs, outBytes = GpuTransferHelper.ByteSize(output);
         ulong pQ = 0, pK = 0, pV = 0, pLengths = 0, pBias = 0, pOut = 0;
         ulong pKeyMeans = 0, pValueSums = 0, pCentroids = 0, pKeyMean = 0, pVariance = 0, pPooled = 0, pReads = 0;
+        ulong pGate = 0, pCoarseLogits = 0, pCoarse = 0;
+        Tensor? gate = options.CoarseGate;
         bool cachedOutput = false;
         try
         {
@@ -78,6 +78,13 @@ public sealed partial class CudaBackend
             pReads = GpuTransferHelper.AllocateDevice(readBytes);
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.sol.workspace",
                 3 * (long)summaryBytes + 2 * (long)statBytes + (long)pooledBytes + (long)readBytes, count: 7);
+            if (gate is not null)
+            {
+                pGate = GpuTransferHelper.CopyToDevice(gate);
+                pCoarseLogits = GpuTransferHelper.AllocateDevice(pooledBytes);
+                pCoarse = GpuTransferHelper.AllocateDevice(summaryBytes);
+                AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.sol.coarse", (long)pooledBytes + (long)summaryBytes, count: 2);
+            }
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             nint stream = _stream.Handle;
@@ -86,8 +93,13 @@ public sealed partial class CudaBackend
             _kernels.LaunchSolPooled(pPooled, pCentroids, pKeyMeans, pKeyMean, batch, heads, dim, blocks, log2Scale, stream);
             _kernels.LaunchSolRoute(pReads, pPooled, pCentroids, pVariance, batch, heads, dim, blocks, log2Scale, options.Tau, budget,
                 sinkStart, sinkEnd, sinkQueryStart, sinkQueryEnd, stream);
+            if (gate is not null)
+            {
+                _kernels.LaunchSolCoarseLogits(pCoarseLogits, pCentroids, pKeyMeans, batch, heads, dim, blocks, scale, stream);
+                _kernels.LaunchSolCoarse(pCoarse, pCoarseLogits, pValueSums, pLengths, batch, heads, dim, blocks, stream);
+            }
             _kernels.LaunchSolAttend(pOut, pQ, pK, pV, pKeyMean, pPooled, pValueSums, pReads, pLengths, pBias, biasStride, batch, tokens, heads, dim,
-                blocks, log2Scale, options.Tail, stream);
+                blocks, log2Scale, options.Tail, pGate, pCoarse, stream);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
 
@@ -102,7 +114,8 @@ public sealed partial class CudaBackend
         finally
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            foreach (ulong pointer in (ReadOnlySpan<ulong>)[pQ, pK, pV, pLengths, pBias, pKeyMeans, pValueSums, pCentroids, pKeyMean, pVariance, pPooled, pReads])
+            foreach (ulong pointer in (ReadOnlySpan<ulong>)[pQ, pK, pV, pLengths, pBias, pKeyMeans, pValueSums, pCentroids, pKeyMean, pVariance, pPooled, pReads,
+                         pGate, pCoarseLogits, pCoarse])
                 GpuTransferHelper.FreeDevice(pointer);
         }
     }

@@ -4,7 +4,9 @@
 // Per (query token, head, batch): one base-2 softmax over the exactly read keys and, when the tail is on, one pooled
 // entry per unread block weighing its live length. Invocation j is token j of whichever key block is being read.
 // The bias is in natural-log units, [T] (biasStride 0) or [B, T] (biasStride T); -inf masks a key. A buffer is always
-// bound for it; hasBias says whether it is read. Ordinary F32 arithmetic: this stage is compared by tolerance.
+// bound for it; hasBias says whether it is read. With a coarse gate (hasGate), gate * coarse[query block] is added to the
+// row; buffers are always bound for the gate and the coarse values too. Ordinary F32 arithmetic: this stage is compared
+// by tolerance.
 
 #version 460
 
@@ -23,6 +25,8 @@ layout(set = 0, binding = 6) readonly  buffer R_ { uint reads[]; };
 layout(set = 0, binding = 7) readonly  buffer Len_ { int len_data[]; };
 layout(set = 0, binding = 8) readonly  buffer B_ { float bias_data[]; };
 layout(set = 0, binding = 9) writeonly buffer O_ { float o_data[]; };
+layout(set = 0, binding = 10) readonly buffer G_ { float gate_data[]; };
+layout(set = 0, binding = 11) readonly buffer Co_ { float coarse[]; };
 
 layout(push_constant) uniform Push {
     uint tokens;
@@ -33,6 +37,7 @@ layout(push_constant) uniform Push {
     uint tail;
     uint biasStride;
     uint hasBias;
+    uint hasGate;
 } pc;
 
 shared float s_q[256];
@@ -108,6 +113,8 @@ void main() {
     for (uint e = 0u; e < 4u; ++e) {
         uint d = tid + e * 64u;
         if (d >= pc.dim) break;
-        o_data[qAt + d] = acc[e] * inverse;
+        float result = acc[e] * inverse;
+        if (pc.hasGate != 0u) result += gate_data[qAt + d] * coarse[(head * pc.blocks + qb) * pc.dim + d];
+        o_data[qAt + d] = result;
     }
 }
