@@ -31,7 +31,7 @@ What is left falls into four groups:
 | keep: public adapter | 5 | K5, C2, C5, V9, M9 |
 | keep: not a duplicate | 20 | K1 to K4, C1, C3, C4, V5 to V8, V10, M10 to M12, D3, D5 to D8 |
 
-The counts are of table rows (each row may name several symbols; the rows say how many). Two groups of "remove: no caller"
+The counts are of table rows (each row may name several symbols; the rows say how many). In "remove after migrating N callers", N counts files where a row says files (V2, M3) and call sites otherwise (M1, M2, M4 to M8). Three groups of "remove: no caller"
 are not duplicates of the shared path at all: they are dead accessors and diagnostics (section D), listed because they are
 internal, unreferenced, and the same deletion build proves them removable.
 
@@ -164,7 +164,7 @@ SDPA entry builds, and `MergeHeads` (`:362`) is one `Permute0213` that disposes 
 |---|---|---|
 | V1 | `VulkanBackend.TokenMajorStrides` (`VulkanBackend.FlashTiled.cs:30`) | One hit for the name in the whole repository: its declaration. A duplicate of strides the row builds inline. |
 | D1 | `WanVideoBlock` `SelfAttentionStage`, `CrossAttentionStage`, `ImageAttentionStage`, `SelfAttentionF16Stage`, `CrossAttentionF16Stage` | Five declarations and no other hit in any file type. Dead test seams. |
-| D2 | `AttentionStage` on `SeedVr2DitBlock`, `MiniMaxH3Transformer`, `MatrixGame3ActionModule`, `OasisSpatioTemporalBlock` | Same. (`WanS2VAudioInjector.AttentionStage` is **not** in this list: open drafts use it.) |
+| D2 | `AttentionStage` on `SeedVr2DitBlock`, `MiniMaxH3Transformer`, `MatrixGame3ActionModule`, `OasisSpatioTemporalBlock` | Same. (`WanS2VAudioInjector.AttentionStage` is **not** in this list: tests merged in #1028 call it on `main`.) |
 | D4 | `CudaBackend` `CudnnSdpaDiagnostics`, `CudnnSdpaSessionGeneration`, `CudnnSdpaDisposedSessionCount` | One hit each, the declaration. Leaves two write-only counter fields to delete after. |
 
 V1 is the only one that is a duplicate. D1, D2 and D4 are dead members; none of the four changes behavior a user can observe,
@@ -178,7 +178,8 @@ The scratch edit deleted V1, D1, D2 and D4 and also dropped the `allowF16` param
 `tests/python-reference/trellis2_stage_parity/csharp/Capture/Capture.csproj`, is `CS1529` at `Program.cs(29,1)`, a `using`
 placed after statements at line 29 of a file this edit did not touch (it is the committed `HEAD` text), so it cannot depend on
 the edit. Assemblies named in `InternalsVisibleTo` that have no project here (`HartsyInference.Cuda.Tests`,
-`HartsyInference.Vulkan.Tests`) are not built by this, which is why the greps, not the build, cover them. The edit was reverted with `git checkout -- src/`.
+`HartsyInference.Vulkan.Tests`) are not built by this; `tests/HartsyInference.Cuda.Tests/` has tracked `.cs` files (one:
+`NcclRankCommTests.cs`) but no `.csproj`, so the deletion build does not cover it and the greps do. The edit was reverted with `git checkout -- src/`.
 
 ### Public adapters confirmed kept
 
@@ -198,10 +199,12 @@ being public although the ledger does not name them: `CudaKernels.LaunchSoftmax`
 - **M6 to M8** (Idol, Trellis, CoLa3D): route selection and exception classes for malformed input may differ on CUDA and
   Vulkan; the ledger's "Removal evidence" section asks for the caller, configuration, explicit policy, route evidence and a
   real-generation result first.
-- **M4 and M5**: the output is a copy and does not change; on a GPU backend the host loop's device-to-host sync goes away, which
-  is a timing change only.
+- **M1** (`CausalGqaAttention`): its `ArgumentNullException` and the `ArgumentException` for heads that do not divide evenly
+  go, so a malformed call gets whatever `FlashAttention` raises. Small: the helper is `internal static` with one caller, but it is
+  the same kind of change as K3 and C1.
 
-V1, V2, V3, V4, D1, D2, D4 and M1 to M3 do not change observable behavior.
+V1, V2, V3, V4, D1, D2, D4, M2 and M3 do not change observable behavior. M4 and M5 change timing only: the output is a copy, and
+on a GPU backend the host loop's device-to-host sync goes away.
 
 ### Leads, not findings
 
@@ -227,14 +230,15 @@ V1, V2, V3, V4, D1, D2, D4 and M1 to M3 do not change observable behavior.
 - Consumers of `JointAttention` (Flux, SD3 and the like) and `AttentionLayer` wrappers such as `Kandinsky5BlockOps.Attention`,
   for pure forwarders.
 - Open pull requests and other worktrees beyond the symbol check on `origin/main` and the K02 branch tip; any other branch may
-  use a symbol I call dead. I did not fetch, so even those refs are as last updated locally.
+  use a symbol I call dead. The refs were fetched once, when `origin/main` was `b9e56b9ef`, and were not refreshed after that.
 - The scripts' limits: the identifier count does not look inside `tools/` as a caller class of its own (it is a repository-wide
   count), and a common name such as `Attend` or `MergeHeads` cannot be judged by count alone, so those rows were read by hand;
   the artifact check counts any quoted name in a `.cs` file as a load, so a name quoted only in a test or a comment would pass
   it (the entry check does not have this limit for the entries it names).
 - Assemblies named in `InternalsVisibleTo` that have no project in this repository (`HartsyInference.Cuda.Tests`,
   `HartsyInference.Vulkan.Tests`, the Audio phonemizer and ModelAssets tokenizer test assemblies): any caller in them is
-  invisible to the deletion build; the greps cover every `.cs` file in the tree, including `tests/HartsyInference.Cuda.Tests/`.
+  invisible to the deletion build; the greps cover every tracked `.cs` file, including the source in
+  `tests/HartsyInference.Cuda.Tests/`, which exists without a project.
 
 ## TL;DR
 
