@@ -102,29 +102,43 @@ The IndexTTS perceiver and the GPT-SoVITS MRTE were a few milliseconds at their 
 The K-series is plan items K01 to K09 of `proposed-queue.md`: the kernel work (INT8 attention, decode with lengths,
 merges, Sol-Attn) that landed between the first audit and this update.
 
-Whole test projects at `main` `f28b0f384` on the RTX 3060 box, every backend the box has, on 2026-11-21. That commit has
-the merged #1026 and #1028, so the totals include `T5Gemma2AttentionTests` and `WanS2VAudioInjectorTests`. Each
-total was compared with the project's `--list-tests` count, since a crashed test host can still print a pass.
+Whole test projects at `main` `f28b0f384` on the RTX 3060 box, every backend the box has, on 2026-11-21, in two
+sittings (Audio and Diffusion, then the other four). That commit has the merged #1026 and #1028, so the Audio and
+Diffusion totals include `T5Gemma2AttentionTests` and `WanS2VAudioInjectorTests`.
 
-| Project | Listed | Passed | Failed | Skipped |
-|---|---|---|---|---|
-| `HartsyInference.Audio.Tests` | 137 | 135 | 0 | 2 |
-| `HartsyInference.Diffusion.Tests` | 383 | 373 | 0 | 10 |
-| `HartsyInference.Core.Tests` | 466 | 466 | 0 | 0 |
-| `HartsyInference.Vision.Tests` | 69 | 65 | 0 | 4 |
-| `HartsyInference.ThreeD.Tests` | 1,434 | 1,412 | 0 | 31 |
-| `HartsyInference.LLM.Tests` (whole project, not only the GPU lane) | 749 | 715 | 0 | 34 |
+| Project | Listed | Ran | Passed | Failed | Skipped | Passed after printing `SKIPPED` |
+|---|---|---|---|---|---|---|
+| `HartsyInference.Audio.Tests` | 137 | 137 | 135 | 0 | 2 | 0 |
+| `HartsyInference.Diffusion.Tests` | 383 | 383 | 373 | 0 | 10 | 1 |
+| `HartsyInference.Core.Tests` | 466 | 466 | 466 | 0 | 0 | 2 |
+| `HartsyInference.Vision.Tests` | 69 | 69 | 65 | 0 | 4 | 0 |
+| `HartsyInference.ThreeD.Tests` | 1,434 | 1,443 | 1,412 | 0 | 31 | 55 |
+| `HartsyInference.LLM.Tests` (whole project, not only the GPU lane) | 749 | 749 | 715 | 0 | 34 | 2 |
 
-Expectation written before the runs: no failures. It held. A first pass at `24ff78dbb`, before those two merges, had 132
-and 374 listed with the same two and ten skips and no failures; a review pointed out that it left the migrated code out,
-and the table is the rerun. The skips are real-weight checks whose files are not on this box (word alignment in Audio;
-Sana WM and one LTX Video 2 VAE check in Diffusion), so those cases are unvalidated here, not passed. The last four rows
-were run in a second sitting at the same commit, under the same expectation, and their skips are of the same kind:
-DINOv2 and BiRefNet in Vision; HairDeck, Hunyuan Paint, Pixal3D, P3-SAM, UniRig, X-Part and one Trellis 2 check in
-ThreeD; MOSS-VL and the Kimi tokenizer in LLM. ThreeD ran 1,443 cases where `--list-tests` printed 1,434: nine more than
-listed, which is not the short count a crashed host gives, and its result file ends `Completed` with none aborted; I did
-not find which theories account for the nine. This is unit and parity coverage with synthetic weights; it is not a real
-generation, and it says nothing about the RTX 4090.
+Expectation written before the runs: no failures. It held, and every result file ends `Completed` with none aborted. A
+first pass of Audio and Diffusion at `24ff78dbb`, before those two merges, had 132 and 374 listed with the same two and
+ten skips and no failures; a review pointed out that it left the migrated code out, and their rows are the rerun.
+
+How to read the columns:
+
+- **Listed against ran.** A crashed test host prints a pass over a short count, so each run was compared with the
+  project's `--list-tests` count. ThreeD ran nine more than listed, for a known reason: three theories in
+  `MeshPostProcess/UvUnwrapperTests.cs` take four meshes from `MemberData`, the mesh type cannot be serialized, so
+  discovery lists each theory once and the run expands it to four cases (3 x 3 = 9). The count to hold a ThreeD run to
+  is therefore 1,443, not the listed 1,434.
+- **Skipped** are cases the framework reports as not executed: real-weight checks whose files are not on this box. In
+  Audio, word alignment; in Diffusion, Sana WM and one LTX Video 2 VAE check; in Vision, DINOv2 and BiRefNet; in ThreeD,
+  HairDeck, Hunyuan Paint, Pixal3D, P3-SAM, UniRig, X-Part and one Trellis 2 check; in LLM, MOSS-VL and the Kimi
+  tokenizer. They are unvalidated here, not passed.
+- **Passed after printing `SKIPPED`** are cases the framework counts as passed although the test printed `SKIPPED` and
+  returned early, so they validated nothing either: the two- and eight-GPU NCCL tests in Core and the two sharded
+  Kimi tests in LLM (one GPU here), one T5 reference check in Diffusion, and 55 real-weight parity cases in ThreeD
+  (Hunyuan 3D shape, Budget, Idol, paint bake, P3-SAM geometry and others). The count is of tests whose captured
+  output holds the word; a test that returns early without printing it is not counted, and I did not search for
+  those.
+
+This is unit and parity coverage with synthetic weights; it is not a real generation, and it says nothing about the
+RTX 4090.
 
 The statuses in the first table are as of the commit in its header. When a draft named there merges or changes,
 this file needs the same update.
