@@ -66,7 +66,7 @@ refused, and so are paged keys and values. A call may also name an **LSE output*
 excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
 takes such a call through it. On CUDA and on Vulkan one row declares both, `flash.decode.lengths`: F32 head-major Q and
 the `[B, Sq, Hq × D]` output over a head-major cache. CUDA takes an F32, F16 or BF16 cache, head dim 64 or 128 and at
-most 16 query heads per key head; Vulkan an F32 cache, a head dim of one to four subgroup widths and at most 8. Each
+most 16 query heads per key head; Vulkan an F32 cache, a head dim of one to eight subgroup widths (256 at 32 lanes) and at most 8. Each
 takes only calls with sequence lengths, so an LSE on a call with one shared length is still refused on a GPU. Both
 kernels cut the keys into chunks sized from the longest sequence of the call, so the order a sequence's keys are summed
 in, and with it the last bits of its result, depends on the other sequences' lengths. Each result stays within the

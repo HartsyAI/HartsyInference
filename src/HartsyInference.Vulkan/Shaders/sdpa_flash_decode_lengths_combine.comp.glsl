@@ -12,7 +12,7 @@ layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint LANES = 32;
 layout(constant_id = 2) const uint DPL = 2;
 
-#define MAX_DPL 4
+#define MAX_DPL 8
 #define NEG_INF (-1.0 / 0.0)
 
 layout(set = 0, binding = 0) readonly buffer Part_ { float part_data[]; };

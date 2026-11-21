@@ -32,7 +32,7 @@ public sealed partial class VulkanBackend
         uint lanes = Vk.SubgroupSize;
         int group = c.KvGroup, dim = c.QkHeadDim;
         long rows = (long)c.Batch * c.QueryTokens;
-        if (lanes == 0 || (Vk.SubgroupOps & VkSubgroupFeatureFlags.Arithmetic) == 0 || dim % lanes != 0 || dim / lanes > FlashDecodeMaxDpl
+        if (lanes == 0 || (Vk.SubgroupOps & VkSubgroupFeatureFlags.Arithmetic) == 0 || dim % lanes != 0 || dim / lanes > FlashDecodeLengthsMaxDpl
             || group < 1 || group > FlashDecodeMaxGroup || c.Heads != c.KvHeads * group || c.ValueHeadDim != dim
             || c.Query.Layout != AttentionLayout.HeadMajor || c.Key.Layout != AttentionLayout.HeadMajor
             || c.Value.Layout != AttentionLayout.HeadMajor || c.Output.Layout != AttentionLayout.TokenMajor

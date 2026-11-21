@@ -23,7 +23,7 @@ layout(constant_id = 1) const uint GROUP = 1;
 layout(constant_id = 2) const uint DPL = 2;
 
 #define MAX_GROUP 8
-#define MAX_DPL 4
+#define MAX_DPL 8
 #define NEG_INF (-1.0 / 0.0)
 
 layout(set = 0, binding = 0) readonly  buffer Q_ { float q_data[]; };
