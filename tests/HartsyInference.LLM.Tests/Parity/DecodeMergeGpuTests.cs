@@ -6,7 +6,7 @@ using HartsyInference.Vulkan;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
-/// <summary>The speculative-decode merge on CUDA and on Vulkan against <see cref="DecodeMergeReference"/>, and on CUDA
+/// <summary>The speculative-decode merge on CUDA and on Vulkan against <see cref="DecodeMergeReference"/>, and on each
 /// chained after the decode that leaves the prefix output and its LSE on the device. Tolerances were fixed before either
 /// kernel first ran: 2e-5 against the reference for one merge, 5e-5 for a decode and a merge chained against one causal
 /// decode.</summary>
@@ -128,11 +128,23 @@ public sealed class DecodeMergeGpuTests
     /// then the merge, with nothing read back in between. The result is the causal decode over a cache that already holds
     /// the step's rows.</summary>
     [CudaFact]
-    public void ADecodeThenAMergeOnTheDeviceIsTheCausalDecodeOverTheJoinedCache()
+    public void OnCudaADecodeThenAMergeOnTheDeviceIsTheCausalDecodeOverTheJoinedCache()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        ADecodeThenAMergeOnTheDeviceIsTheCausalDecodeOverTheJoinedCache(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanADecodeThenAMergeOnTheDeviceIsTheCausalDecodeOverTheJoinedCache()
+    {
+        using VulkanBackend backend = new();
+        ADecodeThenAMergeOnTheDeviceIsTheCausalDecodeOverTheJoinedCache(backend);
+    }
+
+    private static void ADecodeThenAMergeOnTheDeviceIsTheCausalDecodeOverTheJoinedCache(IBackend backend)
     {
         const int batch = 2, heads = 8, kvHeads = 2, dim = 64, rows = 5, capacity = 120;
         int[] prefix = [100, 37];
-        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         using Step step = new(batch, heads, kvHeads, dim, rows, capacity, prefix);
         using Tensor devicePrefix = new(step.Prefix.Shape, DType.F32);
         using Tensor deviceLse = new(step.Lse.Shape, DType.F32);

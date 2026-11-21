@@ -1,15 +1,17 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Vulkan;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
-/// <summary>The CUDA decode that takes a key length per sequence and returns the LSE (row <c>flash.decode.lengths</c>),
-/// against the host reference for the same call. Tolerances were fixed before the kernel first ran: 2e-5 on the output,
-/// and 2e-5 relative to the larger of 1 and the value on the LSE.</summary>
+/// <summary>The CUDA and Vulkan decodes that take a key length per sequence and return the LSE (row
+/// <c>flash.decode.lengths</c> on each), against the host reference for the same call. Tolerances were fixed before either
+/// kernel first ran: 2e-5 on the output, and 2e-5 relative to the larger of 1 and the value on the LSE.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
-public sealed class DecodeLengthsCudaTests
+public sealed class DecodeLengthsGpuTests
 {
     private static Tensor Random(TensorShape shape, int seed)
     {
@@ -41,7 +43,7 @@ public sealed class DecodeLengthsCudaTests
             AttentionCall.FromDecodeWithLengths(Output, Query, Key, Value, lengths, causal, 1f / MathF.Sqrt(Query.Shape[3]), lse ? Lse : null);
 
         /// <summary>Runs the call on the backend and on the host reference, and compares.</summary>
-        public AttentionEvidenceEvent[] RunAndCompare(CudaBackend backend, int[] lengths, bool causal, bool lse)
+        public AttentionEvidenceEvent[] RunAndCompare(IBackend backend, int[] lengths, bool causal, bool lse)
         {
             AttentionCall call = Call(lengths, causal, lse);
             AttentionCall reference = call with { Output = call.Output with { Storage = Expected }, Lse = lse ? ExpectedLse : null };
@@ -88,10 +90,32 @@ public sealed class DecodeLengthsCudaTests
 
     [CudaTheory]
     [MemberData(nameof(Shapes))]
-    public void TheKernelMatchesTheHostReferenceWithAndWithoutTheLse(int batch, int heads, int kvHeads, int dim, int rows, int capacity,
+    public void TheCudaKernelMatchesTheHostReferenceWithAndWithoutTheLse(int batch, int heads, int kvHeads, int dim, int rows, int capacity,
         int[] lengths, bool causal)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        MatchesTheHostReference(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal);
+    }
+
+    /// <summary>Every shape the Vulkan split shader is built for: its group limit is 8 query heads a key head.</summary>
+    [VulkanFact]
+    public void TheVulkanKernelMatchesTheHostReferenceWithAndWithoutTheLse()
+    {
+        using VulkanBackend backend = new();
+        int ran = 0;
+        foreach (object[] shape in Shapes)
+        {
+            int heads = (int)shape[1], kvHeads = (int)shape[2];
+            if (heads / kvHeads > 8) continue;
+            MatchesTheHostReference(backend, (int)shape[0], heads, kvHeads, (int)shape[3], (int)shape[4], (int)shape[5], (int[])shape[6], (bool)shape[7]);
+            ran++;
+        }
+        Assert.Equal(7, ran);
+    }
+
+    private static void MatchesTheHostReference(IBackend backend, int batch, int heads, int kvHeads, int dim, int rows, int capacity,
+        int[] lengths, bool causal)
+    {
         using Case shape = new(batch, heads, kvHeads, dim, rows, capacity);
         foreach (bool lse in (ReadOnlySpan<bool>)[true, false])
         {
@@ -109,10 +133,22 @@ public sealed class DecodeLengthsCudaTests
     }
 
     [CudaFact]
-    public void RowsPastASequencesLengthAreNeverRead()
+    public void OnCudaRowsPastASequencesLengthAreNeverRead()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        RowsPastASequencesLengthAreNeverRead(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanRowsPastASequencesLengthAreNeverRead()
+    {
+        using VulkanBackend backend = new();
+        RowsPastASequencesLengthAreNeverRead(backend);
+    }
+
+    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend)
     {
         int[] lengths = [130, 7];
-        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         using Case shape = new(2, 8, 2, 64, 3, 200);
         for (int b = 0; b < 2; b++)
             for (int kh = 0; kh < 2; kh++)
@@ -129,9 +165,33 @@ public sealed class DecodeLengthsCudaTests
         }
     }
 
+    /// <summary>The Vulkan row's limits: a group above 8, an F16 cache and a strided view are refused whole.</summary>
+    [VulkanFact]
+    public void OnVulkanACallOutsideTheKernelIsRefusedAndWritesNothing()
+    {
+        using VulkanBackend backend = new();
+        using Case wide = new(1, 16, 1, 64, 1, 96);
+        wide.Output.AsSpan<float>().Fill(-7f);
+        AttentionCall call = wide.Call([80], causal: true, lse: false);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+        using Case shape = new(2, 8, 2, 64, 1, 96);
+        using Tensor halfKey = new(shape.Key.Shape, DType.F16);
+        using Tensor halfValue = new(shape.Key.Shape, DType.F16);
+        shape.Output.AsSpan<float>().Fill(-7f);
+        AttentionCall half = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, halfValue, [80, 70], true, 0.125f);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in half));
+        using Tensor longer = Random(new TensorShape(2, 8, 2, 64), 54);
+        AttentionCall whole = shape.Call([80, 70], causal: true, lse: false);
+        AttentionCall view = whole with { Query = new AttentionOperand(longer, AttentionLayout.HeadMajor, 2, 8, 1, 64, 64, 8 * 2 * 64, 2 * 64, 64) };
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in view));
+        backend.Sync();
+        Assert.Equal(-1, wide.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+        Assert.Equal(-1, shape.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+    }
+
     /// <summary>The row takes only calls with sequence lengths: a call it is not built for is refused whole.</summary>
     [CudaFact]
-    public void ACallOutsideTheKernelIsRefusedAndWritesNothing()
+    public void OnCudaACallOutsideTheKernelIsRefusedAndWritesNothing()
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         // Head dim 32 has no decode kernel.
