@@ -27,11 +27,20 @@ public sealed partial class CudaKernels
     /// A build without the file leaves this false, and a paged call is then gathered into a contiguous buffer.</summary>
     public bool HasDecodeGqaPaged => _decPagedD128 != 0 && _decPagedD64 != 0;
 
-    private nint _decLengthsD128, _decLengthsD64, _decLengthsCombine;
+    // Index: cache type (0 = F32, 1 = F16, 2 = BF16) * 2 + (head dim 128 ? 0 : 1).
+    private readonly nint[] _decLengths = new nint[6];
+    private nint _decLengthsCombine;
 
     /// <summary>True when flash_attn_decode_lengths.ptx loaded: the grouped-query decode that takes a key length per sequence
     /// and returns the LSE. A build without the file leaves this false, and such a call is then refused.</summary>
-    public bool HasDecodeLengths => _decLengthsD128 != 0 && _decLengthsD64 != 0 && _decLengthsCombine != 0;
+    public bool HasDecodeLengths => _decLengthsCombine != 0 && Array.TrueForAll(_decLengths, static fn => fn != 0);
+
+    /// <summary>Cache types the lengths decode reads: keys and values of one of F32, F16 and BF16.</summary>
+    public static bool DecodeLengthsReads(HartsyInference.Core.Tensors.DType cache) => DecodeLengthsCacheIndex(cache) >= 0;
+
+    private static int DecodeLengthsCacheIndex(HartsyInference.Core.Tensors.DType cache) =>
+        cache == HartsyInference.Core.Tensors.DType.F32 ? 0 : cache == HartsyInference.Core.Tensors.DType.F16 ? 1
+        : cache == HartsyInference.Core.Tensors.DType.BF16 ? 2 : -1;
 
     private nint _decMerge;
 
@@ -103,8 +112,12 @@ public sealed partial class CudaKernels
         if (CanLoad(lengths))
         {
             _decodeLengthsModule = LoadOwnedModule(lengths);
-            _decLengthsD128 = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_f32_d128");
-            _decLengthsD64 = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_f32_d64");
+            string[] types = ["f32", "f16", "bf16"];
+            for (int t = 0; t < types.Length; t++)
+            {
+                _decLengths[t * 2] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d128");
+                _decLengths[t * 2 + 1] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d64");
+            }
             _decLengthsCombine = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_combine");
         }
         string merge = Ptx("flash_attn_decode_merge");
@@ -202,11 +215,15 @@ public sealed partial class CudaKernels
     /// and query row). Query row <c>r</c> of sequence <c>b</c> reads the first <c>min(lengths[b], capacity)</c> rows of its
     /// cache, or under the causal rule the rows up to position <c>length − rows + r</c>.</summary>
     /// <param name="lengths">Device pointer to one I32 length per sequence.</param>
+    /// <param name="cache">The type of the keys and values: F32, F16 or BF16.</param>
     public unsafe void LaunchFlashDecodeLengths(ulong partialM, ulong partialL, ulong partialAcc, ulong q, ulong k, ulong v, ulong lengths,
-        int batch, int rows, int hq, int d, int hkv, int capacity, int kvGroup, bool causal, float scale, int splits, int chunk, nint stream)
+        int batch, int rows, int hq, int d, int hkv, int capacity, int kvGroup, bool causal, float scale, int splits, int chunk,
+        HartsyInference.Core.Tensors.DType cache, nint stream)
     {
-        nint fn = d == 128 ? _decLengthsD128 : _decLengthsD64;
-        if (fn == 0 || !DecodeGqaSupports(d, kvGroup)) throw new InvalidOperationException($"flash_attn_decode_lengths has no kernel for head dim {d}, group {kvGroup}.");
+        int type = DecodeLengthsCacheIndex(cache);
+        nint fn = type < 0 ? 0 : _decLengths[type * 2 + (d == 128 ? 0 : 1)];
+        if (fn == 0 || !DecodeGqaSupports(d, kvGroup))
+            throw new InvalidOperationException($"flash_attn_decode_lengths has no kernel for head dim {d}, group {kvGroup}, a {cache} cache.");
         ulong mA = partialM, lA = partialL, accA = partialAcc, qA = q, lenA = lengths, kA = k, vA = v;
         int hqA = hq, hkvA = hkv, lkA = capacity, sA = rows, groupA = kvGroup, causalA = causal ? 1 : 0, gA = splits, chunkA = chunk;
         float scaleA = scale;
@@ -214,7 +231,7 @@ public sealed partial class CudaKernels
         a[0] = &mA; a[1] = &lA; a[2] = &accA; a[3] = &qA; a[4] = &hqA; a[5] = &hkvA; a[6] = &lkA; a[7] = &lenA; a[8] = &sA;
         a[9] = &groupA; a[10] = &causalA; a[11] = &scaleA; a[12] = &gA; a[13] = &chunkA; a[14] = &kA; a[15] = &vA;
         CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, (uint)(batch * rows), 256, 1, 1,
-            (uint)DecodeSharedBytes(d, kvGroup, f16Kv: false), stream, (nint)a, 0).ThrowOnError();
+            (uint)DecodeSharedBytes(d, kvGroup, f16Kv: type != 0), stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Merges the partial states <see cref="LaunchFlashDecodeLengths"/> wrote: the output as <c>[B, S, Hq × D]</c> and,

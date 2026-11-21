@@ -65,8 +65,8 @@ refused, and so are paged keys and values. A call may also name an **LSE output*
 `[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
 excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
 takes such a call through it. On CUDA and on Vulkan one row declares both, `flash.decode.lengths`: F32 head-major Q, K
-and V and the `[B, Sq, Hq × D]` output. CUDA takes head dim 64 or 128 and at most 16 query heads per key head; Vulkan a
-head dim of one to four subgroup widths and at most 8. Each takes only calls with sequence lengths, so an LSE on a call
+and the `[B, Sq, Hq × D]` output over a head-major cache. CUDA takes an F32, F16 or BF16 cache, head dim 64 or 128 and at
+most 16 query heads per key head; Vulkan an F32 cache, a head dim of one to four subgroup widths and at most 8. Each takes only calls with sequence lengths, so an LSE on a call
 with one shared length is still refused on a GPU.
 
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
