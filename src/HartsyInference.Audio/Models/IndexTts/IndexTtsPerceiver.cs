@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.IndexTts;
@@ -114,48 +115,24 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
         Tensor kv = WhisperOps.ProjectLinear(backend, kvInput, _toKv[layer]!, null, 1, kvLen, _dim, 2 * dimInner);
         kvInput.Dispose();
 
-        float* qp = (float*)q.DataPointer;
-        float* kvAll = (float*)kv.DataPointer;   // [1, kvLen, 2*dimInner] — k then v per row
-
-        Tensor outMerged = new(new TensorShape(1, _numLatents, dimInner), DType.F32);
-        float* om = (float*)outMerged.DataPointer;
-        float scale = 1f / MathF.Sqrt(_dimHead);
-        float[] scores = new float[kvLen];
-
-        for (int h = 0; h < _heads; h++)
-        {
-            int hOff = h * _dimHead;
-            for (int i = 0; i < _numLatents; i++)
-            {
-                float* qi = qp + (long)i * dimInner + hOff;
-                float maxS = float.NegativeInfinity;
-                for (int j = 0; j < kvLen; j++)
-                {
-                    float* kj = kvAll + (long)j * 2 * dimInner + hOff;
-                    float dot = 0f;
-                    for (int e = 0; e < _dimHead; e++) dot += qi[e] * kj[e];
-                    float s = dot * scale;
-                    scores[j] = s;
-                    if (s > maxS) maxS = s;
-                }
-                float sum = 0f;
-                for (int j = 0; j < kvLen; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
-                float invSum = 1f / sum;
-                float* oi = om + (long)i * dimInner + hOff;
-                for (int e = 0; e < _dimHead; e++) oi[e] = 0f;
-                for (int j = 0; j < kvLen; j++)
-                {
-                    float a = scores[j] * invSum;
-                    float* vj = kvAll + (long)j * 2 * dimInner + dimInner + hOff;
-                    for (int e = 0; e < _dimHead; e++) oi[e] += a * vj[e];
-                }
-            }
-        }
-        q.Dispose(); kv.Dispose();
+        Tensor outMerged = Attend(backend, q, kv, _heads, _dimHead);
+        kv.Dispose();
 
         Tensor o = WhisperOps.ProjectLinear(backend, outMerged, _toOut[layer]!, null, 1, _numLatents, dimInner, _dim);
         outMerged.Dispose();
         return o;
+    }
+
+    /// <summary>Unmasked multi-head attention of <paramref name="q"/> <c>[1, Sq, heads·dimHead]</c>, which it takes over, over
+    /// <paramref name="kv"/> <c>[1, Skv, 2·heads·dimHead]</c>, each row holding its key then its value. Returns
+    /// <c>[1, Sq, heads·dimHead]</c>.</summary>
+    internal static Tensor Attend(IBackend backend, Tensor q, Tensor kv, int heads, int dimHead)
+    {
+        int dimInner = heads * dimHead;
+        Tensor k = new(new TensorShape(1, kv.Shape[1], dimInner), DType.F32), v = new(k.Shape, DType.F32);
+        backend.SliceLastDim(k, kv, 0);
+        backend.SliceLastDim(v, kv, dimInner);
+        return AttentionLayer.Shared(heads, dimHead, computeDType: DType.F32).AttendFlat(backend, q, k, v, q.Shape, default);
     }
 
     /// <summary>GEGLU feed-forward: <c>Linear(dim→2·inner) → split → gelu(gate)·x → Linear(inner→dim)</c>.</summary>
