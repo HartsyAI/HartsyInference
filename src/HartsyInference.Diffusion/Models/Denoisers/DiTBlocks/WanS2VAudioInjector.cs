@@ -114,29 +114,18 @@ public sealed unsafe class WanS2VAudioInjector
         backend.AffineBroadcastLastDim(adain, normed, scale1p, shift);
         normed.Dispose(); scale1p.Dispose(); shift.Dispose();
 
-        // Q from the modulated video tokens; K/V from the audio tokens; full-dim RMSNorm QK-norm.
-        Tensor q = new Tensor(new TensorShape(seqLen, _dim), DType.F32); backend.Linear(q, adain, inj.QW!, inj.QB); adain.Dispose();
+        // Q from the modulated video tokens; K/V from the audio tokens; full-dim RMSNorm QK-norm. Each is shaped
+        // [t, tokens, dim]: one batch item a frame.
+        Tensor q = new Tensor(new TensorShape(t, n, _dim), DType.F32); backend.Linear(q, adain, inj.QW!, inj.QB); adain.Dispose();
         Tensor qn = new Tensor(q.Shape, DType.F32); backend.RmsNorm(qn, q, inj.NQ!, _eps); q.Dispose();
-        int kvRows = t * nTok;
-        Tensor k = new Tensor(new TensorShape(kvRows, _dim), DType.F32); backend.Linear(k, audioLocal, inj.KW!, inj.KB);
+        Tensor k = new Tensor(new TensorShape(t, nTok, _dim), DType.F32); backend.Linear(k, audioLocal, inj.KW!, inj.KB);
         Tensor kn = new Tensor(k.Shape, DType.F32); backend.RmsNorm(kn, k, inj.NK!, _eps); k.Dispose();
-        Tensor v = new Tensor(new TensorShape(kvRows, _dim), DType.F32); backend.Linear(v, audioLocal, inj.VW!, inj.VB);
+        Tensor v = new Tensor(new TensorShape(t, nTok, _dim), DType.F32); backend.Linear(v, audioLocal, inj.VW!, inj.VB);
 
-        // Per-frame attention: frame ti's n video tokens attend only to its nTok audio tokens. All slicing stays
-        // on-device; per-frame outputs are concatenated once at the end.
-        Tensor[] frameOuts = new Tensor[t];
-        for (int ti = 0; ti < t; ti++)
-        {
-            Tensor qF = new Tensor(new TensorShape(n, _dim), DType.F32); backend.SliceRows(qF, qn, ti * n);
-            Tensor kF = new Tensor(new TensorShape(nTok, _dim), DType.F32); backend.SliceRows(kF, kn, ti * nTok);
-            Tensor vF = new Tensor(new TensorShape(nTok, _dim), DType.F32); backend.SliceRows(vF, v, ti * nTok);
-            frameOuts[ti] = _attention.AttendFlat(backend, qF, kF, vF, new TensorShape(n, _dim), default);
-        }
-        qn.Dispose(); kn.Dispose(); v.Dispose();
-
-        Tensor attnFlat = new Tensor(new TensorShape(seqLen, _dim), DType.F32);
-        backend.Concat(attnFlat, frameOuts, 0);
-        foreach (Tensor f in frameOuts) f.Dispose();
+        // One call for every frame: frame ti's n video tokens attend only to its nTok audio tokens, because each frame
+        // is a batch item. It was one call a frame, with three slices before it and a concat after. The layer takes
+        // the three operands over and disposes them.
+        Tensor attnFlat = _attention.AttendFlat(backend, qn, kn, v, new TensorShape(seqLen, _dim), default);
 
         Tensor residual = new Tensor(new TensorShape(seqLen, _dim), DType.F32);
         backend.Linear(residual, attnFlat, inj.OW!, inj.OB);
