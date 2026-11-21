@@ -125,7 +125,7 @@
       "probabilities": "unsigned-int8",
       "state": "f32"
     },
-    "hartsy_current": "partial: Vulkan only, unused. VulkanBackend quantizes Q and K with the four transforms (H4, H64, signed and padded H128) and attends with u8 probabilities and F32 state (QuantizeInt8AttentionRows, Keys, Values and Queries; Int8AttentionU8): unmasked, per-key K scales, keys centered by their mean over one segment, F32 operands at padded head dim 64, 128 or 256. No representative-key center, no thread-class K scales, no masks. CUDA has no rotation",
+    "hartsy_current": "partial: Vulkan only, unused. VulkanBackend quantizes Q and K with the four transforms (H4, H64, signed and padded H128) and attends with u8 probabilities and F32 state (QuantizeInt8AttentionRows, Keys, Values and Queries; Int8AttentionU8): unmasked, per-key K scales, keys centered by their mean over one segment, F32 operands at padded head dim 64, 128 or 256. No representative-key center, no thread-class K scales, no masks. The CUDA INT8 attention rows do not rotate: the backend has a general Hadamard operation, and those kernels do not use it",
     "required_final": [
       "cuda",
       "vulkan"
