@@ -297,16 +297,13 @@ public sealed class ControlFoleyStyleEncoder : IDisposable
     internal static float[] SelfAttention(IBackend backend, float[] qkv, int frames, int dim, int heads)
     {
         TensorShape rows = new(1, frames, dim);
+        using Tensor packed = DacOps.FromHost(qkv, 1, frames, 3 * dim);
         Tensor q = new(rows, DType.F32), k = new(rows, DType.F32), v = new(rows, DType.F32);
-        for (int i = 0; i < frames; i++)
-        {
-            ReadOnlySpan<float> row = qkv.AsSpan(i * 3 * dim, 3 * dim);
-            row[..dim].CopyTo(q.AsSpan<float>().Slice(i * dim, dim));
-            row.Slice(dim, dim).CopyTo(k.AsSpan<float>().Slice(i * dim, dim));
-            row.Slice(2 * dim, dim).CopyTo(v.AsSpan<float>().Slice(i * dim, dim));
-        }
+        backend.SliceLastDim(q, packed, 0);
+        backend.SliceLastDim(k, packed, dim);
+        backend.SliceLastDim(v, packed, 2 * dim);
         using Tensor attended = AttentionLayer.Shared(heads, dim / heads, computeDType: DType.F32).AttendFlat(backend, q, k, v, rows, default);
-        return attended.AsReadOnlySpan<float>().ToArray();
+        return DacOps.ToHost(attended);
     }
 
     private sealed record Layer(Tensor Norm1W, Tensor Norm1B, Tensor InW, Tensor OutW, Tensor Norm2W, Tensor Norm2B, Tensor Fc1W,

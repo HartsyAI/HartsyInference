@@ -145,7 +145,8 @@ public sealed class FormerAttentionLoopTests
         return merged;
     }
 
-    /// <summary>All three sites at the geometry their models have (read from the model code) and at small odd shapes. With
+    /// <summary>Reading a result on the host waits for the device, so no case needs a sync of its own. All three sites at
+    /// the geometry their models have (read from the model code) and at small odd shapes. With
     /// <paramref name="longSequences"/>, also one long sequence a site, which a GPU row could refuse where the loop ran
     /// anything; the loops take seconds at that size, so the CPU lane leaves it out.</summary>
     private static void EverySiteMatchesItsFormerLoop(IBackend backend, float tolerance = Tolerance, bool longSequences = false)
@@ -157,10 +158,12 @@ public sealed class FormerAttentionLoopTests
         {
             if (skv > 2000 && !longSequences) continue;
             using Tensor kv = Random(new TensorShape(1, skv, 2 * heads * dimHead), 12);
-            Tensor q = Random(new TensorShape(1, sq, heads * dimHead), 11);
-            float[] expected = FormerPerceiver(q.AsReadOnlySpan<float>(), kv.AsReadOnlySpan<float>(), sq, skv, heads, dimHead);
+            using Tensor queries = Random(new TensorShape(1, sq, heads * dimHead), 11);
+            float[] expected = FormerPerceiver(queries.AsReadOnlySpan<float>(), kv.AsReadOnlySpan<float>(), sq, skv, heads, dimHead);
+            // The site takes its query over, so it gets a copy.
+            Tensor q = new(queries.Shape, DType.F32);
+            queries.AsReadOnlySpan<float>().CopyTo(q.AsSpan<float>());
             using Tensor actual = IndexTtsPerceiver.Attend(backend, q, kv, heads, dimHead);
-            backend.Sync();
             Assert.Equal(new TensorShape(1, sq, heads * dimHead), actual.Shape);
             AssertClose(expected, actual.AsReadOnlySpan<float>(), tolerance, $"perceiver {sq}x{skv}, {heads} heads of {dimHead}");
         }
@@ -174,7 +177,6 @@ public sealed class FormerAttentionLoopTests
             using Tensor v = Random(new TensorShape(1, channels, tt), 23);
             float[] expected = FormerCrossAttention(q.AsReadOnlySpan<float>(), k.AsReadOnlySpan<float>(), v.AsReadOnlySpan<float>(), channels, t, tt, heads);
             using Tensor actual = SoVitsEncP.CrossAttention(backend, q, t, k, v, tt, heads);
-            backend.Sync();
             Assert.Equal(new TensorShape(1, channels, t), actual.Shape);
             AssertClose(expected, actual.AsReadOnlySpan<float>(), tolerance, $"MRTE {channels} channels, {t}x{tt}, {heads} heads");
         }
