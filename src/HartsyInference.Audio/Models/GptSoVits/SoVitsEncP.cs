@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Vits;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.GptSoVits;
@@ -154,7 +155,7 @@ public sealed unsafe class SoVitsEncP
         backend.Conv1d(v, textEnc, _mrteCrossVW!, _mrteCrossVB, 1, 0, 0, 1, 1);
         textEnc.Dispose();
 
-        Tensor attn = CrossAttention(q, t, k, v, tt);
+        Tensor attn = CrossAttention(backend, q, t, k, v, tt, _mrteHeads);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor o = new(new TensorShape(1, _mrteHidden, t), DType.F32);
         backend.Conv1d(o, attn, _mrteCrossOW!, _mrteCrossOB, 1, 0, 0, 1, 1); attn.Dispose();
@@ -171,42 +172,22 @@ public sealed unsafe class SoVitsEncP
         return outT;
     }
 
-    /// <summary>Multi-head cross-attention: query <c>[1, mrte_hidden, t]</c> attends over key/value
-    /// <c>[1, mrte_hidden, tt]</c>. Channels-first throughout; output <c>[1, mrte_hidden, t]</c>.</summary>
-    private Tensor CrossAttention(Tensor q, int t, Tensor k, Tensor v, int tt)
+    /// <summary>Multi-head cross-attention, channels-first: query <c>[1, channels, t]</c> attends over key and value
+    /// <c>[1, channels, tt]</c>, head <c>h</c> holding its <c>channels / heads</c> adjacent channels. Returns
+    /// <c>[1, channels, t]</c>; the operands stay the caller's.</summary>
+    internal static Tensor CrossAttention(IBackend backend, Tensor q, int t, Tensor k, Tensor v, int tt, int heads)
     {
-        int heads = _mrteHeads, kc = _mrteHidden / heads;
-        float invSqrt = 1f / MathF.Sqrt(kc);
-        Tensor outT = new(new TensorShape(1, _mrteHidden, t), DType.F32);
-        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer;
-        float* op = (float*)outT.DataPointer;
-        float[] scores = new float[tt];
-        for (int hd = 0; hd < heads; hd++)
-        {
-            int chBase = hd * kc;
-            for (int i = 0; i < t; i++)
-            {
-                float maxS = float.NegativeInfinity;
-                for (int j = 0; j < tt; j++)
-                {
-                    float dot = 0f;
-                    for (int c = 0; c < kc; c++)
-                        dot += qp[(long)(chBase + c) * t + i] * kp[(long)(chBase + c) * tt + j];
-                    float s = dot * invSqrt;
-                    scores[j] = s;
-                    if (s > maxS) maxS = s;
-                }
-                float sum = 0f;
-                for (int j = 0; j < tt; j++) { scores[j] = MathF.Exp(scores[j] - maxS); sum += scores[j]; }
-                float inv = 1f / sum;
-                for (int c = 0; c < kc; c++)
-                {
-                    float acc = 0f;
-                    for (int j = 0; j < tt; j++) acc += scores[j] * inv * vp[(long)(chBase + c) * tt + j];
-                    op[(long)(chBase + c) * t + i] = acc;
-                }
-            }
-        }
+        int channels = (int)q.Shape[1];
+        // The shared layer reads [1, S, heads·D]: the same channel order with the two axes swapped.
+        TensorShape queryRows = new(1, t, channels), keyRows = new(1, tt, channels);
+        Tensor ql = new(queryRows, DType.F32), kl = new(keyRows, DType.F32), vl = new(keyRows, DType.F32);
+        backend.Transpose2D(ql, q, channels, t);
+        backend.Transpose2D(kl, k, channels, tt);
+        backend.Transpose2D(vl, v, channels, tt);
+        using Tensor attended = AttentionLayer.Shared(heads, channels / heads, computeDType: DType.F32)
+            .AttendFlat(backend, ql, kl, vl, queryRows, default);
+        Tensor outT = new(new TensorShape(1, channels, t), DType.F32);
+        backend.Transpose2D(outT, attended, t, channels);
         return outT;
     }
 

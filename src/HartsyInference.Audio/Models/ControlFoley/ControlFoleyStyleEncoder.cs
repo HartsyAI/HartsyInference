@@ -2,6 +2,7 @@ using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HubertModel = HartsyInference.Audio.Models.Hubert.Hubert;
 
@@ -290,53 +291,33 @@ public sealed class ControlFoleyStyleEncoder : IDisposable
         return quantized;
     }
 
+    /// <summary>Unmasked multi-head self-attention over a packed projection: <paramref name="qkv"/> holds, for each of
+    /// <paramref name="frames"/> rows, its query, its key and its value, <paramref name="dim"/> channels each. Returns
+    /// <c>[frames, dim]</c>.</summary>
+    internal static float[] SelfAttention(IBackend backend, float[] qkv, int frames, int dim, int heads)
+    {
+        TensorShape rows = new(1, frames, dim);
+        Tensor q = new(rows, DType.F32), k = new(rows, DType.F32), v = new(rows, DType.F32);
+        for (int i = 0; i < frames; i++)
+        {
+            ReadOnlySpan<float> row = qkv.AsSpan(i * 3 * dim, 3 * dim);
+            row[..dim].CopyTo(q.AsSpan<float>().Slice(i * dim, dim));
+            row.Slice(dim, dim).CopyTo(k.AsSpan<float>().Slice(i * dim, dim));
+            row.Slice(2 * dim, dim).CopyTo(v.AsSpan<float>().Slice(i * dim, dim));
+        }
+        using Tensor attended = AttentionLayer.Shared(heads, dim / heads, computeDType: DType.F32).AttendFlat(backend, q, k, v, rows, default);
+        return attended.AsReadOnlySpan<float>().ToArray();
+    }
+
     private sealed record Layer(Tensor Norm1W, Tensor Norm1B, Tensor InW, Tensor OutW, Tensor Norm2W, Tensor Norm2B, Tensor Fc1W,
         Tensor Fc2W)
     {
         internal float[] Forward(IBackend backend, float[] x, int frames, ControlFoleyStyleConfig c)
         {
-            int dim = c.Dim, heads = c.Heads, headDim = dim / heads;
+            int dim = c.Dim;
             float[] normed = ControlFoleyClipTransformer.LayerNorm(backend, x, Norm1W, Norm1B, frames, dim, NormEps);
             float[] qkv = DacOps.Linear(backend, normed, InW, frames, dim, 3 * dim);
-            float[] merged = new float[frames * dim];
-            float[] scores = new float[frames];
-            float scale = 1f / MathF.Sqrt(headDim);
-            for (int h = 0; h < heads; h++)
-            {
-                for (int i = 0; i < frames; i++)
-                {
-                    float max = float.NegativeInfinity;
-                    for (int j = 0; j < frames; j++)
-                    {
-                        float dot = 0f;
-                        for (int d = 0; d < headDim; d++)
-                        {
-                            dot += qkv[i * 3 * dim + h * headDim + d] * qkv[j * 3 * dim + dim + h * headDim + d];
-                        }
-
-                        scores[j] = dot * scale;
-                        max = MathF.Max(max, scores[j]);
-                    }
-
-                    float sum = 0f;
-                    for (int j = 0; j < frames; j++)
-                    {
-                        scores[j] = MathF.Exp(scores[j] - max);
-                        sum += scores[j];
-                    }
-
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        float acc = 0f;
-                        for (int j = 0; j < frames; j++)
-                        {
-                            acc += scores[j] / sum * qkv[j * 3 * dim + 2 * dim + h * headDim + d];
-                        }
-
-                        merged[i * dim + h * headDim + d] = acc;
-                    }
-                }
-            }
+            float[] merged = SelfAttention(backend, qkv, frames, dim, c.Heads);
 
             float[] attn = DacOps.Linear(backend, merged, OutW, frames, dim, dim);
             for (int i = 0; i < x.Length; i++)
