@@ -9,7 +9,7 @@ beyond the lane below, or for Blackwell.
 | Arm | Commit | What it is |
 |---|---|---|
 | R | `57b143f004050d484dc1b667ae8d5f91fc82ac22` | The PR 02 correctness pin (P2 in the [GPU handoff](../gpu-agent-handoff.md)) |
-| C | `efbd2f6d7` | `main` at `e99279b84` plus the paged pool, the native paged decode and the cost accounting (#989, #990, #991, #992), all since merged |
+| C | `efbd2f6d79781e5665efe6d3716d88a3f49c29b5` | `main` at `e99279b847fc329338e278e88fdf4bf8fcc1e97d` plus the paged pool, the native paged decode and the cost accounting (#989, #990, #991, #992), all since merged |
 
 **Bfix was never frozen by an earlier PR.** R is the PR 02 pin, chosen for this campaign because it is the correctness
 fixes and nothing after them. The earlier reports say PR 02 must not be labeled Bfix until its gates close, and the
@@ -51,14 +51,22 @@ alternating order. The text is identical on all 40 runs.
 | C total per request | 1,938 to 2,010 ms |
 | Peak VRAM, C minus R | -3,689 MiB on average (-2,753 to -4,903) |
 
-The protocol's improvement rule is met: the interval is wholly below 1.0 and so is the confirmation.
+By the numbers the improvement rule is met: the interval is wholly below 1.0 and so is the confirmation. (The
+confirmation, 0.0832, sits below the interval's lower end; the protocol keeps the confirmation session out of the
+interval, so that is allowed.) **Whether the rule is met under the frozen protocol is a separate question, and it is
+open**: see the next point.
 
 Two things qualify the size of that number:
 
-- **R runs out of device memory once in every process.** Each of the 20 R slots logs one out-of-memory warning, one
-  retry and one release of all device memory, then completes with the right text. The log has no timestamps, so it is
-  not known whether that falls in a warmup or in the timed request. No C slot logs one. The pairs were kept: this is
-  how R behaves under the frozen workload on a 24 GB card, not a fault of the measurement.
+- **R runs out of device memory once in every process, and the protocol counts that against the pair.** Each of the
+  20 R slots logs one out-of-memory warning, one retry and one release of all device memory, then completes with the
+  right text. No C slot logs one. The protocol's rule is that a memory violation invalidates the pair, and the Qwen
+  workload sets `always_free_memory` to false. Read as written, that invalidates all 20 primary pairs, and the 20
+  batched pairs for the same reason, which would leave this lane with no valid inferential result. I kept the pairs
+  because the out-of-memory retry is what R does under the frozen workload on a 24 GB card, so removing them removes
+  the reference. That is an argument for amending the rule or the reference, not a reading of the rule, and it is not
+  mine to settle here: it belongs with the Bfix decision. It is also not known whether the retry falls in a warm-up or
+  in the timed request (the log has no timestamps), which bears directly on the 0.0844.
 - **Most of the gap was already closed on `main` before this campaign.** The same workload on `main` at `e99279b84`
   takes about 2,184 ms. #990's head against that `main` is 0.895 (0.8895 to 0.9000) over twenty pairs, and C, which is
   #990's head plus the cost accounting, measured 0.991 of #990's head over three sets. So the step from R's 23 s to
@@ -114,9 +122,10 @@ Twenty pairs, all valid: 40 runs and 80 requests, every text identical (SHA-256 
 | R tokens per second, mean | 5.39 |
 | C tokens per second, mean | 63.42 |
 
-The lane is preserved and improved: the bound was C not more than 3% below R. The figures are the per-pair mean and
-range as the GPU session reported them; the protocol's geometric mean and interval for this lane have not been
-computed here.
+These are consistent with a preserved lane (the bound was C not more than 3% below R, and the smallest per-pair ratio
+is 10.76), but that is not the protocol's verdict: the figures are an arithmetic mean of throughput ratios, where the
+protocol's estimator is the geometric mean of paired latency ratios with equal weight a session and an upper bound.
+That has not been computed here.
 
 This lane runs through the paged pool, so it shows the same thing as the primary and carries the same qualifiers:
 every R slot logs one out-of-memory line (20 of 20) and no C slot does, and R gathers the prefix at every step. It is
@@ -141,11 +150,15 @@ predicted 0.98 to 1.02 before any timing result; it is inside.
 
 **The graph lane's text is not the eager text.** Both arms produce the same text here (SHA-256 prefix
 d490e1fc030bf1fd, 792 characters), and it differs from the eager lanes' text (26c68e74a9df5f02, 777 characters) from
-character 343 on. The GPU session stopped the lane on that difference; I resumed it with the rule, set before any
-graph timing was seen, that a pair is valid when C's text equals R's and both equal the lane's own text. Neither
+character 343 on. The GPU session stopped the lane on that difference. **I resumed it under an amended validity
+rule**: a pair is valid when C's text equals R's and both equal the lane's own text. The amendment was made before any
+graph timing was seen, but after a candidate output had been, so it does not meet the protocol's order rule (endpoints
+frozen before candidate results) and this lane's result should be read as obtained under an amended rule. Neither
 `protocol.json` nor the campaign brief freezes a text for this lane. Because R, the PR 02 pin, shows the same
 text as C, nothing in this series introduced the difference. I have not explained it, and the token at which the two
-decodes part is not known (the saved outputs are text, with no token ids).
+decodes part is not known (the saved outputs are text, with no token ids). It is recorded as an open item in
+[troubleshooting](../../../docs/Checklists/TROUBLESHOOTING.md), since it may be a fault in the captured graph and not
+only a property of this benchmark.
 
 ### Vulkan paged (descriptive, and not like-for-like)
 

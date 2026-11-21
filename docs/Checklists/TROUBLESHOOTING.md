@@ -424,6 +424,15 @@ no bug, any more than one bad seed was proof there was one.
 
 ## GPU residency / throughput (CUDA)
 
+- **OPEN, not diagnosed: CUDA graph decode and eager decode produce different text for the same greedy request.**
+  Qwen3-4B Q4_K_M, 8,192 prompt tokens, 128 generated, seed 42, RTX 4090: the eager lanes give one text (SHA-256
+  prefix 26c68e74a9df5f02, 777 characters) and the graph lane another (d490e1fc030bf1fd, 792 characters), parting at
+  character 343. It is the same on the PR 02 pin and on the PR 12 candidate, and stable across 40 graph runs, so it
+  predates the attention series. Nobody has found the token where the two decodes part: the campaign saved text, not
+  token ids. A greedy decode can legitimately flip at a near-tie when two paths round differently, so this may be
+  benign, but a captured graph replaying something stale would look the same. To locate it, save token ids and
+  logits for both paths at the first differing step. Source:
+  [the PR 12 report](../../benchmarks/attention/reports/pr12-qwen-primary.md).
 - **A TRELLIS.2 or Pixal3D shape or texture flow step stops returning and nothing is logged (Windows).** The entry below is the cause. These flow stages now run a
   `StageWatchdog` (`HartsyInference.Core.Runtime`; the small structure flows are not watched): when no step finishes for ten times the median step so far (never under two minutes), it logs one `[Stall]`
   warning naming the stage, the free and total device memory as of the last finished step and the remedies, and the next finished step throws `StageStalledException`, so a run that would

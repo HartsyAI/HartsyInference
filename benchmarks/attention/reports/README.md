@@ -43,5 +43,5 @@ in the [implementation queue](../proposed-queue.md); it does not certify the inc
 Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
 identified by the report; retain it through the handoff and exit review.
 
-Other reports in this folder: the [consumer audit](consumer-audit.md) of attention computed outside the backend
-entry points (plan items 14 to 17).
+Other reports in this folder: the [PR 12 Qwen campaign](pr12-qwen-primary.md) on the RTX 4090, and the
+[consumer audit](consumer-audit.md) of attention computed outside the backend entry points (plan items 14 to 17).
