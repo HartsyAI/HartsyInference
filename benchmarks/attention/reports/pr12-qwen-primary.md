@@ -34,13 +34,29 @@ so only the total is compared.
 | Decode route | `flash.decode` x4,608 | `flash.decode.paged` x4,608 |
 | `PrefixGather` | 9,288 records, 314,088,357,888 bytes | 72 records, 2,415,919,104 bytes |
 
+The protocol's required proof for the Qwen primary, from the observed path-proof run of each arm (two warm-ups and
+the measured request; the measured request alone in brackets). The timed primary sessions themselves were not
+observed; they share this workload.
+
+| Required entry | R | C |
+|---|---|---|
+| `scheduler.paged` | 3 [1] | 3 [1] |
+| `scheduler.decode.batch` | 384 [128] | 384 [128] |
+| `paged.keys` | 13,932 [4,644] | 108 [36] |
+| `paged.values` | 13,932 [4,644] | 108 [36] |
+
+All four are present on both arms. R reads its paged keys and values through a gather at every decode step of every
+layer, which is why its counts are 129 times C's.
+
 On R every decode step of every layer gathers the whole F32 prefix again, about 33.8 MB each time. That, not the
 attention kernel, is most of what follows.
 
 ## Primary result
 
 Twenty pairs, all valid: three inferential sessions of five and the predeclared confirmation session of five,
-alternating order. The text is identical on all 40 runs.
+alternating order. The text is identical on all 40 runs. The geometric mean and the interval below cover the 15
+inferential pairs; the confirmation session is reported on its own line, as the protocol has it. The same holds for
+every lane in this report.
 
 | | Value |
 |---|---|
@@ -66,7 +82,10 @@ Two things qualify the size of that number:
   because the out-of-memory retry is what R does under the frozen workload on a 24 GB card, so removing them removes
   the reference. That is an argument for amending the rule or the reference, not a reading of the rule, and it is not
   mine to settle here: it belongs with the Bfix decision. It is also not known whether the retry falls in a warm-up or
-  in the timed request (the log has no timestamps), which bears directly on the 0.0844.
+  in the timed request, which bears directly on the 0.0844. The R log shows the three lines after the model load (an
+  allocation of 4,748 MB with 50 MB free, an eviction that released 5,342 MB, then the release of all device memory),
+  but it has no timestamps and no per-request markers, and the observation file marks requests without recording
+  allocations, so neither can place them. Settling it needs a rerun with a marker before the timed region.
 - **Most of the gap was already closed on `main` before this campaign.** The same workload on `main` at `e99279b84`
   takes about 2,184 ms. #990's head against that `main` is 0.895 (0.8895 to 0.9000) over twenty pairs, and C, which is
   #990's head plus the cost accounting, measured 0.991 of #990's head over three sets. So the step from R's 23 s to
@@ -113,19 +132,23 @@ that three-set difference as noise. No measurement isolates the cause.
 
 ### CUDA batched (two concurrent requests)
 
-Twenty pairs, all valid: 40 runs and 80 requests, every text identical (SHA-256 prefix 26c68e74a9df5f02).
+Twenty pairs: 40 runs and 80 requests, every text identical (SHA-256 prefix 26c68e74a9df5f02).
 
 | | Value |
 |---|---|
-| C/R tokens per second, mean of the per-pair ratios | **11.80** |
-| Range of the per-pair ratios | 10.76 to 13.53 |
+| C/R total time of the batch, geometric mean, 15 inferential pairs | **0.0851** |
+| Two-sided 95% interval | 0.0832 to 0.0868 |
+| One-sided 95% upper bound | 0.0865 |
+| Confirmation session | 0.0841 |
 | R tokens per second, mean | 5.39 |
 | C tokens per second, mean | 63.42 |
 
-These are consistent with a preserved lane (the bound was C not more than 3% below R, and the smallest per-pair ratio
-is 10.76), but that is not the protocol's verdict: the figures are an arithmetic mean of throughput ratios, where the
-protocol's estimator is the geometric mean of paired latency ratios with equal weight a session and an upper bound.
-That has not been computed here.
+By the numbers the lane is preserved and improved (upper bound and confirmation far under 1.03 and under 1.0). In
+throughput terms the estimator is 1 / 0.0851 = 11.75 times. An earlier version of this report gave 11.80, the
+arithmetic mean of the per-pair throughput ratios, which is not the protocol's estimator.
+
+The same validity question as the primary applies: every R slot has the out-of-memory retry, so read as written the
+protocol invalidates these pairs too.
 
 This lane runs through the paged pool, so it shows the same thing as the primary and carries the same qualifiers:
 every R slot logs one out-of-memory line (20 of 20) and no C slot does, and R gathers the prefix at every step. It is
@@ -199,3 +222,14 @@ texts differ; no interval is given and no speed claim is made from this lane.
 Each arm is repeatable within itself: R produces its different text on all five runs, and C the eager text on all
 five. Neither log has a warning, an error or an out-of-memory line. The plain ratio of the means is 0.085, which
 describes two different computations.
+
+## Raw results
+
+On the RTX 4090 host, under `/home/hartsy/evidence/attention-4090/attn989-campaign` (`slots/`, `pr12/`, `info/`,
+`queue/` and the kernel-check folders). Kept by the GPU session, not in this repository.
+
+| File | SHA-256 |
+|---|---|
+| `pr12/index-results.tsv` (352 rows: every PR 12 result and status file) | c13cd8533a0fb36d102d74d562af46e83d7e6c9f8137dfaae6fecbe30dd4d2b6 |
+| `pr12/schedule.tsv` | 4d2eb7c83b8610298a47f4c89b0b1df34b5f733f9947fc366c3e2f2bf4db685e |
+| `pr12/FROZEN.md` | faf9d7809b27b389871da937e2aed6848a3e43e80908dee04dec29dff568e64e |
