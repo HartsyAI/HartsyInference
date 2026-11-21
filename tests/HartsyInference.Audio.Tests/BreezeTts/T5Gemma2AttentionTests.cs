@@ -155,7 +155,7 @@ public sealed unsafe class T5Gemma2AttentionTests(ITestOutputHelper output)
     {
         if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend backend = new(0, PtxDirectory());
-        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
         try { EveryCallMatches(backend, Tf32Tolerance); }
         finally
         {
@@ -173,7 +173,7 @@ public sealed unsafe class T5Gemma2AttentionTests(ITestOutputHelper output)
         catch (Exception ex) { output.WriteLine($"SKIPPED: Vulkan unavailable ({ex.Message})"); return; }
         using (backend)
         {
-            using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+            using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
             try { EveryCallMatches(backend, Tolerance); }
             finally
             {
