@@ -308,6 +308,38 @@ public sealed class DecodeLengthsGpuTests
         }
     }
 
+    /// <summary>F16 values below the smallest normal half (2^-14) are read as stored and not as zero. Whether a device
+    /// keeps half-precision subnormals on input differs by driver, and a cache can hold them. The output here is a
+    /// weighted mean of such values, so it is that small itself, and the bound is relative to its largest magnitude:
+    /// an absolute bound would pass with every value read as zero.</summary>
+    [VulkanFact]
+    public void OnVulkanSubnormalF16ValuesAreReadAsStored()
+    {
+        using VulkanBackend backend = new();
+        int dim = 2 * (int)backend.Vk.SubgroupSize;
+        using Case shape = new(2, 4, 2, dim, 1, 120, DType.F16);
+        Span<ushort> values = shape.Value.AsSpan<ushort>();
+        Random random = new(77);
+        // Exponent field zero and a nonzero fraction: every value is a subnormal half, of either sign.
+        for (int i = 0; i < values.Length; i++) values[i] = (ushort)((random.Next(2) << 15) | random.Next(1, 1024));
+        int[] lengths = [120, 55];
+        AttentionCall call = shape.Call(lengths, causal: true, lse: false);
+        AttentionCall reference = call with { Output = call.Output with { Storage = shape.Expected } };
+        AttentionHostReference.Run(in reference);
+        shape.Output.AsSpan<float>().Fill(-7f);
+        backend.Attention(in call);
+        backend.Sync();
+        ReadOnlySpan<float> expected = shape.Expected.AsReadOnlySpan<float>(), actual = shape.Output.AsReadOnlySpan<float>();
+        float largest = 0f, worst = 0f;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            largest = MathF.Max(largest, MathF.Abs(expected[i]));
+            worst = MathF.Max(worst, MathF.Abs(expected[i] - actual[i]));
+        }
+        Assert.InRange(largest, 1e-7f, 6.2e-5f);   // the reference's own output is of subnormal-half size, and not zero
+        Assert.True(worst <= 1e-4f * largest, $"the output differs by {worst} where its largest value is {largest}");
+    }
+
     [VulkanTheory]
     [InlineData("F16")]
     [InlineData("BF16")]

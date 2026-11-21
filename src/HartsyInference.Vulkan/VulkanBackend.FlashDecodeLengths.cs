@@ -23,7 +23,8 @@ public sealed partial class VulkanBackend
     }
 
     /// <summary>The lengths row's admission (C.9). It takes only a call with sequence lengths, so the single-length rows keep
-    /// every call they had: F32 head-major Q, K and V, the <c>[B, S, Hq × D]</c> output, a head dim and group the split
+    /// every call they had: F32 head-major Q, head-major K and V of one type (F32, F16 or BF16), the F32
+    /// <c>[B, S, Hq × D]</c> output, a head dim and group the split
     /// shader is built for on this device, and a workspace inside <see cref="FlashDecodeLengthsWorkspaceLimit"/>.</summary>
     private bool FlashDecodeLengthsAdmits(in AttentionCall c)
     {
