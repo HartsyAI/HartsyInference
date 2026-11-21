@@ -11,9 +11,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
 {
     private readonly LlamaStyleEncoderConfig _config;
     private readonly GptOssBlock[] _blocks;
-    private Tensor? _causalMaskFull;
-    private Tensor? _causalMaskSliding;
-    private int _causalMasksBuiltForLen;
 
     private Tensor? _embedWeight;
     private Tensor? _finalNormWeight;
@@ -47,7 +44,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
         _blocks = new GptOssBlock[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
             _blocks[i] = new GptOssBlock(config, layerIndex: i);
-        _causalMasksBuiltForLen = 0;
     }
 
     /// <summary>Number of transformer layers — convenience accessor (24 for GPT-OSS).</summary>
@@ -102,15 +98,13 @@ public sealed unsafe class GptOssEncoder : IDisposable
                 $"Prompt length {seqLen} exceeds MaxPositionEmbeddings ({_config.MaxPositionEmbeddings}).");
 
         EnsureRopeTable(seqLen);
-        EnsureMasks(seqLen);
 
         Tensor hidden = TextEncoderTensorHelpers.EmbeddingLookupHost(
             tokenIds, batch, seqLen, _embedWeight!, _config.HiddenSize, _config.VocabSize, embeddingScale: 1.0f);
 
         for (int i = 0; i < _config.NumLayers; i++)
         {
-            Tensor mask = _config.LayerAttentionTypes![i] == "sliding_attention" ? _causalMaskSliding! : _causalMaskFull!;
-            Tensor next = _blocks[i].Forward(backend, hidden, mask, _ropeCos!, _ropeSin!, seqLen);
+            Tensor next = _blocks[i].Forward(backend, hidden, SlidingWindowOf(i), _ropeCos!, _ropeSin!, seqLen);
             hidden.Dispose();
             hidden = next;
         }
@@ -161,7 +155,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
                 $"Prompt length {seqLen} exceeds MaxPositionEmbeddings ({_config.MaxPositionEmbeddings}).");
 
         EnsureRopeTable(seqLen);
-        EnsureMasks(seqLen);
 
         Tensor hidden = TextEncoderTensorHelpers.EmbeddingLookupHost(
             tokenIds, batch, seqLen, _embedWeight!, _config.HiddenSize, _config.VocabSize, embeddingScale: 1.0f);
@@ -171,8 +164,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
 
         for (int i = 0; i <= maxSelected; i++)
         {
-            Tensor mask = _config.LayerAttentionTypes![i] == "sliding_attention" ? _causalMaskSliding! : _causalMaskFull!;
-            Tensor next = _blocks[i].Forward(backend, hidden, mask, _ropeCos!, _ropeSin!, seqLen);
+            Tensor next = _blocks[i].Forward(backend, hidden, SlidingWindowOf(i), _ropeCos!, _ropeSin!, seqLen);
             hidden.Dispose();
             hidden = next;
 
@@ -201,20 +193,26 @@ public sealed unsafe class GptOssEncoder : IDisposable
         return copy;
     }
 
-    /// <summary>Builds (or rebuilds, if seqLen grew) both the full-causal and sliding-window causal masks,
-    /// each <c>[seqLen, seqLen]</c>. Sliding-window: position q only attends to positions in
-    /// <c>[q - SlidingWindow + 1, q]</c>. Cached on the encoder between calls.</summary>
-    private void EnsureMasks(int seqLen)
+    /// <summary>The window of layer <paramref name="layer"/>: <see cref="LlamaStyleEncoderConfig.SlidingWindow"/> for a
+    /// sliding layer, where each query attends itself and the positions just before it up to that many in total, and 0
+    /// for a layer that attends every earlier position.</summary>
+    private int SlidingWindowOf(int layer) =>
+        _config.LayerAttentionTypes![layer] == "sliding_attention" ? _config.SlidingWindow : 0;
+
+    /// <summary>A block's self-attention: causal, grouped keys and values read in place, an optional sliding window, and
+    /// the per-head sink logits, which join the softmax's denominator and carry no value. It is the backend's flash
+    /// attention; nothing is repeated to the query head count and no mask tensor is built.</summary>
+    /// <param name="output">F32 <c>[B, Hq, S, D]</c>.</param>
+    /// <param name="query">F32 <c>[B, Hq, S, D]</c>.</param>
+    /// <param name="key">F32 <c>[B, Hkv, S, D]</c>.</param>
+    /// <param name="value">F32 <c>[B, Hkv, S, D]</c>.</param>
+    /// <param name="sinks">F32 <c>[Hq]</c>, or null for none.</param>
+    /// <param name="slidingWindow">Positions each query attends, itself included; 0 for all earlier positions.</param>
+    internal static void Attend(IBackend backend, Tensor output, Tensor query, Tensor key, Tensor value, Tensor? sinks, int slidingWindow)
     {
-        if (_causalMaskFull is not null && _causalMasksBuiltForLen >= seqLen)
-            return;
-
-        _causalMaskFull?.Dispose();
-        _causalMaskSliding?.Dispose();
-
-        _causalMaskFull = TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue);
-        _causalMaskSliding = TextEncoderTensorHelpers.BuildCausalMask(seqLen, _config.SlidingWindow);
-        _causalMasksBuiltForLen = seqLen;
+        int heads = (int)query.Shape[1], seqLen = (int)query.Shape[2], headDim = (int)query.Shape[3];
+        backend.FlashAttention(output, query, key, value, kvLen: seqLen, kvGroup: heads / (int)key.Shape[1], causal: true, qOffset: 0,
+            scale: 1f / MathF.Sqrt(headDim), softcap: 0f, sink: sinks, slidingWindow: slidingWindow);
     }
 
     /// <summary>Precomputes RoPE cos/sin tables. Applies YaRN frequency scaling when configured,
@@ -270,19 +268,14 @@ public sealed unsafe class GptOssEncoder : IDisposable
         {
             _embedWeight = null;
             _finalNormWeight = null;
-            if (_causalMasksBuiltForLen > 0)
-            {
-                _causalMaskFull?.Dispose();
-                _causalMaskSliding?.Dispose();
-            }
         }
         GC.SuppressFinalize(this);
     }
 
     // ──────────────────────────────────────────────────────────────────────
     // Per-layer GPT-OSS block: RMSNorm → biased GQA self-attn (RoPE, sinks,
-    // sliding-or-full causal mask via passed-in mask, manual SDPA so we can
-    // incorporate sinks) → residual → RMSNorm → MoE FFN → residual.
+    // full or sliding-window causal, through the backend's flash attention)
+    // → residual → RMSNorm → MoE FFN → residual.
     // ──────────────────────────────────────────────────────────────────────
     private sealed unsafe class GptOssBlock
     {
@@ -354,7 +347,7 @@ public sealed unsafe class GptOssEncoder : IDisposable
             foreach (Tensor w in _moe.EnumerateWeights()) yield return w;
         }
 
-        public Tensor Forward(IBackend backend, Tensor hidden, Tensor mask, float[] ropeCos, float[] ropeSin, int seqLen)
+        public Tensor Forward(IBackend backend, Tensor hidden, int slidingWindow, float[] ropeCos, float[] ropeSin, int seqLen)
         {
             int batch = (int)hidden.Shape[0];
             int H = _config.HiddenSize;
@@ -394,29 +387,12 @@ public sealed unsafe class GptOssEncoder : IDisposable
             ApplyRopeSplitHalf(qMh, ropeCos, ropeSin, batch, Hq, seqLen, D);
             ApplyRopeSplitHalf(kMh, ropeCos, ropeSin, batch, Hkv, seqLen, D);
 
-            // GQA: replicate KV from Hkv heads to Hq heads.
-            Tensor kRepeated = kMh;
-            Tensor vRepeated = vMh;
-            if (Hkv != Hq)
-            {
-                kRepeated = new Tensor(qMhShape, DType.F32);
-                vRepeated = new Tensor(qMhShape, DType.F32);
-                StridedCopies.RepeatInterleave(backend, kRepeated, kMh, 1, _config.KvGroupSize);
-                StridedCopies.RepeatInterleave(backend, vRepeated, vMh, 1, _config.KvGroupSize);
-                kMh.Dispose();
-                vMh.Dispose();
-            }
-
-            // Manual SDPA-with-sinks. We don't use backend.ScaledDotProductAttention because we need
-            // the sink term in the softmax denominator and we don't have access to the per-head log-sum-exp
-            // from the standard SDPA primitive.
             Tensor attnOut = new Tensor(qMhShape, DType.F32);
-            ManualScaledDotProductAttention(attnOut, qMh, kRepeated, vRepeated, mask, _sinks,
-                batch, Hq, seqLen, D, _config.HasAttentionSinks);
+            Attend(backend, attnOut, qMh, kMh, vMh, _config.HasAttentionSinks ? _sinks : null, slidingWindow);
 
             qMh.Dispose();
-            kRepeated.Dispose();
-            vRepeated.Dispose();
+            kMh.Dispose();
+            vMh.Dispose();
 
             Tensor attnFlat = new Tensor(qShape, DType.F32);
             ReshapeMultiHeadToFlat(attnFlat, attnOut, batch, seqLen, Hq, D);
@@ -443,77 +419,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
             moeOut.Dispose();
 
             return result;
-        }
-
-        /// <summary>Manual scaled-dot-product attention with optional GPT-OSS per-head sinks.
-        /// Standard softmax(QK^T/√d + mask)·V if <paramref name="hasSinks"/> is false (matches
-        /// <see cref="IBackend.ScaledDotProductAttention"/> semantics). With sinks, the denominator
-        /// of the softmax gains a virtual <c>exp(sinks[h] - max_logit)</c> term, equivalent to
-        /// prepending one virtual key-value pair with logit = sinks[h] and zero value contribution.
-        /// Numerically stable via max-subtract. O(B · H · S² · D) — fine for the encoder's single
-        /// forward pass on prompts ≤ 512 tokens.</summary>
-        private static void ManualScaledDotProductAttention(Tensor output, Tensor q, Tensor k, Tensor v,
-            Tensor mask, Tensor? sinks, int batch, int heads, int seqLen, int headDim, bool hasSinks)
-        {
-            float* qPtr = (float*)q.DataPointer;
-            float* kPtr = (float*)k.DataPointer;
-            float* vPtr = (float*)v.DataPointer;
-            float* outPtr = (float*)output.DataPointer;
-            float* maskPtr = (float*)mask.DataPointer;
-            float* sinkPtr = hasSinks ? (float*)sinks!.DataPointer : null;
-
-            float scale = 1.0f / MathF.Sqrt(headDim);
-
-            // Per-(batch, head) attention.
-            float[] logits = new float[seqLen];
-            for (int b = 0; b < batch; b++)
-            {
-                for (int h = 0; h < heads; h++)
-                {
-                    long headOffset = ((long)b * heads + h) * seqLen * headDim;
-                    float sinkLogit = hasSinks ? sinkPtr![h] : 0f;
-
-                    for (int qPos = 0; qPos < seqLen; qPos++)
-                    {
-                        long qOff = headOffset + (long)qPos * headDim;
-                        // 1) Logits: QK^T row · scale + mask.
-                        float maxLogit = float.NegativeInfinity;
-                        for (int kPos = 0; kPos < seqLen; kPos++)
-                        {
-                            long kOff = headOffset + (long)kPos * headDim;
-                            float dot = 0f;
-                            for (int d = 0; d < headDim; d++) dot += qPtr[qOff + d] * kPtr[kOff + d];
-                            float logit = dot * scale + maskPtr[(long)qPos * seqLen + kPos];
-                            logits[kPos] = logit;
-                            if (logit > maxLogit) maxLogit = logit;
-                        }
-
-                        // 2) Stabilized softmax.
-                        float sumExp = 0f;
-                        for (int kPos = 0; kPos < seqLen; kPos++)
-                        {
-                            float e = MathF.Exp(logits[kPos] - maxLogit);
-                            logits[kPos] = e;
-                            sumExp += e;
-                        }
-                        // 3) Sink bucket adds exp(sinks[h] - max) to the denominator.
-                        float denom = sumExp;
-                        if (hasSinks) denom += MathF.Exp(sinkLogit - maxLogit);
-                        float invDenom = 1.0f / denom;
-
-                        // 4) Weighted V combine.
-                        long outOff = headOffset + (long)qPos * headDim;
-                        for (int d = 0; d < headDim; d++) outPtr[outOff + d] = 0f;
-                        for (int kPos = 0; kPos < seqLen; kPos++)
-                        {
-                            float w = logits[kPos] * invDenom;
-                            if (w == 0f) continue;
-                            long kOff = headOffset + (long)kPos * headDim;
-                            for (int d = 0; d < headDim; d++) outPtr[outOff + d] += w * vPtr[kOff + d];
-                        }
-                    }
-                }
-            }
         }
 
         // [B, S, H*D] → [B, H, S, D]
