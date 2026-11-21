@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
@@ -164,6 +165,8 @@ public sealed class Ernie5RealCheckpointTests
         DumpProfiles(backend, profileDir, "prefill");
         AssertHealthy(logits, model.Config.VocabSize, "prefill");
         int next = Argmax(logits);
+        // The engine's choice after each position it produced logits for, with its lead over the runner-up, for compare.py's per-position check.
+        List<(int Position, int Argmax, float Margin)> choices = [(tokens.Length - 1, next, TopMargin(logits))];
 
         // Greedy decode, or the fed tokens; the first step pays every first-touch cost, so later steps are the steady state.
         List<string> steps = [];
@@ -194,10 +197,11 @@ public sealed class Ernie5RealCheckpointTests
             }
             int argmax = Argmax(step);
             generated.Add(argmax);
+            choices.Add((tokens.Length + i, argmax, TopMargin(step)));
             token = feed is null || i + 1 >= feed.Length ? argmax : feed[i + 1];
         }
         DumpProfiles(backend, profileDir, "decode");
-        WriteFedTokens(fed, generated[^1]);
+        WriteFedTokens(fed, generated[^1], choices);
 
         if (offload is not null)
         {
@@ -208,12 +212,14 @@ public sealed class Ernie5RealCheckpointTests
         Console.WriteLine($"ERNIE real run on {device}{(stages.Length > 1 ? $" stages [{string.Join(",", stages)}]" : "")} ({precision} precision, resident {resident}, "
             + $"preloaded experts {preloadExperts}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s{prefillIo}, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
-            + $"{(feed is null ? "greedy tokens" : "argmax per step")} [{string.Join(",", generated)}].");
+            + $"{(feed is null ? "greedy tokens" : "argmax per step")} [{string.Join(",", generated)}], "
+            + $"top-2 logit lead per choice [{string.Join(", ", choices.Select(c => c.Margin.ToString("G3", CultureInfo.InvariantCulture)))}].");
         if (feed is not null)
         {
-            // Each fed token against the engine's own choice at that position: the argmax after prefill, then after each fed token.
-            int[] choices = [next, .. generated.Take(feed.Length - 1)];
-            int agree = feed.Zip(choices).Count(p => p.First == p.Second);
+            // Each fed token against the engine's own choice at that position: the argmax after prefill, then after each fed token. A feed
+            // that is not the engine's own greedy path from this prompt disagrees by construction, so this count is not a parity result.
+            int[] own = [next, .. generated.Take(feed.Length - 1)];
+            int agree = feed.Zip(own).Count(p => p.First == p.Second);
             Console.WriteLine($"ERNIE decode feed [{string.Join(",", feed)}]: the engine's argmax matched {agree} of {feed.Length} fed tokens; "
                 + $"argmax after the last fed token {generated[^1]}.");
         }
@@ -234,13 +240,18 @@ public sealed class Ernie5RealCheckpointTests
 
     // With the layer dump on, records every token fed to the model in order (prompt, then each decode input) and the argmax after the
     // last one as tokens.json beside the dumps, so compare.py can check the reference ran on the same sequence and chose the same token.
-    private static void WriteFedTokens(List<int> fed, int argmaxAfterLast)
+    private static void WriteFedTokens(List<int> fed, int argmaxAfterLast, List<(int Position, int Argmax, float Margin)>? choices = null)
     {
         string? dumpDir = Ernie5LayerDump.DirectoryFromEnvironment();
         if (dumpDir is null) return;
         Directory.CreateDirectory(dumpDir);
         File.WriteAllText(Path.Combine(dumpDir, "tokens.json"),
-            JsonSerializer.Serialize(new Dictionary<string, object> { ["tokens"] = fed, ["argmax_after_last"] = argmaxAfterLast }));
+            JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["tokens"] = fed,
+                ["argmax_after_last"] = argmaxAfterLast,
+                ["choices"] = (choices ?? []).Select(c => new Dictionary<string, object> { ["position"] = c.Position, ["argmax"] = c.Argmax, ["margin"] = c.Margin }).ToList(),
+            }));
     }
 
     [RealCheckpointFact]
@@ -418,6 +429,18 @@ public sealed class Ernie5RealCheckpointTests
             max = MathF.Max(max, logits[i]);
         }
         Assert.True(max > min, $"{stage} logits are constant, which means the forward did not compute.");
+    }
+
+    // The top logit's lead over the runner-up: how far a choice is from flipping.
+    private static float TopMargin(float[] logits)
+    {
+        float first = float.NegativeInfinity, second = float.NegativeInfinity;
+        foreach (float v in logits)
+        {
+            if (v > first) (first, second) = (v, first);
+            else if (v > second) second = v;
+        }
+        return first - second;
     }
 
     private static int Argmax(float[] logits)

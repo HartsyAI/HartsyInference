@@ -29,7 +29,7 @@ treat them as approximate.
 | Audio `Models/GptSoVits/SoVitsEncP.cs` `CrossAttention` | Unmasked, channels-first; single-threaded | Migrated in draft #1010 (read by me) |
 | Audio `Models/ControlFoley/ControlFoleyStyleEncoder.cs` | Unmasked self-attention over frames; single-threaded | Migrated in draft #1010 (read by me) |
 | Audio `Models/FishAudio/DacOps.cs` `RunTransformer` | Causal, window of 128 keys (512 in the encoder), host RoPE; single-threaded | Open (read by me). On CUDA the causal F32 route narrows to F16, a larger precision change than TF32 inside a codec, and no Fish Audio weights are on either test machine |
-| Audio `Models/BreezeTts/T5Gemma2TextEncoder.cs` `Encode` 87-112 | Two-sided window on some layers, grouped heads; single-threaded | Open. Needs a two-sided window, which is an additive bias today |
+| Audio `Models/BreezeTts/T5Gemma2TextEncoder.cs` `Encode` 87-112 | Two-sided window on some layers, grouped heads; single-threaded | Migrated to the shared layer: grouped heads native, the two-sided window as an additive bias and none where the window covers the segment. CPU backend verified against the former loop; no GPU run yet |
 | Audio `Models/ControlFoley/ControlFoleySwinStage.cs` `WindowAttention` 153-201 | Swin: learned relative-position bias and the shift mask, both additive; single-threaded | Open. Fits an additive-bias call after the window gather |
 | Audio `Models/IndexTts/IndexTtsConformerLayer.cs` `RelPosAttention` 100-157 | Positional terms indexed by the key alone, with no relative shift, so the score is `q · (k + p)` plus `u · k + v · p`, a bias a head and key that no query row changes; single-threaded | Plain with an additive bias, confirmed by two further readings (an earlier pass had it as specialized). A migration is prepared on a branch and passes on the CPU backend; its GPU run and draft are pending |
 | Video `Tokenizers/CosmosDvModule.cs` `SpatialAttn` 120-147, `TemporalAttn` 168-195 | Single head; temporal is causal; single-threaded | Left on the host on purpose: the tokenizer is written for a deterministic F32 result |
@@ -68,8 +68,9 @@ Video sparse attention (Video `MiniMaxH3Pipeline`, Diffusion `MiniMaxH3Transform
 directly.
 
 One site already on the device repeats a pattern that a migrated site now does in one call: Diffusion
-`WanS2VAudioInjector` attends frame by frame, one call a frame, where the face adapter in #1011 uses one batch item a
-frame.
+`WanS2VAudioInjector` attended frame by frame, one call a frame, where the face adapter in #1011 uses one batch item a
+frame. It now makes one call with a batch item a frame; on CUDA and on Vulkan the result is bit-identical to the
+per-frame forward on the same backend (RTX 3060).
 
 ## What a migration changes
 
