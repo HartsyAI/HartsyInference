@@ -242,6 +242,18 @@ public sealed class Int8AttentionRotationCudaTests(ITestOutputHelper output)
             () => cuda.RunInt8AttentionV2ForTest(in call, Int8AttentionV2Pv.U8TileScales, 64, null, rotation));
     }
 
+    /// <summary>The rotation kernel's files are never candidates for <c>int8_attn_v2</c>, whose only builds are sm_80 and
+    /// up: a Turing card must find no INT8 v2 module, not the rotation floor build under the attention kernel's name.</summary>
+    [CudaFact]
+    public void TheRotationFilesAreNotVariantsOfTheAttentionKernel()
+    {
+        string ptx = CudaPtxDirectory.Resolve();
+        Assert.Equal("int8_attn_v2.ptx", Path.GetFileName(CudaKernels.PtxPath(ptx, "int8_attn_v2", CudaArch.Turing)));
+        Assert.Equal("int8_attn_v2.ptx", Path.GetFileName(CudaKernels.PtxPath(ptx, "int8_attn_v2", 86)));
+        Assert.Equal("int8_attn_v2_rot.sm75.ptx", Path.GetFileName(CudaKernels.PtxPath(ptx, "int8_attn_v2_rot", CudaArch.Turing)));
+        Assert.Equal("int8_attn_v2_rot.ptx", Path.GetFileName(CudaKernels.PtxPath(ptx, "int8_attn_v2_rot", 86)));
+    }
+
     private static KnobProfile Policy(bool rotate) => KnobProfile.Create("int8v2-rotation")
         .With(EngineKnobs.Int8AttnV2, true).With(EngineKnobs.Int8AttnV2MinTokens, 64).With(EngineKnobs.SageAttn, false)
         .With(EngineKnobs.Int8AttnV2Rotate, rotate);
