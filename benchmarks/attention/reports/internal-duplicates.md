@@ -20,18 +20,20 @@ repeated here.
 
 ## Result
 
+**Status.** V1, D1, D2 and D4 were removed in #1039 (13 members). D9, found by that review as a consequence of D4, is removed in #1043. V2 and V3 and the "remove after migrating" rows are not yet done.
+
 Almost nothing in the attention backends is a duplicate any more. Every private attention method in the CPU, CUDA and Vulkan
 backends is reached from a row or a public entry, and every `.ptx` entry point and every `.spv` is loaded by some host code.
 What is left falls into four groups:
 
 | Verdict | Count | Items |
 |---|---|---|
-| remove: no caller | 4 | V1, D1, D2, D4 |
+| remove: no caller | 5 | V1, D1, D2, D4, D9 |
 | remove after migrating N callers | 11 | V2, V3, V4, M1 to M8 |
 | keep: public adapter | 5 | K5, C2, C5, V9, M9 |
 | keep: not a duplicate | 20 | K1 to K4, C1, C3, C4, V5 to V8, V10, M10 to M12, D3, D5 to D8 |
 
-The counts are of table rows (each row may name several symbols; the rows say how many). In "remove after migrating N callers", N counts files where a row says files (V2, M3) and call sites otherwise (M1, M2, M4 to M8). Three groups of "remove: no caller"
+The counts are of table rows (each row may name several symbols; the rows say how many). In "remove after migrating N callers", N counts files where a row says files (V2, M3) and call sites otherwise (M1, M2, M4 to M8). Four groups of "remove: no caller" (D1, D2, D4, D9)
 are not duplicates of the shared path at all: they are dead accessors and diagnostics (section D), listed because they are
 internal, unreferenced, and the same deletion build proves them removable.
 
@@ -101,7 +103,7 @@ are `LaunchAddScalarF16` and `LaunchMulMatVecQ8_0Q8_1PerRow`, which are not atte
 
 | # | File and symbol | Access | Duplicates / shared equivalent | Callers | Ledger | Change to remove | Verdict |
 |---|---|---|---|---|---|---|---|
-| V1 | `Vulkan/VulkanBackend.FlashTiled.cs:30` `TokenMajorStrides` | internal static | The token-major strides row B.1 builds inline (`VulkanBackend.AttentionRows.cs:234-235`). | None. `rg TokenMajorStrides` over `*.cs` in the whole repository: one hit, the declaration. | not named | Delete the method. | **remove: no caller.** Deletion build: clean. |
+| V1 | `Vulkan/VulkanBackend.FlashTiled.cs:30` `TokenMajorStrides` | internal static | The token-major strides row B.1 builds inline (`VulkanBackend.AttentionRows.cs:234-235`). | None. `rg TokenMajorStrides` over `*.cs` in the whole repository: one hit, the declaration. | not named | Delete the method. | **remove: no caller.** Deletion build: clean. **Removed in #1039.** |
 | V2 | `VulkanBackend.FlashCm2.cs:277` `AttnStrides` and `:269` `WriteStrides`, against `VulkanBackend.FlashTiled.cs:169` `TiledStrides` and `:161` `WriteTiledStrides` | private vs internal | Two identical `(uint Row, uint Head, uint Batch)` record structs and two identical three-line writers. Re-read. | `AttnStrides`: `FlashCm2.cs:92,93,181,193,202,214`; `AttentionRows.cs:170,171,234,235`. `WriteStrides`: `FlashCm2.cs:193,221-224`. | not named | Replace `AttnStrides` and `WriteStrides` by the tiled pair: 2 files, about a dozen lines. Layout only, no numerics. | **remove after migrating 2 callers** (`VulkanBackend.FlashCm2.cs`, `VulkanBackend.AttentionRows.cs`). |
 | V3 | `VulkanBackend.AttentionRows.cs:116` `TokenMajorCm2Admits` against the inline lambda of row A.1 (`:159-164`) | private | Same predicate text: F16 inputs or the legacy F16 assertion, not BF16, `CanUseFlashCm2(...)`. Re-read. | `TokenMajorCm2Admits`: `:228`. The lambda is its twin. | not named | Make row A.1 call the named predicate (rename it). | **remove after migrating 1 caller** (row A.1). |
 | V4 | `VulkanBackend.cs:2199` parameter `allowF16` of `ScaledDotProductAttentionNaive` | private parameter | The body never reads it: the compute type follows the operands. | Passed by `AttentionRows.cs:208-209` (`c.Numerics.LegacyAssertedBounded`). Nothing else. | The Boolean is the ledger's legacy permission; this row does not act on it. | Drop the parameter and the argument. | **remove after migrating 1 caller** (the row at `AttentionRows.cs:208`). No behavior change: the permission still reaches the planner through `AttentionCall.Numerics`. Deletion build: clean. |
@@ -125,14 +127,15 @@ removing them is a cleanup, not a retirement, and is outside item 18's rule unle
 
 | # | File and symbol | Access | What it is | Callers (search) | Ledger | Verdict |
 |---|---|---|---|---|---|---|
-| D1 | `Diffusion/Models/Denoisers/DiTBlocks/WanVideoBlock.cs:33-37` `SelfAttentionStage`, `CrossAttentionStage`, `ImageAttentionStage`, `SelfAttentionF16Stage`, `CrossAttentionF16Stage` (5 properties) | internal | Accessors returning the private `_selfAttention` etc. Test seams; a sub-agent found the tests that used them deleted in `e9474bb06` (not re-checked). | `rg '\b(SelfAttentionStage\|CrossAttentionStage\|ImageAttentionStage\|SelfAttentionF16Stage\|CrossAttentionF16Stage)\b'` over every file type in the tree: 5 hits, the declarations. No `GetProperty` reflection names them (sub-agent). Declarations only on `origin/main` `f28b0f384` and the K02 branch tip. | not named | **remove: no caller.** Deletion build: clean. |
-| D2 | `AttentionStage` in `Diffusion/Models/Denoisers/SeedVr2DitBlock.cs:60`, `MiniMaxH3Transformer.cs:51`, `DiTBlocks/MatrixGame3ActionModule.cs:36`, `DiTBlocks/OasisSpatioTemporalBlock.cs:53` (4 properties) | internal | Same shape. | `rg '\bAttentionStage\b'`: the four declarations, the fifth below, and nothing else. | not named | **remove: no caller.** Deletion build: clean. |
+| D1 | `Diffusion/Models/Denoisers/DiTBlocks/WanVideoBlock.cs:33-37` `SelfAttentionStage`, `CrossAttentionStage`, `ImageAttentionStage`, `SelfAttentionF16Stage`, `CrossAttentionF16Stage` (5 properties) | internal | Accessors returning the private `_selfAttention` etc. Test seams; a sub-agent found the tests that used them deleted in `e9474bb06` (not re-checked). | `rg '\b(SelfAttentionStage\|CrossAttentionStage\|ImageAttentionStage\|SelfAttentionF16Stage\|CrossAttentionF16Stage)\b'` over every file type in the tree: 5 hits, the declarations. No `GetProperty` reflection names them (sub-agent). Declarations only on `origin/main` `f28b0f384` and the K02 branch tip. | not named | **remove: no caller.** Deletion build: clean. **Removed in #1039.** |
+| D2 | `AttentionStage` in `Diffusion/Models/Denoisers/SeedVr2DitBlock.cs:60`, `MiniMaxH3Transformer.cs:51`, `DiTBlocks/MatrixGame3ActionModule.cs:36`, `DiTBlocks/OasisSpatioTemporalBlock.cs:53` (4 properties) | internal | Same shape. | `rg '\bAttentionStage\b'`: the four declarations, the fifth below, and nothing else. | not named | **remove: no caller.** Deletion build: clean. **Removed in #1039.** |
 | D3 | `DiTBlocks/WanS2VAudioInjector.cs:26` `AttentionStage` | internal | Same shape. | None at `ab67d61f6`. Since #1028 merged, `tests/HartsyInference.Diffusion.Tests/WanS2VAudioInjectorTests.cs:154,215,216,227,274` call `injector.AttentionStage` (the former forward is the test oracle). | not named | **keep: not a duplicate.** In use on `main`. |
-| D4 | `Cuda/CudaBackend.cs:67` `CudnnSdpaDiagnostics`, `:108` `CudnnSdpaSessionGeneration`, `:111` `CudnnSdpaDisposedSessionCount` (3 properties) | internal | cuDNN SDPA session health and "test diagnostic" counters. | `rg` for each name over the whole tree, all file types: only the declaration. Declarations only on `origin/main` `f28b0f384` and the K02 branch tip. The counters they read (`_cudnnSdpaSessionGeneration`, `_cudnnSdpaDisposedSessionCount`) are still incremented, so removing the properties leaves two write-only fields; that is a follow-on cleanup. | not named | **remove: no caller.** Deletion build: clean. |
+| D4 | `Cuda/CudaBackend.cs:67` `CudnnSdpaDiagnostics`, `:108` `CudnnSdpaSessionGeneration`, `:111` `CudnnSdpaDisposedSessionCount` (3 properties) | internal | cuDNN SDPA session health and "test diagnostic" counters. | `rg` for each name over the whole tree, all file types: only the declaration. Declarations only on `origin/main` `f28b0f384` and the K02 branch tip. The counters they read (`_cudnnSdpaSessionGeneration`, `_cudnnSdpaDisposedSessionCount`) are still incremented, so removing the properties left two write-only fields; D9 removes them (#1043). | not named | **remove: no caller.** Deletion build: clean. **Removed in #1039.** |
 | D5 | `CudaBackend.cs:48,63,89,116` `CudnnSdpaRefusedShapes`, `CudnnSdpaDimDiagnostics`, `CudnnSdpaEngaged`, `SageAttentionEngaged` | public | cuDNN and Sage health and engagement reports, which `AttentionEvidence` (a per-call route record) does not give. | None anywhere in the tree. | not named | **keep: not a duplicate.** Public and unread, so removal is an API break; an owner decision. |
 | D6 | `Vulkan/VulkanBackend.FlashCm2.cs` `FlashCm2PrefillDispatches` | public | A dispatch counter whose comment says "tests and profiling". | None. (sub-agent) | not named | **keep: not a duplicate.** Public and unread. |
 | D7 | `Cuda/CudaBackend.Int8AttentionV2.TestHooks.cs` `RunInt8AttentionV2ForTest`, `Int8V2*ForTest` | internal | Test hooks. | None on `main`, but `origin/hartsy/attention-k02-cuda-int8-rotation-b5a1bb` (an active session) calls `RunInt8AttentionV2ForTest` in new tests. | not named | **keep: not a duplicate.** In use by in-flight work. |
 | D8 | `Core/Backends/Attention/Int8AttentionExp2.cs` `Int8AttentionExp2` and `DecodeLengthsReference.cs` `DecodeLengthsReference` | public | References, not row bodies. | Tests only (`DecodeLengthsReferenceTests`, `AttentionSequenceLengthsCallTests` and others in `tests/HartsyInference.Core.Tests/Backends/`); none in `src/`. | not named | **keep: not a duplicate.** Oracles with no shared equivalent. |
+| D9 | `Cuda/CudnnSdpaPolicy.cs:101` `CudnnSdpaHealth.Diagnostics`; `Cuda/CudaBackend.cs` fields `_cudnnSdpaSessionGeneration`, `_cudnnSdpaDisposedSessionCount` with their three `Interlocked.Increment` calls | public member of an internal class; private fields | What D4 left behind: the only reader of `Diagnostics` was `CudnnSdpaDiagnostics`, and the counters were read only by the two removed properties. | `git grep -w` over `src`, `tests`, `tools`, `benchmarks` at `e203634b1`: the declarations, the increments and `CudnnSdpaDiagnostics`' former use; no test, no `InternalsVisibleTo` consumer, no reflection. `DimDiagnostics` uses `Describe`, not `Diagnostics`, and stays. | not named | **remove: no caller.** **Removed in #1043** (the follow-up to #1039). |
 
 ## M. Per-model attention helpers (sub-agent survey; re-read where marked)
 
@@ -160,15 +163,16 @@ SDPA entry builds, and `MergeHeads` (`:362`) is one `Permute0213` that disposes 
 
 ### The "remove: no caller" items, which could be done first
 
-| Item | Symbol | Why it is safe |
+| Item | Symbol | Why it is safe (V1, D1, D2 and D4 were removed in #1039, D9 in #1043) |
 |---|---|---|
 | V1 | `VulkanBackend.TokenMajorStrides` (`VulkanBackend.FlashTiled.cs:30`) | One hit for the name in the whole repository: its declaration. A duplicate of strides the row builds inline. |
 | D1 | `WanVideoBlock` `SelfAttentionStage`, `CrossAttentionStage`, `ImageAttentionStage`, `SelfAttentionF16Stage`, `CrossAttentionF16Stage` | Five declarations and no other hit in any file type. Dead test seams. |
 | D2 | `AttentionStage` on `SeedVr2DitBlock`, `MiniMaxH3Transformer`, `MatrixGame3ActionModule`, `OasisSpatioTemporalBlock` | Same. (`WanS2VAudioInjector.AttentionStage` is **not** in this list: tests merged in #1028 call it on `main`.) |
 | D4 | `CudaBackend` `CudnnSdpaDiagnostics`, `CudnnSdpaSessionGeneration`, `CudnnSdpaDisposedSessionCount` | One hit each, the declaration. Leaves two write-only counter fields to delete after. |
+| D9 | `CudnnSdpaHealth.Diagnostics` and the two write-only counter fields D4 left | Found by the review of #1039: nothing read them once D4 was gone. |
 
-V1 is the only one that is a duplicate. D1, D2 and D4 are dead members; none of the four changes behavior a user can observe,
-so none needs a ledger entry. Everything in this table compiled away cleanly in the deletion build below.
+V1 is the only one that is a duplicate. D1, D2, D4 and D9 are dead members; none of the five changes behavior a user can observe,
+so none needs a ledger entry. Everything in this table except D9 compiled away cleanly in the deletion build below; D9's evidence is #1043's own build and test run.
 
 ### Deletion build
 

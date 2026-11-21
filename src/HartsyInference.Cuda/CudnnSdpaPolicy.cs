@@ -97,10 +97,6 @@ internal sealed class CudnnSdpaHealth
 
     public int RefusedShapeCount => _refused.Count;
 
-    /// <summary>Consecutive failures, permanence and retry time per signature.</summary>
-    public IReadOnlyDictionary<CudnnSdpaSignature, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> Diagnostics =>
-        _state.ToDictionary(kv => kv.Key, kv => Describe(kv.Value));
-
     /// <summary>The same snapshot folded per head dim: the highest count, permanent if any signature is.</summary>
     public IReadOnlyDictionary<long, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> DimDiagnostics =>
         _state.GroupBy(kv => (long)kv.Key.HeadDim).ToDictionary(g => g.Key, g =>
