@@ -109,6 +109,7 @@ SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
     quant_int8_rowwise
+    rounded_ops_probe
     int8_attn_quant_rows
     int8_attn_key_mean
     int8_attn_value_scales
