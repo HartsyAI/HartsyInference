@@ -4,10 +4,11 @@ namespace HartsyInference.Cuda;
 public sealed partial class CudaKernels
 {
     private CudaModule? _solAttentionModule;
-    private nint _solSummaries, _solKeyStats, _solPooled, _solRoute, _solAttend;
+    private nint _solSummaries, _solKeyStats, _solPooled, _solRoute, _solAttend, _solCoarseLogits, _solCoarse;
 
     /// <summary>True when sol_attn_f32.ptx loaded. A build without the file leaves this false, and Sol-Attn is then refused.</summary>
-    public bool HasSolAttention => _solSummaries != 0 && _solKeyStats != 0 && _solPooled != 0 && _solRoute != 0 && _solAttend != 0;
+    public bool HasSolAttention => _solSummaries != 0 && _solKeyStats != 0 && _solPooled != 0 && _solRoute != 0 && _solAttend != 0
+        && _solCoarseLogits != 0 && _solCoarse != 0;
 
     // Optional module: absence leaves the primitive unsupported on this backend instead of failing construction.
     private void LoadSolAttentionKernels()
@@ -20,6 +21,32 @@ public sealed partial class CudaKernels
         _solPooled = _solAttentionModule.GetFunction("sol_pooled");
         _solRoute = _solAttentionModule.GetFunction("sol_route");
         _solAttend = _solAttentionModule.GetFunction("sol_attend");
+        _solCoarseLogits = _solAttentionModule.GetFunction("sol_coarse_logits");
+        _solCoarse = _solAttentionModule.GetFunction("sol_coarse");
+    }
+
+    /// <summary>The coarse gate's first stage: the natural-unit score of every (query block, key block), <c>[B, H, blocks, blocks]</c>.</summary>
+    public unsafe void LaunchSolCoarseLogits(ulong logits, ulong centroids, ulong keyMeans, int batch, int heads, int dim, int blocks, float scale,
+        nint stream)
+    {
+        ulong lA = logits, cA = centroids, kmA = keyMeans;
+        int hA = heads, dA = dim, bA = blocks;
+        float sA = scale;
+        void** a = stackalloc void*[7];
+        a[0] = &lA; a[1] = &cA; a[2] = &kmA; a[3] = &hA; a[4] = &dA; a[5] = &bA; a[6] = &sA;
+        CudaDriverApi.cuLaunchKernel(_solCoarseLogits, (uint)blocks, (uint)heads, (uint)batch, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>The coarse gate's second stage: each query block's softmax over blocks mixing the blocks' mean values,
+    /// <c>[B, H, blocks, D]</c>.</summary>
+    public unsafe void LaunchSolCoarse(ulong coarse, ulong logits, ulong valueSums, ulong lengths, int batch, int heads, int dim, int blocks,
+        nint stream)
+    {
+        ulong cA = coarse, lA = logits, vsA = valueSums, lenA = lengths;
+        int hA = heads, dA = dim, bA = blocks;
+        void** a = stackalloc void*[7];
+        a[0] = &cA; a[1] = &lA; a[2] = &vsA; a[3] = &lenA; a[4] = &hA; a[5] = &dA; a[6] = &bA;
+        CudaDriverApi.cuLaunchKernel(_solCoarse, (uint)blocks, (uint)heads, (uint)batch, 128, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Stage 1: mean K, summed V and mean Q of each block's live rows, each <c>[B, H, blocks, D]</c>.</summary>
@@ -72,15 +99,19 @@ public sealed partial class CudaKernels
     /// <summary>Stage 5: one softmax per query token over the exactly read keys and, with the tail, the pooled blocks.</summary>
     /// <param name="bias">Device pointer to a per-key bias in natural-log units, or 0.</param>
     /// <param name="biasStride">0 for a bias of <c>[T]</c>, the token count for one of <c>[B, T]</c>.</param>
+    /// <param name="gate">Device pointer to the coarse gate <c>[B, T, H, D]</c>, or 0 for none.</param>
+    /// <param name="coarse">Device pointer to <see cref="LaunchSolCoarse"/>'s output; read only with a gate.</param>
     public unsafe void LaunchSolAttend(ulong output, ulong q, ulong k, ulong v, ulong keyMean, ulong pooled, ulong valueSums, ulong reads,
-        ulong lengths, ulong bias, int biasStride, int batch, int tokens, int heads, int dim, int blocks, float log2Scale, bool tail, nint stream)
+        ulong lengths, ulong bias, int biasStride, int batch, int tokens, int heads, int dim, int blocks, float log2Scale, bool tail,
+        ulong gate, ulong coarse, nint stream)
     {
         ulong oA = output, qA = q, kA = k, vA = v, mA = keyMean, pA = pooled, vsA = valueSums, rA = reads, lenA = lengths, biasA = bias;
+        ulong gateA = gate, coarseA = coarse;
         int strideA = biasStride, tA = tokens, hA = heads, dA = dim, bA = blocks, tailA = tail ? 1 : 0;
         float sA = log2Scale;
-        void** a = stackalloc void*[17];
+        void** a = stackalloc void*[19];
         a[0] = &oA; a[1] = &qA; a[2] = &kA; a[3] = &vA; a[4] = &mA; a[5] = &pA; a[6] = &vsA; a[7] = &rA; a[8] = &lenA; a[9] = &biasA;
-        a[10] = &strideA; a[11] = &tA; a[12] = &hA; a[13] = &dA; a[14] = &bA; a[15] = &sA; a[16] = &tailA;
+        a[10] = &strideA; a[11] = &tA; a[12] = &hA; a[13] = &dA; a[14] = &bA; a[15] = &sA; a[16] = &tailA; a[17] = &gateA; a[18] = &coarseA;
         CudaDriverApi.cuLaunchKernel(_solAttend, (uint)tokens, (uint)heads, (uint)batch, 64, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 }

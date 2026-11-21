@@ -365,6 +365,47 @@ public sealed class SolAttentionGpuTests
     }
 
     [CudaFact]
+    public void OnCudaTheCoarseGateMatchesTheReference()
+    {
+        using CudaBackend backend = Cuda();
+        TheCoarseGateMatchesTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanTheCoarseGateMatchesTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        TheCoarseGateMatchesTheReference(backend);
+    }
+
+    /// <summary>A gate adds <c>gate × coarse</c> to each row, where coarse is the query block's softmax over the blocks' mean
+    /// keys mixing their mean values. Checked with the tail on and off, with block lengths, with a key bias and sinks (which
+    /// the coarse term ignores), and that the gate matters: the reference's own output moves by more than 0.01 with it.</summary>
+    private static void TheCoarseGateMatchesTheReference(IBackend backend)
+    {
+        using Operands operands = new(2, 64 * 5 + 20, 2, 128, 105);
+        using Tensor gate = new(operands.Query.Shape, DType.F32);
+        Random random = new(106);
+        Span<float> values = gate.AsSpan<float>();
+        for (int i = 0; i < values.Length; i++) values[i] = random.NextSingle() * 2f - 1f;
+
+        using Tensor without = new(operands.Query.Shape, DType.F32);
+        using Tensor with = new(operands.Query.Shape, DType.F32);
+        SolAttentionReference.Run(without, operands.Query, operands.Key, operands.Value, new SolAttentionOptions { TopKRatio = 0.5, Tail = false });
+        SolAttentionReference.Run(with, operands.Query, operands.Key, operands.Value, new SolAttentionOptions { TopKRatio = 0.5, Tail = false, CoarseGate = gate });
+        float moved = 0f;
+        ReadOnlySpan<float> a = without.AsReadOnlySpan<float>(), b = with.AsReadOnlySpan<float>();
+        for (int i = 0; i < a.Length; i++) moved = MathF.Max(moved, MathF.Abs(a[i] - b[i]));
+        Assert.True(moved > 0.01f, $"the gate moves this fixture by only {moved}");
+
+        operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.5, Tail = false, CoarseGate = gate });
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, CoarseGate = gate });
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, CoarseGate = gate, BlockLengths = [64, 30, 64, 64, 9, 20] });
+        using Tensor bias = operands.Bias(perBatch: true, mask: false, 4);
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1.5f, CoarseGate = gate, KeyBias = bias, SinkBlocks = (0, 2), SinkQueries = (1, 3) });
+    }
+
+    [CudaFact]
     public void OnCudaWithoutTheRoutingReportTheOutputIsTheSame()
     {
         using CudaBackend backend = Cuda();
@@ -407,9 +448,6 @@ public sealed class SolAttentionGpuTests
     {
         using Operands operands = new(1, 64 * 3, 2, 128, 98);
         operands.Output.AsSpan<float>().Fill(-7f);
-        using Tensor gate = new(operands.Query.Shape, DType.F32);
-        Assert.Throws<NotSupportedException>(() =>
-            backend.SolAttention(operands.Output, operands.Query, operands.Key, operands.Value, new SolAttentionOptions { CoarseGate = gate }));
         using Operands wide = new(1, 64 * 2, 1, 320, 99);
         wide.Output.AsSpan<float>().Fill(-7f);
         Assert.Throws<NotSupportedException>(() => backend.SolAttention(wide.Output, wide.Query, wide.Key, wide.Value, new SolAttentionOptions()));

@@ -19,7 +19,10 @@
 // the routing. Stage 5 is ordinary F32 arithmetic (its exponential is the approximate ex2, and the bias term fuses into
 // the logit) and is compared by tolerance.
 //
-// Not here: the coarse gate. The backend refuses a call that asks for one.
+// The coarse gate is two more stages, run only when a call gives a gate: sol_coarse_logits scores every (query block, key
+// block) pair with the mean query against the uncentered mean key in natural units, and sol_coarse turns each query
+// block's row of them into one softmax over blocks and mixes the blocks' mean values. sol_attend then adds
+// gate * coarse to each output row. Ordinary F32 arithmetic, compared by tolerance.
 //
 // Build: ../attention/build.sh (nvrtc).
 
@@ -129,13 +132,51 @@ extern "C" __global__ void sol_route(
     }
 }
 
+// Grid (blocks, H, B) over query blocks, block 256. logits[qb][n] = scale * (mean query of qb . mean key of n).
+extern "C" __global__ void sol_coarse_logits(
+    float* __restrict__ logits, const float* __restrict__ centroids, const float* __restrict__ keyMeans, int H, int D, int blocks,
+    float scale)
+{
+    const int qb = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+    const size_t head = (size_t)b * H + h;
+    const float* c = centroids + (head * blocks + qb) * D;
+    for (int n = threadIdx.x; n < blocks; n += blockDim.x) {
+        const float* k = keyMeans + (head * blocks + n) * D;
+        float dot = 0.0f;
+        for (int d = 0; d < D; ++d) dot += c[d] * k[d];
+        logits[(head * blocks + qb) * blocks + n] = dot * scale;
+    }
+}
+
+// Grid (blocks, H, B) over query blocks, block 128. coarse[qb][d] = sum over key blocks of softmax(logits[qb])[n] times the
+// block's mean value, valueSums[n][d] / len[n].
+extern "C" __global__ void sol_coarse(
+    float* __restrict__ coarse, const float* __restrict__ logits, const float* __restrict__ valueSums,
+    const int* __restrict__ lengths, int H, int D, int blocks)
+{
+    const int qb = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+    const size_t head = (size_t)b * H + h;
+    const float* row = logits + (head * blocks + qb) * blocks;
+    float m = SOL_NEG_INF;
+    for (int n = 0; n < blocks; ++n) m = fmaxf(m, row[n]);
+    float total = 0.0f;
+    for (int n = 0; n < blocks; ++n) total += expf(row[n] - m);
+    for (int d = threadIdx.x; d < D; d += blockDim.x) {
+        float sum = 0.0f;
+        for (int n = 0; n < blocks; ++n)
+            sum += expf(row[n] - m) / total / (float)lengths[n] * valueSums[(head * blocks + n) * D + d];
+        coarse[(head * blocks + qb) * D + d] = sum;
+    }
+}
+
 // Grid (T, H, B) over query tokens, block 64: thread j is token j of whichever key block is being read.
 // bias is null, [T] (biasStride 0) or [B, T] (biasStride T), in natural-log units; -inf masks a key.
+// gate is null or [B, T, H, D]; with one, gate * coarse[query block] is added to the row.
 extern "C" __global__ void sol_attend(
     float* __restrict__ output, const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V,
     const float* __restrict__ keyMean, const float* __restrict__ pooled, const float* __restrict__ valueSums,
     const unsigned char* __restrict__ reads, const int* __restrict__ lengths, const float* __restrict__ bias, int biasStride,
-    int T, int H, int D, int blocks, float log2s, int tail)
+    int T, int H, int D, int blocks, float log2s, int tail, const float* __restrict__ gate, const float* __restrict__ coarse)
 {
     __shared__ float qs[256];
     __shared__ float ps[SOL_BLOCK];
@@ -207,6 +248,8 @@ extern "C" __global__ void sol_attend(
     for (int e = 0; e < 4; ++e) {
         const int d = tid + e * SOL_BLOCK;
         if (d >= D) break;
-        output[qAt + d] = acc[e] * inverse;
+        float result = acc[e] * inverse;
+        if (gate != nullptr) result += gate[qAt + d] * coarse[(head * blocks + qb) * D + d];
+        output[qAt + d] = result;
     }
 }

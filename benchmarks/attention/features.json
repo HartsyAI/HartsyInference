@@ -125,13 +125,13 @@
       "probabilities": "unsigned-int8",
       "state": "f32"
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "partial: Vulkan only, unused. VulkanBackend quantizes Q and K with the four transforms (H4, H64, signed and padded H128) and attends with u8 probabilities and F32 state (QuantizeInt8AttentionRows, QuantizeInt8AttentionKeys, QuantizeInt8AttentionValues, QuantizeInt8AttentionQueries; Int8AttentionU8): unmasked, per-key K scales, keys centered by their mean over one segment, F32 operands at padded head dim 64, 128 or 256. No representative-key center, no thread-class K scales, no masks. The CUDA INT8 attention rows do not rotate: the backend has a general Hadamard operation, and those kernels do not use it",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 and RTX 4090, both at commit 5472c0393: every quantized operand and the attention output bit-equal to Int8AttentionV2Reference run with Int8AttentionExp2.Evaluate as its exp2 (Int8AttentionQuantizeVulkanTests, Int8AttentionCenteringVulkanTests, Int8AttentionQueriesVulkanTests, Int8AttentionU8VulkanTests), except output values below 2^-100 where the reference carries a subnormal float and both cards read it as zero. The RTX 4090 run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). The reference's transforms and selection rule are pinned to the Kitchen kernel's constants in Int8AttentionRotationTests; there is no Kitchen-generated vector for the INT8 output, so this is not a runtime parity claim against the Kitchen kernel. A descriptive timing on the RTX 3060 for 1,024 by 1,024 unmasked attention: about 10 times faster than the exact F32 route and 10 to 14 times slower than the F16 cooperative-matrix route, with about 12 times that route's error. No caller, no planner row."
   },
   {
     "id": "sage-prequantized",
@@ -144,13 +144,13 @@
         8
       ]
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "partial: Vulkan only, unused. The quantize entries and Int8AttentionU8 are separate calls, so quantized Q, K and V can be kept and attended again; nothing keeps or reuses them. CUDA quantizes inside each call, and without rotation, so its quantized operands are not these",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 and RTX 4090, both at commit 5472c0393: the operands the Vulkan quantize entries write are bit-equal to Int8AttentionV2Reference.Quantize, and Int8AttentionU8 over them gives the reference's output, as recorded under sage-rotation. Reuse itself has no test, and no reuse count is timed. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-bf16",
@@ -174,7 +174,7 @@
       "cuda",
       "vulkan"
     ],
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-lse",
@@ -194,7 +194,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-tree-merge",
@@ -210,7 +210,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-step-merge",
@@ -224,7 +224,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "sol-general",
@@ -245,13 +245,13 @@
       "coarse_gate": true,
       "token_aug": true
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "partial: IBackend.SolAttention on CPU, CUDA and Vulkan, F32, with tau and top-k routing, the tail on and off, block lengths, a key bias, sink blocks, sink queries and the coarse gate; no token_aug; unused",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (SolAttentionGpuTests: the routed blocks equal for every pair, the output within 1e-4); the reference is checked against the pinned Kitchen eager definition in SolAttentionReferenceTests over SolAttentionKitchenVectors. token_aug is an open gap: the Kitchen CUDA kernel implements it and the eager definition ignores it, so only that kernel could serve as its oracle, and nothing here has it. No caller, no timing. The RTX 4090 runs (commits 22ea05b9d and 6ef28a1e4) rebuilt the PTX and all seven shaders byte-identical and reported no routing difference on CUDA or Vulkan; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "hartsy-vsa",

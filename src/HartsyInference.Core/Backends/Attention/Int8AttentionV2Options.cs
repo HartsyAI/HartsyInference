@@ -87,7 +87,9 @@ public sealed record Int8AttentionV2Options
     /// <summary>Seed of the stochastic rounding hash.</summary>
     public uint RoundingSeed { get; init; }
 
-    /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's.</summary>
+    /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's. It is asked
+    /// only for arguments up to <see cref="Int8AttentionV2Reference.U8Offset"/>, so a function need be right only there
+    /// (<see cref="Int8AttentionExp2.Evaluate"/> is not above 127).</summary>
     public Func<float, float>? Exp2 { get; init; }
 
     /// <summary>Observes every u8 key tile a row drains, for a kernel's trace test; null in normal use.</summary>
