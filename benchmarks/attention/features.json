@@ -174,7 +174,7 @@
       "cuda",
       "vulkan"
     ],
-    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-lse",
@@ -194,7 +194,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-tree-merge",
@@ -210,7 +210,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-step-merge",
@@ -224,7 +224,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "sol-general",

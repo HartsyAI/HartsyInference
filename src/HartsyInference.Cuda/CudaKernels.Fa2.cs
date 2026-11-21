@@ -122,17 +122,11 @@ public sealed partial class CudaKernels
             string[] types = ["f32", "f16", "bf16"];
             for (int t = 0; t < types.Length; t++)
             {
-                // The half-type entry points came after the F32 ones: a PTX file built before them leaves their handles at
-                // zero instead of failing the backend's construction.
-                try
-                {
-                    _decLengths[t * 2] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d128");
-                    _decLengths[t * 2 + 1] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d64");
-                }
-                catch (CudaException) when (t > 0)
-                {
-                    _decLengths[t * 2] = _decLengths[t * 2 + 1] = 0;
-                }
+                // The half-type entry points came after the F32 ones: a PTX file built before them lacks them, and their
+                // handles then stay at zero instead of failing the backend's construction. The F32 ones are required.
+                string d128 = $"lm_fa_decode_lengths_{types[t]}_d128", d64 = $"lm_fa_decode_lengths_{types[t]}_d64";
+                _decLengths[t * 2] = t == 0 ? _decodeLengthsModule.GetFunction(d128) : _decodeLengthsModule.TryGetFunction(d128);
+                _decLengths[t * 2 + 1] = t == 0 ? _decodeLengthsModule.GetFunction(d64) : _decodeLengthsModule.TryGetFunction(d64);
             }
             _decLengthsCombine = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_combine");
         }

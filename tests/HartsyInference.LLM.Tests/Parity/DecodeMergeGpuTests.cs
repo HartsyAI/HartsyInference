@@ -322,7 +322,15 @@ public sealed class DecodeMergeGpuTests
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.Value, [1, 3, 7, 0b10000]));
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.CacheValue, mask));
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Prefix, step.Query, step.Key, step.Value, mask));
+        // An operand that is not F32, and a step of more rows than a mask entry has bits.
+        using Tensor halfKey = new(step.Key.Shape, DType.F16);
+        using Tensor halfValue = new(step.Key.Shape, DType.F16);
+        Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, halfKey, halfValue, mask));
+        using Step tall = new(1, 2, 1, 64, 33, 40, [40]);
+        tall.Merged.AsSpan<float>().Fill(7f);
+        Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(tall.Merged, tall.Prefix, tall.Lse, tall.Query, tall.Key, tall.Value, new int[33]));
         backend.Sync();
         Assert.Equal(-1, step.Merged.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
+        Assert.Equal(-1, tall.Merged.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
     }
 }

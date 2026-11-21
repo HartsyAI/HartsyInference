@@ -124,7 +124,9 @@ public sealed class DecodeLengthsGpuTests
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         foreach ((int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths, bool causal) in
             ((int, int, int, int, int, int, int[], bool)[])[(2, 8, 2, 64, 1, 96, [80, 70], true), (2, 4, 4, 128, 5, 200, [150, 3], true),
-                (2, 8, 1, 64, 4, 130, [0, 129], false), (1, 16, 1, 128, 3, 700, [699], true)])
+                (2, 8, 1, 64, 4, 130, [0, 129], false), (1, 16, 1, 128, 3, 700, [699], true),
+                // lengths outside the cache are clamped; each sequence ends on a chunk boundary
+                (2, 4, 2, 64, 2, 100, [1000, -5], true), (4, 4, 2, 64, 1, 256, [256, 128, 64, 192], true)])
         {
             using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache);
             foreach (bool lse in (ReadOnlySpan<bool>)[true, false])
@@ -150,6 +152,26 @@ public sealed class DecodeLengthsGpuTests
             ran++;
         }
         Assert.Equal(7, ran);
+    }
+
+    /// <summary>The row's head dims run from one subgroup width to four, and the shapes above reach two and four where a
+    /// subgroup is 32 lanes wide. This runs one and three widths, and checks that half a width and five are refused whole.</summary>
+    [VulkanFact]
+    public void TheVulkanKernelRunsTheHeadDimsItsRowDeclaresAndRefusesTheOthers()
+    {
+        using VulkanBackend backend = new();
+        int lanes = (int)backend.Vk.SubgroupSize;
+        MatchesTheHostReference(backend, 2, 8, 2, lanes, 2, 150, [150, 41], causal: true);
+        MatchesTheHostReference(backend, 2, 6, 2, 3 * lanes, 1, 200, [199, 64], causal: false);
+        foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 5 * lanes])
+        {
+            using Case outside = new(1, 4, 2, dim, 1, 96);
+            outside.Output.AsSpan<float>().Fill(-7f);
+            AttentionCall call = outside.Call([80], causal: true, lse: false);
+            Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+            backend.Sync();
+            Assert.Equal(-1, outside.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+        }
     }
 
     private static void MatchesTheHostReference(IBackend backend, int batch, int heads, int kvHeads, int dim, int rows, int capacity,
@@ -178,6 +200,15 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend);
     }
 
+    [CudaTheory]
+    [InlineData("F16")]
+    [InlineData("BF16")]
+    public void OnCudaRowsPastASequencesLengthOfAHalfTypeCacheAreNeverRead(string type)
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        RowsPastASequencesLengthAreNeverRead(backend, type == "F16" ? DType.F16 : DType.BF16);
+    }
+
     [VulkanFact]
     public void OnVulkanRowsPastASequencesLengthAreNeverRead()
     {
@@ -185,16 +216,20 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend);
     }
 
-    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend)
+    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend, DType? cache = null)
     {
         int[] lengths = [130, 7];
-        using Case shape = new(2, 8, 2, 64, 3, 200);
+        using Case shape = new(2, 8, 2, 64, 3, 200, cache);
         for (int b = 0; b < 2; b++)
             for (int kh = 0; kh < 2; kh++)
             {
                 int tail = ((b * 2 + kh) * 200 + lengths[b]) * 64, count = (200 - lengths[b]) * 64;
-                shape.Key.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
-                shape.Value.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
+                foreach (Tensor tensor in (ReadOnlySpan<Tensor>)[shape.Key, shape.Value])
+                {
+                    if (tensor.DType == DType.F32) tensor.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
+                    // A quiet NaN in either half type: every exponent bit and the top fraction bit.
+                    else tensor.AsSpan<ushort>().Slice(tail, count).Fill(tensor.DType == DType.F16 ? (ushort)0x7E00 : (ushort)0x7FC0);
+                }
             }
         foreach (bool causal in (ReadOnlySpan<bool>)[true, false])
         {

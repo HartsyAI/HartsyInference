@@ -34,7 +34,6 @@ public sealed partial class CpuBackend
     }
 
     /// <inheritdoc/>
-    /// <inheritdoc/>
     public bool HasDecodeMerge => true;
 
     /// <inheritdoc/>
@@ -42,10 +41,12 @@ public sealed partial class CpuBackend
     public void DecodeTreeMerge(Tensor merged, Tensor prefixOutput, Tensor prefixLse, Tensor query, Tensor key, Tensor value,
         ReadOnlySpan<int> mask, float? scale = null)
     {
+        // The tensor form checks what the span form below cannot: the LSE's dtype, its shape and that it is no other operand.
         DecodeMergeReference.CheckOperands(merged, prefixOutput, prefixLse, query, key, value, mask, scale);
         DecodeMergeReference.TreeMerge(merged, prefixOutput, prefixLse.AsReadOnlySpan<float>(), query, key, value, mask, scale);
     }
 
+    /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
         AttentionCall prepared = AttentionExecution.Prepare(in call);
