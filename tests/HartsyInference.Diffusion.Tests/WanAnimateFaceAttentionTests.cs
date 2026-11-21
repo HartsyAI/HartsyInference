@@ -10,30 +10,32 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>The Wan-Animate face adapter's frame-local attention through the shared attention layer, against the host loop
-/// the block ran before: each frame's group of latent tokens attends that frame's motion tokens only. The loop is kept
-/// here, verbatim in its arithmetic, as the oracle.
+/// <summary>The Wan-Animate face adapter, which now runs on the backend throughout, against the block as it ran before
+/// on the host, written out here step by step: the two pre-norms and the per-head RMS norm with their sums in double,
+/// the projections, the frame-local attention loop (each frame's group of latent tokens attends that frame's motion
+/// tokens only) and the output projection.
 /// <para>The tolerances were fixed before the first run: 1e-4 relative to the larger of 1 and the value on the CPU backend
 /// and on Vulkan, and on CUDA the contract bound for TF32, 2e-3, because CUDA multiplies F32 attention in TF32 for every
 /// caller of the shared layer.</para></summary>
 public sealed class WanAnimateFaceAttentionTests
 {
-    private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f;
+    private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f, Eps = 1e-6f;
 
     private readonly ITestOutputHelper _output;
 
     public WanAnimateFaceAttentionTests(ITestOutputHelper output) => _output = output;
 
-    private static Tensor Random(TensorShape shape, int seed)
+    private static Tensor Random(TensorShape shape, int seed, float scale = 1f)
     {
         Tensor tensor = new(shape, DType.F32);
         Random random = new(seed);
         Span<float> values = tensor.AsSpan<float>();
-        for (int i = 0; i < values.Length; i++) values[i] = random.NextSingle() * 2f - 1f;
+        for (int i = 0; i < values.Length; i++) values[i] = (random.NextSingle() * 2f - 1f) * scale;
         return tensor;
     }
 
-    /// <summary>The block's former loop: <c>q [S, dim]</c> in <paramref name="frames"/> groups over <c>k, v [frames·n, dim]</c>.</summary>
+    /// <summary>The block's former attention loop: <c>q [S, dim]</c> in <paramref name="frames"/> groups over
+    /// <c>k, v [frames·n, dim]</c>.</summary>
     private static float[] FormerLoop(ReadOnlySpan<float> q, ReadOnlySpan<float> k, ReadOnlySpan<float> v, int frames, int groupLen, int n, int heads,
         int headDim)
     {
@@ -70,141 +72,135 @@ public sealed class WanAnimateFaceAttentionTests
         return output;
     }
 
-    /// <summary>The 14B model's 40 heads of 128 at a reduced token count, small odd shapes, and with
-    /// <paramref name="fullSize"/> the token count of a 21-frame 480p clip, which a GPU row could refuse where the loop ran
-    /// anything. The loop takes seconds at that size, so the CPU lane leaves it out.</summary>
-    private static void MatchesTheFormerLoop(IBackend backend, float tolerance, bool fullSize)
+    private static float[] Normed(ReadOnlySpan<float> x, int rows, int dim)
     {
-        foreach ((int frames, int groupLen, int n, int heads, int headDim) in ((int, int, int, int, int)[])[(5, 390, 5, 40, 128),
-            (21, 1560, 5, 40, 128), (1, 7, 3, 2, 16), (3, 4, 1, 4, 8), (4, 9, 6, 3, 32)])
+        float[] o = new float[rows * dim];
+        for (int i = 0; i < rows; i++)
         {
-            if (frames * groupLen > 10_000 && !fullSize) continue;
-            int dim = heads * headDim;
-            using Tensor q = Random(new TensorShape(frames * groupLen, dim), 81);
-            using Tensor k = Random(new TensorShape(frames * n, dim), 82);
-            using Tensor v = Random(new TensorShape(frames * n, dim), 83);
-            float[] expected = FormerLoop(q.AsReadOnlySpan<float>(), k.AsReadOnlySpan<float>(), v.AsReadOnlySpan<float>(), frames, groupLen, n, heads,
-                headDim);
+            double mean = 0, variance = 0;
+            for (int d = 0; d < dim; d++) mean += x[i * dim + d];
+            mean /= dim;
+            for (int d = 0; d < dim; d++) variance += (x[i * dim + d] - mean) * (x[i * dim + d] - mean);
+            float inv = 1f / MathF.Sqrt((float)(variance / dim) + Eps);
+            for (int d = 0; d < dim; d++) o[i * dim + d] = (float)((x[i * dim + d] - mean) * inv);
+        }
+        return o;
+    }
 
-            using Tensor output = WanAnimateFaceBlock.Attend(backend, q, k, v, frames, heads, headDim);
-            Assert.Equal(q.Shape, output.Shape);
+    private static float[] Projected(float[] x, int rows, int dim, ReadOnlySpan<float> w, ReadOnlySpan<float> b)
+    {
+        float[] o = new float[rows * dim];
+        for (int i = 0; i < rows; i++)
+            for (int r = 0; r < dim; r++)
+            {
+                double sum = b[r];
+                for (int c = 0; c < dim; c++) sum += (double)w[r * dim + c] * x[i * dim + c];
+                o[i * dim + r] = (float)sum;
+            }
+        return o;
+    }
+
+    private static void HeadNormed(float[] x, int rows, int heads, int headDim, ReadOnlySpan<float> w)
+    {
+        int dim = heads * headDim;
+        for (int i = 0; i < rows; i++)
+            for (int h = 0; h < heads; h++)
+            {
+                int at = i * dim + h * headDim;
+                double sumSq = 0;
+                for (int d = 0; d < headDim; d++) sumSq += (double)x[at + d] * x[at + d];
+                float inv = 1f / MathF.Sqrt((float)(sumSq / headDim) + Eps);
+                for (int d = 0; d < headDim; d++) x[at + d] = x[at + d] * inv * w[d];
+            }
+    }
+
+    /// <summary>The block against its former steps, with random weights. The first shape uses the legacy weight layout, the
+    /// others the fused key/value weight the Wan-Animate checkpoint has; the last has one key a frame.</summary>
+    private static void TheWholeBlockMatchesItsFormerSteps(IBackend backend, float tolerance)
+    {
+        foreach ((int heads, int headDim, int frames, int groupLen, int n, bool fused) in ((int, int, int, int, int, bool)[])[(4, 8, 3, 4, 2, false),
+            (8, 64, 5, 130, 5, true), (3, 16, 4, 9, 1, true)])
+        {
+            int dim = heads * headDim, s = frames * groupLen, seed = 90 + heads;
+            Tensor Weight() => Random(new TensorShape(dim, dim), seed++, 1f / MathF.Sqrt(dim));
+            Tensor Bias() => Random(new TensorShape(dim), seed++, 0.1f);
+            using Tensor qW = Weight(), kW = Weight(), vW = Weight(), oW = Weight(), qB = Bias(), kB = Bias(), vB = Bias(), oB = Bias();
+            using Tensor normQ = Random(new TensorShape(headDim), seed++), normK = Random(new TensorShape(headDim), seed++);
+            using Tensor hidden = Random(new TensorShape(s, dim), seed++);
+            using Tensor motion = Random(new TensorShape(frames, n, dim), seed++);
+
+            Dictionary<string, Tensor> weights = new();
+            List<Tensor> owned = [];
+            if (fused)
+            {
+                Tensor kv = new(new TensorShape(2 * dim, dim), DType.F32), kvBias = new(new TensorShape(2 * dim), DType.F32);
+                kW.AsReadOnlySpan<float>().CopyTo(kv.AsSpan<float>());
+                vW.AsReadOnlySpan<float>().CopyTo(kv.AsSpan<float>().Slice(dim * dim));
+                kB.AsReadOnlySpan<float>().CopyTo(kvBias.AsSpan<float>());
+                vB.AsReadOnlySpan<float>().CopyTo(kvBias.AsSpan<float>().Slice(dim));
+                owned.AddRange([kv, kvBias]);
+                weights["face.linear1_kv.weight"] = kv;
+                weights["face.linear1_kv.bias"] = kvBias;
+                weights["face.linear1_q.weight"] = qW;
+                weights["face.linear1_q.bias"] = qB;
+                weights["face.linear2.weight"] = oW;
+                weights["face.linear2.bias"] = oB;
+                weights["face.q_norm.weight"] = normQ;
+                weights["face.k_norm.weight"] = normK;
+            }
+            else
+            {
+                weights["face.to_q.weight"] = qW; weights["face.to_q.bias"] = qB;
+                weights["face.to_k.weight"] = kW; weights["face.to_k.bias"] = kB;
+                weights["face.to_v.weight"] = vW; weights["face.to_v.bias"] = vB;
+                weights["face.to_out.weight"] = oW; weights["face.to_out.bias"] = oB;
+                weights["face.norm_q.weight"] = normQ;
+                weights["face.norm_k.weight"] = normK;
+            }
+
+            float[] qn = Normed(hidden.AsReadOnlySpan<float>(), s, dim), kn = Normed(motion.AsReadOnlySpan<float>(), frames * n, dim);
+            float[] q = Projected(qn, s, dim, qW.AsReadOnlySpan<float>(), qB.AsReadOnlySpan<float>());
+            float[] k = Projected(kn, frames * n, dim, kW.AsReadOnlySpan<float>(), kB.AsReadOnlySpan<float>());
+            float[] v = Projected(kn, frames * n, dim, vW.AsReadOnlySpan<float>(), vB.AsReadOnlySpan<float>());
+            HeadNormed(q, s, heads, headDim, normQ.AsReadOnlySpan<float>());
+            HeadNormed(k, frames * n, heads, headDim, normK.AsReadOnlySpan<float>());
+            float[] expected = Projected(FormerLoop(q, k, v, frames, groupLen, n, heads, headDim), s, dim, oW.AsReadOnlySpan<float>(),
+                oB.AsReadOnlySpan<float>());
+
+            WanAnimateFaceBlock block = new(dim, heads, headDim, Eps);
+            block.LoadWeights(weights, "face");
+            using Tensor output = block.Forward(backend, hidden, motion);
+            Assert.Equal(new TensorShape(s, dim), output.Shape);
             ReadOnlySpan<float> actual = output.AsReadOnlySpan<float>();
             for (int i = 0; i < expected.Length; i++)
                 Assert.True(Math.Abs(expected[i] - actual[i]) <= tolerance * Math.Max(1f, Math.Abs(expected[i])),
-                    $"{frames} frames of {groupLen} over {n}, {heads} heads of {headDim}: element {i} is {actual[i]}, expected {expected[i]}");
+                    $"{heads} heads of {headDim}, {frames} frames of {groupLen} over {n}, fused {fused}: element {i} is {actual[i]}, expected {expected[i]}");
+            foreach (Tensor tensor in owned) tensor.Dispose();
         }
     }
 
-    /// <summary>The whole block on the CPU backend, with random weights in the legacy layout, against the same steps written
-    /// out here: the two pre-norms, the three projections, the per-head RMS norm on Q and K, the frame-local loop and the
-    /// output projection. It covers what <see cref="WanAnimateFaceBlock.Forward"/> passes to the attention, which the
-    /// cases below do not. Tolerance 1e-4 as above, fixed before the first run.</summary>
     [Fact]
-    public void TheWholeBlockMatchesItsStepsWrittenOut()
-    {
-        const int heads = 4, headDim = 8, dim = heads * headDim, frames = 3, groupLen = 4, n = 2, s = frames * groupLen;
-        const float eps = 1e-6f;
-        Dictionary<string, Tensor> weights = new();
-        int seed = 90;
-        foreach (string name in (ReadOnlySpan<string>)["to_q", "to_k", "to_v", "to_out"])
-        {
-            weights[$"face.{name}.weight"] = Random(new TensorShape(dim, dim), seed++);
-            weights[$"face.{name}.bias"] = Random(new TensorShape(dim), seed++);
-        }
-        weights["face.norm_q.weight"] = Random(new TensorShape(headDim), seed++);
-        weights["face.norm_k.weight"] = Random(new TensorShape(headDim), seed++);
-        using Tensor hidden = Random(new TensorShape(s, dim), seed++);
-        using Tensor motion = Random(new TensorShape(frames, n, dim), seed++);
-
-        float[] Normed(ReadOnlySpan<float> x, int rows)
-        {
-            float[] o = new float[rows * dim];
-            for (int i = 0; i < rows; i++)
-            {
-                double mean = 0, variance = 0;
-                for (int d = 0; d < dim; d++) mean += x[i * dim + d];
-                mean /= dim;
-                for (int d = 0; d < dim; d++) variance += (x[i * dim + d] - mean) * (x[i * dim + d] - mean);
-                float inv = 1f / MathF.Sqrt((float)(variance / dim) + eps);
-                for (int d = 0; d < dim; d++) o[i * dim + d] = (float)((x[i * dim + d] - mean) * inv);
-            }
-            return o;
-        }
-        float[] Projected(float[] x, int rows, string name)
-        {
-            ReadOnlySpan<float> w = weights[$"face.{name}.weight"].AsReadOnlySpan<float>(), b = weights[$"face.{name}.bias"].AsReadOnlySpan<float>();
-            float[] o = new float[rows * dim];
-            for (int i = 0; i < rows; i++)
-                for (int r = 0; r < dim; r++)
-                {
-                    double sum = b[r];
-                    for (int c = 0; c < dim; c++) sum += (double)w[r * dim + c] * x[i * dim + c];
-                    o[i * dim + r] = (float)sum;
-                }
-            return o;
-        }
-        void HeadNormed(float[] x, int rows, string name)
-        {
-            ReadOnlySpan<float> w = weights[$"face.{name}.weight"].AsReadOnlySpan<float>();
-            for (int i = 0; i < rows; i++)
-                for (int h = 0; h < heads; h++)
-                {
-                    int at = i * dim + h * headDim;
-                    double sumSq = 0;
-                    for (int d = 0; d < headDim; d++) sumSq += (double)x[at + d] * x[at + d];
-                    float inv = 1f / MathF.Sqrt((float)(sumSq / headDim) + eps);
-                    for (int d = 0; d < headDim; d++) x[at + d] = x[at + d] * inv * w[d];
-                }
-        }
-
-        float[] qn = Normed(hidden.AsReadOnlySpan<float>(), s), kn = Normed(motion.AsReadOnlySpan<float>(), frames * n);
-        float[] q = Projected(qn, s, "to_q"), k = Projected(kn, frames * n, "to_k"), v = Projected(kn, frames * n, "to_v");
-        HeadNormed(q, s, "norm_q");
-        HeadNormed(k, frames * n, "norm_k");
-        float[] expected = Projected(FormerLoop(q, k, v, frames, groupLen, n, heads, headDim), s, "to_out");
-
-        WanAnimateFaceBlock block = new(dim, heads, headDim, eps);
-        block.LoadWeights(weights, "face");
-        using CpuBackend backend = new();
-        using Tensor output = block.Forward(backend, hidden, motion);
-        Assert.Equal(new TensorShape(s, dim), output.Shape);
-        ReadOnlySpan<float> actual = output.AsReadOnlySpan<float>();
-        for (int i = 0; i < expected.Length; i++)
-            Assert.True(Math.Abs(expected[i] - actual[i]) <= Tolerance * Math.Max(1f, Math.Abs(expected[i])), $"element {i} is {actual[i]}, expected {expected[i]}");
-        foreach (Tensor weight in weights.Values) weight.Dispose();
-    }
-
-    /// <summary>The helper refuses operands that do not split into the frames it is given.</summary>
-    [Fact]
-    public void GroupsThatDoNotDivideAreRefused()
+    public void OnTheCpuBackendTheWholeBlockMatchesItsFormerSteps()
     {
         using CpuBackend backend = new();
-        using Tensor q = Random(new TensorShape(7, 16), 1), k = Random(new TensorShape(4, 16), 2), v = Random(new TensorShape(4, 16), 3);
-        Assert.Throws<ArgumentException>(() => WanAnimateFaceBlock.Attend(backend, q, k, v, 2, 2, 8));
-    }
-
-    [Fact]
-    public void OnTheCpuBackendItMatchesTheFormerLoop()
-    {
-        using CpuBackend backend = new();
-        MatchesTheFormerLoop(backend, Tolerance, fullSize: false);
+        TheWholeBlockMatchesItsFormerSteps(backend, Tolerance);
     }
 
     [Fact]
     [Trait("Category", "GpuIntegration")]
-    public void OnCudaItMatchesTheFormerLoopAndNamesTheRowsThatRan()
+    public void OnCudaTheWholeBlockMatchesItsFormerStepsAndNamesTheRowsThatRan()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend backend = new(0, PtxDirectory());
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
-        try { MatchesTheFormerLoop(backend, Tf32Tolerance, fullSize: true); }
+        try { TheWholeBlockMatchesItsFormerSteps(backend, Tf32Tolerance); }
         finally { ReportRows(evidence.Snapshot()); }
-        Assert.Equal(5, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
+        Assert.Equal(3, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
     }
 
     [Fact]
     [Trait("Category", "GpuIntegration")]
-    public void OnVulkanItMatchesTheFormerLoopAndNamesTheRowsThatRan()
+    public void OnVulkanTheWholeBlockMatchesItsFormerStepsAndNamesTheRowsThatRan()
     {
         VulkanBackend backend;
         try { backend = new VulkanBackend(); }
@@ -212,13 +208,85 @@ public sealed class WanAnimateFaceAttentionTests
         using (backend)
         {
             using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
-            try { MatchesTheFormerLoop(backend, Tolerance, fullSize: true); }
+            try { TheWholeBlockMatchesItsFormerSteps(backend, Tolerance); }
             finally { ReportRows(evidence.Snapshot()); }
-            Assert.Equal(5, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
+            Assert.Equal(3, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
         }
     }
 
-    /// <summary>Which kernel rows served the calls: reported also when a comparison fails.</summary>
+    /// <summary>The 14B geometry at the token count of a 21-frame 480p clip: 40 heads of 128, 21 frames of 1,560 tokens, 5
+    /// motion tokens a frame. The host steps would take minutes here, so this checks only that a GPU backend serves the
+    /// call where the host loop ran anything, that the output is finite, and how long one call takes.</summary>
+    private void AtTheSizeOfARealClipTheBlockIsServed(IBackend backend)
+    {
+        const int heads = 40, headDim = 128, dim = heads * headDim, frames = 21, groupLen = 1560, n = 5, s = frames * groupLen;
+        Dictionary<string, Tensor> weights = new();
+        int seed = 300;
+        foreach (string name in (ReadOnlySpan<string>)["to_q", "to_k", "to_v", "to_out"])
+            weights[$"face.{name}.weight"] = Random(new TensorShape(dim, dim), seed++, 1f / MathF.Sqrt(dim));
+        weights["face.norm_q.weight"] = Random(new TensorShape(headDim), seed++);
+        weights["face.norm_k.weight"] = Random(new TensorShape(headDim), seed++);
+        WanAnimateFaceBlock block = new(dim, heads, headDim, Eps);
+        block.LoadWeights(weights, "face");
+        using Tensor hidden = Random(new TensorShape(s, dim), seed++);
+        using Tensor motion = Random(new TensorShape(frames, n, dim), seed++);
+        // The latent stream lives on the device in the model; a backend copy puts this one there.
+        using Tensor resident = new(hidden.Shape, DType.F32);
+        backend.CopyTo(resident, hidden);
+
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        using (Tensor warm = block.Forward(backend, resident, motion)) backend.Sync();
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+        using Tensor output = block.Forward(backend, resident, motion);
+        backend.Sync();
+        _output.WriteLine($"one call at {frames} frames of {groupLen}: {watch.Elapsed.TotalMilliseconds:F0} ms");
+        ReportRows(evidence.Snapshot());
+        Assert.Equal(2, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
+        Assert.Equal(new TensorShape(s, dim), output.Shape);
+        ReadOnlySpan<float> values = output.AsReadOnlySpan<float>();
+        for (int i = 0; i < values.Length; i += 4099) Assert.True(float.IsFinite(values[i]), $"element {i} is {values[i]}");
+        foreach (Tensor weight in weights.Values) weight.Dispose();
+    }
+
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void OnCudaAtTheSizeOfARealClipTheBlockIsServed()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        using CudaBackend backend = new(0, PtxDirectory());
+        AtTheSizeOfARealClipTheBlockIsServed(backend);
+    }
+
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void OnVulkanAtTheSizeOfARealClipTheBlockIsServed()
+    {
+        VulkanBackend backend;
+        try { backend = new VulkanBackend(); }
+        catch (Exception ex) { _output.WriteLine($"SKIPPED: Vulkan unavailable ({ex.Message})"); return; }
+        using (backend) AtTheSizeOfARealClipTheBlockIsServed(backend);
+    }
+
+    /// <summary>A latent stream the frames do not divide is refused before anything runs.</summary>
+    [Fact]
+    public void FramesThatDoNotDivideTheTokensAreRefused()
+    {
+        const int heads = 2, headDim = 8, dim = heads * headDim;
+        Dictionary<string, Tensor> weights = new();
+        int seed = 5;
+        foreach (string name in (ReadOnlySpan<string>)["to_q", "to_k", "to_v", "to_out"])
+            weights[$"face.{name}.weight"] = Random(new TensorShape(dim, dim), seed++);
+        weights["face.norm_q.weight"] = Random(new TensorShape(headDim), seed++);
+        weights["face.norm_k.weight"] = Random(new TensorShape(headDim), seed++);
+        WanAnimateFaceBlock block = new(dim, heads, headDim, Eps);
+        block.LoadWeights(weights, "face");
+        using CpuBackend backend = new();
+        using Tensor hidden = Random(new TensorShape(7, dim), seed++), motion = Random(new TensorShape(2, 3, dim), seed++);
+        Assert.Throws<ArgumentException>(() => block.Forward(backend, hidden, motion));
+        foreach (Tensor weight in weights.Values) weight.Dispose();
+    }
+
+    /// <summary>Which kernel rows served the calls, and what else was recorded: reported also when a comparison fails.</summary>
     private void ReportRows(AttentionEvidenceEvent[] events)
     {
         foreach (IGrouping<string, AttentionEvidenceEvent> row in events.Where(e => e.Kind == AttentionEvidenceKind.Execution)
