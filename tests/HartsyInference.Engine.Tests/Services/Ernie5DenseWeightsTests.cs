@@ -100,10 +100,11 @@ public sealed partial class Ernie5DenseWeightsTests : IDisposable
         long mapped = groups.SelectMany(g => g).Where(t => TensorFileExtents.TryGet(t, out _, out _)).Sum(t => t.DType.ComputeByteCount(t.ElementCount));
         Assert.True(mapped >= experts.Sum(t => t.DType.ComputeByteCount(t.ElementCount)));
         Assert.Equal(readers == 0 ? 0 : mapped, read);
-        // The dense set goes through the same call ungrouped; nothing of it is read twice either.
+        // The dense set goes through the same call ungrouped, one tensor per group; nothing of it is read twice either.
         List<Tensor> dense = [.. layer.EnumerateDenseWeights()];
         long denseMapped = dense.Where(t => TensorFileExtents.TryGet(t, out _, out _)).Sum(t => t.DType.ComputeByteCount(t.ElementCount));
-        Assert.Equal(readers == 0 ? 0 : denseMapped, Ernie5Model.PreloadGroups(backend, [dense], readers, grouped: false));
+        Assert.Equal(readers == 0 ? 0 : denseMapped,
+            Ernie5Model.PreloadGroups(backend, [.. dense.Select(t => (IReadOnlyList<Tensor>)[t])], readers, grouped: false));
     }
 
     [GeneratedRegex(@"\.experts\.\d+\.")]

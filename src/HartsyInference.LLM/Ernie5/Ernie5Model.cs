@@ -314,7 +314,8 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
             long bytes = Bytes(weights);
             if (used + bytes > budget) break;
             placed.AddRange(weights);
-            read += PreloadGroups(backend, [weights], readers, grouped: false);
+            // One group per tensor: each upload waits only for its own read, so the readers keep working ahead through the layer.
+            read += PreloadGroups(backend, [.. weights.Select(w => (IReadOnlyList<Tensor>)[w])], readers, grouped: false);
             used += bytes;
             layers++;
         }
