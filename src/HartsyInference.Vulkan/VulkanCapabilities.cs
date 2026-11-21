@@ -10,6 +10,9 @@ public sealed class VulkanCapabilities
     /// <summary>Vulkan physical-device UUID (not the pipeline-cache UUID).</summary>
     public string DeviceUuid { get; init; } = "";
 
+    /// <summary>VkPhysicalDeviceProperties.pipelineCacheUUID as lowercase hex; a pipeline-cache blob with another UUID is not this driver build's.</summary>
+    public string PipelineCacheUuid { get; init; } = "";
+
     /// <summary>Vendor-encoded driver version; compare only within one vendor.</summary>
     public uint DriverVersion { get; init; }
 

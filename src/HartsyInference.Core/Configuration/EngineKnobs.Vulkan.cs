@@ -100,6 +100,11 @@ public static partial class EngineKnobs
         Str("diagnostics.vkProfileFile", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "File to write the Vulkan op profile to; an unopenable path falls back to stderr.");
 
+    /// <summary>Directory for the on-disk Vulkan pipeline cache; unset resolves under the user cache directory.</summary>
+    public static readonly Knob<string?> VkPipelineCacheDir =
+        Str("paths.vkPipelineCacheDir", null, KnobScope.Construction, KnobDomain.Paths,
+            "Directory for the on-disk Vulkan pipeline cache; unset resolves under the user cache directory.");
+
     // ── Derived defaults: null means "no opinion", the call site keeps its own resolution ──
 
     /// <summary>Model root; unset resolves relative to the discovered repo root.</summary>
