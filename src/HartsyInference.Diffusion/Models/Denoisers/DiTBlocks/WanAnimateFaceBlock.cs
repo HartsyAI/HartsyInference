@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -55,7 +56,7 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
         int t = (int)motion.Shape[0], n = (int)motion.Shape[1];
         if (s % t != 0)
             throw new ArgumentException($"face adapter needs T|S; T={t} does not divide S={s}.");
-        int groupLen = s / t;
+
         int kvRows = t * n;
 
         Tensor qn = LayerNormNoAffine(hidden, s, _dim);                 // pre_norm_feat
@@ -70,51 +71,27 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
         RmsPerHead(q, s, _nq!);
         RmsPerHead(k, kvRows, _nk!);
 
-        Tensor outFlat = new Tensor(new TensorShape(s, _dim), DType.F32);
-        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer, op = (float*)outFlat.DataPointer;
-        float scale = 1f / MathF.Sqrt(_headDim);
-        float[] scores = new float[n];
-        // Frame group ti (S/T latent tokens) attends only to frame ti's N motion tokens, per head.
-        for (int ti = 0; ti < t; ti++)
-        {
-            for (int gi = 0; gi < groupLen; gi++)
-            {
-                int qRow = ti * groupLen + gi;
-                for (int h = 0; h < _heads; h++)
-                {
-                    long qOff = (long)qRow * _dim + (long)h * _headDim;
-                    float maxS = float.NegativeInfinity;
-                    for (int j = 0; j < n; j++)
-                    {
-                        long kOff = ((long)ti * n + j) * _dim + (long)h * _headDim;
-                        float dot = 0;
-                        for (int d = 0; d < _headDim; d++) dot += qp[qOff + d] * kp[kOff + d];
-                        scores[j] = dot * scale;
-                        if (scores[j] > maxS) maxS = scores[j];
-                    }
-                    float sum = 0;
-                    for (int j = 0; j < n; j++) { scores[j] = MathF.Exp(scores[j] - maxS); sum += scores[j]; }
-                    float invSum = 1f / sum;
-                    long oOff = (long)qRow * _dim + (long)h * _headDim;
-                    for (int d = 0; d < _headDim; d++)
-                    {
-                        float acc = 0;
-                        for (int j = 0; j < n; j++)
-                        {
-                            long vOff = ((long)ti * n + j) * _dim + (long)h * _headDim;
-                            acc += scores[j] * vp[vOff + d];
-                        }
-                        op[oOff + d] = acc * invSum;
-                    }
-                }
-            }
-        }
+        // Frame group ti (S/T latent tokens) attends only to frame ti's N motion tokens: one batch item a frame.
+        Tensor outFlat = Attend(backend, q, k, v, t, _heads, _headDim);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
         backend.Linear(o, outFlat, _oW!, _oB);
         outFlat.Dispose();
         return o;
+    }
+
+    /// <summary>Frame-local attention through the shared attention layer: <paramref name="q"/> <c>[S, heads·headDim]</c> is
+    /// <paramref name="frames"/> equal contiguous groups, and group <c>f</c> attends rows <c>[f·N, (f+1)·N)</c> of
+    /// <paramref name="k"/> and <paramref name="v"/> <c>[frames·N, heads·headDim]</c>. Returns <c>[S, heads·headDim]</c>; the
+    /// operands stay the caller's.</summary>
+    internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int frames, int heads, int headDim)
+    {
+        int dim = heads * headDim;
+        TensorShape queries = new(frames, q.Shape[0] / frames, dim), keys = new(frames, k.Shape[0] / frames, dim);
+        // The layer disposes what it is given: views, which leave the operands themselves to the caller.
+        return AttentionLayer.Shared(heads, headDim, computeDType: DType.F32)
+            .AttendFlat(backend, q.Reshape(queries), k.Reshape(keys), v.Reshape(keys), q.Shape, default);
     }
 
     /// <summary>Splits a fused <c>[2·rows, cols]</c> weight into two F32 <c>[rows, cols]</c> halves (row-major).</summary>
