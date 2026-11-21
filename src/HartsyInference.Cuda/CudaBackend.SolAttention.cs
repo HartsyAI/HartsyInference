@@ -81,6 +81,7 @@ public sealed partial class CudaBackend
             if (gate is not null)
             {
                 pGate = GpuTransferHelper.CopyToDevice(gate);
+                AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "cuda.sol.gate", (long)GpuTransferHelper.ByteSize(gate));
                 pCoarseLogits = GpuTransferHelper.AllocateDevice(pooledBytes);
                 pCoarse = GpuTransferHelper.AllocateDevice(summaryBytes);
                 AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.sol.coarse", (long)pooledBytes + (long)summaryBytes, count: 2);

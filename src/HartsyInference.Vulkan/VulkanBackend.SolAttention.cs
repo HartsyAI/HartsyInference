@@ -16,8 +16,8 @@ public sealed partial class VulkanBackend
     /// <remarks>F32, in the reference's five stages. The routing stages are written to reproduce the reference's scores:
     /// their adds, subtracts and multiplies are exact and uncontracted where the driver keeps subnormal values, and a
     /// divide and a square root are exact only where the driver rounds them correctly; the Vulkan specification requires
-    /// neither. The token pass and the coarse gate are ordinary F32 arithmetic. A
-    /// call that asks for one is refused. Asking for the routing report reads it back, which waits for the device.</remarks>
+    /// neither. The token pass and the coarse gate are ordinary F32 arithmetic. Asking for the routing report reads it
+    /// back, which waits for the device.</remarks>
     public void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -63,6 +63,7 @@ public sealed partial class VulkanBackend
         Tensor? gate = options.CoarseGate;
         // Buffers are always bound at the gate and coarse bindings; without a gate the lengths stand in and are not read.
         VulkanBuffer gateBuf = gate is null ? lenBuf : GetBuffer(gate);
+        if (gate is not null) AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "vulkan.sol.gate", gate.ElementCount * sizeof(float));
         bool readsCached = false, outputCached = false;
         try
         {

@@ -245,13 +245,13 @@
       "coarse_gate": true,
       "token_aug": true
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "partial: IBackend.SolAttention on CPU, CUDA and Vulkan, F32, with tau and top-k routing, the tail on and off, block lengths, a key bias, sink blocks, sink queries and the coarse gate; no token_aug; unused",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 parity against the host reference (SolAttentionGpuTests: the routed blocks equal for every pair, the output within 1e-4); the reference is checked against the pinned Kitchen eager definition in SolAttentionReferenceTests over SolAttentionKitchenVectors. token_aug is an open gap: the Kitchen CUDA kernel implements it and the eager definition ignores it, so only that kernel could serve as its oracle, and nothing here has it. No caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "hartsy-vsa",

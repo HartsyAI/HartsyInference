@@ -379,8 +379,8 @@ public sealed class SolAttentionGpuTests
     }
 
     /// <summary>A gate adds <c>gate × coarse</c> to each row, where coarse is the query block's softmax over the blocks' mean
-    /// keys mixing their mean values. Checked with the tail on and off, with block lengths, and that the gate matters: the
-    /// reference's own output moves by more than 0.01 with it.</summary>
+    /// keys mixing their mean values. Checked with the tail on and off, with block lengths, with a key bias and sinks (which
+    /// the coarse term ignores), and that the gate matters: the reference's own output moves by more than 0.01 with it.</summary>
     private static void TheCoarseGateMatchesTheReference(IBackend backend)
     {
         using Operands operands = new(2, 64 * 5 + 20, 2, 128, 105);
@@ -401,6 +401,8 @@ public sealed class SolAttentionGpuTests
         operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.5, Tail = false, CoarseGate = gate });
         operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, CoarseGate = gate });
         operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, CoarseGate = gate, BlockLengths = [64, 30, 64, 64, 9, 20] });
+        using Tensor bias = operands.Bias(perBatch: true, mask: false, 4);
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1.5f, CoarseGate = gate, KeyBias = bias, SinkBlocks = (0, 2), SinkQueries = (1, 3) });
     }
 
     [CudaFact]

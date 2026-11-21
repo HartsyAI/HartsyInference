@@ -272,3 +272,11 @@ The planner reproduces these until the row that owns each is rewritten.
   restricted wide-sink row admits the call: softcap, causal sinks, ALiBi, or a head dim past the flash tile. Gemma-2
   (decoder and text encoder), GPT-OSS and ALiBi models take it. The wide row covers unmasked F32 sinks with optional
   softcap, no ALiBi, up to D1024. CUDA refuses Flash above D1024.
+- **General Sol-Attn** is not an `AttentionCall`. It is a backend primitive, `IBackend.SolAttention`, defined by
+  `SolAttentionReference`, and `IBackend.HasSolAttention` says whether a backend runs it. The CPU backend runs the
+  reference; CUDA and Vulkan each run it as five kernels, seven with the coarse gate, in F32, with every option the
+  reference has. Which key blocks a query block reads is the same as the reference's on CUDA, and on Vulkan wherever
+  the driver rounds a divide and a square root correctly and keeps subnormals; the output is compared by tolerance.
+  The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
+  so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
+  has it. No model calls the primitive yet, and it has no timing.
