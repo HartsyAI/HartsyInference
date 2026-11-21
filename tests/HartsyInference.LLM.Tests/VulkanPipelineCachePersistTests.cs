@@ -8,7 +8,8 @@ namespace HartsyInference.LLM.Tests;
 /// <para>Bounds fixed before the first run: the first backend starts with no initial data; the file it leaves
 /// passes the checks against this device's vendor, device and pipeline-cache UUID; the second backend hands the
 /// driver exactly that blob; a third, started on the file cut to six tenths, hands the driver nothing, still
-/// computes, and leaves a whole file again.</para></summary>
+/// computes, and leaves a whole file again; a fourth, disposed while another handle holds the file without
+/// sharing (Windows), does not throw, leaves the file as it was and leaves no temporary file.</para></summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class VulkanPipelineCachePersistTests
 {
@@ -47,6 +48,19 @@ public sealed class VulkanPipelineCachePersistTests
                 RunOneKernel(third);
             }
             Assert.Equal(VulkanPipelineCacheLoadStatus.Loaded, VulkanPipelineCacheFile.Load(path, identity).Status);
+
+            if (OperatingSystem.IsWindows())
+            {
+                byte[] before = File.ReadAllBytes(path);
+                VulkanBackend fourth = new(null, null, dir);
+                RunOneKernel(fourth);
+                using (FileStream held = new(path, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    fourth.Dispose();
+                }
+                Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+                Assert.Equal(before, File.ReadAllBytes(path));
+            }
         }
         finally
         {

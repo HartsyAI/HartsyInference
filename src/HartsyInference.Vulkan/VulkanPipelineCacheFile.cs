@@ -138,6 +138,7 @@ internal static class VulkanPipelineCacheFile
     {
         // Process and thread make the name unique among writers; one holds it for a single synchronous call.
         string temp = $"{path}.{Environment.ProcessId}.{Environment.CurrentManagedThreadId}{TempSuffix}";
+        bool moved = false;
         try
         {
             using (FileStream stream = new(temp, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -145,11 +146,11 @@ internal static class VulkanPipelineCacheFile
                 stream.Write(Wrap(blob));
             }
             AtomicFileReplace.Move(temp, path);
+            moved = true;
         }
-        catch
+        finally
         {
-            TryDelete(temp);
-            throw;
+            if (!moved) TryDelete(temp);
         }
         RemoveStaleTemps(path);
     }
