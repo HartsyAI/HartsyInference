@@ -69,14 +69,24 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
         if (s % t != 0)
             throw new ArgumentException($"face adapter needs T|S; T={t} does not divide S={s}.");
 
-        // pre_norm_feat and pre_norm_motion: no weights. The query rows are declared as T groups of S/T.
-        using Tensor qn = new(new TensorShape(t, s / t, _dim), DType.F32);
-        backend.LayerNormNoAffine(qn, hidden, _eps);
+        // pre_norm_feat and pre_norm_motion: no weights. The query rows are declared as T groups of S/T. The normed latent
+        // stream is as large as the stream itself, so the layer releases it as soon as Q is projected.
         using Tensor kn = new(new TensorShape(t, n, _dim), DType.F32);
         backend.LayerNormNoAffine(kn, motion, _eps);
+        Tensor qn = new(new TensorShape(t, s / t, _dim), DType.F32);
+        try
+        {
+            backend.LayerNormNoAffine(qn, hidden, _eps);
+        }
+        catch
+        {
+            qn.Dispose();
+            throw;
+        }
 
-        using Tensor adapted = layer.Forward(backend, qn, kn, default);
-        // The layer returns the query's [T, S/T, dim]; the caller adds rows of [S, dim].
+        using Tensor adapted = layer.Forward(backend, qn, kn, new AttentionCallContext { ReleaseQueryAfterProjection = true });
+        // The layer returns the query's [T, S/T, dim] and the caller adds rows of [S, dim]. This is a copy on the backend and
+        // not a view: Tensor.Reshape reads the host pointer, which would bring the result down from the device.
         Tensor o = new(new TensorShape(s, _dim), DType.F32);
         backend.CopyTo(o, adapted);
         return o;
