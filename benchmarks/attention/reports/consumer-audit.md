@@ -96,5 +96,20 @@ with the square of the frame count here, which a single process on a shared box 
 
 The IndexTTS perceiver and the GPT-SoVITS MRTE were a few milliseconds at their model sizes and stay there.
 
+## Package tests renewed after the K-series (plan item 17)
+
+Whole test projects at `main` `24ff78dbb` on the RTX 3060 box, every backend the box has, on 2026-11-21. Each total
+was compared with the project's `--list-tests` count, since a crashed test host can still print a pass.
+
+| Project | Listed | Passed | Failed | Skipped |
+|---|---|---|---|---|
+| `HartsyInference.Audio.Tests` | 132 | 130 | 0 | 2 |
+| `HartsyInference.Diffusion.Tests` | 374 | 364 | 0 | 10 |
+
+Expectation written before the runs: no failures. It held. The skips are real-weight checks whose files are not on
+this box (word alignment in Audio; Sana WM and one LTX Video 2 VAE check in Diffusion), so those cases are
+unvalidated here, not passed. This is unit and parity coverage with synthetic weights; it is not a real generation,
+and it says nothing about the RTX 4090.
+
 The statuses in the first table are as of the commit in its header. When a draft named there merges or changes,
 this file needs the same update.
