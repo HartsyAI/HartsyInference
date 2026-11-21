@@ -36,30 +36,34 @@ internal, unreferenced, and the same deletion build proves them removable.
   reverted with `git checkout` and `git status` was clean before this file was added. No deletion is committed.
 - A one-off analyzer build of the solution (`dotnet build HartsyInference.sln -f net10.0`) with `IDE0051`, `IDE0052`, `IDE0060`
   and `CA1823` raised to warnings in a temporary `.editorconfig` edit (reverted). It reports unused private members and unused
-  parameters; for attention code it found no unused private method, only the unused parameters in section C.
+  parameters; for attention code it found no unused private method, only the unused parameters listed under "Leads, not findings".
 - Three throwaway scripts over `git ls-files` (deleted afterwards): a comment-stripped identifier count over all 5,124 tracked
   `.cs` files (a member whose only occurrence is its declaration has no caller); a check that every `.spv`, `.ptx` and `.cu`
   is named by some `.cs` file; and a check that every `.entry` in each committed PTX is requested by `GetFunction`, literally
   or through a name built in a loop (`lm_fa_decode_lengths_{type}_d{dim}` and `int8v2_attn_br{n}_{variant}`, both read).
-- A `git grep` of the named symbols in the 28 local `origin/*` refs updated since 2026-11-18, to see whether an open branch
-  starts using a symbol that `main` does not use. The refs are the local copies of remote branches; I did not fetch.
+- A `git grep` of the "no caller" symbols in `origin/main` (now `f28b0f384`, after #1028 merged; this report's line numbers are
+  at `ab67d61f6`) and in the tip of `origin/hartsy/attention-k02-cuda-int8-rotation-b5a1bb`, with the full output read. Only
+  the declarations match, except `WanS2VAudioInjector.AttentionStage`, which #1028 made used (D3). An earlier sweep of 28 recent
+  refs had its output cut by `head`, so I do not rely on it; other open branches were not checked.
 
 **Read, not run:** every claim about numerics, about which row takes a call, and about what a helper does. I ran no test
 (CPU or GPU) and no kernel: the GPU is in use by other sessions.
 
 **Read by me versus by a sub-agent.** I read the CPU, Host and CUDA sites and the shared layer myself. Two read-only
 sub-agents surveyed Vulkan (the row table, dispatchers, every shader and `.spv`) and the per-model wrappers. I re-read and
-re-grepped the findings behind every row that is not "keep: not a duplicate" in sections V and M; the rows I took from them
+re-grepped the findings behind every "remove" row in the V and M sections; the rows I took from them
 without re-reading are marked "(sub-agent)".
 
 **Rules applied.** Public members, members a model outside `src/HartsyInference.Core` calls, and anything whose numerics
 differ from the shared path (compute type, summation order, mask rule) are not duplicates until shown otherwise; each row says
 which of these applies. "Callers" were found with ripgrep over the whole repository (`src/`, `tests/`, `tools/`,
-`benchmarks/`); comments and `cref`s are not callers. `internal` members are visible to the test assemblies named by
+`benchmarks/`); comments and `cref`s are not callers. "keep: public adapter" means a public entry, wrapper or legacy launcher that stays for compatibility (named in the
+ledger or not; the row says which); "keep: not a duplicate" means the member does something the shared path does not, or is not
+attention at all. `internal` members are visible to the test assemblies named by
 `InternalsVisibleTo` in the `.csproj` files (Cuda: Core.Tests, Cuda.Tests, Engine.Tests, LLM.Tests, GpuBenchmarks; Vulkan:
 Vulkan.Tests; Diffusion: Diffusion.Tests, Cuda.Tests, Engine, Video), and the greps cover those.
 
-## A. CPU, Core and Host
+## K. CPU, Core and Host
 
 | # | File and symbol | Access | Duplicates / shared equivalent | Callers | Ledger | Change to remove | Verdict |
 |---|---|---|---|---|---|---|---|
@@ -69,22 +73,22 @@ Vulkan.Tests; Diffusion: Diffusion.Tests, Cuda.Tests, Engine, Video), and the gr
 | K4 | `Core/Backends/Host/SoftmaxReference.cs` `Rows`, behind the `IBackend.SoftmaxRows` default (`IBackend.Softmax.cs:11`) | public static class | Softmax inside attention is `AttentionKernels.SoftmaxInPlace` / the reference's own loop. | `IBackend.Softmax.cs:11`; `LLM/Transformer/AttnRes/AttentionResidual.cs:74`; `SoftmaxRowsTests.cs`. | not named | n/a | **keep: not a duplicate.** A general row softmax, not an attention op. Its mask rule differs: a row of all `-inf` gives NaN here, zeros in `SoftmaxInPlace` and the reference (contract section 3). Public. |
 | K5 | `Core/Backends/IBackend.Attention.cs:154,164,175,190` and `IBackend.Decode.cs:81`: the interface defaults `ScaledDotProductAttention`, both `ScaledDotProductAttentionTokenMajor`, `FlashAttention`, `FlashAttentionDev` | public interface | They already build an `AttentionCall` and enter `Attention` (or `FlashAttention`). | Dozens; see the consumer audit. | The first three are the ledger's first rows; `FlashAttention` and `FlashAttentionDev` are public entries the ledger discusses only as defaults. | n/a | **keep: public adapter.** |
 
-## B. CUDA
+## C. CUDA
 
 | # | File and symbol | Access | Duplicates / shared equivalent | Callers | Ledger | Change to remove | Verdict |
 |---|---|---|---|---|---|---|---|
 | C1 | `Cuda/CudaBackend.cs` `ValidateScaledDotProductAttentionContract` (`:5829`), `ValidateTokenMajorAttentionContract` (`:5790`), `ValidateFlashAttentionContract` (`:8422`); `CudaBackend.AttentionRows.cs:638` `ValidateTokenMajorGqaAttentionContract` | internal static | Geometry, dtype and scale checks that `AttentionCallValidation` now makes. | One call each, from `ExecuteDenseAttention` (`:5421`), `ExecuteTokenMajorAttention` (`:5701`), `ExecuteTokenMajorGqaAttention` (`:5721`), `ExecuteFlashAttention` (`:7787`) and `ExecuteFlashDeviceAttention` (`:8063`). None from tests or tools. | The ledger: "a legacy entry's own contract check runs before the shared boundary and keeps its historical classes". | Delete them and let the shared boundary run first. | **keep: not a duplicate.** They run first and throw `ArgumentOutOfRangeException` (scale, softcap, `kvLen`) and `NotSupportedException` (dtype) where the shared boundary throws `ArgumentException`; they also hold the 32-bit launch bounds. Removing them is a behavior change that needs a ledger entry. The three SDPA ones repeat one another's text (same checks, different messages); merging them would change messages. |
-| C2 | `Cuda/CudaKernels.cs:3277` `LaunchSoftmax`, `:3281` `LaunchSoftmaxF16`, private `LaunchSoftmaxImpl` (`:1519`), the `_softmaxF32`/`_softmaxF16` fields and `softmax_f32.ptx` / `softmax_f16.ptx` (loaded at construction, `:655`, `:801`) | public, in public class `CudaKernels` | `LaunchAttentionSoftmax` (`:3285`) and `attention_softmax.ptx`, which every materialized and tiled row uses. | `tests/HartsyInference.LLM.Tests/Parity/AttentionSemanticParityTests.cs:290-291`, which uses them as the legacy oracle for "finite rows stay bit-identical". Nothing in `src/`. | not named | Migrate that test to stored bits or a CPU oracle; delete the two launchers, the fields, the two modules and both `.ptx` files. | **keep: public adapter.** Public API of a public class, not named in the ledger, and still the oracle of a parity test; removal is an API break that needs a ledger entry first. The numerics also differ from the shared kernel: no bias, no zeroing of fully excluded rows, no NaN propagation. `softmax_f32/f16.ptx` are hand-written PTX with no `.cu` (see `Kernels/README.md`), so they cannot be rebuilt either. |
+| C2 | `Cuda/CudaKernels.cs:3277` `LaunchSoftmax`, `:3281` `LaunchSoftmaxF16`, private `LaunchSoftmaxImpl` (`:1519`), the `_softmaxF32`/`_softmaxF16` fields and `softmax_f32.ptx` / `softmax_f16.ptx` (loaded at construction, `:655`, `:801`) | public, in public class `CudaKernels` | `LaunchAttentionSoftmax` (`:3285`) and `attention_softmax.ptx`, which every materialized and tiled row uses. | `tests/HartsyInference.LLM.Tests/Parity/AttentionSemanticParityTests.cs:290-291`, which uses them as the legacy oracle for "finite rows stay bit-identical". Nothing in `src/`. | not named | Migrate that test to stored bits or a CPU oracle; delete the two launchers, the fields, the two modules and both `.ptx` files. | **keep: public adapter.** Public API of a public class, not named in the ledger, and still the oracle of a parity test; removal is an API break that needs a ledger entry first. The numerics also differ from the shared kernel (no bias, no zeroing of fully excluded rows, no NaN propagation), per the launcher's doc comment and the parity test's summary; I did not read the hand-written PTX. `softmax_f32/f16.ptx` are hand-written PTX with no `.cu` (see `Kernels/README.md`), so they cannot be rebuilt either. |
 | C3 | `Cuda/CudaBackend.cs:7795` `FlashAttentionDecode` and `:8070` `FlashAttentionDeviceDecode` | private | The F.4 to F.7 and V.x branch ladders inside rows `flash.decode` and `flash.decode.device`. | Row bodies in `CudaBackend.AttentionRows.cs:587` and `:628`. | not named | n/a | **keep: not a duplicate.** Kernel selection the row table does not express (grouped decode, split-K, F16 K/V, graph-capturable splits); each branch is a distinct kernel with its own numerics. |
 | C4 | `Cuda/CudaBackend.cs:5415,5698,5717,7781,8044` `ExecuteDenseAttention`, `ExecuteTokenMajorAttention`, `ExecuteTokenMajorGqaAttention`, `ExecuteFlashAttention`, `ExecuteFlashDeviceAttention` | private | The adapter plumbing between the public overloads and `RunAttentionRows`. | The public overloads and `Attention` (`CudaBackend.Attention` partial, `AttentionRows.cs:65`). | The ledger's "CUDA/Vulkan Boolean overloads". | n/a | **keep: not a duplicate.** They add the legacy contract check (C1), NVTX ranges and the op scope; they are the thin legacy adapters, not copies of the planner. |
 | C5 | `CudaBackend.cs:5412` `ScaledDotProductAttention`, `:5694` and `:5712` `ScaledDotProductAttentionTokenMajor`, `:7777` `FlashAttention`, `:8039` `FlashAttentionDev` | public | Forward to the executors above. | Many. | **Named** (CUDA/Vulkan Boolean overloads: "keep until the public compatibility review explicitly deprecates an overload"). | n/a | **keep: public adapter.** |
 
-PTX and kernels: every `.cu` under `Kernels/` has a `.ptx`; every committed `.ptx` is loaded by name (`Ptx("...")`); every `.entry` in the attention PTX files is requested by `GetFunction`. Entry names built in loops were read and match
+PTX and kernels: every `.cu` under `Kernels/` has a `.ptx`; every committed `.ptx` has a quoted name in a `.cs` file (`expert_f32` matched only loosely, in `CudaExpertKernels.cs`); every `.entry` in the attention PTX files is requested by `GetFunction`. Entry names built in loops were read and match
 all 6 `lm_fa_decode_lengths_*` and all 16 `int8v2_attn_br*` entries. The 26 `.ptx` files with no `.cu` are the hand-written ones the
 README describes, and only `softmax_f32/f16` (C2) are attention-related. The only other `Launch*` methods with no caller in `src/`
 are `LaunchAddScalarF16` and `LaunchMulMatVecQ8_0Q8_1PerRow`, which are not attention.
 
-## C. Vulkan (sub-agent survey, re-read where marked)
+## V. Vulkan (sub-agent survey, re-read where marked)
 
 | # | File and symbol | Access | Duplicates / shared equivalent | Callers | Ledger | Change to remove | Verdict |
 |---|---|---|---|---|---|---|---|
@@ -112,16 +116,16 @@ removing them is a cleanup, not a retirement, and is outside item 18's rule unle
 
 | # | File and symbol | Access | What it is | Callers (search) | Ledger | Verdict |
 |---|---|---|---|---|---|---|
-| D1 | `Diffusion/Models/Denoisers/DiTBlocks/WanVideoBlock.cs:33-37` `SelfAttentionStage`, `CrossAttentionStage`, `ImageAttentionStage`, `SelfAttentionF16Stage`, `CrossAttentionF16Stage` (5 properties) | internal | Accessors returning the private `_selfAttention` etc. Test seams: the tests that used them were deleted in `e9474bb06`. | `rg '\b(SelfAttentionStage\|CrossAttentionStage\|ImageAttentionStage\|SelfAttentionF16Stage\|CrossAttentionF16Stage)\b'` over every file type in the tree: 5 hits, the declarations. No `GetProperty` reflection names them. Not used on the 28 recent local remote refs. | not named | **remove: no caller.** Deletion build: clean. |
+| D1 | `Diffusion/Models/Denoisers/DiTBlocks/WanVideoBlock.cs:33-37` `SelfAttentionStage`, `CrossAttentionStage`, `ImageAttentionStage`, `SelfAttentionF16Stage`, `CrossAttentionF16Stage` (5 properties) | internal | Accessors returning the private `_selfAttention` etc. Test seams; a sub-agent found the tests that used them deleted in `e9474bb06` (not re-checked). | `rg '\b(SelfAttentionStage\|CrossAttentionStage\|ImageAttentionStage\|SelfAttentionF16Stage\|CrossAttentionF16Stage)\b'` over every file type in the tree: 5 hits, the declarations. No `GetProperty` reflection names them (sub-agent). Declarations only on `origin/main` `f28b0f384` and the K02 branch tip. | not named | **remove: no caller.** Deletion build: clean. |
 | D2 | `AttentionStage` in `Diffusion/Models/Denoisers/SeedVr2DitBlock.cs:60`, `MiniMaxH3Transformer.cs:51`, `DiTBlocks/MatrixGame3ActionModule.cs:36`, `DiTBlocks/OasisSpatioTemporalBlock.cs:53` (4 properties) | internal | Same shape. | `rg '\bAttentionStage\b'`: the four declarations, the fifth below, and nothing else. | not named | **remove: no caller.** Deletion build: clean. |
-| D3 | `DiTBlocks/WanS2VAudioInjector.cs:26` `AttentionStage` | internal | Same shape. | None on `main`, but test code on `origin/codex/attention-integration-4090` and `origin/codex/attention-wan-s2v-injector-batch` calls `injector.AttentionStage` (the former forward is its oracle). | not named | **keep: not a duplicate.** Removing it would break an open draft; revisit when that merges. |
-| D4 | `Cuda/CudaBackend.cs:67` `CudnnSdpaDiagnostics`, `:108` `CudnnSdpaSessionGeneration`, `:111` `CudnnSdpaDisposedSessionCount` (3 properties) | internal | cuDNN SDPA session health and "test diagnostic" counters. | `rg` for each name over the whole tree, all file types: only the declaration. Not used on the 28 recent local remote refs. The counters they read (`_cudnnSdpaSessionGeneration`, `_cudnnSdpaDisposedSessionCount`) are still incremented, so removing the properties leaves two write-only fields; that is a follow-on cleanup. | not named | **remove: no caller.** Deletion build: clean. |
+| D3 | `DiTBlocks/WanS2VAudioInjector.cs:26` `AttentionStage` | internal | Same shape. | None at `ab67d61f6`. Since #1028 merged, `tests/HartsyInference.Diffusion.Tests/WanS2VAudioInjectorTests.cs:154,215,216,227,274` call `injector.AttentionStage` (the former forward is the test oracle). | not named | **keep: not a duplicate.** In use on `main`. |
+| D4 | `Cuda/CudaBackend.cs:67` `CudnnSdpaDiagnostics`, `:108` `CudnnSdpaSessionGeneration`, `:111` `CudnnSdpaDisposedSessionCount` (3 properties) | internal | cuDNN SDPA session health and "test diagnostic" counters. | `rg` for each name over the whole tree, all file types: only the declaration. Declarations only on `origin/main` `f28b0f384` and the K02 branch tip. The counters they read (`_cudnnSdpaSessionGeneration`, `_cudnnSdpaDisposedSessionCount`) are still incremented, so removing the properties leaves two write-only fields; that is a follow-on cleanup. | not named | **remove: no caller.** Deletion build: clean. |
 | D5 | `CudaBackend.cs:48,63,89,116` `CudnnSdpaRefusedShapes`, `CudnnSdpaDimDiagnostics`, `CudnnSdpaEngaged`, `SageAttentionEngaged` | public | cuDNN and Sage health and engagement reports, which `AttentionEvidence` (a per-call route record) does not give. | None anywhere in the tree. | not named | **keep: not a duplicate.** Public and unread, so removal is an API break; an owner decision. |
 | D6 | `Vulkan/VulkanBackend.FlashCm2.cs` `FlashCm2PrefillDispatches` | public | A dispatch counter whose comment says "tests and profiling". | None. (sub-agent) | not named | **keep: not a duplicate.** Public and unread. |
 | D7 | `Cuda/CudaBackend.Int8AttentionV2.TestHooks.cs` `RunInt8AttentionV2ForTest`, `Int8V2*ForTest` | internal | Test hooks. | None on `main`, but `origin/hartsy/attention-k02-cuda-int8-rotation-b5a1bb` (an active session) calls `RunInt8AttentionV2ForTest` in new tests. | not named | **keep: not a duplicate.** In use by in-flight work. |
 | D8 | `Core/Backends/Attention/Int8AttentionExp2.cs` `Int8AttentionExp2` and `DecodeLengthsReference.cs` `DecodeLengthsReference` | public | References, not row bodies. | Tests only (`DecodeLengthsReferenceTests`, `AttentionSequenceLengthsCallTests` and others in `tests/HartsyInference.Core.Tests/Backends/`); none in `src/`. | not named | **keep: not a duplicate.** Oracles with no shared equivalent. |
 
-## E. Per-model attention helpers (sub-agent survey; re-read where marked)
+## M. Per-model attention helpers (sub-agent survey; re-read where marked)
 
 The shared layer is `Core/Layers/Attention/AttentionLayer.cs`. `AttendHeadMajorOperands` (`:164`) builds
 `AttentionCall.FromScaledDotProductAttention(..., allowF16: false) with { Numerics = _config.Numerics }` and calls
@@ -138,8 +142,8 @@ SDPA entry builds, and `MergeHeads` (`:362`) is one `Permute0213` that disposes 
 | M6 | `ThreeD/Models/Idol/IdolAttention.cs:21` `Attend` | internal static | `AttentionLayer.AttendHeadMajorOperands` plus `MergeHeads`, after the helper's own permutes. Re-read. | `IdolBlock.cs:153`, `IdolDecoderAttention.cs:70`. | The helper passes `allowF16: true`. Equivalent only through `new AttentionLayer(new AttentionLayerConfig { ..., AllowF16 = true })`, which builds `FromLegacy(true)`; `AttentionLayer.Shared` cannot express it. | Migrate both callers to a configured layer. | **remove after migrating 2 callers** (`IdolBlock.cs:153`, `IdolDecoderAttention.cs:70`). Needs the route evidence the ledger's "Removal evidence" section requires, and the plan item 16 audit owns the move. |
 | M7 | `ThreeD/Models/TrellisV2/Trellis2FlowBlock.cs:265` `Attend` | private | SDPA with a null mask, then `Permute0213` back: `AttentionLayer.Shared(heads, headDim, scale, DType.F32).AttendHeadMajorOperands` plus `MergeHeads`. Re-read. | `Trellis2FlowBlock.cs:177,203`. | `allowF16` is false on both sides, so the calls are equal by reading. The layer also checks that K and V shapes match, and malformed input reaches the planner by a different path, so exception classes may differ (not tested). | Replace the body with the layer calls. | **remove after migrating 2 callers** (`:177`, `:203`). Needs route evidence. |
 | M8 | `ThreeD/Models/CoLa3D/CoLa3DBlock.cs:169` `Attend` | private | Same pipeline. Re-read. | `CoLa3DBlock.cs:84,112,146`. | As M7. | As M7. | **remove after migrating 3 callers** (`:84`, `:112`, `:146`). Needs route evidence. |
-| M9 | `Vision/Detection/RtDetrAttention.cs:21` `MultiHead` | public static class | A thin wrapper over `AttentionLayer.Shared(...).AttendHeadMajorOperands`. (sub-agent) | Five: `GroundingDinoEncoder.cs:220,221`, `GroundingDinoMultiheadAttention.cs:34`, `RtDetrDecoder.cs:230`, `RtDetrHybridEncoder.cs:288`, `Sam3MultiheadAttention.cs:66`. | Same call. | n/a | **keep: public adapter.** Public in a package; not named in the ledger. |
-| M10 | `Audio/Models/Dia/DiaHeads.cs:53` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`, `SliceLeading` | public static class | Host copies of `StridedCopies.RepeatInterleave` and `Permute0213`. (sub-agent) | `DiaAttention.cs:193,194` for `RepeatKv`; the others also in `NeuCodecDecoder.cs`, `DemucsCrossTransformer.cs`, `Text2Semantic`. | Pure copies. | n/a | **keep: not a duplicate.** Public, with callers in other models; consolidating them is model work. |
+| M9 | `Vision/Detection/RtDetrAttention.cs:21` `MultiHead` | public static class | A thin wrapper over `AttentionLayer.Shared(...).AttendHeadMajorOperands`. (sub-agent) | Five: `GroundingDinoEncoder.cs:220,221`, `GroundingDinoMultiheadAttention.cs:34`, `RtDetrDecoder.cs:230`, `RtDetrHybridEncoder.cs:288`, `Sam3MultiheadAttention.cs:66`. | Same call. | n/a | **keep: public adapter.** Public, with five callers in other models; not named in the ledger. |
+| M10 | `Audio/Models/Dia/DiaHeads.cs:53` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`, `SliceLeading` | public static class | Host copies of `StridedCopies.RepeatInterleave` and `Permute0213`. (sub-agent) | `DiaAttention.cs:193,194` for `RepeatKv`; the others also in `NeuCodecDecoder.cs`, `DemucsCrossTransformer.cs`, `Text2Semantic`. | Pure copies. | n/a | **keep: not a duplicate.** Public with callers in other models, but these are host copies, not wrappers of the shared path, so this is model work rather than an adapter. |
 | M11 | Causal-mask tensor builders: `ClipTextEncoder.cs:417`, `Sam3TextEncoder.cs:136`, `WhisperOps.cs:90`, `GptBackbone.cs:157`, `OasisDit.cs:310`, `MiniMaxH3AudioVaeEncoder.cs:421`, `TextEncoderTensorHelpers.cs:140`, `ZonosBackbone.cs:114` | private or internal | No shared tensor builder exists: `AttentionMask` is a descriptor (`Causal`, `WindowLeft`), not a bias. (sub-agent) | Local to each model. | The sentinels differ (`-inf`, `-1e9`, `-1e30`) and so do the shapes; moving to the structural `Causal` mask selects different kernels. | n/a | **keep: not a duplicate** of any shared helper. A new shared helper would be needed first. |
 | M12 | The 45 direct `ScaledDotProductAttention(` / `FlashAttention(` / `FlashAttentionDev(` calls under `src/` outside `Backends/` that add RoPE, QK norm, masks, ALiBi, GQA repeat or windowing, and small wrapper classes such as `HeadGatedAttention` and `HunyuanPaintAttention`; `MusicGenBlock.cs:115` calls `FlashAttentionDev` on purpose to keep its own rows on Vulkan | various | Inline copies of what `AttentionLayer` does around the call. (sub-agent) | n/a | Moving them onto the layer's token-major or GQA routes could change summation order; not tested. | n/a | **keep: not a duplicate.** These are model migrations (plan items 14 to 17), not item 18. |
 
@@ -163,9 +167,9 @@ The scratch edit deleted V1, D1, D2 and D4 and also dropped the `allowF16` param
 `AttentionRows.cs:208`). `dotnet build <project> -f net10.0` then ran for each of the 42 projects from
 `git ls-files '*.csproj'`: **41 built with 0 errors.** The one failure,
 `tests/python-reference/trellis2_stage_parity/csharp/Capture/Capture.csproj`, is `CS1529` at `Program.cs(29,1)`, a `using`
-placed after statements; no edited symbol is involved, but I did not build that project without the edit to prove it was
-already failing. The projects without a test assembly of their own (`HartsyInference.Cuda.Tests`, `HartsyInference.Vulkan.Tests`)
-are not built by this, which is why the greps, not the build, cover them. The edit was reverted with `git checkout -- src/`.
+placed after statements at line 29 of a file this edit did not touch (it is the committed `HEAD` text), so it cannot depend on
+the edit. Assemblies named in `InternalsVisibleTo` that have no project here (`HartsyInference.Cuda.Tests`,
+`HartsyInference.Vulkan.Tests`) are not built by this, which is why the greps, not the build, cover them. The edit was reverted with `git checkout -- src/`.
 
 ### Public adapters confirmed kept
 
@@ -196,8 +200,8 @@ V1, V2, V3, V4, D1, D2, D4 and M1 to M3 do not change observable behavior.
   `int8.v2.f16pv` (`CudaBackend.AttentionRows.cs:145-148`) both reach it, and the PV format comes from `CurrentInt8V2Pv()`. I did
   not trace why. It is the K02 session's area, so I left it alone.
 - The analyzer also reports unused parameters: `AttentionHostReference.cs:191` `BiasView.Of(..., call)`, and
-  `VulkanBackend.FlashCm2.cs:164` `CanUseFlashCm2(..., sq, skv, ...)` (`sq` and `skv`; the Vulkan agent noted `TryFlashCm2CausalPrefill`
-  repeats the same minimum-rows rule elsewhere). Not duplicates; trivial.
+  `VulkanBackend.FlashCm2.cs:164` `CanUseFlashCm2(..., sq, skv, ...)` (`sq` and `skv`; separately, `TryFlashCm2CausalPrefill` has its own
+  minimum-rows test beside the row's `MinQueryTokens`, per the Vulkan sub-agent). Not duplicates; trivial.
 - `Krea2Attention.Forward` takes an unused `seqLen` (`Diffusion/Models/Denoisers/DiTBlocks/Krea2Attention.cs:75`).
 
 ### What I did not examine
@@ -213,8 +217,8 @@ V1, V2, V3, V4, D1, D2, D4 and M1 to M3 do not change observable behavior.
   sparse session) beyond confirming they are separate operations and not rows.
 - Consumers of `JointAttention` (Flux, SD3 and the like) and `AttentionLayer` wrappers such as `Kandinsky5BlockOps.Attention`,
   for pure forwarders.
-- Open pull requests and other worktrees beyond the symbol check on 28 local remote refs; a branch older than 2026-11-18 may
-  use a symbol I call dead. The local remote refs were not refreshed.
+- Open pull requests and other worktrees beyond the symbol check on `origin/main` and the K02 branch tip; any other branch may
+  use a symbol I call dead. I did not fetch, so even those refs are as last updated locally.
 - The scripts' limits: the identifier count does not look inside `tools/` as a caller class of its own (it is a repository-wide
   count), and a common name such as `Attend` or `MergeHeads` cannot be judged by count alone, so those rows were read by hand;
   the artifact check counts any quoted name in a `.cs` file as a load, so a name quoted only in a test or a comment would pass
