@@ -141,4 +141,62 @@ public sealed class Int8AttentionCenteringVulkanTests
                 $"value scale {i} is {actual[i]:R}, expected {expected.ValueScales[i]:R}");
         AssertBytes(expected.Values, bytes.AsReadOnlySpan<sbyte>(), "value bytes at the edges");
     }
+
+    /// <summary>A head with no keys: each channel takes the scale floor of 1, as the reference's whole-head scale of an
+    /// empty channel does, in place of whatever the tensor held.</summary>
+    [VulkanFact]
+    public void ValueScalesOfNoKeysAreTheFloor()
+    {
+        const int heads = 2, headDim = 64;
+        using VulkanBackend backend = new();
+        using Tensor rows = new(new TensorShape(heads, 0, headDim), DType.F32);
+        using Tensor bytes = new(new TensorShape(0, headDim), DType.I8);
+        using Tensor scales = new(new TensorShape(heads, 1, headDim), DType.F32);
+        scales.AsSpan<float>().Fill(7f);
+        backend.QuantizeInt8AttentionValues(bytes, scales, rows, 128);
+        backend.Sync();
+        foreach (float scale in scales.AsReadOnlySpan<float>()) Assert.Equal(1f, scale);
+    }
+
+    /// <summary>More scales than one dispatch covers (65,535 workgroups of 256): one scale a value, so each is
+    /// <c>|v| / 127</c> and those past the first dispatch are written too.</summary>
+    [VulkanFact]
+    public void ValueScalesPastOneDispatchAreWritten()
+    {
+        const int keys = 65600, headDim = 256;
+        using Tensor rows = new(new TensorShape(1, keys, headDim), DType.F32);
+        Random random = new(71);
+        Span<float> v = rows.AsSpan<float>();
+        for (int i = 0; i < v.Length; i++) v[i] = random.NextSingle() * 2f - 1f;
+        float[] expectedScales = new float[v.Length];
+        sbyte[] expectedBytes = new sbyte[v.Length];
+        for (int i = 0; i < v.Length; i++)
+        {
+            float scale = MathF.Abs(v[i]) / 127f;
+            if (!(scale >= 1.17549435e-38f)) scale = 1f;
+            expectedScales[i] = scale;
+            expectedBytes[i] = (sbyte)MathF.Round(Math.Clamp(v[i] * (1f / scale), -127f, 127f));
+        }
+
+        using VulkanBackend backend = new();
+        using Tensor bytes = new(new TensorShape(keys, headDim), DType.I8);
+        using Tensor scales = new(new TensorShape(1, keys, headDim), DType.F32);
+        backend.QuantizeInt8AttentionValues(bytes, scales, rows, 1);
+        backend.Sync();
+        AssertBits(expectedScales, scales.AsReadOnlySpan<float>(), "value scales past one dispatch");
+        AssertBytes(expectedBytes, bytes.AsReadOnlySpan<sbyte>(), "value bytes past one dispatch");
+    }
+
+    /// <summary>Outputs of the wrong shape are refused before any device work.</summary>
+    [VulkanFact]
+    public void KeyOutputsOfTheWrongShapeAreRefused()
+    {
+        using VulkanBackend backend = new();
+        using Tensor keys = new(new TensorShape(2, 10, 64), DType.F32);
+        using Tensor means = new(new TensorShape(2, 64), DType.F32);
+        using Tensor bytes = new(new TensorShape(20, 64), DType.I8), shortBytes = new(new TensorShape(19, 64), DType.I8);
+        using Tensor scales = new(new TensorShape(20), DType.F32), shortScales = new(new TensorShape(19), DType.F32);
+        Assert.Throws<ArgumentException>(() => backend.QuantizeInt8AttentionKeys(shortBytes, scales, means, keys, Int8Rotation.None));
+        Assert.Throws<ArgumentException>(() => backend.QuantizeInt8AttentionKeys(bytes, shortScales, means, keys, Int8Rotation.None));
+    }
 }

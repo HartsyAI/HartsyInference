@@ -53,6 +53,11 @@ public sealed partial class VulkanBackend
     public void QuantizeInt8AttentionKeys(Tensor bytes, Tensor scales, Tensor means, Tensor keys, Int8Rotation rotation)
     {
         (int heads, int count, int dp) = Int8HeadMajor(keys, nameof(keys));
+        long keyRows = (long)heads * count;
+        if (bytes.DType != DType.I8 || bytes.Shape != new TensorShape(keyRows, dp))
+            throw new ArgumentException($"The bytes are I8 [{keyRows}, {dp}]; got {bytes.DType} {bytes.Shape}.", nameof(bytes));
+        if (scales.DType != DType.F32 || scales.ElementCount != keyRows)
+            throw new ArgumentException($"The scales are F32, one a key ({keyRows}); got {scales.DType} {scales.Shape}.", nameof(scales));
         Int8AttentionKeyMeans(means, keys);
         if ((long)heads * count == 0) return;
 
@@ -83,7 +88,13 @@ public sealed partial class VulkanBackend
             throw new ArgumentException($"The bytes are I8 with {elements} elements; got {bytes.DType} {bytes.Shape}.", nameof(bytes));
         if (scales.DType != DType.F32 || scales.ElementCount != scaleCount)
             throw new ArgumentException($"The scales are F32 [{heads}, {blocks}, {dp}]; got {scales.DType} {scales.Shape}.", nameof(scales));
-        if (elements == 0) return;
+        if (scaleCount == 0) return;
+        if (elements == 0)
+        {
+            // No keys: the reference takes the scale of a channel with nothing in it, which is its floor.
+            Fill(scales, 1f);
+            return;
+        }
         RequireShader("int8_attn_value_scales");
         RequireShader("int8_attn_quant_values");
 
@@ -95,23 +106,29 @@ public sealed partial class VulkanBackend
         try
         {
             VulkanKernel stats = GetKernel("int8_attn_value_scales", storageBufferCount: 3, _default1DSpec);
-            Span<byte> pc = stackalloc byte[6 * 4];
-            BinaryWriteUInt(pc, 0, (uint)heads);
-            BinaryWriteUInt(pc, 4, (uint)count);
-            BinaryWriteUInt(pc, 8, (uint)dp);
-            BinaryWriteUInt(pc, 12, (uint)blockKeys);
-            BinaryWriteUInt(pc, 16, (uint)blocks);
-            BinaryWriteFloat(pc, 20, 127f);
+            Span<byte> statPc = stackalloc byte[7 * 4];
+            BinaryWriteUInt(statPc, 0, (uint)heads);
+            BinaryWriteUInt(statPc, 4, (uint)count);
+            BinaryWriteUInt(statPc, 8, (uint)dp);
+            BinaryWriteUInt(statPc, 12, (uint)blockKeys);
+            BinaryWriteUInt(statPc, 16, (uint)blocks);
+            BinaryWriteFloat(statPc, 20, 127f);
             Span<ulong> statBuffers = stackalloc ulong[] { source.Handle, scaleBuffer.Handle, inverseBuffer.Handle };
-            Dispatch(stats, statBuffers, pc, GroupCount(scaleCount, LocalX1D));
+            for (long done = 0; done < scaleCount; done += MaxElementsPerDispatch)
+            {
+                BinaryWriteUInt(statPc, 24, (uint)done);
+                Dispatch(stats, statBuffers, statPc, GroupCount(Math.Min(scaleCount - done, MaxElementsPerDispatch), LocalX1D));
+            }
 
             VulkanKernel quantize = GetKernel("int8_attn_quant_values", storageBufferCount: 3, _default1DSpec);
             Span<ulong> quantBuffers = stackalloc ulong[] { source.Handle, inverseBuffer.Handle, byteBuffer.Handle };
+            Span<byte> quantPc = stackalloc byte[6 * 4];
+            statPc[..20].CopyTo(quantPc);
             long words = elements / 4;
             for (long done = 0; done < words; done += MaxElementsPerDispatch)
             {
-                BinaryWriteUInt(pc, 20, (uint)done);   // the quantize pass reads a word base where the stats pass read the range
-                Dispatch(quantize, quantBuffers, pc, GroupCount(Math.Min(words - done, MaxElementsPerDispatch), LocalX1D));
+                BinaryWriteUInt(quantPc, 20, (uint)done);
+                Dispatch(quantize, quantBuffers, quantPc, GroupCount(Math.Min(words - done, MaxElementsPerDispatch), LocalX1D));
             }
             CacheOutput(bytes, byteBuffer);
             CacheOutput(scales, scaleBuffer);

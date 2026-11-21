@@ -22,6 +22,7 @@ layout(push_constant) uniform Push {
     uint blockKeys;     // keys per block; the last block may be short
     uint blocks;
     float range;        // 127
+    uint scaleBase;     // the first (head, block, channel) of this dispatch
 } pc;
 
 const float MIN_NORMAL = 1.17549435e-38;
@@ -29,7 +30,7 @@ const float MIN_NORMAL = 1.17549435e-38;
 #include "div_rn.glsl"
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
+    uint i = pc.scaleBase + gl_GlobalInvocationID.x;
     if (i >= pc.heads * pc.blocks * pc.K) return;
     uint c = i % pc.K, hb = i / pc.K, block = hb % pc.blocks, head = hb / pc.blocks;
     uint first = block * pc.blockKeys, last = min(first + pc.blockKeys, pc.keys);
