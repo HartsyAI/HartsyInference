@@ -95,6 +95,94 @@ public sealed class WanAnimateFaceAttentionTests
         }
     }
 
+    /// <summary>The whole block on the CPU backend, with random weights in the legacy layout, against the same steps written
+    /// out here: the two pre-norms, the three projections, the per-head RMS norm on Q and K, the frame-local loop and the
+    /// output projection. It covers what <see cref="WanAnimateFaceBlock.Forward"/> passes to the attention, which the
+    /// cases below do not. Tolerance 1e-4 as above, fixed before the first run.</summary>
+    [Fact]
+    public void TheWholeBlockMatchesItsStepsWrittenOut()
+    {
+        const int heads = 4, headDim = 8, dim = heads * headDim, frames = 3, groupLen = 4, n = 2, s = frames * groupLen;
+        const float eps = 1e-6f;
+        Dictionary<string, Tensor> weights = new();
+        int seed = 90;
+        foreach (string name in (ReadOnlySpan<string>)["to_q", "to_k", "to_v", "to_out"])
+        {
+            weights[$"face.{name}.weight"] = Random(new TensorShape(dim, dim), seed++);
+            weights[$"face.{name}.bias"] = Random(new TensorShape(dim), seed++);
+        }
+        weights["face.norm_q.weight"] = Random(new TensorShape(headDim), seed++);
+        weights["face.norm_k.weight"] = Random(new TensorShape(headDim), seed++);
+        using Tensor hidden = Random(new TensorShape(s, dim), seed++);
+        using Tensor motion = Random(new TensorShape(frames, n, dim), seed++);
+
+        float[] Normed(ReadOnlySpan<float> x, int rows)
+        {
+            float[] o = new float[rows * dim];
+            for (int i = 0; i < rows; i++)
+            {
+                double mean = 0, variance = 0;
+                for (int d = 0; d < dim; d++) mean += x[i * dim + d];
+                mean /= dim;
+                for (int d = 0; d < dim; d++) variance += (x[i * dim + d] - mean) * (x[i * dim + d] - mean);
+                float inv = 1f / MathF.Sqrt((float)(variance / dim) + eps);
+                for (int d = 0; d < dim; d++) o[i * dim + d] = (float)((x[i * dim + d] - mean) * inv);
+            }
+            return o;
+        }
+        float[] Projected(float[] x, int rows, string name)
+        {
+            ReadOnlySpan<float> w = weights[$"face.{name}.weight"].AsReadOnlySpan<float>(), b = weights[$"face.{name}.bias"].AsReadOnlySpan<float>();
+            float[] o = new float[rows * dim];
+            for (int i = 0; i < rows; i++)
+                for (int r = 0; r < dim; r++)
+                {
+                    double sum = b[r];
+                    for (int c = 0; c < dim; c++) sum += (double)w[r * dim + c] * x[i * dim + c];
+                    o[i * dim + r] = (float)sum;
+                }
+            return o;
+        }
+        void HeadNormed(float[] x, int rows, string name)
+        {
+            ReadOnlySpan<float> w = weights[$"face.{name}.weight"].AsReadOnlySpan<float>();
+            for (int i = 0; i < rows; i++)
+                for (int h = 0; h < heads; h++)
+                {
+                    int at = i * dim + h * headDim;
+                    double sumSq = 0;
+                    for (int d = 0; d < headDim; d++) sumSq += (double)x[at + d] * x[at + d];
+                    float inv = 1f / MathF.Sqrt((float)(sumSq / headDim) + eps);
+                    for (int d = 0; d < headDim; d++) x[at + d] = x[at + d] * inv * w[d];
+                }
+        }
+
+        float[] qn = Normed(hidden.AsReadOnlySpan<float>(), s), kn = Normed(motion.AsReadOnlySpan<float>(), frames * n);
+        float[] q = Projected(qn, s, "to_q"), k = Projected(kn, frames * n, "to_k"), v = Projected(kn, frames * n, "to_v");
+        HeadNormed(q, s, "norm_q");
+        HeadNormed(k, frames * n, "norm_k");
+        float[] expected = Projected(FormerLoop(q, k, v, frames, groupLen, n, heads, headDim), s, "to_out");
+
+        WanAnimateFaceBlock block = new(dim, heads, headDim, eps);
+        block.LoadWeights(weights, "face");
+        using CpuBackend backend = new();
+        using Tensor output = block.Forward(backend, hidden, motion);
+        Assert.Equal(new TensorShape(s, dim), output.Shape);
+        ReadOnlySpan<float> actual = output.AsReadOnlySpan<float>();
+        for (int i = 0; i < expected.Length; i++)
+            Assert.True(Math.Abs(expected[i] - actual[i]) <= Tolerance * Math.Max(1f, Math.Abs(expected[i])), $"element {i} is {actual[i]}, expected {expected[i]}");
+        foreach (Tensor weight in weights.Values) weight.Dispose();
+    }
+
+    /// <summary>The helper refuses operands that do not split into the frames it is given.</summary>
+    [Fact]
+    public void GroupsThatDoNotDivideAreRefused()
+    {
+        using CpuBackend backend = new();
+        using Tensor q = Random(new TensorShape(7, 16), 1), k = Random(new TensorShape(4, 16), 2), v = Random(new TensorShape(4, 16), 3);
+        Assert.Throws<ArgumentException>(() => WanAnimateFaceBlock.Attend(backend, q, k, v, 2, 2, 8));
+    }
+
     [Fact]
     public void OnTheCpuBackendItMatchesTheFormerLoop()
     {

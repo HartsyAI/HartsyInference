@@ -84,10 +84,13 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
     /// <summary>Frame-local attention through the shared attention layer: <paramref name="q"/> <c>[S, heads·headDim]</c> is
     /// <paramref name="frames"/> equal contiguous groups, and group <c>f</c> attends rows <c>[f·N, (f+1)·N)</c> of
     /// <paramref name="k"/> and <paramref name="v"/> <c>[frames·N, heads·headDim]</c>. Returns <c>[S, heads·headDim]</c>; the
-    /// operands stay the caller's.</summary>
+    /// operands stay the caller's. The operands are read as host views: one that lives on the device is copied to the
+    /// host first, which costs nothing here because the per-head norm has just written Q and K there.</summary>
     internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int frames, int heads, int headDim)
     {
         int dim = heads * headDim;
+        if (frames <= 0 || q.Shape[0] % frames != 0 || k.Shape[0] % frames != 0 || v.Shape != k.Shape)
+            throw new ArgumentException($"Frame-local attention needs {frames} equal groups of queries and of keys; got Q={q.Shape}, K={k.Shape}, V={v.Shape}.");
         TensorShape queries = new(frames, q.Shape[0] / frames, dim), keys = new(frames, k.Shape[0] / frames, dim);
         // The layer disposes what it is given: views, which leave the operands themselves to the caller.
         return AttentionLayer.Shared(heads, headDim, computeDType: DType.F32)
