@@ -112,7 +112,10 @@ overlapped another session's GPU test host for their whole length; two of them a
 (the tiled kernel at 1,024 tokens, D 128, read 9.8 and 23.1 ms against 4.2) and are not used. The next three started
 only when no other test host of this repository was on the card, and sampled for one every 3 seconds: another test
 host was present in 25 of 60, 43 of 66 and 47 of 64 samples. Those three are the table below. Read it as "the figures
-above still hold where the card was quiet enough", not as a clean replication.
+above still hold where the card was quiet enough", not as a clean replication. A further attempt an hour later, after
+the other sessions had been asked to hold, was disturbed in 35 of 62 samples and is further off again (the tiled kernel
+at 1,024 tokens, D 128: 9.4 ms); the processes on the card were GPU test hosts of two other worktrees of this
+repository, running their own lanes. A clean rerun needs the card reserved, which this session could not arrange.
 
 | Call | Row with `off` | `off` | `all` (tiled) | `off` over tiled | Merged range held? |
 | --- | --- | --- | --- | --- | --- |
