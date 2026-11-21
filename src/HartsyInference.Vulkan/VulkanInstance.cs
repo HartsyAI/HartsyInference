@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using System.Runtime.InteropServices;
 using static HartsyInference.Vulkan.VulkanUtilities;
 
@@ -17,6 +18,7 @@ public sealed class VulkanInstance : IDisposable
 {
     private static readonly object _heldLock = new();
     private static nint _held;
+    private static bool _holdAttempted;
 
     /// <summary>Whether this process holds its idle instance: true from the first instance created with
     /// <c>diagnostics.vkKeepInstance</c> on, until the process ends.</summary>
@@ -94,18 +96,23 @@ public sealed class VulkanInstance : IDisposable
 
     /// <summary>Creates the instance this process holds until it ends, once, before the first instance a caller asked
     /// for. It has no layers, no extensions and no device, and nothing destroys it: not Dispose, not a finalizer, not
-    /// process exit, because destroying the last instance is the path being kept away from. A failure to create it is
-    /// left for the caller's own instance to report.</summary>
+    /// process exit, because destroying the last instance is the path being kept away from. It is tried once: a
+    /// failure is logged and the process goes on without it, and the caller's own instance reports its own error.</summary>
     private static void HoldProcessInstance()
     {
         if (Volatile.Read(ref _held) != 0 || !EngineKnobs.VkKeepInstance.Value) return;
         lock (_heldLock)
         {
-            if (_held != 0) return;
+            if (_held != 0 || _holdAttempted) return;
+            _holdAttempted = true;
             using PinnedUtf8String appName = new("HartsyInference");
             using PinnedUtf8String engineName = new("HartsyInference.Vulkan");
             using PinnedStringArray none = new(new List<string>());
-            if (Create(appName, engineName, none, none, out nint held) == VkResult.Success) Volatile.Write(ref _held, held);
+            VkResult result = Create(appName, engineName, none, none, out nint held);
+            if (result == VkResult.Success) Volatile.Write(ref _held, held);
+            else
+                Logs.Warning($"Vulkan: the instance this process holds until it ends could not be created ({result}); "
+                    + "backends are created and destroyed without it.");
         }
     }
 
