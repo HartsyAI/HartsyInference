@@ -50,7 +50,9 @@ public sealed partial class CudaKernels
     }
 
     /// <summary>Whether the loaded lengths decode serves this head dim, group and cache type: 64 and 128 where the cache
-    /// type's entry points loaded, and 256 where that one did and the device gives a block its shared memory.</summary>
+    /// type's entry points loaded, and 256 where that one did and the device gives a block its shared memory. Head dim
+    /// 256 is this kernel's alone: the single-length and paged decodes stay at 64 and 128 (<see cref="DecodeGqaSupports"/>),
+    /// so the two rules are not one.</summary>
     public bool DecodeLengthsSupports(int d, int group, HartsyInference.Core.Tensors.DType cache)
     {
         int type = DecodeLengthsCacheIndex(cache);
@@ -145,12 +147,10 @@ public sealed partial class CudaKernels
                 // at zero, and a call at 256 over that cache type is then refused.
                 nint d256 = _decodeLengthsModule.TryGetFunction($"lm_fa_decode_lengths_{types[t]}_d256");
                 int shared = DecodeSharedBytes(256, 16, f16Kv: t != 0);
-                if (d256 != 0 && shared <= MaxDynamicSharedBytes)
-                {
-                    // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8.
-                    CudaDriverApi.cuFuncSetAttribute(d256, 8, shared).ThrowOnError();
+                // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. A driver that refuses the opt-in leaves the
+                // handle at zero like the other cases: the backend still loads, and the call is refused.
+                if (d256 != 0 && shared <= MaxDynamicSharedBytes && CudaDriverApi.cuFuncSetAttribute(d256, 8, shared) == 0)
                     _decLengths256[t] = d256;
-                }
             }
             _decLengthsCombine = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_combine");
         }

@@ -123,7 +123,24 @@ public sealed class DecodeLengthsGpuTests
         int[] lengths, bool causal)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        if (RefusedWhereNotServed(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal, DType.F32)) return;
         MatchesTheHostReference(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal);
+    }
+
+    /// <summary>A card may not serve head dim 256 for a cache type: a block there needs more shared memory than a Turing
+    /// card allows for an F32 cache, and a PTX file built before the entry points has none. Such a call has to be
+    /// refused whole. Returns true when it was, so the caller does not go on to expect a result.</summary>
+    private static bool RefusedWhereNotServed(CudaBackend backend, int batch, int heads, int kvHeads, int dim, int rows, int capacity,
+        int[] lengths, bool causal, DType cache)
+    {
+        if (backend.DecodeLengthsServedForTest(dim, heads / kvHeads, cache)) return false;
+        using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache == DType.F32 ? null : cache);
+        shape.Output.AsSpan<float>().Fill(-7f);
+        AttentionCall call = shape.Call(lengths, causal, lse: false);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+        backend.Sync();
+        Assert.Equal(-1, shape.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+        return true;
     }
 
     [CudaTheory]
@@ -152,6 +169,7 @@ public sealed class DecodeLengthsGpuTests
                 // head dim 256: the Kitchen vector's shape, a group of 16, and several chunks with an empty sequence
                 (1, 4, 2, 256, 3, 40, [37], true), (2, 16, 1, 256, 1, 300, [300, 7], true), (3, 8, 2, 256, 2, 500, [499, 0, 64], false)])
         {
+            if (RefusedWhereNotServed(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal, cache)) continue;
             using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache);
             foreach (bool lse in (ReadOnlySpan<bool>)[true, false])
             {
@@ -253,7 +271,10 @@ public sealed class DecodeLengthsGpuTests
     public void OnCudaRowsPastASequencesLengthAreNeverReadAtHeadDim256(string type)
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
-        RowsPastASequencesLengthAreNeverRead(backend, type == "F32" ? null : type == "F16" ? DType.F16 : DType.BF16, 256);
+        DType cache = type == "F32" ? DType.F32 : type == "F16" ? DType.F16 : DType.BF16;
+        // The helper's shape: 2 sequences, 8 heads over 2 key heads, 3 rows, 200 slots, lengths 130 and 7.
+        if (RefusedWhereNotServed(backend, 2, 8, 2, 256, 3, 200, [130, 7], true, cache)) return;
+        RowsPastASequencesLengthAreNeverRead(backend, cache == DType.F32 ? null : cache, 256);
     }
 
     [VulkanFact]
