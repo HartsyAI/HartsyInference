@@ -9,7 +9,7 @@ using HartsyInference.Cuda.Profiling;
 
 namespace HartsyInference.Cuda;
 
-// INT8 attention v2 rows (S.17/S.18, M.4/M.5): admission, the persistent workspace and the three launches.
+// INT8 attention v2 rows (S.17/S.18, M.4/M.5): admission, the persistent workspace and the three launches, four with a rotation.
 public sealed partial class CudaBackend
 {
     private readonly HighWaterWorkspace _int8V2Workspace = new(static bytes => GpuTransferHelper.AllocateDevice((nuint)bytes),
@@ -61,12 +61,19 @@ public sealed partial class CudaBackend
         && (c.Numerics.Refused & AttentionFormats.Int8) == 0 && c.Mask.Bias is null && !c.Positions.OnDevice && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
         && c.Output.DType == c.Query.DType && c.Scale > 0f && float.IsFinite(c.Scale);
 
-    /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded.</summary>
+    /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded, and with
+    /// <c>numerics.int8AttnV2Rotate</c> the rotation kernel too: a call asked to rotate never runs unrotated.</summary>
     private bool Int8V2KernelsLoaded()
     {
         EnsureKernels();
+        if (EngineKnobs.Int8AttnV2Rotate.Value && !_kernels!.HasInt8AttentionV2Rotation) return false;
         return EngineKnobs.Int8AttnV2F16Pv.Value ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
     }
+
+    /// <summary>The transform <c>numerics.int8AttnV2Rotate</c> gives a call of <paramref name="validKeys"/> keys: none, or the
+    /// pinned rule's (<see cref="Int8AttentionRotation.Select"/>).</summary>
+    private static Int8Rotation CurrentInt8V2Rotation(int validKeys) =>
+        EngineKnobs.Int8AttnV2Rotate.Value ? Int8AttentionRotation.Select(Int8AttentionV2Layout.HeadDim, validKeys) : Int8Rotation.None;
 
     /// <summary>What the INT8 v2 rows take beyond their declared capability: <see cref="Int8V2Eligible"/>, the row's PV format,
     /// 16-byte aligned rows and the kernels.</summary>
@@ -117,7 +124,7 @@ public sealed partial class CudaBackend
             Tensor output = c.Output.Storage;
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, Int8V2BlockRows, null);
+            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, Int8V2BlockRows, null, CurrentInt8V2Rotation(c.ValidKvLength));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cached = true;
             Interlocked.Increment(ref _int8V2ExecutionCount);
@@ -132,10 +139,19 @@ public sealed partial class CudaBackend
         }
     }
 
-    /// <summary>The stats, quant and attention launches of one call over device operands.</summary>
+    /// <summary>The stats, quant and attention launches of one call over device operands. With a rotation (or
+    /// <paramref name="rotationKernel"/>, a test's way to run the rotation kernel's identity) the quant launch leaves Q to the
+    /// rotation launch, which also rewrites the K it wrote; V is never rotated.</summary>
     private void LaunchInt8V2(in AttentionCall c, in Int8AttentionV2Layout layout, ulong workspace, ulong pQ, ulong pK, ulong pV,
-        ulong pOut, int blockRows, Int8V2TraceArgs? trace)
+        ulong pOut, int blockRows, Int8V2TraceArgs? trace, Int8Rotation rotation = Int8Rotation.None, bool rotationKernel = false)
     {
+        uint transform = Int8AttentionRotation.Resolve(rotation, Int8AttentionV2Layout.HeadDim, c.ValidKvLength) switch
+        {
+            Int8Rotation.H4 => 1u,
+            Int8Rotation.SignedH128 => 2u,
+            _ => 0u,
+        };
+        bool rotated = transform != 0 || rotationKernel;
         bool f32 = c.Query.DType == DType.F32, f32Out = c.Output.DType == DType.F32;
         ulong elem = f32 ? 4UL : 2UL;
         ulong q = pQ + (ulong)c.Query.Offset * elem, k = pK + (ulong)c.Key.Offset * elem, v = pV + (ulong)c.Value.Offset * elem;
@@ -147,7 +163,11 @@ public sealed partial class CudaBackend
                 _stream.Handle);
         using (NvtxRange _ = NvtxRange.PushFine("Int8V2.Quant"))
             _kernels!.LaunchInt8V2Quant(f32, q, Strides(c.Query), k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch,
-                c.Heads, c.QueryTokens, keys, _stream.Handle);
+                c.Heads, c.QueryTokens, keys, _stream.Handle, queries: !rotated);
+        if (rotated)
+            using (NvtxRange _ = NvtxRange.PushFine("Int8V2.RotatedQk"))
+                _kernels!.LaunchInt8V2RotatedQk(f32, q, Strides(c.Query), k, Strides(c.Key), workspace, in layout, c.Batch, c.Heads,
+                    c.QueryTokens, keys, transform, _stream.Handle);
         using (NvtxRange _ = NvtxRange.PushFine("Int8V2.Attention"))
             _kernels!.LaunchInt8V2Attention(blockRows, f32Out, o, Strides(c.Output), workspace, in layout, c.Batch, c.Heads, c.QueryTokens,
                 keys, c.Scale * Int8AttentionV2Reference.Log2E, _stream.Handle, trace);

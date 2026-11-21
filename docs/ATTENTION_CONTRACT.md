@@ -269,7 +269,11 @@ The planner reproduces these until the row that owns each is rewritten.
   shared by several keys lets one outlier key move the winner of a near-argmax row. u8 P rounds each key against its
   128-key tile's maximum, so a key below 1/510 of it is dropped, and a tile whose whole mass sits below that step loses
   it; the F16 PV keeps it. V scales default to one per channel per tile (`numerics.int8AttnV2VTile`), at or below the
-  per-sequence error on every synthetic and captured call measured.
+  per-sequence error on every synthetic and captured call measured. With `numerics.int8AttnV2Rotate` (off by default)
+  the rows rotate Q and the centered K before quantizing them, by the pinned rule at head dim 128: the 4-point
+  Hadamard up to 256 keys, the signed 128-point one past that. A fourth launch between the quant and attention
+  launches rewrites the Q and K bytes and scales; V is not rotated. The rows decline when the knob is set and that
+  launch's kernel is not loaded, so a call asked to rotate never runs unrotated. No model sets the knob.
 - CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.

@@ -1,6 +1,7 @@
 namespace HartsyInference.Cuda;
 
-// INT8 attention v2 (Kernels/attention/int8_attn_v2.cu): the stats, quant and attention launches over a caller's workspace.
+// INT8 attention v2 (Kernels/attention/int8_attn_v2.cu): the stats, quant and attention launches over a caller's workspace,
+// and the rotated Q/K launch (int8_attn_v2_rot.cu) that rewrites the quant launch's Q and K before the attention launch.
 public sealed partial class CudaKernels
 {
     private const int Int8V2StatsThreads = 128, Int8V2QuantThreads = 256;
@@ -11,12 +12,17 @@ public sealed partial class CudaKernels
     private readonly nint[] _int8V2Quant = new nint[4];      // [f32 input · 2 + F16 PV]
     private readonly nint[] _int8V2Attention = new nint[12]; // [(BR 128) · 6 + pv · 2 + F32 output]
     private readonly nint[] _int8V2Trace = new nint[4];      // [(BR 128) · 2 + tile V scales]
+    private CudaModule? _int8V2RotationModule;
+    private nint _int8V2RotatedQkF16, _int8V2RotatedQkF32;
 
     /// <summary>Whether int8_attn_v2.ptx loaded with its u8 PV entries.</summary>
     internal bool HasInt8AttentionV2 { get; private set; }
 
     /// <summary>Whether int8_attn_v2.ptx loaded with its F16 PV entries, which need the shared-memory opt-in.</summary>
     internal bool HasInt8AttentionV2F16Pv { get; private set; }
+
+    /// <summary>Whether int8_attn_v2_rot.ptx loaded beside int8_attn_v2.ptx, so a call's Q and K can be rotated.</summary>
+    internal bool HasInt8AttentionV2Rotation => _int8V2RotatedQkF16 != 0 && _int8V2RotatedQkF32 != 0;
 
     /// <summary>Dynamic shared memory of one INT8 v2 attention block: the K and V tiles, the tile's K scales and per-tile V scales.</summary>
     internal static int Int8V2SharedBytes(Int8AttentionV2Pv pv) =>
@@ -61,6 +67,11 @@ public sealed partial class CudaKernels
             if ((i / 2) % 3 == (int)Int8AttentionV2Pv.F16) HasInt8AttentionV2F16Pv = false;
             else HasInt8AttentionV2 = false;
         }
+        string rotationPath = Ptx("int8_attn_v2_rot");
+        if (!CanLoad(rotationPath)) return;
+        _int8V2RotationModule = LoadOwnedModule(rotationPath, required: false);
+        _int8V2RotatedQkF16 = _int8V2RotationModule.TryGetFunction("int8v2_rot_qk_f16");
+        _int8V2RotatedQkF32 = _int8V2RotationModule.TryGetFunction("int8v2_rot_qk_f32");
     }
 
     /// <summary>Every loaded INT8 v2 entry with the registers and local (spill) bytes the driver's JIT gave it on this card.</summary>
@@ -103,9 +114,10 @@ public sealed partial class CudaKernels
     }
 
     /// <summary>Q rows, K tiles and V tiles into the workspace's bytes and scales. Grid (Q blocks + 2·tiles, H, B).</summary>
+    /// <param name="queries">False leaves the Q rows to <see cref="LaunchInt8V2RotatedQk"/>, which rewrites K as well.</param>
     internal unsafe void LaunchInt8V2Quant(bool f32, ulong q, FlashStrides qStrides, ulong k, FlashStrides kStrides, ulong v,
         FlashStrides vStrides, ulong workspace, in Int8AttentionV2Layout layout, int batch, int heads, int queryTokens, int validKeys,
-        nint stream)
+        nint stream, bool queries = true)
     {
         bool pvF16 = layout.Pv == Int8AttentionV2Pv.F16;
         ulong qA = q, kA = k, vA = v;
@@ -114,7 +126,7 @@ public sealed partial class CudaKernels
         ulong kScale = workspace + (ulong)layout.KScale, v8 = workspace + (ulong)layout.V8, vScale = workspace + (ulong)layout.VScale;
         ulong kMean = workspace + (ulong)layout.KMean;
         uint hA = (uint)heads, sqA = (uint)queryTokens, kvA = (uint)validKeys, tiles = (uint)layout.Tiles;
-        uint qBlocks = (uint)((queryTokens + Int8V2QueryRowsPerQuantBlock - 1) / Int8V2QueryRowsPerQuantBlock);
+        uint qBlocks = queries ? (uint)((queryTokens + Int8V2QueryRowsPerQuantBlock - 1) / Int8V2QueryRowsPerQuantBlock) : 0u;
         uint vTile = layout.Pv == Int8AttentionV2Pv.U8TileScales ? 1u : 0u;
         void** a = stackalloc void*[20];
         a[0] = &qA; a[1] = &qs; a[2] = &kA; a[3] = &ks; a[4] = &vA; a[5] = &vs; a[6] = &q8; a[7] = &qScale; a[8] = &k8; a[9] = &kScale;
@@ -122,6 +134,27 @@ public sealed partial class CudaKernels
         a[18] = &qBlocks; a[19] = &vTile;
         CudaDriverApi.cuLaunchKernel(_int8V2Quant[(f32 ? 2 : 0) + (pvF16 ? 1 : 0)], qBlocks + 2 * tiles, (uint)heads, (uint)batch,
             Int8V2QuantThreads, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>Rotated Q rows and centered-then-rotated K tiles into the workspace's Q and K bytes and scales, over what the
+    /// quant launch wrote; it reads the stats launch's K means. Grid (Q blocks + tiles, H, B).</summary>
+    /// <param name="rotation">The kernel's transform: 0 none, 1 the 4-point Hadamard, 2 the signed 128-point one.</param>
+    internal unsafe void LaunchInt8V2RotatedQk(bool f32, ulong q, FlashStrides qStrides, ulong k, FlashStrides kStrides, ulong workspace,
+        in Int8AttentionV2Layout layout, int batch, int heads, int queryTokens, int validKeys, uint rotation, nint stream)
+    {
+        nint fn = f32 ? _int8V2RotatedQkF32 : _int8V2RotatedQkF16;
+        if (fn == 0) throw new InvalidOperationException("int8_attn_v2_rot.ptx is not loaded on this device.");
+        ulong qA = q, kA = k;
+        FlashStrides qs = qStrides, ks = kStrides;
+        ulong q8 = workspace + (ulong)layout.Q8, qScale = workspace + (ulong)layout.QScale, k8 = workspace + (ulong)layout.K8;
+        ulong kScale = workspace + (ulong)layout.KScale, kMean = workspace + (ulong)layout.KMean;
+        uint hA = (uint)heads, sqA = (uint)queryTokens, kvA = (uint)validKeys, tiles = (uint)layout.Tiles, rotationA = rotation;
+        uint qBlocks = (uint)((queryTokens + Int8V2QueryRowsPerQuantBlock - 1) / Int8V2QueryRowsPerQuantBlock);
+        void** a = stackalloc void*[15];
+        a[0] = &qA; a[1] = &qs; a[2] = &kA; a[3] = &ks; a[4] = &q8; a[5] = &qScale; a[6] = &k8; a[7] = &kScale; a[8] = &kMean;
+        a[9] = &hA; a[10] = &sqA; a[11] = &kvA; a[12] = &tiles; a[13] = &qBlocks; a[14] = &rotationA;
+        CudaDriverApi.cuLaunchKernel(fn, qBlocks + tiles, (uint)heads, (uint)batch, Int8V2QuantThreads, 1, 1, 0, stream, (nint)a, 0)
+            .ThrowOnError();
     }
 
     /// <summary>The attention kernel over the quantized workspace into a strided output. Grid (⌈Sq/BR⌉, H, B), 2·BR threads.</summary>

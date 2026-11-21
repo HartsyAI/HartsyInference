@@ -22,9 +22,11 @@ public sealed partial class CudaBackend
     }
 
     /// <summary>Test hook: runs one call on <paramref name="pv"/> at <paramref name="blockRows"/> and copies its workspace back, with
-    /// the trace of (batch, head, query tile) when <paramref name="traceTarget"/> is set (u8 PV, F32 output).</summary>
+    /// the trace of (batch, head, query tile) when <paramref name="traceTarget"/> is set (u8 PV, F32 output).
+    /// <paramref name="rotation"/> rotates Q and K; <paramref name="rotationKernel"/> sends an unrotated call through the
+    /// rotation kernel too.</summary>
     internal unsafe Int8V2Readback RunInt8AttentionV2ForTest(in AttentionCall c, Int8AttentionV2Pv pv, int blockRows,
-        (int Batch, int Head, int QueryTile)? traceTarget = null)
+        (int Batch, int Head, int QueryTile)? traceTarget = null, Int8Rotation rotation = Int8Rotation.None, bool rotationKernel = false)
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -53,7 +55,7 @@ public sealed partial class CudaBackend
                     Batch = (uint)target.Batch, Head = (uint)target.Head, QueryTile = (uint)target.QueryTile,
                 };
             }
-            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, blockRows, trace);
+            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, blockRows, trace, rotation, rotationKernel);
             _stream.Synchronize();
             T[] Read<T>(ulong at, long count) where T : unmanaged
             {
