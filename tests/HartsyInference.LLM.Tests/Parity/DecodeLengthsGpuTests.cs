@@ -165,11 +165,16 @@ public sealed class DecodeLengthsGpuTests
         using VulkanBackend backend = new();
         int lanes = (int)backend.Vk.SubgroupSize;
         MatchesTheHostReference(backend, 2, 8, 2, lanes, 2, 150, [150, 41], causal: true);
-        MatchesTheHostReference(backend, 2, 6, 2, 3 * lanes, 1, 200, [199, 64], causal: false);
-        MatchesTheHostReference(backend, 2, 4, 2, 6 * lanes, 1, 180, [180, 9], causal: true);
-        MatchesTheHostReference(backend, 3, 8, 2, 8 * lanes, 1, 300, [300, 1, 0], causal: true);
-        MatchesTheHostReference(backend, 2, 4, 4, 8 * lanes, 5, 200, [150, 3], causal: true);
-        MatchesTheHostReference(backend, 1, 8, 1, 8 * lanes, 3, 900, [899], causal: false);
+        // The row stops at head dim 256 whatever the subgroup width, so on a subgroup wider than 32 lanes the wider
+        // cases below are past it and are not run; the refusals after them still are.
+        if (3 * lanes <= 256) MatchesTheHostReference(backend, 2, 6, 2, 3 * lanes, 1, 200, [199, 64], causal: false);
+        if (6 * lanes <= 256) MatchesTheHostReference(backend, 2, 4, 2, 6 * lanes, 1, 180, [180, 9], causal: true);
+        if (8 * lanes <= 256)
+        {
+            MatchesTheHostReference(backend, 3, 8, 2, 8 * lanes, 1, 300, [300, 1, 0], causal: true);
+            MatchesTheHostReference(backend, 2, 4, 4, 8 * lanes, 5, 200, [150, 3], causal: true);
+            MatchesTheHostReference(backend, 1, 8, 1, 8 * lanes, 3, 900, [899], causal: false);
+        }
         foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 9 * lanes, 256 + lanes])
         {
             using Case outside = new(1, 4, 2, dim, 1, 96);
