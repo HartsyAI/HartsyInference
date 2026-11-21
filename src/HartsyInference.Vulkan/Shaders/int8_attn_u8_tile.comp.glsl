@@ -62,7 +62,7 @@ void main() {
     // md - md, written out so that no compiler may take it for zero when md is not finite.
     float shift = (isnan(md) || isinf(md)) ? uintBitsToFloat(0x7FC00000u) : 0.0;
 
-    float score[128];
+    float score[128];   // one a key of the tile: bc is 64 or 128, which the host entry enforces
     float best = uintBitsToFloat(0xFF800000u);
     bool anyNan = false;
     for (uint j = j0; j < j1; j++) {

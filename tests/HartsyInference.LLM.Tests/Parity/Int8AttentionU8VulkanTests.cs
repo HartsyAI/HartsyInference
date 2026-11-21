@@ -256,6 +256,18 @@ public sealed class Int8AttentionU8VulkanTests(ITestOutputHelper output)
         Assert.Equal(0, tiny);
     }
 
+    /// <summary>The drain refuses a head dim it cannot index, as the tile pass does.</summary>
+    [VulkanFact]
+    public void TheDrainRefusesAnUnpaddedHeadDim()
+    {
+        using VulkanBackend backend = new();
+        using Tensor output = new(new TensorShape(1, 2, 96), DType.F32), tileMax = new(new TensorShape(2), DType.F32);
+        using Tensor sums = new(new TensorShape(2), DType.U32), p = new(new TensorShape(2 * 64), DType.U8);
+        using Tensor valueBytes = new(new TensorShape(10, 96), DType.I8), valueScales = new(new TensorShape(1, 1, 96), DType.F32);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            backend.Int8AttentionU8Drain(output, tileMax, sums, p, valueBytes, valueScales, 1, 1, 64, false));
+    }
+
     /// <summary>No keys: every output value is zero, in place of whatever the tensor held.</summary>
     [VulkanFact]
     public void NoKeysGiveZeros()

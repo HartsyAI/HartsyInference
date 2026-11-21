@@ -86,7 +86,8 @@ public sealed partial class VulkanBackend
 
     /// <summary>The second pass: the reference's online recurrence over the key tiles of each query row, from what
     /// <see cref="Int8AttentionU8Tiles"/> wrote, into the attention output.</summary>
-    /// <param name="output">Output, F32 <c>[heads, rows, outDim]</c> with <c>outDim</c> at most <c>Dp</c>: NaN for a row
+    /// <param name="output">Output, F32 <c>[heads, rows, outDim]</c> with <c>outDim</c> at most <c>Dp</c>; its <c>rows</c>
+    /// is the row count the tile pass ran with, which the element counts of the three tile tensors hold it to. NaN for a row
     /// with a tile whose maximum is not finite, zero where there are no keys.</param>
     /// <param name="tileMax">F32 <c>[heads · rows, tiles]</c>.</param>
     /// <param name="tileSums">U32 <c>[heads · rows, tiles]</c>.</param>
@@ -105,6 +106,8 @@ public sealed partial class VulkanBackend
             throw new ArgumentException($"The value bytes are I8 [kvHeads · keys, Dp]; got {valueBytes.DType} {valueBytes.Shape}.", nameof(valueBytes));
         Int8U8Heads(heads, kvHeads, blockKeys);
         int dp = (int)valueBytes.Shape[1];
+        if (dp is not (64 or 128 or 256))
+            throw new ArgumentOutOfRangeException(nameof(valueBytes), dp, "The padded head dim is 64, 128 or 256.");
         if (valueBytes.Shape[0] % kvHeads != 0)
             throw new ArgumentException($"{valueBytes.Shape[0]} value rows are not a whole number of keys for {kvHeads} KV heads.", nameof(valueBytes));
         int keys = (int)(valueBytes.Shape[0] / kvHeads), tiles = (keys + blockKeys - 1) / blockKeys;
