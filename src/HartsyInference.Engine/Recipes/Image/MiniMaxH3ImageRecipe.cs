@@ -2,15 +2,18 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Engine.Features;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.ModelAssets.Metadata;
+using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>MiniMax-H3-Image recipe (text-to-image). The checkpoint is the audio-free H3 DiT; the Qwen3-VL-32B text
-/// encoder and the single-frame image VAE are found next to it. Declares no composition features yet: editing (5b),
-/// LoRA (5c), the prompt enhancer (5d) and the memory features (5e) are later phases.
+/// encoder and the single-frame image VAE are found next to it. Declares LoRA; editing (5b), the prompt enhancer (5d)
+/// and the memory features (5e) are later phases.
 /// <para>UNTESTED. Written without weights or a GPU. See <see cref="MiniMaxH3ImageRecipePipeline"/> for the TODO(gpu)
 /// list.</para></summary>
 public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
@@ -33,9 +36,8 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
         || string.Equals(familyId, "minimax-h3-image-bf16", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "minimax-h3-image-w4a8", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Text-to-image only for now. TODO(phase 5b): add RefEdit once reference conditioning is wired.
-    /// TODO(phase 5c): add Lora once merges are verified on the bf16 base.</summary>
-    public ImageFeatures Supports => ImageFeatures.None;
+    /// <summary>Text-to-image and LoRA. TODO(phase 5b): add RefEdit once reference conditioning is wired.</summary>
+    public ImageFeatures Supports => ImageFeatures.Lora;
 
     /// <summary>The image build is tuned at 2048x2048 (ComfyUI's node default and the official minimum area). The 16 MP
     /// sizes are supported but are not the default.</summary>
@@ -61,6 +63,13 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
             MiniMaxH3Transformer transformer = MiniMaxH3Components.LoadTransformer(context.CheckpointPath, loaders,
                 DType.F32, context.TransformerBackends, out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
             // LoadTransformer converts the weights but does not bind them; the video recipe binds them the same way.
+            // The merge must run before LoadWeights, or the bound device caches keep serving the unmerged tensors.
+            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(context, new LoraMergeTargets { Transformer = ditWeights },
+                "MiniMaxH3ImageRecipe");
+            if (loraStack is not null)
+            {
+                loaders.Add(loraStack);
+            }
             transformer.LoadWeights(ditWeights);
             MiniMaxH3TextEncoder encoder = MiniMaxH3Components.LoadTextEncoder(assets.TextEncoder, loaders);
             Qwen2Tokenizer tokenizer = MiniMaxH3Components.LoadTokenizer(null);

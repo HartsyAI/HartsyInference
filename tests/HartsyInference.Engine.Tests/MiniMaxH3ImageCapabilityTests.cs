@@ -57,9 +57,9 @@ public sealed class MiniMaxH3ImageCapabilityTests
     }
 
     [Fact]
-    public void TheRecipeDeclaresNoOptionalFeaturesYet()
+    public void TheRecipeDeclaresOnlyLora()
     {
-        Assert.Equal(ImageFeatures.None, new MiniMaxH3ImageRecipe().Supports);
+        Assert.Equal(ImageFeatures.Lora, new MiniMaxH3ImageRecipe().Supports);
     }
 
     [Fact]
