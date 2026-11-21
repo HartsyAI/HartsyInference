@@ -43,7 +43,10 @@ in the [implementation queue](../proposed-queue.md); it does not certify the inc
 Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
 identified by the report; retain it through the handoff and exit review.
 
-Other reports in this folder: the [PR 12 Qwen campaign](pr12-qwen-primary.md) on the RTX 4090, the
-[consumer audit](consumer-audit.md) of attention computed outside the backend entry points (plan items 14 to 17),
-and the [Vulkan tiled F32 A/B](vulkan-tiled-f32-ab.md), the descriptive RTX 3060 comparison that
-`numerics.vkTiledAttention` waits on.
+The [PR 12 Qwen campaign](pr12-qwen-primary.md) on the RTX 4090 is recorded in this folder as its own report.
+
+Other reports in this folder: the [consumer audit](consumer-audit.md) of attention computed outside the backend
+entry points (plan items 14 to 17), and the [Vulkan tiled F32 A/B](vulkan-tiled-f32-ab.md), the descriptive RTX 3060
+comparison that `numerics.vkTiledAttention` waits on. The
+[Blackwell rental campaign](blackwell-rental-campaign.md) is the stage plan and spending ceiling for the final
+hardware gate; nothing in it has been provisioned or run.
