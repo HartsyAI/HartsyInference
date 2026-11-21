@@ -32,11 +32,18 @@ public sealed partial class CudaKernels
     private nint _decLengthsCombine;
 
     /// <summary>True when flash_attn_decode_lengths.ptx loaded: the grouped-query decode that takes a key length per sequence
-    /// and returns the LSE. A build without the file leaves this false, and such a call is then refused.</summary>
-    public bool HasDecodeLengths => _decLengthsCombine != 0 && Array.TrueForAll(_decLengths, static fn => fn != 0);
+    /// and returns the LSE, over an F32 cache at least. A build without the file leaves this false, and such a call is then
+    /// refused.</summary>
+    public bool HasDecodeLengths => _decLengthsCombine != 0 && _decLengths[0] != 0 && _decLengths[1] != 0;
 
-    /// <summary>Cache types the lengths decode reads: keys and values of one of F32, F16 and BF16.</summary>
-    public static bool DecodeLengthsReads(HartsyInference.Core.Tensors.DType cache) => DecodeLengthsCacheIndex(cache) >= 0;
+    /// <summary>Whether the loaded lengths decode reads keys and values of <paramref name="cache"/>: F32, and F16 and BF16
+    /// when the PTX file has those entry points. A file built before them leaves the half types unread, and a call over
+    /// such a cache is then refused; the F32 kernel and the rest of the backend are unaffected.</summary>
+    public bool DecodeLengthsReads(HartsyInference.Core.Tensors.DType cache)
+    {
+        int type = DecodeLengthsCacheIndex(cache);
+        return type >= 0 && _decLengths[type * 2] != 0 && _decLengths[type * 2 + 1] != 0;
+    }
 
     private static int DecodeLengthsCacheIndex(HartsyInference.Core.Tensors.DType cache) =>
         cache == HartsyInference.Core.Tensors.DType.F32 ? 0 : cache == HartsyInference.Core.Tensors.DType.F16 ? 1
@@ -115,8 +122,17 @@ public sealed partial class CudaKernels
             string[] types = ["f32", "f16", "bf16"];
             for (int t = 0; t < types.Length; t++)
             {
-                _decLengths[t * 2] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d128");
-                _decLengths[t * 2 + 1] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d64");
+                // The half-type entry points came after the F32 ones: a PTX file built before them leaves their handles at
+                // zero instead of failing the backend's construction.
+                try
+                {
+                    _decLengths[t * 2] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d128");
+                    _decLengths[t * 2 + 1] = _decodeLengthsModule.GetFunction($"lm_fa_decode_lengths_{types[t]}_d64");
+                }
+                catch (CudaException) when (t > 0)
+                {
+                    _decLengths[t * 2] = _decLengths[t * 2 + 1] = 0;
+                }
             }
             _decLengthsCombine = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_combine");
         }

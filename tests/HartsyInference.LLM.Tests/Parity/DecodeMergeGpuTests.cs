@@ -174,6 +174,43 @@ public sealed class DecodeMergeGpuTests
     }
 
     [CudaFact]
+    public void OnCudaADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        ADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated()
+    {
+        using VulkanBackend backend = new();
+        ADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated(backend);
+    }
+
+    /// <summary>The use the in-place form is for: decode into a tensor, then merge that tensor into itself, with the tensor's
+    /// only copy on the device. Done three times over the same tensors, so the buffer an in-place merge replaces is
+    /// released once and the next decode and merge find the tensor as they should.</summary>
+    private static void ADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated(IBackend backend)
+    {
+        const int batch = 2, heads = 8, kvHeads = 2, dim = 64, rows = 4, capacity = 90;
+        int[] prefix = [80, 21];
+        using Step step = new(batch, heads, kvHeads, dim, rows, capacity, prefix);
+        int[] mask = DecodeMergeReference.CausalStepMask(rows);
+        step.Reference(mask);
+        using Tensor x = new(step.Prefix.Shape, DType.F32);
+        using Tensor lse = new(step.Lse.Shape, DType.F32);
+        AttentionCall decode = AttentionCall.FromDecodeWithLengths(x, step.Query, step.CacheKey, step.CacheValue, prefix, causal: false,
+            1f / MathF.Sqrt(dim), lse);
+        for (int round = 0; round < 3; round++)
+        {
+            backend.Attention(in decode);
+            backend.DecodeTreeMerge(x, x, lse, step.Query, step.Key, step.Value, mask);
+            backend.Sync();
+            step.AssertMerged(x, 5e-5f, $"round {round}");
+        }
+    }
+
+    [CudaFact]
     public void OnCudaMergingInPlaceGivesTheSameResult()
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());

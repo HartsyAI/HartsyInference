@@ -169,12 +169,12 @@
       "per_sequence_lengths": true,
       "capacity_tail": true
     },
-    "hartsy_current": "deliberately different",
+    "hartsy_current": "partial: per-sequence lengths and capacity tails at head dim 64 and 128 over an F32, F16 or BF16 cache on CUDA and an F32 cache on Vulkan (flash.decode.lengths); queries and output are F32; no head dim 256",
     "required_final": [
       "cuda",
       "vulkan"
     ],
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-lse",
@@ -188,13 +188,13 @@
       "native_head_dim": 256,
       "native_dtype": "bf16"
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "partial: LSE with per-sequence lengths, causal and not, on CUDA and Vulkan (flash.decode.lengths); F32 queries; head dim 64 and 128, not 256",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-tree-merge",
@@ -204,13 +204,13 @@
       "mask": "int32-tree",
       "lse": "natural-log"
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "present, unused: IBackend.DecodeTreeMerge on CPU, CUDA and Vulkan, F32, at most 32 rows",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-step-merge",
@@ -218,13 +218,13 @@
     "parameters": {
       "visibility": "causal-current-step"
     },
-    "hartsy_current": "out of scope",
+    "hartsy_current": "present, unused: IBackend.DecodeTreeMerge with the causal step mask on CPU, CUDA and Vulkan",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "Source inventory awaiting executed-route review; this is not a runtime parity claim."
+    "status_evidence": "RTX 3060 parity against the host reference, itself checked against the pinned Kitchen torch definition; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "sol-general",
