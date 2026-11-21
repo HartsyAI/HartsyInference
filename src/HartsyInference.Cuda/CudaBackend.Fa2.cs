@@ -166,8 +166,9 @@ public sealed partial class CudaBackend
     }
 
     /// <summary>The lengths row's admission (F.9). It takes only a call with sequence lengths, so the single-length decode rows
-    /// keep every call they had: F32 head-major Q, K and V, the <c>[B, S, Hq × D]</c> output, grouped heads the decode kernel
-    /// is built for, and a workspace inside <see cref="DecodeLengthsWorkspaceLimit"/>.</summary>
+    /// keep every call they had: F32 head-major Q, a head-major cache whose keys and values are both F32, both F16 or both
+    /// BF16, the <c>[B, S, Hq × D]</c> output, grouped heads the decode kernel is built for, and a workspace inside
+    /// <see cref="DecodeLengthsWorkspaceLimit"/>.</summary>
     private bool DecodeLengthsAdmits(in AttentionCall c)
     {
         if (c.SequenceLengths is null || _kernels is not { HasDecodeLengths: true }) return false;
@@ -175,6 +176,7 @@ public sealed partial class CudaBackend
         long rows = (long)c.Batch * c.QueryTokens, outputRows = rows * c.Heads;
         if (c.Query.Layout != AttentionLayout.HeadMajor || c.Key.Layout != AttentionLayout.HeadMajor || c.Value.Layout != AttentionLayout.HeadMajor
             || c.Output.Layout != AttentionLayout.TokenMajor || c.ValueHeadDim != c.QkHeadDim || c.Heads != c.KvHeads * group
+            || c.Key.DType != c.Value.DType || !_kernels.DecodeLengthsReads(c.Key.DType)
             || !CudaKernels.DecodeGqaSupports(c.QkHeadDim, group) || !CudaKernels.GridYzFits(c.KvHeads, rows) || outputRows > int.MaxValue)
             return false;
         return outputRows * DecodeLengthsSplits(in c).Splits * (c.QkHeadDim + 2) * sizeof(float) <= DecodeLengthsWorkspaceLimit;
@@ -210,7 +212,7 @@ public sealed partial class CudaBackend
             if (lse is not null) pLse = GpuTransferHelper.AllocateDevice(lseBytes);
             partials = RentDecodePartials((long)batch * rows * hq, splits, d, "cuda.flash.decode.lengths.partials");
             _kernels!.LaunchFlashDecodeLengths(partials.M, partials.L, partials.Acc, pQ, pK, pV, pLengths, batch, rows, hq, d, hkv, capacity, group,
-                c.Mask.Causal, c.Scale, splits, chunk, _stream.Handle);
+                c.Mask.Causal, c.Scale, splits, chunk, key.DType, _stream.Handle);
             _kernels.LaunchFlashDecodeLengthsCombine(pOut, pLse, partials.M, partials.L, partials.Acc, batch, rows, hq, d, splits, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

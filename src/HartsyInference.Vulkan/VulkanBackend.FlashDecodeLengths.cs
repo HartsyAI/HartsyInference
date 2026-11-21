@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
@@ -63,7 +64,6 @@ public sealed partial class VulkanBackend
         VulkanBuffer outBuf = _xfer.AllocateDevice(outputRows * (ulong)headDim * floatBytes);
         // The combine always writes an LSE; when the call names none it goes to a scratch buffer.
         VulkanBuffer lseBuf = _xfer.AllocateDevice(outputRows * floatBytes);
-        bool lseCached = false;
         try
         {
             uint lanes = Vk.SubgroupSize;
@@ -101,22 +101,21 @@ public sealed partial class VulkanBackend
             Dispatch(combine, combineBufs, pc, (uint)hq, (uint)(batch * rows));
 
             CacheOutput(output, outBuf);
-            if (lse is not null)
-            {
-                CacheOutput(lse, lseBuf);
-                lseCached = true;
-            }
+            if (lse is not null) CacheOutput(lse, lseBuf);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            outBuf.Dispose();
-            if (!lseCached) lseBuf.Dispose();
+            Logs.Error("Vulkan flash-decode with sequence lengths failed", ex);
             throw;
         }
         finally
         {
+            // FreeDevice leaves a buffer the cache has taken to the cache: the output and a named LSE after a success, and
+            // whichever of them was bound before a failure. Every other buffer is released, deferred past the dispatches
+            // already recorded against it.
             _xfer.FreeDevice(partBuf);
+            _xfer.FreeDevice(outBuf);
+            _xfer.FreeDevice(lseBuf);
         }
-        if (!lseCached) _xfer.FreeDevice(lseBuf);
     }
 }

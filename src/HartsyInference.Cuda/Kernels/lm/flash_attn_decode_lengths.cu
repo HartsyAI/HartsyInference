@@ -12,8 +12,10 @@
 //
 // The body is a copy of the paged kernel's and not a header both include. The paged kernel's shipped PTX is the bytes its
 // 4090 campaign was timed on and rebuilt from; moving its body into a shared header is a change to that file, to be made
-// when a 4090 run can show the paged PTX unchanged or re-time it. The half-type loads below are kept from that kernel for
-// the F16 cache this one is to take next; only the F32 entry points exist today.
+// when a 4090 run can show the paged PTX unchanged or re-time it.
+//
+// The cache is F32, F16 or BF16 (keys and values of one type); Q, the partial states and the output are F32. A half-type
+// row is widened as it is read, so the arithmetic is the F32 kernel's over the exact stored values.
 //
 // No device lengths: they are the host's and are uploaded for each call, so this kernel is not replayed from a captured graph.
 //
@@ -50,6 +52,22 @@ __device__ __forceinline__ float4 dec_f4(const uint2& r)
 }
 __device__ __forceinline__ float2 dec_ld2(const float* p) { return *reinterpret_cast<const float2*>(p); }
 __device__ __forceinline__ float2 dec_ld2(const __half* p) { return __half22float2(*reinterpret_cast<const __half2*>(p)); }
+
+// BF16 is the upper half of an F32, so widening one is a shift. Its own element and raw types keep it apart from F16 in
+// overload resolution; the bytes moved are the same four 16-bit elements.
+struct DecBf16 { unsigned short bits; };
+struct DecBf16x4 { uint2 raw; };
+template <> struct DecRaw<DecBf16> { using type = DecBf16x4; };
+__device__ __forceinline__ float dec_bf16(unsigned int bits) { return __uint_as_float(bits << 16); }
+__device__ __forceinline__ float4 dec_f4(const DecBf16x4& r)
+{
+    return make_float4(dec_bf16(r.raw.x & 0xffffu), dec_bf16(r.raw.x >> 16), dec_bf16(r.raw.y & 0xffffu), dec_bf16(r.raw.y >> 16));
+}
+__device__ __forceinline__ float2 dec_ld2(const DecBf16* p)
+{
+    const unsigned int u = *reinterpret_cast<const unsigned int*>(p);
+    return make_float2(dec_bf16(u & 0xffffu), dec_bf16(u >> 16));
+}
 
 template <typename KvT, int D>
 __device__ __forceinline__ void fa_decode_gqa(
@@ -191,13 +209,20 @@ __device__ __forceinline__ void fa_decode_gqa(
     }
 }
 
-#define DEC_LENGTHS_ARGS float* __restrict__ partialM, float* __restrict__ partialL, float* __restrict__ partialAcc,     const float* __restrict__ Q, int Hq, int Hkv, int Lk, const int* __restrict__ lengths, int S, int kvGroup, int causal,     float scale, int G, int chunk, const float* __restrict__ K, const float* __restrict__ V
+#define DEC_LENGTHS_ARGS(KvT) float* __restrict__ partialM, float* __restrict__ partialL, float* __restrict__ partialAcc, \
+    const float* __restrict__ Q, int Hq, int Hkv, int Lk, const int* __restrict__ lengths, int S, int kvGroup, int causal, \
+    float scale, int G, int chunk, const KvT* __restrict__ K, const KvT* __restrict__ V
 
-extern "C" __global__ void __launch_bounds__(DEC_THREADS) lm_fa_decode_lengths_f32_d128(DEC_LENGTHS_ARGS)
-{ fa_decode_gqa<float, 128>(partialM, partialL, partialAcc, Q, K, V, Hq, Hkv, Lk, lengths, S, kvGroup, causal, scale, G, chunk); }
+#define DEC_LENGTHS_ENTRY(name, KvT, D) \
+    extern "C" __global__ void __launch_bounds__(DEC_THREADS) name(DEC_LENGTHS_ARGS(KvT)) \
+    { fa_decode_gqa<KvT, D>(partialM, partialL, partialAcc, Q, K, V, Hq, Hkv, Lk, lengths, S, kvGroup, causal, scale, G, chunk); }
 
-extern "C" __global__ void __launch_bounds__(DEC_THREADS) lm_fa_decode_lengths_f32_d64(DEC_LENGTHS_ARGS)
-{ fa_decode_gqa<float, 64>(partialM, partialL, partialAcc, Q, K, V, Hq, Hkv, Lk, lengths, S, kvGroup, causal, scale, G, chunk); }
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f32_d128, float, 128)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f32_d64, float, 64)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f16_d128, __half, 128)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f16_d64, __half, 64)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_bf16_d128, DecBf16, 128)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_bf16_d64, DecBf16, 64)
 
 // Merges the G chunk states of one output row and writes it with its LSE. Block x is the row (b * S + r) * Hq + head, which
 // is the row's place in the [B, S, Hq * D] output; thread d is the column. A chunk that saw no key has l == 0 and is skipped,

@@ -46,7 +46,8 @@ public sealed partial class VulkanBackend
         }
         catch (Exception)
         {
-            outBuf.Dispose();
+            // Through the cache: the dispatch may already be recorded against the buffer, and the release is deferred past it.
+            _xfer.FreeDevice(outBuf);
             throw;
         }
     }

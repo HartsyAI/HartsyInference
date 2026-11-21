@@ -22,17 +22,33 @@ public sealed class DecodeLengthsGpuTests
         return tensor;
     }
 
+    /// <summary><paramref name="source"/> stored as <paramref name="dtype"/>: F16, or BF16 rounded to nearest even.</summary>
+    private static Tensor Stored(Tensor source, DType dtype)
+    {
+        if (dtype == DType.F32) return source;
+        Tensor stored = new(source.Shape, dtype);
+        ReadOnlySpan<float> values = source.AsReadOnlySpan<float>();
+        Span<ushort> bits = stored.AsSpan<ushort>();
+        for (int i = 0; i < values.Length; i++)
+        {
+            uint u = BitConverter.SingleToUInt32Bits(values[i]);
+            bits[i] = dtype == DType.F16 ? BitConverter.HalfToUInt16Bits((Half)values[i]) : (ushort)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+        }
+        source.Dispose();
+        return stored;
+    }
+
     private sealed class Case : IDisposable
     {
         public readonly Tensor Query, Key, Value, Output, Lse, Expected, ExpectedLse;
         public readonly int Batch, Heads, Rows;
 
-        public Case(int batch, int heads, int kvHeads, int dim, int rows, int capacity)
+        public Case(int batch, int heads, int kvHeads, int dim, int rows, int capacity, DType? cache = null)
         {
             (Batch, Heads, Rows) = (batch, heads, rows);
             Query = Random(new TensorShape(batch, heads, rows, dim), 51);
-            Key = Random(new TensorShape(batch, kvHeads, capacity, dim), 52);
-            Value = Random(Key.Shape, 53);
+            Key = Stored(Random(new TensorShape(batch, kvHeads, capacity, dim), 52), cache ?? DType.F32);
+            Value = Stored(Random(Key.Shape, 53), cache ?? DType.F32);
             Output = new Tensor(new TensorShape(batch, rows, heads * dim), DType.F32);
             Expected = new Tensor(Output.Shape, DType.F32);
             Lse = new Tensor(new TensorShape(batch, heads, rows), DType.F32);
@@ -97,6 +113,31 @@ public sealed class DecodeLengthsGpuTests
         MatchesTheHostReference(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal);
     }
 
+    /// <summary>An F16 or BF16 cache is widened as it is read: the result is the host reference's over the same stored
+    /// values, to the F32 tolerance.</summary>
+    [CudaTheory]
+    [InlineData("F16")]
+    [InlineData("BF16")]
+    public void TheCudaKernelReadsAHalfTypeCache(string type)
+    {
+        DType cache = type == "F16" ? DType.F16 : DType.BF16;
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        foreach ((int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths, bool causal) in
+            ((int, int, int, int, int, int, int[], bool)[])[(2, 8, 2, 64, 1, 96, [80, 70], true), (2, 4, 4, 128, 5, 200, [150, 3], true),
+                (2, 8, 1, 64, 4, 130, [0, 129], false), (1, 16, 1, 128, 3, 700, [699], true),
+                // lengths outside the cache are clamped; each sequence ends on a chunk boundary
+                (2, 4, 2, 64, 2, 100, [1000, -5], true), (4, 4, 2, 64, 1, 256, [256, 128, 64, 192], true)])
+        {
+            using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache);
+            foreach (bool lse in (ReadOnlySpan<bool>)[true, false])
+            {
+                AttentionEvidenceEvent[] events = shape.RunAndCompare(backend, lengths, causal, lse);
+                Assert.Equal("flash.decode.lengths", Assert.Single(events, e => e.Kind == AttentionEvidenceKind.Execution).Implementation);
+                Assert.DoesNotContain(events, e => e.Kind == AttentionEvidenceKind.Cast);
+            }
+        }
+    }
+
     /// <summary>Every shape the Vulkan split shader is built for: its group limit is 8 query heads a key head.</summary>
     [VulkanFact]
     public void TheVulkanKernelMatchesTheHostReferenceWithAndWithoutTheLse()
@@ -111,6 +152,26 @@ public sealed class DecodeLengthsGpuTests
             ran++;
         }
         Assert.Equal(7, ran);
+    }
+
+    /// <summary>The row's head dims run from one subgroup width to four, and the shapes above reach two and four where a
+    /// subgroup is 32 lanes wide. This runs one and three widths, and checks that half a width and five are refused whole.</summary>
+    [VulkanFact]
+    public void TheVulkanKernelRunsTheHeadDimsItsRowDeclaresAndRefusesTheOthers()
+    {
+        using VulkanBackend backend = new();
+        int lanes = (int)backend.Vk.SubgroupSize;
+        MatchesTheHostReference(backend, 2, 8, 2, lanes, 2, 150, [150, 41], causal: true);
+        MatchesTheHostReference(backend, 2, 6, 2, 3 * lanes, 1, 200, [199, 64], causal: false);
+        foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 5 * lanes])
+        {
+            using Case outside = new(1, 4, 2, dim, 1, 96);
+            outside.Output.AsSpan<float>().Fill(-7f);
+            AttentionCall call = outside.Call([80], causal: true, lse: false);
+            Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+            backend.Sync();
+            Assert.Equal(-1, outside.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+        }
     }
 
     private static void MatchesTheHostReference(IBackend backend, int batch, int heads, int kvHeads, int dim, int rows, int capacity,
@@ -139,6 +200,15 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend);
     }
 
+    [CudaTheory]
+    [InlineData("F16")]
+    [InlineData("BF16")]
+    public void OnCudaRowsPastASequencesLengthOfAHalfTypeCacheAreNeverRead(string type)
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        RowsPastASequencesLengthAreNeverRead(backend, type == "F16" ? DType.F16 : DType.BF16);
+    }
+
     [VulkanFact]
     public void OnVulkanRowsPastASequencesLengthAreNeverRead()
     {
@@ -146,16 +216,20 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend);
     }
 
-    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend)
+    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend, DType? cache = null)
     {
         int[] lengths = [130, 7];
-        using Case shape = new(2, 8, 2, 64, 3, 200);
+        using Case shape = new(2, 8, 2, 64, 3, 200, cache);
         for (int b = 0; b < 2; b++)
             for (int kh = 0; kh < 2; kh++)
             {
                 int tail = ((b * 2 + kh) * 200 + lengths[b]) * 64, count = (200 - lengths[b]) * 64;
-                shape.Key.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
-                shape.Value.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
+                foreach (Tensor tensor in (ReadOnlySpan<Tensor>)[shape.Key, shape.Value])
+                {
+                    if (tensor.DType == DType.F32) tensor.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
+                    // A quiet NaN in either half type: every exponent bit and the top fraction bit.
+                    else tensor.AsSpan<ushort>().Slice(tail, count).Fill(tensor.DType == DType.F16 ? (ushort)0x7E00 : (ushort)0x7FC0);
+                }
             }
         foreach (bool causal in (ReadOnlySpan<bool>)[true, false])
         {
@@ -199,13 +273,16 @@ public sealed class DecodeLengthsGpuTests
         narrow.Output.AsSpan<float>().Fill(-7f);
         AttentionCall call = narrow.Call([80, 70], causal: true, lse: false);
         Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
-        // An F16 cache is not this kernel's.
+        // Keys and values of two types are not this kernel's: it reads one cache type.
         using Case shape = new(2, 8, 2, 64, 1, 96);
         using Tensor halfKey = new(shape.Key.Shape, DType.F16);
-        using Tensor halfValue = new(shape.Key.Shape, DType.F16);
         shape.Output.AsSpan<float>().Fill(-7f);
-        AttentionCall half = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, halfValue, [80, 70], true, 0.125f);
-        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in half));
+        AttentionCall mixed = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, shape.Value, [80, 70], true, 0.125f);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in mixed));
+        // Neither is an F16 query.
+        using Tensor halfQuery = new(shape.Query.Shape, DType.F16);
+        AttentionCall halfQ = AttentionCall.FromDecodeWithLengths(shape.Output, halfQuery, shape.Key, shape.Value, [80, 70], true, 0.125f);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in halfQ));
         // The row reads whole tensors: a view of the queries (rows 1 and up of a longer tensor) is not its call.
         using Tensor longer = Random(new TensorShape(2, 8, 2, 64), 54);
         AttentionCall whole = shape.Call([80, 70], causal: true, lse: false);

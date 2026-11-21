@@ -46,7 +46,7 @@ public sealed partial class VulkanBackend
         // A length per sequence, or an LSE output, is no legacy entry's: the flash rows are planned directly, where only a
         // row that declares it covers the call and the planner refuses what none takes. Only a call pinned to the flash
         // route comes this way, which is how FromDecodeWithLengths builds one.
-        if ((call.SequenceLengths is not null || call.Lse is not null) && call.Route == AttentionRoute.Flash)
+        if (call.PlansFlashRowsDirectly)
         {
             RunAttentionRows(FlashAttentionRows, in call);
             return;
@@ -271,6 +271,9 @@ public sealed partial class VulkanBackend
             new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32, AttentionDTypes.F32, HM | AttentionLayouts.TokenMajor) with
                 {
                     Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
+                    // What the split shader is built for on this device, so a plan names the limit a call missed.
+                    MinHeadDim = (int)Vk.SubgroupSize, MaxHeadDim = (int)(Vk.SubgroupSize * FlashDecodeMaxDpl),
+                    MaxQueryTokens = ushort.MaxValue,
                 }, "C.9",
                 (in AttentionCall c) => FlashDecodeLengthsAdmits(in c),
                 (in AttentionCall c) =>

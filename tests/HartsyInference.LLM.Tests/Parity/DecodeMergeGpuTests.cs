@@ -174,6 +174,43 @@ public sealed class DecodeMergeGpuTests
     }
 
     [CudaFact]
+    public void OnCudaADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        ADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated()
+    {
+        using VulkanBackend backend = new();
+        ADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated(backend);
+    }
+
+    /// <summary>The use the in-place form is for: decode into a tensor, then merge that tensor into itself, with the tensor's
+    /// only copy on the device. Done three times over the same tensors, so the buffer an in-place merge replaces is
+    /// released once and the next decode and merge find the tensor as they should.</summary>
+    private static void ADecodeThenAMergeInPlaceOnTheDeviceCanBeRepeated(IBackend backend)
+    {
+        const int batch = 2, heads = 8, kvHeads = 2, dim = 64, rows = 4, capacity = 90;
+        int[] prefix = [80, 21];
+        using Step step = new(batch, heads, kvHeads, dim, rows, capacity, prefix);
+        int[] mask = DecodeMergeReference.CausalStepMask(rows);
+        step.Reference(mask);
+        using Tensor x = new(step.Prefix.Shape, DType.F32);
+        using Tensor lse = new(step.Lse.Shape, DType.F32);
+        AttentionCall decode = AttentionCall.FromDecodeWithLengths(x, step.Query, step.CacheKey, step.CacheValue, prefix, causal: false,
+            1f / MathF.Sqrt(dim), lse);
+        for (int round = 0; round < 3; round++)
+        {
+            backend.Attention(in decode);
+            backend.DecodeTreeMerge(x, x, lse, step.Query, step.Key, step.Value, mask);
+            backend.Sync();
+            step.AssertMerged(x, 5e-5f, $"round {round}");
+        }
+    }
+
+    [CudaFact]
     public void OnCudaMergingInPlaceGivesTheSameResult()
     {
         using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
@@ -285,7 +322,15 @@ public sealed class DecodeMergeGpuTests
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.Value, [1, 3, 7, 0b10000]));
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, step.Key, step.CacheValue, mask));
         Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Prefix, step.Query, step.Key, step.Value, mask));
+        // An operand that is not F32, and a step of more rows than a mask entry has bits.
+        using Tensor halfKey = new(step.Key.Shape, DType.F16);
+        using Tensor halfValue = new(step.Key.Shape, DType.F16);
+        Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(step.Merged, step.Prefix, step.Lse, step.Query, halfKey, halfValue, mask));
+        using Step tall = new(1, 2, 1, 64, 33, 40, [40]);
+        tall.Merged.AsSpan<float>().Fill(7f);
+        Assert.Throws<ArgumentException>(() => backend.DecodeTreeMerge(tall.Merged, tall.Prefix, tall.Lse, tall.Query, tall.Key, tall.Value, new int[33]));
         backend.Sync();
         Assert.Equal(-1, step.Merged.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
+        Assert.Equal(-1, tall.Merged.AsReadOnlySpan<float>().IndexOfAnyExcept(7f));
     }
 }

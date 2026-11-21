@@ -22,7 +22,7 @@ layout(set = 0, binding = 3) writeonly buffer Lse_ { float lse_data[]; };   // a
 
 layout(push_constant) uniform Push {
     uint hq;
-    uint hkv;
+    uint hkv;            // unused here
     uint kvCapacity;     // clamps a length; same layout as the split pass
     uint rows;           // S
     uint headDim;

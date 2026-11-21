@@ -73,7 +73,7 @@ public sealed partial class CudaBackend
         // A length per sequence, or an LSE output, is no legacy entry's: the flash rows are planned directly, where only a
         // row that declares it covers the call and the planner refuses what none takes. Only a call pinned to the flash
         // route comes this way, which is how FromDecodeWithLengths builds one; an Auto call with lengths is still refused below.
-        if ((call.SequenceLengths is not null || call.Lse is not null) && call.Route == AttentionRoute.Flash)
+        if (call.PlansFlashRowsDirectly)
         {
             RunAttentionRows(FlashAttentionRows, in call);
             return;
@@ -493,7 +493,8 @@ public sealed partial class CudaBackend
             // The only flash row that takes a key length per sequence, and it takes nothing else (its admission requires the
             // lengths), so its place in the list is free and the single-length rows keep every call they had. Not capture-safe:
             // the lengths are host values uploaded for the call.
-            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32, AttentionDTypes.F32, HM | AttentionLayouts.TokenMajor) with
+            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32,
+                    AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16, HM | AttentionLayouts.TokenMajor) with
                 {
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
                 }, "F.9",
