@@ -6,8 +6,10 @@
 //
 // This stage decides the routing, and a routing decision is a comparison. Every value is declared `precise`, so the
 // compiler may not contract a multiply and an add into one fused operation, and the operations run in the reference's
-// order. Add, subtract and multiply are then the reference's bit for bit. The Vulkan specification does not require a
-// divide or a square root to be correctly rounded, so those two are exact only where the driver makes them so.
+// order. Add, subtract and multiply are then the reference's bit for bit, provided the driver keeps subnormal values:
+// no float-controls mode is declared here, and without one a driver may flush them to zero. The Vulkan specification
+// also does not require a divide or a square root to be correctly rounded, so those are exact only where the driver
+// makes them so.
 #version 460
 
 layout(local_size_x = 128) in;

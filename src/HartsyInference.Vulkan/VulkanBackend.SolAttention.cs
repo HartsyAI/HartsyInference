@@ -14,8 +14,9 @@ public sealed partial class VulkanBackend
 
     /// <inheritdoc/>
     /// <remarks>F32, in the reference's five stages. The routing stages are written to reproduce the reference's scores:
-    /// their adds, subtracts and multiplies are exact and uncontracted. A divide and a square root are exact only where
-    /// the driver makes them so, which the Vulkan specification does not require. The coarse gate is not implemented: a
+    /// their adds, subtracts and multiplies are exact and uncontracted where the driver keeps subnormal values, and a
+    /// divide and a square root are exact only where the driver rounds them correctly; the Vulkan specification requires
+    /// neither. The coarse gate is not implemented: a
     /// call that asks for one is refused. Asking for the routing report reads it back, which waits for the device.</remarks>
     public void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default)
     {
@@ -27,9 +28,11 @@ public sealed partial class VulkanBackend
         if (!routed.IsEmpty && routed.Length != pairs)
             throw new ArgumentException($"The routing report holds {routed.Length} entries; [B, H, blocks, blocks] needs {pairs}.", nameof(routed));
         if (options.CoarseGate is not null) throw new NotSupportedException("Vulkan Sol-Attn has no coarse gate; run SolAttentionReference for it.");
-        if (dim > SolAttentionMaxHeadDim || tokens > ushort.MaxValue || heads > ushort.MaxValue || batch > ushort.MaxValue || pairs > int.MaxValue)
+        // The shaders index with 32-bit unsigned arithmetic, so the operands' element count must fit one.
+        if (dim > SolAttentionMaxHeadDim || tokens > ushort.MaxValue || heads > ushort.MaxValue || batch > ushort.MaxValue || pairs > int.MaxValue
+            || query.ElementCount > uint.MaxValue)
             throw new NotSupportedException(
-                $"Vulkan Sol-Attn takes a head dim up to {SolAttentionMaxHeadDim} and up to {ushort.MaxValue} tokens, heads and sequences; got {query.Shape}.");
+                $"Vulkan Sol-Attn takes a head dim up to {SolAttentionMaxHeadDim}, up to {ushort.MaxValue} tokens, heads and sequences, and operands of under 2^32 elements; got {query.Shape}.");
 
         float scale = options.Scale ?? 1f / MathF.Sqrt(dim);
         float log2Scale = scale * SolAttentionReference.Log2E;
@@ -55,14 +58,20 @@ public sealed partial class VulkanBackend
         ulong floatBytes = sizeof(float);
         ulong summaryBytes = (ulong)batch * (ulong)heads * (ulong)blocks * (ulong)dim * floatBytes, statBytes = (ulong)batch * (ulong)heads * (ulong)dim * floatBytes;
         ulong pairBytes = (ulong)pairs * floatBytes;
-        VulkanBuffer keyMeans = _xfer.AllocateDevice(summaryBytes), valueSums = _xfer.AllocateDevice(summaryBytes), centroids = _xfer.AllocateDevice(summaryBytes);
-        VulkanBuffer keyMean = _xfer.AllocateDevice(statBytes), variance = _xfer.AllocateDevice(statBytes), pooled = _xfer.AllocateDevice(pairBytes);
-        AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.sol.workspace", (long)(3 * summaryBytes + 2 * statBytes + 2 * pairBytes), count: 7);
-        VulkanBuffer readsBuf = _xfer.AllocateDevice(pairBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)output.ElementCount * floatBytes);
+        // Allocated inside the try, so one that fails leaves none of the earlier ones behind.
+        VulkanBuffer? keyMeans = null, valueSums = null, centroids = null, keyMean = null, variance = null, pooled = null, readsBuf = null, outBuf = null;
         bool readsCached = false, outputCached = false;
         try
         {
+            keyMeans = _xfer.AllocateDevice(summaryBytes);
+            valueSums = _xfer.AllocateDevice(summaryBytes);
+            centroids = _xfer.AllocateDevice(summaryBytes);
+            keyMean = _xfer.AllocateDevice(statBytes);
+            variance = _xfer.AllocateDevice(statBytes);
+            pooled = _xfer.AllocateDevice(pairBytes);
+            readsBuf = _xfer.AllocateDevice(pairBytes);
+            outBuf = _xfer.AllocateDevice((ulong)output.ElementCount * floatBytes);
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "vulkan.sol.workspace", (long)(3 * summaryBytes + 2 * statBytes + 2 * pairBytes), count: 7);
             Span<byte> pc = stackalloc byte[10 * 4];
 
             BinaryWriteUInt(pc, 0, (uint)tokens);
@@ -113,13 +122,14 @@ public sealed partial class VulkanBackend
         }
         catch (Exception)
         {
-            if (!outputCached) outBuf.Dispose();
-            if (!readsCached) readsBuf.Dispose();
+            if (!outputCached) outBuf?.Dispose();
+            if (!readsCached) readsBuf?.Dispose();
             throw;
         }
         finally
         {
-            foreach (VulkanBuffer buffer in (ReadOnlySpan<VulkanBuffer>)[keyMeans, valueSums, centroids, keyMean, variance, pooled]) _xfer.FreeDevice(buffer);
+            foreach (VulkanBuffer? buffer in (ReadOnlySpan<VulkanBuffer?>)[keyMeans, valueSums, centroids, keyMean, variance, pooled])
+                if (buffer is not null) _xfer.FreeDevice(buffer);
         }
         if (routed.IsEmpty) return;
         Sync();

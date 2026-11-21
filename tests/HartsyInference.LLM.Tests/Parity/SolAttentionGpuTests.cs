@@ -335,6 +335,36 @@ public sealed class SolAttentionGpuTests
     }
 
     [CudaFact]
+    public void OnCudaAChannelInTheSubnormalRangeMatchesTheReference()
+    {
+        using CudaBackend backend = Cuda();
+        AChannelInTheSubnormalRangeMatchesTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanAChannelInTheSubnormalRangeMatchesTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        AChannelInTheSubnormalRangeMatchesTheReference(backend);
+    }
+
+    /// <summary>One key channel of one block scaled to about 1e-20, so its centered mean squares into the subnormal range
+    /// in the key statistics. The routing and the output must still be the reference's. This shows the result is unchanged
+    /// for this input; it does not prove a device keeps subnormals, since a flushed term this small rarely moves a
+    /// threshold.</summary>
+    private static void AChannelInTheSubnormalRangeMatchesTheReference(IBackend backend)
+    {
+        const int tokens = 64 * 5, heads = 2, dim = 128;
+        using Operands operands = new(1, tokens, heads, dim, 104);
+        Span<float> k = operands.Key.AsSpan<float>();
+        for (int t = 0; t < tokens; t++)
+            for (int h = 0; h < heads; h++)
+                k[(t * heads + h) * dim + 7] *= t / 64 == 2 ? 1e-20f : 0f;
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f });
+        operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.4 });
+    }
+
+    [CudaFact]
     public void OnCudaWithoutTheRoutingReportTheOutputIsTheSame()
     {
         using CudaBackend backend = Cuda();
