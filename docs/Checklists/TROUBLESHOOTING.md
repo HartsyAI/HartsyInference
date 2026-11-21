@@ -952,29 +952,50 @@ run-by-run history is in git and in `ROADMAP.md` §3.
 - **Graph/step capture is model-dependent.** A Vulkan-native capture mechanism (persistent command pool +
   reusable command buffer + fence) was proven correct in isolation but did not fit the model's memory
   profile. Prove the mechanism separately from proving it helps.
-- **`dotnet test` prints `Passed!` after the test host crashes.** Open, cause not found. On the RTX 3060 the LLM
-  GPU lane (`--filter Category=GpuIntegration -f net10.0`) twice ended after about 10 seconds with `Passed! -
-  Failed: 0, Passed: 100, Skipped: 19, Total: 119` where the same filter and framework list 345 tests (2026-11-21,
-  about 2 of 25 runs, on two different branches). Further up, the console also said `The active test run was
-  aborted. Reason: Test host process crashed` and `Test Run Aborted.`, and the TRX summary's outcome was `Failed`.
-  A search for failed tests finds none. The tests that had finished were the same set both times (the ERNIE-5,
-  INT8 and block-op parity classes); none of the attention parity classes had started.
-  - *Not the cause:* the log line just before it, `VulkanPipelineCache: failed to persist cache ... being used by
-    another process`. That write is inside a try that only logs (`VulkanPipelineCache.Persist`). It does show
-    several backends alive in the one process.
-  - *A lead, not verified:* six Vulkan types free native objects in a finalizer through a raw device handle
-    (`VulkanBuffer`, `VulkanMemoryBlock`, `VulkanCommandStream`, `VulkanPipelineCache`, `VulkanDevice`,
-    `VulkanInstance`), and finalizers run in no fixed order. One that runs after its device was destroyed, whether
-    the device was disposed or finalized first, is a native use-after-free, which ends the process with no managed
-    exception and would depend on GC timing. Every backend the tests I read create is disposed, so the candidate is
-    an object left alive past its device's disposal.
-  - *Next step:* the lane under `--blame` (its `Sequence_*.xml` names the test that was running) until it recurs,
-    then `--blame-crash` for the call, after checking that a dump tool is present on the machine.
-  - **Until then a pass line alone is not a pass.** Compare the total with `dotnet test --list-tests` under the
-    same `--filter` and one `--framework` (the repo builds two, and an unscoped listing doubles the count; a theory
-    whose data cannot be serialized lists as one entry and runs as several, so allow for that), and search the
-    output for `aborted`. Whether the exit code is non-zero on such a run is not yet confirmed here; if it is, that
-    is the simplest check of the three.
+- **`dotnet test` prints `Passed!` after the test host crashes: an NVIDIA driver thread, when a process destroys
+  its only Vulkan instance.** On the RTX 3060 (driver 610.88, Windows) the LLM GPU lane
+  (`--filter Category=GpuIntegration -f net10.0`) ended after about 10 seconds with `Passed! - Failed: 0, Passed:
+  100, Skipped: 19, Total: 119` where the same filter and framework list 345 tests (2026-11-21, about 2 of 25
+  runs). Further up, the console said `The active test run was aborted. Reason: Test host process crashed` and
+  `Test Run Aborted.`; the TRX outcome was `Failed` and the exit code 1. A search for failed tests finds none.
+  - **What dies.** A native thread inside `nvoglv64.dll` whose start routine does `call [argument + 10h]` on an
+    argument block that holds garbage. No code of ours is on its stack, so there is no managed exception and
+    nothing on stderr. Windows records each one in the Application log (source `.NET Runtime`, event 1026,
+    `testhost.exe`, exception code `c0000005`) at an instruction address that is `0`, a small constant, a heap
+    address, or `nvoglv64.dll+0xA3D2A5`.
+  - **What sets it off.** A process that creates a `VulkanBackend`, runs cooperative-matrix attention on it
+    (head dim 64 with the F16 permission) and destroys it, again and again, with no other Vulkan instance alive.
+    That loop ended the process within 15 rounds in 6 of 6 processes, usually with the main thread inside
+    `vkDestroyDevice`, sometimes while the next backend was being created or during the next call. The same loop
+    with only an instance, only an instance and a device, a backend that ran nothing, `Scale`, or the scalar
+    attention kernel survived (40 to 100 rounds each); so did one backend reused for 200 calls. A pause of 1 s
+    before the destroy did not help.
+  - **What stops it.** One more Vulkan instance alive in the process. `VulkanInstance` now creates one before
+    the first and never destroys it (`VulkanInstance.HoldsProcessInstance`; `diagnostics.vkKeepInstance` turns it
+    off). `VulkanBackendTeardownTests` is that loop: alone in its process it crashed the host in 5 of 5 runs with
+    the setting off and in 0 of 5 with it on. A round costs about 0.1 to 0.2 s with the instance held and was
+    measured at up to 1.8 s without. That the driver tears process-wide state down with the
+    last instance is the inference from those runs, not something seen in the driver. Not checked: other driver
+    versions, the RTX 4090, other vendors, Linux.
+  - **Not the cause** (each was a lead): the `VulkanPipelineCache: failed to persist cache ... being used by
+    another process` warning just before it (a logged, caught write); a finalizer running after its device (the
+    six Vulkan finalizers were logged through a crashed run and none ran); a leak in `CacheOutputCastingFrom`
+    (it frees its input; an earlier read of the method was cut short); OBS Studio's capture layer
+    (`graphics-hook64.dll`, which is in every Vulkan process on a machine with OBS installed: an interleaved A/B
+    with `DISABLE_VULKAN_OBS_CAPTURE=1` crashed 3 of 10 against 3 of 11).
+  - **How it was found, for the next native crash.** `--blame` names the test that was running, which was not the
+    cause here and changed from run to run. `--blame-crash` writes no dump without procdump.
+    `DOTNET_DbgEnableMiniDump=1` with `DOTNET_DbgMiniDumpType=2` fails on a process with a GPU context (`Only part of
+    a ReadProcessMemory ... request was completed`); type `1` writes a usable dump of about 300 MB, without the
+    memory that names managed frames. What named the thread was a first-chance vectored exception handler
+    installed from a module initializer in the test assembly: on an access violation it writes the instruction,
+    the registers, `Environment.StackTrace` (the managed callers of the native call that faulted, when there are
+    any) and the modules of the return addresses on the stack. After that, a loop in one process per variant found
+    the trigger in minutes where the lane took hours.
+  - **A pass line alone is still not a pass.** Compare the total with `dotnet test --list-tests` under the same
+    `--filter` and one `--framework` (the repo builds two, and an unscoped listing doubles the count; a theory
+    whose data cannot be serialized lists as one entry and runs as several, so allow for that), search the output
+    for `aborted`, and check the exit code: a crashed run exits 1.
 
 ### GEMM acceleration: what was tried, and what holds
 
