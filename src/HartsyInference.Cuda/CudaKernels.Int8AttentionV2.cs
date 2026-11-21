@@ -69,9 +69,20 @@ public sealed partial class CudaKernels
         }
         string rotationPath = Ptx("int8_attn_v2_rot");
         if (!CanLoad(rotationPath)) return;
-        _int8V2RotationModule = LoadOwnedModule(rotationPath, required: false);
-        _int8V2RotatedQkF16 = _int8V2RotationModule.TryGetFunction("int8v2_rot_qk_f16");
-        _int8V2RotatedQkF32 = _int8V2RotationModule.TryGetFunction("int8v2_rot_qk_f32");
+        // Optional and off by default: a file that does not load leaves the rotation unavailable, not the kernel table.
+        try
+        {
+            _int8V2RotationModule = LoadOwnedModule(rotationPath, required: false);
+            _int8V2RotatedQkF16 = _int8V2RotationModule.TryGetFunction("int8v2_rot_qk_f16");
+            _int8V2RotatedQkF32 = _int8V2RotationModule.TryGetFunction("int8v2_rot_qk_f32");
+        }
+        catch (Exception ex)
+        {
+            _int8V2RotatedQkF16 = 0;
+            _int8V2RotatedQkF32 = 0;
+            HartsyInference.Core.Logging.Logs.Warning(
+                $"[Cuda] INT8 attention v2 rotation kernel unavailable ({ex.Message}); calls asked to rotate take the next row.");
+        }
     }
 
     /// <summary>Every loaded INT8 v2 entry with the registers and local (spill) bytes the driver's JIT gave it on this card.</summary>

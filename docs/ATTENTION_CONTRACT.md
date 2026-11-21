@@ -273,7 +273,8 @@ The planner reproduces these until the row that owns each is rewritten.
   the rows rotate Q and the centered K before quantizing them, by the pinned rule at head dim 128: the 4-point
   Hadamard up to 256 keys, the signed 128-point one past that. A fourth launch between the quant and attention
   launches rewrites the Q and K bytes and scales; V is not rotated. The rows decline when the knob is set and that
-  launch's kernel is not loaded, so a call asked to rotate never runs unrotated. No model sets the knob.
+  launch's kernel is not loaded, so a call asked to rotate never runs unrotated. A captured graph replays the launches chosen when it was captured,
+  whatever the knob says later. No model sets the knob.
 - CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.

@@ -254,6 +254,44 @@ public sealed class Int8AttentionRotationCudaTests(ITestOutputHelper output)
         Assert.Equal("int8_attn_v2_rot.ptx", Path.GetFileName(CudaKernels.PtxPath(ptx, "int8_attn_v2_rot", 86)));
     }
 
+    /// <summary>A rotation file that does not load leaves the backend and the unrotated rows working, and a call asked to
+    /// rotate takes another row instead of running unrotated.</summary>
+    [CudaFact]
+    public void ARotationKernelThatDoesNotLoadSendsACallAskedToRotateToAnotherRow()
+    {
+        if (!TryOpen(out CudaBackend probe)) return;
+        probe.Dispose();
+        const int heads = 2, tokens = 160;
+        using Tensor query = Random(new TensorShape(1, heads, tokens, HeadDim), 71, 0f, 0f, DType.F32);
+        using Tensor key = Random(new TensorShape(1, heads, tokens, HeadDim), 72, 3f, 6f, DType.F32);
+        using Tensor value = Random(key.Shape, 73, 1f, 0f, DType.F32);
+        using Tensor rotated = new(query.Shape, DType.F32), plain = new(query.Shape, DType.F32);
+        Func<string, Exception?>? before = CudaKernels.ModuleLoadFailureForTests;
+        CudaKernels.ModuleLoadFailureForTests = path => path.EndsWith("int8_attn_v2_rot.ptx", StringComparison.Ordinal)
+            ? new InvalidOperationException("injected: the rotation PTX does not load") : before?.Invoke(path);
+        try
+        {
+            using CudaBackend cuda = new(0, CudaPtxDirectory.Resolve());
+            using (Policy(rotate: true).Push())
+            {
+                cuda.ScaledDotProductAttention(rotated, query, key, value, null, Scale);
+                cuda.Sync();
+            }
+            Assert.Equal(0, cuda.Int8AttentionV2ExecutionCount);
+            Assert.DoesNotContain(rotated.AsReadOnlySpan<float>().ToArray(), float.IsNaN);
+            using (Policy(rotate: false).Push())
+            {
+                cuda.ScaledDotProductAttention(plain, query, key, value, null, Scale);
+                cuda.Sync();
+            }
+            Assert.Equal(1, cuda.Int8AttentionV2ExecutionCount);
+        }
+        finally
+        {
+            CudaKernels.ModuleLoadFailureForTests = before;
+        }
+    }
+
     private static KnobProfile Policy(bool rotate) => KnobProfile.Create("int8v2-rotation")
         .With(EngineKnobs.Int8AttnV2, true).With(EngineKnobs.Int8AttnV2MinTokens, 64).With(EngineKnobs.SageAttn, false)
         .With(EngineKnobs.Int8AttnV2Rotate, rotate);
