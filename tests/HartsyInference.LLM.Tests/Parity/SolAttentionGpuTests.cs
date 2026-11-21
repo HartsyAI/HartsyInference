@@ -2,16 +2,17 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Vulkan;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
-/// <summary>General Sol-Attn on CUDA against <see cref="SolAttentionReference"/>. Two things were fixed before the kernels
-/// first ran: the routing (which key blocks each query block reads exactly) must equal the reference's entry for entry,
-/// because the routing stages are written to reproduce its scores bit for bit; and the output must agree to 1e-4
-/// relative to the larger of 1 and the value.</summary>
+/// <summary>General Sol-Attn on CUDA and on Vulkan against <see cref="SolAttentionReference"/>. Two things were fixed
+/// before either backend's kernels first ran: the routing (which key blocks each query block reads exactly) must equal
+/// the reference's entry for entry, because the routing stages are written to reproduce its scores; and the output must
+/// agree to 1e-4 relative to the larger of 1 and the value.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
-public sealed class SolAttentionCudaTests
+public sealed class SolAttentionGpuTests
 {
     /// <summary>Operands with structure for the routing to find: noise, plus a component shared by every third block.</summary>
     private sealed class Operands : IDisposable
@@ -81,9 +82,16 @@ public sealed class SolAttentionCudaTests
         }
     }
 
-    private static CudaBackend Backend()
+    private static CudaBackend Cuda()
     {
         CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        Assert.True(backend.HasSolAttention);
+        return backend;
+    }
+
+    private static VulkanBackend Vulkan()
+    {
+        VulkanBackend backend = new();
         Assert.True(backend.HasSolAttention);
         return backend;
     }
@@ -93,9 +101,24 @@ public sealed class SolAttentionCudaTests
     [InlineData(0.2f)]
     [InlineData(3f)]
     [InlineData(-1e6f)]
-    public void TauRoutingOverARaggedLastBlockMatchesTheReference(float tau)
+    public void OnCudaTauRoutingOverARaggedLastBlockMatchesTheReference(float tau)
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        TauRoutingOverARaggedLastBlockMatchesTheReference(backend, tau);
+    }
+
+    [VulkanFact]
+    public void OnVulkanTauRoutingOverARaggedLastBlockMatchesTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        TauRoutingOverARaggedLastBlockMatchesTheReference(backend, 1f);
+        TauRoutingOverARaggedLastBlockMatchesTheReference(backend, 0.2f);
+        TauRoutingOverARaggedLastBlockMatchesTheReference(backend, 3f);
+        TauRoutingOverARaggedLastBlockMatchesTheReference(backend, -1e6f);
+    }
+
+    private static void TauRoutingOverARaggedLastBlockMatchesTheReference(IBackend backend, float tau)
+    {
         using Operands operands = new(1, 64 * 5 + 17, 2, 128, 91);
         (int read, int pairs) = operands.RunAndCompare(backend, new SolAttentionOptions { Tau = tau });
         // A threshold far below every score reads everything; the others read some blocks and pool the rest.
@@ -107,17 +130,43 @@ public sealed class SolAttentionCudaTests
     [InlineData(0.4, true)]
     [InlineData(0.4, false)]
     [InlineData(0.1, true)]
-    public void TopKRoutingMatchesTheReferenceWithAndWithoutTheTail(double ratio, bool tail)
+    public void OnCudaTopKRoutingMatchesTheReferenceWithAndWithoutTheTail(double ratio, bool tail)
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        TopKRoutingMatchesTheReferenceWithAndWithoutTheTail(backend, ratio, tail);
+    }
+
+    [VulkanFact]
+    public void OnVulkanTopKRoutingMatchesTheReferenceWithAndWithoutTheTail()
+    {
+        using VulkanBackend backend = Vulkan();
+        TopKRoutingMatchesTheReferenceWithAndWithoutTheTail(backend, 0.4, true);
+        TopKRoutingMatchesTheReferenceWithAndWithoutTheTail(backend, 0.4, false);
+        TopKRoutingMatchesTheReferenceWithAndWithoutTheTail(backend, 0.1, true);
+    }
+
+    private static void TopKRoutingMatchesTheReferenceWithAndWithoutTheTail(IBackend backend, double ratio, bool tail)
+    {
         using Operands operands = new(1, 64 * 7, 2, 128, 92);
         operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = ratio, Tail = tail });
     }
 
     [CudaFact]
-    public void SinkBlocksAndSinkQueriesMatchTheReference()
+    public void OnCudaSinkBlocksAndSinkQueriesMatchTheReference()
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        SinkBlocksAndSinkQueriesMatchTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanSinkBlocksAndSinkQueriesMatchTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        SinkBlocksAndSinkQueriesMatchTheReference(backend);
+    }
+
+    private static void SinkBlocksAndSinkQueriesMatchTheReference(IBackend backend)
+    {
         using Operands operands = new(1, 64 * 6 + 5, 2, 128, 93);
         operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 2f, SinkBlocks = (1, 3), SinkQueries = (0, 1) });
         operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.3, SinkBlocks = (1, 3) });
@@ -126,9 +175,21 @@ public sealed class SolAttentionCudaTests
     }
 
     [CudaFact]
-    public void AKeyBiasAndAKeyMaskMatchTheReference()
+    public void OnCudaAKeyBiasAndAKeyMaskMatchTheReference()
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        AKeyBiasAndAKeyMaskMatchTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanAKeyBiasAndAKeyMaskMatchTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        AKeyBiasAndAKeyMaskMatchTheReference(backend);
+    }
+
+    private static void AKeyBiasAndAKeyMaskMatchTheReference(IBackend backend)
+    {
         using Operands operands = new(2, 64 * 4 + 30, 2, 128, 94);
         using Tensor perBatch = operands.Bias(perBatch: true, mask: false, 1);
         using Tensor shared = operands.Bias(perBatch: false, mask: false, 2);
@@ -139,9 +200,21 @@ public sealed class SolAttentionCudaTests
     }
 
     [CudaFact]
-    public void BlockLengthsWithDeadRowsMatchTheReference()
+    public void OnCudaBlockLengthsWithDeadRowsMatchTheReference()
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        BlockLengthsWithDeadRowsMatchTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanBlockLengthsWithDeadRowsMatchTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        BlockLengthsWithDeadRowsMatchTheReference(backend);
+    }
+
+    private static void BlockLengthsWithDeadRowsMatchTheReference(IBackend backend)
+    {
         using Operands operands = new(1, 64 * 5, 2, 128, 95);
         operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, BlockLengths = [64, 40, 64, 1, 17] });
         operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.5, Tail = false, BlockLengths = [10, 64, 64, 64, 33] });
@@ -153,18 +226,46 @@ public sealed class SolAttentionCudaTests
     [InlineData(1, 2, 256, 64 * 4 + 9)]
     [InlineData(1, 5, 40, 64 * 5)]
     [InlineData(1, 2, 128, 50)]
-    public void OtherShapesAndACustomScaleMatchTheReference(int batch, int heads, int dim, int tokens)
+    public void OnCudaOtherShapesAndACustomScaleMatchTheReference(int batch, int heads, int dim, int tokens)
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        OtherShapesAndACustomScaleMatchTheReference(backend, batch, heads, dim, tokens);
+    }
+
+    [VulkanFact]
+    public void OnVulkanOtherShapesAndACustomScaleMatchTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        OtherShapesAndACustomScaleMatchTheReference(backend, 2, 3, 128, 64 * 3 + 1);
+        OtherShapesAndACustomScaleMatchTheReference(backend, 1, 4, 64, 64 * 6);
+        OtherShapesAndACustomScaleMatchTheReference(backend, 1, 2, 256, 64 * 4 + 9);
+        OtherShapesAndACustomScaleMatchTheReference(backend, 1, 5, 40, 64 * 5);
+        OtherShapesAndACustomScaleMatchTheReference(backend, 1, 2, 128, 50);
+    }
+
+    private static void OtherShapesAndACustomScaleMatchTheReference(IBackend backend, int batch, int heads, int dim, int tokens)
+    {
         using Operands operands = new(batch, tokens, heads, dim, 96);
         operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, Scale = 0.07f });
         operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.34 });
     }
 
     [CudaFact]
-    public void WithoutTheRoutingReportTheOutputIsTheSame()
+    public void OnCudaWithoutTheRoutingReportTheOutputIsTheSame()
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        WithoutTheRoutingReportTheOutputIsTheSame(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanWithoutTheRoutingReportTheOutputIsTheSame()
+    {
+        using VulkanBackend backend = Vulkan();
+        WithoutTheRoutingReportTheOutputIsTheSame(backend);
+    }
+
+    private static void WithoutTheRoutingReportTheOutputIsTheSame(IBackend backend)
+    {
         using Operands operands = new(1, 64 * 4, 2, 128, 97);
         SolAttentionOptions options = new() { Tau = 1f };
         operands.RunAndCompare(backend, options);
@@ -175,9 +276,21 @@ public sealed class SolAttentionCudaTests
     }
 
     [CudaFact]
-    public void WhatTheKernelsDoNotTakeIsRefusedAndWritesNothing()
+    public void OnCudaWhatTheKernelsDoNotTakeIsRefusedAndWritesNothing()
     {
-        using CudaBackend backend = Backend();
+        using CudaBackend backend = Cuda();
+        WhatTheKernelsDoNotTakeIsRefusedAndWritesNothing(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanWhatTheKernelsDoNotTakeIsRefusedAndWritesNothing()
+    {
+        using VulkanBackend backend = Vulkan();
+        WhatTheKernelsDoNotTakeIsRefusedAndWritesNothing(backend);
+    }
+
+    private static void WhatTheKernelsDoNotTakeIsRefusedAndWritesNothing(IBackend backend)
+    {
         using Operands operands = new(1, 64 * 3, 2, 128, 98);
         operands.Output.AsSpan<float>().Fill(-7f);
         using Tensor gate = new(operands.Query.Shape, DType.F32);
