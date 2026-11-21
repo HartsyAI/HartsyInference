@@ -11,11 +11,16 @@ Dense F32 attention through `IBackend.ScaledDotProductAttention` on Vulkan, head
 - **Tiled**: the knob on. The call takes `tiled.f32` (A.2t), the query-tiled F32 kernel.
 
 Same call, same device buffers, one backend, the two arms alternated run by run. Harness:
-`tests/HartsyInference.LLM.Tests/Parity/VulkanTiledAttentionAbTests.cs` (category `Timing`, outside the GPU lane).
+`tests/HartsyInference.LLM.Tests/Parity/VulkanTiledAttentionAbTests.cs` (category `GpuBenchmark`, which the CPU
+lane and the GPU lane both leave out). It fails if the tiled arm did not take `tiled.f32`, so a device that cannot
+run the kernel cannot report a comparison of the default row with itself.
 
 - Card: RTX 3060 12 GB, shared with a desktop session; each run started only with the card under 10% utilisation.
 - Each figure is the median of 7 calls after 2 warm-ups. The test was run three times; the ranges below are over those
   three medians.
+- Each time is the wall time of the call and a `Sync`, so it includes allocating the output buffer on the device and
+  the round trip, for both arms. That is small beside the gaps at 256 tokens and above and a visible part of the
+  figures under 2 ms.
 - This is descriptive. It is not the frozen protocol of `protocol.json` (no paired sessions, no quiet-window evidence).
 
 Expectation written in the test before the first run: tiled at least 3 times faster at 1,024 by 1,024 tokens, possibly

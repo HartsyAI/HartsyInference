@@ -11,10 +11,11 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// <summary>The A/B that <c>numerics.vkTiledAttention</c> waits on: dense F32 attention on Vulkan through the scalar route
 /// it takes by default and through the query-tiled F32 kernel the knob turns on, same call, same device buffers, the arms
 /// alternated. It reports the time of each, the row each took, and how far each is from the host reference; it asserts
-/// only that the two outputs agree. It is not part of the GPU lane (category <c>Timing</c>): run it alone on an idle card.
+/// only that each arm took the row it is meant to measure and that the two outputs agree. It is a
+/// <c>GpuBenchmark</c>, which the CPU lane and the GPU lane both leave out: run it alone on an idle card.
 /// <para>Expectation written before the first run: the tiled kernel is at least 3 times faster at 1,024 by 1,024 tokens,
 /// may be slower on the smallest shapes, and both outputs are within 2e-5 of the host reference.</para></summary>
-[Trait("Category", "Timing")]
+[Trait("Category", "GpuBenchmark")]
 public sealed class VulkanTiledAttentionAbTests(ITestOutputHelper output)
 {
     private static Tensor Random(TensorShape shape, int seed)
@@ -87,6 +88,9 @@ public sealed class VulkanTiledAttentionAbTests(ITestOutputHelper output)
             if (run >= 0) tiledMs[run] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
             tiledRoute = Route();
         }
+        // A device that cannot run the tiled bucket sends the second arm down the default row again; that is not an A/B.
+        Assert.True(tiledRoute == "A.2t", $"{name}: with the knob on the call took {tiledRoute}, not the tiled row A.2t");
+        Assert.True(scalarRoute != "A.2t", $"{name}: with the knob off the call took the tiled row");
         Array.Sort(scalarMs);
         Array.Sort(tiledMs);
         double scalar = scalarMs[runs / 2], tiled = tiledMs[runs / 2];
