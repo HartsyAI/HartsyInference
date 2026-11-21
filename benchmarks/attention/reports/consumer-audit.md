@@ -28,7 +28,7 @@ treat them as approximate.
 | Audio `Models/IndexTts/IndexTtsPerceiver.cs` | Unmasked; single-threaded | Migrated in draft #1010 (read by me) |
 | Audio `Models/GptSoVits/SoVitsEncP.cs` `CrossAttention` | Unmasked, channels-first; single-threaded | Migrated in draft #1010 (read by me) |
 | Audio `Models/ControlFoley/ControlFoleyStyleEncoder.cs` | Unmasked self-attention over frames; single-threaded | Migrated in draft #1010 (read by me) |
-| Audio `Models/FishAudio/DacOps.cs` `RunTransformer` | Causal, window of 128 keys (512 in the encoder), host RoPE; single-threaded | Open (read by me). On CUDA the causal F32 route narrows to F16, a larger precision change than TF32 inside a codec, and no Fish Audio weights are on either test machine. Looked at again after #1026: its window as an additive bias would be a `t × t` tensor a call, where the loop is linear in `t`, so the two-sided-window route of #1026 is not a fit at codec lengths |
+| Audio `Models/FishAudio/DacOps.cs` `RunTransformer` | Causal, window of 128 keys (512 in the encoder), host RoPE; single-threaded | Open (read by me). On CUDA the causal F32 route narrows to F16, a larger precision change than TF32 inside a codec, and no Fish Audio weights are on either test machine. Looked at again after #1026: its window as an additive bias would be a `t × t` tensor a call, where the loop is linear in `t` for its fixed window of 128 or 512 keys, so the two-sided-window route of #1026 is not a fit at codec lengths |
 | Audio `Models/BreezeTts/T5Gemma2TextEncoder.cs` `Encode` 87-112 | Two-sided window on some layers, grouped heads; single-threaded | Migrated in #1026 (merged): grouped heads go to the backend as they are (CUDA repeats K and V before its dense row), the two-sided window is an additive bias, and none is passed where the window covers the segment. Checked against the former loop on the CPU backend, CUDA and Vulkan, on the RTX 3060 and the RTX 4090; no real generation |
 | Audio `Models/ControlFoley/ControlFoleySwinStage.cs` `WindowAttention` 153-201 | Swin: learned relative-position bias and the shift mask, both additive; single-threaded | Migrated in draft #1014: one batch item a window, with the relative-position bias and the shift mask as one additive bias |
 | Audio `Models/IndexTts/IndexTtsConformerLayer.cs` `RelPosAttention` 100-157 | Positional terms indexed by the key alone, with no relative shift, so the score is `q · (k + p)` plus `u · k + v · p`, a bias a head and key that no query row changes; single-threaded | Migrated in draft #1013. Plain with an additive bias, confirmed by two further readings (an earlier pass had it as specialized) |
@@ -99,18 +99,23 @@ The IndexTTS perceiver and the GPT-SoVITS MRTE were a few milliseconds at their 
 
 ## Package tests renewed after the K-series (plan item 17)
 
-Whole test projects at `main` `24ff78dbb` on the RTX 3060 box, every backend the box has, on 2026-11-21. Each total
-was compared with the project's `--list-tests` count, since a crashed test host can still print a pass.
+The K-series is plan items K01 to K09 of `proposed-queue.md`: the kernel work (INT8 attention, decode with lengths,
+merges, Sol-Attn) that landed between the first audit and this update.
+
+Whole test projects at `main` `f28b0f384` on the RTX 3060 box, every backend the box has, on 2026-11-21. That commit has
+the merged #1026 and #1028, so the totals include `T5Gemma2AttentionTests` and `WanS2VAudioInjectorTests`. Each
+total was compared with the project's `--list-tests` count, since a crashed test host can still print a pass.
 
 | Project | Listed | Passed | Failed | Skipped |
 |---|---|---|---|---|
-| `HartsyInference.Audio.Tests` | 132 | 130 | 0 | 2 |
-| `HartsyInference.Diffusion.Tests` | 374 | 364 | 0 | 10 |
+| `HartsyInference.Audio.Tests` | 137 | 135 | 0 | 2 |
+| `HartsyInference.Diffusion.Tests` | 383 | 373 | 0 | 10 |
 
-Expectation written before the runs: no failures. It held. The skips are real-weight checks whose files are not on
-this box (word alignment in Audio; Sana WM and one LTX Video 2 VAE check in Diffusion), so those cases are
-unvalidated here, not passed. This is unit and parity coverage with synthetic weights; it is not a real generation,
-and it says nothing about the RTX 4090.
+Expectation written before the runs: no failures. It held. A first pass at `24ff78dbb`, before those two merges, had 132
+and 374 listed with the same two and ten skips and no failures; a review pointed out that it left the migrated code out,
+and the table is the rerun. The skips are real-weight checks whose files are not on this box (word alignment in Audio;
+Sana WM and one LTX Video 2 VAE check in Diffusion), so those cases are unvalidated here, not passed. This is unit and
+parity coverage with synthetic weights; it is not a real generation, and it says nothing about the RTX 4090.
 
 The statuses in the first table are as of the commit in its header. When a draft named there merges or changes,
 this file needs the same update.
