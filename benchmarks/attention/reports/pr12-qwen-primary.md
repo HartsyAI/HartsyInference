@@ -103,6 +103,28 @@ this lane (three sets, +0.70%, all three slower) suggested the cost accounting, 
 adds only a guarded evidence call and one delegate field on the per-call path, which cannot cost that much, so I take
 that three-set difference as noise. No measurement isolates the cause.
 
-### CUDA batched, CUDA graph, Vulkan paged
+### CUDA batched (two concurrent requests)
+
+Twenty pairs, all valid: 40 runs and 80 requests, every text identical (SHA-256 prefix 26c68e74a9df5f02).
+
+| | Value |
+|---|---|
+| C/R tokens per second, mean of the per-pair ratios | **11.80** |
+| Range of the per-pair ratios | 10.76 to 13.53 |
+| R tokens per second, mean | 5.39 |
+| C tokens per second, mean | 63.42 |
+
+The lane is preserved and improved: the bound was C not more than 3% below R. The figures are the per-pair mean and
+range as the GPU session reported them; the protocol's geometric mean and interval for this lane have not been
+computed here.
+
+This lane runs through the paged pool, so it shows the same thing as the primary and carries the same qualifiers:
+every R slot logs one out-of-memory line (20 of 20) and no C slot does, and R gathers the prefix at every step. It is
+not a second, independent gain.
+
+I predicted 5 to 15% above R. That was wrong by an order of magnitude, for the same reason the primary prediction
+was: I had not accounted for what R's gather costs.
+
+### CUDA graph, Vulkan paged
 
 Pending at the time of writing.
