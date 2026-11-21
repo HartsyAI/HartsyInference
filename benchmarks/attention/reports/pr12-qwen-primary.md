@@ -125,6 +125,28 @@ not a second, independent gain.
 I predicted 5 to 15% above R. That was wrong by an order of magnitude, for the same reason the primary prediction
 was: I had not accounted for what R's gather costs.
 
-### CUDA graph, Vulkan paged
+### CUDA graph
+
+Twenty pairs, all valid. The path proof passed first: 128 measured graph replays on both arms.
+
+| | Value |
+|---|---|
+| C/R total, geometric mean | **1.0019** |
+| Two-sided 95% interval | 0.9990 to 1.0051 |
+| One-sided 95% upper bound | 1.0045 |
+| Confirmation session | 1.0119 |
+
+The lane is preserved (upper bound and confirmation under 1.03) and not improved (the interval includes 1). I
+predicted 0.98 to 1.02 before any timing result; it is inside.
+
+**The graph lane's text is not the eager text.** Both arms produce the same text here (SHA-256 prefix
+d490e1fc030bf1fd, 792 characters), and it differs from the eager lanes' text (26c68e74a9df5f02, 777 characters) from
+character 343 on. The GPU session stopped the lane on that difference; I resumed it with the rule, set before any
+graph timing was seen, that a pair is valid when C's text equals R's and both equal the lane's own text. Neither
+`protocol.json` nor the campaign brief freezes a text for this lane. Because R, the PR 02 pin, shows the same
+text as C, nothing in this series introduced the difference. I have not explained it, and the token at which the two
+decodes part is not known (the saved outputs are text, with no token ids).
+
+### Vulkan paged
 
 Pending at the time of writing.
