@@ -120,7 +120,10 @@ The reference is a causal forward over every position, so feeding it the prompt 
 must reach at each decode step through its KV caches. The harness feeds fixed decode tokens (`ERNIE_REAL_DECODE_FEED`), writes one dump
 file per forward call (`pos0_t5`, then `pos5_t1`, `pos6_t1`, ...) and `tokens.json` (every fed token and the argmax after the last).
 `compare.py` stitches the files by position, checks the tokens against the reference's `meta.json`, applies the threshold to every
-position, and with `--logits` checks the last argmax.
+position, and with `--logits` checks the last argmax. `reference.py --logits` also writes `choices.json`, every position's argmax and
+its lead over the runner-up, and the harness writes the same for each position it produced logits for (the last prefill position and
+every decode step) into `tokens.json`; `compare.py` then compares the argmax at each of those positions and prints both leads on a
+disagreement. `--choice-margin` turns a disagreement where either lead is at most that many logit units into a note.
 
 ```bash
 export FEED=2551,7479,2811,1230,2810,4357,1298,36326   # any ids work; these are the 2026-11-16 run's (see below)
@@ -143,7 +146,12 @@ positions without loosening the whole-stream check.
 
 The fed ids need not be the engine's greedy choices: the reference runs on the same ids, so the check holds for any sequence. The ids
 above are a 16-step greedy run's outputs. That run's own first decode input was the prefill argmax, 1298, which the feed leaves out, so
-every fed id sits one position early against the greedy path and the engine's argmax agrees with 6 of the 8.
+every fed id sits one position early against the greedy path and the engine's argmax agrees with 6 of the 8. The harness's "matched 6
+of 8 fed tokens" line therefore says nothing about parity: the first disagreement (1298 against the fed 2551) is by construction, and
+the second (1232 against the fed 2810, after `/`) follows a context that lacks 1298. The greedy path itself reads
+`s://github.com/ahmedsalah1999/ahmedsalah1` in the checkpoint's tokenizer. Runs before the per-position check compared only the last
+argmax with the reference, so the second disagreement is consistent with the shifted context but was never compared with the reference
+at that position; a rerun with `choices.json` does that.
 
 What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax. With 13
 positions it does not reach the HCA compressor, whose first 128-token group completes at the 128th token, or the DSA indexer's key

@@ -7,9 +7,10 @@
 // compiler may not contract a multiply and an add into one fused operation, and the operations run in the reference's
 // order. Add, subtract and multiply are then the reference's bit for bit, provided the driver keeps subnormal values:
 // no float-controls mode is declared here, and without one a driver may flush them to zero. The Vulkan specification
-// also does not require a divide or a square root to be correctly rounded, so those are exact only where the driver
-// makes them so.
+// does not require a divide to be correctly rounded, and on an RTX 3060 it is not always, so the divides here go
+// through divRn (div_rn.glsl), which is.
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 128) in;
 
@@ -28,6 +29,8 @@ layout(push_constant) uniform Push {
     uint blocks;
 } pc;
 
+#include "div_rn.glsl"
+
 uint row(uint b, uint t, uint h) { return ((b * pc.tokens + t) * pc.heads + h) * pc.dim; }
 
 void main() {
@@ -44,8 +47,8 @@ void main() {
             vs = vs + v_data[at];
             qs = qs + q_data[at];
         }
-        precise float km = ks / float(len);
-        precise float c = qs / float(len);
+        precise float km = divRn(ks, float(len));
+        precise float c = divRn(qs, float(len));
         key_means[outBase + d] = km;
         value_sums[outBase + d] = vs;
         centroids[outBase + d] = c;

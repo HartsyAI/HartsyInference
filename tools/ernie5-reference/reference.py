@@ -17,6 +17,7 @@ Outputs in --out:
   layer_LL_last.npy   float32 [hc, hidden]     the same, last token
   final_hidden.npy    float32 [T, hidden]      after the head read-out and final RMS norm
   logits_last.npy     float32 [vocab]          with --logits: LM head and multimax, last token
+  choices.json        with --logits: every position's argmax and its lead over the runner-up, {"argmax": [T], "margin": [T]}
   meta.json           tokens, checkpoint, per-layer seconds
 """
 
@@ -476,6 +477,19 @@ def decoder_layer(ck: Checkpoint, i: int, stream: torch.Tensor, positions: torch
     return mhc_post(out, stream, post, comb)
 
 
+CHOICES_FILE = "choices.json"
+
+
+def lm_logits(hidden: torch.Tensor, head: torch.Tensor, multimax: tuple[torch.Tensor, torch.Tensor] | None) -> torch.Tensor:
+    """LM head and multimax of final hidden rows [rows, hidden]; head is the transposed weight [hidden, vocab]."""
+    logits = hidden @ head
+    if multimax is not None:
+        r, g = multimax
+        logits = (logits + g[0] * torch.relu(r[0] - logits) + g[1] * torch.relu(logits - r[1])
+                  + g[2] * torch.relu(r[2] - logits).pow(2) + g[3] * torch.relu(logits - r[3]).pow(2))
+    return logits
+
+
 def forward(ck: Checkpoint, tokens: list[int], out: Path, max_layers: int | None, want_logits: bool) -> dict:
     cfg = ck.cfg
     hc, H, eps = int(cfg["hc_mult"]), int(cfg["hidden_size"]), float(cfg["rms_norm_eps"])
@@ -502,12 +516,18 @@ def forward(ck: Checkpoint, tokens: list[int], out: Path, max_layers: int | None
                       ck.read(FINAL_NORM), eps)
     np.save(out / "final_hidden.npy", hidden.numpy().astype(np.float32))
     if want_logits and n_layers == int(cfg["num_hidden_layers"]):
-        logits = hidden[-1] @ ck.read(LM_HEAD).T
-        if ck.has(MULTIMAX_RANGES):
-            r, g = ck.read(MULTIMAX_RANGES), ck.read(MULTIMAX_GAINS)
-            logits = (logits + g[0] * torch.relu(r[0] - logits) + g[1] * torch.relu(logits - r[1])
-                      + g[2] * torch.relu(r[2] - logits).pow(2) + g[3] * torch.relu(logits - r[3]).pow(2))
-        np.save(out / "logits_last.npy", logits.numpy().astype(np.float32))
+        head = ck.read(LM_HEAD).T
+        multimax = (ck.read(MULTIMAX_RANGES), ck.read(MULTIMAX_GAINS)) if ck.has(MULTIMAX_RANGES) else None
+        # Every position's choice, a few rows at a time: the full [T, vocab] logits of a long prompt would not fit beside the head.
+        argmax, margin = [], []
+        for start in range(0, T, 16):
+            rows = lm_logits(hidden[start:start + 16], head, multimax)
+            top = torch.topk(rows, 2, dim=-1)
+            argmax += top.indices[:, 0].tolist()
+            margin += (top.values[:, 0] - top.values[:, 1]).tolist()
+            if start + 16 >= T:
+                np.save(out / "logits_last.npy", rows[-1].numpy().astype(np.float32))
+        (out / CHOICES_FILE).write_text(json.dumps({"argmax": argmax, "margin": margin}), encoding="utf-8")
     return timings
 
 
@@ -517,7 +537,7 @@ def main() -> None:
     p.add_argument("--tokens", required=True, help="comma-separated token ids")
     p.add_argument("--out", required=True, help="output directory (created)")
     p.add_argument("--max-layers", type=int, default=None)
-    p.add_argument("--logits", action="store_true", help="also write the last token's logits (full LM head, about 3.3 GB F32)")
+    p.add_argument("--logits", action="store_true", help="also write the last token's logits and every position's argmax and top-2 margin (full LM head, about 3.3 GB F32)")
     p.add_argument("--indexer-quant", choices=["fp8", "f32"], default="fp8",
                    help="DSA indexer queries and keys: Hadamard plus FP8 UE8M0 round trip as served (fp8), or exact (f32)")
     args = p.parse_args()
