@@ -1146,7 +1146,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Caches <paramref name="computed"/> as <paramref name="output"/>'s buffer, first dispatching a dtype cast when the compute dtype differs from the output's storage dtype. Takes ownership of <paramref name="computed"/> (freed after a cast, cached otherwise).</summary>
+    /// <summary>Caches <paramref name="computed"/> as <paramref name="output"/>'s buffer, first dispatching a dtype cast when the compute dtype differs from the output's storage dtype.</summary>
+    /// <remarks>Ownership of <paramref name="computed"/> passes here only when the call returns: it is then cached
+    /// as the output's buffer, or freed once the cast has been dispatched. When the call throws,
+    /// <paramref name="computed"/> is still the caller's and is not freed here: each caller's own <c>catch</c> disposes
+    /// it, so freeing it here as well would free it twice. A new caller needs the same <c>catch</c>.</remarks>
     private void CacheOutputCastingFrom(Tensor output, VulkanBuffer computed, DType computedDtype, string what)
     {
         if (output.DType == computedDtype)
