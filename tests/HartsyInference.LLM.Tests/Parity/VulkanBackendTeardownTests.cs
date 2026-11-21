@@ -16,9 +16,12 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// without the hold is run with this class alone in its process and <c>diagnostics.vkKeepInstance</c> off. In that
 /// run the only failure there can be is the crash: the second case checks nothing with the setting off.</para>
 /// <para>Bound written before the first run with the hold: every round leaves the process alive. Measured on an
-/// RTX 3060 with driver 610.88, this class alone in its process, 40 rounds: with the hold off the host crashed in
-/// 5 of 5 runs; with it on, 0 of 5. Each round has a pipeline cache directory of its own because a first version
-/// that used the machine's cache file stopped crashing, hold off, once that file was warm (0 of 2).</para></summary>
+/// RTX 3060 with driver 610.88, this class alone in its process, 40 rounds, interleaved over one afternoon: with
+/// the hold off the host crashed in 10 of 18 runs; with it on, 0 of 13. With the hold off it does not crash every
+/// time: 5 of 5 while other jobs shared the machine, 0 of 5 once it was quiet, 4 of 5 with every core kept busy.
+/// So one passing run with the hold off proves nothing; repeat it, on a machine that is doing other work.</para>
+/// <para>Each round has a pipeline cache directory of its own so that its kernels are compiled rather than loaded,
+/// which takes the state of the machine's cache file out of the result.</para></summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class VulkanBackendTeardownTests
 {
@@ -49,7 +52,7 @@ public sealed class VulkanBackendTeardownTests
     }
 
     /// <summary>One backend on a pipeline cache directory of its own that starts empty, so its kernels are compiled
-    /// rather than loaded: with the pipelines coming from a warm cache file the loop did not end the process.</summary>
+    /// rather than loaded.</summary>
     private static void Round(int round, int rounds, string cacheDirectory)
     {
         Directory.CreateDirectory(cacheDirectory);
