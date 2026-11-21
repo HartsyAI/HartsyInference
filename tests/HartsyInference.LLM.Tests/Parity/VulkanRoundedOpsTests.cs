@@ -44,7 +44,7 @@ public sealed class VulkanRoundedOpsTests
                     x[i] = 1f;
                     y[i] = MathF.Pow(2f, random.Next(-30, 30)) * (1f + random.NextSingle());
                     break;
-                case 3:   // subnormal results and operands
+                case 3:   // subnormal dividends (read as zero on the 3060; reported, not asserted)
                     x[i] = BitConverter.Int32BitsToSingle(random.Next(1, 0x00800000));
                     y[i] = 1f + random.NextSingle() * 7f;
                     break;
