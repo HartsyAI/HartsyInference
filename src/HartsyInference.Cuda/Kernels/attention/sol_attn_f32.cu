@@ -12,9 +12,12 @@
 //                      on, one pooled entry per unread block weighing its live length.
 //
 // Stages 1 to 4 decide the routing, and a routing decision is a comparison: a score a rounding apart from the
-// reference's can flip a block. So they use the round-to-nearest intrinsics (__fadd_rn, __fmul_rn, __fdiv_rn), which the
-// compiler does not contract into fused multiply-adds, in the reference's order of operations. Their results are the
-// reference's bit for bit, and so is the routing. Stage 5 is ordinary F32 arithmetic and is compared by tolerance.
+// reference's can flip a block. So they use the round-to-nearest intrinsics (__fadd_rn, __fsub_rn, __fmul_rn, __fdiv_rn),
+// which the compiler does not contract into fused multiply-adds, in the reference's order of operations. The threshold's
+// square root relies on sqrtf compiling to the correctly rounded sqrt.rn, which it does without fast-math; a build with
+// --use_fast_math or -prec-sqrt=false would break that silently. Their results are the reference's bit for bit, and so is
+// the routing. Stage 5 is ordinary F32 arithmetic (its exponential is the approximate ex2, and the bias term fuses into
+// the logit) and is compared by tolerance.
 //
 // Not here: the coarse gate. The backend refuses a call that asks for one.
 //

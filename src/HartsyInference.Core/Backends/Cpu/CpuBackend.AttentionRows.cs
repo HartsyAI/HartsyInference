@@ -34,7 +34,6 @@ public sealed partial class CpuBackend
     }
 
     /// <inheritdoc/>
-    /// <inheritdoc/>
     public bool HasSolAttention => true;
 
     /// <inheritdoc/>
@@ -42,6 +41,7 @@ public sealed partial class CpuBackend
     public void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default) =>
         SolAttentionReference.Run(output, query, key, value, options, routed);
 
+    /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
         AttentionCall prepared = AttentionExecution.Prepare(in call);

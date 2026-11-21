@@ -6,7 +6,7 @@ namespace HartsyInference.Cuda;
 // General Sol-Attn on the device (Kernels/attention/sol_attn_f32.cu).
 public sealed partial class CudaBackend
 {
-    /// <summary>The most tokens a head dimension the kernels take: the token pass stages a query row of up to 256 values.</summary>
+    /// <summary>The largest head dimension the kernels take: the token pass stages a query row of up to 256 values.</summary>
     private const int SolAttentionMaxHeadDim = 256;
 
     /// <inheritdoc/>
@@ -64,7 +64,11 @@ public sealed partial class CudaBackend
             pV = GpuTransferHelper.CopyToDevice(value);
             pLengths = GpuTransferHelper.CopyToDevice(lengths);
             AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "cuda.sol.lengths", blocks * sizeof(int));
-            if (bias is not null) pBias = GpuTransferHelper.CopyToDevice(bias);
+            if (bias is not null)
+            {
+                pBias = GpuTransferHelper.CopyToDevice(bias);
+                AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "cuda.sol.bias", (long)GpuTransferHelper.ByteSize(bias));
+            }
             pKeyMeans = GpuTransferHelper.AllocateDevice(summaryBytes);
             pValueSums = GpuTransferHelper.AllocateDevice(summaryBytes);
             pCentroids = GpuTransferHelper.AllocateDevice(summaryBytes);
