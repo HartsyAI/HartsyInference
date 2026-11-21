@@ -66,7 +66,7 @@ public sealed class SwinWindowAttentionTests
 
     /// <summary>The four stages of the audio branch (window 8 over grids of 64, 32, 16 and 8; widths 128 to 1,024; 4 to 32
     /// heads), each with and without the shift mask except the last, whose one window is never shifted, and a small odd
-    /// shape.</summary>
+    /// shape. A stage's shifted case uses the mask the stage itself builds; the odd shape uses a random one.</summary>
     private static void MatchesTheFormerLoop(IBackend backend, float tolerance)
     {
         foreach ((int windows, int tokens, int dim, int heads, bool shifted) in ((int, int, int, int, bool)[])[(64, 64, 128, 4, false),
@@ -80,12 +80,23 @@ public sealed class SwinWindowAttentionTests
             float[]? mask = null;
             if (shifted)
             {
-                mask = new float[windows * tokens * tokens];
-                for (int i = 0; i < mask.Length; i++) mask[i] = random.Next(4) == 0 ? -100f : 0f;
+                if (tokens == 64)
+                {
+                    // The stage's own shift mask: its grid is the window (8) times the windows a side, shifted by half a window.
+                    mask = ControlFoleySwinStage.BuildShiftMask(8 * (int)Math.Sqrt(windows), 8, 4);
+                    Assert.Equal(windows * tokens * tokens, mask.Length);
+                    Assert.Contains(-100f, mask);
+                }
+                else
+                {
+                    mask = new float[windows * tokens * tokens];
+                    for (int i = 0; i < mask.Length; i++) mask[i] = random.Next(4) == 0 ? -100f : 0f;
+                }
             }
 
             float[] expected = FormerLoop(qkv, bias, mask, windows, tokens, dim, heads);
-            float[] actual = ControlFoleySwinStage.AttendWindows(backend, qkv, bias, mask, windows, tokens, dim, heads);
+            float[] actual = ControlFoleySwinStage.AttendWindows(backend, qkv,
+                ControlFoleySwinStage.CombineTerms(bias, mask, windows, tokens, heads), windows, tokens, dim, heads);
             Assert.Equal(expected.Length, actual.Length);
             for (int i = 0; i < expected.Length; i++)
                 Assert.True(Math.Abs(expected[i] - actual[i]) <= tolerance * Math.Max(1f, Math.Abs(expected[i])),

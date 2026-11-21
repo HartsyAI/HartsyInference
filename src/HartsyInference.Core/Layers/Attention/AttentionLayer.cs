@@ -133,7 +133,7 @@ public sealed partial class AttentionLayer
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
     /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout); rank-2
-    /// <c>[S, heads·D]</c> operands are one batch item.</summary>
+    /// <c>[S, heads·D]</c> operands are one batch item. As in <see cref="Attend"/>, all three are taken over and disposed.</summary>
     public Tensor AttendFlat(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
         if (_config.QkNorm is not (AttentionQkNorm.None or AttentionQkNorm.FullWidthRms))
