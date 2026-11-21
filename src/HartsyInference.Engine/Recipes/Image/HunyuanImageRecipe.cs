@@ -16,6 +16,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -25,6 +26,12 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "hunyuan-image";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm", "t5"], Format = "text", Negative = "separate",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/hunyuan-image.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Img2img only. HunyuanImage integrates in token space after a one-time patchify, and the shared

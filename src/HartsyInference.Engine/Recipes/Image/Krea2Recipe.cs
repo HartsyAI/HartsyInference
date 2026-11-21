@@ -19,6 +19,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -27,6 +28,19 @@ public sealed class Krea2Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "krea2";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["weights", "text-rendering"],
+        Guide = "docs/prompting/krea-2.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(Krea2Variants.Turbo) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Krea 2 shares the Qwen-Image VAE; its encoder half is built alongside the decoder and

@@ -12,6 +12,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -21,6 +22,12 @@ public sealed class WanS2VRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "wan-s2v";
 
+    /// <inheritdoc/>
+    /// <remarks>The Wan guide does not cover speech-to-video.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Wan-S2V turns the init image into appended identity reference tokens.</remarks>

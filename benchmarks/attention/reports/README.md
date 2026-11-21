@@ -42,3 +42,6 @@ Continue with the [4090 handoff](../vps-handoff.md). The user's subsequent autho
 in the [implementation queue](../proposed-queue.md); it does not certify the incomplete PR 01 evidence or create Bfix.
 Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
 identified by the report; retain it through the handoff and exit review.
+
+Other reports in this folder: the [consumer audit](consumer-audit.md) of attention computed outside the backend
+entry points (plan items 14 to 17).

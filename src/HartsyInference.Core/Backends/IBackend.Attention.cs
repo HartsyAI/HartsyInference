@@ -27,6 +27,26 @@ public partial interface IBackend
         return new(null, null, "no attention rows; call AttentionHostReference.Run explicitly for host execution", null);
     }
 
+    /// <summary>Whether <see cref="DecodeTreeMerge"/> runs on this backend. False by default: a caller then merges some other
+    /// way, and a call made anyway is refused.</summary>
+    bool HasDecodeMerge => false;
+
+    /// <summary>The speculative-decode merge (<see cref="DecodeMergeReference"/>): folds a verify step's own rows into an
+    /// attention result computed over the committed prefix alone, joining the two softmaxes through the prefix LSE.</summary>
+    /// <param name="merged">Output, F32 <c>[B, S, H × D]</c>; may be <paramref name="prefixOutput"/> itself.</param>
+    /// <param name="prefixOutput">The step's rows attended over the committed prefix only, F32 <c>[B, S, H × D]</c>.</param>
+    /// <param name="prefixLse">The natural-log LSE of those rows, F32 <c>[B, H, S]</c>, as a decode with
+    /// <see cref="AttentionCall.Lse"/> writes it; negative infinity for a row whose prefix was empty.</param>
+    /// <param name="query">The step's queries, F32 <c>[B, H, S, D]</c>.</param>
+    /// <param name="key">The step's own keys, F32 <c>[B, Hkv, S, D]</c>.</param>
+    /// <param name="value">The step's own values, F32 <c>[B, Hkv, S, D]</c>.</param>
+    /// <param name="mask">One entry per row: bit <c>t</c> set means the row attends step row <c>t</c>
+    /// (<see cref="DecodeMergeReference.CausalStepMask"/> for a causal step).</param>
+    /// <param name="scale">The score multiplier; null is <c>D^-1/2</c>.</param>
+    /// <exception cref="NotSupportedException">The backend has no merge; see <see cref="HasDecodeMerge"/>.</exception>
+    void DecodeTreeMerge(Tensor merged, Tensor prefixOutput, Tensor prefixLse, Tensor query, Tensor key, Tensor value, ReadOnlySpan<int> mask,
+        float? scale = null) => throw NotSupportedPrimitive(nameof(DecodeTreeMerge));
+
     /// <summary>Whether <see cref="SolAttention"/> runs on this backend. False by default, and a call made anyway is refused.</summary>
     bool HasSolAttention => false;
 

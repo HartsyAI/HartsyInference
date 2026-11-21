@@ -13,6 +13,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Chroma recipe (Lodestone Rock's 8.9B Flux derivative: T5-only, no CLIP/pooled conditioning, joint-attention DiT, same VAE as Flux.1). Lifted from the SwarmUI backend's <c>ChromaLoader</c>; the checkpoint is the DiT, the T5-XXL text encoder and Flux VAE are resolved as side models. Constructs and drives through <see cref="ChromaRecipePipeline"/>.</summary>
@@ -21,6 +22,12 @@ public sealed class ChromaRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "chroma";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["t5"], Format = "text", Negative = "separate", Supports = ["regions"],
+        Guide = "docs/prompting/chroma.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Chroma reuses the Flux.1 VAE; the encoder half is built alongside the decoder and ChromaPipeline implements the packed-latent masked path.</remarks>

@@ -59,7 +59,7 @@ public sealed class RecipeCatalog : IRecipeCatalog
         string familyId = InferenceEngine.ResolveFamilyId(spec);
         IArchitectureRecipe recipe = RecipeRegistry.Resolve(familyId)
             ?? throw new RecipeNotRegisteredException(Modality.Image, familyId, RecipeRegistry.RegisteredNames);
-        return ImageDescriptor(familyId, recipe, RecipeResolution.ResolveVariant(recipe.Variants, spec));
+        return ImageDescriptor(familyId, recipe, RecipeResolution.ResolveVariant(recipe.Variants, spec), promptNeedsEvidence: true);
     }
 
     private static ModelDescriptor DescribeVideo(ModelSpec spec)
@@ -70,7 +70,7 @@ public sealed class RecipeCatalog : IRecipeCatalog
         {
             throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
         }
-        return VideoDescriptor(familyId, recipe, variant, spec.LocalPath);
+        return VideoDescriptor(familyId, recipe, variant, spec.LocalPath, promptNeedsEvidence: true);
     }
 
     private static ModelDescriptor DescribeImageFamily(string familyId, string? variantId)
@@ -91,7 +91,10 @@ public sealed class RecipeCatalog : IRecipeCatalog
             : VideoDescriptor(familyId, recipe, variant, null);
     }
 
-    private static ImageModelDescriptor ImageDescriptor(string familyId, IArchitectureRecipe recipe, ResolvedModelVariant? variant)
+    /// <param name="promptNeedsEvidence">True for a checkpoint: a variant it merely defaulted to is no evidence of the build,
+    /// so the prompt profile is the family-level one. A family route names its variant, or its default on purpose.</param>
+    private static ImageModelDescriptor ImageDescriptor(string familyId, IArchitectureRecipe recipe, ResolvedModelVariant? variant,
+        bool promptNeedsEvidence = false)
     {
         ImageDefaults defaults = recipe.DefaultsFor(variant);
         return new ImageModelDescriptor
@@ -100,6 +103,7 @@ public sealed class RecipeCatalog : IRecipeCatalog
             Modality = Modality.Image,
             Variants = VariantIds(recipe.Variants),
             ProfileBound = false,
+            Prompt = recipe.PromptFor(PromptVariant(variant, promptNeedsEvidence)),
             Defaults = defaults,
             Features = RecipeResolution.ImageFeaturesFor(recipe, variant),
             InputLimits = recipe.InputLimitsFor(variant),
@@ -108,7 +112,7 @@ public sealed class RecipeCatalog : IRecipeCatalog
     }
 
     private static VideoModelDescriptor VideoDescriptor(string familyId, IVideoRecipe recipe, ResolvedModelVariant? variant,
-        string? checkpointPath)
+        string? checkpointPath, bool promptNeedsEvidence = false)
     {
         VideoDefaults defaults = recipe.DefaultsFor(variant);
         return new VideoModelDescriptor
@@ -117,12 +121,16 @@ public sealed class RecipeCatalog : IRecipeCatalog
             Modality = Modality.Video,
             Variants = VariantIds(recipe.Variants),
             ProfileBound = VideoProfileResolver.BindsProfiles(familyId),
+            Prompt = recipe.PromptFor(PromptVariant(variant, promptNeedsEvidence)),
             Defaults = defaults,
             Constraints = recipe.Constraints,
             Features = RecipeResolution.VideoFeaturesFor(recipe, variant, checkpointPath),
             Sampling = recipe.SamplingSupportFor(familyId, variant),
         };
     }
+
+    private static ResolvedModelVariant? PromptVariant(ResolvedModelVariant? variant, bool needsEvidence) =>
+        needsEvidence && variant is not { IsDefinitive: true } ? null : variant;
 
     /// <summary>The variant a family-level descriptor answers for: the named one, or the catalog default when none is named.</summary>
     private static ResolvedModelVariant? FamilyVariant(string familyId, ModelVariantCatalog? catalog, string? variantId)

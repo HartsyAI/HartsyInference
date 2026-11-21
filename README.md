@@ -60,7 +60,9 @@ Image, video and music families take their defaults from a recipe: a request fie
 value where the recipe declares one, and a recipe value of null leaves that choice to the pipeline or loader. Image and video results carry provenance (`ParameterProvenance`) for the settings planning resolves: each
 names its source, such as the recipe, the caller, or a normalization of the caller's value. GET /v1/native/recipes lists the image and video
 recipes, and POST /v1/native/recipes/describe answers for one model without loading weights; text, speech and
-transcription defaults still live in their loaders. See the
+transcription defaults still live in their loaders. Each image or video descriptor also carries a `prompt` block saying what
+shapes the model's prompt text (format, negative handling, boxes), and `hartsy merge --model` writes the same facts into the
+checkpoint as `modelspec.prompt_*` header keys. See the
 [recipe contract](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Research/RECIPE_CONTRACT.md).
 
 Video supports preflight at POST /v1/native/video/plan and SSE generation at POST /v1/native/video/stream.
