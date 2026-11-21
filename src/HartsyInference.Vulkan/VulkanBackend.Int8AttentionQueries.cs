@@ -112,4 +112,40 @@ public sealed partial class VulkanBackend
             _xfer.FreeDevice(nativeBuffer);
         }
     }
+
+    /// <summary>Test probe: <c>exp2Fixed</c> of Shaders/exp2_fixed.glsl, whose host twin is
+    /// <see cref="Int8AttentionExp2.Evaluate"/>, and the device's own <c>exp2()</c> of each argument.</summary>
+    /// <param name="fixedResult">Output, F32: <c>exp2Fixed(x)</c>.</param>
+    /// <param name="native">Output, F32: the device's <c>exp2(x)</c>, a driver's approximation.</param>
+    /// <param name="x">F32 arguments.</param>
+    public void Exp2FixedProbe(Tensor fixedResult, Tensor native, Tensor x)
+    {
+        long count = x.ElementCount;
+        foreach (Tensor tensor in (Tensor[])[fixedResult, native, x])
+            if (tensor.DType != DType.F32 || tensor.ElementCount != count)
+                throw new ArgumentException($"Every operand is F32 with {count} elements; got {tensor.DType} {tensor.Shape}.");
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(count, MaxElementsPerDispatch);
+        if (count == 0) return;
+        RequireShader("exp2_fixed_probe");
+
+        using OpScope _op = EnterOp();
+        VulkanBuffer source = GetBuffer(x);
+        VulkanBuffer fixedBuffer = _xfer.AllocateDevice((ulong)count * sizeof(float));
+        VulkanBuffer nativeBuffer = _xfer.AllocateDevice((ulong)count * sizeof(float));
+        try
+        {
+            VulkanKernel kernel = GetKernel("exp2_fixed_probe", storageBufferCount: 3, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4];
+            BinaryWriteUInt(pc, 0, (uint)count);
+            Span<ulong> buffers = stackalloc ulong[] { source.Handle, fixedBuffer.Handle, nativeBuffer.Handle };
+            Dispatch(kernel, buffers, pc, GroupCount(count, LocalX1D));
+            CacheOutput(fixedResult, fixedBuffer);
+            CacheOutput(native, nativeBuffer);
+        }
+        finally
+        {
+            _xfer.FreeDevice(fixedBuffer);
+            _xfer.FreeDevice(nativeBuffer);
+        }
+    }
 }

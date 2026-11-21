@@ -8,8 +8,9 @@ namespace HartsyInference.LLM.Tests.Parity;
 
 /// <summary>The Vulkan query side of INT8 attention against <see cref="Int8AttentionV2Reference.Quantize"/>, and the exact
 /// fused multiply-add it rests on (Shaders/fma_rn.glsl) against <see cref="MathF.FusedMultiplyAdd"/>.
-/// <para>The bounds were fixed before the first run. The fused multiply-add: bit-equal for every triple whose
-/// multiplicands are zero or within [2^-40, 2^40] and whose addend is zero or within [2^-80, 2^80]. The device's own
+/// <para>The bounds were fixed before the first run. The fused multiply-add: bit-equal for every triple in the range
+/// fma_rn.glsl states (operands zero or within [2^-100, 2^100], product and addend zero or within [2^-100, 2^120],
+/// result zero or normal); that range was [2^-40, 2^40] and [2^-80, 2^80] until the scaling step. The device's own
 /// <c>fma()</c> is counted and reported, not asserted. The query side: every dot and scale bit-equal and every byte equal
 /// to the reference's, on finite operands of ordinary magnitude.</para></summary>
 [Trait("Category", "GpuIntegration")]
@@ -76,9 +77,12 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
 
     private static bool InRange(float a, float b, float c)
     {
-        static bool Ok(float x, int bound) => x == 0f || (float.IsFinite(x) && MathF.Abs(x) >= MathF.ScaleB(1f, -bound)
-            && MathF.Abs(x) <= MathF.ScaleB(1f, bound));
-        return Ok(a, 40) && Ok(b, 40) && Ok(c, 80);
+        static bool Within(float x, int low, int high) => x == 0f || (float.IsFinite(x)
+            && MathF.Abs(x) >= MathF.ScaleB(1f, low) && MathF.Abs(x) <= MathF.ScaleB(1f, high));
+        float product = a * b, result = MathF.FusedMultiplyAdd(a, b, c);
+        bool productOk = a == 0f || b == 0f || (product != 0f && Within(product, -100, 120));
+        return Within(a, -100, 100) && Within(b, -100, 100) && productOk && Within(c, -100, 120)
+            && (result == 0f || MathF.Abs(result) >= MathF.ScaleB(1f, -126));
     }
 
     /// <summary>Triples in the classes a double rounding gets wrong: sums that land on or beside the midpoint of two floats
@@ -130,6 +134,34 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
             if (random.Next(2) == 0) z = -z;
             Add(x, y, z, square ? "exact tie, product rounded down" : "exact tie, product rounded up");
         }
+        // The same ties with the product between 2^-95 and 2^-45, where fmaRn works on scaled operands.
+        for (int i = 0; i < 24000; i++)
+        {
+            int j = 13 + i % 11, shift = random.Next(-95, -44);
+            bool square = i % 2 == 0;
+            float x = MathF.ScaleB(1f + MathF.ScaleB(1f, -j), shift), y = square ? 1f + MathF.ScaleB(1f, -j) : 1f - MathF.ScaleB(1f, -j);
+            float mantissa = 1f + random.Next(1 << 23) / (float)(1 << 23);
+            float z = MathF.ScaleB(mantissa, (square ? 25 - j : 24) + shift);
+            if (random.Next(2) == 0) x = -x;
+            if (random.Next(2) == 0) z = -z;
+            Add(x, y, z, "exact tie, small product");
+        }
+        // What the attention drain multiplies: a whole number up to 128 * 255 * 127 by a scale far below one, added
+        // to something near the product or near a midpoint above it.
+        for (int i = 0; i < 30000; i++)
+        {
+            float x = random.Next(1, 4112641), y = Pick(random, -95, -41);
+            if (random.Next(2) == 0) x = -x;
+            double product = (double)x * y;
+            int gap = gaps[i % gaps.Length];
+            float sum = MathF.ScaleB(1f + random.Next(1 << 23) / (float)(1 << 23), Math.ILogB(product) + gap);
+            double half = ((double)MathF.BitIncrement(sum) - sum) / 2;
+            double mid = random.Next(2) == 0 ? sum + half : sum - half;
+            if (random.Next(2) == 0) mid = -mid;
+            Add(x, y, (float)(mid - product), "integer times a small scale");
+        }
+        for (int i = 0; i < 4000; i++)
+            Add(Pick(random, -45, -21), Pick(random, -45, -21), Pick(random, 28, 100), "small product, large addend");
         for (int i = 0; i < 2000; i++)
         {
             float x = Pick(random, -20, 20), y = Pick(random, -20, 20), z = Pick(random, -40, 40);
