@@ -983,10 +983,11 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it had cost up
     to 1.8 s. So `VulkanInstance` creates one more instance before the first and never destroys it
     (`VulkanInstance.HoldsProcessInstance`); `diagnostics.vkKeepInstance` turns that off, and a process that never
-    creates a Vulkan backend never creates it. `VulkanBackendTeardownTests` is the loop: alone in its process it
-    crashed the host in 5 of 5 runs with the setting off and 0 of 5 with it on. That the driver tears process-wide
-    state down with a process's last instance is the inference from those runs, not something seen in the driver.
-    Not checked: other driver versions, the RTX 4090, other vendors, Linux.
+    touches Vulkan (no backend, no `VulkanContext` device count, which `auto` asks for only when CUDA is not
+    taken) never creates it. `VulkanBackendTeardownTests` is the loop: alone in its process it crashed the host in
+    5 of 5 runs with the setting off and 0 of 5 with it on. That the driver tears process-wide state down with a
+    process's last instance is the inference from those runs, not something seen in the driver. Not checked: other
+    driver versions, the RTX 4090, other vendors, Linux.
   - **Leads that did not hold** (the first was reported as the cause before it was checked):
     - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
       ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
