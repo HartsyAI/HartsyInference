@@ -977,25 +977,27 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     created, once during the next attention call. A pause of 1 s before the destroy did not help. The loop
     survived with only an instance (100 rounds), an instance and a device (100), a backend that ran nothing (100),
     a backend that ran `Scale` (40), a backend that ran the scalar attention kernel (40), and one backend reused
-    for 200 cooperative-matrix calls. Reading the output back every round made it rarer.
+    for 200 cooperative-matrix calls. Reading the output back every round made it rarer: at 40 rounds the host
+    crashed in 1 of 3 processes with the read and 3 of 5 without.
   - **What stopped it in these runs.** One more Vulkan instance alive in the process. With an idle `VulkanInstance`
     held for the whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it
     had cost up to 1.8 s. That the driver tears process-wide state down with a process's last instance is the
     inference from those runs, not something seen in the driver. Making the engine hold such an instance is
     proposed in PR #1038 and is a decision, not a correction: it changes what a process keeps alive.
-  - **Not the cause** (each was a lead, and the first was reported as the cause before it was checked):
+  - **Leads that did not hold** (the first was reported as the cause before it was checked):
     - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
-      ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line;
+      ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
+      to the end of a method before calling it a leak;
     - a finalizer running after its device. The six Vulkan finalizers and `VulkanDevice.Dispose` were logged
-      through a crashed run: 61 devices disposed, no finalizer ran. A forced-collection repro that crashed 3 of 3
-      once then survived 6 of 6 on the same binaries;
+      through a crashed run: 61 devices disposed, no finalizer ran. A forced-collection repro crashed 3 of 3 in one
+      sitting and survived 6 of 6 an hour later on the same binaries, so it showed nothing about collection;
     - the `VulkanPipelineCache: failed to persist cache ... being used by another process` warning just before
       it, or a damaged cache file. The write is caught and logged, and nothing tied the file to the crash;
     - OBS Studio's capture layer. `graphics-hook64.dll` is loaded into every Vulkan process on a machine with OBS
       installed (the implicit layer `VK_LAYER_OBS_HOOK`), and it is on the stack of the thread inside
       `vkDestroyDevice`. Interleaved A/B on the evidence class, the layer on against
       `DISABLE_VULKAN_OBS_CAPTURE=1`: 3 crashed of 11 against 3 of 10, with the hook DLL confirmed absent in the
-      second arm.
+      second arm. So the crash does not need the layer; whether the layer changes its rate, that sample cannot say.
   - **How to capture a native crash like this one.**
     - `--blame` names a test, which here was not the cause. `--blame-crash` writes no dump without procdump.
     - `DOTNET_DbgEnableMiniDump=1` with `DOTNET_DbgMiniDumpType=2` fails on a process with a GPU context
