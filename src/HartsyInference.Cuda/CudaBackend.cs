@@ -78,8 +78,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool _cudnnConv3dDead; // a 3-D failure → causal 3-D convs go back to per-tap 2-D for the session
 
     private long _cudnnSdpaExecutionCount;
-    private long _cudnnSdpaSessionGeneration;
-    private long _cudnnSdpaDisposedSessionCount;
 
     /// <summary>True once the cuDNN fused-attention fast path has run at least once this session (confirms engagement vs fallback).</summary>
     public bool CudnnSdpaEngaged => CudnnSdpaExecutionCount > 0;
@@ -5943,7 +5941,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (_cudnnSdpa is null)
             {
                 _cudnnSdpa = new CudnnSdpa(_stream.Handle);
-                Interlocked.Increment(ref _cudnnSdpaSessionGeneration);
             }
 
             // Checked right after real (or already-cached) engine construction, so an injected failure is
@@ -9114,7 +9111,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // through the half-disposed session; it will construct a fresh one after this lock is released.
             _cudnnSdpa = null;
             session.Dispose();
-            Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
         }
     }
 
@@ -9367,7 +9363,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 Attempt("cuDNN SDPA session", () =>
                 {
                     sdpa.Dispose();
-                    Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
                 });
             }
 
