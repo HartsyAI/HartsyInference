@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -10,10 +11,13 @@ namespace HartsyInference.Audio.Models.BreezeTts;
 /// layer is <c>x + post_attn_norm(attn(pre_attn_norm(x)))</c> then <c>x + post_ffn_norm(mlp(pre_ffn_norm(x)))</c> with
 /// Gemma RMSNorm (<c>1 + w</c>), per-head Q/K RMSNorm, split-half RoPE, GQA, scale <c>query_pre_attn_scalar^-½</c> and a
 /// tanh-GELU gated MLP. Attention is bidirectional: sliding layers let a token see the previous
-/// <c>(window+1)/2</c> and the next <c>window/2+1</c> positions (itself included), full layers see everything.</summary>
+/// <c>(window+1)/2</c> and the next <c>window/2+1</c> positions (itself included), full layers see everything.
+/// <para>The attention itself runs through the shared <see cref="AttentionLayer"/> on the backend, grouped heads native;
+/// a sliding layer's window is an additive bias, and none is passed where the window covers the whole segment.</para></summary>
 public sealed unsafe class T5Gemma2TextEncoder : IDisposable
 {
     private readonly T5Gemma2TextEncoderConfig _cfg;
+    private readonly AttentionLayer _attention;
     private Tensor? _embed, _eoi, _finalNorm;
     private Layer[] _layers = [];
     private int _disposed;
@@ -21,7 +25,19 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
     private sealed record Layer(Tensor PreAttn, Tensor PostAttn, Tensor PreFfn, Tensor PostFfn, Tensor QNorm, Tensor KNorm,
         Tensor Wq, Tensor Wk, Tensor Wv, Tensor Wo, Tensor Gate, Tensor Up, Tensor Down);
 
-    public T5Gemma2TextEncoder(T5Gemma2TextEncoderConfig cfg) { _cfg = cfg; }
+    public T5Gemma2TextEncoder(T5Gemma2TextEncoderConfig cfg)
+    {
+        _cfg = cfg;
+        _attention = AttentionFor(cfg);
+    }
+
+    /// <summary>The weightless attention layer of this encoder's geometry: grouped key/value heads, F32, and the scale
+    /// <c>query_pre_attn_scalar^-½</c> in place of <c>1/√headDim</c>.</summary>
+    internal static AttentionLayer AttentionFor(T5Gemma2TextEncoderConfig cfg) => new(new AttentionLayerConfig
+    {
+        Heads = cfg.NumHeads, KvHeads = cfg.NumKvHeads, HeadDim = cfg.HeadDim, Scale = 1f / MathF.Sqrt(cfg.QueryPreAttnScalar),
+        ComputeDType = DType.F32,
+    });
 
     public int HiddenSize => _cfg.HiddenSize;
 
@@ -66,8 +82,9 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
 
         float[,] localRope = RopeTable(n, hd, _cfg.LocalRopeTheta, 1f);
         float[,] globalRope = RopeTable(n, hd, _cfg.GlobalRopeTheta, _cfg.GlobalRopeLinearFactor);
-        float scale = 1f / MathF.Sqrt(_cfg.QueryPreAttnScalar);
         int left = (_cfg.SlidingWindow + 1) / 2, right = _cfg.SlidingWindow / 2 + 1;
+        // One mask for every sliding layer of this segment, and none where the window takes in all of it.
+        using Tensor? window = WindowBias(n, left, right);
 
         for (int li = 0; li < _layers.Length; li++)
         {
@@ -84,32 +101,7 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
             ApplyRope(q, rope, n, heads, hd);
             ApplyRope(k, rope, n, kvHeads, hd);
 
-            float[] ctx = new float[n * heads * hd];
-            float[] sc = new float[n];
-            int group = heads / kvHeads;
-            for (int head = 0; head < heads; head++)
-            {
-                int kv = head / group;
-                for (int i = 0; i < n; i++)
-                {
-                    int lo = full ? 0 : Math.Max(0, i - left + 1), hi = full ? n - 1 : Math.Min(n - 1, i + right - 1);
-                    float max = float.NegativeInfinity;
-                    for (int j = lo; j <= hi; j++)
-                    {
-                        float s = 0f;
-                        for (int e = 0; e < hd; e++) s += q[(i * heads + head) * hd + e] * k[(j * kvHeads + kv) * hd + e];
-                        sc[j] = s * scale; max = MathF.Max(max, sc[j]);
-                    }
-                    float sum = 0f;
-                    for (int j = lo; j <= hi; j++) { sc[j] = MathF.Exp(sc[j] - max); sum += sc[j]; }
-                    for (int e = 0; e < hd; e++)
-                    {
-                        float o = 0f;
-                        for (int j = lo; j <= hi; j++) o += sc[j] * v[(j * kvHeads + kv) * hd + e];
-                        ctx[(i * heads + head) * hd + e] = o / sum;
-                    }
-                }
-            }
+            float[] ctx = Attend(backend, _attention, q, k, v, n, heads, kvHeads, hd, full ? null : window);
             float[] attn = DacOps.Linear(backend, ctx, l.Wo, n, heads * hd, h);
             attn = Norm(backend, attn, l.PostAttn, n, h);
             for (int i = 0; i < x.Length; i++) x[i] += attn[i];
@@ -126,13 +118,56 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
         return Norm(backend, x, _finalNorm!, n, h);
     }
 
+    /// <summary>What a sliding layer adds to its scores: zero where token <c>i</c> sees token <c>j</c> (the previous
+    /// <paramref name="left"/> and the next <paramref name="right"/> positions, each counting <c>i</c> itself) and −∞
+    /// elsewhere, F32 <c>[n, n]</c>. Null where every token sees the whole segment, which needs no mask.</summary>
+    internal static Tensor? WindowBias(int n, int left, int right)
+    {
+        if (left >= n && right >= n) return null;
+        Tensor bias = new(new TensorShape(n, n), DType.F32);
+        Span<float> rows = bias.AsSpan<float>();
+        rows.Fill(float.NegativeInfinity);
+        for (int i = 0; i < n; i++)
+        {
+            int lo = Math.Max(0, i - left + 1), hi = Math.Min(n - 1, i + right - 1);
+            rows.Slice(i * n + lo, hi - lo + 1).Clear();
+        }
+        return bias;
+    }
+
+    /// <summary>Attention over one segment: <paramref name="q"/> <c>[n, heads · hd]</c>, <paramref name="k"/> and
+    /// <paramref name="v"/> <c>[n, kvHeads · hd]</c>, already normed and rotated, with <paramref name="bias"/> added to the
+    /// scores when given. Returns <c>[n, heads · hd]</c>.</summary>
+    internal static float[] Attend(IBackend backend, AttentionLayer layer, float[] q, float[] k, float[] v, int n, int heads,
+        int kvHeads, int hd, Tensor? bias)
+    {
+        Tensor? qT = null, kT = null, vT = null;
+        try
+        {
+            qT = DacOps.FromHost(q, 1, n, heads * hd);
+            kT = DacOps.FromHost(k, 1, n, kvHeads * hd);
+            vT = DacOps.FromHost(v, 1, n, kvHeads * hd);
+        }
+        catch
+        {
+            qT?.Dispose();
+            kT?.Dispose();
+            vT?.Dispose();
+            throw;
+        }
+        // The layer takes the three operands over and disposes them.
+        using Tensor attended = layer.AttendFlat(backend, qT, kT, vT, new TensorShape(1, n, heads * hd),
+            new AttentionCallContext { Bias = bias });
+        return DacOps.ToHost(attended);
+    }
+
     private float[] Norm(IBackend backend, float[] x, Tensor weight, int rows, int dim)
         => DacOps.RmsNorm(backend, x, weight, rows, dim, _cfg.RmsNormEps);
 
-    private static float GeluTanh(float x)
+    internal static float GeluTanh(float x)
         => 0.5f * x * (1f + MathF.Tanh(0.7978845608028654f * (x + 0.044715f * x * x * x)));
 
-    private static float[,] RopeTable(int n, int hd, float theta, float linearFactor)
+    internal static float[,] RopeTable(int n, int hd, float theta, float linearFactor)
     {
         float[,] t = new float[n, hd];   // [pos, i] = cos(angle_i); [pos, hd/2 + i] = sin(angle_i)
         for (int p = 0; p < n; p++)
@@ -145,7 +180,7 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
     }
 
     // HF rotate_half: pairs dimension i with i + hd/2.
-    private static void ApplyRope(float[] v, float[,] table, int n, int heads, int hd)
+    internal static void ApplyRope(float[] v, float[,] table, int n, int heads, int hd)
     {
         int half = hd / 2;
         for (int p = 0; p < n; p++)
