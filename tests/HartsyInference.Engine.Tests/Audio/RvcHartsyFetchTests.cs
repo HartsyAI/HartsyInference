@@ -70,6 +70,40 @@ public sealed class RvcHartsyFetchTests : IDisposable
         Assert.False(File.Exists(destination));
     }
 
+    private sealed class BreaksAfter(byte[] start) : Stream
+    {
+        private int _at;
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_at >= start.Length) throw new IOException("connection reset");
+            int n = Math.Min(count, start.Length - _at);
+            Array.Copy(start, _at, buffer, offset, n);
+            _at += n;
+            return n;
+        }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => _at; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public async Task AConnectionLostMidFileLeavesNothingAndFallsBack()
+    {
+        string destination = Path.Combine(_dir, "contentvec.safetensors");
+        using HttpClient http = new(new StandInNetwork(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new BreaksAfter([1, 2, 3])) }));
+
+        bool fetched = await VcCatalog.TryFromHartsyAsync(http, VcCatalog.ContentVecHartsyUrl, Sha(Weights), destination, "contentvec.safetensors", CancellationToken.None);
+
+        Assert.False(fetched);
+        Assert.Empty(Directory.GetFiles(_dir));
+    }
+
     [Fact]
     public async Task ACancelledRunIsNotAFallback()
     {

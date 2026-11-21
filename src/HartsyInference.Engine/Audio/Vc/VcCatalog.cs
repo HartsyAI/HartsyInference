@@ -187,7 +187,9 @@ internal static class VcCatalog
             Logs.Info($"[Audio][RVC] {label} ready (from Hartsy).");
             return true;
         }
-        catch (Exception ex) when ((ex is HttpRequestException or InvalidOperationException or IOException or TaskCanceledException) && !cancel.IsCancellationRequested)
+        // The same failures ModelDownloader's mirror fetch falls back on.
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or IOException or ArgumentException
+            or OperationCanceledException && !cancel.IsCancellationRequested)
         {
             Logs.Warning($"[Audio][RVC] Could not fetch {label} from Hartsy ({ex.Message}); converting the upstream file instead.");
             return false;
