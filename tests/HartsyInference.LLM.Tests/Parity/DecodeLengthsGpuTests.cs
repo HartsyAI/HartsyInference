@@ -178,8 +178,11 @@ public sealed class DecodeLengthsGpuTests
         Assert.Equal(7, ran);
     }
 
-    /// <summary>The row's head dims run from one subgroup width to four, and the shapes above reach two and four where a
-    /// subgroup is 32 lanes wide. This runs one and three widths, and checks that half a width and five are refused whole.</summary>
+    /// <summary>The row's head dims run from one subgroup width to eight, and the shapes above reach two and four where a
+    /// subgroup is 32 lanes wide. This runs one, three, six and eight widths. At eight (head dim 256 at 32 lanes): full,
+    /// one-key and empty sequences over several chunks with a group of 4; a five-row staircase with a sequence shorter
+    /// than the step, one query head a key head; and a group of 8 over 899 of 900 slots, which leaves a one-slot tail.
+    /// Half a width and nine are refused whole, and so is anything past head dim 256 on a wider subgroup.</summary>
     [VulkanFact]
     public void TheVulkanKernelRunsTheHeadDimsItsRowDeclaresAndRefusesTheOthers()
     {
@@ -187,7 +190,11 @@ public sealed class DecodeLengthsGpuTests
         int lanes = (int)backend.Vk.SubgroupSize;
         MatchesTheHostReference(backend, 2, 8, 2, lanes, 2, 150, [150, 41], causal: true);
         MatchesTheHostReference(backend, 2, 6, 2, 3 * lanes, 1, 200, [199, 64], causal: false);
-        foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 5 * lanes])
+        MatchesTheHostReference(backend, 2, 4, 2, 6 * lanes, 1, 180, [180, 9], causal: true);
+        MatchesTheHostReference(backend, 3, 8, 2, 8 * lanes, 1, 300, [300, 1, 0], causal: true);
+        MatchesTheHostReference(backend, 2, 4, 4, 8 * lanes, 5, 200, [150, 3], causal: true);
+        MatchesTheHostReference(backend, 1, 8, 1, 8 * lanes, 3, 900, [899], causal: false);
+        foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 9 * lanes, 256 + lanes])
         {
             using Case outside = new(1, 4, 2, dim, 1, 96);
             outside.Output.AsSpan<float>().Fill(-7f);
