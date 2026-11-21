@@ -35,7 +35,8 @@ public static class Int8AttentionRotation
     /// <summary>The key count up to which every head dim takes <see cref="Int8Rotation.H4"/>.</summary>
     public const int ShortKeyLimit = 256;
 
-    private const float H128Scale = 0.1767766952966369f;
+    /// <summary>The scale after the radix-2 stages of a 128-point transform; with the four-point stage halving it is 128^-1/2.</summary>
+    public const float H128Scale = 0.1767766952966369f;
 
     // One bit per channel of the signed 128-point transform: set keeps the value, clear negates it.
     private static readonly uint[] SignWords = [0x1035997b, 0x8087f5ee, 0xee2e4e1a, 0x71132418];
