@@ -92,7 +92,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return (hits, misses);
     }
 
-    /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache; exposed for persist/reload tests.</summary>
+    /// <summary>Filesystem path of the on-disk pipeline cache; exposed for persist/reload tests.</summary>
     public string PipelineCachePath => _pipelineCache.CachePath;
 
     /// <summary>Bytes of on-disk cache handed to the driver when this backend started; 0 when there was none.</summary>
@@ -123,7 +123,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <remarks>The default is null, not 0, and the difference is the whole point: 0 pins the loader's first device,
     /// which on any box that also exposes a software rasterizer is not the GPU. Null is what makes the summary above
     /// true.</remarks>
-    public VulkanBackend(int? deviceOrdinal = null, string? spvDir = null)
+    public VulkanBackend(int? deviceOrdinal = null, string? spvDir = null) : this(deviceOrdinal, spvDir, null)
+    {
+    }
+
+    /// <summary>As the public constructor, with the pipeline-cache file in <paramref name="pipelineCacheDir"/> when one is given.</summary>
+    internal VulkanBackend(int? deviceOrdinal, string? spvDir, string? pipelineCacheDir)
     {
         _instance = new VulkanInstance();
         _vkDevice = VulkanDevice.Create(_instance, deviceOrdinal);
@@ -149,7 +154,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             _gpuOpTimer = new VulkanGpuOpTimer(_vkDevice.Handle, Vk.TimestampPeriod);
             _stream.WaitStats = new Dictionary<string, (long Count, double Ms)>(StringComparer.Ordinal);
         }
-        _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
+        _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk, pipelineCacheDir);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
         // A bulk release drains the stream on its own, which submits whatever was recorded; the batching count
