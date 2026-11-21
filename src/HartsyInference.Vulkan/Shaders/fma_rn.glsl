@@ -5,12 +5,13 @@
 //
 // Exact when all of these hold:
 //   a and b are zero, or |a| and |b| are within [2^-100, 2^100];
-//   a*b is zero, or |a*b| is within [2^-100, 2^120];
+//   a*b is zero, or |a*b| is within [2^-124, 2^120];
 //   c is zero, or |c| is within [2^-100, 2^120];
 //   the result is zero or at least 2^-126 in magnitude.
 // The product may be small whatever the operands are: an integer times a scale of 2^-90 is covered. A product below
 // 2^-40 is worked on after scaling one operand and the addend by 2^72, so every split part, partial product and error
-// term is a whole multiple of at least 2^-123 and none is subnormal (a device may read a subnormal as zero).
+// term is a whole multiple of at least 2^-123 and none is subnormal (a device may read a subnormal as zero). The
+// product itself only has to be a normal float for the device to read it, which is what its floor of 2^-124 keeps.
 // Where an operand, the product or the addend is outside those ranges, the result is the plain a*b + c of the device.
 #ifndef FMA_RN_GLSL
 #define FMA_RN_GLSL
@@ -31,10 +32,10 @@ float fmaRn(float a, float b, float c) {
     precise float p = a * b;
     precise float plain = p + c;
     if (a == 0.0 || b == 0.0 || c == 0.0 || isnan(p) || isinf(p) || isnan(c) || isinf(c)) return plain;
-    // 2^-100, 2^100 and 2^120.
-    const float LOW = 7.88860905e-31, HIGH = 1.2676506e30, TOP = 1.329228e36;
+    // 2^-100, 2^100 and 2^120, and 2^-124 for the product.
+    const float LOW = 7.88860905e-31, HIGH = 1.2676506e30, TOP = 1.329228e36, PLOW = 4.70197740e-38;
     float aa = abs(a), ab = abs(b), ap = abs(p), ac = abs(c);
-    if (min(aa, ab) < LOW || max(aa, ab) > HIGH || ap < LOW || ap > TOP || ac < LOW || ac > TOP) return plain;
+    if (min(aa, ab) < LOW || max(aa, ab) > HIGH || ap < PLOW || ap > TOP || ac < LOW || ac > TOP) return plain;
     float back = 1.0;
     // A product below 2^-40: against an addend of 2^28 or more it is far under a quarter of the addend's last place,
     // and the fused result is the addend, as the plain one is. Otherwise scale by 2^72, which is exact here.

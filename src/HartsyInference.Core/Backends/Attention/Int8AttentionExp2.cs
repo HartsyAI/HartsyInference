@@ -7,7 +7,8 @@ namespace HartsyInference.Core.Backends.Attention;
 /// what they produce. The two must change together.</summary>
 public static class Int8AttentionExp2
 {
-    /// <summary>Arguments above this give +∞.</summary>
+    /// <summary>Arguments above this give +∞, also those below 128 whose true power is finite: the attention pass asks
+    /// for nothing above <see cref="Int8AttentionV2Reference.U8Offset"/>.</summary>
     public const float Max = 127f;
 
     /// <summary>Arguments below this give exactly zero, so no result is subnormal.</summary>
@@ -32,7 +33,8 @@ public static class Int8AttentionExp2
         if (x < Min) return 0f;
         float k = MathF.Floor(x + 0.5f);
         float r = x - k;
-        // Each product is rounded to single before its add: the casts keep a JIT from carrying extra precision.
+        // Each product is rounded to single before its add. The JIT does that today without the casts; they are a
+        // guard against a compiler that would fuse or widen the step.
         float p = C7;
         p = (float)(p * r) + C6;
         p = (float)(p * r) + C5;
