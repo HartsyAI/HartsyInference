@@ -262,6 +262,7 @@ public sealed class VulkanDevice : IDisposable
         {
             DeviceName = ReadFixedString(props2.properties.deviceName, 256),
             DeviceUuid = Convert.ToHexString(new ReadOnlySpan<byte>(identity.DeviceUuid, 16)).ToLowerInvariant(),
+            PipelineCacheUuid = Convert.ToHexString(new ReadOnlySpan<byte>(props2.properties.pipelineCacheUUID, 16)).ToLowerInvariant(),
             DriverVersion = props2.properties.driverVersion,
             VendorId = props2.properties.vendorID,
             DeviceId = props2.properties.deviceID,
