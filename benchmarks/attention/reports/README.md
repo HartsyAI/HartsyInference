@@ -48,3 +48,6 @@ entry points (plan items 14 to 17), and the [Vulkan tiled F32 A/B](vulkan-tiled-
 comparison that `numerics.vkTiledAttention` waits on. The
 [Blackwell rental campaign](blackwell-rental-campaign.md) is the stage plan and spending ceiling for the final
 hardware gate; nothing in it has been provisioned or run.
+
+The [internal duplicates audit](internal-duplicates.md) lists the internal attention code that plan item 18 could retire, with
+the callers and the evidence for each.
