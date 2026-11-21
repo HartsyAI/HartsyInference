@@ -91,20 +91,23 @@ public sealed unsafe class T5Gemma2AttentionTests(ITestOutputHelper output)
 
     /// <summary>One attention call the way <c>Encode</c> now makes it, against the former loop.</summary>
     private static void AttentionMatches(IBackend backend, float tolerance, int n, int heads, int kvHeads, int hd, bool full, int window,
-        int seed)
+        int seed, float scalar = 0f)
     {
-        T5Gemma2TextEncoderConfig cfg = new() { NumHeads = heads, NumKvHeads = kvHeads, HeadDim = hd, QueryPreAttnScalar = hd, SlidingWindow = window };
+        // The checkpoint's scalar is its head dim, which is also the layer's default scale; a case with another scalar
+        // is what shows the scale is the configured one.
+        if (scalar == 0f) scalar = hd;
+        T5Gemma2TextEncoderConfig cfg = new() { NumHeads = heads, NumKvHeads = kvHeads, HeadDim = hd, QueryPreAttnScalar = scalar, SlidingWindow = window };
         int left = (window + 1) / 2, right = window / 2 + 1;
         float[] q = Random(n * heads * hd, seed), k = Random(n * kvHeads * hd, seed + 1), v = Random(n * kvHeads * hd, seed + 2);
         long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-        float[] expected = FormerLoop(q, k, v, n, heads, kvHeads, hd, 1f / MathF.Sqrt(hd), full, left, right);
+        float[] expected = FormerLoop(q, k, v, n, heads, kvHeads, hd, 1f / MathF.Sqrt(scalar), full, left, right);
         double formerMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
         using Tensor? bias = full ? null : T5Gemma2TextEncoder.WindowBias(n, left, right);
         long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
         float[] actual = T5Gemma2TextEncoder.Attend(backend, T5Gemma2TextEncoder.AttentionFor(cfg), q, k, v, n, heads, kvHeads, hd, bias);
         backend.Sync();
-        Timings.Add($"n {n}, heads {heads}/{kvHeads}, D {hd}, {(full ? "full" : $"window {window}")}: former loop {formerMs:F1} ms, shared layer {System.Diagnostics.Stopwatch.GetElapsedTime(t1).TotalMilliseconds:F1} ms");
-        AssertClose(expected, actual, tolerance, $"n {n}, heads {heads}/{kvHeads}, D {hd}, {(full ? "full" : $"window {window}")}");
+        Timings.Add($"n {n}, heads {heads}/{kvHeads}, D {hd}, scalar {scalar}, {(full ? "full" : $"window {window}")}: former loop {formerMs:F1} ms, shared layer {System.Diagnostics.Stopwatch.GetElapsedTime(t1).TotalMilliseconds:F1} ms");
+        AssertClose(expected, actual, tolerance, $"n {n}, heads {heads}/{kvHeads}, D {hd}, scalar {scalar}, {(full ? "full" : $"window {window}")}");
     }
 
     private static void EveryCallMatches(IBackend backend, float tolerance)
@@ -118,6 +121,9 @@ public sealed unsafe class T5Gemma2AttentionTests(ITestOutputHelper output)
         // Two key/value heads, an odd window and one token.
         AttentionMatches(backend, tolerance, 57, 4, 2, 64, full: false, 9, 61);
         AttentionMatches(backend, tolerance, 1, 4, 1, 256, full: false, 512, 71);
+        // A scalar that is not the head dim, so the scores are scaled by 1/12 and not by the layer's default of 1/16.
+        AttentionMatches(backend, tolerance, 90, 4, 1, 256, full: true, 512, 81, scalar: 144f);
+        AttentionMatches(backend, tolerance, 90, 4, 2, 64, full: false, 20, 91, scalar: 25f);
     }
 
     [Fact]
@@ -201,7 +207,7 @@ public sealed unsafe class T5Gemma2AttentionTests(ITestOutputHelper output)
     private static readonly T5Gemma2TextEncoderConfig Small = new()
     {
         VocabSize = 60, HiddenSize = 32, IntermediateSize = 64, NumLayers = 4, NumHeads = 4, NumKvHeads = 2, HeadDim = 8,
-        QueryPreAttnScalar = 8f, SlidingWindow = 6, SlidingPatternPeriod = 2, EoiTokenIndex = 59,
+        QueryPreAttnScalar = 12f, SlidingWindow = 6, SlidingPatternPeriod = 2, EoiTokenIndex = 59,
     };
 
     private static Tensor Weight(int seed, float scale, params long[] shape)

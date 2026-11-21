@@ -83,8 +83,10 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
         float[,] localRope = RopeTable(n, hd, _cfg.LocalRopeTheta, 1f);
         float[,] globalRope = RopeTable(n, hd, _cfg.GlobalRopeTheta, _cfg.GlobalRopeLinearFactor);
         int left = (_cfg.SlidingWindow + 1) / 2, right = _cfg.SlidingWindow / 2 + 1;
-        // One mask for every sliding layer of this segment, and none where the window takes in all of it.
-        using Tensor? window = WindowBias(n, left, right);
+        // One mask for every sliding layer of this segment; none where the window takes in all of it or no layer slides.
+        bool slides = false;
+        for (int li = 0; li < _layers.Length && !slides; li++) slides = !_cfg.IsFullAttention(li);
+        using Tensor? window = slides ? WindowBias(n, left, right) : null;
 
         for (int li = 0; li < _layers.Length; li++)
         {
@@ -200,6 +202,11 @@ public sealed unsafe class T5Gemma2TextEncoder : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        // The norm weights are this object's own copies (1 + w), made in LoadWeights; the projections are the caller's.
+        _finalNorm?.Dispose();
+        foreach (Layer l in _layers)
+            foreach (Tensor norm in (ReadOnlySpan<Tensor>)[l.PreAttn, l.PostAttn, l.PreFfn, l.PostFfn, l.QNorm, l.KNorm])
+                norm.Dispose();
         GC.SuppressFinalize(this);
     }
 }
