@@ -81,13 +81,17 @@ public sealed partial class VulkanBackend
             try
             {
                 VulkanKernel kernel = GetKernel("int8_attn_quant_rows", storageBufferCount: 3, _default1DSpec);
-                Span<byte> pc = stackalloc byte[3 * 4];
+                Span<byte> pc = stackalloc byte[4 * 4];
                 BinaryWriteUInt(pc, 0, (uint)n);
                 BinaryWriteUInt(pc, 4, (uint)dp);
-                // The divisor travels as a value so the shader divides by it at run time.
                 BinaryWriteFloat(pc, 8, 127f);
                 Span<ulong> buffers = stackalloc ulong[] { source.Handle, byteBuffer.Handle, scaleBuffer.Handle };
-                Dispatch(kernel, buffers, pc, (uint)n, 1, 1);
+                // One workgroup a row, and a grid dimension is only guaranteed 65535 of them: a long key axis goes in pieces.
+                for (int done = 0; done < n; done += Int8QuantizeRowsPerDispatch)
+                {
+                    BinaryWriteUInt(pc, 12, (uint)done);
+                    Dispatch(kernel, buffers, pc, (uint)Math.Min(n - done, Int8QuantizeRowsPerDispatch), 1, 1);
+                }
                 CacheOutput(bytes, byteBuffer);
                 CacheOutput(scales, scaleBuffer);
             }
@@ -103,6 +107,9 @@ public sealed partial class VulkanBackend
             if (!ReferenceEquals(rotated, rows)) rotated.Dispose();
         }
     }
+
+    /// <summary>Rows one dispatch of the quantizer takes: the workgroup count every Vulkan device guarantees in a dimension.</summary>
+    private const int Int8QuantizeRowsPerDispatch = 65535;
 
     /// <summary>A copy of <paramref name="rows"/> on the backend declared as <c>[count, width]</c>, so a transform over
     /// groups of <paramref name="width"/> channels sees them as its rows.</summary>

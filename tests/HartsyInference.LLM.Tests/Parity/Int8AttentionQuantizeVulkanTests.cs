@@ -91,7 +91,9 @@ public sealed class Int8AttentionQuantizeVulkanTests
     }
 
     /// <summary>The rows the reference treats specially: one holding a NaN (a NaN scale and zero bytes), one whose largest
-    /// magnitude is subnormal (the scale floor of 1, so every byte rounds to zero), and one of zeros.</summary>
+    /// magnitude is subnormal (the scale floor of 1, so every byte rounds to zero), one of zeros, one holding an infinity
+    /// (an infinite scale and zero bytes), and one whose scale is exactly the smallest normal float, where the floor
+    /// does not apply.</summary>
     [VulkanFact]
     public void EdgeRowsFollowTheReference()
     {
@@ -104,12 +106,16 @@ public sealed class Int8AttentionQuantizeVulkanTests
         q[5] = float.NaN;                                   // row 0
         q.Slice(headDim, headDim).Fill(1e-40f);             // row 1: subnormal
         q.Slice(2 * headDim, headDim).Clear();              // row 2: zeros
+        q[3 * headDim + 7] = float.PositiveInfinity;        // row 3
+        q.Slice(4 * headDim, headDim).Fill(127f * 1.17549435e-38f);   // row 4: the scale is the smallest normal float
         AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, query, key, value, null, 0.125f, false);
         Int8AttentionV2Operands expected = Int8AttentionV2Reference.Quantize(in call,
             new Int8AttentionV2Options { SmoothKeys = false, Rotation = Int8Rotation.None, KeyScales = Int8KeyScaleGrouping.PerKey });
         Assert.True(float.IsNaN(expected.QueryScales[0]));
         Assert.Equal(1f, expected.QueryScales[1]);
         Assert.Equal(1f, expected.QueryScales[2]);
+        Assert.True(float.IsPositiveInfinity(expected.QueryScales[3]));
+        Assert.Equal(1.17549435e-38f, expected.QueryScales[4]);
 
         using VulkanBackend backend = new();
         using Tensor rows = new(new TensorShape(queryRows, headDim), DType.F32);
@@ -123,7 +129,25 @@ public sealed class Int8AttentionQuantizeVulkanTests
         for (int i = 1; i < queryRows; i++)
             Assert.Equal(BitConverter.SingleToInt32Bits(expected.QueryScales[i]), BitConverter.SingleToInt32Bits(actualScales[i]));
         Assert.True(expected.Queries.AsSpan().SequenceEqual(bytes.AsReadOnlySpan<sbyte>()), "the bytes differ from the reference");
-        Assert.Equal(-1, bytes.AsReadOnlySpan<sbyte>().Slice(0, 3 * headDim).IndexOfAnyExcept((sbyte)0));
+        Assert.Equal(-1, bytes.AsReadOnlySpan<sbyte>().Slice(0, 4 * headDim).IndexOfAnyExcept((sbyte)0));
+        Assert.Equal(-1, bytes.AsReadOnlySpan<sbyte>().Slice(4 * headDim, headDim).IndexOfAnyExcept((sbyte)127));
+    }
+
+    /// <summary>More rows than one grid dimension is guaranteed to hold: the entry dispatches in pieces, and the rows either
+    /// side of each seam are the reference's.</summary>
+    [VulkanFact]
+    public void MoreRowsThanOneDispatchHolds()
+    {
+        const int heads = 1, queryRows = 2, keys = 140_000, headDim = 64;
+        using Tensor query = Random(new TensorShape(1, heads, queryRows, headDim), 31);
+        using Tensor key = Random(new TensorShape(1, heads, keys, headDim), 32);
+        using Tensor value = new(key.Shape, DType.F32);
+        using Tensor output = new(query.Shape, DType.F32);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, query, key, value, null, 0.125f, false);
+        Int8AttentionV2Operands expected = Int8AttentionV2Reference.Quantize(in call,
+            new Int8AttentionV2Options { SmoothKeys = false, Rotation = Int8Rotation.H64, KeyScales = Int8KeyScaleGrouping.PerKey });
+        using VulkanBackend backend = new();
+        Compare(backend, key, keys, headDim, Int8Rotation.H64, expected.Keys, expected.KeyScales, "key");
     }
 
     /// <summary>What the entry refuses: the unresolved rotation, a transform that does not run at the width, and outputs of
