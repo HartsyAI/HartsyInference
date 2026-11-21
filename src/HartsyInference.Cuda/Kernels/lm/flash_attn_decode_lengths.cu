@@ -10,6 +10,13 @@
 // The partial-state contract, the tiles of 32 keys and the order of arithmetic are that kernel's. The combine below merges a
 // row's chunks and writes the output as [B, S, Hq * D] and the LSE as [B, Hq, S]; a row with no key is zeros and -inf.
 //
+// The body is a copy of the paged kernel's and not a header both include. The paged kernel's shipped PTX is the bytes its
+// 4090 campaign was timed on and rebuilt from; moving its body into a shared header is a change to that file, to be made
+// when a 4090 run can show the paged PTX unchanged or re-time it. The half-type loads below are kept from that kernel for
+// the F16 cache this one is to take next; only the F32 entry points exist today.
+//
+// No device lengths: they are the host's and are uploaded for each call, so this kernel is not replayed from a captured graph.
+//
 // Launch: partials grid = (G, Hkv, B * S), block = 256, dynamic shared memory = DecodeSharedBytes(D) (CudaKernels.Fa2.cs).
 // Combine grid = (B * S * Hq, 1, 1), block = D.
 //

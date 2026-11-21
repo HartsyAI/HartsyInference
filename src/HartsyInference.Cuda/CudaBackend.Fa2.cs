@@ -200,7 +200,9 @@ public sealed partial class CudaBackend
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            // The lengths are the host's and change every step: they are uploaded for the call.
+            // The lengths are the host's and change every step: they are uploaded for the call. A caller that issues this
+            // for every layer of a step uploads the same array each time; before one does, the lengths should arrive as a
+            // tensor its owner replaces, as the page table does.
             pLengths = GpuTransferHelper.CopyToDevice(lengths);
             AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "cuda.flash.decode.lengths", batch * sizeof(int));
             nuint outBytes = GpuTransferHelper.ByteSize(output), lseBytes = lse is null ? 0 : GpuTransferHelper.ByteSize(lse);

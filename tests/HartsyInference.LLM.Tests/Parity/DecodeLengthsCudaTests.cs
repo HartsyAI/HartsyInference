@@ -83,6 +83,7 @@ public sealed class DecodeLengthsCudaTests
         { 1, 16, 1, 128, 3, 2000, new[] { 1999 }, true },              // group of 16 over a long cache
         { 2, 4, 2, 64, 2, 100, new[] { 1000, -5 }, true },             // lengths outside the cache are clamped
         { 1, 8, 8, 64, 32, 64, new[] { 40 }, false },                  // the most rows a verify step holds
+        { 4, 4, 2, 64, 1, 256, new[] { 256, 128, 64, 192 }, true },    // four chunks of 64: each sequence ends on a chunk boundary
     };
 
     [CudaTheory]
@@ -145,6 +146,11 @@ public sealed class DecodeLengthsCudaTests
         shape.Output.AsSpan<float>().Fill(-7f);
         AttentionCall half = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, halfValue, [80, 70], true, 0.125f);
         Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in half));
+        // The row reads whole tensors: a view of the queries (rows 1 and up of a longer tensor) is not its call.
+        using Tensor longer = Random(new TensorShape(2, 8, 2, 64), 54);
+        AttentionCall whole = shape.Call([80, 70], causal: true, lse: false);
+        AttentionCall view = whole with { Query = new AttentionOperand(longer, AttentionLayout.HeadMajor, 2, 8, 1, 64, 64, 8 * 2 * 64, 2 * 64, 64) };
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in view));
         backend.Sync();
         Assert.Equal(-1, narrow.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
         Assert.Equal(-1, shape.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
