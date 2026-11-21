@@ -18,14 +18,10 @@ namespace HartsyInference.Diffusion.Tests;
 /// <para>The tolerance was fixed before the first run: 1e-5 relative to the larger of 1 and the value, on the CPU
 /// backend. The two forms reach the CPU attention by different entries (one batch item takes the token-major entry, a
 /// batch the head-major one), so the last bits may differ and bit-equality is not asked.</para>
-/// <para>On a GPU the new forward is compared with the former forward run on the CPU backend. Those bounds were fixed
-/// before any GPU run too: 1e-4 on Vulkan, and 2e-3 on CUDA, whose F32 dense row multiplies in TF32.</para>
-/// <para>CUDA missed that bound on the first GPU run, on the one case at dim 512: 9.9e-3 from the CPU. The cause is not
-/// the batching. The former per-frame forward, run on CUDA, is itself 8.7e-3 from the CPU there (its five linears and the
-/// attention all multiply in TF32, and the random weights here are large), and the batched forward is bit-identical to
-/// the former one on the same backend, on CUDA and on Vulkan. So, set after seeing that: every GPU case requires the
-/// batched forward to equal the former forward on the same backend bit for bit, and the comparison with the CPU is
-/// asserted below dim 512 and reported at it.</para></summary>
+/// <para>On a GPU every case requires the batched forward to equal the former forward on the same backend bit for bit.
+/// Against the former forward on the CPU the bound is 1e-4 on Vulkan and 2e-3 on CUDA, whose F32 dense row multiplies
+/// in TF32; it is asserted below dim 512 and reported at it, because at dim 512 with these random weights CUDA's
+/// forward is 8.7e-3 from the CPU whether batched or not (its five linears and the attention all multiply in TF32).</para></summary>
 public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
 {
     private const float Tolerance = 1e-5f, GpuTolerance = 1e-4f, Tf32Tolerance = 2e-3f, AdaLnEps = 1e-5f, QkEps = 1e-6f;
@@ -57,6 +53,17 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
             w[$"audio_injector.injector_adain_layers.{i}.linear.bias"] = Random(seed++, 0.1f, 2 * dim);
         }
         return w;
+    }
+
+    /// <summary>Frees the weights and what the injector made of them at load (the AdaLN halves and any F32 norm copies),
+    /// which belong to nobody else in a test.</summary>
+    private static void Release(WanS2VAudioInjector? injector, Dictionary<string, Tensor> weights)
+    {
+        HashSet<Tensor> given = new(weights.Values, ReferenceEqualityComparer.Instance);
+        if (injector is not null)
+            foreach (Tensor t in injector.EnumerateWeights().Distinct<Tensor>(ReferenceEqualityComparer.Instance))
+                if (!given.Contains(t)) t.Dispose();
+        foreach (Tensor t in weights.Values) t.Dispose();
     }
 
     /// <summary>The first or second half of the rows of a <c>[2 · rows, …]</c> weight or <c>[2 · rows]</c> bias.</summary>
@@ -136,10 +143,11 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
         const int count = 2;
         int seqLen = frames * tokensAFrame;
         Dictionary<string, Tensor> weights = Weights(count, dim);
+        WanS2VAudioInjector? injector = null;
         try
         {
             using CpuBackend backend = new();
-            WanS2VAudioInjector injector = new(count, dim, heads, dim / heads);
+            injector = new(count, dim, heads, dim / heads);
             injector.LoadWeights(weights);
             using Tensor hidden = Random(11, 1f, seqLen + trailing, dim);
             using Tensor audioLocal = Random(12, 1f, frames, audioTokens, dim), audioGlobal = Random(13, 1f, frames, 1, dim);
@@ -165,7 +173,7 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
         }
         finally
         {
-            foreach (Tensor t in weights.Values) t.Dispose();
+            Release(injector, weights);
         }
     }
 
@@ -195,9 +203,10 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
 
         const int f = 20, n = 400, a = 5, d = 512, h = 8, seqLen = f * n;
         Dictionary<string, Tensor> weights = Weights(1, d);
+        WanS2VAudioInjector? injector = null;
         try
         {
-            WanS2VAudioInjector injector = new(1, d, h, d / h);
+            injector = new(1, d, h, d / h);
             injector.LoadWeights(weights);
             using Tensor hidden = Random(31, 1f, seqLen, d), audioLocal = Random(32, 1f, f, a, d), audioGlobal = Random(33, 1f, f, 1, d);
             // Where a difference from the CPU comes from: the same former forward on this backend against the CPU's, and
@@ -225,7 +234,7 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
         }
         finally
         {
-            foreach (Tensor t in weights.Values) t.Dispose();
+            Release(injector, weights);
         }
     }
 
@@ -255,9 +264,10 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
     {
         int seqLen = frames * tokensAFrame;
         Dictionary<string, Tensor> weights = Weights(2, dim);
+        WanS2VAudioInjector? injector = null;
         try
         {
-            WanS2VAudioInjector injector = new(2, dim, heads, dim / heads);
+            injector = new(2, dim, heads, dim / heads);
             injector.LoadWeights(weights);
             using Tensor hidden = Random(11, 1f, seqLen + trailing, dim);
             using Tensor audioLocal = Random(12, 1f, frames, audioTokens, dim), audioGlobal = Random(13, 1f, frames, 1, dim);
@@ -274,7 +284,7 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
         }
         finally
         {
-            foreach (Tensor t in weights.Values) t.Dispose();
+            Release(injector, weights);
         }
     }
 
@@ -302,6 +312,7 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
     [InlineData(7, 9, 5, 18, 32, 4, 1)]      // trailing reference rows, the second injector
     [InlineData(5, 30, 3, 7, 64, 8, 1)]
     [InlineData(3, 16, 1, 0, 32, 2, 0)]      // one audio token a frame
+    [InlineData(20, 400, 5, 64, 512, 8, 0)]  // the GPU tests' large case, with trailing rows
     public void TheBatchedForwardMatchesTheFormerPerFrameForward(int frames, int tokensAFrame, int audioTokens, int trailing, int dim,
         int heads, int index) => ForwardMatches(frames, tokensAFrame, audioTokens, trailing, dim, heads, index);
 
@@ -312,10 +323,11 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
     {
         const int frames = 4, tokensAFrame = 10, audioTokens = 5, dim = 32, heads = 4, seqLen = frames * tokensAFrame;
         Dictionary<string, Tensor> weights = Weights(1, dim);
+        WanS2VAudioInjector? injector = null;
         try
         {
             using CpuBackend backend = new();
-            WanS2VAudioInjector injector = new(1, dim, heads, dim / heads);
+            injector = new(1, dim, heads, dim / heads);
             injector.LoadWeights(weights);
             using Tensor hidden = Random(21, 1f, seqLen, dim), audioGlobal = Random(23, 1f, frames, 1, dim);
             using Tensor audio = Random(22, 1f, frames, audioTokens, dim), changed = new(audio.Shape, DType.F32);
@@ -337,7 +349,7 @@ public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
         }
         finally
         {
-            foreach (Tensor t in weights.Values) t.Dispose();
+            Release(injector, weights);
         }
     }
 }

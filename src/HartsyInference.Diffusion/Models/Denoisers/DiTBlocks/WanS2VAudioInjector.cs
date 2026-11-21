@@ -123,8 +123,7 @@ public sealed unsafe class WanS2VAudioInjector
         Tensor v = new Tensor(new TensorShape(t, nTok, _dim), DType.F32); backend.Linear(v, audioLocal, inj.VW!, inj.VB);
 
         // One call for every frame: frame ti's n video tokens attend only to its nTok audio tokens, because each frame
-        // is a batch item. It was one call a frame, with three slices before it and a concat after. The layer takes
-        // the three operands over and disposes them.
+        // is a batch item. The layer takes the three operands over and disposes them.
         Tensor attnFlat = _attention.AttendFlat(backend, qn, kn, v, new TensorShape(seqLen, _dim), default);
 
         Tensor residual = new Tensor(new TensorShape(seqLen, _dim), DType.F32);
