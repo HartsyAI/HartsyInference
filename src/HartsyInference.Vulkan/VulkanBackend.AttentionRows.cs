@@ -200,8 +200,7 @@ public sealed partial class VulkanBackend
                 static (in AttentionCall c) => true,
                 (in AttentionCall c) =>
                 {
-                    ScaledDotProductAttentionNaive(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
-                        c.Numerics.LegacyAssertedBounded);
+                    ScaledDotProductAttentionNaive(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale);
                     return true;
                 }),
         ];
