@@ -110,6 +110,9 @@ SINGLE_KERNELS=(
     affine_mix
     quant_int8_rowwise
     int8_attn_quant_rows
+    int8_attn_key_mean
+    int8_attn_value_scales
+    int8_attn_quant_values
     dequant_recipe_bf16
     gated_residual_row_indexed
     guided_euler
