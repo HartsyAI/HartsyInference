@@ -10,6 +10,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -19,6 +20,12 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "wan-animate";
 
+    /// <inheritdoc/>
+    /// <remarks>The Wan guide does not cover Animate.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Wan-Animate drives from the init image as the pose/motion reference.</remarks>

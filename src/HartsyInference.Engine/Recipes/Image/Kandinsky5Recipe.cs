@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Kandinsky 5.0 T2I-Lite recipe (kandinskylab, ~6B DiT): the checkpoint is the transformer — either a single repackaged safetensors or a diffusers <c>transformer/</c> shard directory — and the dual text stack (Qwen2.5-VL-7B sequence embeddings via <see cref="SideModels.Qwen2_5_VL_7B"/> + CLIP-L pooled via <see cref="SideModels.ClipL"/>) plus the 16-channel Flux VAE (<see cref="SideModels.FluxAe"/>) resolve as side models.</summary>
@@ -20,6 +21,12 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "kandinsky5";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm", "clip"], Format = "text", Negative = "separate",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/kandinsky5-image.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Kandinsky 5 image-lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.

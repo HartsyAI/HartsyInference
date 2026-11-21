@@ -13,6 +13,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -22,6 +23,12 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "hidream";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip", "t5", "llm"], Format = "text", Supports = [],
+        Guide = "docs/prompting/hidream.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>HiDream shares the Flux.1 VAE, so its encoder half rides the encode-parity gate that already

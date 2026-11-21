@@ -15,6 +15,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Variants;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -23,6 +24,21 @@ namespace HartsyInference.Engine.Recipes.Image;
 public sealed class MageFlowRecipe : IArchitectureRecipe
 {
     public string Name => "mage-flow";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["regions", "text-rendering"],
+        Guide = "docs/prompting/mage-flow.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(MageFlowVariants.Base) ? Prompt! with { Negative = "separate" }
+        : variant.Is(MageFlowVariants.Turbo) ? Prompt! with { Negative = "none" }
+        : variant.Is(MageFlowVariants.Edit) || variant.Is(MageFlowVariants.EditTurbo) ? Prompt!.ArchitectureOnly()
+        : Prompt;
     public bool Matches(string familyId) => string.Equals(familyId, "mage-flow", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: Mage-Flow's ComfyUI tokenizer subclasses the

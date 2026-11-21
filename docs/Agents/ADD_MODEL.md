@@ -16,7 +16,8 @@ Work through these steps in order. Each one produces evidence the next one uses.
    and consumer dispatch. Video models must follow the planning contract in [engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
 4. Declare the recipe's complete `Defaults` (and, for a video family, its `Constraints` frame grid), taken from SwarmUI's
    documented defaults. Comment any deviation. The registry validator and `RecipeLedgerTests` pick the recipe up
-   automatically. See the [recipe contract](ENGINE_PATTERNS.md#recipe-contract).
+   automatically. Declare its `Prompt` profile too when a reviewed prompting guide covers the model; leave a field unset
+   rather than guess. See the [recipe contract](ENGINE_PATTERNS.md#recipe-contract).
 5. If builds share an architecture but not a contract (base and edit, or turbo and distilled), declare a variant catalog.
    See [model variants](ENGINE_PATTERNS.md#model-variants). Map each SwarmUI class id and `modelspec.architecture` value
    before you reach for filename tokens.

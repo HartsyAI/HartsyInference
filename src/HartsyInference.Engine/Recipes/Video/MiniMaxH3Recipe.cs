@@ -20,6 +20,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Video.Pipelines;
 using HartsyInference.Core.Backends.Attention;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -31,6 +32,13 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     /// <inheritdoc/>
     public string Name => "minimax-h3";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["vlm"], Format = "text", Negative = "none", Supports = [],
+        Guide = "docs/prompting/minimax-h3.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>The released surface VAE-encodes legacy start/end conditioning and references, and is the first

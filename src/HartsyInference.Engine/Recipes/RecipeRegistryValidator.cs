@@ -1,4 +1,5 @@
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -19,6 +20,7 @@ public static class RecipeRegistryValidator
         foreach ((string label, ResolvedModelVariant? variant) in VariantsOf(recipe.Variants))
         {
             CheckImage($"{recipe.Name}{label}", recipe.DefaultsFor(variant), problems);
+            CheckPrompt($"{recipe.Name}{label}", recipe.PromptFor(variant), "image", problems);
         }
         return problems;
     }
@@ -37,6 +39,7 @@ public static class RecipeRegistryValidator
         foreach ((string label, ResolvedModelVariant? variant) in VariantsOf(recipe.Variants))
         {
             CheckVideo($"{recipe.Name}{label}", recipe.DefaultsFor(variant), grid, problems);
+            CheckPrompt($"{recipe.Name}{label}", recipe.PromptFor(variant), "video", problems);
         }
         return problems;
     }
@@ -109,6 +112,23 @@ public static class RecipeRegistryValidator
         else if (!matches(name))
         {
             problems.Add($"{name}: does not match its own name, so it cannot be resolved by it.");
+        }
+    }
+
+    /// <summary>A declared prompt profile stays inside the vocabulary and names the modality its recipe serves.</summary>
+    private static void CheckPrompt(string owner, PromptProfile? prompt, string kind, List<string> problems)
+    {
+        if (prompt is null)
+        {
+            return;
+        }
+        foreach (string problem in prompt.Problems())
+        {
+            problems.Add($"{owner}: prompt {problem}");
+        }
+        if (prompt.Kind != kind)
+        {
+            problems.Add($"{owner}: prompt kind '{prompt.Kind}' is not '{kind}'.");
         }
     }
 

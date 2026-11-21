@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using HartsyInference.Engine.Planning;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Catalog;
 
@@ -21,4 +22,8 @@ public abstract record ModelDescriptor
 
     /// <summary>True when exact-hash checkpoint profiles overlay this family's defaults at plan time.</summary>
     public required bool ProfileBound { get; init; }
+
+    /// <summary>What shapes the prompt text this model takes; absent when the recipe declares nothing about it.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PromptProfile? Prompt { get; init; }
 }

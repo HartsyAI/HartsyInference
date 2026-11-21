@@ -13,6 +13,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Boogu-Image recipe (<c>boogu-project/Boogu-Image</c>, 10B): an OmniGen2/Lumina-2 lineage DiT (8 dual-stream + 32 single-stream blocks, GQA 28:7) conditioned on Qwen3-VL-8B (<see cref="SideModels.Qwen3VL_8B"/>) and decoded by the FLUX.1 VAE (<see cref="SideModels.FluxAe"/>). Lifted from the SwarmUI backend's <c>BooguImageLoader</c>; constructs the components and drives generation through <see cref="BooguImageRecipePipeline"/>.</summary>
@@ -27,6 +28,20 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "boogu";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["regions", "text-rendering"],
+        Guide = "docs/prompting/boogu.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(BooguImageVariants.Base) ? Prompt! with { Negative = "separate" }
+        : variant.Is(BooguImageVariants.Turbo) ? Prompt! with { Negative = "none" }
+        : variant.Is(BooguImageVariants.Edit) || variant.Is(BooguImageVariants.EditTurbo) ? Prompt!.ArchitectureOnly()
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>The pipeline reads only <c>Img2Img.InitImage</c>.</remarks>

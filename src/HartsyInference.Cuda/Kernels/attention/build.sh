@@ -10,6 +10,7 @@ KERNELS=(
     "sage_attn_int8"
     "int8_attn_v2"
     "neighborhood_attention"
+    "sol_attn_f32"
 )
 # CUDA 13.0.88 nvcc output: the ptxas register and spill check needs the toolchain the PTX came from.
 NVCC_BUILT=("int8_attn_v2")
