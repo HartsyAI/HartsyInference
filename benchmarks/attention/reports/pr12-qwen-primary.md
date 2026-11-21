@@ -169,10 +169,20 @@ is the gather, where R moves 128 times the bytes C does.
 
 So on this lane the PR 02 pin generates something other than what CUDA generates, and the candidate does not. I read
 that as a correctness difference on R's Vulkan paged path that later work removed, but I have not found the change
-that removed it, and one observed run an arm does not show whether R's text is stable.
+that removed it.
 
 I predicted 0.95 to 1.05 for this lane. The path-proof ratio is about 0.08, wrong by an order of magnitude, and I did
 not predict the text difference at all.
 
-The five-pair session is running; under the per-pair rule every pair is invalid for a comparison, and its times will
-be added here as descriptive only.
+The five-pair session, descriptive only. Under the per-pair rule every pair is invalid for a comparison, because the
+texts differ; no interval is given and no speed claim is made from this lane.
+
+| | R | C |
+|---|---|---|
+| Total per request, five runs | 28,046 to 29,234 ms (mean 28,716) | 2,366 to 2,481 ms (mean 2,441) |
+| Text on every run | 980406f74bb46717 | 26c68e74a9df5f02 |
+| Peak VRAM | 21,916 to 21,959 MiB | 14,455 to 14,479 MiB |
+
+Each arm is repeatable within itself: R produces its different text on all five runs, and C the eager text on all
+five. Neither log has a warning, an error or an out-of-memory line. The plain ratio of the means is 0.085, which
+describes two different computations.
