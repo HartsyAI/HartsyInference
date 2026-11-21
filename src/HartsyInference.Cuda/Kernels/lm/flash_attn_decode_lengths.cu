@@ -19,6 +19,10 @@
 //
 // No device lengths: they are the host's and are uploaded for each call, so this kernel is not replayed from a captured graph.
 //
+// Head dim 64, 128 or 256. At 256 a block's shared memory (the query heads, a K tile and a V tile) is past the 48 KB a
+// kernel gets without asking: 83,456 bytes for an F32 cache and 50,432 for a half type, so the host opts those entry
+// points in and leaves out any the device cannot give that much.
+//
 // Launch: partials grid = (G, Hkv, B * S), block = 256, dynamic shared memory = DecodeSharedBytes(D) (CudaKernels.Fa2.cs).
 // Combine grid = (B * S * Hq, 1, 1), block = D.
 //
@@ -184,7 +188,12 @@ __device__ __forceinline__ void fa_decode_gqa(
             #pragma unroll 8
             for (int kk = 0; kk < DEC_BK; ++kk) {
                 const float pk = Ps[warp * DEC_BK + kk];
-                if constexpr (DL == 4) {
+                if constexpr (DL == 8) {
+                    const float4 va = dec_f4(*reinterpret_cast<const Raw*>(Vs + kk * D + lane * 8));
+                    const float4 vb = dec_f4(*reinterpret_cast<const Raw*>(Vs + kk * D + lane * 8 + 4));
+                    acc[j][0] += pk * va.x; acc[j][1] += pk * va.y; acc[j][2] += pk * va.z; acc[j][3] += pk * va.w;
+                    acc[j][4] += pk * vb.x; acc[j][5] += pk * vb.y; acc[j][6] += pk * vb.z; acc[j][7] += pk * vb.w;
+                } else if constexpr (DL == 4) {
                     const float4 vv = dec_f4(*reinterpret_cast<const Raw*>(Vs + kk * D + lane * 4));
                     acc[j][0] += pk * vv.x; acc[j][1] += pk * vv.y; acc[j][2] += pk * vv.z; acc[j][3] += pk * vv.w;
                 } else {
@@ -204,7 +213,11 @@ __device__ __forceinline__ void fa_decode_gqa(
         const size_t pBase = idx * G + g;
         if (lane == 0) { partialM[pBase] = m[j]; partialL[pBase] = l[j]; }
         float* dst = partialAcc + pBase * D + lane * DL;
-        if constexpr (DL == 4) *reinterpret_cast<float4*>(dst) = make_float4(acc[j][0], acc[j][1], acc[j][2], acc[j][3]);
+        if constexpr (DL == 8) {
+            *reinterpret_cast<float4*>(dst) = make_float4(acc[j][0], acc[j][1], acc[j][2], acc[j][3]);
+            *reinterpret_cast<float4*>(dst + 4) = make_float4(acc[j][4], acc[j][5], acc[j][6], acc[j][7]);
+        }
+        else if constexpr (DL == 4) *reinterpret_cast<float4*>(dst) = make_float4(acc[j][0], acc[j][1], acc[j][2], acc[j][3]);
         else *reinterpret_cast<float2*>(dst) = make_float2(acc[j][0], acc[j][1]);
     }
 }
@@ -223,6 +236,9 @@ DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f16_d128, __half, 128)
 DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f16_d64, __half, 64)
 DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_bf16_d128, DecBf16, 128)
 DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_bf16_d64, DecBf16, 64)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f32_d256, float, 256)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_f16_d256, __half, 256)
+DEC_LENGTHS_ENTRY(lm_fa_decode_lengths_bf16_d256, DecBf16, 256)
 
 // Merges the G chunk states of one output row and writes it with its LSE. Block x is the row (b * S + r) * Hq + head, which
 // is the row's place in the [B, S, Hq * D] output; thread d is the column. A chunk that saw no key has l == 0 and is skipped,

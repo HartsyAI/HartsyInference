@@ -104,6 +104,62 @@ public sealed class DecodeLengthsGpuTests
         { 4, 4, 2, 64, 1, 256, new[] { 256, 128, 64, 192 }, true },    // four chunks of 64: each sequence ends on a chunk boundary
     };
 
+    /// <summary>Head dim 256, which the Kitchen's decode also covers: the block's shared memory is past what a kernel gets
+    /// without asking, so these also show the opt-in holds at the largest group.</summary>
+    public static TheoryData<int, int, int, int, int, int, int[], bool> WideShapes => new()
+    {
+        // batch, heads, kv heads, head dim, step rows, capacity, lengths, causal
+        { 3, 8, 2, 256, 1, 300, new[] { 300, 1, 0 }, true },           // full, one key, empty; several chunks
+        { 2, 4, 4, 256, 5, 200, new[] { 150, 3 }, true },              // a staircase, and a sequence shorter than the step
+        { 1, 16, 1, 256, 3, 900, new[] { 899 }, false },               // group of 16: the most shared memory a block asks for
+        { 2, 16, 2, 256, 1, 130, new[] { 0, 129 }, false },            // group of 8, one sequence empty
+        { 4, 4, 2, 256, 1, 256, new[] { 256, 128, 64, 192 }, true },   // each sequence ends on a chunk boundary
+        { 1, 4, 2, 256, 3, 40, new[] { 37 }, true },                   // the shape of the Kitchen vector at this head dim
+    };
+
+    [CudaTheory]
+    [MemberData(nameof(WideShapes))]
+    public void TheCudaKernelMatchesTheHostReferenceAtHeadDim256(int batch, int heads, int kvHeads, int dim, int rows, int capacity,
+        int[] lengths, bool causal)
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        if (RefusedWhereNotServed(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal, DType.F32)) return;
+        MatchesTheHostReference(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal);
+    }
+
+    /// <summary>The tests above pass by refusal where head dim 256 is not served, so this pins when it must be: wherever
+    /// the card lets a block opt in to the shared memory the entry point asks for (83,456 bytes for an F32 cache, 50,432
+    /// for a half type). On such a card a refusal is a failure, not a skip.</summary>
+    [CudaFact]
+    public void HeadDim256IsServedWhereTheCardHasTheSharedMemory()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        int limit = backend.Context.MaxSharedMemoryPerBlockOptin;
+        foreach ((DType cache, int bytes) in ((DType, int)[])[(DType.F32, 83456), (DType.F16, 50432), (DType.BF16, 50432)])
+            foreach (int group in (ReadOnlySpan<int>)[1, 4, 16])
+                Assert.True(backend.DecodeLengthsServedForTest(256, group, cache) == (limit >= bytes),
+                    $"head dim 256, group {group}, {cache} cache: served {backend.DecodeLengthsServedForTest(256, group, cache)} "
+                    + $"on a card whose blocks can opt in to {limit} bytes of shared memory; the entry point needs {bytes}");
+        Assert.False(backend.DecodeLengthsServedForTest(192, 1, DType.F32));
+        Assert.False(backend.DecodeLengthsServedForTest(256, 17, DType.F32));
+    }
+
+    /// <summary>A card may not serve head dim 256 for a cache type: a block there needs more shared memory than a Turing
+    /// card allows for an F32 cache, and a PTX file built before the entry points has none. Such a call has to be
+    /// refused whole. Returns true when it was, so the caller does not go on to expect a result.</summary>
+    private static bool RefusedWhereNotServed(CudaBackend backend, int batch, int heads, int kvHeads, int dim, int rows, int capacity,
+        int[] lengths, bool causal, DType cache)
+    {
+        if (backend.DecodeLengthsServedForTest(dim, heads / kvHeads, cache)) return false;
+        using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache == DType.F32 ? null : cache);
+        shape.Output.AsSpan<float>().Fill(-7f);
+        AttentionCall call = shape.Call(lengths, causal, lse: false);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+        backend.Sync();
+        Assert.Equal(-1, shape.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+        return true;
+    }
+
     [CudaTheory]
     [MemberData(nameof(Shapes))]
     public void TheCudaKernelMatchesTheHostReferenceWithAndWithoutTheLse(int batch, int heads, int kvHeads, int dim, int rows, int capacity,
@@ -126,8 +182,11 @@ public sealed class DecodeLengthsGpuTests
             ((int, int, int, int, int, int, int[], bool)[])[(2, 8, 2, 64, 1, 96, [80, 70], true), (2, 4, 4, 128, 5, 200, [150, 3], true),
                 (2, 8, 1, 64, 4, 130, [0, 129], false), (1, 16, 1, 128, 3, 700, [699], true),
                 // lengths outside the cache are clamped; each sequence ends on a chunk boundary
-                (2, 4, 2, 64, 2, 100, [1000, -5], true), (4, 4, 2, 64, 1, 256, [256, 128, 64, 192], true)])
+                (2, 4, 2, 64, 2, 100, [1000, -5], true), (4, 4, 2, 64, 1, 256, [256, 128, 64, 192], true),
+                // head dim 256: the Kitchen vector's shape, a group of 16, and several chunks with an empty sequence
+                (1, 4, 2, 256, 3, 40, [37], true), (2, 16, 1, 256, 1, 300, [300, 7], true), (3, 8, 2, 256, 2, 500, [499, 0, 64], false)])
         {
+            if (RefusedWhereNotServed(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal, cache)) continue;
             using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache);
             foreach (bool lse in (ReadOnlySpan<bool>)[true, false])
             {
@@ -258,6 +317,20 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend, type == "F16" ? DType.F16 : DType.BF16);
     }
 
+    /// <summary>The same at head dim 256, where the tile fetch indexes eight dims a lane and two loads a row.</summary>
+    [CudaTheory]
+    [InlineData("F32")]
+    [InlineData("F16")]
+    [InlineData("BF16")]
+    public void OnCudaRowsPastASequencesLengthAreNeverReadAtHeadDim256(string type)
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        DType cache = type == "F32" ? DType.F32 : type == "F16" ? DType.F16 : DType.BF16;
+        // The helper's shape: 2 sequences, 8 heads over 2 key heads, 3 rows, 200 slots, lengths 130 and 7.
+        if (RefusedWhereNotServed(backend, 2, 8, 2, 256, 3, 200, [130, 7], true, cache)) return;
+        RowsPastASequencesLengthAreNeverRead(backend, cache == DType.F32 ? null : cache, 256);
+    }
+
     [VulkanFact]
     public void OnVulkanRowsPastASequencesLengthAreNeverRead()
     {
@@ -265,14 +338,14 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend);
     }
 
-    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend, DType? cache = null)
+    private static void RowsPastASequencesLengthAreNeverRead(IBackend backend, DType? cache = null, int dim = 64)
     {
         int[] lengths = [130, 7];
-        using Case shape = new(2, 8, 2, 64, 3, 200, cache);
+        using Case shape = new(2, 8, 2, dim, 3, 200, cache);
         for (int b = 0; b < 2; b++)
             for (int kh = 0; kh < 2; kh++)
             {
-                int tail = ((b * 2 + kh) * 200 + lengths[b]) * 64, count = (200 - lengths[b]) * 64;
+                int tail = ((b * 2 + kh) * 200 + lengths[b]) * dim, count = (200 - lengths[b]) * dim;
                 foreach (Tensor tensor in (ReadOnlySpan<Tensor>)[shape.Key, shape.Value])
                 {
                     if (tensor.DType == DType.F32) tensor.AsSpan<float>().Slice(tail, count).Fill(float.NaN);
@@ -325,6 +398,11 @@ public sealed class DecodeLengthsGpuTests
         narrow.Output.AsSpan<float>().Fill(-7f);
         AttentionCall call = narrow.Call([80, 70], causal: true, lse: false);
         Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+        // Nor has a head dim between the three it is built for.
+        using Case between = new(2, 4, 2, 192, 1, 96);
+        between.Output.AsSpan<float>().Fill(-7f);
+        AttentionCall betweenCall = between.Call([80, 70], causal: true, lse: false);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in betweenCall));
         // Keys and values of two types are not this kernel's: it reads one cache type.
         using Case shape = new(2, 8, 2, 64, 1, 96);
         using Tensor halfKey = new(shape.Key.Shape, DType.F16);
@@ -342,6 +420,7 @@ public sealed class DecodeLengthsGpuTests
         Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in view));
         backend.Sync();
         Assert.Equal(-1, narrow.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
+        Assert.Equal(-1, between.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
         Assert.Equal(-1, shape.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(-7f));
     }
 }
