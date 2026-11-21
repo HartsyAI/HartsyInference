@@ -8,9 +8,9 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
-/// <summary>The A/B that <c>numerics.vkTiledAttention</c> waits on: dense F32 attention on Vulkan through the scalar route
-/// it takes by default and through the query-tiled F32 kernel the knob turns on, same call, same device buffers, the arms
-/// alternated. It reports the time of each, the row each took, and how far each is from the host reference; it asserts
+/// <summary>The A/B behind the default of <c>numerics.vkTiledAttention</c>: dense F32 attention on Vulkan through the row
+/// it takes with the knob <c>off</c> and through the query-tiled F32 kernel <c>all</c> selects, same call, same device
+/// buffers, the arms alternated. It reports the time of each, the row each took, and how far each is from the host reference; it asserts
 /// only that each arm took the row it is meant to measure and that the two outputs agree. It is a
 /// <c>GpuBenchmark</c>, which the CPU lane and the GPU lane both leave out: run it alone on an idle card.
 /// <para>Expectation written before the first run: the tiled kernel is at least 3 times faster at 1,024 by 1,024 tokens,
@@ -74,14 +74,14 @@ public sealed class VulkanTiledAttentionAbTests(ITestOutputHelper output)
         double[] scalarMs = new double[runs], tiledMs = new double[runs];
         for (int run = -2; run < runs; run++)
         {
-            backend.EnableTiledAttention = false;
+            backend.TiledAttention = VulkanTiledAttention.Off;
             long start = Stopwatch.GetTimestamp();
             backend.ScaledDotProductAttention(scalarOut, q, k, v, bias, scale);
             backend.Sync();
             if (run >= 0) scalarMs[run] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
             scalarRoute = Route();
 
-            backend.EnableTiledAttention = true;
+            backend.TiledAttention = VulkanTiledAttention.All;
             start = Stopwatch.GetTimestamp();
             backend.ScaledDotProductAttention(tiledOut, q, k, v, bias, scale);
             backend.Sync();
@@ -89,7 +89,7 @@ public sealed class VulkanTiledAttentionAbTests(ITestOutputHelper output)
             tiledRoute = Route();
         }
         // A device that cannot run the tiled bucket sends the second arm down the default row again; that is not an A/B.
-        Assert.True(tiledRoute == "A.2t", $"{name}: with the knob on the call took {tiledRoute}, not the tiled row A.2t");
+        Assert.True(tiledRoute == "A.2t", $"{name}: with the knob at all the call took {tiledRoute}, not the tiled row A.2t");
         Assert.True(scalarRoute != "A.2t", $"{name}: with the knob off the call took the tiled row");
         Array.Sort(scalarMs);
         Array.Sort(tiledMs);
@@ -108,5 +108,48 @@ public sealed class VulkanTiledAttentionAbTests(ITestOutputHelper output)
         output.WriteLine($"AB | {name} | B {batch}, H {heads}/{kvHeads}, {queryTokens} x {keyTokens}, D {dim} | {scalarRoute} | {scalar:F2} | "
             + $"{tiledRoute} | {tiled:F2} | {scalar / tiled:F2} | {between:G3} | {reference}");
         Assert.True(between <= 1e-4, $"{name}: the scalar and tiled outputs differ by {between}");
+    }
+
+    /// <summary>Head dim 256 under the default: the call stays on the materialized row, as with the knob off, so the two arms
+    /// are the same row. Expectation written before the first run: both take A.3, the outputs are identical and the
+    /// medians are within 20% of each other.</summary>
+    [VulkanFact]
+    public void HeadDim256UnderTheDefaultStaysOnTheMaterializedRow()
+    {
+        const int runs = 7, heads = 8, tokens = 1024, dim = 256;
+        float scale = 1f / MathF.Sqrt(dim);
+        using VulkanBackend backend = new();
+        Assert.Equal(VulkanTiledAttention.Auto, backend.TiledAttention);
+        using Tensor qHost = Random(new TensorShape(1, heads, tokens, dim), 1), kHost = Random(new TensorShape(1, heads, tokens, dim), 2);
+        using Tensor vHost = Random(kHost.Shape, 3);
+        using Tensor q = OnDevice(backend, qHost), k = OnDevice(backend, kHost), v = OnDevice(backend, vHost);
+        using Tensor offOut = new(qHost.Shape, DType.F32), autoOut = new(qHost.Shape, DType.F32);
+
+        string offRoute = "", autoRoute = "";
+        double[] offMs = new double[runs], autoMs = new double[runs];
+        for (int run = -2; run < runs; run++)
+        {
+            backend.TiledAttention = VulkanTiledAttention.Off;
+            long start = Stopwatch.GetTimestamp();
+            backend.ScaledDotProductAttention(offOut, q, k, v, null, scale);
+            backend.Sync();
+            if (run >= 0) offMs[run] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+            offRoute = Route();
+
+            backend.TiledAttention = VulkanTiledAttention.Auto;
+            start = Stopwatch.GetTimestamp();
+            backend.ScaledDotProductAttention(autoOut, q, k, v, null, scale);
+            backend.Sync();
+            if (run >= 0) autoMs[run] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+            autoRoute = Route();
+        }
+        Array.Sort(offMs);
+        Array.Sort(autoMs);
+        double between = Worst(offOut.AsReadOnlySpan<float>(), autoOut.AsReadOnlySpan<float>());
+        output.WriteLine($"AB256 | self, {tokens} tokens, D {dim} | off {offRoute} | {offMs[runs / 2]:F2} | auto {autoRoute} | "
+            + $"{autoMs[runs / 2]:F2} | {offMs[runs / 2] / autoMs[runs / 2]:F2} | {between:G3}");
+        Assert.Equal("A.3", offRoute);
+        Assert.Equal("A.3", autoRoute);
+        Assert.Equal(0d, between);
     }
 }

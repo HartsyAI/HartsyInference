@@ -19,8 +19,16 @@ public sealed partial class VulkanBackend
 
     private bool? _tiledModulesPresent;
 
-    /// <summary>Whether dense F32 attention takes the query-tiled kernel ahead of the scalar route.</summary>
-    public bool EnableTiledAttention { get; set; } = ParseTiledAttention(EngineKnobs.VkTiledAttention.Value);
+    /// <summary>Which dense F32 attention calls take the query-tiled kernel.</summary>
+    public VulkanTiledAttention TiledAttention { get; set; } = ParseTiledAttention(EngineKnobs.VkTiledAttention.Value);
+
+    /// <summary>Whether any dense F32 attention takes the query-tiled kernel; setting it chooses between
+    /// <see cref="VulkanTiledAttention.Auto"/> and <see cref="VulkanTiledAttention.Off"/>.</summary>
+    public bool EnableTiledAttention
+    {
+        get => TiledAttention != VulkanTiledAttention.Off;
+        set => TiledAttention = value ? VulkanTiledAttention.Auto : VulkanTiledAttention.Off;
+    }
 
     /// <summary>Head-major [B, H, S, D] strides: each head spans <paramref name="tokens"/> rows.</summary>
     internal static TiledStrides HeadMajorStrides(int heads, int tokens, int headDim) =>
@@ -67,11 +75,14 @@ public sealed partial class VulkanBackend
         }
     }
 
-    /// <summary>Whether the query-tiled kernel takes this dense call: the knob is auto, every tensor is F32, the head dim has a bucket,
-    /// the device has the shared memory and the grid, and the modules are shipped.</summary>
+    /// <summary>Whether the query-tiled kernel takes this dense call: the knob allows its head dim, every tensor is F32, the head
+    /// dim has a bucket, the device has the shared memory and the grid, and the modules are shipped.</summary>
     private bool TiledF32Admits(in AttentionCall c)
     {
-        if (!EnableTiledAttention) return false;
+        if (TiledAttention == VulkanTiledAttention.Off) return false;
+        // Past the scalar kernel's head dim the other row is the materialized one, which is the faster wherever it can tile.
+        if (c.QkHeadDim > FlashMaxHeadDim && TiledAttention != VulkanTiledAttention.All && !NaiveHoldsWholeScoresPastLimit(in c))
+            return false;
         int bucket = TiledBucket(c.QkHeadDim);
         bool f32 = c.Query.DType == DType.F32 && c.Key.DType == DType.F32 && c.Value.DType == DType.F32 && c.Output.DType == DType.F32;
         if (bucket < 0 || !f32 || c.KvHeads <= 0 || c.Heads % c.KvHeads != 0) return false;
@@ -115,11 +126,17 @@ public sealed partial class VulkanBackend
         return (ulong)(4 * (br * stride + 2 * tk * stride + br * (tk + 1) + 2 * br * 8));
     }
 
-    private static bool ParseTiledAttention(string? value) => value switch
+    /// <summary>Whether the materialized row would hold this call's whole score matrix past the size at which it tiles: it tiles
+    /// the query axis only for a call without a bias.</summary>
+    private static bool NaiveHoldsWholeScoresPastLimit(in AttentionCall c) => c.Mask.Bias is not null
+        && (ulong)c.Batch * (ulong)c.Heads * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float) > NaiveWholeScoreLimitBytes;
+
+    private static VulkanTiledAttention ParseTiledAttention(string? value) => value switch
     {
-        "auto" => true,
-        "off" => false,
-        _ => throw new ArgumentException($"numerics.vkTiledAttention must be 'auto' or 'off'; got '{value}'."),
+        "auto" => VulkanTiledAttention.Auto,
+        "all" => VulkanTiledAttention.All,
+        "off" => VulkanTiledAttention.Off,
+        _ => throw new ArgumentException($"numerics.vkTiledAttention must be 'auto', 'all' or 'off'; got '{value}'."),
     };
 
     private bool TiledModulesShipped()
