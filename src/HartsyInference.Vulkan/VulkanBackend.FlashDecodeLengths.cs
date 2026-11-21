@@ -23,7 +23,8 @@ public sealed partial class VulkanBackend
     }
 
     /// <summary>The lengths row's admission (C.9). It takes only a call with sequence lengths, so the single-length rows keep
-    /// every call they had: F32 head-major Q, K and V, the <c>[B, S, Hq × D]</c> output, a head dim and group the split
+    /// every call they had: F32 head-major Q, head-major K and V of one type (F32, F16 or BF16), the F32
+    /// <c>[B, S, Hq × D]</c> output, a head dim and group the split
     /// shader is built for on this device, and a workspace inside <see cref="FlashDecodeLengthsWorkspaceLimit"/>.</summary>
     private bool FlashDecodeLengthsAdmits(in AttentionCall c)
     {
@@ -37,10 +38,17 @@ public sealed partial class VulkanBackend
             || group < 1 || group > FlashDecodeMaxGroup || c.Heads != c.KvHeads * group || c.ValueHeadDim != dim
             || c.Query.Layout != AttentionLayout.HeadMajor || c.Key.Layout != AttentionLayout.HeadMajor
             || c.Value.Layout != AttentionLayout.HeadMajor || c.Output.Layout != AttentionLayout.TokenMajor
-            || rows > ushort.MaxValue || c.Heads > ushort.MaxValue)
+            || rows > ushort.MaxValue || c.Heads > ushort.MaxValue
+            // Keys and values of one type: the split shader widens one cache type a specialization.
+            || c.Key.DType != c.Value.DType || FlashDecodeLengthsCacheKind(c.Key.DType) < 0)
             return false;
         return rows * c.Heads * FlashDecodeLengthsGeometry(in c).Splits * (dim + 2) * sizeof(float) <= FlashDecodeLengthsWorkspaceLimit;
     }
+
+    /// <summary>The split shader's CACHE specialization for a key/value type: 0 F32, 1 F16, 2 BF16; -1 for a type it does
+    /// not read.</summary>
+    private static int FlashDecodeLengthsCacheKind(DType cache) =>
+        cache == DType.F32 ? 0 : cache == DType.F16 ? 1 : cache == DType.BF16 ? 2 : -1;
 
     /// <summary>A decode whose sequences have their own key lengths, with the LSE when the call names one (C.9).</summary>
     private void DispatchFlashDecodeLengths(in AttentionCall c)
@@ -74,6 +82,7 @@ public sealed partial class VulkanBackend
                 SpecConstant.UInt(0, lanes),
                 SpecConstant.UInt(1, (uint)c.KvGroup),
                 SpecConstant.UInt(2, dpl),
+                SpecConstant.UInt(3, (uint)FlashDecodeLengthsCacheKind(key.DType)),
             ];
             ReadOnlySpan<SpecConstant> combineSpec =
             [
