@@ -221,6 +221,43 @@ public sealed class DecodeLengthsGpuTests
         RowsPastASequencesLengthAreNeverRead(backend, type == "F16" ? DType.F16 : DType.BF16);
     }
 
+    /// <summary>An F16 or BF16 cache on Vulkan: each element is widened as it is read, so the result is the host
+    /// reference's over the same stored values, to the F32 tolerance. Head dims of one to eight subgroup widths, odd and
+    /// even key counts, a staircase, an empty sequence and several chunks.</summary>
+    [VulkanTheory]
+    [InlineData("F16")]
+    [InlineData("BF16")]
+    public void TheVulkanKernelReadsAHalfTypeCache(string type)
+    {
+        DType cache = type == "F16" ? DType.F16 : DType.BF16;
+        using VulkanBackend backend = new();
+        int lanes = (int)backend.Vk.SubgroupSize;
+        foreach ((int batch, int heads, int kvHeads, int dim, int rows, int capacity, int[] lengths, bool causal) in
+            ((int, int, int, int, int, int, int[], bool)[])[(2, 8, 2, 2 * lanes, 1, 96, [80, 70], true), (2, 4, 4, 4 * lanes, 5, 200, [150, 3], true),
+                (2, 8, 1, 2 * lanes, 4, 131, [0, 129], false), (1, 8, 1, 4 * lanes, 3, 700, [699], true),
+                (2, 4, 2, lanes, 2, 100, [1000, -5], true), (4, 4, 2, 2 * lanes, 1, 256, [256, 128, 64, 192], true),
+                (3, 8, 2, 8 * lanes, 1, 300, [300, 1, 0], true), (1, 4, 2, 8 * lanes, 3, 40, [37], true)])
+        {
+            if (dim > 256) continue;   // past the row's cap on a subgroup wider than 32 lanes
+            using Case shape = new(batch, heads, kvHeads, dim, rows, capacity, cache);
+            foreach (bool lse in (ReadOnlySpan<bool>)[true, false])
+            {
+                AttentionEvidenceEvent[] events = shape.RunAndCompare(backend, lengths, causal, lse);
+                Assert.Equal("flash.decode.lengths", Assert.Single(events, e => e.Kind == AttentionEvidenceKind.Execution).Implementation);
+                Assert.DoesNotContain(events, e => e.Kind is AttentionEvidenceKind.Cast or AttentionEvidenceKind.Repeat);
+            }
+        }
+    }
+
+    [VulkanTheory]
+    [InlineData("F16")]
+    [InlineData("BF16")]
+    public void OnVulkanRowsPastASequencesLengthOfAHalfTypeCacheAreNeverRead(string type)
+    {
+        using VulkanBackend backend = new();
+        RowsPastASequencesLengthAreNeverRead(backend, type == "F16" ? DType.F16 : DType.BF16);
+    }
+
     [VulkanFact]
     public void OnVulkanRowsPastASequencesLengthAreNeverRead()
     {
@@ -260,12 +297,15 @@ public sealed class DecodeLengthsGpuTests
         wide.Output.AsSpan<float>().Fill(-7f);
         AttentionCall call = wide.Call([80], causal: true, lse: false);
         Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in call));
+        // Keys and values of two types are not this kernel's: it reads one cache type.
         using Case shape = new(2, 8, 2, 64, 1, 96);
         using Tensor halfKey = new(shape.Key.Shape, DType.F16);
-        using Tensor halfValue = new(shape.Key.Shape, DType.F16);
         shape.Output.AsSpan<float>().Fill(-7f);
-        AttentionCall half = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, halfValue, [80, 70], true, 0.125f);
-        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in half));
+        AttentionCall mixed = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, shape.Value, [80, 70], true, 0.125f);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in mixed));
+        using Tensor halfValue = new(shape.Key.Shape, DType.BF16);
+        AttentionCall twoHalves = AttentionCall.FromDecodeWithLengths(shape.Output, shape.Query, halfKey, halfValue, [80, 70], true, 0.125f);
+        Assert.Throws<AttentionUnsupportedException>(() => backend.Attention(in twoHalves));
         using Tensor longer = Random(new TensorShape(2, 8, 2, 64), 54);
         AttentionCall whole = shape.Call([80, 70], causal: true, lse: false);
         AttentionCall view = whole with { Query = new AttentionOperand(longer, AttentionLayout.HeadMajor, 2, 8, 1, 64, 64, 8 * 2 * 64, 2 * 64, 64) };

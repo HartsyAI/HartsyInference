@@ -10,6 +10,10 @@
 // [B, S, hq * D] output. A split past the row's live count does no work and writes nothing;
 // sdpa_flash_decode_lengths_combine derives the same live count and reads only the live splits.
 //
+// The cache is F32, F16 or BF16 (keys and values of one type, CACHE below); Q, the partial states and the output are
+// F32. A half-type element is widened as it is read, exactly, so the arithmetic is the F32 kernel's over the stored
+// values, as in the CUDA kernel.
+//
 // The workgroup is exactly one subgroup: LANES (spec constant 0) = the device subgroup size.
 
 #version 460
@@ -21,6 +25,7 @@ layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint LANES = 32;
 layout(constant_id = 1) const uint GROUP = 1;
 layout(constant_id = 2) const uint DPL = 2;
+layout(constant_id = 3) const uint CACHE = 0;   // 0: F32 keys and values; 1: F16; 2: BF16
 
 // The register arrays below are sized by GROUP and DPL themselves, so a specialization holds only what it uses: a head
 // dim of two lane widths keeps two dims a lane however large the widest admitted call is. The host admits a group of
@@ -28,8 +33,9 @@ layout(constant_id = 2) const uint DPL = 2;
 #define NEG_INF (-1.0 / 0.0)
 
 layout(set = 0, binding = 0) readonly  buffer Q_ { float q_data[]; };
-layout(set = 0, binding = 1) readonly  buffer K_ { float k_data[]; };
-layout(set = 0, binding = 2) readonly  buffer V_ { float v_data[]; };
+// Keys and values as words: one F32 element a word, or two half-type elements a word, the lower 16 bits first.
+layout(set = 0, binding = 1) readonly  buffer K_ { uint k_bits[]; };
+layout(set = 0, binding = 2) readonly  buffer V_ { uint v_bits[]; };
 layout(set = 0, binding = 3) readonly  buffer Len_ { int len_data[]; };     // one valid key length per sequence
 layout(set = 0, binding = 4) writeonly buffer Part_ { float part_data[]; };
 
@@ -44,6 +50,15 @@ layout(push_constant) uniform Push {
     uint splits;         // split count of the grid (partial-state stride)
     uint chunk;          // keys per split
 } pc;
+
+// The word holding cache element e, and that element widened to F32. F16 through unpackHalf2x16 and BF16 by placing
+// its bits in the upper half of an F32: both exact.
+uint cacheWord(uint e) { return CACHE == 0u ? e : e >> 1u; }
+float widen(uint word, uint e) {
+    if (CACHE == 0u) return uintBitsToFloat(word);
+    uint h = (word >> (16u * (e & 1u))) & 0xFFFFu;
+    return CACHE == 1u ? unpackHalf2x16(h).x : uintBitsToFloat(h << 16u);
+}
 
 void main() {
     uint split = gl_WorkGroupID.x;
@@ -92,8 +107,9 @@ void main() {
             if (u < cnt) {
                 uint row = (kvRow0 + k + u) * D;
                 for (uint j = 0u; j < DPL; j++) {
-                    kr[u][j] = k_data[row + j * LANES + lane];
-                    vr[u][j] = v_data[row + j * LANES + lane];
+                    uint e = row + j * LANES + lane;
+                    kr[u][j] = widen(k_bits[cacheWord(e)], e);
+                    vr[u][j] = widen(v_bits[cacheWord(e)], e);
                 }
             }
         }
