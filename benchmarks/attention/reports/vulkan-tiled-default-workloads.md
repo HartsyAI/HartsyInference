@@ -6,7 +6,7 @@ first (head dim 64 or 128 with the F16 permission or F16 operands, on a device t
 planner change for "every workload whose candidates can change"
 ([queue](../proposed-queue.md), evidence cadence). This is that list, as a source audit at `6f9ee3d72`.
 
-**What this is and is not.** Nothing here was run. A read-only sub-agent traced the consumers in two passes; I re-read
+**What this is and is not.** The audit itself ran nothing; two real runs it led to are at the end. A read-only sub-agent traced the consumers in two passes; I re-read
 the rows marked *checked* and the passages named under "How a call gets there". Line numbers are as of that commit.
 Token counts are given only where the source states them. The rules themselves are executed evidence: the
 [route matrix and parity tests](vulkan-tiled-f32-ab.md#routes-and-parity).
@@ -108,7 +108,7 @@ paint UNet and SAM 2 are at 128 or below.
 
 ## The smallest real run that exercises the moved row
 
-Nothing below was run for this report, and nothing needs downloading on the RTX 3060 box.
+Nothing needs downloading on the RTX 3060 box. The first two were run after this list was written; see [Real runs](#real-runs).
 
 1. **BiRefNet matting** is the smallest: one 844 MB file and one image in, a matte out.
    - File: `Models/Vision/BiRefNet-matting/model.safetensors` (884,878,856 bytes).
@@ -127,3 +127,34 @@ Nothing below was run for this report, and nothing needs downloading on the RTX 
    - Whether the 12 GB card runs it on Vulkan was not tried.
 3. SD 1.5 would be the clearest generation (the UNet itself moves at head dims 40 and 80), but its weights are not on
    the box.
+
+## Real runs
+
+Each with the default (`auto`) against `--set numerics.vkTiledAttention=off` on Vulkan, arms alternated. Expectations
+were written into the pull request's text before the first run: for BiRefNet, that it might not complete on Vulkan at
+all, that the Swin calls run `tiled.f32` and `flash.scalar` respectively, that each arm repeats its own matte and the
+two arms' 8-bit mattes are identical or one step apart, and that the default's median wall time is at most 5% above
+`off`; for Flux.2 Klein 4B, the same rows in the Qwen3-4B encoder, images at least 40 dB PSNR apart (bounded, since the
+transformer samples in F16), and text encoding not slower.
+
+**Results** (2026-11-21, RTX 3060 12 GB, branch build at `231c84346`, 24 minutes of the 40-minute budget; the weights' folder has no file newer than the start of the runs).
+
+**BiRefNet matting: every expectation met.**
+
+- It completes on Vulkan (it was recorded as CPU-verified only).
+- Rows, from a debug-level run an arm: all eight Swin attention shape classes (head dim 32, 144 tokens a window, per-head bias, 484 down to 4 windows as the batch) ran `tiled.f32` under the default and `flash.scalar` with the knob off.
+- Output: each arm gave the same matte on its three runs (sha256 `7e0468eb…` default, `2607b42c…` off). Between the arms the 8-bit matte differs by one step in 180 of 196,608 values (0.09%) and nowhere by more.
+- Time, whole command including the model load, runs alternated: `off` 26.19, 25.93, 25.78 s; default 24.26, 22.72, 23.29 s. Medians 25.93 against 23.29 s: the default is 10% faster.
+- The card was quiet for all six timed runs (no other test host in any 1-second sample).
+- Peak memory used on the whole card, sampled once a second: `off` 6.2 to 6.3 GB, default 4.2 to 6.2 GB. The sampling is too coarse to call that a difference.
+
+**Flux.2 Klein 4B: the moved row ran and the encoder's output matches; the time is not shown either way; the image check is void.**
+
+- One prompt, seed 1234, 512 by 512, 4 steps; three default runs and two `off` runs, 34 to 70 s each, so it fits the card and the 15-minute limit.
+- Rows: the Qwen3-4B encoder's calls (32 heads, head dim 128, 512 tokens, causal bias) ran `tiled.f32` under the default and `flash.scalar` with the knob off.
+- Encoder output: the logged statistics of the text embeddings are the same in all five runs to the four digits printed (min -4.598e3, max 1.638e4, mean 4.552e-2, no NaN or infinity).
+- Text-encoding time as the CLI reports it: default 7.31, 3.27, 5.58 s; `off` 4.10, 5.17 s. **The expectation "not slower" is not shown**: the default's median is the higher one, and one arm alone spans 3.3 to 7.3 s. Another session's test host was on the card in four of the five runs, and the figure includes more than attention.
+- **The image is entirely black in every run of both arms** (one hash, `1707efe4…`), so the 40 dB expectation is met trivially and says nothing. During denoising each run logs a Vulkan out-of-memory on a 36 MiB allocation with the card at 11.5 GB, and falls back from the captured graph to eager. This happens with the knob off as well, so it is not caused by this PR; it was not investigated and is a separate finding about Flux.2 Klein 4B on Vulkan on a 12 GB card.
+- One run hung for ten minutes: started with `-m flux2`, the CLI asks whether to download the Flux.2 Dev text encoder and waits when standard input is open. It was killed, nothing was downloaded (`paths.sideModelAutofetch=false` was set, and the prompt defaults to no), and the reruns closed standard input.
+
+So there is now one real workload, on a quiet card, where the moved row ran and the result is within one 8-bit step and 10% faster end to end; and one generation where the moved row ran with matching encoder output but nothing can be said about its picture.
