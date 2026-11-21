@@ -29,15 +29,20 @@ choice is a new volume in another data center (the weights are copied again) or 
 
 ## What is not known and decides the campaign
 
-1. **Vulkan on a pod.** Nothing in this repository records a Vulkan device inside a RunPod container. The backend
-   needs the NVIDIA Vulkan driver exposed to the container, not only CUDA. If `vulkaninfo --summary` shows no NVIDIA
-   device on the pod, the Vulkan half of the gate cannot be run at this provider and the campaign stops after stage 1
-   with that finding. That is why stage 1 is separate and cheap.
+1. **Vulkan on a pod.** An earlier rental had none: `benchmarks/results/2026-10-11_moe_perf_a40.md` records "no
+   Vulkan ICD in the container". The deleted runner (item 4) names the cause and the remedy: a container started
+   without the graphics capability shows the loader no NVIDIA ICD, and the pod has to be created with
+   `NVIDIA_DRIVER_CAPABILITIES=all`; it also installs `libvulkan1` and `vulkan-tools` when `vulkaninfo` is missing.
+   So the remedy is recorded, but no report here records a Vulkan device working on a pod after it. Stage 1 creates
+   the pod with that variable from the start. Only if `vulkaninfo --summary` still shows no NVIDIA device with it set
+   does the campaign stop after stage 1, with the finding that the Vulkan half cannot be run at this provider. That
+   is why stage 1 is separate and cheap.
 2. **Driver.** Every nvcc-built PTX shipped here is ISA 9.0 and needs driver 580 or later
    (`benchmarks/CLOUD_GPU_RUNBOOK.md`). The host driver of a pod is not chosen by the renter.
 3. **How long the frozen corpus takes.** No report in this repository records the wall time of a full campaign on
-   the RTX 4090, so the hours below are a ceiling set here, not a measurement. The one duration measured is the
-   attention GPU test lane: 345 tests in 1.5 to 3 minutes on the RTX 3060.
+   the RTX 4090, so the hours below are a ceiling set here, not a measurement. The one duration behind them is an
+   observation that no report records: the attention GPU test lane of the integration branch at `b4651cdb6` (345
+   tests listed) took between 1.5 and 3 minutes in each of three runs on the RTX 3060 on 2026-11-21.
 4. **The scripted runner.** The runbook names `tests/blackwell-run.sh` as the scripted form of the rental. That file
    was deleted in `e9474bb06` and is not on `main`. Either it is restored (it exists at `0a67f89e5` and `ab04134cf`)
    and rehearsed on the local card first, as the runbook asks, or the stages are driven by hand over SSH.
@@ -47,12 +52,14 @@ choice is a new volume in another data center (the weights are copied again) or 
 ## Stages
 
 Each stage has a hard time budget; a stage that reaches it stops and is recorded as incomplete, and the pod is stopped.
-One GPU job at a time. The pod idle check of this project (10 minutes) is armed at every start.
+One GPU job at a time. Whoever drives the rental also checks the pod every 10 minutes and stops it when it sits idle;
+that is a working rule of the driving session, not a script in this repository. The in-repository equivalents are the
+`--budget-minutes` and `--auto-stop` options of the deleted runner, if it is restored.
 
 | Stage | What it shows | Budget | Stop if |
 | --- | --- | --- | --- |
-| 1. Probe | `nvidia-smi` (card, driver at least 580), `vulkaninfo --summary` (an NVIDIA Vulkan device), `dotnet build`, the attention GPU lane on CUDA and Vulkan with the total compared against `--list-tests` | 30 min | no Vulkan device, driver below 580, or the lane host crashes |
-| 2. Semantics and routes | The complete CPU/CUDA/Vulkan attention suites and the route matrix on the final commit; every skip listed with its reason | 1 h | any failure that is not reproduced on the RTX 4090 at the same commit |
+| 1. Probe | Pod created with `NVIDIA_DRIVER_CAPABILITIES=all`; `libvulkan1` and `vulkan-tools` installed in the container if missing; `nvidia-smi` (card, driver at least 580), `vulkaninfo --summary` (an NVIDIA Vulkan device), `dotnet build`, the attention GPU lane on CUDA and Vulkan with the total compared against `--list-tests` | 30 min | no NVIDIA Vulkan device with the graphics capability requested, driver below 580, or the lane host crashes |
+| 2. Semantics and routes | The complete CPU/CUDA/Vulkan attention suites and the route matrix on the final commit; every skip listed with its reason | 1 h | any failure that the recorded RTX 4090 run of the same commit does not show (that run exists before the rental; it is not repeated for the comparison) |
 | 3. Operation cells | The frozen operation corpus and Kitchen comparison under `protocol.json` (3 sessions of 5 pairs and the confirmation session), CUDA then Vulkan | 3 h | an invalid device clock, or a cohort violation |
 | 4. Primary workloads | Qwen and Krea primaries against Bfix under `protocol.json`, with real-generation correctness | 2 h | weights missing, or a required path proof absent |
 | 5. Collect | Copy artifacts off the pod, verify hashes, stop the pod, confirm in the control plane that it is stopped | 30 min | |
