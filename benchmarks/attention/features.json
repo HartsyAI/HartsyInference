@@ -174,7 +174,7 @@
       "cuda",
       "vulkan"
     ],
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 run rebuilt the PTX and the SPIR-V byte-identical. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-lse",
@@ -194,7 +194,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 run rebuilt the PTX and the SPIR-V byte-identical. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-tree-merge",
@@ -210,7 +210,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing. The RTX 4090 run rebuilt the PTX and the SPIR-V byte-identical. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-step-merge",
@@ -224,7 +224,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeMergeGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeMergeReferenceTests over DecodeMergeKitchenVectors; no caller, no timing. The RTX 4090 run rebuilt the PTX and the SPIR-V byte-identical. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "sol-general",
@@ -251,7 +251,7 @@
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 parity against the host reference (SolAttentionGpuTests: the routed blocks equal for every pair, the output within 1e-4); the reference is checked against the pinned Kitchen eager definition in SolAttentionReferenceTests over SolAttentionKitchenVectors. token_aug is an open gap: the Kitchen CUDA kernel implements it and the eager definition ignores it, so only that kernel could serve as its oracle, and nothing here has it. No caller, no timing, 4090 pending. Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (SolAttentionGpuTests: the routed blocks equal for every pair, the output within 1e-4); the reference is checked against the pinned Kitchen eager definition in SolAttentionReferenceTests over SolAttentionKitchenVectors. token_aug is an open gap: the Kitchen CUDA kernel implements it and the eager definition ignores it, so only that kernel could serve as its oracle, and nothing here has it. No caller, no timing. The RTX 4090 run rebuilt the PTX and the SPIR-V byte-identical and reported no routing difference on CUDA or Vulkan. Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "hartsy-vsa",
