@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.445
+
+- Added a `prompt` block to the recipe descriptors (`GET /v1/native/recipes`, `POST /v1/native/recipes/describe`) saying what shapes each model's
+  prompt text: format, negative handling, boxes and encoder kinds. `hartsy merge --model` writes the same facts as `modelspec.prompt_*`.
+
 ## alpha.444
 
 - The voice session takes a typed message as a turn (`SubmitUserTextAsync`), can run transcribe-only for command use (`TranscribeOnly`), and hears a chosen language (`Language`).

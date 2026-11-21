@@ -64,7 +64,23 @@ carries no other position-dependent or additive term: a window, a block size, a 
 refused, and so are paged keys and values. A call may also name an **LSE output** (`AttentionCall.Lse`, F32
 `[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
 excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
-takes such a call through it. No GPU row declares either yet.
+takes such a call through it. On CUDA and on Vulkan one row declares both, `flash.decode.lengths`: F32 head-major Q and
+the `[B, Sq, Hq × D]` output over a head-major cache. CUDA takes an F32, F16 or BF16 cache, head dim 64 or 128 and at
+most 16 query heads per key head; Vulkan an F32 cache, a head dim of one to four subgroup widths and at most 8. Each
+takes only calls with sequence lengths, so an LSE on a call with one shared length is still refused on a GPU. Both
+kernels cut the keys into chunks sized from the longest sequence of the call, so the order a sequence's keys are summed
+in, and with it the last bits of its result, depends on the other sequences' lengths. Each result stays within the
+kernel's tolerance of the host reference; it is not bit-equal to the same sequence run alone.
+
+The **speculative-decode merge** is not an `AttentionCall`. It is a backend primitive, `IBackend.DecodeTreeMerge`,
+defined by `DecodeMergeReference`, and `IBackend.HasDecodeMerge` says whether a backend runs it; one that does not
+refuses the call. A verify step of `S` rows (at most 32) first attends the committed prefix alone, as a decode with
+sequence lengths, without the causal rule, that names an LSE. The merge then folds the step's own keys and values into
+that result: row `j` attends the step rows its mask entry names, one bit a row, and the two softmaxes are joined through
+the prefix LSE, which is negative infinity for a row whose prefix was empty. A row with no key at all is zero. Every
+operand is F32: the prefix output and the merged output `[B, S, Hq × D]` (they may be one tensor), the prefix LSE
+`[B, Hq, S]`, Q `[B, Hq, S, D]`, and the step's K and V `[B, Hkv, S, D]`. The CPU backend runs the reference; CUDA and
+Vulkan each have one kernel. It records no `Execution` evidence and has no planner row, because no kernel is chosen.
 
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
 of bounds, and the kernel sets a device status word. The next host synchronization point that owns the call (the end

@@ -67,6 +67,14 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   configs; capability limits go in `Constraints`, not defaults.
 - A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
   one-line comment saying why. Design and the per-family ledger: RECIPE_CONTRACT.md.
+- A recipe may declare a `Prompt` (`PromptProfile`) for what shapes its prompt text: `kind`, `encoders`, `format`, `negative`,
+  `supports`, a `boxes` form such as `yxyx-1000`, `maxTokens` and a `guide` path. It is never a generation setting. The values
+  are plain strings from one closed vocabulary (`PromptVocabulary`, the one the SwarmUI-LLMAssistant extension reads) and the
+  registry validator rejects anything outside it. An unset field means the fact was not established, not "no"; `supports`
+  lists only what a reviewed prompting guide affirms, weak or limited included, and is not `PromptWeighting`, which says what
+  the pipeline applies. Put a difference between variants in `PromptFor`, not in extra families. The descriptor routes return
+  it as `prompt`, and `ArtifactMetadata` writes it into the primary weights as `modelspec.prompt_*` when the identity carries
+  it (`RecipePrompts.Find` supplies it from the recipe).
 - Changing any value in a defaults record bumps its `Revision`. For image and video the revision travels into the
   plan's `RecipeIdentity`, so output made under old and new values stays distinguishable; music results do not carry
   it yet.

@@ -9,6 +9,7 @@ using HartsyInference.Engine.HuggingFace;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -21,6 +22,18 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "lens";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Supports = ["regions", "text-rendering"],
+        Guide = "docs/prompting/lens.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(LensVariants.Turbo) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Lens reuses the Flux.2 VAE, so its encoder rides that config's encode-parity gate. Img2img only:

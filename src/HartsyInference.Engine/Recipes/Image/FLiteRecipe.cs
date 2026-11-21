@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -20,6 +21,12 @@ public sealed class FLiteRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "f-lite";
 
+    /// <inheritdoc/>
+    /// <remarks>No guide covers F-Lite; the encoder is the one this recipe constructs.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["t5"],
+    };
 
     /// <inheritdoc/>
     /// <remarks>F-Lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.
