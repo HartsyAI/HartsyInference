@@ -100,11 +100,11 @@ internal sealed unsafe class IndexTtsConformerLayer
     /// with <c>p = linear_pos(pe[0:T])</c> indexed by the key position and no <c>rel_shift</c>.</summary>
     private Tensor RelPosAttention(IBackend backend, Tensor x, Tensor posEmb, int t)
     {
-        int h = _numHeads, d = _headDim, c = _channels, posLen = t;
+        int h = _numHeads, d = _headDim, c = _channels;
         Tensor q = WhisperOps.ProjectLinear(backend, x, _qW!, _qB, 1, t, c, c);
         Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, c, c);
         Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, c, c);
-        Tensor p = WhisperOps.ProjectLinear(backend, posEmb, _posW!, null, 1, posLen, c, c);
+        Tensor p = WhisperOps.ProjectLinear(backend, posEmb, _posW!, null, 1, t, c, c);
 
         Tensor outMerged = Attend(backend, q, k, v, p, _posBiasU!, _posBiasV!, h, d);
         k.Dispose(); p.Dispose();
@@ -119,9 +119,12 @@ internal sealed unsafe class IndexTtsConformerLayer
     /// attention over the keys <c>k + p</c> with one additive bias a head and key. <paramref name="q"/>, <paramref name="k"/>,
     /// <paramref name="v"/> and <paramref name="p"/> are <c>[1, T, heads·headDim]</c>; <paramref name="biasU"/> and
     /// <paramref name="biasV"/> hold one row of <paramref name="headDim"/> a head. Takes <paramref name="q"/> and
-    /// <paramref name="v"/> over; returns <c>[1, T, heads·headDim]</c>.</summary>
+    /// <paramref name="v"/> over; <paramref name="k"/> and <paramref name="p"/> are only read and stay the caller's.
+    /// Returns <c>[1, T, heads·headDim]</c>.</summary>
     internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, Tensor p, Tensor biasU, Tensor biasV, int heads, int headDim)
     {
+        if (p.Shape != k.Shape)
+            throw new ArgumentException($"The position rows are one a key; got K={k.Shape} and P={p.Shape}.", nameof(p));
         int t = (int)k.Shape[1], c = heads * headDim;
         float scale = 1f / MathF.Sqrt(headDim);
         // The query-independent term, in score units: [1, heads, 1, T], broadcast over the query rows.
@@ -137,7 +140,15 @@ internal sealed unsafe class IndexTtsConformerLayer
                 bp[head * t + j] = sum * scale;
             }
         Tensor keys = new(k.Shape, DType.F32);
-        backend.Add(keys, k, p);
+        try
+        {
+            backend.Add(keys, k, p);
+        }
+        catch
+        {
+            keys.Dispose();
+            throw;
+        }
         return AttentionLayer.Shared(heads, headDim, computeDType: DType.F32)
             .AttendFlat(backend, q, keys, v, q.Shape, new AttentionCallContext { Bias = bias });
     }

@@ -79,11 +79,16 @@ public sealed class ConformerPositionAttentionTests
         {
             if (t > 1000 && !longSequence) continue;
             int c = heads * d;
-            using Tensor k = Random(new TensorShape(1, t, c), 42), p = Random(new TensorShape(1, t, c), 43);
+            using Tensor hostK = Random(new TensorShape(1, t, c), 42), hostP = Random(new TensorShape(1, t, c), 43);
+            // The layer's keys and position rows come out of a backend projection, so on a GPU they live on the device
+            // when the bias pass reads them. A backend copy puts these there too.
+            using Tensor k = new(hostK.Shape, DType.F32), p = new(hostP.Shape, DType.F32);
+            backend.CopyTo(k, hostK);
+            backend.CopyTo(p, hostP);
             using Tensor bu = Random(new TensorShape(heads, d), 44, 0.5f), bv = Random(new TensorShape(heads, d), 45, 0.5f);
             using Tensor queries = Random(new TensorShape(1, t, c), 41), values = Random(new TensorShape(1, t, c), 46);
-            float[] expected = FormerLoop(queries.AsReadOnlySpan<float>(), k.AsReadOnlySpan<float>(), values.AsReadOnlySpan<float>(),
-                p.AsReadOnlySpan<float>(), bu.AsReadOnlySpan<float>(), bv.AsReadOnlySpan<float>(), t, heads, d);
+            float[] expected = FormerLoop(queries.AsReadOnlySpan<float>(), hostK.AsReadOnlySpan<float>(), values.AsReadOnlySpan<float>(),
+                hostP.AsReadOnlySpan<float>(), bu.AsReadOnlySpan<float>(), bv.AsReadOnlySpan<float>(), t, heads, d);
 
             // The site takes its query and value over, so it gets copies.
             Tensor q = new(queries.Shape, DType.F32), v = new(values.Shape, DType.F32);
