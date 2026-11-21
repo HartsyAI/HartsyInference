@@ -9,7 +9,7 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// <summary>The Vulkan query side of INT8 attention against <see cref="Int8AttentionV2Reference.Quantize"/>, and the exact
 /// fused multiply-add it rests on (Shaders/fma_rn.glsl) against <see cref="MathF.FusedMultiplyAdd"/>.
 /// <para>The bounds were fixed before the first run. The fused multiply-add: bit-equal for every triple in the range
-/// fma_rn.glsl states (operands zero or within [2^-100, 2^100], product and addend zero or within [2^-100, 2^120],
+/// fma_rn.glsl states (operands and addend zero or within [2^-100, 2^100] and [2^-100, 2^120], product within [2^-124, 2^120],
 /// result zero or normal); that range was [2^-40, 2^40] and [2^-80, 2^80] until the scaling step. The device's own
 /// <c>fma()</c> is counted and reported, not asserted. The query side: every dot and scale bit-equal and every byte equal
 /// to the reference's, on finite operands of ordinary magnitude.</para></summary>
@@ -80,7 +80,7 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
         static bool Within(float x, int low, int high) => x == 0f || (float.IsFinite(x)
             && MathF.Abs(x) >= MathF.ScaleB(1f, low) && MathF.Abs(x) <= MathF.ScaleB(1f, high));
         float product = a * b, result = MathF.FusedMultiplyAdd(a, b, c);
-        bool productOk = a == 0f || b == 0f || (product != 0f && Within(product, -100, 120));
+        bool productOk = a == 0f || b == 0f || (product != 0f && Within(product, -124, 120));
         return Within(a, -100, 100) && Within(b, -100, 100) && productOk && Within(c, -100, 120)
             && (result == 0f || MathF.Abs(result) >= MathF.ScaleB(1f, -126));
     }
@@ -146,6 +146,19 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
             if (random.Next(2) == 0) z = -z;
             Add(x, y, z, "exact tie, small product");
         }
+        // And with the product between 2^-124 and 2^-100, each operand still at least 2^-100.
+        for (int i = 0; i < 24000; i++)
+        {
+            int j = 13 + i % 11, first = random.Next(-62, -54), shift = random.Next(-123, -100);
+            bool square = i % 2 == 0;
+            float x = MathF.ScaleB(1f + MathF.ScaleB(1f, -j), first);
+            float y = MathF.ScaleB(square ? 1f + MathF.ScaleB(1f, -j) : 1f - MathF.ScaleB(1f, -j), shift - first);
+            float mantissa = 1f + random.Next(1 << 23) / (float)(1 << 23);
+            float z = MathF.ScaleB(mantissa, (square ? 25 - j : 24) + shift);
+            if (random.Next(2) == 0) x = -x;
+            if (random.Next(2) == 0) z = -z;
+            Add(x, y, z, "exact tie, product below 2^-100");
+        }
         // What the attention drain multiplies: a whole number up to 128 * 255 * 127 by a scale far below one, added
         // to something near the product or near a midpoint above it.
         for (int i = 0; i < 30000; i++)
@@ -181,7 +194,7 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
             (MathF.ScaleB(1f, 120), MathF.ScaleB(1f, -10), 1f),
             (MathF.ScaleB(1.5f, 120), MathF.ScaleB(-1.25f, -10), MathF.ScaleB(1.75f, 110)),
             (MathF.ScaleB(1.5f, -30), MathF.ScaleB(1.25f, 110), MathF.ScaleB(-1.875f, 80)),
-            (MathF.ScaleB(1.5f, -60), MathF.ScaleB(1.25f, -60), MathF.ScaleB(1.75f, -110)),
+            (MathF.ScaleB(1.5f, -63), MathF.ScaleB(1.25f, -63), MathF.ScaleB(1.75f, -110)),
             (MathF.ScaleB(1.5f, 126), MathF.ScaleB(1.25f, 2), 3f),
         ];
         int n = triples.Length;

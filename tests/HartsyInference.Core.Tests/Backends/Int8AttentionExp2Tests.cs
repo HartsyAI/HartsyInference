@@ -56,15 +56,15 @@ public sealed class Int8AttentionExp2Tests(ITestOutputHelper output)
     }
 
     /// <summary>u8 probabilities are taken against the tile's largest score less <see cref="Int8AttentionV2Reference.U8Offset"/>,
-    /// so that score itself has to come out as 255. It does while the scores are below about 2^16 in magnitude, where
-    /// their last place is still finer than the offset needs.</summary>
+    /// so that score itself has to come out as 255. It does while the score's own last place is finer than the offset
+    /// needs; this samples scores up to 30,000 in magnitude.</summary>
     [Fact]
     public void ATilesLargestScoreMapsTo255()
     {
         Random random = new(82);
         for (int i = 0; i < 1_000_000; i++)
         {
-            float tileMax = (float)(random.NextDouble() * 2000 - 1000);
+            float tileMax = (float)(random.NextDouble() * 60000 - 30000);
             float tileM = tileMax - Int8AttentionV2Reference.U8Offset;
             float p = Int8AttentionExp2.Evaluate(tileMax - tileM);
             Assert.True((int)MathF.Round(Math.Clamp(p, 0f, 255f)) == 255, $"a tile max of {tileMax:R} gives {p:R}");
