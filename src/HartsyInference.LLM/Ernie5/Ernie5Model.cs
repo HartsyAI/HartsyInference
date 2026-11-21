@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
@@ -290,7 +292,8 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         long budget = PreloadBudget(usage.FreeBytes, usage.TotalBytes, _options.PreloadExperts), used = 0;
         List<Tensor> placed = [];
         _preloaded.Add((backend, placed));
-        int count = stage.EndLayer - stage.StartLayer, layers = 0;
+        int count = stage.EndLayer - stage.StartLayer, layers = 0, readers = EngineKnobs.MoeExpertPrefetchThreads.Value;
+        long read = 0;
         // Each layer's lists once, for both the budget and the upload.
         List<Tensor>[] dense = [.. Enumerable.Range(stage.StartLayer, count).Select(i => _layers[i]!.EnumerateDenseWeights().ToList())];
         List<IReadOnlyList<Tensor>>[] expertGroups = _options.PreloadExperts
@@ -311,7 +314,7 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
             long bytes = Bytes(weights);
             if (used + bytes > budget) break;
             placed.AddRange(weights);
-            backend.PreloadWeights(weights);
+            read += PreloadGroups(backend, [weights], readers, grouped: false);
             used += bytes;
             layers++;
         }
@@ -319,21 +322,49 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         if (head)
         {
             placed.Add(_lmHead!);
-            backend.PreloadWeights([_lmHead!]);
+            read += PreloadGroups(backend, [[_lmHead!]], readers, grouped: false);
             used += Bytes([_lmHead!]);
         }
         long experts = 0;
         foreach (List<IReadOnlyList<Tensor>> groups in expertGroups)
         {
             foreach (IReadOnlyList<Tensor> group in groups) placed.AddRange(group);
-            backend.PreloadWeightGroups(groups);
+            read += PreloadGroups(backend, groups, readers, grouped: true);
             experts += groups.Sum(Bytes);
         }
         used += experts;
         Logs.Info($"[ernie5] stage layers [{stage.StartLayer}, {stage.EndLayer}) on {backend.Device}: preloaded {layers}/{count} layers' per-token "
             + $"weights{(head ? ", the LM head" : "")}{(_options.PreloadExperts ? $" and {experts / (1 << 20)} MB of routed experts" : "")}, "
-            + $"{used / (1 << 20)} MB of a {Math.Max(budget, 0) / (1 << 20)} MB budget, in {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s"
+            + $"{used / (1 << 20)} MB of a {Math.Max(budget, 0) / (1 << 20)} MB budget, in {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s "
+            + $"({read / (1 << 20)} MB read ahead by {readers} readers)"
             + DeviceSummary(backend));
+    }
+
+    /// <summary>Uploads <paramref name="groups"/> to <paramref name="backend"/> in order while up to <paramref name="readers"/> threads read
+    /// their mapped bytes ahead of the uploads (<see cref="MappedTensorPrefetch"/>), and returns the bytes read ahead. Each group is uploaded
+    /// once its own bytes are read, as one device allocation when <paramref name="grouped"/>.</summary>
+    /// <remarks>An upload reads a mapped weight on one thread, which a network volume serves far slower than several. One call reads ahead
+    /// at most its own groups (one layer's weights), so the page cache holds a layer, not a stage. The readers' process-wide gate is released
+    /// before the last upload. Zero readers, or weights with no file extent, upload as without the read-ahead.</remarks>
+    internal static long PreloadGroups(IBackend backend, IReadOnlyList<IReadOnlyList<Tensor>> groups, int readers, bool grouped)
+    {
+        List<Tensor> all = [.. groups.SelectMany(g => g)];
+        using MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin(all, readers);
+        long read = 0;
+        int next = 0;
+        for (int g = 0; g < groups.Count; g++)
+        {
+            IReadOnlyList<Tensor> group = groups[g];
+            for (int end = next + group.Count; next < end; next++) batch.WaitFor(next);
+            if (g == groups.Count - 1)
+            {
+                read = batch.Finish();
+                batch.Dispose();
+            }
+            if (grouped) backend.PreloadWeightGroups([group]);
+            else backend.PreloadWeights(group);
+        }
+        return read;
     }
 
     /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB, kept

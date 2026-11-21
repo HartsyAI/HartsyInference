@@ -44,8 +44,15 @@ def write_ref(folder: Path, layers: range, positions: int = TOKENS, tokens: list
         np.save(folder / "logits_last.npy", logits)
 
 
-def write_fed(folder: Path, tokens: list[int], argmax: int) -> None:
-    (folder / "tokens.json").write_text(json.dumps({"tokens": tokens, "argmax_after_last": argmax}), encoding="utf-8")
+def write_fed(folder: Path, tokens: list[int], argmax: int, choices: list[tuple[int, int, float]] | None = None) -> None:
+    fed: dict = {"tokens": tokens, "argmax_after_last": argmax}
+    if choices is not None:
+        fed["choices"] = [{"position": p, "argmax": a, "margin": m} for p, a, m in choices]
+    (folder / "tokens.json").write_text(json.dumps(fed), encoding="utf-8")
+
+
+def write_choices(folder: Path, argmax: list[int], margin: list[float]) -> None:
+    (folder / "choices.json").write_text(json.dumps({"argmax": argmax, "margin": margin}), encoding="utf-8")
 
 
 def run(ref: Path, eng: Path, *extra: str) -> subprocess.CompletedProcess[str]:
@@ -153,6 +160,44 @@ class DecodeStitchTests(unittest.TestCase):
             result = run(root / "ref", root / "eng")
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("argmax mismatch", result.stdout)
+
+    def choice_run(self, root: Path, engine_choices: list[tuple[int, int, float]], *extra: str) -> subprocess.CompletedProcess[str]:
+        write_ref(root / "ref", range(1), positions=6, tokens=self.FED, logits_argmax=7)
+        write_choices(root / "ref", argmax=[1, 2, 3, 40, 41, 7], margin=[1.0, 1.0, 1.0, 0.5, 0.002, 1.0])
+        write_engine(root / "eng", range(1), self.PARTS, positions=6)
+        write_fed(root / "eng", self.FED, argmax=7, choices=engine_choices)
+        return run(root / "ref", root / "eng", *extra)
+
+    def test_per_position_argmax_agreement_passes_and_is_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.choice_run(Path(tmp), [(3, 40, 0.5), (4, 41, 0.002), (5, 7, 1.0)])
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("per-position argmax: 3 of 3 compared positions agree", result.stdout)
+
+    def test_a_per_position_argmax_mismatch_fails_and_names_the_position(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.choice_run(Path(tmp), [(3, 99, 0.4), (4, 41, 0.002), (5, 7, 1.0)])
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("argmax mismatch, argmax after position 3: engine 99 (lead 0.4), reference 40 (lead 0.5)", result.stdout)
+            self.assertIn("per-position argmax: 2 of 3 compared positions agree", result.stdout)
+
+    def test_choice_margin_turns_a_near_tie_mismatch_into_a_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            choices = [(3, 40, 0.5), (4, 99, 0.3), (5, 7, 1.0)]
+            self.assertEqual(self.choice_run(Path(tmp) / "strict", choices).returncode, 1)
+            result = self.choice_run(Path(tmp) / "loose", choices, "--choice-margin", "0.01")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("near tie, argmax after position 4", result.stdout)
+
+    def test_choices_on_one_side_only_say_why_they_were_not_compared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(1), positions=6, tokens=self.FED, logits_argmax=7)
+            write_engine(root / "eng", range(1), self.PARTS, positions=6)
+            write_fed(root / "eng", self.FED, argmax=7, choices=[(5, 7, 1.0)])
+            result = run(root / "ref", root / "eng")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("per-position argmax not compared: the reference has no choices.json", result.stdout)
 
     def test_reference_layers_of_mixed_length_fail(self) -> None:
         # An interrupted shorter rerun into the same folder: layer 0 holds the 3-token prefill, layer 1 the full 6 positions.

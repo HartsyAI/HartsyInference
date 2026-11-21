@@ -13,7 +13,9 @@ flagged when the whole-stream cosine or any single position's cosine falls below
 The reference defines the positions compared: the first T engine positions, where T is the reference's token count. An engine dump
 that is shorter than the reference is an error. When the engine folder holds tokens.json (the harness writes it), its first T
 tokens must equal the reference's meta.json tokens, and when the reference ran with --logits over exactly the fed sequence, the
-reference's last-position argmax must equal the engine's argmax after its last fed token.
+reference's last-position argmax must equal the engine's argmax after its last fed token. When the reference also holds choices.json
+and tokens.json lists the engine's choices, the argmax is compared at every position the engine produced logits for (the last prefill
+position and each decode step); --choice-margin turns a disagreement at a near tie into a note.
 
 With --strict it exits 1 on a flagged layer, a layer-set mismatch, a stitching or length error, a token mismatch or an argmax
 mismatch. --expect-layers N requires exactly layers 0..N-1 on both sides; --expect-tokens N requires the reference to cover N
@@ -188,7 +190,41 @@ def layer_set_errors(ref_layers: set[int], eng_layers: set[int], expect: int | N
     return errors
 
 
-def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int, exact_length: bool) -> tuple[list[str], list[str]]:
+def choice_errors(ref_dir: Path, fed: dict, choice_margin: float) -> tuple[list[str], list[str]]:
+    """The engine's argmax at each position it produced logits for (tokens.json "choices") against the reference's argmax there
+    (choices.json); returns (errors, notes). A disagreement is a note, not an error, when either side's lead over its runner-up is at
+    most choice_margin."""
+    choices_path = ref_dir / "choices.json"
+    engine = list(fed.get("choices") or [])
+    if not choices_path.exists() or not engine:
+        missing = "the reference has no choices.json (run reference.py with --logits)" if engine else "tokens.json has no choices"
+        return [], [f"per-position argmax not compared: {missing}"]
+    ref = json.loads(choices_path.read_text(encoding="utf-8"))
+    errors: list[str] = []
+    notes: list[str] = []
+    compared = agreed = 0
+    for choice in engine:
+        pos = int(choice["position"])
+        if pos >= len(ref["argmax"]):
+            continue
+        compared += 1
+        ref_argmax, ref_margin = int(ref["argmax"][pos]), float(ref["margin"][pos])
+        eng_argmax, eng_margin = int(choice["argmax"]), float(choice["margin"])
+        if ref_argmax == eng_argmax:
+            agreed += 1
+            continue
+        line = (f"argmax after position {pos}: engine {eng_argmax} (lead {eng_margin:.4g}), "
+                f"reference {ref_argmax} (lead {ref_margin:.4g})")
+        if min(ref_margin, eng_margin) <= choice_margin:
+            notes.append(f"near tie, {line}")
+        else:
+            errors.append(f"argmax mismatch, {line}")
+    notes.append(f"per-position argmax: {agreed} of {compared} compared positions agree")
+    return errors, notes
+
+
+def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int, exact_length: bool,
+                    choice_margin: float = 0.0) -> tuple[list[str], list[str]]:
     """Token and argmax checks against tokens.json and meta.json; returns (errors, notes). With exact_length (--expect-tokens),
     a fed sequence longer or shorter than the reference is an error rather than a note."""
     errors: list[str] = []
@@ -221,7 +257,8 @@ def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int, exact_length:
             notes.append(f"argmax after the last position: {eng_argmax} on both sides")
         else:
             errors.append(f"argmax mismatch after the last position: engine {eng_argmax}, reference {ref_argmax}")
-    return errors, notes
+    more_errors, more_notes = choice_errors(ref_dir, fed, choice_margin)
+    return errors + more_errors, notes + more_notes
 
 
 def main() -> int:
@@ -245,6 +282,9 @@ def main() -> int:
                    help="the same for MoE routing (router_gaps.json); separate because every token routes in every MoE layer")
     p.add_argument("--max-tie-fraction", type=float, default=0.05,
                    help="with --tie-margin, an error when more than this fraction of either gap file's positions would be left out")
+    p.add_argument("--choice-margin", type=float, default=0.0,
+                   help="a per-position argmax disagreement is a note, not an error, when either side's top logit leads its "
+                        "runner-up by at most this much (logit units; both leads are printed)")
     p.add_argument("--explain", action="store_true",
                    help="list each position that falls below the per-position threshold, at its first such layer, with the top-k gaps there")
     args = p.parse_args()
@@ -351,7 +391,8 @@ def main() -> int:
         if short:
             errors.append(f"reference layers {short} do not cover {args.expect_tokens} positions")
     if ref_tokens is not None:
-        seq_errors, notes = sequence_errors(ref_dir, eng_dir, ref_tokens, exact_length=args.expect_tokens is not None)
+        seq_errors, notes = sequence_errors(ref_dir, eng_dir, ref_tokens, exact_length=args.expect_tokens is not None,
+                                             choice_margin=args.choice_margin)
         if engine_longest > ref_tokens:
             notes.append(f"the engine covers {engine_longest} positions; compared the first {ref_tokens}")
         errors += seq_errors
