@@ -80,6 +80,12 @@ public static partial class EngineKnobs
         Bool("diagnostics.vkValidation", false, KnobScope.Construction, KnobDomain.Diagnostics,
             "Enables VK_LAYER_KHRONOS_validation when the layer is present.");
 
+    /// <summary>Holds one idle Vulkan instance for the life of the process, so destroying a backend never destroys the
+    /// process's last instance. Off is the behaviour before it, kept to reproduce the driver crash it avoids.</summary>
+    public static readonly Knob<bool> VkKeepInstance =
+        Bool("diagnostics.vkKeepInstance", true, KnobScope.Construction, KnobDomain.Diagnostics,
+            "Holds one idle Vulkan instance for the life of the process, so destroying a backend never destroys the process's last instance; off reproduces a driver crash on backend teardown.");
+
     /// <summary>Enables per-op host-side Vulkan timing and buffer create/destroy accounting.</summary>
     public static readonly Knob<bool> VkProfile =
         Bool("diagnostics.vkProfile", false, KnobScope.Construction, KnobDomain.Diagnostics,
