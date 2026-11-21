@@ -948,6 +948,17 @@ run-by-run history is in git and in `ROADMAP.md` §3.
 - **Graph/step capture is model-dependent.** A Vulkan-native capture mechanism (persistent command pool +
   reusable command buffer + fence) was proven correct in isolation but did not fit the model's memory
   profile. Prove the mechanism separately from proving it helps.
+- **`dotnet test` prints `Passed!` after the test host crashes.** Open, cause not found. On the RTX 3060 the LLM
+  `GpuIntegration` lane twice ended after about 10 seconds with `Passed! - Failed: 0, Passed: 100, Skipped: 19,
+  Total: 119` where the build lists 345 tests (2026-11-21, about 2 of 25 runs, on two different branches). The
+  console also said `The active test run was aborted. Reason: Test host process crashed` and `Test Run Aborted.`,
+  further up, and the TRX summary's outcome was `Failed`. Nothing a grep for failed tests looks at says so. The
+  tests that had finished were the same set both times (the ERNIE-5, INT8 and block-op parity classes); none of
+  the attention parity classes had started. Just before the crash the log has `VulkanPipelineCache: failed to
+  persist cache ... being used by another process`, with several CUDA and Vulkan backends alive in the one
+  process. No dump was taken, so which call crashed is unknown; the next step is the lane under `--blame-crash`
+  until it recurs. **Until then, check a lane's total against `dotnet test --list-tests` and search its output for
+  `aborted`; a pass line alone is not a pass.**
 
 ### GEMM acceleration: what was tried, and what holds
 
