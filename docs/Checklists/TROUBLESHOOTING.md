@@ -970,9 +970,12 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     exception and nothing on stderr. Windows records each one in the Application log (source `.NET Runtime`, event
     1026, `testhost.exe`, exception code `c0000005`). 32 crashed hosts were recorded from inside the process (see
     below), every one with this signature.
-  - **What sets it off.** A process that creates a `VulkanBackend`, runs cooperative-matrix attention on it
-    (`ScaledDotProductAttention` at head dim 64 with the F16 permission) and destroys it, again and again, with no
-    other Vulkan instance alive. One process per variant: that loop ended the process in 9 of 9 processes, at
+  - **What sets it off.** A process that creates a `VulkanBackend`, has it compile the cooperative-matrix
+    attention pipelines (`ScaledDotProductAttention` at head dim 64 with the F16 permission, on a pipeline cache
+    that does not already hold them) and destroys it, again and again, with no other Vulkan instance alive. The
+    cache matters: on the machine's shared cache file the lane crashed about 2 of 25 times, on a private directory
+    that started empty 10 of 12, and a loop that crashed 5 of 5 stopped crashing (0 of 2) once the shared file held
+    its pipelines, then crashed 5 of 5 again when every round was given an empty directory of its own. One process per variant: that loop ended the process in 9 of 9 processes, at
     rounds 4 to 35, usually with the main thread inside `vkDestroyDevice`, twice while the next backend was being
     created, once during the next attention call. A pause of 1 s before the destroy did not help. The loop
     survived with only an instance (100 rounds), an instance and a device (100), a backend that ran nothing (100),
@@ -980,14 +983,14 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     for 200 cooperative-matrix calls. Reading the output back every round made it rarer: at 40 rounds the host
     crashed in 1 of 3 processes with the read and 3 of 5 without.
   - **What stops it.** One more Vulkan instance alive in the process. With an idle `VulkanInstance` held for the
-    whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it had cost up
-    to 1.8 s. So `VulkanInstance` creates one more instance before the first and never destroys it
+    whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it had cost up to
+    1.8 s. So `VulkanInstance` creates one more instance before the first and never destroys it
     (`VulkanInstance.HoldsProcessInstance`); `diagnostics.vkKeepInstance` turns that off, and a process that never
-    touches Vulkan (no backend, no `VulkanContext` device count, which `auto` asks for only when CUDA is not
-    taken) never creates it. `VulkanBackendTeardownTests` is the loop: alone in its process it crashed the host in
-    5 of 5 runs with the setting off and 0 of 5 with it on. That the driver tears process-wide state down with a
-    process's last instance is the inference from those runs, not something seen in the driver. Not checked: other
-    driver versions, the RTX 4090, other vendors, Linux.
+    touches Vulkan (no backend, no `VulkanContext` device count, which `auto` asks for only when CUDA is not taken)
+    never creates it. `VulkanBackendTeardownTests` is the loop, every round on an empty cache directory of its own:
+    alone in its process it crashed the host in 5 of 5 runs with the setting off and 0 of 5 with it on. That the
+    driver tears process-wide state down with a process's last instance is the inference from those runs, not
+    something seen in the driver. Not checked: other driver versions, the RTX 4090, other vendors, Linux.
   - **Leads that did not hold** (the first was reported as the cause before it was checked):
     - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
       ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
