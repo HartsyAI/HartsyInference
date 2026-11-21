@@ -6,7 +6,8 @@ public enum VulkanTiledAttention
     /// <summary>None: the scalar kernel up to its head dim and the materialized row above it.</summary>
     Off,
 
-    /// <summary>Every call up to the scalar kernel's head dim; above it, only a call the materialized row cannot tile.</summary>
+    /// <summary>Every call up to the scalar kernel's head dim; above it, only a call with a bias whose score matrix is past
+    /// the size the materialized row holds whole.</summary>
     Auto,
 
     /// <summary>Every call the kernel serves, at every head dim.</summary>
