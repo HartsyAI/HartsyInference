@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
@@ -14,7 +15,10 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// the canonical one, the card whichever the arithmetic produced); keys past the valid ones hold zero bytes and scale 1.
 /// Output with u8 P: bit-equal to the reference replayed on the kernel's own exp2 (an F16 output: to that rounded to
 /// F16), a NaN matching any NaN. Output with F16 P, which sums on the tensor cores in another order: relative L2 at most
-/// 1e-5 against the reference on its own exp2.</para></summary>
+/// 1e-5 against the reference on its own exp2.</para>
+/// <para>Most cases run 64 to 333 tokens, the route cases with <c>numerics.int8AttnV2MinTokens</c> lowered to 64. The
+/// cases named for the default admitted size run 1,024 query rows and 1,024 or 1,100 keys, the route ones with that knob
+/// untouched, under the same bounds (fixed before their first run too).</para></summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
 public sealed class Int8AttentionRotationCudaTests(ITestOutputHelper output)
@@ -224,6 +228,91 @@ public sealed class Int8AttentionRotationCudaTests(ITestOutputHelper output)
         }
 
         Assert.False(rotated.AsSpan().SequenceEqual(plain), "the rotated and unrotated rows wrote the same output");
+    }
+
+    /// <summary>At a size the rows admit by default (1,024 query rows; 1,100 keys, so eight whole key tiles and a short
+    /// one): bytes, scales, means and the u8 output for both transforms. Past 256 keys the pinned rule picks only the
+    /// signed 128-point transform, so the 4-point one is reachable at this size through the hook alone.</summary>
+    [CudaTheory]
+    [InlineData(Int8Rotation.H4, false)]
+    [InlineData(Int8Rotation.H4, true)]
+    [InlineData(Int8Rotation.SignedH128, false)]
+    [InlineData(Int8Rotation.SignedH128, true)]
+    public void OperandsAndOutputAtTheDefaultAdmittedSizeEqualTheReference(Int8Rotation rotation, bool f16)
+    {
+        if (!TryOpen(out CudaBackend cuda)) return;
+        using CudaBackend owner = cuda;
+        const int heads = 2, queryRows = 1024, keys = 1100;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        using Tensor query = Random(new TensorShape(1, heads, queryRows, HeadDim), 81, 0f, 0f, dtype);
+        using Tensor key = Random(new TensorShape(1, heads, keys, HeadDim), 82, 3f, 6f, dtype);
+        using Tensor value = Random(key.Shape, 83, 1f, 0f, dtype);
+        using Tensor result = new(query.Shape, dtype);
+        using Tensor referenceResult = new(query.Shape, DType.F32);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(result, query, key, value, null, Scale, false);
+        AttentionCall reference = call with { Output = AttentionOperand.HeadMajor(referenceResult) };
+        Int8AttentionV2Pv pv = Int8AttentionV2Pv.U8TileScales;
+        Int8AttentionV2Options options = Options(pv, rotation);
+        string what = $"{rotation}, {dtype}, {queryRows} rows, {keys} keys";
+
+        Int8AttentionV2Operands expected = Int8AttentionV2Reference.Quantize(in call, options);
+        Int8V2Readback gpu = cuda.RunInt8AttentionV2ForTest(in call, pv, 64, null, rotation);
+        AssertOperands(expected, gpu, heads, queryRows, keys, tileScales: true, what);
+
+        long start = Stopwatch.GetTimestamp();
+        Int8AttentionV2Reference.Run(in reference, Replayed(cuda, in reference, options));
+        output.WriteLine($"{what}: the reference twice and its exp2 table took {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s");
+        float[] replayed = referenceResult.AsReadOnlySpan<float>().ToArray();
+        if (f16)
+            for (int i = 0; i < replayed.Length; i++) replayed[i] = (float)(Half)replayed[i];
+        AssertFloats(replayed, Floats(gpu.Output, dtype), $"output on the kernel's exp2, {what}");
+    }
+
+    /// <summary>The public route with only <c>numerics.int8AttnV2</c> and <c>numerics.int8AttnV2Rotate</c> set, so the
+    /// row admits the call at its default size: 1,024 query rows and keys, F32 and F16 operands, and four query heads
+    /// on two key heads. The INT8 v2 row runs once and the output is the reference's with the pinned transform.</summary>
+    [CudaTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void ACallOfTheDefaultAdmittedSizeRotatesOnTheRow(bool f16, bool grouped)
+    {
+        if (!TryOpen(out CudaBackend probe)) return;
+        probe.Dispose();
+        const int tokens = 1024, kvHeads = 2;
+        int heads = grouped ? 4 : 2;
+        DType dtype = f16 ? DType.F16 : DType.F32;
+        Assert.Equal(Int8Rotation.SignedH128, Int8AttentionRotation.Select(HeadDim, tokens));
+        using Tensor query = Random(new TensorShape(1, heads, tokens, HeadDim), 91, 0f, 0f, dtype);
+        using Tensor key = Random(new TensorShape(1, kvHeads, tokens, HeadDim), 92, 3f, 6f, dtype);
+        using Tensor value = Random(key.Shape, 93, 1f, 0f, dtype);
+        using Tensor result = new(query.Shape, dtype);
+        using Tensor referenceResult = new(query.Shape, DType.F32);
+        AttentionCall reference = AttentionCall.FromScaledDotProductAttention(referenceResult, query, key, value, null, Scale, false);
+        string what = $"{dtype}, {heads} heads on {kvHeads}, {tokens} tokens";
+
+        using IDisposable policy = KnobProfile.Create("int8v2-rotation-default-size")
+            .With(EngineKnobs.Int8AttnV2, true).With(EngineKnobs.Int8AttnV2Rotate, true).Push();
+        Assert.Equal(tokens, EngineKnobs.Int8AttnV2MinTokens.Value);
+        using CudaBackend cuda = new(0, CudaPtxDirectory.Resolve());
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(64);
+        cuda.ScaledDotProductAttention(result, query, key, value, null, Scale);
+        cuda.Sync();
+        AttentionEvidenceEvent[] executions = evidence.Snapshot().Where(e => e.Kind == AttentionEvidenceKind.Execution).ToArray();
+        Assert.Equal(1, cuda.Int8AttentionV2ExecutionCount);
+        Assert.Contains(executions, e => e.Implementation == "int8.v2" && e.KvHeads == heads);
+        Assert.Equal(grouped, executions.Any(e => e.Implementation == "widen.preferred"));
+
+        Int8AttentionV2Reference.Run(in reference, Replayed(cuda, in reference, Options(Int8AttentionV2Pv.U8TileScales, Int8Rotation.Pinned)));
+        float[] replayed = referenceResult.AsReadOnlySpan<float>().ToArray();
+        float[] actual = new float[replayed.Length];
+        if (f16)
+        {
+            ReadOnlySpan<Half> halves = result.AsReadOnlySpan<Half>();
+            for (int i = 0; i < replayed.Length; i++) (replayed[i], actual[i]) = ((float)(Half)replayed[i], (float)halves[i]);
+        }
+        else result.AsReadOnlySpan<float>().CopyTo(actual);
+        AssertFloats(replayed, actual, $"output on the kernel's exp2 through the row, {what}");
     }
 
     /// <summary>The transforms the reference refuses at head dim 128 are refused here, before any launch.</summary>
