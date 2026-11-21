@@ -34,6 +34,18 @@ public sealed partial class CpuBackend
     }
 
     /// <inheritdoc/>
+    /// <inheritdoc/>
+    public bool HasDecodeMerge => true;
+
+    /// <inheritdoc/>
+    /// <remarks>The reference is the CPU's merge.</remarks>
+    public void DecodeTreeMerge(Tensor merged, Tensor prefixOutput, Tensor prefixLse, Tensor query, Tensor key, Tensor value,
+        ReadOnlySpan<int> mask, float? scale = null)
+    {
+        DecodeMergeReference.CheckOperands(merged, prefixOutput, prefixLse, query, key, value, mask, scale);
+        DecodeMergeReference.TreeMerge(merged, prefixOutput, prefixLse.AsReadOnlySpan<float>(), query, key, value, mask, scale);
+    }
+
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
         AttentionCall prepared = AttentionExecution.Prepare(in call);
