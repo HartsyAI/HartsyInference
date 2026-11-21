@@ -36,8 +36,8 @@ public sealed class VulkanRoundedOpsTests
                     x[i] = random.NextSingle() * 50f;
                     y[i] = 127f;
                     break;
-                case 1:   // the routing stages' case: a sum over a small count
-                    x[i] = (random.NextSingle() * 2f - 1f) * 300f;
+                case 1:   // the routing stages' divides: a sum over a small count (non-negative, so its root is checked too)
+                    x[i] = random.NextSingle() * 300f;
                     y[i] = random.Next(1, 65);
                     break;
                 case 2:   // a reciprocal
@@ -51,6 +51,10 @@ public sealed class VulkanRoundedOpsTests
                 case 4:   // tiny over large, large over tiny
                     x[i] = MathF.Pow(2f, random.Next(-120, 120)) * (1f + random.NextSingle());
                     y[i] = MathF.Pow(2f, random.Next(-20, 20)) * (1f + random.NextSingle());
+                    break;
+                case 5:   // the routing stage's root: 1e-6 plus a spread over several decades
+                    x[i] = 1e-6f + MathF.Pow(10f, random.Next(-9, 3)) * random.NextSingle();
+                    y[i] = 1f + random.NextSingle();
                     break;
                 default:  // any positive finite bit patterns
                     x[i] = BitConverter.Int32BitsToSingle(random.Next(0x00800000, 0x7F000000));
@@ -72,13 +76,15 @@ public sealed class VulkanRoundedOpsTests
         int quotientMisses = 0, rootMisses = 0, rawQuotientMisses = 0, rawRootMisses = 0, firstQuotient = -1, firstRoot = -1;
         const int SubnormalOperands = 3;
         int[] quotientByClass = new int[8], rootByClass = new int[8], rawQuotientByClass = new int[8], rawRootByClass = new int[8];
+        int[] classSize = new int[8];
         for (int i = 0; i < count; i++)
         {
             int expectedQuotient = BitConverter.SingleToInt32Bits(x[i] / y[i]);
             // The root of a negative operand is a NaN on both sides; any NaN equals any other here.
             float hostRoot = MathF.Sqrt(x[i]);
             int expectedRoot = BitConverter.SingleToInt32Bits(hostRoot);
-            int operandClass = Math.Min(i % 8, 5);
+            int operandClass = Math.Min(i % 8, 6);
+            classSize[operandClass]++;
             bool asserted = operandClass != SubnormalOperands;
             if (BitConverter.SingleToInt32Bits(q[i]) != expectedQuotient)
             {
@@ -94,9 +100,9 @@ public sealed class VulkanRoundedOpsTests
             if (BitConverter.SingleToInt32Bits(rr[i]) != expectedRoot && !(float.IsNaN(rr[i]) && float.IsNaN(hostRoot))) { rawRootMisses++; rawRootByClass[operandClass]++; }
         }
         _output.WriteLine($"device divide: {rawQuotientMisses} of {count} differ from the rounded quotient; device sqrt: {rawRootMisses} of {count}");
-        string[] names = ["over 127", "over a small count", "reciprocal", "subnormal operand", "wide exponents", "any bits (3 of 8)"];
+        string[] names = ["over 127", "over a small count", "reciprocal", "subnormal operand", "wide exponents", "1e-6 plus a spread", "any bits"];
         for (int c = 0; c < names.Length; c++)
-            _output.WriteLine($"class {names[c]}: divRn {quotientByClass[c]}, sqrtRn {rootByClass[c]}, device divide {rawQuotientByClass[c]}, device sqrt {rawRootByClass[c]} of {(c == 5 ? 3 : 1) * count / 8}");
+            _output.WriteLine($"class {names[c]}: divRn {quotientByClass[c]}, sqrtRn {rootByClass[c]}, device divide {rawQuotientByClass[c]}, device sqrt {rawRootByClass[c]} of {classSize[c]}");
         Assert.True(quotientMisses == 0, $"divRn: {quotientMisses} of {count} differ; element {firstQuotient}: "
             + $"{(firstQuotient < 0 ? 0f : x[firstQuotient]):R} / {(firstQuotient < 0 ? 0f : y[firstQuotient]):R} gave "
             + $"{(firstQuotient < 0 ? 0f : q[firstQuotient]):R}, expected {(firstQuotient < 0 ? 0f : x[firstQuotient] / y[firstQuotient]):R}");

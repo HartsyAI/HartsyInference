@@ -1,5 +1,7 @@
 // Correctly rounded fp32 square root, built on div_rn.glsl's exact residual. Its own file so that shaders which only
 // divide keep their SPIR-V: an include is compiled into every shader that names it, whether its functions are called or not.
+#ifndef SQRT_RN_GLSL
+#define SQRT_RN_GLSL
 
 #include "div_rn.glsl"
 
@@ -23,3 +25,5 @@ float sqrtRn(float a) {
     }
     return ldexp(best, e / 2);
 }
+
+#endif

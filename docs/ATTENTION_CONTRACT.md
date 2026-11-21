@@ -296,7 +296,8 @@ The planner reproduces these until the row that owns each is rewritten.
   their square root through `divRn` and `sqrtRn` (`Shaders/div_rn.glsl`, `sqrt_rn.glsl`), because a device's own
   need not be correctly rounded and on an RTX 3060 are not: about a third of sampled quotients and a quarter of sampled
   roots differ from the rounded result. An operand that is itself subnormal is read as zero by that device, helpers
-  included.
+  included, and no routing test covers a subnormal sum or spread, so the match with the reference stays conditional
+  on that.
   The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
   so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
   has it. No model calls the primitive yet, and it has no timing.
