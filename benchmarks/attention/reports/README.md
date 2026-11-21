@@ -44,4 +44,5 @@ Raw binaries, models, tensors, full locks and captures remain in the external ar
 identified by the report; retain it through the handoff and exit review.
 
 Other reports in this folder: the [consumer audit](consumer-audit.md) of attention computed outside the backend
-entry points (plan items 14 to 17).
+entry points (plan items 14 to 17), and the [Vulkan tiled F32 A/B](vulkan-tiled-f32-ab.md), the descriptive RTX 3060
+comparison that `numerics.vkTiledAttention` waits on.
