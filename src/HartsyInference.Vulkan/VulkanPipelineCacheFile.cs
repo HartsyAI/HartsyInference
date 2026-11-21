@@ -30,7 +30,8 @@ internal enum VulkanPipelineCacheLoadStatus
 }
 
 /// <summary>A load's outcome; <see cref="Blob"/> is empty unless the status is <see cref="VulkanPipelineCacheLoadStatus.Loaded"/>.</summary>
-internal readonly record struct VulkanPipelineCacheLoad(VulkanPipelineCacheLoadStatus Status, ReadOnlyMemory<byte> Blob)
+/// <param name="Detail">The I/O error's message when the status is <see cref="VulkanPipelineCacheLoadStatus.Unreadable"/>.</param>
+internal readonly record struct VulkanPipelineCacheLoad(VulkanPipelineCacheLoadStatus Status, ReadOnlyMemory<byte> Blob, string? Detail = null)
 {
     /// <summary>True when the file is whole but names another device or driver build, as after a driver update.</summary>
     public bool IsForAnotherDevice => Status is VulkanPipelineCacheLoadStatus.VendorMismatch
@@ -77,8 +78,7 @@ internal static class VulkanPipelineCacheFile
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Logs.Verbose($"VulkanPipelineCache: could not read {path}: {ex.Message}");
-            return new(VulkanPipelineCacheLoadStatus.Unreadable, default);
+            return new(VulkanPipelineCacheLoadStatus.Unreadable, default, ex.Message);
         }
         return Parse(file, expected);
     }
@@ -162,9 +162,11 @@ internal static class VulkanPipelineCacheFile
             string? directory = Path.GetDirectoryName(path);
             if (string.IsNullOrEmpty(directory)) return;
             DateTime cutoff = DateTime.UtcNow - StaleTempAge;
-            foreach (string temp in Directory.EnumerateFiles(directory, Path.GetFileName(path) + ".*" + TempSuffix))
+            foreach (FileInfo temp in new DirectoryInfo(directory).EnumerateFiles(Path.GetFileName(path) + ".*" + TempSuffix))
             {
-                if (File.GetLastWriteTimeUtc(temp) < cutoff) TryDelete(temp);
+                // A name that vanished since the listing reads as year 1601, and its writer may be reusing it.
+                temp.Refresh();
+                if (temp.Exists && temp.LastWriteTimeUtc < cutoff) TryDelete(temp.FullName);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

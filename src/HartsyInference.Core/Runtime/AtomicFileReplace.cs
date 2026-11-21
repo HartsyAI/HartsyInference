@@ -22,7 +22,7 @@ internal static partial class AtomicFileReplace
     public static void Move(string temp, string path)
     {
         if (OperatingSystem.IsWindows() && Environment.Is64BitProcess && TryPosixRename(temp, Path.GetFullPath(path))) return;
-        // Also the path for a volume without POSIX rename; a failure here carries the reason.
+        // 32-bit processes and volumes without POSIX rename land here, where an open handle on the target makes it throw.
         File.Move(temp, path, overwrite: true);
     }
 

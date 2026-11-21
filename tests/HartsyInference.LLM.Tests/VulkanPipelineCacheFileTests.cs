@@ -159,7 +159,9 @@ public sealed class VulkanPipelineCacheFileTests : IDisposable
         Assert.Equal(VulkanPipelineCacheLoadStatus.UnsupportedVersion, VulkanPipelineCacheFile.Load(_path, Device).Status);
 
         Directory.CreateDirectory(_path + ".d");
-        Assert.Equal(VulkanPipelineCacheLoadStatus.Unreadable, VulkanPipelineCacheFile.Load(_path + ".d", Device).Status);
+        VulkanPipelineCacheLoad unreadable = VulkanPipelineCacheFile.Load(_path + ".d", Device);
+        Assert.Equal(VulkanPipelineCacheLoadStatus.Unreadable, unreadable.Status);
+        Assert.False(string.IsNullOrEmpty(unreadable.Detail));
     }
 
     /// <summary>Two threads replace one file 300 times each with blobs of different sizes while a third loads it.

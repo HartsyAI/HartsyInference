@@ -29,6 +29,10 @@ public sealed class VulkanPipelineCache : IDisposable
             Logs.Info($"VulkanPipelineCache: {_cachePath} was written for another device or driver build "
                 + $"({load.Status}); starting with an empty cache.");
         }
+        else if (load.Status == VulkanPipelineCacheLoadStatus.Unreadable)
+        {
+            Logs.Warning($"VulkanPipelineCache: could not read {_cachePath} ({load.Detail}); starting with an empty cache.");
+        }
         else if (load.Status is not (VulkanPipelineCacheLoadStatus.Loaded or VulkanPipelineCacheLoadStatus.Missing))
         {
             Logs.Warning($"VulkanPipelineCache: {_cachePath} failed its integrity check ({load.Status}); "

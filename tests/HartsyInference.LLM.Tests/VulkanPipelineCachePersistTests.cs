@@ -53,8 +53,13 @@ public sealed class VulkanPipelineCachePersistTests
             {
                 byte[] before = File.ReadAllBytes(path);
                 VulkanBackend fourth = new(null, null, dir);
-                RunOneKernel(fourth);
-                using (FileStream held = new(path, FileMode.Open, FileAccess.Read, FileShare.None))
+                try
+                {
+                    RunOneKernel(fourth);
+                    using FileStream held = new(path, FileMode.Open, FileAccess.Read, FileShare.None);
+                    fourth.Dispose();
+                }
+                finally
                 {
                     fourth.Dispose();
                 }
