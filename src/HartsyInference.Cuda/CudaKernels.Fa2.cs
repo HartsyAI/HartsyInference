@@ -3,7 +3,7 @@ namespace HartsyInference.Cuda;
 // Causal grouped-query FlashAttention-2 for LLM prefill (Kernels/lm/flash_attn_causal_f16.cu): F16 tensor cores, F32 accumulation.
 public sealed partial class CudaKernels
 {
-    private CudaModule? _fa2Module, _decodeGqaModule, _decodeGqaPagedModule, _kvScatterF16Module, _normFastModule;
+    private CudaModule? _fa2Module, _decodeGqaModule, _decodeGqaPagedModule, _decodeLengthsModule, _decodeMergeModule, _kvScatterF16Module, _normFastModule;
     private readonly nint[] _normFast = new nint[6], _addNormFast = new nint[6];   // index log2(K): K = 2, 4, 8, 16, 32 -> 1..5
 
     /// <summary>Test hook: route the RMSNorm Q8 launchers to the reference kernels even when the fast ones loaded.</summary>
@@ -26,6 +26,34 @@ public sealed partial class CudaKernels
     /// <summary>True when flash_attn_decode_gqa_paged.ptx loaded: the grouped-query decode kernel that follows a page table.
     /// A build without the file leaves this false, and a paged call is then gathered into a contiguous buffer.</summary>
     public bool HasDecodeGqaPaged => _decPagedD128 != 0 && _decPagedD64 != 0;
+
+    // Index: cache type (0 = F32, 1 = F16, 2 = BF16) * 2 + (head dim 128 ? 0 : 1).
+    private readonly nint[] _decLengths = new nint[6];
+    private nint _decLengthsCombine;
+
+    /// <summary>True when flash_attn_decode_lengths.ptx loaded: the grouped-query decode that takes a key length per sequence
+    /// and returns the LSE, over an F32 cache at least. A build without the file leaves this false, and such a call is then
+    /// refused.</summary>
+    public bool HasDecodeLengths => _decLengthsCombine != 0 && _decLengths[0] != 0 && _decLengths[1] != 0;
+
+    /// <summary>Whether the loaded lengths decode reads keys and values of <paramref name="cache"/>: F32, and F16 and BF16
+    /// when the PTX file has those entry points. A file built before them leaves the half types unread, and a call over
+    /// such a cache is then refused; the F32 kernel and the rest of the backend are unaffected.</summary>
+    public bool DecodeLengthsReads(HartsyInference.Core.Tensors.DType cache)
+    {
+        int type = DecodeLengthsCacheIndex(cache);
+        return type >= 0 && _decLengths[type * 2] != 0 && _decLengths[type * 2 + 1] != 0;
+    }
+
+    private static int DecodeLengthsCacheIndex(HartsyInference.Core.Tensors.DType cache) =>
+        cache == HartsyInference.Core.Tensors.DType.F32 ? 0 : cache == HartsyInference.Core.Tensors.DType.F16 ? 1
+        : cache == HartsyInference.Core.Tensors.DType.BF16 ? 2 : -1;
+
+    private nint _decMerge;
+
+    /// <summary>True when flash_attn_decode_merge.ptx loaded: the speculative-decode merge. A build without the file leaves
+    /// this false, and a merge is then refused.</summary>
+    public bool HasDecodeMerge => _decMerge != 0;
 
     /// <summary>Head dimension and query-head group the grouped-query decode kernel is built for.</summary>
     public static bool DecodeGqaSupports(int d, int group) => (d == 128 || d == 64) && group >= 1 && group <= 16;
@@ -86,6 +114,27 @@ public sealed partial class CudaKernels
             _decodeGqaPagedModule = LoadOwnedModule(paged);
             _decPagedD128 = _decodeGqaPagedModule.GetFunction("lm_fa_decode_gqa_paged_f32_d128");
             _decPagedD64 = _decodeGqaPagedModule.GetFunction("lm_fa_decode_gqa_paged_f32_d64");
+        }
+        string lengths = Ptx("flash_attn_decode_lengths");
+        if (CanLoad(lengths))
+        {
+            _decodeLengthsModule = LoadOwnedModule(lengths);
+            string[] types = ["f32", "f16", "bf16"];
+            for (int t = 0; t < types.Length; t++)
+            {
+                // The half-type entry points came after the F32 ones: a PTX file built before them lacks them, and their
+                // handles then stay at zero instead of failing the backend's construction. The F32 ones are required.
+                string d128 = $"lm_fa_decode_lengths_{types[t]}_d128", d64 = $"lm_fa_decode_lengths_{types[t]}_d64";
+                _decLengths[t * 2] = t == 0 ? _decodeLengthsModule.GetFunction(d128) : _decodeLengthsModule.TryGetFunction(d128);
+                _decLengths[t * 2 + 1] = t == 0 ? _decodeLengthsModule.GetFunction(d64) : _decodeLengthsModule.TryGetFunction(d64);
+            }
+            _decLengthsCombine = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_combine");
+        }
+        string merge = Ptx("flash_attn_decode_merge");
+        if (CanLoad(merge))
+        {
+            _decodeMergeModule = LoadOwnedModule(merge);
+            _decMerge = _decodeMergeModule.GetFunction("lm_fa_decode_merge_f32");
         }
     }
 
@@ -170,6 +219,57 @@ public sealed partial class CudaKernels
         a[9] = &offA; a[10] = &scaleA; a[11] = &capA; a[12] = &winA; a[13] = &gA; a[14] = &chunkA; a[15] = &tableA; a[16] = &shiftA;
         a[17] = &kA; a[18] = &vA;
         CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, 1, 256, 1, 1, (uint)DecodeSharedBytes(d, kvGroup, f16Kv: false), stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>Partial states of a decode whose sequences have their own key lengths: one block per (split, KV head, sequence
+    /// and query row). Query row <c>r</c> of sequence <c>b</c> reads the first <c>min(lengths[b], capacity)</c> rows of its
+    /// cache, or under the causal rule the rows up to position <c>length − rows + r</c>.</summary>
+    /// <param name="lengths">Device pointer to one I32 length per sequence.</param>
+    /// <param name="cache">The type of the keys and values: F32, F16 or BF16.</param>
+    public unsafe void LaunchFlashDecodeLengths(ulong partialM, ulong partialL, ulong partialAcc, ulong q, ulong k, ulong v, ulong lengths,
+        int batch, int rows, int hq, int d, int hkv, int capacity, int kvGroup, bool causal, float scale, int splits, int chunk,
+        HartsyInference.Core.Tensors.DType cache, nint stream)
+    {
+        int type = DecodeLengthsCacheIndex(cache);
+        nint fn = type < 0 ? 0 : _decLengths[type * 2 + (d == 128 ? 0 : 1)];
+        if (fn == 0 || !DecodeGqaSupports(d, kvGroup))
+            throw new InvalidOperationException($"flash_attn_decode_lengths has no kernel for head dim {d}, group {kvGroup}, a {cache} cache.");
+        ulong mA = partialM, lA = partialL, accA = partialAcc, qA = q, lenA = lengths, kA = k, vA = v;
+        int hqA = hq, hkvA = hkv, lkA = capacity, sA = rows, groupA = kvGroup, causalA = causal ? 1 : 0, gA = splits, chunkA = chunk;
+        float scaleA = scale;
+        void** a = stackalloc void*[16];
+        a[0] = &mA; a[1] = &lA; a[2] = &accA; a[3] = &qA; a[4] = &hqA; a[5] = &hkvA; a[6] = &lkA; a[7] = &lenA; a[8] = &sA;
+        a[9] = &groupA; a[10] = &causalA; a[11] = &scaleA; a[12] = &gA; a[13] = &chunkA; a[14] = &kA; a[15] = &vA;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, (uint)(batch * rows), 256, 1, 1,
+            (uint)DecodeSharedBytes(d, kvGroup, f16Kv: type != 0), stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>Merges the partial states <see cref="LaunchFlashDecodeLengths"/> wrote: the output as <c>[B, S, Hq × D]</c> and,
+    /// when <paramref name="lse"/> is not 0, each row's LSE as <c>[B, Hq, S]</c>.</summary>
+    public unsafe void LaunchFlashDecodeLengthsCombine(ulong output, ulong lse, ulong partialM, ulong partialL, ulong partialAcc, int batch,
+        int rows, int hq, int d, int splits, nint stream)
+    {
+        if (_decLengthsCombine == 0) throw new InvalidOperationException("flash_attn_decode_lengths.ptx not present in the Ptx folder.");
+        ulong oA = output, lseA = lse, mA = partialM, lA = partialL, accA = partialAcc;
+        int hqA = hq, sA = rows, dA = d, gA = splits;
+        void** a = stackalloc void*[9];
+        a[0] = &oA; a[1] = &lseA; a[2] = &mA; a[3] = &lA; a[4] = &accA; a[5] = &hqA; a[6] = &sA; a[7] = &dA; a[8] = &gA;
+        CudaDriverApi.cuLaunchKernel(_decLengthsCombine, (uint)((long)batch * rows * hq), 1, 1, (uint)d, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>The speculative-decode merge: one block per output row, in the <c>[B, S, Hq × D]</c> output's order.</summary>
+    /// <param name="mask">Device pointer to one I32 mask per step row.</param>
+    public unsafe void LaunchFlashDecodeMerge(ulong merged, ulong prefix, ulong lse, ulong q, ulong k, ulong v, ulong mask, int batch, int rows,
+        int hq, int hkv, int d, float scale, nint stream)
+    {
+        if (_decMerge == 0) throw new InvalidOperationException("flash_attn_decode_merge.ptx not present in the Ptx folder.");
+        ulong mA = merged, pA = prefix, lseA = lse, qA = q, kA = k, vA = v, maskA = mask;
+        int hqA = hq, hkvA = hkv, sA = rows, dA = d;
+        float scaleA = scale;
+        void** a = stackalloc void*[12];
+        a[0] = &mA; a[1] = &pA; a[2] = &lseA; a[3] = &qA; a[4] = &kA; a[5] = &vA; a[6] = &maskA; a[7] = &hqA; a[8] = &hkvA; a[9] = &sA;
+        a[10] = &dA; a[11] = &scaleA;
+        CudaDriverApi.cuLaunchKernel(_decMerge, (uint)((long)batch * rows * hq), 1, 1, 32, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Fused graph-decode QKV epilogue writing an F16 key/value cache (q stays F32).</summary>

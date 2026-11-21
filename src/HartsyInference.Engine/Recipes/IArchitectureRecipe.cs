@@ -1,4 +1,5 @@
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -52,6 +53,15 @@ public interface IArchitectureRecipe
 
     /// <summary>The official defaults for <paramref name="variant"/>; the default is the family-level <see cref="Defaults"/>.</summary>
     ImageDefaults DefaultsFor(ResolvedModelVariant? variant) => Defaults;
+
+    /// <summary>What shapes this family's prompt text: encoder kinds, format, negative handling and what the prompt may
+    /// carry. Declared only from a reviewed prompting guide (or the recipe's own encoder construction); the default
+    /// declares nothing, and a field left unset was not established, never "no". Generation settings stay in <see cref="Defaults"/>.</summary>
+    PromptProfile? Prompt => null;
+
+    /// <summary>The prompt profile of <paramref name="variant"/>; the default is the family-level <see cref="Prompt"/>.
+    /// A family overrides it where variants differ, such as a guidance-free build that takes no negative.</summary>
+    PromptProfile? PromptFor(ResolvedModelVariant? variant) => Prompt;
 
     /// <summary>What this family's activations cost at a given geometry, read from the checkpoint header without
     /// loading weights; the default describes nothing and the memory estimate falls back to a generic allowance.</summary>

@@ -50,6 +50,10 @@ public sealed record ArtifactIdentity
     /// as different SwarmUI classes (Qwen3-TTS base/custom/design). Absent variants use <see cref="SwarmClassId"/>.</summary>
     public IReadOnlyDictionary<string, string> VariantClassIds { get; init; } = new Dictionary<string, string>();
 
+    /// <summary>What shapes the model's prompt text, written as <c>modelspec.prompt_*</c> on the primary weights. The
+    /// engine's recipe declares it, so the conversion site that holds the identity attaches it from there; null writes none.</summary>
+    public PromptProfile? Prompt { get; init; }
+
     /// <summary>This identity with <see cref="SwarmClassId"/> resolved for <paramref name="variant"/>.</summary>
     public ArtifactIdentity ForVariant(string? variant)
     {

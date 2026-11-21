@@ -258,6 +258,9 @@ compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=0 -- ""
 compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=1 -- "_dev"
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=0 -- ""
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=1 -- "_dev"
+compile_one "sdpa_flash_decode_lengths_split" -- ""
+compile_one "sdpa_flash_decode_lengths_combine" -- ""
+compile_one "sdpa_decode_merge" -- ""
 
 # sdpa_flash_wide: F32 unmasked FlashAttention with sinks or a soft-cap and head dims up to 1024 (AttentionFlashLowering).
 compile_one "sdpa_flash_wide" -- ""

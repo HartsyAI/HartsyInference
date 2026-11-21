@@ -16,6 +16,7 @@ using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -72,6 +73,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
 
     /// <inheritdoc/>
     public string Name => _distilled ? LtxVideo2Variants.DistilledFamilyId : "ltx-video-2";
+
+    /// <inheritdoc/>
+    /// <remarks>The guide states a negative only for the dev build. A file under a dev id may be distilled, so the variant-less answer leaves it unset.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["llm"], Format = "text", Supports = [], Guide = "docs/prompting/ltx-video.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        !_distilled && variant is not null && variant.Is(LtxVideo2Variants.Dev) ? Prompt! with { Negative = "separate" } : Prompt;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => _distilled

@@ -141,6 +141,27 @@ public sealed class SafeTensorsMergeServiceTests : IDisposable
     }
 
     [Fact]
+    public void ThePromptProfileOnTheIdentityLandsInTheHeaderAsFlatModelSpecKeys()
+    {
+        PromptProfile prompt = new()
+        {
+            Kind = "image", Encoders = ["vlm"], Format = "json", Supports = ["boxes"], Boxes = "yxyx-1000",
+        };
+        ArtifactIdentity identity = ModelIdentityCatalog.Find("iris-z-small")! with { Prompt = prompt };
+        WriteShard("model-00001-of-00001.safetensors", ("head.weight", Values(1f, 16), 2, 8));
+        string output = Path.Combine(_dir, "out", "merged.safetensors");
+
+        SafeTensorsMergeService.Merge(new SafeTensorsMergeJob { InputPaths = [_dir], OutputPath = output, Identity = identity });
+
+        using SafeTensorsLoader merged = Reopen(output);
+        Assert.Equal("json", merged.Metadata!["modelspec.prompt_format"]);
+        Assert.Equal("boxes", merged.Metadata["modelspec.prompt_supports"]);
+        Assert.Equal("yxyx-1000", merged.Metadata["modelspec.prompt_boxes"]);
+        Assert.Equal("vlm", merged.Metadata["modelspec.prompt_encoder"]);
+        Assert.False(merged.Metadata.ContainsKey("modelspec.prompt_negative"));
+    }
+
+    [Fact]
     public void CastToF16StoresTheFloatTensorsAsF16()
     {
         WriteShard("model-00001-of-00001.safetensors", ("head.weight", Values(1f, 16), 2, 8));

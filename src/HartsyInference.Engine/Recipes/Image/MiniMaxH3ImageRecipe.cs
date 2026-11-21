@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -18,6 +19,13 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => FamilyId;
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Negative = "none", Supports = ["text-rendering"],
+        MaxTokens = 4096, Guide = "docs/prompting/minimax-h3-image.md",
+    };
 
     /// <inheritdoc/>
     public bool Matches(string familyId) =>

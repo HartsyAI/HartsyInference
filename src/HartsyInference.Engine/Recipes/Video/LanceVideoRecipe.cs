@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -19,6 +20,13 @@ public sealed class LanceVideoRecipe : IVideoRecipe
 {
     /// <inheritdoc/>
     public string Name => "lance-video";
+
+    /// <inheritdoc/>
+    /// <remarks>No guide covers Lance.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video",
+    };
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lance-video", StringComparison.OrdinalIgnoreCase);

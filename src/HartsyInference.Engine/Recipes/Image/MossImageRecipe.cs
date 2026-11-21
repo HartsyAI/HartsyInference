@@ -9,6 +9,7 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -29,6 +30,14 @@ public sealed class MossImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => "moss-image";
+
+    /// <inheritdoc/>
+    /// <remarks>Boxes are centred absolute pixels, not a 0-1000 grid, so no box form is declared.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Negative = "separate",
+        Supports = ["boxes", "text-rendering"], Guide = "docs/prompting/moss-image.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Regional prompts become the model's own layout JSON (<see cref="LayoutPromptBuilder.BuildSceneLayout"/>)

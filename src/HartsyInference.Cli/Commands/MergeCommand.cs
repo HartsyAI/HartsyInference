@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.SafeTensors;
 using Spectre.Console;
@@ -91,6 +92,7 @@ public sealed class MergeCommand : Command<MergeCommand.Settings>
                 AnsiConsole.MarkupLine($"[red]Error:[/] unknown --model '{Markup.Escape(settings.Model)}'. Use a catalog id, e.g. iris-z-small.");
                 return 1;
             }
+            identity = identity with { Prompt = RecipePrompts.Find(identity.EngineId) };
         }
         Dictionary<string, string> meta = new(StringComparer.Ordinal);
         foreach (string pair in settings.Meta)
