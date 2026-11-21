@@ -145,12 +145,17 @@ public sealed class FormerAttentionLoopTests
         return merged;
     }
 
-    /// <summary>All three sites at the shapes their models run and at small odd ones.</summary>
-    private static void EverySiteMatchesItsFormerLoop(IBackend backend, float tolerance = Tolerance)
+    /// <summary>All three sites at the geometry their models have (read from the model code) and at small odd shapes. With
+    /// <paramref name="longSequences"/>, also one long sequence a site, which a GPU row could refuse where the loop ran
+    /// anything; the loops take seconds at that size, so the CPU lane leaves it out.</summary>
+    private static void EverySiteMatchesItsFormerLoop(IBackend backend, float tolerance = Tolerance, bool longSequences = false)
     {
-        // The perceiver: 32 latents over the latents and a context, 8 heads of 64.
-        foreach ((int sq, int skv, int heads, int dimHead) in ((int, int, int, int)[])[(32, 32 + 200, 8, 64), (32, 32 + 7, 8, 64), (5, 9, 3, 16)])
+        // The perceiver: the speaker one is 32 latents and 8 heads of 64, the IndexTTS-2 emotion one a single latent and 4
+        // heads; each attends its latents and a context.
+        foreach ((int sq, int skv, int heads, int dimHead) in ((int, int, int, int)[])[(32, 32 + 200, 8, 64), (32, 32 + 7, 8, 64),
+            (1, 1 + 221, 4, 64), (32, 32 + 4000, 8, 64), (5, 9, 3, 16)])
         {
+            if (skv > 2000 && !longSequences) continue;
             using Tensor kv = Random(new TensorShape(1, skv, 2 * heads * dimHead), 12);
             Tensor q = Random(new TensorShape(1, sq, heads * dimHead), 11);
             float[] expected = FormerPerceiver(q.AsReadOnlySpan<float>(), kv.AsReadOnlySpan<float>(), sq, skv, heads, dimHead);
@@ -161,8 +166,9 @@ public sealed class FormerAttentionLoopTests
         }
 
         // The MRTE: 512 channels in 4 heads, the SSL stream over the text stream.
-        foreach ((int channels, int t, int tt, int heads) in ((int, int, int, int)[])[(512, 150, 60, 4), (512, 1, 40, 4), (24, 7, 5, 3)])
+        foreach ((int channels, int t, int tt, int heads) in ((int, int, int, int)[])[(512, 150, 60, 4), (512, 1, 40, 4), (512, 3000, 600, 4), (24, 7, 5, 3)])
         {
+            if (t > 2000 && !longSequences) continue;
             using Tensor q = Random(new TensorShape(1, channels, t), 21);
             using Tensor k = Random(new TensorShape(1, channels, tt), 22);
             using Tensor v = Random(new TensorShape(1, channels, tt), 23);
@@ -173,9 +179,10 @@ public sealed class FormerAttentionLoopTests
             AssertClose(expected, actual.AsReadOnlySpan<float>(), tolerance, $"MRTE {channels} channels, {t}x{tt}, {heads} heads");
         }
 
-        // The style encoder: self-attention over the frames of a clip.
-        foreach ((int frames, int dim, int heads) in ((int, int, int)[])[(120, 256, 4), (1, 256, 4), (11, 48, 3)])
+        // The style encoder: 512 channels in 8 heads, self-attention over the frames of a clip.
+        foreach ((int frames, int dim, int heads) in ((int, int, int)[])[(120, 512, 8), (1, 512, 8), (2048, 512, 8), (11, 48, 3)])
         {
+            if (frames > 2000 && !longSequences) continue;
             using Tensor packed = Random(new TensorShape(frames, 3 * dim), 31);
             float[] qkv = packed.AsReadOnlySpan<float>().ToArray();
             float[] expected = FormerSelfAttention(qkv, frames, dim, heads);
@@ -198,9 +205,9 @@ public sealed class FormerAttentionLoopTests
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend backend = new(0, PtxDirectory());
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
-        try { EverySiteMatchesItsFormerLoop(backend, Tf32Tolerance); }
+        try { EverySiteMatchesItsFormerLoop(backend, Tf32Tolerance, longSequences: true); }
         finally { ReportRows(evidence.Snapshot()); }
-        Assert.Equal(9, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
+        Assert.Equal(13, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
     }
 
     [Fact]
@@ -213,9 +220,9 @@ public sealed class FormerAttentionLoopTests
         using (backend)
         {
             using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
-            try { EverySiteMatchesItsFormerLoop(backend); }
+            try { EverySiteMatchesItsFormerLoop(backend, longSequences: true); }
             finally { ReportRows(evidence.Snapshot()); }
-            Assert.Equal(9, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
+            Assert.Equal(13, evidence.Snapshot().Count(e => e.Kind == AttentionEvidenceKind.Execution));
         }
     }
 
