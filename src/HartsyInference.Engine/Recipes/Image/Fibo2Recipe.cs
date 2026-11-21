@@ -10,6 +10,7 @@ using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -38,6 +39,14 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => "fibo2";
+
+    /// <inheritdoc/>
+    /// <remarks>Numeric boxes are unconfirmed against the official schema, so neither boxes nor a box form is declared.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "json", Supports = ["text-rendering"],
+        Guide = "docs/prompting/fibo-2.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Text-to-image, img2img, mask inpaint (a latent blend over the init image), LoRA and reference editing

@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Zeta-Chroma recipe (<c>lodestones/Zeta-Chroma</c>) — the pixel-space, VAE-free Chroma variant that swaps T5 for Qwen3-4B caption conditioning (<see cref="SideModels.Qwen3_4B"/>, the same encoder path as <see cref="ZImageRecipe"/>) and predicts x0 directly in pixel space. No CLIP, no VAE. Lifted from the SwarmUI backend's <c>ZetaChromaLoader</c> and driven through <see cref="ZetaChromaRecipePipeline"/>.</summary>
@@ -18,6 +19,12 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "zeta-chroma";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Guide = "docs/prompting/chroma.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Zeta-Chroma is pixel-space — the source image IS the clean sample, so no VAE encoder is involved.</remarks>

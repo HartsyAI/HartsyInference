@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>AuraFlow v0.2 / v0.3 recipe (fal/AuraFlow, MMDiT + single-DiT hybrid). The single-file checkpoint bundles the transformer, the Pile-T5-XL text encoder, and the SDXL-family VAE under one safetensors; nothing is resolved as a side model. Lifted from the SwarmUI backend's <c>AuraFlowLoader</c>; constructs the components and drives generation through <see cref="AuraFlowRecipePipeline"/>.</summary>
@@ -19,6 +20,12 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "auraflow";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["t5"], Format = "text", Negative = "separate", Supports = [],
+        Guide = "docs/prompting/auraflow.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>AuraFlow reuses the SDXL VAE; the encoder half is built alongside the decoder.

@@ -15,6 +15,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Lumina-Image-2.0 recipe (Alpha-VLLM 2B NextDiT, Apache-2.0). Lifted from the SwarmUI backend's <c>Lumina2Loader</c>: the checkpoint is the diffusers-format transformer; the Gemma-2-2B text encoder (<see cref="SideModels.Gemma2_2B"/>) and the FLUX.1 16-channel VAE (<see cref="SideModels.FluxAe"/>) resolve as side models. Conditioning is a LIVE Gemma-2 encode (system-prompt-prefixed, <c>hidden_states[-2]</c>) driven inside <see cref="Lumina2RecipePipeline"/>; the pipeline itself owns the timestep inversion and velocity negation. Constructs and drives through <see cref="Lumina2RecipePipeline"/>.</summary>
@@ -33,6 +34,12 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "lumina2";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Supports = ["text-rendering"],
+        Guide = "docs/prompting/lumina-2.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Lumina 2 reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>

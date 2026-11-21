@@ -13,6 +13,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -33,6 +34,13 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public string Name => "hunyuan-video";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["vlm", "clip"], Format = "text", Negative = "none", Supports = [],
+        Guide = "docs/prompting/hunyuan-video.md",
+    };
 
     /// <inheritdoc/>
     public bool Matches(string familyId) =>
