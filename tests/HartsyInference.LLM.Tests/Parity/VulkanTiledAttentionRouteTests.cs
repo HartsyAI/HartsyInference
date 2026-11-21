@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vulkan;
 using Xunit.Abstractions;
@@ -40,12 +41,15 @@ public sealed class VulkanTiledAttentionRouteTests(ITestOutputHelper output)
         return backend.PlanAttention(in call).RowId ?? "none";
     }
 
+    /// <summary>The knob's own default, read from its declaration so an override in the environment cannot change the answer.</summary>
+    [Fact]
+    public void TheKnobDefaultsToAuto() => Assert.Equal("auto", EngineKnobs.VkTiledAttention.Default);
+
     [VulkanFact]
     public void EveryDenseCallPlansTheRowTheKnobValueGivesIt()
     {
         const int queryTokens = 24, keyTokens = 40;
         using VulkanBackend backend = new();
-        Assert.Equal(VulkanTiledAttention.Auto, backend.TiledAttention);
         bool cm2 = backend.SupportsTokenMajorAttention;
         int cells = 0, moved = 0;
         List<string> wrong = [];

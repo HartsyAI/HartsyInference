@@ -112,14 +112,13 @@ public sealed class VulkanTiledAttentionAbTests(ITestOutputHelper output)
 
     /// <summary>Head dim 256 under the default: the call stays on the materialized row, as with the knob off, so the two arms
     /// are the same row. Expectation written before the first run: both take A.3, the outputs are identical and the
-    /// medians are within 20% of each other.</summary>
+    /// medians are within 20% of each other. The rows and the outputs are asserted; the times are reported only.</summary>
     [VulkanFact]
     public void HeadDim256UnderTheDefaultStaysOnTheMaterializedRow()
     {
         const int runs = 7, heads = 8, tokens = 1024, dim = 256;
         float scale = 1f / MathF.Sqrt(dim);
         using VulkanBackend backend = new();
-        Assert.Equal(VulkanTiledAttention.Auto, backend.TiledAttention);
         using Tensor qHost = Random(new TensorShape(1, heads, tokens, dim), 1), kHost = Random(new TensorShape(1, heads, tokens, dim), 2);
         using Tensor vHost = Random(kHost.Shape, 3);
         using Tensor q = OnDevice(backend, qHost), k = OnDevice(backend, kHost), v = OnDevice(backend, vHost);

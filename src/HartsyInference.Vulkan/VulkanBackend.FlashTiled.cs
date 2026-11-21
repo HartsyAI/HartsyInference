@@ -24,6 +24,7 @@ public sealed partial class VulkanBackend
 
     /// <summary>Whether any dense F32 attention takes the query-tiled kernel; setting it chooses between
     /// <see cref="VulkanTiledAttention.Auto"/> and <see cref="VulkanTiledAttention.Off"/>.</summary>
+    [Obsolete("Use TiledAttention: true now selects Auto, which leaves head dims past 128 on the materialized row; All is the former meaning.")]
     public bool EnableTiledAttention
     {
         get => TiledAttention != VulkanTiledAttention.Off;
@@ -80,12 +81,12 @@ public sealed partial class VulkanBackend
     private bool TiledF32Admits(in AttentionCall c)
     {
         if (TiledAttention == VulkanTiledAttention.Off) return false;
-        // Past the scalar kernel's head dim the other row is the materialized one, which is the faster wherever it can tile.
-        if (c.QkHeadDim > FlashMaxHeadDim && TiledAttention != VulkanTiledAttention.All && !NaiveHoldsWholeScoresPastLimit(in c))
-            return false;
         int bucket = TiledBucket(c.QkHeadDim);
         bool f32 = c.Query.DType == DType.F32 && c.Key.DType == DType.F32 && c.Value.DType == DType.F32 && c.Output.DType == DType.F32;
         if (bucket < 0 || !f32 || c.KvHeads <= 0 || c.Heads % c.KvHeads != 0) return false;
+        // Past the scalar kernel's head dim the other row is the materialized one, which is the faster wherever it can tile.
+        if (c.QkHeadDim > FlashMaxHeadDim && TiledAttention != VulkanTiledAttention.All && !NaiveHoldsWholeF32ScoresPastLimit(in c))
+            return false;
         if (c.Mask.Bias is not null && c.Mask.Bias.DType != DType.F32) return false;
         // The shader's offsets are 32-bit: every operand must be addressable in uint.
         if (c.Query.Storage.ElementCount > uint.MaxValue || c.Key.Storage.ElementCount > uint.MaxValue
@@ -127,8 +128,8 @@ public sealed partial class VulkanBackend
     }
 
     /// <summary>Whether the materialized row would hold this call's whole score matrix past the size at which it tiles: it tiles
-    /// the query axis only for a call without a bias.</summary>
-    private static bool NaiveHoldsWholeScoresPastLimit(in AttentionCall c) => c.Mask.Bias is not null
+    /// the query axis only for a call without a bias. For an all-F32 call, whose scores that row keeps in F32.</summary>
+    private static bool NaiveHoldsWholeF32ScoresPastLimit(in AttentionCall c) => c.Mask.Bias is not null
         && (ulong)c.Batch * (ulong)c.Heads * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float) > NaiveWholeScoreLimitBytes;
 
     private static VulkanTiledAttention ParseTiledAttention(string? value) => value switch

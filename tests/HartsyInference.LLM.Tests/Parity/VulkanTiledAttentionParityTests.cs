@@ -96,9 +96,9 @@ public sealed class VulkanTiledAttentionParityTests(ITestOutputHelper output)
         output.WriteLine($"PARITY | {name} | B {batch}, H {heads}/{kvHeads}, {queryTokens} x {keyTokens}, D {headDim} | relative L2 {error:E2}");
         Assert.True(error <= F32Bound, $"{name}: relative L2 {error:E3} is past {F32Bound:E0}");
         if (biasKind != Bias.WithAnExcludedRow) return;
-        // Query row 1 of every head has no key left: the contract's result is zero, not NaN.
+        // Query row 1 of every head of every batch item has no key left: the contract's result is zero, not NaN.
         ReadOnlySpan<float> values = actual.AsReadOnlySpan<float>();
-        for (int head = 0; head < heads; head++)
+        for (int head = 0; head < batch * heads; head++)
             for (int d = 0; d < headDim; d++)
                 Assert.Equal(0f, values[(head * queryTokens + 1) * headDim + d]);
     }

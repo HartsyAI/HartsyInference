@@ -34,7 +34,8 @@ public static partial class EngineKnobs
 
     /// <summary>Which dense F32 attention calls on Vulkan take the query-tiled F32 flash kernel: <c>auto</c>, <c>all</c> or
     /// <c>off</c>.</summary>
-    /// <remarks>Default <c>auto</c>: every call up to head dim 128 takes it ahead of the scalar <c>sdpa_flash</c> route, and
+    /// <remarks>Default <c>auto</c>: every call up to head dim 128 that the device can run the kernel for (its shared memory
+    /// and dispatch grid) takes it ahead of the scalar <c>sdpa_flash</c> route, and
     /// a call at head dims 129 to 256 takes it only when it has a bias and a score matrix past 1 GiB, which the
     /// <c>naive</c> row would have to hold whole; every other call there stays on <c>naive</c>. <c>all</c> takes it at every
     /// head dim up to 256. <c>off</c> keeps the scalar route up to head dim 128 and <c>naive</c> above it. Only calls whose
@@ -42,7 +43,7 @@ public static partial class EngineKnobs
     /// comparison behind the default is <c>benchmarks/attention/reports/vulkan-tiled-f32-ab.md</c>.</remarks>
     public static readonly Knob<string?> VkTiledAttention =
         Str("numerics.vkTiledAttention", "auto", KnobScope.Construction, KnobDomain.Numerics,
-            "Query-tiled F32 flash attention for dense F32 attention on Vulkan: auto (default) takes it up to head dim 128 and, at head dims 129 to 256, only for a biased call whose scores pass 1 GiB; all takes it at every head dim up to 256; off keeps the scalar sdpa_flash route and the naive row.");
+            "Query-tiled F32 flash attention for dense F32 attention on Vulkan: auto (default) takes it up to head dim 128 where the device can run the kernel and, at head dims 129 to 256, only for a biased call whose scores pass 1 GiB; all takes it at every head dim up to 256; off keeps the scalar sdpa_flash route and the naive row.");
 
     /// <summary>Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.</summary>
     public static readonly Knob<bool> VkInt8 =
