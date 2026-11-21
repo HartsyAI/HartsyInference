@@ -20,13 +20,13 @@ public sealed class SolAttentionGpuTests
         public readonly Tensor Query, Key, Value, Output, Expected;
         public readonly int Batch, Tokens, Heads, Dim;
 
-        public Operands(int batch, int tokens, int heads, int dim, int seed)
+        public Operands(int batch, int tokens, int heads, int dim, int seed, float shared = 2f)
         {
             (Batch, Tokens, Heads, Dim) = (batch, tokens, heads, dim);
             TensorShape shape = new(batch, tokens, heads, dim);
             Random random = new(seed);
             float[] basis = new float[3 * dim];
-            for (int i = 0; i < basis.Length; i++) basis[i] = (random.NextSingle() * 2f - 1f) * 2f;
+            for (int i = 0; i < basis.Length; i++) basis[i] = (random.NextSingle() * 2f - 1f) * shared;
             Query = new Tensor(shape, DType.F32);
             Key = new Tensor(shape, DType.F32);
             Value = new Tensor(shape, DType.F32);
@@ -36,9 +36,9 @@ public sealed class SolAttentionGpuTests
             for (int i = 0; i < q.Length; i++)
             {
                 int token = i / (heads * dim) % tokens, channel = i % dim;
-                float shared = basis[token / 64 % 3 * dim + channel];
-                q[i] = random.NextSingle() * 2f - 1f + shared;
-                k[i] = random.NextSingle() * 2f - 1f + shared;
+                float common = basis[token / 64 % 3 * dim + channel];
+                q[i] = random.NextSingle() * 2f - 1f + common;
+                k[i] = random.NextSingle() * 2f - 1f + common;
                 v[i] = random.NextSingle() * 2f - 1f;
             }
         }
@@ -248,6 +248,90 @@ public sealed class SolAttentionGpuTests
         using Operands operands = new(batch, tokens, heads, dim, 96);
         operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 1f, Scale = 0.07f });
         operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.34 });
+    }
+
+    [CudaFact]
+    public void OnCudaWhereTheTailCarriesWeightItMatchesTheReference()
+    {
+        using CudaBackend backend = Cuda();
+        WhereTheTailCarriesWeightItMatchesTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanWhereTheTailCarriesWeightItMatchesTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        WhereTheTailCarriesWeightItMatchesTheReference(backend);
+    }
+
+    /// <summary>A weak shared component keeps the pooled scores near each row's maximum, so the unread blocks' pooled
+    /// entries carry real weight: the reference's own output moves by more than 0.05 when the tail is turned off.</summary>
+    private static void WhereTheTailCarriesWeightItMatchesTheReference(IBackend backend)
+    {
+        using Operands operands = new(1, 64 * 8, 2, 128, 101, shared: 0.15f);
+        using Tensor withTail = new(operands.Query.Shape, DType.F32);
+        using Tensor withoutTail = new(operands.Query.Shape, DType.F32);
+        SolAttentionReference.Run(withTail, operands.Query, operands.Key, operands.Value, new SolAttentionOptions { TopKRatio = 0.15 });
+        SolAttentionReference.Run(withoutTail, operands.Query, operands.Key, operands.Value, new SolAttentionOptions { TopKRatio = 0.15, Tail = false });
+        float moved = 0f;
+        ReadOnlySpan<float> on = withTail.AsReadOnlySpan<float>(), off = withoutTail.AsReadOnlySpan<float>();
+        for (int i = 0; i < on.Length; i++) moved = MathF.Max(moved, MathF.Abs(on[i] - off[i]));
+        Assert.True(moved > 0.05f, $"the tail moves this fixture by only {moved}");
+
+        (int read, int pairs) = operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.15 });
+        Assert.InRange(read, 1, pairs - 1);
+        operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.15, Tail = false });
+    }
+
+    [CudaFact]
+    public void OnCudaMoreKeyBlocksThanOneWorkgroupHoldsMatchTheReference()
+    {
+        using CudaBackend backend = Cuda();
+        MoreKeyBlocksThanOneWorkgroupHoldsMatchTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanMoreKeyBlocksThanOneWorkgroupHoldsMatchTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        MoreKeyBlocksThanOneWorkgroupHoldsMatchTheReference(backend);
+    }
+
+    /// <summary>257 blocks: the pooled and routing stages give a thread or invocation more than one key block.</summary>
+    private static void MoreKeyBlocksThanOneWorkgroupHoldsMatchTheReference(IBackend backend)
+    {
+        using Operands operands = new(1, 64 * 257, 1, 16, 102);
+        operands.RunAndCompare(backend, new SolAttentionOptions { TopKRatio = 0.01 });
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = 2.5f });
+    }
+
+    [CudaFact]
+    public void OnCudaAFullyMaskedBlockAndFullyMaskedRowsMatchTheReference()
+    {
+        using CudaBackend backend = Cuda();
+        AFullyMaskedBlockAndFullyMaskedRowsMatchTheReference(backend);
+    }
+
+    [VulkanFact]
+    public void OnVulkanAFullyMaskedBlockAndFullyMaskedRowsMatchTheReference()
+    {
+        using VulkanBackend backend = Vulkan();
+        AFullyMaskedBlockAndFullyMaskedRowsMatchTheReference(backend);
+    }
+
+    /// <summary>A mask over one whole read block, and a mask over every key with the tail off, which leaves each row
+    /// nothing to attend: the output is zero, as in the reference.</summary>
+    private static void AFullyMaskedBlockAndFullyMaskedRowsMatchTheReference(IBackend backend)
+    {
+        const int tokens = 64 * 3;
+        using Operands operands = new(1, tokens, 2, 128, 103);
+        using Tensor oneBlock = new(new TensorShape(tokens), DType.F32);
+        oneBlock.AsSpan<float>().Slice(64, 64).Fill(float.NegativeInfinity);
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = -1e6f, KeyBias = oneBlock });
+        using Tensor everyKey = new(new TensorShape(tokens), DType.F32);
+        everyKey.AsSpan<float>().Fill(float.NegativeInfinity);
+        operands.RunAndCompare(backend, new SolAttentionOptions { Tau = -1e6f, Tail = false, KeyBias = everyKey });
+        Assert.Equal(-1, operands.Output.AsReadOnlySpan<float>().IndexOfAnyExcept(0f));
     }
 
     [CudaFact]

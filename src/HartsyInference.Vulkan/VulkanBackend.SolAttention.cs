@@ -49,6 +49,8 @@ public sealed partial class VulkanBackend
         AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "vulkan.sol.lengths", blocks * sizeof(int));
         // A buffer is always bound at the bias binding; without a bias the lengths stand in and are not read there.
         VulkanBuffer biasBuf = bias is null ? lenBuf : GetBuffer(bias);
+        if (bias is not null)
+            AttentionEvidence.Observed(AttentionEvidenceKind.StagingCopy, "vulkan.sol.bias", bias.ElementCount * sizeof(float));
 
         ulong floatBytes = sizeof(float);
         ulong summaryBytes = (ulong)batch * (ulong)heads * (ulong)blocks * (ulong)dim * floatBytes, statBytes = (ulong)batch * (ulong)heads * (ulong)dim * floatBytes;
