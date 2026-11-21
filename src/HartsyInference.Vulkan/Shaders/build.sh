@@ -113,6 +113,8 @@ SINGLE_KERNELS=(
     int8_attn_key_mean
     int8_attn_value_scales
     int8_attn_quant_values
+    int8_attn_query_mean_dot
+    fma_rn_probe
     dequant_recipe_bf16
     gated_residual_row_indexed
     guided_euler
