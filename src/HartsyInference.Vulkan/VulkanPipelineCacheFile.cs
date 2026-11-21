@@ -29,7 +29,7 @@ internal enum VulkanPipelineCacheLoadStatus
     UuidMismatch,
 }
 
-/// <summary>A load's outcome; <see cref="Blob"/> is empty unless <see cref="Status"/> is <see cref="VulkanPipelineCacheLoadStatus.Loaded"/>.</summary>
+/// <summary>A load's outcome; <see cref="Blob"/> is empty unless the status is <see cref="VulkanPipelineCacheLoadStatus.Loaded"/>.</summary>
 internal readonly record struct VulkanPipelineCacheLoad(VulkanPipelineCacheLoadStatus Status, ReadOnlyMemory<byte> Blob)
 {
     /// <summary>True when the file is whole but names another device or driver build, as after a driver update.</summary>
@@ -37,7 +37,7 @@ internal readonly record struct VulkanPipelineCacheLoad(VulkanPipelineCacheLoadS
         or VulkanPipelineCacheLoadStatus.DeviceMismatch or VulkanPipelineCacheLoadStatus.UuidMismatch;
 }
 
-/// <summary>The on-disk form of a Vulkan pipeline cache: the driver blob behind an envelope with its length and SHA-256, replaced atomically.</summary>
+/// <summary>The on-disk Vulkan pipeline cache: the driver blob behind an envelope with its length and SHA-256, replaced atomically.</summary>
 /// <remarks>Little-endian layout: magic <c>HVPC</c> (4), format version (4), blob length (8), SHA-256 of the blob (32), the blob.
 /// The driver's own header names the device but not the blob's length, so it cannot show a file cut short.</remarks>
 internal static class VulkanPipelineCacheFile
@@ -48,7 +48,7 @@ internal static class VulkanPipelineCacheFile
     /// <summary>Size of <c>VkPipelineCacheHeaderVersionOne</c>, the smallest blob a driver returns.</summary>
     public const int DriverHeaderSize = 32;
 
-    /// <summary>Suffix of the enveloped file; a new name, so builds that read the bare-blob <c>.pipeline_cache</c> file never meet an envelope.</summary>
+    /// <summary>Suffix of the enveloped file; a new name, so builds that read the bare <c>.pipeline_cache</c> blob never meet an envelope.</summary>
     public const string Extension = ".pipeline_cache.v2";
 
     private const uint Magic = 0x43505648;
@@ -105,7 +105,7 @@ internal static class VulkanPipelineCacheFile
         return header == VulkanPipelineCacheLoadStatus.Loaded ? new(header, file[EnvelopeSize..]) : new(header, default);
     }
 
-    /// <summary>Compares a driver blob's header with <paramref name="expected"/>; <see cref="VulkanPipelineCacheLoadStatus.Loaded"/> means it matches.</summary>
+    /// <summary>Compares a driver blob's header with <paramref name="expected"/>; <c>Loaded</c> means it matches.</summary>
     public static VulkanPipelineCacheLoadStatus CheckDriverHeader(ReadOnlySpan<byte> blob, VulkanPipelineCacheIdentity expected)
     {
         if (blob.Length < DriverHeaderSize
@@ -131,7 +131,7 @@ internal static class VulkanPipelineCacheFile
         return file;
     }
 
-    /// <summary>Replaces <paramref name="path"/> with the enveloped <paramref name="blob"/> by writing a temporary file beside it and moving it over.</summary>
+    /// <summary>Replaces <paramref name="path"/> with the enveloped <paramref name="blob"/>: a temporary file beside it, moved over it.</summary>
     /// <remarks>A reader sees the previous file or the new one, and a writer that dies leaves the previous file.
     /// Throws when the write or the move fails, with the temporary file removed.</remarks>
     public static void WriteAtomic(string path, ReadOnlySpan<byte> blob)

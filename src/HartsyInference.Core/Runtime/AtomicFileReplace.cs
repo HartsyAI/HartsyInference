@@ -18,7 +18,7 @@ internal static partial class AtomicFileReplace
     /// <summary>Byte offset of <c>FILE_RENAME_INFO.FileName</c> on 64-bit Windows, after the flags, root handle and name length.</summary>
     private const int RenameInfoNameOffset = 20;
 
-    /// <summary>Replaces <paramref name="path"/> with <paramref name="temp"/>, which must be on the same volume; throws when the target cannot be replaced.</summary>
+    /// <summary>Replaces <paramref name="path"/> with <paramref name="temp"/> (same volume); throws when the target cannot be replaced.</summary>
     public static void Move(string temp, string path)
     {
         if (OperatingSystem.IsWindows() && Environment.Is64BitProcess && TryPosixRename(temp, Path.GetFullPath(path))) return;

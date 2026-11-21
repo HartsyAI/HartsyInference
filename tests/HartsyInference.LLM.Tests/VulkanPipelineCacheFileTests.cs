@@ -214,7 +214,8 @@ public sealed class VulkanPipelineCacheFileTests : IDisposable
         foreach (Thread thread in threads) thread.Start();
         foreach (Thread thread in threads) thread.Join();
 
-        _output.WriteLine($"writes failed {failedWrites} of {2 * writesPerThread}; loads: {loaded} whole, {unreadable} unreadable, {missing} missing");
+        _output.WriteLine($"writes failed {failedWrites} of {2 * writesPerThread}; "
+            + $"loads: {loaded} whole, {unreadable} unreadable, {missing} missing");
         Assert.Empty(violations);
         Assert.True(loaded > 0, "the reader never loaded a blob, so the run showed nothing");
         Assert.True(failedWrites <= 2 * writesPerThread / 10, $"{failedWrites} of {2 * writesPerThread} writes failed");
