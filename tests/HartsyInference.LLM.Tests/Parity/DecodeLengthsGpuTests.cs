@@ -155,8 +155,10 @@ public sealed class DecodeLengthsGpuTests
     }
 
     /// <summary>The row's head dims run from one subgroup width to eight, and the shapes above reach two and four where a
-    /// subgroup is 32 lanes wide. This runs one, three, six and eight widths (head dim 256 at 32 lanes, with a staircase,
-    /// an empty sequence and several chunks), and checks that half a width and nine are refused whole.</summary>
+    /// subgroup is 32 lanes wide. This runs one, three, six and eight widths. At eight (head dim 256 at 32 lanes): full,
+    /// one-key and empty sequences over several chunks with a group of 4; a five-row staircase with a sequence shorter
+    /// than the step, one query head a key head; and a group of 8 over 899 of 900 slots, which leaves a one-slot tail.
+    /// Half a width and nine are refused whole, and so is anything past head dim 256 on a wider subgroup.</summary>
     [VulkanFact]
     public void TheVulkanKernelRunsTheHeadDimsItsRowDeclaresAndRefusesTheOthers()
     {
@@ -168,7 +170,7 @@ public sealed class DecodeLengthsGpuTests
         MatchesTheHostReference(backend, 3, 8, 2, 8 * lanes, 1, 300, [300, 1, 0], causal: true);
         MatchesTheHostReference(backend, 2, 4, 4, 8 * lanes, 5, 200, [150, 3], causal: true);
         MatchesTheHostReference(backend, 1, 8, 1, 8 * lanes, 3, 900, [899], causal: false);
-        foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 9 * lanes])
+        foreach (int dim in (ReadOnlySpan<int>)[lanes / 2, 9 * lanes, 256 + lanes])
         {
             using Case outside = new(1, 4, 2, dim, 1, 96);
             outside.Output.AsSpan<float>().Fill(-7f);

@@ -36,9 +36,13 @@ public sealed partial class VulkanBackend
     /// <summary>Head dims per lane the split kernel keeps in registers (its DPL specialization bound).</summary>
     private const uint FlashDecodeMaxDpl = 4;
 
-    /// <summary>Head dims per lane the lengths split and combine shaders keep in registers (their DPL bound): head dim 256
-    /// where a subgroup is 32 lanes wide, which the decode this row serves reaches.</summary>
+    /// <summary>Head dims per lane the lengths row admits: head dim 256 where a subgroup is 32 lanes wide. Its shaders size
+    /// their registers by the call's own count, so this is the admission limit and not an array bound.</summary>
     private const uint FlashDecodeLengthsMaxDpl = 8;
+
+    /// <summary>The largest head dim the lengths row admits on any device: the largest the host reference is checked
+    /// against the Kitchen at. A wider subgroup does not raise it.</summary>
+    private const int FlashDecodeLengthsMaxHeadDim = 256;
 
     /// <summary>Chunk (keys per split) and split count for a KV cache of <paramref name="capacity"/> keys. A pure function
     /// of the capacity, the KV-head count, the batch and the compute units, so every step of one cache gets the same split

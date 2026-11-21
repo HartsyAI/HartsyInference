@@ -12,7 +12,7 @@ layout(local_size_x_id = 0) in;
 layout(constant_id = 0) const uint LANES = 32;
 layout(constant_id = 2) const uint DPL = 2;
 
-#define MAX_DPL 8
+// The accumulator is sized by DPL itself; the host admits at most 8 dims a lane.
 #define NEG_INF (-1.0 / 0.0)
 
 layout(set = 0, binding = 0) readonly buffer Part_ { float part_data[]; };
@@ -52,8 +52,8 @@ void main() {
     for (uint s = 0u; s < live; s++) gMax = max(gMax, part_data[(rowBase + s) * (D + 2u)]);
 
     float denom = 0.0;
-    float acc[MAX_DPL];
-    for (uint j = 0u; j < MAX_DPL; j++) acc[j] = 0.0;
+    float acc[DPL];
+    for (uint j = 0u; j < DPL; j++) acc[j] = 0.0;
     if (gMax > NEG_INF) {
         for (uint s = 0u; s < live; s++) {
             uint base = (rowBase + s) * (D + 2u);

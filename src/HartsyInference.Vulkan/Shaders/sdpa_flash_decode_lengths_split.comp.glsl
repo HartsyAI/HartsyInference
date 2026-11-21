@@ -22,8 +22,9 @@ layout(constant_id = 0) const uint LANES = 32;
 layout(constant_id = 1) const uint GROUP = 1;
 layout(constant_id = 2) const uint DPL = 2;
 
-#define MAX_GROUP 8
-#define MAX_DPL 8
+// The register arrays below are sized by GROUP and DPL themselves, so a specialization holds only what it uses: a head
+// dim of two lane widths keeps two dims a lane however large the widest admitted call is. The host admits a group of
+// at most 8 and at most 8 dims a lane (VulkanBackend.FlashDecodeMaxGroup, FlashDecodeLengthsMaxDpl).
 #define NEG_INF (-1.0 / 0.0)
 
 layout(set = 0, binding = 0) readonly  buffer Q_ { float q_data[]; };
@@ -63,10 +64,10 @@ void main() {
     uint keyBeg = split * pc.chunk;
     uint keyEnd = min((split + 1u) * pc.chunk, hi);
 
-    float qv[MAX_GROUP][MAX_DPL];
-    float acc[MAX_GROUP][MAX_DPL];
-    float runMax[MAX_GROUP];
-    float runSum[MAX_GROUP];
+    float qv[GROUP][DPL];
+    float acc[GROUP][DPL];
+    float runMax[GROUP];
+    float runSum[GROUP];
     for (uint g = 0u; g < GROUP; g++) {
         uint qRow = ((b * pc.hq + kvHead * GROUP + g) * pc.rows + r) * D;
         for (uint j = 0u; j < DPL; j++) {
@@ -81,8 +82,8 @@ void main() {
     // Four keys per step: their K/V loads are issued together, then folded into the running state in key order.
     for (uint k = keyBeg; k < keyEnd; k += 4u) {
         uint cnt = min(4u, keyEnd - k);
-        float kr[4][MAX_DPL];
-        float vr[4][MAX_DPL];
+        float kr[4][DPL];
+        float vr[4][DPL];
         for (uint u = 0u; u < 4u; u++) {
             for (uint j = 0u; j < DPL; j++) {
                 kr[u][j] = 0.0;
