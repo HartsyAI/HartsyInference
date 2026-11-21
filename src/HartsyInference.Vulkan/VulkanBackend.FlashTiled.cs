@@ -26,10 +26,6 @@ public sealed partial class VulkanBackend
     internal static TiledStrides HeadMajorStrides(int heads, int tokens, int headDim) =>
         new((uint)headDim, (uint)((long)tokens * headDim), (uint)((long)heads * tokens * headDim));
 
-    /// <summary>Token-major [B, S, H, D] strides: each token spans every head.</summary>
-    internal static TiledStrides TokenMajorStrides(int heads, int tokens, int headDim) =>
-        new((uint)heads * (uint)headDim, (uint)headDim, (uint)((long)tokens * heads * headDim));
-
     /// <summary>Runs <c>sdpa_flash_tiled</c> over F32 Q, K, V and an optional F32 additive bias. The strides address every tensor,
     /// so head-major and token-major are the same launch; the output is written with the O strides.</summary>
     internal void DispatchFlashTiled(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? bias, in TiledCall call)
