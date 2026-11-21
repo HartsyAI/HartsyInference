@@ -68,8 +68,9 @@ Video sparse attention (Video `MiniMaxH3Pipeline`, Diffusion `MiniMaxH3Transform
 directly.
 
 One site already on the device repeats a pattern that a migrated site now does in one call: Diffusion
-`WanS2VAudioInjector` attends frame by frame, one call a frame, where the face adapter in #1011 uses one batch item a
-frame.
+`WanS2VAudioInjector` attended frame by frame, one call a frame, where the face adapter in #1011 uses one batch item a
+frame. It now makes one call with a batch item a frame; on CUDA and on Vulkan the result is bit-identical to the
+per-frame forward on the same backend (RTX 3060).
 
 ## What a migration changes
 
