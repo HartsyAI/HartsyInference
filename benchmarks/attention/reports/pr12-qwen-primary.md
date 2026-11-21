@@ -147,6 +147,32 @@ graph timing was seen, that a pair is valid when C's text equals R's and both eq
 text as C, nothing in this series introduced the difference. I have not explained it, and the token at which the two
 decodes part is not known (the saved outputs are text, with no token ids).
 
-### Vulkan paged
+### Vulkan paged (descriptive, and not like-for-like)
 
-Pending at the time of writing.
+Declared descriptive before it ran. The path proof, one observed run an arm, both clean with no warning or
+out-of-memory line:
+
+| | R | C |
+|---|---|---|
+| Total per request | 28,502.5 ms | 2,330.3 ms |
+| Text | 550 characters, SHA-256 prefix 980406f74bb46717 | 777 characters, 26c68e74a9df5f02 |
+| Prefill route | `cm2.causal` x108 | `cm2.causal` x108 |
+| Decode route | `flash.decode.split` x13,824 | `flash.decode.split` x13,824 |
+| `PrefixGather` | 27,864 records, 942,265,073,664 bytes | 27,864 records, 7,361,003,520 bytes |
+| `Workspace`, `Cast` records | 0, 0 | 13,932, 216 |
+| `HostReference` | 0 | 0 |
+
+**The two arms do not produce the same text, so their times are not a speed comparison.** C's Vulkan text is the eager
+CUDA text, character for character. R's is a different text from its first character: it opens with an image link
+where the eager text opens with a heading. Both arms ran the same kernel rows the same number of times; what differs
+is the gather, where R moves 128 times the bytes C does.
+
+So on this lane the PR 02 pin generates something other than what CUDA generates, and the candidate does not. I read
+that as a correctness difference on R's Vulkan paged path that later work removed, but I have not found the change
+that removed it, and one observed run an arm does not show whether R's text is stable.
+
+I predicted 0.95 to 1.05 for this lane. The path-proof ratio is about 0.08, wrong by an order of magnitude, and I did
+not predict the text difference at all.
+
+The five-pair session is running; under the per-pair rule every pair is invalid for a comparison, and its times will
+be added here as descriptive only.
