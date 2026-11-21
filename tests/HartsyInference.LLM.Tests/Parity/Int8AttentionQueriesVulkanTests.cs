@@ -139,6 +139,39 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
         return ([.. a], [.. b], [.. c], [.. kind]);
     }
 
+    /// <summary>Outside its range <c>fmaRn</c> gives the plain multiply and add, not a NaN from its own splitter: operands
+    /// above 2^100, and products below 2^-100.</summary>
+    [VulkanFact]
+    public void FusedMultiplyAddOutsideItsRangeIsThePlainOne()
+    {
+        (float A, float B, float C)[] triples =
+        [
+            (MathF.ScaleB(1f, 120), MathF.ScaleB(1f, -10), 1f),
+            (MathF.ScaleB(1.5f, 120), MathF.ScaleB(-1.25f, -10), MathF.ScaleB(1.75f, 110)),
+            (MathF.ScaleB(1.5f, -30), MathF.ScaleB(1.25f, 110), MathF.ScaleB(-1.875f, 80)),
+            (MathF.ScaleB(1.5f, -60), MathF.ScaleB(1.25f, -60), MathF.ScaleB(1.75f, -110)),
+            (MathF.ScaleB(1.5f, 126), MathF.ScaleB(1.25f, 2), 3f),
+        ];
+        int n = triples.Length;
+        using VulkanBackend backend = new();
+        using Tensor ta = new(new TensorShape(n), DType.F32), tb = new(ta.Shape, DType.F32), tc = new(ta.Shape, DType.F32);
+        float[] expected = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            (ta.AsSpan<float>()[i], tb.AsSpan<float>()[i], tc.AsSpan<float>()[i]) = triples[i];
+            float product = triples[i].A * triples[i].B;
+            expected[i] = product + triples[i].C;
+        }
+        Assert.True(float.IsPositiveInfinity(expected[4]));
+        using Tensor emulated = new(ta.Shape, DType.F32), native = new(ta.Shape, DType.F32);
+        backend.FusedMultiplyAddProbe(emulated, native, ta, tb, tc);
+        backend.Sync();
+        AssertBits(expected, emulated.AsReadOnlySpan<float>(), "fmaRn outside its range");
+    }
+
+    /// <summary>No device tested so far leaves its own <c>fma()</c> unfused, so nothing here has shown the double rounding
+    /// <c>fmaRn</c> exists to avoid on a real device. The constructed exact ties stand in for it: with the round-to-odd
+    /// step removed, a quarter of them fail.</summary>
     [VulkanFact]
     public void FusedMultiplyAddMatchesTheHost()
     {
