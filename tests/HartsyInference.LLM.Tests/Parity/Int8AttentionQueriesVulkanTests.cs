@@ -9,7 +9,7 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// <summary>The Vulkan query side of INT8 attention against <see cref="Int8AttentionV2Reference.Quantize"/>, and the exact
 /// fused multiply-add it rests on (Shaders/fma_rn.glsl) against <see cref="MathF.FusedMultiplyAdd"/>.
 /// <para>The bounds were fixed before the first run. The fused multiply-add: bit-equal for every triple in the range
-/// fma_rn.glsl states (operands and addend zero or within [2^-100, 2^100] and [2^-100, 2^120], product within [2^-124, 2^120],
+/// fma_rn.glsl states (operands and addend zero or normal, up to 2^100 and 2^120; product within [2^-124, 2^120];
 /// result zero or normal); that range was [2^-40, 2^40] and [2^-80, 2^80] until the scaling step. The device's own
 /// <c>fma()</c> is counted and reported, not asserted. The query side: every dot and scale bit-equal and every byte equal
 /// to the reference's, on finite operands of ordinary magnitude.</para></summary>
@@ -81,7 +81,7 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
             && MathF.Abs(x) >= MathF.ScaleB(1f, low) && MathF.Abs(x) <= MathF.ScaleB(1f, high));
         float product = a * b, result = MathF.FusedMultiplyAdd(a, b, c);
         bool productOk = a == 0f || b == 0f || (product != 0f && Within(product, -124, 120));
-        return Within(a, -100, 100) && Within(b, -100, 100) && productOk && Within(c, -100, 120)
+        return Within(a, -126, 100) && Within(b, -126, 100) && productOk && Within(c, -126, 120)
             && (result == 0f || MathF.Abs(result) >= MathF.ScaleB(1f, -126));
     }
 
@@ -158,6 +158,41 @@ public sealed class Int8AttentionQueriesVulkanTests(ITestOutputHelper output)
             if (random.Next(2) == 0) x = -x;
             if (random.Next(2) == 0) z = -z;
             Add(x, y, z, "exact tie, product below 2^-100");
+        }
+        // A product that is itself an exact midpoint (3 times an odd 24-bit mantissa below 4/3), with an addend below
+        // 2^-100: far under the product's last place when the product is ordinary, and of its own size when not.
+        for (int i = 0; i < 24000; i++)
+        {
+            int mantissa = (1 << 23) + 2 * random.Next(0, (1 << 23) / 6) + 1;
+            float x = random.Next(2) == 0 ? 3f : -3f;
+            float y = MathF.ScaleB(mantissa, (i % 2 == 0 ? random.Next(-30, 31) : random.Next(-123, -49)) - 23);
+            Add(x, y, Pick(random, -126, -101), "product an exact tie, addend below 2^-100");
+        }
+        // An operand below 2^-100 against one large enough that the product is ordinary.
+        for (int i = 0; i < 24000; i++)
+        {
+            int j = 13 + i % 11, first = random.Next(-125, -100), shift = random.Next(-38, first + 100);
+            bool square = i % 2 == 0;
+            float x = MathF.ScaleB(1f + MathF.ScaleB(1f, -j), first);
+            float y = MathF.ScaleB(square ? 1f + MathF.ScaleB(1f, -j) : 1f - MathF.ScaleB(1f, -j), shift - first);
+            float mantissa = 1f + random.Next(1 << 23) / (float)(1 << 23);
+            float z = MathF.ScaleB(mantissa, (square ? 25 - j : 24) + shift);
+            if (random.Next(2) == 0) x = -x;
+            if (random.Next(2) == 0) z = -z;
+            Add(x, y, z, "exact tie, operand below 2^-100");
+        }
+        // The drain against a tile more than a hundred binary orders down: a whole number by a scale below 2^-100.
+        for (int i = 0; i < 24000; i++)
+        {
+            float x = random.Next(1, 4112641), y = Pick(random, -126, -101);
+            if (random.Next(2) == 0) x = -x;
+            double product = (double)x * y;
+            int gap = gaps[i % gaps.Length];
+            float sum = MathF.ScaleB(1f + random.Next(1 << 23) / (float)(1 << 23), Math.ILogB(product) + gap);
+            double half = ((double)MathF.BitIncrement(sum) - sum) / 2;
+            double mid = random.Next(2) == 0 ? sum + half : sum - half;
+            if (random.Next(2) == 0) mid = -mid;
+            Add(x, y, (float)(mid - product), "integer times a scale below 2^-100");
         }
         // What the attention drain multiplies: a whole number up to 128 * 255 * 127 by a scale far below one, added
         // to something near the product or near a midpoint above it.
