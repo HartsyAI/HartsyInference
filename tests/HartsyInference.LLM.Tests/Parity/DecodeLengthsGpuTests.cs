@@ -127,6 +127,23 @@ public sealed class DecodeLengthsGpuTests
         MatchesTheHostReference(backend, batch, heads, kvHeads, dim, rows, capacity, lengths, causal);
     }
 
+    /// <summary>The tests above pass by refusal where head dim 256 is not served, so this pins when it must be: wherever
+    /// the card lets a block opt in to the shared memory the entry point asks for (83,456 bytes for an F32 cache, 50,432
+    /// for a half type). On such a card a refusal is a failure, not a skip.</summary>
+    [CudaFact]
+    public void HeadDim256IsServedWhereTheCardHasTheSharedMemory()
+    {
+        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        int limit = backend.Context.MaxSharedMemoryPerBlockOptin;
+        foreach ((DType cache, int bytes) in ((DType, int)[])[(DType.F32, 83456), (DType.F16, 50432), (DType.BF16, 50432)])
+            foreach (int group in (ReadOnlySpan<int>)[1, 4, 16])
+                Assert.True(backend.DecodeLengthsServedForTest(256, group, cache) == (limit >= bytes),
+                    $"head dim 256, group {group}, {cache} cache: served {backend.DecodeLengthsServedForTest(256, group, cache)} "
+                    + $"on a card whose blocks can opt in to {limit} bytes of shared memory; the entry point needs {bytes}");
+        Assert.False(backend.DecodeLengthsServedForTest(192, 1, DType.F32));
+        Assert.False(backend.DecodeLengthsServedForTest(256, 17, DType.F32));
+    }
+
     /// <summary>A card may not serve head dim 256 for a cache type: a block there needs more shared memory than a Turing
     /// card allows for an F32 cache, and a PTX file built before the entry points has none. Such a call has to be
     /// refused whole. Returns true when it was, so the caller does not go on to expect a result.</summary>
