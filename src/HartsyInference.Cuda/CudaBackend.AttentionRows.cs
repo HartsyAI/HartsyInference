@@ -70,6 +70,14 @@ public sealed partial class CudaBackend
             ExecuteFlashAttention(in call);
             return;
         }
+        // A length per sequence, or an LSE output, is no legacy entry's: the flash rows are planned directly, where only a
+        // row that declares it covers the call and the planner refuses what none takes. Only a call pinned to the flash
+        // route comes this way, which is how FromDecodeWithLengths builds one; an Auto call with lengths is still refused below.
+        if ((call.SequenceLengths is not null || call.Lse is not null) && call.Route == AttentionRoute.Flash)
+        {
+            RunAttentionRows(FlashAttentionRows, in call);
+            return;
+        }
         if (call.LegacyGap() is { } gap)
         {
             AttentionCall prepared = AttentionExecution.Prepare(in call);
@@ -482,6 +490,21 @@ public sealed partial class CudaBackend
         const AttentionMaskSupport CW = AttentionMaskSupport.Causal | AttentionMaskSupport.Window;
         return
         [
+            // The only flash row that takes a key length per sequence, and it takes nothing else (its admission requires the
+            // lengths), so its place in the list is free and the single-length rows keep every call they had. Not capture-safe:
+            // the lengths are host values uploaded for the call.
+            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32, AttentionDTypes.F32, HM | AttentionLayouts.TokenMajor) with
+                {
+                    MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
+                }, "F.9",
+                (in AttentionCall c) => DecodeLengthsAdmits(in c),
+                (in AttentionCall c) =>
+                {
+                    FlashAttentionDecodeLengths(in c);
+                    return true;
+                },
+                // Operands are read in place; the lengths upload is a staging copy, recorded as one.
+                static (in AttentionCall _) => AttentionPreparationCost.None),
             // The only flash row that covers a paged call. Every other row excludes one, so its place in the list is free.
             new DelegateAttentionRow(Cap("flash.decode.paged", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {

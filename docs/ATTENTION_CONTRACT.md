@@ -64,7 +64,9 @@ carries no other position-dependent or additive term: a window, a block size, a 
 refused, and so are paged keys and values. A call may also name an **LSE output** (`AttentionCall.Lse`, F32
 `[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
 excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
-takes such a call through it. No GPU row declares either yet.
+takes such a call through it. On CUDA one row declares both, `flash.decode.lengths`: F32 head-major Q, K and V, the
+`[B, Sq, Hq × D]` output, head dim 64 or 128 and at most 16 query heads per key head. It takes only calls with sequence
+lengths, so an LSE on a call with one shared length is still refused on a GPU. Vulkan declares neither.
 
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
 of bounds, and the kernel sets a device status word. The next host synchronization point that owns the call (the end
