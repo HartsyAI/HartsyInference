@@ -12,7 +12,7 @@ namespace HartsyInference.Audio.Models.BreezeTts;
 /// Gemma RMSNorm (<c>1 + w</c>), per-head Q/K RMSNorm, split-half RoPE, GQA, scale <c>query_pre_attn_scalar^-½</c> and a
 /// tanh-GELU gated MLP. Attention is bidirectional: sliding layers let a token see the previous
 /// <c>(window+1)/2</c> and the next <c>window/2+1</c> positions (itself included), full layers see everything.
-/// <para>The attention itself runs through the shared <see cref="AttentionLayer"/> on the backend, grouped heads native;
+//// <para>The attention itself runs through the shared <see cref="AttentionLayer"/> on the backend, which is given the grouped heads as they are (CUDA's dense row widens them);
 /// a sliding layer's window is an additive bias, and none is passed where the window covers the whole segment.</para></summary>
 public sealed unsafe class T5Gemma2TextEncoder : IDisposable
 {
