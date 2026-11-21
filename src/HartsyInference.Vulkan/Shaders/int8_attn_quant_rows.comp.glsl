@@ -7,15 +7,13 @@
 // are corrected to the correctly rounded quotient; the scale has the reference's floor; and a NaN row is defined.
 //
 // The correction: Vulkan allows a divide to be a few units in the last place off, and on the RTX 3060 this was written
-// on it is (about one scale in twenty came out one unit low, with a constant or a run-time divisor alike). divRn takes
-// the device's quotient q0, forms the exact remainder a - q0 * b with one fused multiply-add, and adds remainder / b.
-// The remainder is exact because q0 is within a few units of the true quotient, and a quotient of two floats is never
-// exactly halfway between two floats, so the sum rounds to the correctly rounded quotient. It needs fma to be fused,
-// which a precise fma is.
+// on it is (about one scale in twenty came out one unit low, with a constant or a run-time divisor alike). Both divides
+// go through divRn (div_rn.glsl), the backend's correctly rounded divide, which the FP8 quantizers already share.
 
 #version 460
 #extension GL_KHR_shader_subgroup_basic      : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_GOOGLE_include_directive      : require
 
 layout(local_size_x_id = 0) in;
 
@@ -36,13 +34,7 @@ shared uint warp_nan[64];
 shared float gScale;
 shared uint gNan;
 
-float divRn(float a, float b) {
-    precise float q0 = a / b;
-    precise float remainder = fma(-q0, b, a);
-    precise float correction = remainder / b;
-    precise float q = q0 + correction;
-    return q;
-}
+#include "div_rn.glsl"
 
 int quantOne(float v, float inv) {
     precise float scaled = v * inv;
