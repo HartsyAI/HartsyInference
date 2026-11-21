@@ -268,11 +268,13 @@ public sealed partial class VulkanBackend
             // The only flash row that takes a key length per sequence, and it takes nothing else (its admission requires the
             // lengths), so its place in the list is free and the single-length rows keep every call they had. The lengths are
             // host values uploaded for the call.
-            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32, AttentionDTypes.F32, HM | AttentionLayouts.TokenMajor) with
+            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32,
+                    AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16, HM | AttentionLayouts.TokenMajor) with
                 {
                     Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
                     // What the split shader is built for on this device, so a plan names the limit a call missed.
-                    MinHeadDim = (int)Vk.SubgroupSize, MaxHeadDim = (int)(Vk.SubgroupSize * FlashDecodeMaxDpl),
+                    MinHeadDim = (int)Vk.SubgroupSize,
+                    MaxHeadDim = Math.Min((int)(Vk.SubgroupSize * FlashDecodeLengthsMaxDpl), FlashDecodeLengthsMaxHeadDim),
                     MaxQueryTokens = ushort.MaxValue,
                 }, "C.9",
                 (in AttentionCall c) => FlashDecodeLengthsAdmits(in c),

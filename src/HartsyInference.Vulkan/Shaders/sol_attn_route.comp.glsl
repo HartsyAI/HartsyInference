@@ -10,9 +10,9 @@
 // compiler may not contract a multiply and an add into one fused operation, and the operations run in the reference's
 // order. Add, subtract and multiply are then the reference's bit for bit, provided the driver keeps subnormal values:
 // no float-controls mode is declared here, and without one a driver may flush them to zero. The Vulkan specification
-// also does not require a divide or a square root to be correctly rounded, so those are exact only where the driver
-// makes them so.
+// does not require a square root to be correctly rounded, so the one here goes through sqrtRn (sqrt_rn.glsl), which is.
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 128) in;
 
@@ -36,6 +36,8 @@ layout(push_constant) uniform Push {
 
 shared float s_threshold;
 
+#include "sqrt_rn.glsl"
+
 void main() {
     uint qb = gl_WorkGroupID.x, h = gl_WorkGroupID.y, b = gl_WorkGroupID.z;
     uint head = b * pc.heads + h;
@@ -52,7 +54,8 @@ void main() {
         precise float scaled = spread * pc.log2s;
         precise float scaled2 = scaled * pc.log2s;
         precise float inside = scaled2 + 1e-6;
-        precise float limit = pc.tau * sqrt(inside);
+        precise float root = sqrtRn(inside);
+        precise float limit = pc.tau * root;
         s_threshold = limit;
     }
     barrier();

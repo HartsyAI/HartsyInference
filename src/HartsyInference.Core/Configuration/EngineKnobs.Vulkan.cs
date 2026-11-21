@@ -34,7 +34,10 @@ public static partial class EngineKnobs
 
     /// <summary>Query-tiled F32 flash attention for dense F32 attention on Vulkan: <c>auto</c> takes it ahead of the scalar
     /// <c>sdpa_flash</c> route, <c>off</c> keeps the scalar route.</summary>
-    /// <remarks>Default <c>off</c> until the regression A/B for the default flip is recorded. Any other value is rejected when the
+    /// <remarks>Default <c>off</c>. The A/B it waited on is recorded for one card in
+    /// <c>benchmarks/attention/reports/vulkan-tiled-f32-ab.md</c>: up to head dim 128 the tiled kernel is faster on every
+    /// shape measured, but at head dims 129 to 256 <c>auto</c> takes a call ahead of the <c>naive</c> row, not the scalar
+    /// one, and is about twice as slow there. The default has not been changed. Any other value is rejected when the
     /// Vulkan backend starts.</remarks>
     public static readonly Knob<string?> VkTiledAttention =
         Str("numerics.vkTiledAttention", "off", KnobScope.Construction, KnobDomain.Numerics,
