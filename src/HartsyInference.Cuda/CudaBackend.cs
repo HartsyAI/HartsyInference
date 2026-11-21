@@ -63,10 +63,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public IReadOnlyDictionary<long, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDimDiagnostics =>
         _cudnnSdpaHealth.DimDiagnostics;
 
-    /// <summary>The same snapshot per signature.</summary>
-    internal IReadOnlyDictionary<CudnnSdpaSignature, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDiagnostics =>
-        _cudnnSdpaHealth.Diagnostics;
-
     private CudnnConv? _cudnnConv;
     private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
     private static bool ConvChannelsLast => EngineKnobs.ConvChannelsLast.Value;
@@ -103,12 +99,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Query-tiled attention calls this backend served (see <see cref="SdpaTiledF32Core"/>).</summary>
     internal long SdpaTiledExecutionCount => Interlocked.Read(ref _sdpaTiledExecutionCount);
     private long _sdpaTiledExecutionCount;
-
-    /// <summary>Test diagnostic incremented whenever a new cuDNN SDPA handle/plan cache is constructed.</summary>
-    internal long CudnnSdpaSessionGeneration => Interlocked.Read(ref _cudnnSdpaSessionGeneration);
-
-    /// <summary>Test diagnostic incremented only after a detached cuDNN SDPA session releases all owned resources.</summary>
-    internal long CudnnSdpaDisposedSessionCount => Interlocked.Read(ref _cudnnSdpaDisposedSessionCount);
 
     private long _sageAttentionExecutionCount;
 
