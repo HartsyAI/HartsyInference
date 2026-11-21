@@ -8,8 +8,8 @@ using Xunit.Abstractions;
 namespace HartsyInference.LLM.Tests.Parity;
 
 /// <summary>A descriptive timing of INT8 attention with u8 probabilities on Vulkan beside the backend's F32 attention
-/// of the same shape. It asserts nothing about speed and is not part of the GPU lane (category <c>Timing</c>): run it
-/// alone on an idle card.
+/// of the same shape. It asserts nothing about speed and is a <c>GpuBenchmark</c>, which the CPU lane and the GPU lane
+/// both leave out: run it alone on an idle card.
 /// <para>The INT8 timings are of the bit-exact passes as they stand, with every operand already on the device. The F32
 /// comparators are the flash route and the dense route for the same unmasked call, the dense route with F16 allowed
 /// (the other lossy path, and the one a speed claim has to beat), and the causal flash route for context (INT8 here
@@ -17,7 +17,7 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// <para>Expectation written before the first run: the INT8 path is slower, between 2 and 30 times, because its passes
 /// are written to reproduce the reference bit for bit (about 30 operations for each fused multiply-add, one invocation a
 /// row and tile or a row and channel), not for speed.</para></summary>
-[Trait("Category", "Timing")]
+[Trait("Category", "GpuBenchmark")]
 public sealed class Int8AttentionU8VulkanTimingTests(ITestOutputHelper output)
 {
     private static Tensor Random(TensorShape shape, int seed)
