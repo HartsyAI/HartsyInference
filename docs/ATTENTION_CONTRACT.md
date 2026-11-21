@@ -292,7 +292,11 @@ The planner reproduces these until the row that owns each is rewritten.
   `SolAttentionReference`, and `IBackend.HasSolAttention` says whether a backend runs it. The CPU backend runs the
   reference; CUDA and Vulkan each run it as five kernels, seven with the coarse gate, in F32, with every option the
   reference has. Which key blocks a query block reads is the same as the reference's on CUDA, and on Vulkan wherever
-  the driver rounds a divide and a square root correctly and keeps subnormals; the output is compared by tolerance.
+  the driver keeps subnormals; the output is compared by tolerance. The Vulkan routing stages take their divides and
+  their square root through `divRn` and `sqrtRn` (`Shaders/div_rn.glsl`, `sqrt_rn.glsl`), because a device's own
+  need not be correctly rounded and on an RTX 3060 are not: about a third of sampled quotients and a quarter of sampled
+  roots differ from the rounded result. An operand that is itself subnormal is read as zero by that device, helpers
+  included.
   The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
   so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
   has it. No model calls the primitive yet, and it has no timing.

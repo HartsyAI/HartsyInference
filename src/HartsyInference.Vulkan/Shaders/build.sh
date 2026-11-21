@@ -109,6 +109,7 @@ SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
     quant_int8_rowwise
+    rounded_ops_probe
     dequant_recipe_bf16
     gated_residual_row_indexed
     guided_euler
