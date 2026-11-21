@@ -76,8 +76,7 @@ public sealed unsafe class PsaAttention
         Tensor qkv = new Tensor(new TensorShape(batch, qkvChannels, height, width), DType.F32);
         backend.Conv2D(qkv, input, _qkvWeight!, _qkvBias!, 1, 1, 0, 0);
 
-        // Compute attention manually. Allocate intermediates as managed arrays — the spatial
-        // dim N is small (≤ 1600 at 640²) so this scratch is cheap.
+        // The attention goes through the shared layer (Attend); the positional encoding is added on the host.
         Tensor attnOutCHW = new Tensor(new TensorShape(batch, _dim, height, width), DType.F32);
         ComputeAttention(backend, qkv, attnOutCHW, batch, height, width);
         qkv.Dispose();
@@ -88,24 +87,27 @@ public sealed unsafe class PsaAttention
         return projOut;
     }
 
-    /// <summary>The attention of one batch item through the shared attention layer. <paramref name="qkv"/> is channel-major
-    /// <c>[heads · (2·keyDim + headDim), n]</c>: for each head its query, its key (<paramref name="keyDim"/> channels each)
+    /// <summary>The attention through the shared attention layer, every batch item in one call. <paramref name="qkv"/> is
+    /// channel-major <c>[batch, heads · (2·keyDim + headDim), n]</c>: for each head its query, its key (<paramref name="keyDim"/> channels each)
     /// and its value (<paramref name="headDim"/> channels). The value is wider than the query and key, which no attention
     /// entry takes as it is, so Q and K are zero-padded to the value's width: the added zeros leave every <c>q · k</c>
-    /// unchanged, and <paramref name="scale"/> stays the one for <paramref name="keyDim"/>. Returns channel-major
-    /// <c>[heads · headDim, n]</c>.</summary>
-    internal static float[] Attend(IBackend backend, ReadOnlySpan<float> qkv, int heads, int keyDim, int headDim, int n, float scale)
+    /// unchanged, and <paramref name="scale"/> stays the one for <paramref name="keyDim"/>. The score product therefore runs
+    /// at the value's width, twice the multiplies of the key width at the usual ratio; an entry that took a value wider than
+    /// its keys would remove that. Writes channel-major <c>[batch, heads · headDim, n]</c> into
+    /// <paramref name="destination"/>.</summary>
+    internal static void Attend(IBackend backend, ReadOnlySpan<float> qkv, Span<float> destination, int batch, int heads, int keyDim,
+        int headDim, int n, float scale)
     {
         int slots = 2 * keyDim + headDim;
-        TensorShape shape = new(1, heads, n, headDim);
+        TensorShape shape = new(batch, heads, n, headDim);
         Tensor q = new(shape, DType.F32), k = new(shape, DType.F32), v = new(shape, DType.F32);
         Span<float> qs = q.AsSpan<float>(), ks = k.AsSpan<float>(), vs = v.AsSpan<float>();
         qs.Clear();
         ks.Clear();
-        for (int h = 0; h < heads; h++)
+        for (int bh = 0; bh < batch * heads; bh++)
             for (int i = 0; i < n; i++)
             {
-                int row = (h * n + i) * headDim, plane = h * slots * n + i;
+                int row = (bh * n + i) * headDim, plane = bh * slots * n + i;
                 for (int d = 0; d < keyDim; d++)
                 {
                     qs[row + d] = qkv[plane + d * n];
@@ -116,12 +118,10 @@ public sealed unsafe class PsaAttention
         // The layer takes q, k and v over and disposes them.
         using Tensor attended = AttentionLayer.Shared(heads, headDim, scale, DType.F32).AttendHeadMajorOperands(backend, q, k, v, default);
         ReadOnlySpan<float> a = attended.AsReadOnlySpan<float>();
-        float[] output = new float[heads * headDim * n];
-        for (int h = 0; h < heads; h++)
+        for (int bh = 0; bh < batch * heads; bh++)
             for (int i = 0; i < n; i++)
                 for (int d = 0; d < headDim; d++)
-                    output[(h * headDim + d) * n + i] = a[(h * n + i) * headDim + d];
-        return output;
+                    destination[(bh * headDim + d) * n + i] = a[(bh * n + i) * headDim + d];
     }
 
     /// <summary>Computes the attention output (including the depthwise PE on V added inline)
@@ -142,6 +142,8 @@ public sealed unsafe class PsaAttention
         // For our flat layout, total per-head channels = kd*2 + head_dim, and channel index for
         // (head h, slot s) is h * (kd*2+head_dim) + s.
         int slotsPerHead = _keyDim * 2 + _headDim;
+        Attend(backend, new ReadOnlySpan<float>(qkvPtr, batch * qkvChannels * n), new Span<float>(outPtr, batch * _dim * n), batch, _numHeads,
+            _keyDim, _headDim, n, _scale);
 
         for (int b = 0; b < batch; b++)
         {
@@ -149,17 +151,14 @@ public sealed unsafe class PsaAttention
             long outBatchStride = (long)_dim * n;
             float* qkvBase = qkvPtr + b * qkvBatchStride;
             float* outBase = outPtr + b * outBatchStride;
-            float[] attended = Attend(backend, new ReadOnlySpan<float>(qkvBase, qkvChannels * n), _numHeads, _keyDim, _headDim, n, _scale);
 
             for (int h = 0; h < _numHeads; h++)
             {
                 // This head's value planes follow its query and key planes.
                 float* vPlane = qkvBase + (long)h * slotsPerHead * n + 2L * _keyDim * n;
 
-                // The attention output for this head: out channels h*head_dim .. h*head_dim+head_dim-1.
-                long outHeadOffset = (long)h * _headDim * n;
-                float* outHead = outBase + outHeadOffset;
-                attended.AsSpan(h * _headDim * n, _headDim * n).CopyTo(new Span<float>(outHead, _headDim * n));
+                // The attention output for this head is already in place: out channels h*head_dim .. h*head_dim+head_dim-1.
+                float* outHead = outBase + (long)h * _headDim * n;
 
                 // Add depthwise PE on the V slice for this head. PE weight shape is [C, 1, 3, 3]
                 // — each output channel maps to exactly one input channel (the same index).

@@ -33,7 +33,8 @@ public sealed class PsaAttentionGpuTests
 
     private void MatchesTheCpuBackend(IBackend backend, float tolerance)
     {
-        foreach ((int dim, int heads, int height, int width) in ((int, int, int, int)[])[(256, 4, 20, 20), (512, 8, 20, 20), (24, 3, 3, 5)])
+        foreach ((int batch, int dim, int heads, int height, int width) in
+            ((int, int, int, int, int)[])[(1, 256, 4, 20, 20), (1, 512, 8, 20, 20), (2, 24, 3, 3, 5)])
         {
             int keyDim = dim / heads / 2, qkvChannels = dim + 2 * heads * keyDim, seed = dim;
             Dictionary<string, Tensor> weights = new()
@@ -47,7 +48,7 @@ public sealed class PsaAttentionGpuTests
             };
             PsaAttention block = new(dim, heads);
             block.LoadWeights(weights, "psa");
-            using Tensor input = Random(new TensorShape(1, dim, height, width), seed++, 1f);
+            using Tensor input = Random(new TensorShape(batch, dim, height, width), seed++, 1f);
 
             float[] expected;
             using (CpuBackend cpu = new())
@@ -60,7 +61,7 @@ public sealed class PsaAttentionGpuTests
             Assert.Equal(expected.Length, actual.Length);
             for (int i = 0; i < expected.Length; i++)
                 Assert.True(Math.Abs(expected[i] - actual[i]) <= tolerance * Math.Max(1f, Math.Abs(expected[i])),
-                    $"{dim} channels, {heads} heads, {height}x{width}: element {i} is {actual[i]}, expected {expected[i]}");
+                    $"batch {batch}, {dim} channels, {heads} heads, {height}x{width}: element {i} is {actual[i]}, expected {expected[i]}");
             foreach (Tensor weight in weights.Values) weight.Dispose();
         }
     }
@@ -74,6 +75,7 @@ public sealed class PsaAttentionGpuTests
         using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
         try { MatchesTheCpuBackend(backend, 2e-3f); }
         finally { ReportRows(evidence.Snapshot()); }
+        AssertServedByTheGpu(evidence.Snapshot(), "materialized");
     }
 
     [Fact]
@@ -88,11 +90,21 @@ public sealed class PsaAttentionGpuTests
             using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
             try { MatchesTheCpuBackend(backend, 1e-4f); }
             finally { ReportRows(evidence.Snapshot()); }
+            AssertServedByTheGpu(evidence.Snapshot(), "flash.scalar");
         }
     }
 
-    /// <summary>Which kernel rows served the attention. Each shape runs once on the CPU backend and once on the GPU one, so
-    /// three executions must carry the GPU backend's row.</summary>
+    /// <summary>Each shape runs once on the CPU backend, for the reference, and once on the GPU one: three executions must
+    /// carry the GPU backend's own row and three the CPU backend's, so a GPU call that fell back would fail here.</summary>
+    private static void AssertServedByTheGpu(AttentionEvidenceEvent[] events, string gpuRow)
+    {
+        AttentionEvidenceEvent[] executions = events.Where(e => e.Kind == AttentionEvidenceKind.Execution).ToArray();
+        Assert.Equal(3, executions.Count(e => e.Implementation == gpuRow));
+        Assert.Equal(6, executions.Length);
+        Assert.DoesNotContain(events, e => e.Kind == AttentionEvidenceKind.HostReference);
+    }
+
+    /// <summary>Which kernel rows served the attention: reported also when a comparison fails.</summary>
     private void ReportRows(AttentionEvidenceEvent[] events)
     {
         foreach (IGrouping<string, AttentionEvidenceEvent> row in events.Where(e => e.Kind == AttentionEvidenceKind.Execution)

@@ -13,12 +13,12 @@ public sealed class PsaAttentionTests
 {
     private const float Tolerance = 1e-4f;
 
-    /// <summary>The former loop over channel-major planes: for each head its query, key and value planes.</summary>
-    private static float[] FormerLoop(float[] qkv, int heads, int keyDim, int headDim, int n, float scale)
+    /// <summary>The former loop over channel-major planes: for each batch item and head its query, key and value planes.</summary>
+    private static float[] FormerLoop(float[] qkv, int batch, int heads, int keyDim, int headDim, int n, float scale)
     {
         int slots = 2 * keyDim + headDim;
-        float[] output = new float[heads * headDim * n], attn = new float[n * n];
-        for (int h = 0; h < heads; h++)
+        float[] output = new float[batch * heads * headDim * n], attn = new float[n * n];
+        for (int h = 0; h < batch * heads; h++)
         {
             int qPlane = h * slots * n, kPlane = qPlane + keyDim * n, vPlane = kPlane + keyDim * n;
             for (int i = 0; i < n; i++)
@@ -54,25 +54,27 @@ public sealed class PsaAttentionTests
     }
 
     /// <summary>The detector's geometry (heads of 64 with a key width of 32, over a 20 by 20 grid), a wider model, a
-    /// key ratio that is not a half, and a small odd shape.</summary>
+    /// key ratio that is not a half, a small odd shape, and two batch items in one call.</summary>
     [Theory]
-    [InlineData(4, 32, 64, 400)]
-    [InlineData(8, 32, 64, 400)]
-    [InlineData(2, 16, 64, 49)]
-    [InlineData(3, 4, 8, 15)]
-    public void OnTheCpuBackendItMatchesTheFormerLoop(int heads, int keyDim, int headDim, int n)
+    [InlineData(1, 4, 32, 64, 400)]
+    [InlineData(1, 8, 32, 64, 400)]
+    [InlineData(1, 2, 16, 64, 49)]
+    [InlineData(1, 3, 4, 8, 15)]
+    [InlineData(2, 3, 4, 8, 15)]
+    public void OnTheCpuBackendItMatchesTheFormerLoop(int batch, int heads, int keyDim, int headDim, int n)
     {
-        Random random = new(heads * 1000 + n);
-        float[] qkv = new float[heads * (2 * keyDim + headDim) * n];
+        Random random = new(batch * 7919 + heads * 1000 + n);
+        float[] qkv = new float[batch * heads * (2 * keyDim + headDim) * n];
         for (int i = 0; i < qkv.Length; i++) qkv[i] = random.NextSingle() * 2f - 1f;
         float scale = 1f / MathF.Sqrt(keyDim);
-        float[] expected = FormerLoop(qkv, heads, keyDim, headDim, n, scale);
+        float[] expected = FormerLoop(qkv, batch, heads, keyDim, headDim, n, scale);
 
         using CpuBackend backend = new();
-        float[] actual = PsaAttention.Attend(backend, qkv, heads, keyDim, headDim, n, scale);
+        float[] actual = new float[expected.Length];
+        PsaAttention.Attend(backend, qkv, actual, batch, heads, keyDim, headDim, n, scale);
         Assert.Equal(expected.Length, actual.Length);
         for (int i = 0; i < expected.Length; i++)
             Assert.True(Math.Abs(expected[i] - actual[i]) <= Tolerance * Math.Max(1f, Math.Abs(expected[i])),
-                $"{heads} heads, key {keyDim}, value {headDim}, {n} tokens: element {i} is {actual[i]}, expected {expected[i]}");
+                $"batch {batch}, {heads} heads, key {keyDim}, value {headDim}, {n} tokens: element {i} is {actual[i]}, expected {expected[i]}");
     }
 }
