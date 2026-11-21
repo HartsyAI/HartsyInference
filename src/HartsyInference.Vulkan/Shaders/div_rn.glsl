@@ -1,4 +1,6 @@
 // Correctly rounded fp32 division, CUDA's div.rn, shared by fp8_absmax and quant_e4m3 so scale and reciprocal agree.
+#ifndef DIV_RN_GLSL
+#define DIV_RN_GLSL
 
 // a - q*b to within one rounding. Vulkan need not fuse fma(), but OpFMul/OpFAdd are correctly rounded: Dekker's exact product.
 float divResidual(float a, float b, float q) {
@@ -41,3 +43,5 @@ float divRn(float a, float b) {
     }
     return uintBitsToFloat(uint(bestK) | sign);
 }
+
+#endif
