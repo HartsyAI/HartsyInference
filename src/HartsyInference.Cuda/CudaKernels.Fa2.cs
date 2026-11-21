@@ -29,6 +29,10 @@ public sealed partial class CudaKernels
 
     // Index: cache type (0 = F32, 1 = F16, 2 = BF16) * 2 + (head dim 128 ? 0 : 1).
     private readonly nint[] _decLengths = new nint[6];
+
+    /// <summary>The head-dim-256 entry points of the lengths decode, one a cache type (F32, F16, BF16); zero where the PTX
+    /// file was built before them or the device cannot give a block their shared memory.</summary>
+    private readonly nint[] _decLengths256 = new nint[3];
     private nint _decLengthsCombine;
 
     /// <summary>True when flash_attn_decode_lengths.ptx loaded: the grouped-query decode that takes a key length per sequence
@@ -43,6 +47,15 @@ public sealed partial class CudaKernels
     {
         int type = DecodeLengthsCacheIndex(cache);
         return type >= 0 && _decLengths[type * 2] != 0 && _decLengths[type * 2 + 1] != 0;
+    }
+
+    /// <summary>Whether the loaded lengths decode serves this head dim, group and cache type: 64 and 128 where the cache
+    /// type's entry points loaded, and 256 where that one did and the device gives a block its shared memory.</summary>
+    public bool DecodeLengthsSupports(int d, int group, HartsyInference.Core.Tensors.DType cache)
+    {
+        int type = DecodeLengthsCacheIndex(cache);
+        if (type < 0 || group < 1 || group > 16) return false;
+        return d == 256 ? _decLengths256[type] != 0 : (d == 128 || d == 64) && DecodeLengthsReads(cache);
     }
 
     private static int DecodeLengthsCacheIndex(HartsyInference.Core.Tensors.DType cache) =>
@@ -127,6 +140,17 @@ public sealed partial class CudaKernels
                 string d128 = $"lm_fa_decode_lengths_{types[t]}_d128", d64 = $"lm_fa_decode_lengths_{types[t]}_d64";
                 _decLengths[t * 2] = t == 0 ? _decodeLengthsModule.GetFunction(d128) : _decodeLengthsModule.TryGetFunction(d128);
                 _decLengths[t * 2 + 1] = t == 0 ? _decodeLengthsModule.GetFunction(d64) : _decodeLengthsModule.TryGetFunction(d64);
+                // Head dim 256 came later still, and its block needs more shared memory than a kernel gets without
+                // asking. The opt-in is sized for the largest group; a device that cannot give it leaves the handle
+                // at zero, and a call at 256 over that cache type is then refused.
+                nint d256 = _decodeLengthsModule.TryGetFunction($"lm_fa_decode_lengths_{types[t]}_d256");
+                int shared = DecodeSharedBytes(256, 16, f16Kv: t != 0);
+                if (d256 != 0 && shared <= MaxDynamicSharedBytes)
+                {
+                    // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8.
+                    CudaDriverApi.cuFuncSetAttribute(d256, 8, shared).ThrowOnError();
+                    _decLengths256[t] = d256;
+                }
             }
             _decLengthsCombine = _decodeLengthsModule.GetFunction("lm_fa_decode_lengths_combine");
         }
@@ -231,8 +255,8 @@ public sealed partial class CudaKernels
         HartsyInference.Core.Tensors.DType cache, nint stream)
     {
         int type = DecodeLengthsCacheIndex(cache);
-        nint fn = type < 0 ? 0 : _decLengths[type * 2 + (d == 128 ? 0 : 1)];
-        if (fn == 0 || !DecodeGqaSupports(d, kvGroup))
+        nint fn = type < 0 ? 0 : d == 256 ? _decLengths256[type] : _decLengths[type * 2 + (d == 128 ? 0 : 1)];
+        if (fn == 0 || !DecodeLengthsSupports(d, kvGroup, cache))
             throw new InvalidOperationException($"flash_attn_decode_lengths has no kernel for head dim {d}, group {kvGroup}, a {cache} cache.");
         ulong mA = partialM, lA = partialL, accA = partialAcc, qA = q, lenA = lengths, kA = k, vA = v;
         int hqA = hq, hkvA = hkv, lkA = capacity, sA = rows, groupA = kvGroup, causalA = causal ? 1 : 0, gA = splits, chunkA = chunk;

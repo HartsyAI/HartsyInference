@@ -176,8 +176,8 @@ public sealed partial class CudaBackend
         long rows = (long)c.Batch * c.QueryTokens, outputRows = rows * c.Heads;
         if (c.Query.Layout != AttentionLayout.HeadMajor || c.Key.Layout != AttentionLayout.HeadMajor || c.Value.Layout != AttentionLayout.HeadMajor
             || c.Output.Layout != AttentionLayout.TokenMajor || c.ValueHeadDim != c.QkHeadDim || c.Heads != c.KvHeads * group
-            || c.Key.DType != c.Value.DType || !_kernels.DecodeLengthsReads(c.Key.DType)
-            || !CudaKernels.DecodeGqaSupports(c.QkHeadDim, group) || !CudaKernels.GridYzFits(c.KvHeads, rows) || outputRows > int.MaxValue)
+            || c.Key.DType != c.Value.DType || !_kernels.DecodeLengthsSupports(c.QkHeadDim, group, c.Key.DType)
+            || !CudaKernels.GridYzFits(c.KvHeads, rows) || outputRows > int.MaxValue)
             return false;
         return outputRows * DecodeLengthsSplits(in c).Splits * (c.QkHeadDim + 2) * sizeof(float) <= DecodeLengthsWorkspaceLimit;
     }

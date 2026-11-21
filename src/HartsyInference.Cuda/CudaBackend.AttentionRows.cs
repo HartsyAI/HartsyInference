@@ -496,7 +496,7 @@ public sealed partial class CudaBackend
             new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32,
                     AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16, HM | AttentionLayouts.TokenMajor) with
                 {
-                    MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
+                    MinHeadDim = 64, MaxHeadDim = 256, Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
                 }, "F.9",
                 (in AttentionCall c) => DecodeLengthsAdmits(in c),
                 (in AttentionCall c) =>
