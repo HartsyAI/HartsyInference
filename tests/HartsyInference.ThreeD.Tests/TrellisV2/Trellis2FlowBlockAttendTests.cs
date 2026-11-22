@@ -12,7 +12,7 @@ namespace HartsyInference.ThreeD.Tests.TrellisV2;
 /// <summary><see cref="Trellis2FlowBlock.Attend"/> attends through a shared <see cref="Core.Layers.Attention.AttentionLayer"/> and merges
 /// the heads with <c>MergeHeads</c>. It used to call <c>ScaledDotProductAttention(..., null, scale)</c> and permute back itself; that body is
 /// kept here as the oracle. On the CPU backend the new path must be bit-identical to it, take the same row the same number of times
-/// without the F16 permission, and dispose q, k and v like the old body did. (CUDA and Vulkan are compared on a real generation, not here.)</summary>
+/// without the F16 permission, and dispose q, k and v like the old body did. (The CUDA backend is compared in the GpuIntegration theory below; Vulkan is compared on a real generation, not here.)</summary>
 [Collection("AttentionEvidence")]
 public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
 {
