@@ -133,7 +133,7 @@ public sealed partial class AttentionLayer
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
     /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout); rank-2
-    /// <c>[S, heads·D]</c> operands are one batch item.</summary>
+    /// <c>[S, heads·D]</c> operands are one batch item. As in <see cref="Attend"/>, all three are taken over and disposed.</summary>
     public Tensor AttendFlat(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
         if (_config.QkNorm is not (AttentionQkNorm.None or AttentionQkNorm.FullWidthRms))
@@ -767,14 +767,26 @@ public sealed partial class AttentionLayer
         return RunHeadMajor(backend, qMh, kMh, vMh, sq, act, flatShape, in context);
     }
 
-    /// <summary>The head-major call over permuted operands, then the permute back to <paramref name="flatShape"/>.</summary>
+    /// <summary>The head-major call over permuted operands, then the permute back to <paramref name="flatShape"/>. When that permute
+    /// throws, the attention output and the new tensor are disposed and the exception propagates.</summary>
     private Tensor RunHeadMajor(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, int sq, DType act, TensorShape flatShape,
         in AttentionCallContext context)
     {
         Tensor attn = RunAttention(backend, qMh, kMh, vMh, act, in context, OperandOwnership.All);
         Tensor flat = new(flatShape, act);
-        backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
-        attn.Dispose();
+        try
+        {
+            backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attn.Dispose();
+        }
         return flat;
     }
 

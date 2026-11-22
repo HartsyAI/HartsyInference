@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
@@ -18,7 +19,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
     private const float NormEps = 1e-6f;
 
     private readonly int _width, _heads, _headDim, _mlpHidden;
-    private readonly float _scale;
+    private readonly AttentionLayer _attention;
     private readonly HeadRmsNorm _headNorm;
     private readonly Tensor _modulation;
     private readonly Tensor _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B;
@@ -35,7 +36,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
         _heads = config.NumHeads;
         _headDim = config.HeadDim;
         _mlpHidden = config.MlpHidden;
-        _scale = 1f / MathF.Sqrt(_headDim);
+        _attention = AttentionLayer.Shared(_heads, _headDim);   // scale 0 is 1/sqrt(headDim), no F16 permission: what the legacy call without a mask gave
         _headNorm = new HeadRmsNorm(_headDim);
         _modulation = weights[p + "modulation"].Reshape(new TensorShape(1, 6L * _width));
         _qkvW = weights[p + "self_attn.to_qkv.weight"];
@@ -262,16 +263,9 @@ internal sealed class Trellis2FlowBlock : IDisposable
         => gamma is null ? heads : _headNorm.Apply(backend, heads, gamma);
 
     /// <summary>Attention over head-major operands, returned flat as <c>[1, tokens, C]</c>; consumes q, k and v.</summary>
-    private Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int tokens)
+    internal Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int tokens)
     {
-        Tensor att = new(new TensorShape(1, _heads, tokens, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(att, q, k, v, null, _scale);
-        q.Dispose();
-        k.Dispose();
-        v.Dispose();
-        Tensor flat = new(new TensorShape(1, tokens, _width), DType.F32);
-        backend.Permute0213(flat, att, _heads, tokens, _headDim);
-        att.Dispose();
-        return flat;
+        Tensor att = _attention.AttendHeadMajorOperands(backend, q, k, v, default);   // consumes q, k and v
+        return _attention.MergeHeads(backend, att, new TensorShape(1, tokens, _width));   // consumes att
     }
 }
