@@ -25,13 +25,13 @@ treat them as approximate.
 |---|---|---|
 | Diffusion `Models/TextEncoders/GptOssEncoder.cs` | Causal or windowed, grouped heads, per-head sink; single-threaded | Migrated in draft #1005 (read by me) |
 | Diffusion `Models/Denoisers/DiTBlocks/WanAnimateFaceBlock.cs` | Frame-local cross-attention, 16 calls a step with CFG; single-threaded | Migrated in draft #1011 (read by me) |
-| Audio `Models/IndexTts/IndexTtsPerceiver.cs` | Unmasked; single-threaded | Migrated in #1010 (merged). Real runs on the RTX 4090: on IndexTTS 1.5 the output is 56 dB from the base and repeats itself; on IndexTTS 2.5 it is identical, with the new calls shown executing |
+| Audio `Models/IndexTts/IndexTtsPerceiver.cs` | Unmasked; single-threaded | Migrated in #1010 (merged). Real runs on the RTX 4090, CUDA: on IndexTTS 1.5 the output is 56.35 dB from the base and two runs are bit-identical; on IndexTTS 2.5 it is identical to the base's, with the new calls shown executing |
 | Audio `Models/GptSoVits/SoVitsEncP.cs` `CrossAttention` | Unmasked, channels-first; single-threaded | Migrated in #1010 (merged). **No real run**: no reference clip with a transcript was on the RTX 4090 host. Unit tests only |
-| Audio `Models/ControlFoley/ControlFoleyStyleEncoder.cs` | Unmasked self-attention over frames; single-threaded | Migrated in #1010 (merged). Real run on the RTX 4090 with a reference clip: the new calls execute and the output is bit-identical to the base's; a video-only request does not reach this code |
+| Audio `Models/ControlFoley/ControlFoleyStyleEncoder.cs` | Unmasked self-attention over frames; single-threaded | Migrated in #1010 (merged). Real run on the RTX 4090, CUDA, with a reference clip: the new calls execute and the output is bit-identical to the base's; a video-only request does not reach this code |
 | Audio `Models/FishAudio/DacOps.cs` `RunTransformer` | Causal, window of 128 keys (512 in the encoder), host RoPE; single-threaded | Open (read by me). On CUDA the causal F32 route narrows to F16, a larger precision change than TF32 inside a codec, and no Fish Audio weights are on either test machine. Looked at again after #1026: its window as an additive bias would be a `t × t` tensor a call, where the loop is linear in `t` for its fixed window of 128 or 512 keys, so the two-sided-window route of #1026 is not a fit at codec lengths |
 | Audio `Models/BreezeTts/T5Gemma2TextEncoder.cs` `Encode` 87-112 | Two-sided window on some layers, grouped heads; single-threaded | Migrated in #1026 (merged): grouped heads go to the backend as they are (CUDA repeats K and V before its dense row), the two-sided window is an additive bias, and none is passed where the window covers the segment. Checked against the former loop on the CPU backend, CUDA and Vulkan, on the RTX 3060 and the RTX 4090; no real generation |
-| Audio `Models/ControlFoley/ControlFoleySwinStage.cs` `WindowAttention` 153-201 | Swin: learned relative-position bias and the shift mask, both additive; single-threaded | Migrated in draft #1014: one batch item a window, with the relative-position bias and the shift mask as one additive bias |
-| Audio `Models/IndexTts/IndexTtsConformerLayer.cs` `RelPosAttention` 100-157 | Positional terms indexed by the key alone, with no relative shift, so the score is `q · (k + p)` plus `u · k + v · p`, a bias a head and key that no query row changes; single-threaded | Migrated in #1013 (merged). Real runs on the RTX 4090: on IndexTTS 1.5 the output is 56.8 dB from the base, repeats itself and is 24% faster; on IndexTTS 2.5 it is identical, with the emotion conformer's calls shown executing. Plain with an additive bias, confirmed by two further readings (an earlier pass had it as specialized) |
+| Audio `Models/ControlFoley/ControlFoleySwinStage.cs` `WindowAttention` 153-201 | Swin: learned relative-position bias and the shift mask, both additive; single-threaded | Migrated in draft #1014: one batch item a window, with the relative-position bias and the shift mask as one additive bias. Real run on the RTX 4090, CUDA, with a reference clip: the new calls execute and the output is 28.2 dB from the base; a rounding control is prepared and not yet run |
+| Audio `Models/IndexTts/IndexTtsConformerLayer.cs` `RelPosAttention` 100-157 | Positional terms indexed by the key alone, with no relative shift, so the score is `q · (k + p)` plus `u · k + v · p`, a bias a head and key that no query row changes; single-threaded | Migrated in #1013 (merged). Real runs on the RTX 4090, CUDA: on IndexTTS 1.5 the output is 56.79 dB from the base, two runs are bit-identical and it is 24% faster; on IndexTTS 2.5 it is identical to the base's, with the emotion conformer's calls shown executing. Plain with an additive bias, confirmed by two further readings (an earlier pass had it as specialized) |
 | Video `Tokenizers/CosmosDvModule.cs` `SpatialAttn` 120-147, `TemporalAttn` 168-195 | Single head; temporal is causal; single-threaded | Left on the host on purpose: the tokenizer is written for a deterministic F32 result |
 | LLM `Decision/Clef/ClefJointHead.cs` `Attention` (from line 286) | `nn.MultiheadAttention` mirror; already `Parallel.For` | Open, low value (read by me): small and already multi-threaded |
 | ThreeD `Models/Idol/Budget/BudgetRefineStage.cs` `Attend` | Block-diagonal over 2 or 4 children a parent; `Parallel.For` | Leave (read by me): tiny fixed groups, linear cost |
@@ -74,19 +74,22 @@ per-frame forward on the same backend (RTX 3060).
 
 ## What a migration changes
 
-The first three drafts (#1005, #1010, #1011) move exact-F32 host loops to the shared layer. On the CPU backend and on
+The first three migrations (#1005, #1010, #1011) move exact-F32 host loops to the shared layer. On the CPU backend and on
 Vulkan the result stays F32. **On CUDA the products become TF32**, as for every other caller of that layer, inside the
-contract bound of 2e-3. Each draft keeps the former loop as its test oracle and names this change. The later drafts
+contract bound of 2e-3. Each keeps the former loop as its test oracle and names this change. The later ones
 (#1013, #1014, #1016) do the same and say so in their own text.
 
 Real generations before and after, run on the RTX 4090 on 2026-11-21 and recorded on each pull request with the
 expectations fixed beforehand:
 
-- **#1005, GPT-OSS encoder (Lens), still a draft.** Each arm repeats itself, the new rows execute, total time is 24%
+- **#1005, GPT-OSS encoder (Lens), still a draft.** Each arm's two images are identical, the new rows execute, total time is 24%
   lower. The image is 32.0 dB from the base where 40 dB had been required, so that gate was missed. A control (the old
   loop with its sums reordered) is 31.7 dB from the base: the pipeline amplifies last-bit rounding that far. Whether to
   take it is the owner's decision.
-- **#1010 and #1013, merged.** See the table rows above. Two limits: a first run asked ControlFoley for a video-only
+- **#1010 and #1013, merged.** See the table rows above; all of these runs were on CUDA, where the changed attention
+  multiplies in TF32. Why IndexTTS 2.5 and the ControlFoley style encoder come out identical to the base there while
+  IndexTTS 1.5 moves to 56 dB is not established: the attention records show the new calls running in each, and a
+  conditioning that only steers sampled tokens would explain an exact match, but that was not checked. Two limits: a first run asked ControlFoley for a video-only
   request, which never reaches its reference encoders, so it showed nothing for the style encoder or the Swin stage and
   had to be repeated with a reference clip; and GPT-SoVITS has had no real run at all.
 - **#1014, ControlFoley Swin stage, still a draft.** With a reference clip the new calls execute and the output is
