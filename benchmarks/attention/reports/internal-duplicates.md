@@ -231,10 +231,19 @@ on a GPU backend the host loop's device-to-host sync goes away.
 - **Rows marked keep that are worth another look:** M10 (`DiaHeads` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`, `SliceLeading`) is public
   with callers in other models, but its members are host copies of `StridedCopies.RepeatInterleave` and `Permute0213`, so migrating
   the callers would be model work, not an adapter change. The `DiTUtils` host loops that M3 noted could be `Permute0213` calls.
-- **Found while collecting the evidence, not duplicates:** CUDA's query-tiled F32 row (S.9) does not repeat bit for bit between two
-  identical calls (largest difference 2.9e-07 at 14,748 by 14,748 tokens, 12 heads of 128, seen in #1054; the materialized
-  rows repeat), so a whole TRELLIS.2 generation on CUDA is not bit-reproducible; and Idol on Vulkan ends in a stack overflow in
-  `VulkanBackend.Concat`, reached through `VaeEncoder.PadRightBottom`, on `main`.
+- **Found while collecting the evidence, not duplicates:**
+  - CUDA's query-tiled F32 row (S.9) sizes its tile from free device memory (`SdpaTiledF32` in `CudaBackend.cs`; a different tile
+    changes the summation order). Two calls of the same shape repeat bit for bit when free memory is the same before each, and
+    differ by rounding when it is not (RTX 3060, 14,748 tokens, 12 heads of 128: identical at 6,691 MB free before every run,
+    2.6e-07 at 11,203 / 11,139 / 11,043 MB). The 2.9e-07 seen in #1054 is therefore not a defect of the row: it is the tile
+    following free memory, and, most likely, on the RTX 4090 a `materialized` call against a `tiled.f32` one (the planner takes the
+    tiled row when the scores exceed half of free memory, and memory a finished call freed stays reserved by the stream-ordered
+    pool until trimmed, so the first call materializes and later ones tile); a rerun on the 4090 at the fix commit is pending. An
+    earlier version of this report called the row "not repeatable between identical calls"; that diagnosis was wrong. What
+    remains is an open product question, not a defect: the planner does not count pool-reserved memory as free, so repeated
+    large attention calls on a card where the scores are between a quarter and a half of memory change kernel after the first
+    call. Outputs agree to rounding. A whole TRELLIS.2 generation on CUDA is not bit-reproducible for that reason.
+  - Idol on Vulkan ends in a stack overflow in `VulkanBackend.Concat`, reached through `VaeEncoder.PadRightBottom`, on `main`.
 
 ### What I did not examine
 
