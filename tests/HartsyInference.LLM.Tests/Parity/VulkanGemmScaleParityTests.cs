@@ -118,11 +118,14 @@ public sealed class VulkanGemmScaleParityTests
 
     /// <summary>A GGUF weight with a factor, at the row counts on both sides of <c>gemv_quant</c>'s limit: five rows would
     /// take the fused GEMV, which has no alpha and must decline, and forty-eight take the dequantize-then-GEMM path. The
-    /// reference is the same call with a factor of 1, so the test needs no second dequantizer.</summary>
+    /// reference is the same call with a factor of 1, so the test needs no second dequantizer. <c>Linear</c> and
+    /// <c>QuantizedMatMul</c> each pass the factor themselves, so both entry points run.</summary>
     [VulkanTheory]
-    [InlineData(5)]
-    [InlineData(48)]
-    public void QuantizedLinearScalesTheProductByTheWeightFactorBeforeTheBias(int rows)
+    [InlineData(5, false)]
+    [InlineData(48, false)]
+    [InlineData(5, true)]
+    [InlineData(48, true)]
+    public void QuantizedLinearScalesTheProductByTheWeightFactorBeforeTheBias(int rows, bool viaQuantizedMatMul)
     {
         const int k = 64, n = 48;
         Random rng = new(14);
@@ -136,8 +139,16 @@ public sealed class VulkanGemmScaleParityTests
         using Tensor scaled = new(new TensorShape(rows, n), DType.F32);
 
         using VulkanBackend vulkan = new();
-        vulkan.Linear(plain, input, plainWeight, bias);
-        vulkan.Linear(scaled, input, scaledWeight, bias);
+        if (viaQuantizedMatMul)
+        {
+            vulkan.QuantizedMatMul(plain, input, plainWeight, bias);
+            vulkan.QuantizedMatMul(scaled, input, scaledWeight, bias);
+        }
+        else
+        {
+            vulkan.Linear(plain, input, plainWeight, bias);
+            vulkan.Linear(scaled, input, scaledWeight, bias);
+        }
 
         float[] b = Read(bias), expected = Read(plain), actual = Read(scaled);
         float worst = 0f;
