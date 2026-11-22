@@ -30,12 +30,6 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     private Tensor? _addK, _addKB, _addV, _addVB, _normAddedK;
     private AttentionLayer? _selfAttention, _crossAttention, _imageAttention, _selfAttention16, _crossAttention16;
 
-    internal AttentionLayer? SelfAttentionStage => _selfAttention;
-    internal AttentionLayer? CrossAttentionStage => _crossAttention;
-    internal AttentionLayer? ImageAttentionStage => _imageAttention;
-    internal AttentionLayer? SelfAttentionF16Stage => _selfAttention16;
-    internal AttentionLayer? CrossAttentionF16Stage => _crossAttention16;
-
     public WanVideoBlock(WanVideoConfig c, bool crossAttnNorm)
     {
         _dim = c.InnerDim;

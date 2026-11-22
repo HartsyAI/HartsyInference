@@ -399,20 +399,6 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
         return output;
     }
 
-    /// <summary>Runs Qwen3-VL's causal grouped-query attention without expanding KV heads or materializing a score mask.</summary>
-    internal static void CausalGqaAttention(IBackend backend, Tensor output, Tensor query, Tensor key, Tensor value,
-        int queryHeads, int kvHeads, int seqLen, int headDim)
-    {
-        ArgumentNullException.ThrowIfNull(backend);
-        if (queryHeads <= 0 || kvHeads <= 0 || queryHeads % kvHeads != 0)
-        {
-            throw new ArgumentException(
-                $"Qwen3-VL query heads ({queryHeads}) must be a positive multiple of KV heads ({kvHeads}).");
-        }
-        backend.FlashAttention(output, query, key, value, seqLen, queryHeads / kvHeads, causal: true,
-            qOffset: 0, scale: 1.0f / MathF.Sqrt(headDim));
-    }
-
     private static void SpliceVisionTokens(Tensor embeds, VisionResult[] visionOut, bool[] visualMask, int seqLen)
     {
         int hidden = (int)embeds.Shape[2];
@@ -632,7 +618,9 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             ApplyRopeSplitHalf(kMh, ropeCos, ropeSin, kvHeads, seqLen, headDim);
 
             Tensor attnOut = new Tensor(queryHeadShape, DType.F32);
-            CausalGqaAttention(backend, attnOut, qMh, kMh, vMh, queryHeads, kvHeads, seqLen, headDim);
+            // Causal grouped-query attention: K and V keep their kvHeads, no score mask is built.
+            backend.FlashAttention(attnOut, qMh, kMh, vMh, seqLen, queryHeads / kvHeads, causal: true,
+                qOffset: 0, scale: 1.0f / MathF.Sqrt(headDim));
             qMh.Dispose();
             kMh.Dispose();
             vMh.Dispose();

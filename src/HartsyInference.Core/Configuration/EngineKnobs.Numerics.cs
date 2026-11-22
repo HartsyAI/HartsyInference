@@ -223,6 +223,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Int8AttnV2F16Pv =
         Bool("numerics.int8AttnV2F16Pv", false, KnobScope.Runtime, KnobDomain.Numerics, "Runs INT8 attention v2's PV product in F16 against the running maximum instead of u8 P times s8 V: slower, and it keeps the keys below u8 P's step.");
 
+    /// <summary>Rotates INT8 attention v2's Q and centered K rows with the pinned Hadamard before they are quantized.</summary>
+    public static readonly Knob<bool> Int8AttnV2Rotate =
+        Bool("numerics.int8AttnV2Rotate", false, KnobScope.Runtime, KnobDomain.Numerics, "Rotates INT8 attention v2's Q and centered K rows before they are quantized: a 4-point Hadamard up to 256 keys, the signed 128-point one past that.");
+
     /// <summary>Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).</summary>
     public static readonly Knob<bool> SageAttn =
         Bool("numerics.sageAttn", true, KnobScope.Runtime, KnobDomain.Numerics, "Selects the INT8 SageAttention kernel for attention; =0 disables it (any non-0 value leaves it on).");
@@ -264,10 +268,11 @@ public static partial class EngineKnobs
         Bool("numerics.moeIndexed", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the routed experts of a small MoE batch (decode) entirely on the device with expert-indexed GEMVs; =0 returns to the host-routed per-expert loop.");
 
     /// <summary>Readers that bring a layer's routed experts from a memory-mapped checkpoint into the page cache before the host-routed
-    /// per-expert loop uploads them (<see cref="Memory.Host.MappedTensorPrefetch"/>); 0 turns the prefetch off.</summary>
+    /// per-expert loop uploads them (<see cref="Memory.Host.MappedTensorPrefetch"/>), and a layer's weights before the ERNIE-5.5 stage preload
+    /// uploads them; 0 turns the prefetch off.</summary>
     public static readonly Knob<int> MoeExpertPrefetchThreads =
         Int("numerics.moeExpertPrefetchThreads", 16, KnobScope.Runtime, KnobDomain.Numerics,
-            "Threads that read a layer's selected routed experts from the mapped checkpoint in parallel before the host-routed per-expert loop runs them; =0 turns it off. A network volume serves one reader far slower than several.",
+            "Threads that read a layer's selected routed experts from the mapped checkpoint in parallel before the host-routed per-expert loop runs them, and a layer's weights ahead of the ERNIE-5.5 stage preload; =0 turns it off. A network volume serves one reader far slower than several.",
             static v => Math.Clamp(v, 0, 64));
 
     /// <summary>Runs cuDNN convolutions channels-last, transposing activations and weights around the call; 0 keeps them

@@ -63,10 +63,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public IReadOnlyDictionary<long, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDimDiagnostics =>
         _cudnnSdpaHealth.DimDiagnostics;
 
-    /// <summary>The same snapshot per signature.</summary>
-    internal IReadOnlyDictionary<CudnnSdpaSignature, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> CudnnSdpaDiagnostics =>
-        _cudnnSdpaHealth.Diagnostics;
-
     private CudnnConv? _cudnnConv;
     private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
     private static bool ConvChannelsLast => EngineKnobs.ConvChannelsLast.Value;
@@ -82,8 +78,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool _cudnnConv3dDead; // a 3-D failure → causal 3-D convs go back to per-tap 2-D for the session
 
     private long _cudnnSdpaExecutionCount;
-    private long _cudnnSdpaSessionGeneration;
-    private long _cudnnSdpaDisposedSessionCount;
 
     /// <summary>True once the cuDNN fused-attention fast path has run at least once this session (confirms engagement vs fallback).</summary>
     public bool CudnnSdpaEngaged => CudnnSdpaExecutionCount > 0;
@@ -103,12 +97,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Query-tiled attention calls this backend served (see <see cref="SdpaTiledF32Core"/>).</summary>
     internal long SdpaTiledExecutionCount => Interlocked.Read(ref _sdpaTiledExecutionCount);
     private long _sdpaTiledExecutionCount;
-
-    /// <summary>Test diagnostic incremented whenever a new cuDNN SDPA handle/plan cache is constructed.</summary>
-    internal long CudnnSdpaSessionGeneration => Interlocked.Read(ref _cudnnSdpaSessionGeneration);
-
-    /// <summary>Test diagnostic incremented only after a detached cuDNN SDPA session releases all owned resources.</summary>
-    internal long CudnnSdpaDisposedSessionCount => Interlocked.Read(ref _cudnnSdpaDisposedSessionCount);
 
     private long _sageAttentionExecutionCount;
 
@@ -5953,7 +5941,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (_cudnnSdpa is null)
             {
                 _cudnnSdpa = new CudnnSdpa(_stream.Handle);
-                Interlocked.Increment(ref _cudnnSdpaSessionGeneration);
             }
 
             // Checked right after real (or already-cached) engine construction, so an injected failure is
@@ -9124,7 +9111,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // through the half-disposed session; it will construct a fresh one after this lock is released.
             _cudnnSdpa = null;
             session.Dispose();
-            Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
         }
     }
 
@@ -9377,7 +9363,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 Attempt("cuDNN SDPA session", () =>
                 {
                     sdpa.Dispose();
-                    Interlocked.Increment(ref _cudnnSdpaDisposedSessionCount);
                 });
             }
 

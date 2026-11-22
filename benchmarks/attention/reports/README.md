@@ -47,6 +47,10 @@ The [PR 12 Qwen campaign](pr12-qwen-primary.md) on the RTX 4090 is recorded in t
 
 Other reports in this folder: the [consumer audit](consumer-audit.md) of attention computed outside the backend
 entry points (plan items 14 to 17), and the [Vulkan tiled F32 A/B](vulkan-tiled-f32-ab.md), the descriptive RTX 3060
-comparison that `numerics.vkTiledAttention` waits on. The
+comparison behind the default of `numerics.vkTiledAttention`, with the [workloads that default moves](vulkan-tiled-default-workloads.md)
+(a source audit). The
 [Blackwell rental campaign](blackwell-rental-campaign.md) is the stage plan and spending ceiling for the final
 hardware gate; nothing in it has been provisioned or run.
+
+The [internal duplicates audit](internal-duplicates.md) lists the internal attention code that plan item 18 could retire, with
+the callers and the evidence for each.

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Idol;
@@ -15,20 +16,21 @@ internal static class IdolAttention
         return o;
     }
 
+    /// <summary>The layer Idol's blocks and decoders attend through: equal heads, the default scale <c>1/sqrt(headDim)</c>, and the F16
+    /// permission, because the queries and keys are RMS-normalised in every Idol attention, so their scores are bounded and the backend
+    /// may run it in F16, as idol-sdk's attention does.</summary>
+    internal static AttentionLayer Layer(int heads, int headDim) =>
+        new(new AttentionLayerConfig { Heads = heads, KvHeads = heads, HeadDim = headDim, AllowF16 = true });
+
     /// <summary>Attention of token-major <paramref name="q"/> (<paramref name="queryTokens"/> rows) over <paramref name="k"/> and <paramref name="v"/>
-    /// (<paramref name="keyTokens"/> rows), without a mask; consumes the three. The queries and keys are RMS-normalised in every Idol attention, so their scores
-    /// are bounded and the backend may run it in F16, as idol-sdk's attention does.</summary>
-    internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int queryTokens, int keyTokens, int heads, int headDim, float scale)
+    /// (<paramref name="keyTokens"/> rows), without a mask, through <paramref name="layer"/> (made by <see cref="Layer"/>); consumes the three.</summary>
+    internal static Tensor Attend(IBackend backend, AttentionLayer layer, Tensor q, Tensor k, Tensor v, int queryTokens, int keyTokens, int heads, int headDim)
     {
         using Tensor qh = ToHeadMajor(backend, q, queryTokens, heads, headDim);
         using Tensor kh = ToHeadMajor(backend, k, keyTokens, heads, headDim);
         using Tensor vh = ToHeadMajor(backend, v, keyTokens, heads, headDim);
-        Tensor att = new(new TensorShape(1, heads, queryTokens, headDim), DType.F32);
-        backend.ScaledDotProductAttention(att, qh, kh, vh, null, scale, allowF16: true);
-        Tensor flat = new(new TensorShape(1, queryTokens, (long)heads * headDim), DType.F32);
-        backend.Permute0213(flat, att, heads, queryTokens, headDim);
-        att.Dispose();
-        return flat;
+        Tensor att = layer.AttendHeadMajorOperands(backend, qh, kh, vh, default, OperandOwnership.None);
+        return layer.MergeHeads(backend, att, new TensorShape(1, queryTokens, (long)heads * headDim));   // consumes att
     }
 
     private static Tensor ToHeadMajor(IBackend backend, Tensor tokenMajor, int tokens, int heads, int headDim)

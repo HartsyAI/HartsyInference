@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.IndexTts;
@@ -99,61 +100,57 @@ internal sealed unsafe class IndexTtsConformerLayer
     /// with <c>p = linear_pos(pe[0:T])</c> indexed by the key position and no <c>rel_shift</c>.</summary>
     private Tensor RelPosAttention(IBackend backend, Tensor x, Tensor posEmb, int t)
     {
-        int h = _numHeads, d = _headDim, c = _channels, posLen = t;
+        int h = _numHeads, d = _headDim, c = _channels;
         Tensor q = WhisperOps.ProjectLinear(backend, x, _qW!, _qB, 1, t, c, c);
         Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, c, c);
         Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, c, c);
-        Tensor p = WhisperOps.ProjectLinear(backend, posEmb, _posW!, null, 1, posLen, c, c);
+        Tensor p = WhisperOps.ProjectLinear(backend, posEmb, _posW!, null, 1, t, c, c);
 
-        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer, pp = (float*)p.DataPointer;
-        float* bu = (float*)_posBiasU!.DataPointer, bv = (float*)_posBiasV!.DataPointer;
-
-        Tensor outMerged = new(new TensorShape(1, t, c), DType.F32);
-        float* om = (float*)outMerged.DataPointer;
-        float invSqrtD = 1f / MathF.Sqrt(d);
-        float[] scores = new float[t];
-
-        for (int head = 0; head < h; head++)
-        {
-            int hOff = head * d;
-            float* buH = bu + (long)head * d;
-            float* bvH = bv + (long)head * d;
-            for (int i = 0; i < t; i++)
-            {
-                float* qi = qp + (long)i * c + hOff;
-                float maxS = float.NegativeInfinity;
-                for (int j = 0; j < t; j++)
-                {
-                    float* kj = kp + (long)j * c + hOff;
-                    float* pj = pp + (long)j * c + hOff;   // position of KEY j (no rel_shift in the reference)
-                    float ac = 0f, bd = 0f;
-                    for (int e = 0; e < d; e++)
-                    {
-                        ac += (qi[e] + buH[e]) * kj[e];
-                        bd += (qi[e] + bvH[e]) * pj[e];
-                    }
-                    float s = (ac + bd) * invSqrtD;
-                    scores[j] = s;
-                    if (s > maxS) maxS = s;
-                }
-                float sum = 0f;
-                for (int j = 0; j < t; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
-                float invSum = 1f / sum;
-                float* oi = om + (long)i * c + hOff;
-                for (int e = 0; e < d; e++) oi[e] = 0f;
-                for (int j = 0; j < t; j++)
-                {
-                    float a = scores[j] * invSum;
-                    float* vj = vp + (long)j * c + hOff;
-                    for (int e = 0; e < d; e++) oi[e] += a * vj[e];
-                }
-            }
-        }
-        q.Dispose(); k.Dispose(); v.Dispose(); p.Dispose();
+        Tensor outMerged = Attend(backend, q, k, v, p, _posBiasU!, _posBiasV!, h, d);
+        k.Dispose(); p.Dispose();
 
         Tensor o = WhisperOps.ProjectLinear(backend, outMerged, _oW!, _oB, 1, t, c, c);
         outMerged.Dispose();
         return o;
+    }
+
+    /// <summary>The position-aware attention through the shared attention layer. With the position row indexed by the key
+    /// alone, <c>(q+u)·k + (q+v)·p</c> is <c>q·(k+p)</c> plus a term that does not depend on the query, <c>u·k + v·p</c>: an
+    /// attention over the keys <c>k + p</c> with one additive bias a head and key. <paramref name="q"/>, <paramref name="k"/>,
+    /// <paramref name="v"/> and <paramref name="p"/> are <c>[1, T, heads·headDim]</c>; <paramref name="biasU"/> and
+    /// <paramref name="biasV"/> hold one row of <paramref name="headDim"/> a head. Takes <paramref name="q"/> and
+    /// <paramref name="v"/> over; <paramref name="k"/> and <paramref name="p"/> are only read and stay the caller's.
+    /// Returns <c>[1, T, heads·headDim]</c>.</summary>
+    internal static Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, Tensor p, Tensor biasU, Tensor biasV, int heads, int headDim)
+    {
+        if (p.Shape != k.Shape)
+            throw new ArgumentException($"The position rows are one a key; got K={k.Shape} and P={p.Shape}.", nameof(p));
+        int t = (int)k.Shape[1], c = heads * headDim;
+        float scale = 1f / MathF.Sqrt(headDim);
+        // The query-independent term, in score units: [1, heads, 1, T], broadcast over the query rows.
+        using Tensor bias = new(new TensorShape(1, heads, 1, t), DType.F32);
+        float* kp = (float*)k.DataPointer, pp = (float*)p.DataPointer, bu = (float*)biasU.DataPointer, bv = (float*)biasV.DataPointer;
+        float* bp = (float*)bias.DataPointer;
+        for (int head = 0; head < heads; head++)
+            for (int j = 0; j < t; j++)
+            {
+                float* kj = kp + (long)j * c + head * headDim, pj = pp + (long)j * c + head * headDim;
+                float sum = 0f;
+                for (int e = 0; e < headDim; e++) sum += bu[head * headDim + e] * kj[e] + bv[head * headDim + e] * pj[e];
+                bp[head * t + j] = sum * scale;
+            }
+        Tensor keys = new(k.Shape, DType.F32);
+        try
+        {
+            backend.Add(keys, k, p);
+        }
+        catch
+        {
+            keys.Dispose();
+            throw;
+        }
+        return AttentionLayer.Shared(heads, headDim, computeDType: DType.F32)
+            .AttendFlat(backend, q, keys, v, q.Shape, new AttentionCallContext { Bias = bias });
     }
 
     /// <summary>ESPnet <c>ConvolutionModule</c>: pointwise expand → GLU → depthwise conv (kernel <see cref="IndexTtsConformerConfig.ConvKernel"/>, groups=channels) → LayerNorm → SiLU → pointwise contract. Channels-last in/out, channels-first internally for the convs.</summary>

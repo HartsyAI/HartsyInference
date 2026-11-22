@@ -9,6 +9,7 @@ KERNELS=(
     "h3_vsa"
     "sage_attn_int8"
     "int8_attn_v2"
+    "int8_attn_v2_rot"
     "neighborhood_attention"
     "sol_attn_f32"
 )

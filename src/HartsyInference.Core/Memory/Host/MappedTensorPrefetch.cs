@@ -136,7 +136,7 @@ public static class MappedTensorPrefetch
         }
 
         /// <summary>Waits for every read and returns the bytes read; zero on an empty or ended batch.</summary>
-        internal long Finish()
+        public long Finish()
         {
             if (!IsLive) return 0;
             if (_chunkCount > 0) Finished.Wait();

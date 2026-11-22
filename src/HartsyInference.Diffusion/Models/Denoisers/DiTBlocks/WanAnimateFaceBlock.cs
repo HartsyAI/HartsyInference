@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -17,6 +18,7 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
     private readonly int _dim = dim, _heads = heads, _headDim = headDim;
     private readonly float _eps = eps;
     private Tensor? _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _nq, _nk;
+    private AttentionLayer? _layer;
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
@@ -40,6 +42,14 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
             _nq = TensorCasts.LoadF32(w, $"{p}.norm_q.weight");
             _nk = TensorCasts.LoadF32(w, $"{p}.norm_k.weight");
         }
+        // The projections, the per-head RMS norm on Q and K, the attention and the output projection are the shared layer's.
+        _layer = new AttentionLayer(
+            new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, ComputeDType = DType.F32 },
+            new AttentionLayerWeights
+            {
+                Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = _kB, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
+                QueryNorm = _nq, KeyNorm = _nk, QueryNormEps = _eps, KeyNormEps = _eps,
+            });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -48,72 +58,37 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
     }
 
     /// <summary>Returns the adapter output <c>[S, dim]</c> to be added to the latent stream. <paramref name="hidden"/>
-    /// is <c>[S, dim]</c>; <paramref name="motion"/> is <c>[T, N, dim]</c>; <c>T</c> must divide <c>S</c>.</summary>
+    /// is <c>[S, dim]</c>; <paramref name="motion"/> is <c>[T, N, dim]</c>; <c>T</c> must divide <c>S</c>. Every step runs on
+    /// the backend with one batch item a frame, so frame group <c>t</c> (S/T latent tokens) attends frame <c>t</c>'s N motion
+    /// tokens only and nothing is read back to the host.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor motion)
     {
+        AttentionLayer layer = _layer ?? throw new InvalidOperationException("Call LoadWeights before Forward.");
         int s = (int)hidden.Shape[0];
         int t = (int)motion.Shape[0], n = (int)motion.Shape[1];
         if (s % t != 0)
             throw new ArgumentException($"face adapter needs T|S; T={t} does not divide S={s}.");
-        int groupLen = s / t;
-        int kvRows = t * n;
 
-        Tensor qn = LayerNormNoAffine(hidden, s, _dim);                 // pre_norm_feat
-        Tensor motionFlat = Reshape(motion, kvRows, _dim);
-        Tensor kn = LayerNormNoAffine(motionFlat, kvRows, _dim);        // pre_norm_motion
-        motionFlat.Dispose();
-
-        Tensor q = new Tensor(new TensorShape(s, _dim), DType.F32); backend.Linear(q, qn, _qW!, _qB); qn.Dispose();
-        Tensor k = new Tensor(new TensorShape(kvRows, _dim), DType.F32); backend.Linear(k, kn, _kW!, _kB);
-        Tensor v = new Tensor(new TensorShape(kvRows, _dim), DType.F32); backend.Linear(v, kn, _vW!, _vB); kn.Dispose();
-
-        RmsPerHead(q, s, _nq!);
-        RmsPerHead(k, kvRows, _nk!);
-
-        Tensor outFlat = new Tensor(new TensorShape(s, _dim), DType.F32);
-        float* qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer, op = (float*)outFlat.DataPointer;
-        float scale = 1f / MathF.Sqrt(_headDim);
-        float[] scores = new float[n];
-        // Frame group ti (S/T latent tokens) attends only to frame ti's N motion tokens, per head.
-        for (int ti = 0; ti < t; ti++)
+        // pre_norm_feat and pre_norm_motion: no weights. The query rows are declared as T groups of S/T. The normed latent
+        // stream is as large as the stream itself, so the layer releases it as soon as Q is projected.
+        using Tensor kn = new(new TensorShape(t, n, _dim), DType.F32);
+        backend.LayerNormNoAffine(kn, motion, _eps);
+        Tensor qn = new(new TensorShape(t, s / t, _dim), DType.F32);
+        try
         {
-            for (int gi = 0; gi < groupLen; gi++)
-            {
-                int qRow = ti * groupLen + gi;
-                for (int h = 0; h < _heads; h++)
-                {
-                    long qOff = (long)qRow * _dim + (long)h * _headDim;
-                    float maxS = float.NegativeInfinity;
-                    for (int j = 0; j < n; j++)
-                    {
-                        long kOff = ((long)ti * n + j) * _dim + (long)h * _headDim;
-                        float dot = 0;
-                        for (int d = 0; d < _headDim; d++) dot += qp[qOff + d] * kp[kOff + d];
-                        scores[j] = dot * scale;
-                        if (scores[j] > maxS) maxS = scores[j];
-                    }
-                    float sum = 0;
-                    for (int j = 0; j < n; j++) { scores[j] = MathF.Exp(scores[j] - maxS); sum += scores[j]; }
-                    float invSum = 1f / sum;
-                    long oOff = (long)qRow * _dim + (long)h * _headDim;
-                    for (int d = 0; d < _headDim; d++)
-                    {
-                        float acc = 0;
-                        for (int j = 0; j < n; j++)
-                        {
-                            long vOff = ((long)ti * n + j) * _dim + (long)h * _headDim;
-                            acc += scores[j] * vp[vOff + d];
-                        }
-                        op[oOff + d] = acc * invSum;
-                    }
-                }
-            }
+            backend.LayerNormNoAffine(qn, hidden, _eps);
         }
-        q.Dispose(); k.Dispose(); v.Dispose();
+        catch
+        {
+            qn.Dispose();
+            throw;
+        }
 
-        Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        backend.Linear(o, outFlat, _oW!, _oB);
-        outFlat.Dispose();
+        using Tensor adapted = layer.Forward(backend, qn, kn, new AttentionCallContext { ReleaseQueryAfterProjection = true });
+        // The layer returns the query's [T, S/T, dim] and the caller adds rows of [S, dim]. This is a copy on the backend and
+        // not a view: Tensor.Reshape reads the host pointer, which would bring the result down from the device.
+        Tensor o = new(new TensorShape(s, _dim), DType.F32);
+        backend.CopyTo(o, adapted);
         return o;
     }
 
@@ -141,41 +116,5 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
         Buffer.MemoryCopy((float*)src.DataPointer + n, (float*)bottom.DataPointer, (long)n * 4, (long)n * 4);
         if (!ReferenceEquals(src, fused)) src.Dispose();
         return (top, bottom);
-    }
-
-    private Tensor LayerNormNoAffine(Tensor x, int rows, int dim)
-    {
-        Tensor o = new Tensor(new TensorShape(rows, dim), DType.F32);
-        float* xp = (float*)x.DataPointer, op = (float*)o.DataPointer;
-        for (int i = 0; i < rows; i++)
-        {
-            long off = (long)i * dim;
-            double mean = 0; for (int d = 0; d < dim; d++) mean += xp[off + d]; mean /= dim;
-            double var = 0; for (int d = 0; d < dim; d++) { double dd = xp[off + d] - mean; var += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(var / dim) + _eps);
-            for (int d = 0; d < dim; d++) op[off + d] = (float)((xp[off + d] - mean) * inv);
-        }
-        return o;
-    }
-
-    /// <summary>Per-head-dim RMSNorm (over <c>headDim</c>) with affine weight, in place on <c>[rows, heads·headDim]</c>.</summary>
-    private void RmsPerHead(Tensor x, int rows, Tensor weight)
-    {
-        float* xp = (float*)x.DataPointer, wp = (float*)weight.DataPointer;
-        for (int i = 0; i < rows; i++)
-            for (int h = 0; h < _heads; h++)
-            {
-                long off = (long)i * _dim + (long)h * _headDim;
-                double sumSq = 0; for (int d = 0; d < _headDim; d++) sumSq += (double)xp[off + d] * xp[off + d];
-                float inv = 1f / MathF.Sqrt((float)(sumSq / _headDim) + _eps);
-                for (int d = 0; d < _headDim; d++) xp[off + d] = xp[off + d] * inv * wp[d];
-            }
-    }
-
-    private static Tensor Reshape(Tensor x, int rows, int dim)
-    {
-        Tensor o = new Tensor(new TensorShape(rows, dim), DType.F32);
-        Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, (long)rows * dim * 4, (long)rows * dim * 4);
-        return o;
     }
 }
