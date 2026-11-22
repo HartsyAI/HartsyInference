@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>OmniGen 2 recipe (VectorSpaceLab, 4B MMDiT, Apache-2.0). The checkpoint is the fp16 transformer; the Qwen2.5-VL-3B text encoder (<see cref="SideModels.Qwen2_5_VL_3B"/>) and the FLUX.1 16-channel VAE (<see cref="SideModels.FluxAe"/>) resolve as side models. Lifted from the SwarmUI backend's <c>OmniGen2Loader</c>; the text encoder lives OUTSIDE the pipeline, so <see cref="OmniGen2RecipePipeline"/> live-encodes the caption and calls the embeddings overload.</summary>
@@ -19,6 +20,12 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "omnigen2";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Negative = "separate", Supports = [],
+        Guide = "docs/prompting/omnigen-2.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Reference editing only: OmniGen2 conditions on VAE-encoded reference latents with dual

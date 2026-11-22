@@ -49,7 +49,8 @@ Before that loop runs, the selected experts that are not on the device are read 
 parallel readers (`MappedTensorPrefetch`, `numerics.moeExpertPrefetchThreads`, default 16, 0 turns it off), so each expert's upload
 copies from memory. A network volume serves one reader far slower than several: on a RunPod MooseFS volume a 4 MiB read runs at about
 95 MB/s from one thread and 600 to 800 MB/s across 16 to 30. ERNIE-5.5 takes this loop (split-feature routing and SiTU keep it off the
-device-routed path), and its decode was almost entirely serial expert reads before the prefetch.
+device-routed path), and its decode was almost entirely serial expert reads before the prefetch. The ERNIE-5.5 stage preload reads
+each layer's weights ahead of their uploads with the same readers (`Ernie5Model.PreloadGroups`).
 
 **Small batches (at most 16 tokens: decode, speculative verify).**
 `router GEMV → MoeRoute → MoeExpertGateUp → MoeExpertDown → MoeCombineSlots`. The expert ids stay on the device. The

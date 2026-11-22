@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -25,6 +26,12 @@ public sealed class WanVaceRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => _familyId;
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["t5"], Format = "text", Negative = "separate", Supports = [],
+        Guide = "docs/prompting/wan.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>VACE requires a control image/video — it throws without one, so the init image is mandatory rather than optional.</remarks>

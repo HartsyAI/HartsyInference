@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -39,10 +40,30 @@ public sealed class WanVideoRecipe : IVideoRecipe
     private readonly string _familyId;
 
     /// <summary>Binds the recipe to one Wan family id. The catalog slug "wan" derives the config from the weights; a compat-class id ("wan-22-5b" / "wan-21-1_3b" / "wan-21-14b") selects the matching preset instead.</summary>
-    public WanVideoRecipe(string familyId = "wan") => _familyId = familyId;
+    public WanVideoRecipe(string familyId = "wan")
+    {
+        _familyId = familyId;
+        // The guide states on-screen text for Wan 2.1 only; wan-21-14b also carries 2.2 14B weights, so only the 1.3B id claims it.
+        Prompt = new()
+        {
+            Kind = "video", Encoders = ["t5"], Format = "text", Negative = "separate",
+            Supports = familyId is Wan21_1_3BCompatClassId ? ["text-rendering"] : [],
+            Guide = "docs/prompting/wan.md",
+        };
+    }
 
     /// <inheritdoc/>
     public string Name => _familyId;
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; }
+
+    /// <inheritdoc/>
+    /// <remarks>Animate and speech-to-video are not covered by the Wan guide, and the standalone recipes for them say so.</remarks>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && (variant.Is(WanVideoVariants.Animate) || variant.Is(WanVideoVariants.Animate2) || variant.Is(WanVideoVariants.S2V))
+            ? new PromptProfile { Kind = Prompt!.Kind }
+            : Prompt;
 
 
     /// <inheritdoc/>

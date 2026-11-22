@@ -2406,13 +2406,16 @@ public static class ModelCatalog
                 Id = "rvc", Modality = vc, DisplayName = "RVC v2", Architecture = "ContentVec + YIN F0 + NSF-HiFiGAN", Status = ok,
                 // No fixed weights repo: RVC re-voices toward a USER-TRAINED voice model placed at
                 // Models/audio/clone/rvc/<name>.pth (or passed via --model-path) — there is nothing upstream to
-                // catalog per se. The one auto-downloadable piece is the shared ContentVec content encoder, listed
-                // here so the CLI can still offer to fetch it; VcCatalog.EnsureContentVecAsync converts it to
-                // contentvec.safetensors on first use regardless of what's listed here.
+                // catalog per se. The auto-downloadable pieces are the two shared encoders, already converted to safetensors on
+                // the RVC v2 card on Hartsy, saved where VcCatalog reads them ({models}/audio). VcCatalog fetches the same files
+                // on first use, and falls back to converting the upstream pickles when Hartsy cannot be reached.
                 CliDrivable = true, // `hartsy convert <source.wav> -m rvc --model-path <voice.pth> [--pitch-shift N]` — VcCatalog "rvc"
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "lengyue233/content-vec-best", RepoPath = "pytorch_model.bin", TargetSubdir = "Audio/Rvc", Role = "content encoder (shared)" },
+                    new() { Repo = "lengyue233/content-vec-best", RepoPath = "pytorch_model.bin", TargetSubdir = "Audio", TargetName = "contentvec.safetensors",
+                        Role = "content encoder (shared)", Url = Audio.VcCatalog.ContentVecHartsyUrl, Sha256 = Audio.VcCatalog.ContentVecHartsySha256 },
+                    new() { Repo = "lj1995/VoiceConversionWebUI", RepoPath = "rmvpe.pt", TargetSubdir = "Audio", TargetName = "rmvpe.safetensors",
+                        Role = "pitch extractor (shared)", Url = Audio.VcCatalog.RmvpeHartsyUrl, Sha256 = Audio.VcCatalog.RmvpeHartsySha256 },
                 },
             },
 

@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.445
+
+- Added a `prompt` block to the recipe descriptors (`GET /v1/native/recipes`, `POST /v1/native/recipes/describe`) saying what shapes each model's
+  prompt text: format, negative handling, boxes and encoder kinds. `hartsy merge --model` writes the same facts as `modelspec.prompt_*`.
+
 ## alpha.444
 
 - The voice session takes a typed message as a turn (`SubmitUserTextAsync`), can run transcribe-only for command use (`TranscribeOnly`), and hears a chosen language (`Language`).
@@ -135,6 +140,10 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   checkpoints; the real checkpoint has not been run.
 
 ## Unreleased
+
+- **Changed: ERNIE-5.5 stage preload reads each layer's weights ahead with parallel readers, and the host linear behind the
+  hyper-connection mixes and the DeepSeek-V4.1 host weights is vectorized (CPU-tested; no speed measured on hardware).** The decode parity
+  tools compare the argmax at every position the engine produced logits for (`choices.json`, `compare.py --choice-margin`).
 
 - **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text and images (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run), from its `tiktoken.model` with the built-in XTML chat template when `tokenizer.json` is

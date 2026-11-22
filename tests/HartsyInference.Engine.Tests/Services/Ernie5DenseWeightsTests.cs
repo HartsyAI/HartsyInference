@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
@@ -74,6 +75,37 @@ public sealed partial class Ernie5DenseWeightsTests : IDisposable
     [InlineData(3L << 30, 24L << 30, 0L)]                                        // less free than the headroom
     public void Preload_budget_with_every_weight_keeps_a_smaller_headroom(long free, long total, long expected) =>
         Assert.Equal(expected, Ernie5Model.PreloadBudget(free, total, allWeights: true));
+
+    // The load reads a layer's mapped weights ahead of their uploads with parallel readers. That only helps for tensors with a file
+    // extent, so every routed expert of a sharded FP8 checkpoint must have one, and the read-ahead must cover each byte once.
+    [Theory]
+    [InlineData(4)]
+    [InlineData(0)]
+    public void Preload_reads_every_mapped_expert_byte_ahead_once(int readers)
+    {
+        Ernie5SyntheticCheckpoint.Write(_root, storage: Ernie5SyntheticCheckpoint.Storage.Fp8, shards: 3);
+        Ernie5Config config = Ernie5Config.Load(Path.Combine(_root, "config.json"));
+        using Ernie5CheckpointWeights weights = Ernie5CheckpointWeights.Open(_root);
+        DeepSeekV41RopeTable hca = DeepSeekV41RopeTable.Build(config.QkRopeHeadDim, 8, config.CompressRopeTheta, config.HcaRopeScaling);
+        DeepSeekV41RopeTable dsa = DeepSeekV41RopeTable.Build(config.MlaQkRopeHeadDim, 8, config.RopeTheta, null);
+        using CpuBackend backend = new();
+        using Ernie5Layer layer = new(backend, config, config.FirstKDenseReplace, weights, hca, dsa);
+        List<IReadOnlyList<Tensor>> groups = [.. layer.EnumerateExpertPreloadGroups()];
+        Tensor[] experts = [.. layer.Moe!.EnumerateExpertGroups().SelectMany(g => g)];
+        Assert.Equal(3 * config.NRoutedExperts, experts.Length);
+        Assert.All(experts, t => Assert.True(TensorFileExtents.TryGet(t, out _, out _), "a routed expert has no file extent"));
+
+        long read = Ernie5Model.PreloadGroups(backend, groups, readers, grouped: true);
+
+        long mapped = groups.SelectMany(g => g).Where(t => TensorFileExtents.TryGet(t, out _, out _)).Sum(t => t.DType.ComputeByteCount(t.ElementCount));
+        Assert.True(mapped >= experts.Sum(t => t.DType.ComputeByteCount(t.ElementCount)));
+        Assert.Equal(readers == 0 ? 0 : mapped, read);
+        // The dense set goes through the same call ungrouped, one tensor per group; nothing of it is read twice either.
+        List<Tensor> dense = [.. layer.EnumerateDenseWeights()];
+        long denseMapped = dense.Where(t => TensorFileExtents.TryGet(t, out _, out _)).Sum(t => t.DType.ComputeByteCount(t.ElementCount));
+        Assert.Equal(readers == 0 ? 0 : denseMapped,
+            Ernie5Model.PreloadGroups(backend, [.. dense.Select(t => (IReadOnlyList<Tensor>)[t])], readers, grouped: false));
+    }
 
     [GeneratedRegex(@"\.experts\.\d+\.")]
     private static partial Regex RoutedExpert();

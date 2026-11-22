@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -22,6 +23,14 @@ public sealed class LtxVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public string Name => "ltx-video";
+
+    /// <inheritdoc/>
+    /// <remarks>The guide does not name LTX-Video 1's encoder; it is the T5 this recipe constructs.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["t5"], Format = "text", Negative = "separate", Supports = [],
+        Guide = "docs/prompting/ltx-video.md",
+    };
 
     /// <inheritdoc/>
     public bool Matches(string familyId) =>

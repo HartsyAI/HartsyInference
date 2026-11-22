@@ -13,6 +13,7 @@ using HartsyInference.Vision.Clip;
 using HartsyInference.Engine.Features;
 
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -21,6 +22,13 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
 {
     /// <inheritdoc/>
     public string Name => "wan-animate-2";
+
+    /// <inheritdoc/>
+    /// <remarks>The Wan guide does not cover Animate.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video",
+    };
 
     /// <inheritdoc/>
     /// <remarks>A driving video and a reference character image, and nothing else. Unlike V1 there is no pose, face,

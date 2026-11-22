@@ -101,6 +101,13 @@ public static class ArtifactMetadata
             {
                 metadata["modelspec.tags"] = string.Join(",", identity.Tags);
             }
+            if (identity.Prompt is not null)
+            {
+                foreach ((string key, string value) in identity.Prompt.ToModelSpecKeys())
+                {
+                    metadata[key] = value;
+                }
+            }
         }
         Put(metadata, "hartsy.provider_id", identity.ProviderId);
         Put(metadata, "hartsy.model_id", provenance.ModelId);

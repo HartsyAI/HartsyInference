@@ -8,6 +8,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -16,6 +17,13 @@ public sealed class SdxlRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "sdxl";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip"], Format = "tags", Negative = "separate",
+        Supports = ["weights", "break", "regions"], Guide = "docs/prompting/sdxl.md",
+    };
 
     /// <inheritdoc/>
     public ImageFeatures Supports =>

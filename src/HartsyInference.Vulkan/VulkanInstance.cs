@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using System.Runtime.InteropServices;
 using static HartsyInference.Vulkan.VulkanUtilities;
 
@@ -6,9 +7,23 @@ namespace HartsyInference.Vulkan;
 
 /// <summary>Wraps a VkInstance with deterministic disposal.</summary>
 /// <remarks>Headless compute — no surface/swapchain extensions. Validation layer is opt-in via the
-/// HARTSYINFERENCE_VK_VALIDATION env var.</remarks>
+/// HARTSYINFERENCE_VK_VALIDATION env var.
+/// <para>The first instance a process creates is preceded by one more that is never destroyed
+/// (<see cref="HoldsProcessInstance"/>). On the NVIDIA Windows driver, destroying the device of a process's only
+/// instance after cooperative-matrix attention ran on it can leave a driver helper thread starting on memory the
+/// driver has already released, which ends the process with an access violation in <c>nvoglv64.dll</c>. With a
+/// second instance alive that does not happen, and creating the next backend is several times faster.
+/// <c>diagnostics.vkKeepInstance</c> turns it off.</para></remarks>
 public sealed class VulkanInstance : IDisposable
 {
+    private static readonly object _heldLock = new();
+    private static nint _held;
+    private static bool _holdAttempted;
+
+    /// <summary>Whether this process holds its idle instance: true from the first instance created with
+    /// <c>diagnostics.vkKeepInstance</c> on, until the process ends.</summary>
+    public static bool HoldsProcessInstance => Volatile.Read(ref _held) != 0;
+
     private nint _instance;
     private PinnedStringArray? _layers;
     private PinnedStringArray? _extensions;
@@ -29,6 +44,7 @@ public sealed class VulkanInstance : IDisposable
     public VulkanInstance(bool? enableValidation = null)
     {
         VulkanLibraryResolver.Register();
+        HoldProcessInstance();
 
         bool enableVal = enableValidation ?? EngineKnobs.VkValidation.Value;
 
@@ -46,32 +62,57 @@ public sealed class VulkanInstance : IDisposable
         _layers = new PinnedStringArray(layers);
         _extensions = new PinnedStringArray(extensions);
 
-        unsafe
+        Create(_appName, _engineName, _layers, _extensions, out _instance).ThrowOnError("vkCreateInstance");
+    }
+
+    private static unsafe VkResult Create(PinnedUtf8String appName, PinnedUtf8String engineName, PinnedStringArray layers,
+        PinnedStringArray extensions, out nint instance)
+    {
+        VkApplicationInfo appInfo = new()
         {
-            VkApplicationInfo appInfo = new()
-            {
-                sType = VkStructureType.ApplicationInfo,
-                pNext = 0,
-                pApplicationName = _appName.Pointer,
-                applicationVersion = MakeVersion(1, 0, 0),
-                pEngineName = _engineName.Pointer,
-                engineVersion = MakeVersion(1, 0, 0),
-                apiVersion = VkApiVersion13,
-            };
+            sType = VkStructureType.ApplicationInfo,
+            pNext = 0,
+            pApplicationName = appName.Pointer,
+            applicationVersion = MakeVersion(1, 0, 0),
+            pEngineName = engineName.Pointer,
+            engineVersion = MakeVersion(1, 0, 0),
+            apiVersion = VkApiVersion13,
+        };
 
-            VkInstanceCreateInfo ci = new()
-            {
-                sType = VkStructureType.InstanceCreateInfo,
-                pNext = 0,
-                flags = 0,
-                pApplicationInfo = (nint)(&appInfo),
-                enabledLayerCount = _layers.Count,
-                ppEnabledLayerNames = _layers.Pointers,
-                enabledExtensionCount = _extensions.Count,
-                ppEnabledExtensionNames = _extensions.Pointers,
-            };
+        VkInstanceCreateInfo ci = new()
+        {
+            sType = VkStructureType.InstanceCreateInfo,
+            pNext = 0,
+            flags = 0,
+            pApplicationInfo = (nint)(&appInfo),
+            enabledLayerCount = layers.Count,
+            ppEnabledLayerNames = layers.Pointers,
+            enabledExtensionCount = extensions.Count,
+            ppEnabledExtensionNames = extensions.Pointers,
+        };
 
-            VulkanApi.vkCreateInstance(in ci, 0, out _instance).ThrowOnError("vkCreateInstance");
+        return VulkanApi.vkCreateInstance(in ci, 0, out instance);
+    }
+
+    /// <summary>Creates the instance this process holds until it ends, once, before the first instance a caller asked
+    /// for. It has no layers, no extensions and no device, and nothing destroys it: not Dispose, not a finalizer, not
+    /// process exit, because destroying the last instance is the path being kept away from. It is tried once: a
+    /// failure is logged and the process goes on without it, and the caller's own instance reports its own error.</summary>
+    private static void HoldProcessInstance()
+    {
+        if (Volatile.Read(ref _held) != 0 || !EngineKnobs.VkKeepInstance.Value) return;
+        lock (_heldLock)
+        {
+            if (_held != 0 || _holdAttempted) return;
+            _holdAttempted = true;
+            using PinnedUtf8String appName = new("HartsyInference");
+            using PinnedUtf8String engineName = new("HartsyInference.Vulkan");
+            using PinnedStringArray none = new(new List<string>());
+            VkResult result = Create(appName, engineName, none, none, out nint held);
+            if (result == VkResult.Success) Volatile.Write(ref _held, held);
+            else
+                Logs.Warning($"Vulkan: the instance this process holds until it ends could not be created ({result}); "
+                    + "backends are created and destroyed without it.");
         }
     }
 
