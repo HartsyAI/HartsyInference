@@ -18,6 +18,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// they serve a causal prefill with no sinks from their F16 kernels, as they do for every caller of this entry. Those
 /// cases are held to 3e-3 on a GPU, the bound this repo's attention tests already hold F16 rows to, set after seeing that
 /// miss.</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class GptOssAttentionTests
 {
     private readonly ITestOutputHelper _output;
