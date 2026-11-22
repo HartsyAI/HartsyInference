@@ -92,9 +92,9 @@ expectations fixed beforehand:
 - **#1014, ControlFoley Swin stage, still a draft.** With a reference clip the new calls execute and the output is
   28.2 dB from the base (the arm without this change is bit-identical to the base). No bound had been set for that; a
   rounding control like the one for #1005 is prepared and not yet run.
-- **#1011, Wan Animate face adapter, still a draft.** Nothing to run on either machine: the 4090 host holds Wan Animate 2
-  checkpoints, and `WanAnimate2Transformer` does not use `WanAnimateFaceBlock`; the first Wan Animate, which does, has
-  no checkpoint there.
+- **#1011, Wan Animate face adapter, still a draft.** Nothing to run on either machine: the 4090 host holds Wan
+  Animate 2 checkpoints, and `WanAnimate2Transformer` does not use `WanAnimateFaceBlock`; the first Wan Animate,
+  which does, has no checkpoint there.
 - **#1016, PSA block, still a draft.** No YOLO11 detector weights on either machine.
 
 ## Timing seen so far (smoke only, RTX 3060 box, attention alone)
