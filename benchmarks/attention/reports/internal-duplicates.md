@@ -2,7 +2,10 @@
 
 Plan item 18 ([proposed queue](../proposed-queue.md)) says: retire internal duplicates only, preserve public adapters, and
 document behavioral compatibility changes. This report is the evidence for what could be retired. It is a source audit at
-`main` `ab67d61f6` (2026-11-21). **No source was changed**; the only edits in the pull request are this file and one link.
+`main` `ab67d61f6` (2026-11-21). **No source was changed by the audit pull request** (#1037); its only edits were this file
+and one link. The removals and migrations that followed are listed in the Status line below, each in its own pull request.
+The sections below are the audit as written: their line numbers and their statements about what was run ("no test was run",
+"no real generation") belong to the audit, not to those later pull requests, whose descriptions carry their own evidence.
 
 **Recheck against `main` `b9e56b9ef`.** The audit was taken at `ab67d61f6`; the merged PRs since touched the Vulkan and CUDA
 decode-with-lengths rows and shaders (head dim 256, F16/BF16 caches), the Vulkan Sol-Attn shaders, `T5Gemma2TextEncoder` and
@@ -220,6 +223,42 @@ on a GPU backend the host loop's device-to-host sync goes away.
   minimum-rows test beside the row's `MinQueryTokens`, per the Vulkan sub-agent). Not duplicates; trivial.
 - `Krea2Attention.Forward` takes an unused `seqLen` (`Diffusion/Models/Denoisers/DiTBlocks/Krea2Attention.cs:75`).
 
+### What is left after the removals
+
+- **`AttentionLayer.AttendHeadMajor`** (`AttentionLayer.cs:753`) has no disposal guard at all, so it leaks when any of the
+  three operand permutes throws or when `context.HeadMajorRotation?.RotateHeadMajor(...)` throws. What leaks, by the point of
+  the throw (`ownsKv` is true unless a `KvCapture` holds k and v; the caller's `catch when (!ownsKv)` disposes k and v only
+  when it is false):
+  - first permute: `qMh` and `q`; with `ownsKv`, `k` and `v` as well, because the caller's catch does not run;
+  - second permute: `qMh` and `kMh`; with `ownsKv`, `k` and `v`;
+  - third permute: `qMh`, `kMh` and `vMh`; with `ownsKv`, `v` (`k` is already disposed);
+  - `RotateHeadMajor`: `qMh`, `kMh` and `vMh` (the originals are already disposed when `ownsKv`; the caller disposes k and v
+    otherwise).
+
+  Its siblings are fixed: `MergeHeads` (#1051) and `RunHeadMajor` (#1057). The fix needs the ownership of q, k and v traced
+  through `ownsKv`, so it is its own change.
+- **Rows marked keep that are worth another look:** M10 (`DiaHeads` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`,
+  `SliceLeading`) is public with callers in other models, but its members are host copies of `StridedCopies.RepeatInterleave`
+  and `Permute0213`, so migrating the callers would be model work, not an adapter change. The `DiTUtils` host loops that M3
+  noted could be `Permute0213` calls.
+- **Found while collecting the evidence, not duplicates:**
+  - CUDA's query-tiled F32 row (S.9) sizes its tile from free device memory (`SdpaTiledF32` in `CudaBackend.cs`; a different tile
+    changes the summation order). Two calls of the same shape repeat bit for bit when free memory is the same before each, and
+    differ by rounding when it is not (RTX 3060, 14,748 tokens, 12 heads of 128: identical at 6,691 MB free before every run,
+    2.6e-07 at 11,203 / 11,139 / 11,043 MB). The 2.9e-07 seen in #1054 is therefore not a defect of the row: it is the tile
+    following free memory, and, most likely, on the RTX 4090 a `materialized` call against a `tiled.f32` one (the planner takes the
+    tiled row when the scores exceed half of free memory, and memory a finished call freed stays reserved by the stream-ordered
+    pool until trimmed, so the first call materializes and later ones tile). A rerun on the 4090 (Linux, driver 595.99.02) at
+    the fix commit (#1061, `a9b28061b` on `main`) supports that reading: the Trellis2 attention test class, run alone, passed 8
+    of 8; at 14,748 tokens, 12 heads, head dim 128 the free memory before the three runs was 22,270 / 22,206 / 22,110 MB, all
+    three took `materialized`, and the outputs are bit-identical. The reading is supported, not proven: the earlier failing run
+    did not print free memory or the row of its second call, and the rerun was the class alone, not inside a whole ThreeD
+    run. An earlier version of this report called the row "not repeatable between identical calls"; that diagnosis was wrong. What
+    remains is an open product question, not a defect: the planner does not count pool-reserved memory as free, so repeated
+    large attention calls on a card where the scores are between a quarter and a half of memory change kernel after the first
+    call. Outputs agree to rounding. A whole TRELLIS.2 generation on CUDA is not bit-reproducible for that reason.
+  - Idol on Vulkan ends in a stack overflow in `VulkanBackend.Concat`, reached through `VaeEncoder.PadRightBottom`, on `main`.
+
 ### What I did not examine
 
 - Any shader's contents; whether each committed `.spv` or `.ptx` matches its source (I did not run `build.sh` or an NVRTC
@@ -250,4 +289,5 @@ The attention backends have been cleaned up enough that there is almost nothing 
 (V1), plus three groups of dead accessors and diagnostics (D1, D2, D4) that compile away cleanly. Eleven more items are real
 duplicates but have callers to migrate first; three of them (Idol, Trellis, CoLa3D) need route evidence. The two obvious
 "old path" candidates, the CUDA legacy validators and the CUDA legacy softmax launchers, are deliberately kept: they carry
-historical exception classes and a public API.
+historical exception classes and a public API. This is the audit as written; most of the migrations have since landed (see the
+Status line), and "What is left after the removals" lists what remains.
