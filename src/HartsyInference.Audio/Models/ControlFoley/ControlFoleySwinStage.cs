@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ControlFoley;
@@ -24,7 +25,11 @@ internal sealed class ControlFoleySwinStage
     private readonly int[] _relativeIndex;
 
     private sealed record Block(int Shift, float[]? Mask, Tensor Norm1W, Tensor Norm1B, Tensor Bias, Tensor QkvW, Tensor QkvB,
-        Tensor ProjW, Tensor ProjB, Tensor Norm2W, Tensor Norm2B, Tensor Fc1W, Tensor Fc1B, Tensor Fc2W, Tensor Fc2B);
+        Tensor ProjW, Tensor ProjB, Tensor Norm2W, Tensor Norm2B, Tensor Fc1W, Tensor Fc1B, Tensor Fc2W, Tensor Fc2B)
+    {
+        /// <summary>The block's additive terms, built on first use: they depend on its weights and its shift alone.</summary>
+        public float[]? Terms;
+    }
 
     internal ControlFoleySwinStage(IReadOnlyDictionary<string, Tensor> weights, string prefix, int dim, int heads, int depth,
         int resolution, int window, bool downsample)
@@ -133,73 +138,26 @@ internal sealed class ControlFoleySwinStage
         }
 
         float[] qkv = DacOps.Linear(backend, gathered, b.QkvW, n, c, 3 * c, b.QkvB);
-        float[] merged = new float[n * c];
-        int headDim = c / _heads;
-        float scale = MathF.Pow(headDim, -0.5f);
-        float[] scores = new float[tokensPerWindow];
-        float[] bias = new float[_heads * tokensPerWindow * tokensPerWindow];
-        unsafe
+        int windows = windowsPerSide * windowsPerSide;
+        if (b.Terms is null)
         {
-            float* table = (float*)b.Bias.DataPointer;
-            for (int h = 0; h < _heads; h++)
+            float[] bias = new float[_heads * tokensPerWindow * tokensPerWindow];
+            unsafe
             {
-                for (int i = 0; i < tokensPerWindow * tokensPerWindow; i++)
+                float* table = (float*)b.Bias.DataPointer;
+                for (int h = 0; h < _heads; h++)
                 {
-                    bias[h * tokensPerWindow * tokensPerWindow + i] = table[_relativeIndex[i] * _heads + h];
-                }
-            }
-        }
-
-        for (int w = 0; w < windowsPerSide * windowsPerSide; w++)
-        {
-            int baseRow = w * tokensPerWindow;
-            for (int h = 0; h < _heads; h++)
-            {
-                for (int i = 0; i < tokensPerWindow; i++)
-                {
-                    int qOff = (baseRow + i) * 3 * c + h * headDim;
-                    float max = float.NegativeInfinity;
-                    for (int j = 0; j < tokensPerWindow; j++)
+                    for (int i = 0; i < tokensPerWindow * tokensPerWindow; i++)
                     {
-                        int kOff = (baseRow + j) * 3 * c + c + h * headDim;
-                        float dot = 0f;
-                        for (int d = 0; d < headDim; d++)
-                        {
-                            dot += qkv[qOff + d] * scale * qkv[kOff + d];
-                        }
-
-                        dot += bias[(h * tokensPerWindow + i) * tokensPerWindow + j];
-                        if (b.Mask is not null)
-                        {
-                            dot += b.Mask[(w * tokensPerWindow + i) * tokensPerWindow + j];
-                        }
-
-                        scores[j] = dot;
-                        max = MathF.Max(max, dot);
-                    }
-
-                    float sum = 0f;
-                    for (int j = 0; j < tokensPerWindow; j++)
-                    {
-                        scores[j] = MathF.Exp(scores[j] - max);
-                        sum += scores[j];
-                    }
-
-                    int outOff = (baseRow + i) * c + h * headDim;
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        float acc = 0f;
-                        for (int j = 0; j < tokensPerWindow; j++)
-                        {
-                            acc += scores[j] / sum * qkv[(baseRow + j) * 3 * c + 2 * c + h * headDim + d];
-                        }
-
-                        merged[outOff + d] = acc;
+                        bias[h * tokensPerWindow * tokensPerWindow + i] = table[_relativeIndex[i] * _heads + h];
                     }
                 }
             }
+
+            b.Terms = CombineTerms(bias, b.Mask, windows, tokensPerWindow, _heads);
         }
 
+        float[] merged = AttendWindows(backend, qkv, b.Terms, windows, tokensPerWindow, c, _heads);
         float[] projected = DacOps.Linear(backend, merged, b.ProjW, n, c, c, b.ProjB);
         float[] result = new float[n * c];
         for (int i = 0; i < n; i++)
@@ -208,6 +166,55 @@ internal sealed class ControlFoleySwinStage
         }
 
         return result;
+    }
+
+    /// <summary>The additive terms of one block's scores. <paramref name="bias"/> is the relative-position bias
+    /// <c>[heads, tokens, tokens]</c>, shared by every window; <paramref name="mask"/> is the shifted block's additive mask
+    /// <c>[windows, tokens, tokens]</c>, shared by every head, or null. Without a mask the result is the bias alone,
+    /// <c>[1, heads, tokens, tokens]</c>, which serves every window; with one it is their sum a window,
+    /// <c>[windows, heads, tokens, tokens]</c>. Both stay finite terms.</summary>
+    internal static float[] CombineTerms(float[] bias, float[]? mask, int windows, int tokens, int heads)
+    {
+        int perWindow = heads * tokens * tokens;
+        if (mask is null)
+        {
+            return bias.AsSpan(0, perWindow).ToArray();
+        }
+
+        float[] terms = new float[windows * perWindow];
+        for (int w = 0; w < windows; w++)
+        {
+            for (int h = 0; h < heads; h++)
+            {
+                for (int i = 0; i < tokens * tokens; i++)
+                {
+                    terms[w * perWindow + h * tokens * tokens + i] = bias[h * tokens * tokens + i] + mask[w * tokens * tokens + i];
+                }
+            }
+        }
+
+        return terms;
+    }
+
+    /// <summary>Window attention through the shared attention layer, one batch item a window. <paramref name="qkv"/> holds,
+    /// for each of <paramref name="windows"/> × <paramref name="tokens"/> rows, its query, key and value of
+    /// <paramref name="dim"/> channels each. <paramref name="terms"/> comes from <see cref="CombineTerms"/>. Returns
+    /// <c>[windows · tokens, dim]</c>.</summary>
+    internal static float[] AttendWindows(IBackend backend, float[] qkv, float[] terms, int windows, int tokens, int dim, int heads)
+    {
+        TensorShape rows = new(windows, tokens, dim);
+        int perWindow = heads * tokens * tokens;
+        using Tensor packed = DacOps.FromHost(qkv, windows, tokens, 3 * dim);
+        using Tensor bias = new(new TensorShape(terms.Length / perWindow, heads, tokens, tokens), DType.F32);
+        terms.CopyTo(bias.AsSpan<float>());
+        Tensor q = new(rows, DType.F32), k = new(rows, DType.F32), v = new(rows, DType.F32);
+        backend.SliceLastDim(q, packed, 0);
+        backend.SliceLastDim(k, packed, dim);
+        backend.SliceLastDim(v, packed, 2 * dim);
+        // AttendFlat takes q, k and v over and disposes them; the bias is only borrowed.
+        using Tensor attended = AttentionLayer.Shared(heads, dim / heads, computeDType: DType.F32)
+            .AttendFlat(backend, q, k, v, rows, new AttentionCallContext { Bias = bias });
+        return DacOps.ToHost(attended);
     }
 
     private float[] Merge(IBackend backend, float[] x)
@@ -247,7 +254,7 @@ internal sealed class ControlFoleySwinStage
     }
 
     /// <summary>The 0 / -100 additive mask of shifted-window attention, <c>[windows, N, N]</c>.</summary>
-    private static float[] BuildShiftMask(int resolution, int window, int shift)
+    internal static float[] BuildShiftMask(int resolution, int window, int shift)
     {
         int[] region = new int[resolution * resolution];
         int count = 0;
