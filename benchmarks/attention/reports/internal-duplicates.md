@@ -20,7 +20,7 @@ repeated here.
 
 ## Result
 
-**Status.** Done: V1, D1, D2 and D4 (#1039, 13 members); D9 (#1043); V2 and V3 (#1044, one stride type and one cm2 admission predicate); V4 (#1046); M1 to M3 (#1048); M4 and M5 (#1050); M6 (#1052); M7 (#1054); M8 (#1056). Each of the last three was checked on real CUDA generations (rows and counts identical to main); the PRs list what was and was not shown. The rename of the surviving `TiledStrides`/`WriteTiledStrides` to a neutral name is a separate small PR.
+**Status.** Done: V1, D1, D2 and D4 (#1039, 13 members); D9 (#1043); V2 and V3 (#1044, one stride type and one cm2 admission predicate); V4 (#1046); M1 to M3 (#1048); M4 and M5 (#1050); M6 (#1052); M7 (#1054); M8 (#1056). Each of the last three was checked on real CUDA generations (rows and counts identical to main); the PRs list what was and was not shown. The surviving `TiledStrides`/`WriteTiledStrides` were renamed `OperandStrides`/`WriteOperandStrides` and moved to `VulkanBackend.OperandStrides.cs` (#1058); the V2 row below keeps the names it was audited under.
 
 Almost nothing in the attention backends is a duplicate any more. Every private attention method in the CPU, CUDA and Vulkan
 backends is reached from a row or a public entry, and every `.ptx` entry point and every `.spv` is loaded by some host code.

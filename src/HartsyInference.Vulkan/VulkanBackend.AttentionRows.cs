@@ -162,8 +162,8 @@ public sealed partial class VulkanBackend
                     int hq = c.Heads, hkv = c.KvHeads, headDim = c.QkHeadDim, sq = c.QueryTokens, skv = c.KeyTokens;
                     uint qHead = (uint)(sq * headDim), kvHead = (uint)(skv * headDim);
                     DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, c.Batch, hq, hkv, sq,
-                        skv, headDim, new TiledStrides((uint)headDim, qHead, qHead * (uint)hq), new TiledStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
-                        new TiledStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new TiledStrides((uint)headDim, qHead, qHead * (uint)hq));
+                        skv, headDim, new OperandStrides((uint)headDim, qHead, qHead * (uint)hq), new OperandStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
+                        new OperandStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new OperandStrides((uint)headDim, qHead, qHead * (uint)hq));
                     return true;
                 }, static (in AttentionCall c) => Cm2FlashPreparation(in c, c.Batch)),
             new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
@@ -227,8 +227,8 @@ public sealed partial class VulkanBackend
                     uint qRow = (uint)((long)c.Heads * c.QkHeadDim), kvRow = (uint)((long)c.KvHeads * c.QkHeadDim);
                     DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         batch: 1, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.QkHeadDim,
-                        new TiledStrides(qRow, (uint)c.QkHeadDim, 0), new TiledStrides(kvRow, (uint)c.QkHeadDim, 0),
-                        new TiledStrides(kvRow, (uint)c.QkHeadDim, 0), new TiledStrides(qRow, (uint)c.QkHeadDim, 0));
+                        new OperandStrides(qRow, (uint)c.QkHeadDim, 0), new OperandStrides(kvRow, (uint)c.QkHeadDim, 0),
+                        new OperandStrides(kvRow, (uint)c.QkHeadDim, 0), new OperandStrides(qRow, (uint)c.QkHeadDim, 0));
                     return true;
                 }, static (in AttentionCall c) => Cm2FlashPreparation(in c, batch: 1)),
             new DelegateAttentionRow(Cap("permute.dense", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
