@@ -774,9 +774,19 @@ public sealed partial class AttentionLayer
     {
         Tensor attn = RunAttention(backend, qMh, kMh, vMh, act, in context, OperandOwnership.All);
         Tensor flat = new(flatShape, act);
-        try { backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim); }
-        catch { flat.Dispose(); throw; }
-        finally { attn.Dispose(); }
+        try
+        {
+            backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attn.Dispose();
+        }
         return flat;
     }
 
