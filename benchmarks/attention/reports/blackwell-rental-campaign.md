@@ -41,8 +41,9 @@ choice is a new volume in another data center (the weights are copied again) or 
    (`benchmarks/CLOUD_GPU_RUNBOOK.md`). The host driver of a pod is not chosen by the renter.
 3. **How long the frozen corpus takes.** No report in this repository records the wall time of a full campaign on
    the RTX 4090, so the hours below are a ceiling set here, not a measurement. The one duration behind them is an
-   observation that no report records: the attention GPU test lane of the integration branch at `b4651cdb6` (345
-   tests listed) took between 1.5 and 3 minutes in each of three runs on the RTX 3060 on 2026-11-21.
+   observation that no report records: the attention GPU test lane (345 tests listed) at `b4651cdb6`, a commit of a
+   local integration branch since deleted, whose changes are on `main` at `f28b0f384`, took between 1.5 and 3
+   minutes in each of three runs on the RTX 3060 on 2026-11-21.
 4. **The scripted runner.** The runbook names `tests/blackwell-run.sh` as the scripted form of the rental. That file
    was deleted in `e9474bb06` and is not on `main`. Either it is restored (it exists at `0a67f89e5` and `ab04134cf`)
    and rehearsed on the local card first, as the runbook asks, or the stages are driven by hand over SSH.

@@ -169,12 +169,12 @@
       "per_sequence_lengths": true,
       "capacity_tail": true
     },
-    "hartsy_current": "partial: per-sequence lengths and capacity tails at head dim 64 and 128 over an F32, F16 or BF16 cache on CUDA and an F32 cache on Vulkan (flash.decode.lengths); queries and output are F32; no head dim 256",
+    "hartsy_current": "partial: per-sequence lengths and capacity tails at head dim 64, 128 and 256 over an F32, F16 or BF16 cache on CUDA and on Vulkan (flash.decode.lengths); queries and output are F32. On CUDA head dim 256 needs a shared-memory grant the kernel asks for at load and the row declines where the card refuses it; on Vulkan the head dim is one to eight subgroup widths up to 256",
     "required_final": [
       "cuda",
       "vulkan"
     ],
-    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Head dim 256 on both backends and the F16 and BF16 caches on Vulkan ran on both cards at b4651cdb6, a commit of a local integration branch since deleted that held #1018, #1023, #1025, #1029, #1026 and #1028 on main together; the same changes are on main at f28b0f384 (RTX 4090: the ten head-dim-256 cases and the subnormal-F16 case passed, and the CUDA PTX rebuilt byte-identical; the SPIR-V of the two changed shaders was not rebuilt on that host). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-lse",
@@ -188,13 +188,13 @@
       "native_head_dim": 256,
       "native_dtype": "bf16"
     },
-    "hartsy_current": "partial: LSE with per-sequence lengths, causal and not, on CUDA and Vulkan (flash.decode.lengths); F32 queries; head dim 64 and 128, not 256",
+    "hartsy_current": "partial: LSE with per-sequence lengths, causal and not, on CUDA and Vulkan (flash.decode.lengths) at head dim 64, 128 and 256 over an F32, F16 or BF16 cache; F32 queries, so not the native BF16 form. It is the same row as decode-bf16, so on CUDA head dim 256 needs the same shared-memory grant and declines without it",
     "required_final": [
       "cuda",
       "vulkan"
     ],
     "disposition": "Out of PR 01 production implementation; required later port, cannot be excluded at completion.",
-    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Not a runtime parity claim against the Kitchen kernel."
+    "status_evidence": "RTX 3060 and RTX 4090 parity against the host reference (DecodeLengthsGpuTests); the reference is checked against the pinned Kitchen torch definition in DecodeLengthsReferenceTests over DecodeLengthsKitchenVectors; no caller, no timing. The RTX 4090 runs (commits 0852dcbba and 4264d3948) rebuilt the PTX and the SPIR-V byte-identical; each run also had one unrelated test that fails on that host on main (Kimi.PackedMoeTests). Head dim 256 on both backends and the F16 and BF16 caches on Vulkan ran on both cards at b4651cdb6, a commit of a local integration branch since deleted that held #1018, #1023, #1025, #1029, #1026 and #1028 on main together; the same changes are on main at f28b0f384 (RTX 4090: the ten head-dim-256 cases and the subnormal-F16 case passed, and the CUDA PTX rebuilt byte-identical; the SPIR-V of the two changed shaders was not rebuilt on that host). Not a runtime parity claim against the Kitchen kernel."
   },
   {
     "id": "decode-tree-merge",
