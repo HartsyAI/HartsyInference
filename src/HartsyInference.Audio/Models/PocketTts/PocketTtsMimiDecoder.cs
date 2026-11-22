@@ -155,9 +155,7 @@ internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
 
             Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
 
-            Tensor attnFlat = new(new TensorShape(batch, t, Dim), DType.F32);
-            MergeHeads(attn, attnFlat, batch, t);
-            attn.Dispose();
+            Tensor attnFlat = _attention.MergeHeads(backend, attn, new TensorShape(batch, t, Dim));   // disposes attn
             Tensor outp = WhisperOps.ProjectLinear(backend, attnFlat, _outProjAttnW[i]!, null, batch, t, Dim, Dim);
             attnFlat.Dispose();
             AddScaled(cur, outp, _ls1[i]!, batch, t);   // cur += ls1 * outp
@@ -197,17 +195,6 @@ internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
                         vp[dst] = s[rb + 2 * Dim + c];
                     }
             }
-    }
-
-    private static void MergeHeads(Tensor attn, Tensor flat, int batch, int t)
-    {
-        float* ap = (float*)attn.DataPointer, fp = (float*)flat.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int ti = 0; ti < t; ti++)
-                for (int h = 0; h < NHeads; h++)
-                    for (int dd = 0; dd < HeadDim; dd++)
-                        fp[((long)b * t + ti) * Dim + h * HeadDim + dd]
-                            = ap[(((long)b * NHeads + h) * t + ti) * HeadDim + dd];
     }
 
     private static void AddScaled(Tensor cur, Tensor upd, Tensor scale, int batch, int t)

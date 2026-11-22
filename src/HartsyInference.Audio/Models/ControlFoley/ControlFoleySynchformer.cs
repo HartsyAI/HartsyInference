@@ -341,8 +341,8 @@ public sealed unsafe class ControlFoleySynchformer : IDisposable
             }
         }
 
-        using Tensor ctx = _attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
-        using Tensor merged = ControlFoleyVitOps.MergeHeads(ctx);
+        Tensor ctx = _attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
+        using Tensor merged = _attention.MergeHeads(backend, ctx, new TensorShape(t, 1, d));   // disposes ctx
         using Tensor attn = ControlFoleyOps.Linear(backend, merged, a.OutW, a.OutB);
         using Tensor y = new(new TensorShape(t, 1, d), DType.F32);
         float* yp = (float*)y.DataPointer, ap = (float*)attn.DataPointer, clsRaw = (float*)a.Cls.DataPointer;

@@ -66,36 +66,15 @@ internal static unsafe class ControlFoleyVitOps
         return (q, k, v);
     }
 
-    /// <summary>Merges <c>[B, heads, N, headDim]</c> attention output back to <c>[B, N, D]</c>.</summary>
-    internal static Tensor MergeHeads(Tensor ctx)
-    {
-        int b = (int)ctx.Shape[0], heads = (int)ctx.Shape[1], n = (int)ctx.Shape[2], hd = (int)ctx.Shape[3];
-        Tensor o = new(new TensorShape(b, n, heads * hd), DType.F32);
-        float* src = (float*)ctx.DataPointer, dst = (float*)o.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-        {
-            for (int h = 0; h < heads; h++)
-            {
-                for (int ti = 0; ti < n; ti++)
-                {
-                    new ReadOnlySpan<float>(src + (((long)bi * heads + h) * n + ti) * hd, hd)
-                        .CopyTo(new Span<float>(dst + ((long)bi * n + ti) * heads * hd + h * hd, hd));
-                }
-            }
-        }
-
-        return o;
-    }
-
     /// <summary>Multi-head self-attention over <c>[B, N, D]</c> with a packed qkv projection and an output projection.</summary>
     internal static Tensor SelfAttention(IBackend backend, Tensor x, Tensor qkvW, Tensor qkvB, Tensor projW, Tensor projB, int heads)
     {
         using Tensor qkv = ControlFoleyOps.Linear(backend, x, qkvW, qkvB);
         (Tensor q, Tensor k, Tensor v) = SplitQkv(qkv, heads);
         using Tensor qd = q, kd = k, vd = v;
-        using Tensor ctx = AttentionLayer.Shared(heads, (int)q.Shape[3])
-            .AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
-        using Tensor merged = MergeHeads(ctx);
+        AttentionLayer attention = AttentionLayer.Shared(heads, (int)q.Shape[3]);
+        Tensor ctx = attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
+        using Tensor merged = attention.MergeHeads(backend, ctx, new TensorShape((int)q.Shape[0], (int)q.Shape[2], heads * (int)q.Shape[3]));   // disposes ctx
         return ControlFoleyOps.Linear(backend, merged, projW, projB);
     }
 
