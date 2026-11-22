@@ -133,17 +133,17 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
                 {
                     float* kj = kvAll + (long)j * 2 * dimInner + hOff;
                     float dot = 0f;
-                    for (int e = 0; e < _dimHead; e++) dot += qi[e] * kj[e];
+                    for (int e = _dimHead - 1; e >= 0; e--) dot += qi[e] * kj[e];   // control: reversed order
                     float s = dot * scale;
                     scores[j] = s;
                     if (s > maxS) maxS = s;
                 }
                 float sum = 0f;
-                for (int j = 0; j < kvLen; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
+                for (int j = kvLen - 1; j >= 0; j--) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }   // control: reversed order
                 float invSum = 1f / sum;
                 float* oi = om + (long)i * dimInner + hOff;
                 for (int e = 0; e < _dimHead; e++) oi[e] = 0f;
-                for (int j = 0; j < kvLen; j++)
+                for (int j = kvLen - 1; j >= 0; j--)   // control: reversed order
                 {
                     float a = scores[j] * invSum;
                     float* vj = kvAll + (long)j * 2 * dimInner + dimInner + hOff;
