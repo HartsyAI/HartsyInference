@@ -32,7 +32,7 @@ public sealed partial class VulkanBackend
     }
 
     /// <summary>Head-major [B, H, S, D] strides: each head spans <paramref name="tokens"/> rows.</summary>
-    internal static TiledStrides HeadMajorStrides(int heads, int tokens, int headDim) =>
+    internal static OperandStrides HeadMajorStrides(int heads, int tokens, int headDim) =>
         new((uint)headDim, (uint)((long)tokens * headDim), (uint)((long)heads * tokens * headDim));
 
     /// <summary>Runs <c>sdpa_flash_tiled</c> over F32 Q, K, V and an optional F32 additive bias. The strides address every tensor,
@@ -161,10 +161,10 @@ public sealed partial class VulkanBackend
         BinaryWriteUInt(pc, 28, c.Causal ? 1u : 0u);
         BinaryWriteUInt(pc, 32, (uint)c.QOffset);
         BinaryWriteUInt(pc, 36, (uint)c.Window);
-        WriteTiledStrides(pc, 40, c.Q);
-        WriteTiledStrides(pc, 52, c.K);
-        WriteTiledStrides(pc, 64, c.V);
-        WriteTiledStrides(pc, 76, c.O);
+        WriteOperandStrides(pc, 40, c.Q);
+        WriteOperandStrides(pc, 52, c.K);
+        WriteOperandStrides(pc, 64, c.V);
+        WriteOperandStrides(pc, 76, c.O);
         if (bias is null) return;
         AttentionMaskLayout m = AttentionMaskLayout.Of(bias, c.Batch, c.Hq, c.Sq, c.Skv);
         BinaryWriteUInt(pc, 88, (uint)m.BatchStride);
@@ -172,17 +172,7 @@ public sealed partial class VulkanBackend
         BinaryWriteUInt(pc, 96, (uint)m.RowStride);
     }
 
-    private static void WriteTiledStrides(Span<byte> pc, int offset, TiledStrides s)
-    {
-        BinaryWriteUInt(pc, offset, s.Row);
-        BinaryWriteUInt(pc, offset + 4, s.Head);
-        BinaryWriteUInt(pc, offset + 8, s.Batch);
-    }
-
-    /// <summary>Element strides of one tensor: between tokens (rows), between heads and between batch items. The innermost dim is contiguous.</summary>
-    internal readonly record struct TiledStrides(uint Row, uint Head, uint Batch);
-
     /// <summary>One query-tiled launch: the shape, the causal and window mask, the scale and the strides of Q, K, V and O.</summary>
     internal readonly record struct TiledCall(int Batch, int Hq, int Hkv, int Sq, int Skv, int HeadDim, float Scale, bool Causal,
-        int QOffset, int Window, TiledStrides Q, TiledStrides K, TiledStrides V, TiledStrides O);
+        int QOffset, int Window, OperandStrides Q, OperandStrides K, OperandStrides V, OperandStrides O);
 }

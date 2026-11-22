@@ -89,8 +89,8 @@ public sealed partial class VulkanBackend
         if (!FlashCm2PrefillPolicy.MaskFits(sq, kvLen)) return false;
 
         long kvCap = key.Shape[2];
-        TiledStrides qs = new((uint)headDim, (uint)(sq * headDim), (uint)((long)sq * headDim * hq));
-        TiledStrides ks = new((uint)headDim, (uint)(kvCap * headDim), (uint)(kvCap * headDim * hkv));
+        OperandStrides qs = new((uint)headDim, (uint)(sq * headDim), (uint)((long)sq * headDim * hq));
+        OperandStrides ks = new((uint)headDim, (uint)(kvCap * headDim), (uint)(kvCap * headDim * hkv));
         DispatchFlashCm2Causal(output, query, key, value, scale, batch: 1, hq, hkv, sq, kvLen, headDim,
             qs, ks, ks, qs, new CausalWindow(qOffset, slidingWindow));
         FlashCm2PrefillDispatches++;
@@ -178,7 +178,7 @@ public sealed partial class VulkanBackend
     /// are in elements. The causal prefill has its own entry, <see cref="DispatchFlashCm2Causal"/>, so a mask and a causal
     /// window cannot be passed together.</summary>
     private void DispatchFlashCm2(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        int batch, int hq, int hkv, int sq, int skv, int headDim, TiledStrides qs, TiledStrides ks, TiledStrides vs, TiledStrides os)
+        int batch, int hq, int hkv, int sq, int skv, int headDim, OperandStrides qs, OperandStrides ks, OperandStrides vs, OperandStrides os)
     {
         using Tensor? expanded = WithRowsForCm2(mask, batch, hq, sq, skv);
         if (expanded is not null) AttentionEvidence.Payload(AttentionEvidenceKind.ExpandMask, "vulkan.cm2.mask", expanded);
@@ -190,7 +190,7 @@ public sealed partial class VulkanBackend
             AttentionMaskLayout m = AttentionMaskLayout.Of(mask, batch, hq, sq, skv);
             // A one-row mask still gets a real row stride: only row 0 is in bounds, and no layout stride is ever 0.
             uint rowStride = m.RowStride == 0 ? (uint)skv : (uint)m.RowStride;
-            WriteTiledStrides(pc, 68, new TiledStrides(rowStride, (uint)m.HeadStride, (uint)m.BatchStride));
+            WriteOperandStrides(pc, 68, new OperandStrides(rowStride, (uint)m.HeadStride, (uint)m.BatchStride));
         }
         RunFlashCm2(output, query, key, value, mask, mask is null ? "sdpa_flash_cm2" : "sdpa_flash_cm2_mask", pc,
             batch, hq, sq, headDim);
@@ -199,7 +199,7 @@ public sealed partial class VulkanBackend
     /// <summary>Runs <c>sdpa_flash_cm2_causal</c>: the kernel computes the causal and sliding-window mask from
     /// <paramref name="causal"/>, so there is no mask buffer to pass.</summary>
     private void DispatchFlashCm2Causal(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
-        int batch, int hq, int hkv, int sq, int skv, int headDim, TiledStrides qs, TiledStrides ks, TiledStrides vs, TiledStrides os,
+        int batch, int hq, int hkv, int sq, int skv, int headDim, OperandStrides qs, OperandStrides ks, OperandStrides vs, OperandStrides os,
         CausalWindow causal)
     {
         Span<byte> pc = stackalloc byte[19 * 4];
@@ -211,17 +211,17 @@ public sealed partial class VulkanBackend
 
     /// <summary>The 17 push-constant words every cm2 kernel reads: head and row counts, the scale and the Q/K/V/O strides.</summary>
     private static void WriteFlashCm2Common(Span<byte> pc, int hq, int hkv, int sq, int skv, float scale,
-        TiledStrides qs, TiledStrides ks, TiledStrides vs, TiledStrides os)
+        OperandStrides qs, OperandStrides ks, OperandStrides vs, OperandStrides os)
     {
         BinaryWriteUInt(pc, 0, (uint)hq);
         BinaryWriteUInt(pc, 4, (uint)hkv);
         BinaryWriteUInt(pc, 8, (uint)sq);
         BinaryWriteUInt(pc, 12, (uint)skv);
         BinaryWriteFloat(pc, 16, scale);
-        WriteTiledStrides(pc, 20, qs);
-        WriteTiledStrides(pc, 32, ks);
-        WriteTiledStrides(pc, 44, vs);
-        WriteTiledStrides(pc, 56, os);
+        WriteOperandStrides(pc, 20, qs);
+        WriteOperandStrides(pc, 32, ks);
+        WriteOperandStrides(pc, 44, vs);
+        WriteOperandStrides(pc, 56, os);
     }
 
     /// <summary>Casts Q/K/V to F16 where they are not, dispatches <paramref name="kernelName"/> over the query row tiles and the
