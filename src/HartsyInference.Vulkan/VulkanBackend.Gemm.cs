@@ -32,7 +32,7 @@ internal readonly record struct GemmOperands(
 public sealed partial class VulkanBackend
 {
     /// <summary>Runs one GEMM on the fastest kernel its operands admit: coopmat2 (F16, the Linear-layer transpose pair,
-    /// no alpha or beta), then coopmat (F16, N and K multiples of 16, any transpose pair; an unaligned M only without
+    /// any alpha, no beta), then coopmat (F16, N and K multiples of 16, any transpose pair; an unaligned M only without
     /// transposeA and without beta), then the tiled kernel. A bias rides in whichever form the chosen kernel reads, so a caller with one
     /// supplies both forms. The tiled kernel writes <see cref="GemmOperands.Dtype"/>, so an output of another dtype
     /// must reach a cooperative-matrix kernel.</summary>
@@ -41,7 +41,7 @@ public sealed partial class VulkanBackend
         bool outputSupported = g.OutputDtype == DType.F16 || g.OutputDtype == DType.F32;
         if (g.Dtype == DType.F16 && outputSupported && (!g.HasBias || g.BiasF32 != 0))
         {
-            if (EnableCoopMat2 && Vk.HasCooperativeMatrix2 && !g.TransposeA && g.TransposeB && g.Alpha == 1f && g.Beta == 0f)
+            if (EnableCoopMat2 && Vk.HasCooperativeMatrix2 && !g.TransposeA && g.TransposeB && g.Beta == 0f)
             {
                 long t0 = _profiler.IsEnabled ? Stopwatch.GetTimestamp() : 0;
                 DispatchCoopMat2(in g);
@@ -89,8 +89,8 @@ public sealed partial class VulkanBackend
         return GemmKernel.Tiled;
     }
 
-    /// <summary>The 11-word push block every GEMM shader shares: M, N, K, lda, ldb, ldc, alpha, beta, aOffset, bOffset, cOffset (coopmat2 omits alpha and beta).</summary>
-    private static void WriteGemmPush(Span<byte> pc, in GemmOperands g, bool withScalars)
+    /// <summary>The 11-word push block every GEMM shader shares: M, N, K, lda, ldb, ldc, alpha, beta, aOffset, bOffset, cOffset (coopmat2 does not read beta).</summary>
+    private static void WriteGemmPush(Span<byte> pc, in GemmOperands g)
     {
         int o = 0;
         BinaryWriteUInt(pc, o, (uint)g.M); o += 4;
@@ -99,11 +99,8 @@ public sealed partial class VulkanBackend
         BinaryWriteUInt(pc, o, (uint)g.Lda); o += 4;
         BinaryWriteUInt(pc, o, (uint)g.Ldb); o += 4;
         BinaryWriteUInt(pc, o, (uint)g.Ldc); o += 4;
-        if (withScalars)
-        {
-            BinaryWriteFloat(pc, o, g.Alpha); o += 4;
-            BinaryWriteFloat(pc, o, g.Beta); o += 4;
-        }
+        BinaryWriteFloat(pc, o, g.Alpha); o += 4;
+        BinaryWriteFloat(pc, o, g.Beta); o += 4;
         BinaryWriteUInt(pc, o, g.AOffset); o += 4;
         BinaryWriteUInt(pc, o, g.BOffset); o += 4;
         BinaryWriteUInt(pc, o, g.COffset);
@@ -119,7 +116,7 @@ public sealed partial class VulkanBackend
         return (Math.Max(mg, bm / mg * mg), Math.Max(ng, bn / ng * ng));
     }
 
-    /// <summary>VK_NV_cooperative_matrix2: no alignment requirement (the hardware clamp drops out-of-bounds accesses); the [M,K] × [N,K]ᵀ pair only.</summary>
+    /// <summary>VK_NV_cooperative_matrix2: no alignment requirement (the hardware clamp drops out-of-bounds accesses); the [M,K] × [N,K]ᵀ pair only, scaled by alpha before the bias, with no beta · C term.</summary>
     private void DispatchCoopMat2(in GemmOperands g)
     {
         (uint BM, uint BN) = CoopMat2Tile(g.M, g.N);
@@ -137,8 +134,8 @@ public sealed partial class VulkanBackend
             SpecConstant.Bool(16, g.BiasF32 != 0),
         };
         VulkanKernel k = GetKernel("matmul_coopmat2", storageBufferCount: 5, spec);
-        Span<byte> pc = stackalloc byte[9 * 4];
-        WriteGemmPush(pc, in g, withScalars: false);
+        Span<byte> pc = stackalloc byte[11 * 4];
+        WriteGemmPush(pc, in g);
         // HAS_BIAS=false never reads binding 4; A stands in so the layout stays five buffers.
         Span<ulong> bufs = stackalloc ulong[] { g.A, g.B, g.C, g.C, g.BiasF32 != 0 ? g.BiasF32 : g.A };
         Dispatch(k, bufs, pc, (uint)((g.N + BN - 1) / BN), (uint)((g.M + BM - 1) / BM), 1);
@@ -177,7 +174,7 @@ public sealed partial class VulkanBackend
         };
         VulkanKernel k = GetKernel(mAligned ? "matmul_coopmat" : "matmul_coopmat_partial_m", storageBufferCount: 5, spec);
         Span<byte> pc = stackalloc byte[11 * 4];
-        WriteGemmPush(pc, in g, withScalars: true);
+        WriteGemmPush(pc, in g);
         Span<ulong> bufs = stackalloc ulong[] { g.A, g.B, g.C, g.BiasF32 != 0 ? g.BiasF32 : g.C, g.C };
         Dispatch(k, bufs, pc, (uint)((g.N + BN - 1) / BN), (uint)((g.M + BM - 1) / BM), 1);
     }
@@ -204,7 +201,7 @@ public sealed partial class VulkanBackend
         };
         VulkanKernel k = GetKernel("matmul_tiled" + DtypeSuffix(g.Dtype), storageBufferCount: 5, spec);
         Span<byte> pc = stackalloc byte[11 * 4];
-        WriteGemmPush(pc, in g, withScalars: true);
+        WriteGemmPush(pc, in g);
         Span<ulong> bufs = stackalloc ulong[] { g.A, g.B, g.C, g.BiasOut != 0 ? g.BiasOut : g.C, g.C };
         Dispatch(k, bufs, pc, (uint)((g.N + BN - 1) / BN), (uint)((g.M + BM - 1) / BM), 1);
     }

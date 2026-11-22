@@ -36,20 +36,87 @@ public sealed class VulkanGemmScaleParityTests
         using VulkanBackend vulkan = new();
         vulkan.Linear(output, input, weight, bias);
 
-        float[] x = Read(input), w = Read(weight), b = Read(bias), actual = Read(output);
-        float worst = 0f;
-        for (int r = 0; r < rows; r++)
-        {
-            for (int c = 0; c < n; c++)
-            {
-                double sum = 0;
-                for (int i = 0; i < k; i++) sum += (double)x[r * k + i] * w[c * k + i];
-                worst = MathF.Max(worst, MathF.Abs(actual[r * n + c] - (float)(Damp * sum + b[c])));
-            }
-        }
         // Bias values are of order 1 and the damped product of order 0.1: dropping the factor is off by several
         // units, and scaling the bias with the product by most of one.
+        float worst = WorstLinearError(Read(input), Read(weight), Read(bias), Read(output), rows, k, n);
         Assert.True(worst < Tolerance(inputF16 || weightF16 || outputF16), $"worst error {worst}");
+    }
+
+    /// <summary>A scaled F16 Linear runs on the coopmat2 kernel, not on a slower one: the engagement counters say which
+    /// kernel took it, and the values are checked as above. The small shape runs only the clamped loop; the large one
+    /// has an unclamped interior tile, ragged edge tiles in both directions and a K tail.</summary>
+    [VulkanCoopMat2Theory]
+    [InlineData(48, 64, 48, true, true)]
+    [InlineData(200, 600, 320, true, true)]
+    [InlineData(200, 600, 320, false, true)]
+    [InlineData(200, 600, 320, true, false)]
+    public void ScaledF16LinearRunsOnCoopMat2(int rows, int k, int n, bool outputF16, bool withBias)
+    {
+        Random rng = new(15);
+        using Tensor input = Make(Values(rng, rows * k), f16: true, rows, k);
+        using Tensor weight = Make(Values(rng, n * k), f16: true, n, k);
+        using Tensor? bias = withBias ? Make(Values(rng, n), f16: false, n) : null;
+        weight.Fp8ScaleFactor = Damp;
+        using Tensor output = new(new TensorShape(rows, n), outputF16 ? DType.F16 : DType.F32);
+
+        using VulkanBackend vulkan = new() { EnableCoopMat2 = true };
+        (long CoopMat2, long CoopMat, long Tiled) before = vulkan.GemmEngagementCounts;
+        vulkan.Linear(output, input, weight, bias);
+        (long CoopMat2, long CoopMat, long Tiled) after = vulkan.GemmEngagementCounts;
+
+        Assert.Equal((before.CoopMat2 + 1, before.CoopMat, before.Tiled), after);
+        float worst = WorstLinearError(Read(input), Read(weight), bias is null ? new float[n] : Read(bias), Read(output), rows, k, n);
+        Assert.True(worst < Tolerance(anyF16: true), $"worst error {worst}");
+    }
+
+    /// <summary>The naive attention's score product (Q times K transposed, scaled by the attention scale, one head at a time at its
+    /// offsets in Q, K and the score buffer) runs on coopmat2. A head dim of 520 loads the interior tile unclamped at
+    /// those offsets; 150 leaves every row unaligned, so every tile takes the clamped loop.</summary>
+    [VulkanCoopMat2Theory]
+    [InlineData(520)]
+    [InlineData(150)]
+    public void NaiveAttentionScoresRunOnCoopMat2AtTheirOffsets(int headDim)
+    {
+        const int heads = 3, sq = 130, skv = 260;
+        float scale = 4f / MathF.Sqrt(headDim);
+        Random rng = new(16);
+        using Tensor query = Make(Values(rng, heads * sq * headDim), f16: true, 1, heads, sq, headDim);
+        using Tensor key = Make(Values(rng, heads * skv * headDim), f16: true, 1, heads, skv, headDim);
+        using Tensor value = Make(Values(rng, heads * skv * headDim), f16: true, 1, heads, skv, headDim);
+        using Tensor output = new(new TensorShape(1, heads, sq, headDim), DType.F16);
+
+        using VulkanBackend vulkan = new() { EnableCoopMat2 = true };
+        long before = vulkan.GemmEngagementCounts.CoopMat2;
+        vulkan.ScaledDotProductAttention(output, query, key, value, mask: null, scale);
+        Assert.Equal(before + heads, vulkan.GemmEngagementCounts.CoopMat2);
+
+        float[] q = Read(query), kv = Read(key), v = Read(value), actual = Read(output);
+        double[] probs = new double[skv], expected = new double[headDim];
+        float worst = 0f;
+        for (int h = 0; h < heads; h++)
+        {
+            for (int r = 0; r < sq; r++)
+            {
+                double max = double.NegativeInfinity, total = 0;
+                for (int c = 0; c < skv; c++)
+                {
+                    double dot = 0;
+                    for (int i = 0; i < headDim; i++) dot += (double)q[(h * sq + r) * headDim + i] * kv[(h * skv + c) * headDim + i];
+                    probs[c] = scale * dot;
+                    max = Math.Max(max, probs[c]);
+                }
+                for (int c = 0; c < skv; c++) total += probs[c] = Math.Exp(probs[c] - max);
+                Array.Clear(expected);
+                for (int c = 0; c < skv; c++)
+                {
+                    double p = probs[c] / total;
+                    for (int i = 0; i < headDim; i++) expected[i] += p * v[(h * skv + c) * headDim + i];
+                }
+                for (int i = 0; i < headDim; i++)
+                    worst = MathF.Max(worst, MathF.Abs(actual[(h * sq + r) * headDim + i] - (float)expected[i]));
+            }
+        }
+        Assert.True(worst < Tolerance(anyF16: true), $"worst error {worst}");
     }
 
     [VulkanTheory]
@@ -158,6 +225,22 @@ public sealed class VulkanGemmScaleParityTests
                 worst = MathF.Max(worst, MathF.Abs(actual[r * n + c] - (Damp * (expected[r * n + c] - b[c]) + b[c])));
         }
         Assert.True(worst < Tolerance(anyF16: true), $"worst error {worst}");
+    }
+
+    /// <summary>The largest distance of a Linear's output from <c>Damp * x * w^T + b</c>, summed in double.</summary>
+    private static float WorstLinearError(float[] x, float[] w, float[] b, float[] actual, int rows, int k, int n)
+    {
+        float worst = 0f;
+        for (int r = 0; r < rows; r++)
+        {
+            for (int c = 0; c < n; c++)
+            {
+                double sum = 0;
+                for (int i = 0; i < k; i++) sum += (double)x[r * k + i] * w[c * k + i];
+                worst = MathF.Max(worst, MathF.Abs(actual[r * n + c] - (float)(Damp * sum + b[c])));
+            }
+        }
+        return worst;
     }
 
     /// <summary>F16 results carry a 16-bit store of values up to about 2; F32 only the summation order.</summary>
