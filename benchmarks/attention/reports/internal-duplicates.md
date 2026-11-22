@@ -2,7 +2,10 @@
 
 Plan item 18 ([proposed queue](../proposed-queue.md)) says: retire internal duplicates only, preserve public adapters, and
 document behavioral compatibility changes. This report is the evidence for what could be retired. It is a source audit at
-`main` `ab67d61f6` (2026-11-21). **No source was changed**; the only edits in the pull request are this file and one link.
+`main` `ab67d61f6` (2026-11-21). **No source was changed by the audit pull request** (#1037); its only edits were this file and one link. The
+removals and migrations that followed are listed in the Status line below, each in its own pull request. The sections below
+are the audit as written: their line numbers and their statements about what was run ("no test was run", "no real generation")
+belong to the audit, not to those later pull requests, whose descriptions carry their own evidence.
 
 **Recheck against `main` `b9e56b9ef`.** The audit was taken at `ab67d61f6`; the merged PRs since touched the Vulkan and CUDA
 decode-with-lengths rows and shaders (head dim 256, F16/BF16 caches), the Vulkan Sol-Attn shaders, `T5Gemma2TextEncoder` and
@@ -219,6 +222,19 @@ on a GPU backend the host loop's device-to-host sync goes away.
   `VulkanBackend.FlashCm2.cs:164` `CanUseFlashCm2(..., sq, skv, ...)` (`sq` and `skv`; separately, `TryFlashCm2CausalPrefill` has its own
   minimum-rows test beside the row's `MinQueryTokens`, per the Vulkan sub-agent). Not duplicates; trivial.
 - `Krea2Attention.Forward` takes an unused `seqLen` (`Diffusion/Models/Denoisers/DiTBlocks/Krea2Attention.cs:75`).
+
+### What is left after the removals
+
+- **`AttentionLayer.AttendHeadMajor`** leaks its operands when the second or third operand permute throws, or when
+  `context.HeadMajorRotation?.RotateHeadMajor(...)` throws. Its siblings are fixed: `MergeHeads` (#1051) and `RunHeadMajor` (#1057).
+  The fix needs the ownership of q, k and v traced through `ownsKv`, so it is its own change.
+- **Rows marked keep that are worth another look:** M10 (`DiaHeads` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`, `SliceLeading`) is public
+  with callers in other models, but its members are host copies of `StridedCopies.RepeatInterleave` and `Permute0213`, so migrating
+  the callers would be model work, not an adapter change. The `DiTUtils` host loops that M3 noted could be `Permute0213` calls.
+- **Found while collecting the evidence, not duplicates:** CUDA's query-tiled F32 row (S.9) does not repeat bit for bit between two
+  identical calls (largest difference 2.9e-07 at 14,748 by 14,748 tokens, 12 heads of 128, seen in #1054; the materialized
+  rows repeat), so a whole TRELLIS.2 generation on CUDA is not bit-reproducible; and Idol on Vulkan ends in a stack overflow in
+  `VulkanBackend.Concat`, reached through `VaeEncoder.PadRightBottom`, on `main`.
 
 ### What I did not examine
 
