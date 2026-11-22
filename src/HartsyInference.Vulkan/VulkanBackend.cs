@@ -949,7 +949,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         using OpScope _ = EnterOp();
         LowRankAdjunctGemm.RefuseAdjunct(a, "VulkanBackend.MatMul");
         LowRankAdjunctGemm.RefuseAdjunct(b, "VulkanBackend.MatMul");
-        DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
+        DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null, GemmScale(a) * GemmScale(b));
     }
 
     /// <summary>Opt-in switch for <see cref="Linear"/>'s INT8 dot-product GEMM path (see <see cref="TryDispatchInt8Linear"/>). Defaults from <c>HARTSYINFERENCE_VK_INT8=1</c> at construction, same as <c>CudaBackend.EnableW8A8</c>; settable afterward so tests/tooling can toggle it without an env var and a fresh process.</summary>
@@ -968,7 +968,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 && !TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
             {
                 // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
-                DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);
+                DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias, GemmScale(weight));
             }
         }
         // Outside the scope: Accumulate re-enters through the public ops, exactly as an ordinary caller would.
@@ -987,7 +987,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         using (OpScope _ = EnterOp())
         {
             if (!TryDispatchQuantGemv(output, input, quantWeight, bias))
-                DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias);
+                DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias, GemmScale(quantWeight));
         }
         // A LoRA that cannot merge into packed blocks rides as an adjunct; outside the scope, as Linear applies it.
         if (quantWeight.LowRankAdjunct is { IsActive: true } adjunct)
@@ -1004,6 +1004,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         if (!EnableInt8Linear || !Vk.HasInt8DotProduct) return false;
         if (output.Shape.Rank != 2 || input.Shape.Rank != 2 || weight.Shape.Rank != 2) return false;
         if (output.DType != DType.F32 || input.DType != DType.F32 || weight.DType != DType.F32) return false;
+        // The quantized weight is cached without its scale; a scaled weight takes the GEMM, which applies it.
+        if (GemmScale(weight) != 1f) return false;
 
         int M = (int)output.Shape[0], N = (int)output.Shape[1], K = (int)input.Shape[1];
         if ((K & 3) != 0) return false;
@@ -1108,7 +1110,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         {
             // [B, M, K] @ [K, N] is exactly the flattened (B·M, K) @ (K, N) GEMM — one dispatch
             // through the shared matmul path covers every batch.
-            DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null);
+            DispatchMatmul(output, a, b, transposeA: false, transposeB: false, bias: null, GemmScale(a) * GemmScale(b));
             return;
         }
 
@@ -1127,7 +1129,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             for (long bi = 0; bi < batch; bi++)
             {
                 DispatchMatmulWithOffsets(aRes.Handle, bRes.Handle, outBuf.Handle, M, N, K,
-                    transposeA: false, transposeB: false, alpha: 1.0f, beta: 0.0f,
+                    transposeA: false, transposeB: false, alpha: GemmScale(a) * GemmScale(b), beta: 0.0f,
                     aOffset: (uint)(bi * M * K), bOffset: (uint)(bi * K * N), cOffset: (uint)(bi * M * N),
                     dtype: gemmDtype);
             }
@@ -1201,7 +1203,15 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return gemmDtype;
     }
 
-    private void DispatchMatmul(Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias)
+    /// <summary>The per-tensor scale a product still owes for <paramref name="operand"/>: its
+    /// <see cref="Tensor.Fp8ScaleFactor"/>, which is an fp8_scaled checkpoint's scale and also the carrier of the F16
+    /// block loops' residual damp on a 16-bit or F32 weight. An E4M3 operand owes nothing here, because
+    /// <see cref="CastIfNeeded"/> applies its factor in the cast to the compute dtype.</summary>
+    private static float GemmScale(Tensor operand) => operand.DType == DType.F8E4M3 ? 1f : operand.Fp8ScaleFactor;
+
+    /// <param name="alpha">Scales the product before the bias is added, as CUDA's GEMM alpha does: a caller that damps
+    /// a weight through its scale carries the same factor in the bias values.</param>
+    private void DispatchMatmul(Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, float alpha)
     {
         // M/N/K come from the OPERAND shapes, not output.Shape's rank structure: an output legitimately shaped
         // [B, S, heads, headDim] spans the GEMM's column count across two trailing dims.
@@ -1239,7 +1249,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         try
         {
             DispatchGemm(new GemmOperands(aRes.Handle, bRes.Handle, outBuf.Handle, M, N, K, transposeA, transposeB, gemmDtype, output.DType)
-                { BiasOut = biasOut, BiasF32 = biasF32 });
+                { BiasOut = biasOut, BiasF32 = biasF32, Alpha = alpha });
             CacheOutput(output, outBuf);
         }
         catch (Exception ex)

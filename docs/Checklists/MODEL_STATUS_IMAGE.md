@@ -52,7 +52,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **SD3.5 Medium** | ✅ | Clean photorealistic output; 5 pipeline bugs fixed (PHASE_3_DEVIATIONS #31-35). **CLI catalog-path verified 2026-07-21**: `hartsy image -m sd3` (Comfy-Org/stable-diffusion-3.5-fp8, all-in-one bundle), `CliDrivable=true`. |
 | **Flux Dev / Schnell / Krea** | ✅ | Photoreal across all three. ([details](#flux-dev--schnell--krea)) |
 | **Z-Image Turbo / Base** | ✅ | Clean photoreal; 8 plumbing bugs fixed (PHASE_3_DEVIATIONS #25-30). **CLI catalog-path verified 2026-07-21**: `hartsy image -m zimage` (mcmonkey/swarm-models FP8Mix repack), `CliDrivable=true`. **Variant detection 2026-08-11**: Base vs Turbo is resolved from a filename token; the official Base single-file (`Comfy-Org/z_image` → `z_image_bf16.safetensors`) carries NO token and is positively matched via its bare family name — previously it fell through to Turbo's F16 policy, which overflows Base's >83k V range into Inf (silent black/garbage image). Ambiguous names default to the safe Base policy (F32 attention, shift 6) with a warning; only an explicit `turbo` token selects the F16 fast path. Both variants re-verified with real 1024² generations (Base 50st/cfg5 from the official bare-name file, Turbo 8st/cfg1 from the sha256-pinned FP8Mix). |
-| **Flux.2 Klein 4B** | ✅ | Clean astronaut. |
+| **Flux.2 Klein 4B** | ✅ | Clean astronaut. ([details](#flux2-klein-4b)) |
 | **AuraFlow v0.3** | ✅ | Clean on-prompt horse+rider @1024 (`calcuis/aura` fp8). ([details](#auraflow-v03)) |
 | **Qwen-Image** (20B MMDiT) | ✅ | Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). ([details](#qwen-image)) |
 | **Qwen-Image 2.1** (7B single-stream DiT) | ✅ | Clean on-prompt apple @512 text-to-image (bf16 DiT + Qwen3-VL-8B bf16 TE + RGBA VAE). Reference-image editing and LoRA not wired. ([details](#qwen-image-21)) |
@@ -751,6 +751,15 @@ Coherent astronaut-on-horse @512-nocfg AND @1024-CFG. All 3 bugs (wrong subject,
 ### Ideogram 4
 
 e2e coherent + prompt-faithful (structured-JSON prompt), visually verified. Perf grind 2026-07-08 (`alpha.44.7-local`): warm 1024²/20 steps **19.5s vs ComfyUI 17.0s (1.15×; was 2.5×)** — step-invariant conditioning caches, cuDNN flash attn @ head_dim 256, `numerics.ditF16` (o/w3 1/64 sandwich damp), drain-free loop, banded-im2col full-res Flux.2 VAE decode, KEEP_MODELS + prompt cache. **CLI catalog-path verified 2026-07-21**: `hartsy image -m ideogram4` (Comfy-Org/Ideogram-4), `CliDrivable=true` — requires a structured-JSON caption as the prompt (e.g. `{"high_level_description":"...","style_description":{...},"compositional_deconstruction":{"background":"...","elements":[...]}}`); a plain-text prompt is fed verbatim and produces off-prompt output with hallucinated watermark-style gibberish text (the model's own training-data bias, not an engine bug — see Ideogram4Recipe's own runtime warning). **Low-VRAM 2026-07-27**: the recipe's old unconditional ">= 20 GB free VRAM or refuse" gate (both 9.3B DiTs resident for asymmetric CFG) is now enforced **only** when streaming is unavailable (`vram.lowVram=off`, or a non-CUDA backend). `Ideogram4Pipeline` block-streams both transformers via two independent `BlockStreamingController` windows, so the resident set is ~560 MB of shared weights plus the prefetch window. **Verified running on a 12 GB RTX 3060** — 19.7 GB needed (17.1 GB weights + 2.5 GB activations) against 9.2 GB available; completes at 1024²/20st in 205 s with peak **5.1/11.6 GiB** and 0 D2H syncs/step (a per-step pool trim on the streamed path holds it flat; without it the retained stream-ordered pool climbs to the full 11.6 GiB for no speed gain). That old gate is why the 2026-07-26 sweep recorded `OOM²` for Ideogram 4 on the 3060: it never attempted an allocation (1 s, 82 MiB peak) — a policy refusal, not a capacity failure.
+
+### Flux.2 Klein 4B
+
+Clean astronaut on CUDA. **Vulkan, RTX 3060 12 GB (2026-11-21):** the BF16 checkpoint (`flux-2-klein-4b.safetensors`,
+`qwen_3_4b.safetensors`, `flux2-vae.safetensors`), 512², 4 steps, seed 1234, gives a clean astronaut-on-horse that
+matches the CUDA image by eye; no pixel metric against CUDA or a reference implementation was taken. Step-graph
+capture does not fit this card on Vulkan (it retains 4.3 GB of intermediates beside 7.4 GB of weights), so every
+generation logs one capture out-of-memory warning and runs eagerly; the output is unaffected. Not run on Vulkan:
+1024², img2img, inpaint, regions, the GGUF checkpoint, a card where the capture fits.
 
 ### Flux.2 Dev (32B)
 
