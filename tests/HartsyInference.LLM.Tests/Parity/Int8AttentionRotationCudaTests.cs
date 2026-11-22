@@ -291,6 +291,7 @@ public sealed class Int8AttentionRotationCudaTests(ITestOutputHelper output)
         AttentionCall reference = AttentionCall.FromScaledDotProductAttention(referenceResult, query, key, value, null, Scale, false);
         string what = $"{dtype}, {heads} heads on {kvHeads}, {tokens} tokens";
 
+        // SageAttn stays at its default, as on the default route: a planner that ranks another row first fails the count below.
         using IDisposable policy = KnobProfile.Create("int8v2-rotation-default-size")
             .With(EngineKnobs.Int8AttnV2, true).With(EngineKnobs.Int8AttnV2Rotate, true).Push();
         Assert.Equal(tokens, EngineKnobs.Int8AttnV2MinTokens.Value);
