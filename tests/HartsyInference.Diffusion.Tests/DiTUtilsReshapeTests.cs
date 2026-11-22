@@ -16,7 +16,10 @@ public sealed unsafe class DiTUtilsReshapeTests
         Tensor tensor = new(shape, DType.F32);
         Random random = new(seed);
         Span<uint> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<float, uint>(tensor.AsSpan<float>());
-        for (int i = 0; i < bits.Length; i++) bits[i] = (uint)random.NextInt64(0, 1L << 32);
+        for (int i = 0; i < bits.Length; i++)
+        {
+            bits[i] = (uint)random.NextInt64(0, 1L << 32);
+        }
         return tensor;
     }
 
@@ -25,13 +28,20 @@ public sealed unsafe class DiTUtilsReshapeTests
         float* inPtr = (float*)input.DataPointer;
         float* outPtr = (float*)output.DataPointer;
         for (int b = 0; b < batch; b++)
+        {
             for (int s = 0; s < seqLen; s++)
+            {
                 for (int h = 0; h < numHeads; h++)
                 {
                     int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
                     int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    for (int d = 0; d < headDim; d++) outPtr[outOffset + d] = inPtr[inOffset + d];
+                    for (int d = 0; d < headDim; d++)
+                    {
+                        outPtr[outOffset + d] = inPtr[inOffset + d];
+                    }
                 }
+            }
+        }
     }
 
     private static void FromMultiHeadElementLoop(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
@@ -39,13 +49,20 @@ public sealed unsafe class DiTUtilsReshapeTests
         float* inPtr = (float*)input.DataPointer;
         float* outPtr = (float*)output.DataPointer;
         for (int b = 0; b < batch; b++)
+        {
             for (int s = 0; s < seqLen; s++)
+            {
                 for (int h = 0; h < numHeads; h++)
                 {
                     int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
                     int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    for (int d = 0; d < headDim; d++) outPtr[outOffset + d] = inPtr[inOffset + d];
+                    for (int d = 0; d < headDim; d++)
+                    {
+                        outPtr[outOffset + d] = inPtr[inOffset + d];
+                    }
                 }
+            }
+        }
     }
 
     private static void ToMultiHeadMemoryCopy(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
@@ -53,13 +70,17 @@ public sealed unsafe class DiTUtilsReshapeTests
         float* inPtr = (float*)input.DataPointer;
         float* outPtr = (float*)output.DataPointer;
         for (int b = 0; b < batch; b++)
+        {
             for (int s = 0; s < seqLen; s++)
+            {
                 for (int h = 0; h < numHeads; h++)
                 {
                     int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
                     int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
                     Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
                 }
+            }
+        }
     }
 
     private static void FromMultiHeadMemoryCopy(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
@@ -67,13 +88,17 @@ public sealed unsafe class DiTUtilsReshapeTests
         float* inPtr = (float*)input.DataPointer;
         float* outPtr = (float*)output.DataPointer;
         for (int b = 0; b < batch; b++)
+        {
             for (int s = 0; s < seqLen; s++)
+            {
                 for (int h = 0; h < numHeads; h++)
                 {
                     int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
                     int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
                     Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
                 }
+            }
+        }
     }
 
     private static void AssertSameBits(Tensor expected, Tensor actual, string what)
@@ -82,7 +107,9 @@ public sealed unsafe class DiTUtilsReshapeTests
         ReadOnlySpan<uint> a = System.Runtime.InteropServices.MemoryMarshal.Cast<float, uint>(actual.AsReadOnlySpan<float>());
         Assert.Equal(e.Length, a.Length);
         for (int i = 0; i < e.Length; i++)
+        {
             Assert.True(e[i] == a[i], $"{what}: element {i} differs ({e[i]:x8} against {a[i]:x8})");
+        }
     }
 
     [Theory]
