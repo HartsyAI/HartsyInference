@@ -171,7 +171,7 @@ public sealed partial class VulkanBackend
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "A.2",
                 (in AttentionCall c) => c.QkHeadDim <= FlashMaxHeadDim && c.KvHeads > 0 && c.Heads % c.KvHeads == 0
-                    && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch) && !TiledF32Admits(in c),
+                    && !TiledF32Admits(in c) && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
@@ -192,7 +192,9 @@ public sealed partial class VulkanBackend
                             HeadMajorStrides(c.KvHeads, c.KeyTokens, c.QkHeadDim), HeadMajorStrides(c.KvHeads, c.KeyTokens, c.QkHeadDim),
                             HeadMajorStrides(c.Heads, c.QueryTokens, c.QkHeadDim)));
                     return true;
-                }),
+                },
+                // Operands, bias and output are F32 and read or written in place.
+                static (in AttentionCall _) => AttentionPreparationCost.None),
             new DelegateAttentionRow(Cap("naive", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast, Saturates = true,
