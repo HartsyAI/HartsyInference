@@ -206,7 +206,8 @@ public sealed unsafe class GptOssEncoder : IDisposable
     /// <param name="query">F32 <c>[B, Hq, S, D]</c>.</param>
     /// <param name="key">F32 <c>[B, Hkv, S, D]</c>.</param>
     /// <param name="value">F32 <c>[B, Hkv, S, D]</c>.</param>
-    /// <param name="sinks">F32 <c>[Hq]</c>, or null for none.</param>
+    /// <param name="sinks">F32 <c>[Hq]</c>, or null for none. Without sinks a GPU backend serves a causal prefill from its
+    /// F16 kernels, where the former host loop was F32; the GPT-OSS checkpoint has sinks, so it does not take that path.</param>
     /// <param name="slidingWindow">Positions each query attends, itself included; 0 for all earlier positions.</param>
     internal static void Attend(IBackend backend, Tensor output, Tensor query, Tensor key, Tensor value, Tensor? sinks, int slidingWindow)
     {
