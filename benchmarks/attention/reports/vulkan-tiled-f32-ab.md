@@ -2,8 +2,9 @@
 
 When this was taken `numerics.vkTiledAttention` was `off` by default, and its description said it stayed off "until
 the regression A/B for the default flip is recorded". This is that A/B on one card. The default has since changed to
-`auto`; [the last section](#the-default-flip) records that change and the reruns behind it. In the tables above it,
-"default" means the knob `off`, and "tiled" means the kernel at every head dim, which is now the value `all`.
+`auto`; [the last section](#the-default-flip) records that change, the reruns behind it and
+[the same A/B on an RTX 4090](#a-second-card-rtx-4090). In the tables above it, "default" means the knob `off`, and
+"tiled" means the kernel at every head dim, which is now the value `all`.
 
 ## What was compared
 
@@ -95,7 +96,8 @@ The default of `numerics.vkTiledAttention` is now `auto`, and the knob has three
 - `all`: the tiled kernel at every head dim up to 256, which is what `auto` meant when the table above was taken.
 - `off`: `flash.scalar` up to head dim 128 and `naive` above it, as before.
 
-Why that rule at head dims 129 to 256: `naive` is about twice as fast there, and it tiles the query axis itself once an
+Why that rule at head dims 129 to 256: `naive` is about twice as fast there on the 3060 (and level with the tiled
+kernel on the 4090, below), and it tiles the query axis itself once an
 unmasked call's scores pass 1 GiB, so it never has to hold more. With a bias it cannot tile, and holds two buffers of
 the whole score matrix. That is the one case the default gives to the tiled kernel, at the same 1 GiB (one constant in
 the backend, read by both). How a large unmasked call on self-tiled `naive` compares with the tiled kernel was not
@@ -154,6 +156,49 @@ take `naive` (A.3), identical outputs, medians within 20% of each other.
 
 So the regression the first A/B found at head dim 256 (14.5 ms against 6.8) does not come with the new default.
 
+### A second card: RTX 4090
+
+The same tests at `304f3447b` on an RTX 4090, run by another session on another host. The figures are that session's
+report from its raw files (its evidence folder, `queued/t-1033/ab-lines-all-runs.txt`); they were not re-read for this
+report. The host also has an RTX 3060 and llvmpipe; during the three benchmark runs the 3060 stayed at 321 MiB while
+the 4090's memory rose, so the Vulkan backend ran on the 4090.
+
+Expectations written in that session's brief before the run: the tiled kernel faster on every shape up to head dim
+128, at least 5 times faster at 1,024 tokens, head dim 256 on `naive` under the default, and within 2e-5 of the host
+reference. All four held.
+
+`VulkanTiledAttentionAbTests` three times, 13 of 13 passed each time. Ranges over the three runs' medians, 8 heads
+unless stated, milliseconds:
+
+| Call | Row with `off` | `off` | `all` (tiled) | `off` over tiled |
+| --- | --- | --- | --- | --- |
+| Self, 64 tokens, D 64 | `flash.scalar` | 0.11 to 0.12 | 0.10 to 0.11 | 1.09 to 1.19 |
+| Self, 256 tokens, D 128 | `flash.scalar` | 0.97 to 1.02 | 0.16 to 0.23 | 4.41 to 6.11 |
+| Self, 1,024 tokens, D 64 | `flash.scalar` | 7.51 to 7.88 | 0.32 to 0.39 | 19.3 to 24.4 |
+| Self, 1,024 tokens, D 128 | `flash.scalar` | 14.37 to 14.48 | 0.83 to 0.90 | 16.0 to 17.4 |
+| Self, 1,024 tokens, D 128, 2 key/value heads | `flash.scalar` | 12.57 to 13.60 | 0.79 to 0.84 | 15.9 to 16.6 |
+| Self, 1,024 tokens, D 128, additive bias | `flash.scalar` | 13.75 to 14.78 | 0.77 to 0.87 | 17.0 to 18.0 |
+| Self, 512 tokens, D 128, batch 2 | `flash.scalar` | 6.81 to 7.57 | 0.43 to 0.54 | 14.0 to 16.0 |
+| Self, 4,096 tokens, D 64, 16 heads | `flash.scalar` | 221 to 233 | 6.35 to 6.58 | 34.9 to 35.8 |
+| Cross, 4,096 by 77, D 128 | `flash.scalar` | 4.48 to 4.72 | 0.29 to 0.36 | 13.1 to 15.5 |
+| Cross, 4,096 by 512, D 128 | `flash.scalar` | 27.5 to 28.8 | 1.51 to 1.59 | 18.1 to 18.4 |
+| One row over 4,096 keys, D 128 | `flash.scalar` | 1.69 to 1.86 | 1.47 to 1.52 | 1.15 to 1.22 |
+| **Self, 1,024 tokens, D 256** | **`naive`** | **1.97 to 2.13** | **2.08 to 2.13** | **0.93 to 1.01** |
+
+- Up to head dim 128 the tiled kernel is faster on every shape on this card too: 13 to 36 times at 512 tokens and
+  above, 4 to 6 times at 256 tokens, and 1.1 to 1.2 times on the two smallest calls, where both arms are near 0.1 ms
+  or a single row.
+- **At head dim 256 the two rows are level on the 4090** (0.93 to 1.01), where `naive` was twice as fast on the 3060.
+  So the reason for leaving that bucket on `naive` is a 3060 figure; on the 4090 the choice costs nothing either way.
+- Under the default at head dim 256 both arms took `naive` in all three runs, with identical outputs.
+- Numerics: at most 1.6e-7 from the host reference on the 11 shapes that have one.
+
+The LLM GPU lane on the same host: 372 listed, 352 passed, 1 failed, 19 not executed (MOSS-VL real weights), 97.9 s,
+and the TRX total equals the listing. The failure is `Kimi.PackedMoeTests.Cuda_PackedExperts_MatchTheF32Dequantization`,
+a CUDA test that session reports as failing on `main` on that host. The route and parity tests of this change passed.
+
+Not run on the 4090: any model.
+
 ### Routes and parity
 
 - `VulkanTiledAttentionRouteTests` plans 448 dense head-major calls (head dims 32, 64, 96, 128, 192, 256, 320; F32, F16,
@@ -169,6 +214,6 @@ So the regression the first A/B found at head dim 256 (14.5 ms against 6.8) does
 
 ### Still not shown
 
-No RTX 4090 run and no non-NVIDIA device: the tile sizes were chosen on NVIDIA cards and every figure here is from one
-RTX 3060. No real generation before and after, so no whole-model time or output comparison. No peak memory. No quiet
-card for the reruns.
+No non-NVIDIA device: the tile sizes were chosen on NVIDIA cards and every figure here is from an RTX 3060 or an RTX
+4090. No generated picture compared before and after, and no model run on the 4090; the two real runs on the 3060 are
+in [the workload report](vulkan-tiled-default-workloads.md). No peak memory. No quiet card for the 3060 reruns.
