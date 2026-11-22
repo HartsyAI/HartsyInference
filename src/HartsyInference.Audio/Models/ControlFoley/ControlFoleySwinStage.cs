@@ -163,7 +163,7 @@ internal sealed class ControlFoleySwinStage
                     {
                         int kOff = (baseRow + j) * 3 * c + c + h * headDim;
                         float dot = 0f;
-                        for (int d = 0; d < headDim; d++)
+                        for (int d = headDim - 1; d >= 0; d--)   // control: reversed order
                         {
                             dot += qkv[qOff + d] * scale * qkv[kOff + d];
                         }
@@ -179,7 +179,7 @@ internal sealed class ControlFoleySwinStage
                     }
 
                     float sum = 0f;
-                    for (int j = 0; j < tokensPerWindow; j++)
+                    for (int j = tokensPerWindow - 1; j >= 0; j--)   // control: reversed order
                     {
                         scores[j] = MathF.Exp(scores[j] - max);
                         sum += scores[j];
@@ -189,7 +189,7 @@ internal sealed class ControlFoleySwinStage
                     for (int d = 0; d < headDim; d++)
                     {
                         float acc = 0f;
-                        for (int j = 0; j < tokensPerWindow; j++)
+                        for (int j = tokensPerWindow - 1; j >= 0; j--)   // control: reversed order
                         {
                             acc += scores[j] / sum * qkv[(baseRow + j) * 3 * c + 2 * c + h * headDim + d];
                         }
