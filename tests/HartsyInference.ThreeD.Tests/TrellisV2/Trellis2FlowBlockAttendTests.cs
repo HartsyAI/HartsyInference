@@ -103,8 +103,9 @@ public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
     }
 
     /// <summary>The CUDA backend at the shapes the real flows run (the two dense F32 rows: materialized and query-tiled). The head count is
-    /// small and the head dim is the real one, so the row choice is the real one. The former body runs twice to show that the call is
-    /// deterministic on this device; the layer path must then be bit-identical to it and take the same rows.</summary>
+    /// small and the head dim is the real one, so the row choice is the real one. The former body runs twice to measure how far two runs of
+    /// one call differ on this device (nothing, unless the query-tiled row's tile changes with free memory); the layer path must take the
+    /// same rows and differ by no more than that.</summary>
     [Theory]
     [Trait("Category", "GpuIntegration")]
     [InlineData(4096, 1029, 2, 128)]
@@ -133,9 +134,10 @@ public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
         {
             // The planner picks the query-tiled row when the scores exceed half of free device memory, and memory a finished call freed
             // stays reserved by the stream-ordered pool, where it counts as used. Without the trim a score matrix between a quarter and a
-            // half of the card (this theory's largest case on 24 GB) is materialized by the first run and tiled by the next two.
+            // half of the card (this theory's largest case on 24 GB) is materialized by the first run and tiled by the next two. Another
+            // process taking device memory between the runs can still move the row; the line printed below shows it when it does.
             backend.TrimMemoryPool();
-            freeMb[run] = ((IBackend)backend).GetVramInfo().FreeBytes >> 20;
+            freeMb[run] = backend.GetVramInfo().FreeBytes >> 20;
             Tensor q = Filled(qShape, 1), k = Filled(kvShape, 2), v = Filled(kvShape, 3);
             using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
             results[run] = run < 2 ? Former(backend, q, k, v, queryTokens, heads, headDim, scale) : block.Attend(backend, q, k, v, queryTokens);
