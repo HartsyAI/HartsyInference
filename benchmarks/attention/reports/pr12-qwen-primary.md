@@ -79,17 +79,17 @@ open**: see the next point.
 
 Two things qualify the size of that number:
 
-- **R runs out of device memory once in every process, and the protocol counts that against the pair.** Each of the
-  20 R slots logs one out-of-memory warning, one retry and one release of all device memory, then completes with the
-  right text. No C slot logs one. The protocol's rule is that a memory violation invalidates the pair, and the Qwen
-  workload sets `always_free_memory` to false. Read as written, that invalidates all 20 primary pairs, and the 20
-  batched pairs for the same reason, which would leave this lane with no valid inferential result. I kept the pairs
-  because the out-of-memory retry is what R does under the frozen workload on a 24 GB card, so removing them removes
-  the reference. That is an argument for amending the rule or the reference, not a reading of the rule, and it is not
-  mine to settle here: it belongs with the Bfix decision. That decision has since named R as the Qwen reference, so
-  the retry is the reference's own behaviour under the frozen workload and the pairs stand as measured; the rule as
-  written was not amended, and the conflict with it stays recorded here. It is also not known whether the retry falls in a warm-up or
-  in the timed request, which bears directly on the 0.0844. The R log shows the three lines after the model load (an
+- **R runs out of device memory once in every process, and the protocol counts that against the pair.** Each of the 20 R
+  slots logs one out-of-memory warning, one retry and one release of all device memory, then completes with the right
+  text. No C slot logs one. The protocol's rule is that a memory violation invalidates the pair, and the Qwen workload
+  sets `always_free_memory` to false. Read as written, that invalidates all 20 primary pairs, and the 20 batched pairs
+  for the same reason, which would leave this lane with no valid inferential result. I kept the pairs because the
+  out-of-memory retry is what R does under the frozen workload on a 24 GB card, so removing them removes the reference.
+  That is an argument for amending the rule or the reference, not a reading of the rule, and it is not mine to settle
+  here: it belongs with the Bfix decision. That decision has since named R as the Qwen reference, so the retry is the
+  reference's own behaviour under the frozen workload and the pairs stand as measured; the rule as written was not
+  amended, and the conflict with it stays recorded here. It is also not known whether the retry falls in a warm-up or in
+  the timed request, which bears directly on the 0.0844. The R log shows the three lines after the model load (an
   allocation of 4,748 MB with 50 MB free, an eviction that released 5,342 MB, then the release of all device memory),
   but it has no timestamps and no per-request markers, and the observation file marks requests without recording
   allocations, so neither can place them. Settling it needs a rerun with a marker before the timed region.
