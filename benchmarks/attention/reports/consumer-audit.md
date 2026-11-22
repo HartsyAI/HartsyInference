@@ -74,30 +74,31 @@ per-frame forward on the same backend (RTX 3060).
 
 ## What a migration changes
 
-The first three migrations (#1005, #1010, #1011) move exact-F32 host loops to the shared layer. On the CPU backend and on
-Vulkan the result stays F32. **On CUDA the products become TF32**, as for every other caller of that layer, inside the
-contract bound of 2e-3. Each keeps the former loop as its test oracle and names this change. The later ones
-(#1013, #1014, #1016) do the same and say so in their own text.
+The first three migrations (#1005, #1010, #1011) move exact-F32 host loops to the shared layer. On the CPU backend and
+on Vulkan the result stays F32. **On CUDA the products become TF32**, as for every other caller of that layer, inside
+the contract bound of 2e-3. Each keeps the former loop as its test oracle and names this change. The later ones (#1013,
+#1014, #1016) do the same and say so in their own text.
 
 Real generations before and after, run on the RTX 4090 on 2026-11-21 and recorded on each pull request with the
 expectations fixed beforehand:
 
-- **#1005, GPT-OSS encoder (Lens), still a draft.** Each arm's two images are identical, the new rows execute, total time is 24%
-  lower. The image is 32.0 dB from the base where 40 dB had been required, so that gate was missed. A control (the old
-  loop with its sums reordered) is 31.7 dB from the base: the pipeline amplifies last-bit rounding that far. Whether to
-  take it is the owner's decision.
+- **#1005, GPT-OSS encoder (Lens), still a draft.** Each arm's two images are identical, the new rows execute, total
+  time is 24% lower. The image is 32.0 dB from the base where 40 dB had been required, so that gate was missed. A
+  control (the old loop with its sums reordered) is 31.7 dB from the base: the pipeline amplifies last-bit rounding that
+  far. Whether to take it is the owner's decision.
 - **#1010 and #1013, merged.** See the table rows above; all of these runs were on CUDA, where the changed attention
   multiplies in TF32. Why IndexTTS 2.5 and the ControlFoley style encoder come out identical to the base there while
   IndexTTS 1.5 moves to 56 dB is not established: the attention records show the new calls running in each, and a
-  conditioning that only steers sampled tokens would explain an exact match, but that was not checked. Two limits: a first run asked ControlFoley for a video-only
-  request, which never reaches its reference encoders, so it showed nothing for the style encoder or the Swin stage and
-  had to be repeated with a reference clip; and GPT-SoVITS has had no real run at all.
-- **#1014, ControlFoley Swin stage, still a draft.** With a reference clip the new calls execute and the output is
-  28.2 dB from the base (the arm without this change is bit-identical to the base). No bound had been set for that; a
+  conditioning that only steers sampled tokens would explain an exact match, but that was not checked. Two limits: a
+  first run asked ControlFoley for a video-only request, which never reaches its reference encoders, so it showed
+  nothing for the style encoder or the Swin stage and had to be repeated with a reference clip; and GPT-SoVITS has had
+  no real run at all.
+- **#1014, ControlFoley Swin stage, still a draft.** With a reference clip the new calls execute and the output is 28.2
+  dB from the base (the arm without this change is bit-identical to the base). No bound had been set for that; a
   rounding control like the one for #1005 is prepared and not yet run.
-- **#1011, Wan Animate face adapter, still a draft.** Nothing to run on either machine: the 4090 host holds Wan
-  Animate 2 checkpoints, and `WanAnimate2Transformer` does not use `WanAnimateFaceBlock`; the first Wan Animate,
-  which does, has no checkpoint there.
+- **#1011, Wan Animate face adapter, still a draft.** Nothing to run on either machine: the 4090 host holds Wan Animate
+  2 checkpoints, and `WanAnimate2Transformer` does not use `WanAnimateFaceBlock`; the first Wan Animate, which does, has
+  no checkpoint there.
 - **#1016, PSA block, still a draft.** No YOLO11 detector weights on either machine.
 
 ## Timing seen so far (smoke only, RTX 3060 box, attention alone)
