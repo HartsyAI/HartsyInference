@@ -605,9 +605,11 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   16-bit and F32 weights, and scale the bias values to match. A product path that reads the factor only for fp8
   runs a BF16 or F16 checkpoint's stream undamped: it overflows F16 and the image is solid black, while an fp8
   checkpoint of the same model is fine because its cast applies the factor. Tell: black on one checkpoint dtype
-  only, and `numerics.ditF16=false` gives a clean image. Every Vulkan GEMM-like path either passes
-  `GemmScale(operand)` as alpha or declines a scaled weight (`gemv_quant` and the INT8 Linear have no alpha);
-  `Conv2D` does not read the factor, and nothing sets it on a convolution weight today.
+  only, and `numerics.ditF16=false` gives a clean image. On Vulkan, `Linear`, `QuantizedMatMul`, `MatMul` and
+  `BatchedMatMul` pass `GemmScale(operand)` as alpha, and the two Linear paths without an alpha (`gemv_quant`, the
+  INT8 Linear) decline a scaled weight. The other weight-taking ops do not read the factor (`Conv2D`, `Conv1d`,
+  `ConvTranspose1d`, `Conv2dDepthwise`, `Fp8BlockLinear`, `BlockDiagonalLinear`, `MoeExpertsGrouped`); nothing sets
+  it on their weights today, so damping one of those needs the op taught first.
 - **A step-graph capture that runs out of memory is not the cause of a wrong image.** Capture retains every
   intermediate of the recorded step (Flux.2 Klein 4B at 512²: 4.3 GB beside 7.4 GB of weights, so it never fits
   12 GB), the owner reruns the step eagerly, and the output is the eager output. The warning and its stack trace

@@ -10,7 +10,10 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>FLUX.2's F16 block loop on Vulkan with weights that are not fp8. The loop keeps its residual stream inside
 /// F16's range by damping it 1/32, and the damp rides on each weight's <see cref="Tensor.Fp8ScaleFactor"/>; a backend
 /// that drops the factor runs the stream at its natural scale, overflows, and the image comes out black. The tokens
-/// here are large enough that the undamped stream passes 65504 while the damped one stays under it.</summary>
+/// here are large enough that the undamped stream passes 65504 while the damped one stays under it. The tiny
+/// checkpoint's widths (8 and 12) are off the cooperative-matrix fragment, so every product here runs the tiled
+/// kernel or, without the damp's decline, the fused GEMV; the cooperative-matrix kernels are covered by
+/// <c>VulkanGemmScaleParityTests</c>.</summary>
 public sealed class Flux2F16DampVulkanTests(ITestOutputHelper output)
 {
     private const int GridHeight = 2;

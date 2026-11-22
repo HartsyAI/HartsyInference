@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.Vulkan;
 using Xunit;
 
@@ -79,6 +80,73 @@ public sealed class VulkanGemmScaleParityTests
             }
         }
         Assert.True(worst < Tolerance(f16), $"worst error {worst}");
+    }
+
+    /// <summary>The per-batch path of <c>BatchedMatMul</c> (a weight per batch entry), one offset GEMM per entry.</summary>
+    [VulkanTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BatchedMatMulScalesEveryEntryByBothOperandFactors(bool f16)
+    {
+        const int batch = 2, m = 16, k = 64, n = 48;
+        Random rng = new(13);
+        using Tensor a = Make(Values(rng, batch * m * k), f16, batch, m, k);
+        using Tensor b = Make(Values(rng, batch * k * n), f16, batch, k, n);
+        a.Fp8ScaleFactor = 0.5f;
+        b.Fp8ScaleFactor = Damp;
+        using Tensor output = new(new TensorShape(batch, m, n), f16 ? DType.F16 : DType.F32);
+
+        using VulkanBackend vulkan = new();
+        vulkan.BatchedMatMul(output, a, b);
+
+        float[] av = Read(a), bv = Read(b), actual = Read(output);
+        float worst = 0f;
+        for (int e = 0; e < batch; e++)
+        {
+            for (int r = 0; r < m; r++)
+            {
+                for (int c = 0; c < n; c++)
+                {
+                    double sum = 0;
+                    for (int i = 0; i < k; i++) sum += (double)av[(e * m + r) * k + i] * bv[(e * k + i) * n + c];
+                    worst = MathF.Max(worst, MathF.Abs(actual[(e * m + r) * n + c] - (float)(0.5 * Damp * sum)));
+                }
+            }
+        }
+        Assert.True(worst < Tolerance(f16), $"worst error {worst}");
+    }
+
+    /// <summary>A GGUF weight with a factor, at the row counts on both sides of <c>gemv_quant</c>'s limit: five rows would
+    /// take the fused GEMV, which has no alpha and must decline, and forty-eight take the dequantize-then-GEMM path. The
+    /// reference is the same call with a factor of 1, so the test needs no second dequantizer.</summary>
+    [VulkanTheory]
+    [InlineData(5)]
+    [InlineData(48)]
+    public void QuantizedLinearScalesTheProductByTheWeightFactorBeforeTheBias(int rows)
+    {
+        const int k = 64, n = 48;
+        Random rng = new(14);
+        using Tensor input = Make(Values(rng, rows * k), f16: false, rows, k);
+        using Tensor weightF32 = Make(Values(rng, n * k), f16: false, n, k);
+        using Tensor plainWeight = GgufQuantizer.Quantize(weightF32, DType.Q8_0);
+        using Tensor scaledWeight = GgufQuantizer.Quantize(weightF32, DType.Q8_0);
+        scaledWeight.Fp8ScaleFactor = Damp;
+        using Tensor bias = Make(Values(rng, n), f16: false, n);
+        using Tensor plain = new(new TensorShape(rows, n), DType.F32);
+        using Tensor scaled = new(new TensorShape(rows, n), DType.F32);
+
+        using VulkanBackend vulkan = new();
+        vulkan.Linear(plain, input, plainWeight, bias);
+        vulkan.Linear(scaled, input, scaledWeight, bias);
+
+        float[] b = Read(bias), expected = Read(plain), actual = Read(scaled);
+        float worst = 0f;
+        for (int r = 0; r < rows; r++)
+        {
+            for (int c = 0; c < n; c++)
+                worst = MathF.Max(worst, MathF.Abs(actual[r * n + c] - (Damp * (expected[r * n + c] - b[c]) + b[c])));
+        }
+        Assert.True(worst < Tolerance(anyF16: true), $"worst error {worst}");
     }
 
     /// <summary>F16 results carry a 16-bit store of values up to about 2; F32 only the summation order.</summary>

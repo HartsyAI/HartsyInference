@@ -356,7 +356,8 @@ public sealed unsafe class Tensor : IDisposable
 
     /// <summary>Per-tensor scale for ComfyUI-style <c>fp8_scaled</c> quantization: real value = <c>fp8_byte_decoded * Fp8ScaleFactor</c>.</summary>
     /// <remarks>Default 1.0 means no extra scaling. Non-1 values are folded into cuBLAS' <c>alpha</c> at GEMM
-    /// call sites so scaling happens for free during matmul.</remarks>
+    /// call sites so scaling happens for free during matmul. The F16 block loops also set it on weights of any dtype
+    /// to carry their residual damp, so a GPU product path applies it whatever the operand's dtype.</remarks>
     public float Fp8ScaleFactor { get; set; } = 1.0f;
 
     /// <summary>Static activation dequant scale shipped alongside an fp8 weight (<c>.input_scale</c>); 0 = absent.</summary>
