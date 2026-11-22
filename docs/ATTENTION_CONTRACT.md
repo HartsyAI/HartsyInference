@@ -65,8 +65,10 @@ refused, and so are paged keys and values. A call may also name an **LSE output*
 `[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
 excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
 takes such a call through it. On CUDA and on Vulkan one row declares both, `flash.decode.lengths`: F32 head-major Q and
-the `[B, Sq, Hq × D]` output over a head-major cache. CUDA takes an F32, F16 or BF16 cache, head dim 64 or 128 and at
-most 16 query heads per key head; Vulkan an F32 cache, a head dim of one to four subgroup widths and at most 8. Each
+the `[B, Sq, Hq × D]` output over a head-major cache. CUDA takes an F32, F16 or BF16 cache, head dim 64, 128 or 256
+(256 where the device gives a block the shared memory its tiles need: 83,456 bytes for an F32 cache, 50,432 for a
+half type) and at most 16 query heads per key head; Vulkan an F32, F16 or BF16 cache, a head dim of one to eight
+subgroup widths up to 256 (eight widths at 32 lanes), and at most 8 query heads per key head. Each
 takes only calls with sequence lengths, so an LSE on a call with one shared length is still refused on a GPU. Both
 kernels cut the keys into chunks sized from the longest sequence of the call, so the order a sequence's keys are summed
 in, and with it the last bits of its result, depends on the other sequences' lengths. Each result stays within the
@@ -269,7 +271,12 @@ The planner reproduces these until the row that owns each is rewritten.
   shared by several keys lets one outlier key move the winner of a near-argmax row. u8 P rounds each key against its
   128-key tile's maximum, so a key below 1/510 of it is dropped, and a tile whose whole mass sits below that step loses
   it; the F16 PV keeps it. V scales default to one per channel per tile (`numerics.int8AttnV2VTile`), at or below the
-  per-sequence error on every synthetic and captured call measured.
+  per-sequence error on every synthetic and captured call measured. With `numerics.int8AttnV2Rotate` (off by default)
+  the rows rotate Q and the centered K before quantizing them, by the pinned rule at head dim 128: the 4-point
+  Hadamard up to 256 keys, the signed 128-point one past that. A fourth launch between the quant and attention
+  launches rewrites the Q and K bytes and scales; V is not rotated. The rows decline when the knob is set and that
+  launch's kernel is not loaded, so a call asked to rotate never runs unrotated. A captured graph replays the launches chosen when it was captured,
+  whatever the knob says later. No model sets the knob.
 - CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.
@@ -282,6 +289,15 @@ The planner reproduces these until the row that owns each is rewritten.
   attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
   Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
   unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
+- Vulkan's dense head-major entry tries four rows in order: `cm2.flash` (F16 compute: head dim 64 or 128, with the F16
+  permission or F16 operands, no BF16), `flash.scalar` (head dim up to 128), `tiled.f32` (operands and output all F32,
+  head dim up to 256) and `naive` (materializes the scores, and tiles the query axis for an unmasked call whose scores
+  pass 1 GiB). `numerics.vkTiledAttention` decides which calls `flash.scalar` yields to `tiled.f32`. By default (`auto`)
+  that is every all-F32 call up to head dim 128, and at head dims 129 to 256 only a call with a bias whose score matrix
+  passes that 1 GiB, which `naive` would hold whole. `all` gives `tiled.f32` every call it serves and `off` none. A
+  token-major call the cooperative-matrix row does not take re-enters these rows after a permute, BF16 operands widened
+  to F32 first. The comparison behind the default is the
+  [tiled F32 A/B](../benchmarks/attention/reports/vulkan-tiled-f32-ab.md), taken on one card.
 - Vulkan's scalar/tiled mask shaders carry batch/head/query bias strides; the naive path uses the same layout to
   offset each block and expands key-only masks. Source indexing is not a complete executed mask-conformance campaign.
 - Vulkan `FlashAttention` runs its declared host-reference row (C.1) when neither its scalar admission nor its
@@ -292,7 +308,12 @@ The planner reproduces these until the row that owns each is rewritten.
   `SolAttentionReference`, and `IBackend.HasSolAttention` says whether a backend runs it. The CPU backend runs the
   reference; CUDA and Vulkan each run it as five kernels, seven with the coarse gate, in F32, with every option the
   reference has. Which key blocks a query block reads is the same as the reference's on CUDA, and on Vulkan wherever
-  the driver rounds a divide and a square root correctly and keeps subnormals; the output is compared by tolerance.
+  the driver keeps subnormals; the output is compared by tolerance. The Vulkan routing stages take their divides and
+  their square root through `divRn` and `sqrtRn` (`Shaders/div_rn.glsl`, `sqrt_rn.glsl`), because a device's own
+  need not be correctly rounded and on an RTX 3060 are not: about a third of sampled quotients and a quarter of sampled
+  roots differ from the rounded result. An operand that is itself subnormal is read as zero by that device, helpers
+  included, and no routing test covers a subnormal sum or spread, so the match with the reference stays conditional
+  on that.
   The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
   so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
   has it. No model calls the primitive yet, and it has no timing.

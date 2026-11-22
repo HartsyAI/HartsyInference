@@ -112,8 +112,8 @@ public sealed partial class VulkanBackend
         return new(Cast: AttentionPreparationCost.CastsTo(in c, DType.F16), ExpandMask: expanded);
     }
 
-    /// <summary>B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission, as head-major A.1 does.</summary>
-    private bool TokenMajorCm2Admits(in AttentionCall c)
+    /// <summary>A.1's and B.1's admission: the cm2 kernel computes in F16, so an F32 call needs the F16 permission.</summary>
+    private bool Cm2Admits(in AttentionCall c)
     {
         bool f16Inputs = c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16;
         return (c.Numerics.LegacyAssertedBounded || f16Inputs) && !AnyBf16(in c)
@@ -156,19 +156,14 @@ public sealed partial class VulkanBackend
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast | AttentionLowering.ExpandMask, Saturates = true,
                 }, "A.1",
-                (in AttentionCall c) =>
-                {
-                    bool f16Inputs = c.Query.DType == DType.F16 && c.Key.DType == DType.F16 && c.Value.DType == DType.F16;
-                    return (c.Numerics.LegacyAssertedBounded || f16Inputs) && !AnyBf16(in c)
-                        && CanUseFlashCm2(c.QkHeadDim, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.Mask.Bias);
-                },
+                (in AttentionCall c) => Cm2Admits(in c),
                 (in AttentionCall c) =>
                 {
                     int hq = c.Heads, hkv = c.KvHeads, headDim = c.QkHeadDim, sq = c.QueryTokens, skv = c.KeyTokens;
                     uint qHead = (uint)(sq * headDim), kvHead = (uint)(skv * headDim);
                     DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, c.Batch, hq, hkv, sq,
-                        skv, headDim, new AttnStrides((uint)headDim, qHead, qHead * (uint)hq), new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
-                        new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new AttnStrides((uint)headDim, qHead, qHead * (uint)hq));
+                        skv, headDim, new TiledStrides((uint)headDim, qHead, qHead * (uint)hq), new TiledStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
+                        new TiledStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new TiledStrides((uint)headDim, qHead, qHead * (uint)hq));
                     return true;
                 }, static (in AttentionCall c) => Cm2FlashPreparation(in c, c.Batch)),
             new DelegateAttentionRow(Cap("flash.scalar", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
@@ -176,7 +171,7 @@ public sealed partial class VulkanBackend
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "A.2",
                 (in AttentionCall c) => c.QkHeadDim <= FlashMaxHeadDim && c.KvHeads > 0 && c.Heads % c.KvHeads == 0
-                    && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch) && !TiledF32Admits(in c),
+                    && !TiledF32Admits(in c) && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
@@ -197,7 +192,9 @@ public sealed partial class VulkanBackend
                             HeadMajorStrides(c.KvHeads, c.KeyTokens, c.QkHeadDim), HeadMajorStrides(c.KvHeads, c.KeyTokens, c.QkHeadDim),
                             HeadMajorStrides(c.Heads, c.QueryTokens, c.QkHeadDim)));
                     return true;
-                }),
+                },
+                // Operands, bias and output are F32 and read or written in place.
+                static (in AttentionCall _) => AttentionPreparationCost.None),
             new DelegateAttentionRow(Cap("naive", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
                 {
                     Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast, Saturates = true,
@@ -205,8 +202,7 @@ public sealed partial class VulkanBackend
                 static (in AttentionCall c) => true,
                 (in AttentionCall c) =>
                 {
-                    ScaledDotProductAttentionNaive(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
-                        c.Numerics.LegacyAssertedBounded);
+                    ScaledDotProductAttentionNaive(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale);
                     return true;
                 }),
         ];
@@ -225,14 +221,14 @@ public sealed partial class VulkanBackend
                     MaxBatch = 1, MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = AnyBias, UsesQueryKey = AttentionFormats.F16,
                     UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast | AttentionLowering.ExpandMask, Saturates = true,
                 }, "B.1",
-                (in AttentionCall c) => TokenMajorCm2Admits(in c),
+                (in AttentionCall c) => Cm2Admits(in c),
                 (in AttentionCall c) =>
                 {
                     uint qRow = (uint)((long)c.Heads * c.QkHeadDim), kvRow = (uint)((long)c.KvHeads * c.QkHeadDim);
                     DispatchFlashCm2(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         batch: 1, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.QkHeadDim,
-                        new AttnStrides(qRow, (uint)c.QkHeadDim, 0), new AttnStrides(kvRow, (uint)c.QkHeadDim, 0),
-                        new AttnStrides(kvRow, (uint)c.QkHeadDim, 0), new AttnStrides(qRow, (uint)c.QkHeadDim, 0));
+                        new TiledStrides(qRow, (uint)c.QkHeadDim, 0), new TiledStrides(kvRow, (uint)c.QkHeadDim, 0),
+                        new TiledStrides(kvRow, (uint)c.QkHeadDim, 0), new TiledStrides(qRow, (uint)c.QkHeadDim, 0));
                     return true;
                 }, static (in AttentionCall c) => Cm2FlashPreparation(in c, batch: 1)),
             new DelegateAttentionRow(Cap("permute.dense", E, AttentionDTypes.Any, AttentionDTypes.Any, TM) with
@@ -268,11 +264,13 @@ public sealed partial class VulkanBackend
             // The only flash row that takes a key length per sequence, and it takes nothing else (its admission requires the
             // lengths), so its place in the list is free and the single-length rows keep every call they had. The lengths are
             // host values uploaded for the call.
-            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32, AttentionDTypes.F32, HM | AttentionLayouts.TokenMajor) with
+            new DelegateAttentionRow(Cap("flash.decode.lengths", E, AttentionDTypes.F32,
+                    AttentionDTypes.F32 | AttentionDTypes.F16 | AttentionDTypes.BF16, HM | AttentionLayouts.TokenMajor) with
                 {
                     Gqa = true, Masks = AttentionMaskSupport.Causal, SequenceLengths = true, Lse = true,
                     // What the split shader is built for on this device, so a plan names the limit a call missed.
-                    MinHeadDim = (int)Vk.SubgroupSize, MaxHeadDim = (int)(Vk.SubgroupSize * FlashDecodeMaxDpl),
+                    MinHeadDim = (int)Vk.SubgroupSize,
+                    MaxHeadDim = Math.Min((int)(Vk.SubgroupSize * FlashDecodeLengthsMaxDpl), FlashDecodeLengthsMaxHeadDim),
                     MaxQueryTokens = ushort.MaxValue,
                 }, "C.9",
                 (in AttentionCall c) => FlashDecodeLengthsAdmits(in c),

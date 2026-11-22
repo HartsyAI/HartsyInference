@@ -141,6 +141,10 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Changed: ERNIE-5.5 stage preload reads each layer's weights ahead with parallel readers, and the host linear behind the
+  hyper-connection mixes and the DeepSeek-V4.1 host weights is vectorized (CPU-tested; no speed measured on hardware).** The decode parity
+  tools compare the argmax at every position the engine produced logits for (`choices.json`, `compare.py --choice-margin`).
+
 - **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text and images (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run), from its `tiktoken.model` with the built-in XTML chat template when `tokenizer.json` is
   absent. Images on the last user turn go through the MoonViT-V2 tower and are spliced at the checkpoint's media placeholder. The tower loads on the

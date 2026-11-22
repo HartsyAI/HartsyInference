@@ -33,8 +33,6 @@ public sealed unsafe class MatrixGame3ActionModule
     private readonly float _eps;
     private readonly AttentionLayer _attention;
 
-    internal AttentionLayer AttentionStage => _attention;
-
     private Tensor? _mouseMlp1W, _mouseMlp1B, _mouseMlp2W, _mouseMlp2B, _mouseLnW, _mouseLnB;
     private Tensor? _tQkvW, _tQkvB, _projMouseW, _projMouseB;
     private Tensor? _imgQNorm, _imgKNorm;
