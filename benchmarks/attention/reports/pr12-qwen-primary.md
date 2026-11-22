@@ -14,7 +14,12 @@ beyond the lane below, or for Blackwell.
 **Bfix was never frozen by an earlier PR.** R is the PR 02 pin, chosen for this campaign because it is the correctness
 fixes and nothing after them. The earlier reports say PR 02 must not be labeled Bfix until its gates close, and the
 [4090 review](pr01-4090-review.md) records a Krea CUDA identity failure on that same pin that was never shown
-resolved. So the result below is against R as named here; whether R is Bfix is a decision this report does not make.
+resolved. So the result below is against R as named here; whether R is Bfix was a decision this report did not make.
+
+**Decision, 2026-11-22.** The owner named R, `57b143f00`, as Bfix **for the Qwen lanes only**. It is not a
+reference for Krea: on that pin the Krea CUDA image differs from the pre-series baseline, while the candidate
+reproduces the baseline exactly, so for Krea the pin is the arm that is off. Nothing in the figures below changes
+with the decision; it settles which commit the Qwen result is measured against.
 
 Workload: the frozen protocol's Qwen primary ([protocol.json](../protocol.json)): Qwen3-4B Q4_K_M, 8,192 prompt
 tokens, 128 generated, greedy, seed 42, continuous batching on, a 4 GiB KV pool, two warmup requests, the warm complete
@@ -81,7 +86,9 @@ Two things qualify the size of that number:
   batched pairs for the same reason, which would leave this lane with no valid inferential result. I kept the pairs
   because the out-of-memory retry is what R does under the frozen workload on a 24 GB card, so removing them removes
   the reference. That is an argument for amending the rule or the reference, not a reading of the rule, and it is not
-  mine to settle here: it belongs with the Bfix decision. It is also not known whether the retry falls in a warm-up or
+  mine to settle here: it belongs with the Bfix decision. That decision has since named R as the Qwen reference, so
+  the retry is the reference's own behaviour under the frozen workload and the pairs stand as measured; the rule as
+  written was not amended, and the conflict with it stays recorded here. It is also not known whether the retry falls in a warm-up or
   in the timed request, which bears directly on the 0.0844. The R log shows the three lines after the model load (an
   allocation of 4,748 MB with 50 MB free, an eviction that released 5,342 MB, then the release of all device memory),
   but it has no timestamps and no per-request markers, and the observation file marks requests without recording
