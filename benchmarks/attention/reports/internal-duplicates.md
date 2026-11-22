@@ -2,10 +2,10 @@
 
 Plan item 18 ([proposed queue](../proposed-queue.md)) says: retire internal duplicates only, preserve public adapters, and
 document behavioral compatibility changes. This report is the evidence for what could be retired. It is a source audit at
-`main` `ab67d61f6` (2026-11-21). **No source was changed by the audit pull request** (#1037); its only edits were this file and one link. The
-removals and migrations that followed are listed in the Status line below, each in its own pull request. The sections below
-are the audit as written: their line numbers and their statements about what was run ("no test was run", "no real generation")
-belong to the audit, not to those later pull requests, whose descriptions carry their own evidence.
+`main` `ab67d61f6` (2026-11-21). **No source was changed by the audit pull request** (#1037); its only edits were this file
+and one link. The removals and migrations that followed are listed in the Status line below, each in its own pull request.
+The sections below are the audit as written: their line numbers and their statements about what was run ("no test was run",
+"no real generation") belong to the audit, not to those later pull requests, whose descriptions carry their own evidence.
 
 **Recheck against `main` `b9e56b9ef`.** The audit was taken at `ab67d61f6`; the merged PRs since touched the Vulkan and CUDA
 decode-with-lengths rows and shaders (head dim 256, F16/BF16 caches), the Vulkan Sol-Attn shaders, `T5Gemma2TextEncoder` and
@@ -225,12 +225,22 @@ on a GPU backend the host loop's device-to-host sync goes away.
 
 ### What is left after the removals
 
-- **`AttentionLayer.AttendHeadMajor`** leaks its operands when the second or third operand permute throws, or when
-  `context.HeadMajorRotation?.RotateHeadMajor(...)` throws. Its siblings are fixed: `MergeHeads` (#1051) and `RunHeadMajor` (#1057).
-  The fix needs the ownership of q, k and v traced through `ownsKv`, so it is its own change.
-- **Rows marked keep that are worth another look:** M10 (`DiaHeads` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`, `SliceLeading`) is public
-  with callers in other models, but its members are host copies of `StridedCopies.RepeatInterleave` and `Permute0213`, so migrating
-  the callers would be model work, not an adapter change. The `DiTUtils` host loops that M3 noted could be `Permute0213` calls.
+- **`AttentionLayer.AttendHeadMajor`** (`AttentionLayer.cs:753`) has no disposal guard at all, so it leaks when any of the
+  three operand permutes throws or when `context.HeadMajorRotation?.RotateHeadMajor(...)` throws. What leaks, by the point of
+  the throw (`ownsKv` is true unless a `KvCapture` holds k and v; the caller's `catch when (!ownsKv)` disposes k and v only
+  when it is false):
+  - first permute: `qMh` and `q`; with `ownsKv`, `k` and `v` as well, because the caller's catch does not run;
+  - second permute: `qMh` and `kMh`; with `ownsKv`, `k` and `v`;
+  - third permute: `qMh`, `kMh` and `vMh`; with `ownsKv`, `v` (`k` is already disposed);
+  - `RotateHeadMajor`: `qMh`, `kMh` and `vMh` (the originals are already disposed when `ownsKv`; the caller disposes k and v
+    otherwise).
+
+  Its siblings are fixed: `MergeHeads` (#1051) and `RunHeadMajor` (#1057). The fix needs the ownership of q, k and v traced
+  through `ownsKv`, so it is its own change.
+- **Rows marked keep that are worth another look:** M10 (`DiaHeads` `RepeatKv`, `FlatToHeads`, `HeadsToFlat`,
+  `SliceLeading`) is public with callers in other models, but its members are host copies of `StridedCopies.RepeatInterleave`
+  and `Permute0213`, so migrating the callers would be model work, not an adapter change. The `DiTUtils` host loops that M3
+  noted could be `Permute0213` calls.
 - **Found while collecting the evidence, not duplicates:**
   - CUDA's query-tiled F32 row (S.9) sizes its tile from free device memory (`SdpaTiledF32` in `CudaBackend.cs`; a different tile
     changes the summation order). Two calls of the same shape repeat bit for bit when free memory is the same before each, and
@@ -275,4 +285,5 @@ The attention backends have been cleaned up enough that there is almost nothing 
 (V1), plus three groups of dead accessors and diagnostics (D1, D2, D4) that compile away cleanly. Eleven more items are real
 duplicates but have callers to migrate first; three of them (Idol, Trellis, CoLa3D) need route evidence. The two obvious
 "old path" candidates, the CUDA legacy validators and the CUDA legacy softmax launchers, are deliberately kept: they carry
-historical exception classes and a public API.
+historical exception classes and a public API. This is the audit as written; most of the migrations have since landed (see the
+Status line), and "What is left after the removals" lists what remains.
