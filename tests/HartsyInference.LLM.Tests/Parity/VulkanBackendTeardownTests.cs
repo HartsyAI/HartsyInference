@@ -18,7 +18,7 @@ namespace HartsyInference.LLM.Tests.Parity;
 /// <para>Bound written before the first run with the hold: every round leaves the process alive. Measured on an
 /// RTX 3060 with driver 610.88, this class alone in its process, 40 rounds, interleaved over one afternoon: with
 /// the hold off the host crashed in 10 of 18 runs; with it on, 0 of 13. With the hold off it does not crash every
-/// time: 5 of 5 while other jobs shared the machine, 0 of 5 once it was quiet, 4 of 5 with every core kept busy.
+/// time: 5 of 5 while other jobs shared the machine, 0 of 5 once it was quiet, 5 of 8 with every core kept busy.
 /// So one passing run with the hold off proves nothing; repeat it, on a machine that is doing other work.</para>
 /// <para>Each round has a pipeline cache directory of its own so that its kernels are compiled rather than loaded,
 /// which takes the state of the machine's cache file out of the result.</para></summary>

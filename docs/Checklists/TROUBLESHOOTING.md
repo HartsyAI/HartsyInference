@@ -974,7 +974,7 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     pipelines (`ScaledDotProductAttention` at head dim 64 with the F16 permission, on a pipeline cache that does not
     already hold them) and destroys it, again and again, with no other Vulkan instance alive. That is necessary, not
     sufficient: the same loop, every round on an empty cache directory of its own, crashed 5 of 5 while other jobs
-    shared the machine, 0 of 5 half an hour later when it was quiet, and 4 of 5 with every CPU core kept busy. The
+    shared the machine, 0 of 5 half an hour later when it was quiet, and 5 of 8 with every CPU core kept busy. The
     lane crashed about 2 of 25 times on the shared cache file, 10 of 12 on a private empty directory during a busy
     stretch, and 1 of 5 the same way on a quiet one. What the rate follows is not pinned down: load on the machine
     is the best lead, and an empty cache alone is not it. One process per variant: that loop ended the process in 9
