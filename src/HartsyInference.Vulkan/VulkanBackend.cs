@@ -1969,6 +1969,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
     private const int FlashMaxHeadDim = 128;
 
+    /// <summary>The score matrix the materialized path holds whole. Past it an unmasked call is tiled along the query axis; a call
+    /// with a bias cannot be, so the tiled kernel's admission reads the same limit.</summary>
+    private const ulong NaiveWholeScoreLimitBytes = 1UL << 30;
+
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) =>
         ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
 
@@ -2206,7 +2210,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Naive 3-pass SDPA: Q*K^T, mask add, softmax, *V — dispatched once per (B*H) head. FlashAttention-style fusion is a Phase-4 optimization.</summary>
-    private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
+    private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
@@ -2259,7 +2263,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         long Br = Sq;
         ulong fullScoreBytes = (ulong)(totalHeads * Sq * Skv) * (ulong)dtype.SizeInBytes;
         bool forceTile = EngineKnobs.SdpaForceTiled.Value;
-        if (mask is null && (forceTile || fullScoreBytes > (1UL << 30)))   // > 1 GiB score matrix → tile
+        if (mask is null && (forceTile || fullScoreBytes > NaiveWholeScoreLimitBytes))
         {
             long perRow = totalHeads * Skv * dtype.SizeInBytes;            // bytes per query row across all heads
             Br = Math.Max(1, (512L * 1024 * 1024) / Math.Max(1, perRow));  // ~512 MB score-tile budget
