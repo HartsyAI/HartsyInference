@@ -57,8 +57,6 @@ public sealed class SeedVr2DitBlock : IStreamingBlock
     /// <summary>Whether this block uses the shifted window partition (odd layers).</summary>
     public int Parity => _shifted ? 1 : 0;
 
-    internal AttentionLayer AttentionStage => _attention;
-
     /// <summary>Binds <c>blocks.{i}.*</c> checkpoint keys (verbatim names via the near-identity converter).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, int index)
     {

@@ -74,6 +74,11 @@ public readonly record struct AttentionCall
     /// <see cref="AttentionKernelCapability.Lse"/> writes it.</summary>
     public Tensor? Lse { get; init; }
 
+    /// <summary>True for a call no legacy entry point carries: it has a length per sequence or an LSE output, and is pinned
+    /// to the flash route, which is how <see cref="FromDecodeWithLengths"/> builds one. A GPU backend plans its flash rows
+    /// directly for such a call, where only a row that declares what the call uses covers it.</summary>
+    public bool PlansFlashRowsDirectly => (SequenceLengths is not null || Lse is not null) && Route == AttentionRoute.Flash;
+
     /// <summary>Batch.</summary>
     public int Batch => Query.Batch;
 

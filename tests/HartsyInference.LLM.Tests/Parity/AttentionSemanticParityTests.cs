@@ -118,17 +118,22 @@ public sealed class AttentionSemanticParityTests
         CheckBias(backend, storage, cudnn, "cuda", cudnn ? "cudnn.f16" : "materialized");
     }
 
-    [VulkanFact]
-    public void VulkanBiasRetainsF32RangeAndPropagatesNonFiniteScores()
+    /// <summary>The tiled kernel takes this F32 call by default and the scalar kernel with the knob off: both keep the control.</summary>
+    [VulkanTheory]
+    [InlineData(VulkanTiledAttention.Auto, "tiled.f32")]
+    [InlineData(VulkanTiledAttention.Off, "flash.scalar")]
+    public void VulkanBiasRetainsF32RangeAndPropagatesNonFiniteScores(VulkanTiledAttention tiled, string implementation)
     {
-        using IBackend backend = new VulkanBackend();
-        CheckBias(backend, DType.F32, false, "vulkan", "flash.scalar");
+        using IBackend backend = new VulkanBackend { TiledAttention = tiled };
+        CheckBias(backend, DType.F32, false, "vulkan", implementation);
     }
 
-    [VulkanFact]
-    public void VulkanFullyExcludedRowsAreZero()
+    [VulkanTheory]
+    [InlineData(VulkanTiledAttention.Auto, "tiled.f32")]
+    [InlineData(VulkanTiledAttention.Off, "flash.scalar")]
+    public void VulkanFullyExcludedRowsAreZero(VulkanTiledAttention tiled, string implementation)
     {
-        using IBackend backend = new VulkanBackend();
+        using IBackend backend = new VulkanBackend { TiledAttention = tiled };
         using Tensor q = new(new TensorShape(1, 1, 2, 64), DType.F32);
         using Tensor k = new(new TensorShape(1, 1, 3, 64), DType.F32);
         using Tensor v = new(k.Shape, DType.F32);
@@ -144,7 +149,7 @@ public sealed class AttentionSemanticParityTests
         backend.ScaledDotProductAttention(output, q, k, v, bias, 1);
         backend.Sync();
         Assert.Contains(evidence.Snapshot(), e => e.Site == "vulkan" && e.Kind == AttentionEvidenceKind.Execution
-            && e.Implementation == "flash.scalar");
+            && e.Implementation == implementation);
         for (int c = 0; c < 64; c++)
         {
             Assert.Equal(0, Read(output, c));

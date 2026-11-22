@@ -354,8 +354,12 @@ public sealed unsafe class BooguImageDoubleBlock
         Tensor vMh = new Tensor(new TensorShape(batch, _numKvHeads, seqLen, _headDim), DType.F32);
         backend.Permute0213(vMh, vFlat, seqLen, _numKvHeads, _headDim);
 
-        Tensor kRep = RepeatKv(backend, kMh, batch, seqLen);
-        Tensor vRep = RepeatKv(backend, vMh, batch, seqLen);
+        // GQA: repeat K and V to the query head count on the device (group 1 is a device-to-device copy).
+        TensorShape repeatedShape = new(batch, _numKvHeads * _kvGroup, seqLen, _headDim);
+        Tensor kRep = new Tensor(repeatedShape, DType.F32);
+        Tensor vRep = new Tensor(repeatedShape, DType.F32);
+        StridedCopies.RepeatInterleave(backend, kRep, kMh, 1, _kvGroup);
+        StridedCopies.RepeatInterleave(backend, vRep, vMh, 1, _kvGroup);
         kMh.Dispose(); vMh.Dispose();
 
         float scale = 1.0f / MathF.Sqrt(_headDim);
@@ -369,16 +373,6 @@ public sealed unsafe class BooguImageDoubleBlock
         backend.Permute0213(attnFlat, attnMh, _numQHeads, seqLen, _headDim);
         attnMh.Dispose();
         return attnFlat;
-    }
-
-    /// <summary>GQA K/V head repeat to Q head count on the GPU (<c>[B, Hkv, S, D]</c> → <c>[B, Hq, S, D]</c>). When the
-    /// group is 1 the input is already at full head count, so it is returned as a device-to-device copy via
-    /// <c>StridedCopies.RepeatInterleave</c> (group 1).</summary>
-    private Tensor RepeatKv(IBackend backend, Tensor kvMh, int batch, int seqLen)
-    {
-        Tensor output = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroup, seqLen, _headDim), DType.F32);
-        StridedCopies.RepeatInterleave(backend, output, kvMh, 1, _kvGroup);
-        return output;
     }
 
     /// <summary>Lumina <c>RMSNormZero</c>, GPU-resident. <c>SiLU(temb)</c> → modulation <c>Linear</c> → split the

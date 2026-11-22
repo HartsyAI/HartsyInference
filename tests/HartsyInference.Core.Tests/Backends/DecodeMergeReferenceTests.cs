@@ -1,4 +1,6 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -301,6 +303,30 @@ public sealed class DecodeMergeReferenceTests
         float[] separate = step.Merged.AsReadOnlySpan<float>().ToArray();
         DecodeMergeReference.StepMerge(step.Prefix, step.Prefix, step.Lse, step.Query, step.Key, step.Value);
         Assert.True(separate.AsSpan().SequenceEqual(step.Prefix.AsReadOnlySpan<float>()));
+    }
+
+    /// <summary>The backend primitive on the CPU is the reference, with the prefix LSE in a tensor as a decode leaves it.</summary>
+    [Fact]
+    public void TheCpuBackendMergesWithTheReference()
+    {
+        using Step step = new(2, 4, 2, 64, 5, 25, 755);
+        step.DecodePrefix([25, 11]);
+        int[] mask = [0b00001, 0b00011, 0, 0b01011, 0b10101];
+        step.TreeMerge(mask);
+        float[] expected = step.Merged.AsReadOnlySpan<float>().ToArray();
+
+        using CpuBackend backend = new();
+        IBackend asBackend = backend;
+        Assert.True(asBackend.HasDecodeMerge);
+        using Tensor lse = new(new TensorShape(2, 4, 5), DType.F32);
+        step.Lse.CopyTo(lse.AsSpan<float>());
+        step.Merged.AsSpan<float>().Clear();
+        asBackend.DecodeTreeMerge(step.Merged, step.Prefix, lse, step.Query, step.Key, step.Value, mask);
+        Assert.True(expected.AsSpan().SequenceEqual(step.Merged.AsReadOnlySpan<float>()));
+
+        using Tensor wrongShape = new(new TensorShape(2, 5, 4), DType.F32);
+        Assert.Throws<ArgumentException>(() => asBackend.DecodeTreeMerge(step.Merged, step.Prefix, wrongShape, step.Query, step.Key, step.Value, mask));
+        Assert.Throws<ArgumentException>(() => asBackend.DecodeTreeMerge(step.Merged, step.Prefix, step.Prefix, step.Query, step.Key, step.Value, mask));
     }
 
     [Fact]

@@ -8,8 +8,9 @@ namespace HartsyInference.LLM.Tests.Parity;
 
 /// <summary>A call with a key length per sequence, or one that asks for the LSE, has two honest outcomes on a GPU backend:
 /// it is refused whole and nothing is written, or a row that declares it runs it and the result is the host reference's.
-/// What must never happen is the third: the call run with one length, or without its LSE. Today no GPU row declares
-/// either, so every case here is refused; the checks hold as they are once one does.</summary>
+/// What must never happen is the third: the call run with one length, or without its LSE. The checks were written
+/// before any GPU row declared either and have not changed since: on a backend with a <c>flash.decode.lengths</c> row
+/// the lengths cases now take the second outcome, and an LSE on a call with one shared length is still refused.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
 public sealed class SequenceLengthsRefusalTests

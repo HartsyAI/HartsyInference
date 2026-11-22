@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Idol;
@@ -10,7 +11,7 @@ namespace HartsyInference.ThreeD.Models.Idol;
 internal sealed class IdolDecoderAttention : IDisposable
 {
     private readonly int _width, _heads, _headDim;
-    private readonly float _scale;
+    private readonly AttentionLayer _attention;
     private readonly bool _cross;
     private readonly HeadRmsNorm _headNorm;
     private readonly Tensor _qW, _qB, _kvW, _kvB, _outW, _outB, _qGamma, _kGamma;
@@ -20,7 +21,7 @@ internal sealed class IdolDecoderAttention : IDisposable
         _width = width;
         _heads = heads;
         _headDim = width / heads;
-        _scale = 1f / MathF.Sqrt(_headDim);
+        _attention = IdolAttention.Layer(_heads, _headDim);
         _cross = cross;
         _headNorm = new HeadRmsNorm(_headDim);
         if (cross)
@@ -67,7 +68,7 @@ internal sealed class IdolDecoderAttention : IDisposable
 
         Tensor qn = _headNorm.Apply(backend, q, _qGamma, new TensorShape(1, n, _width));
         Tensor kn = _headNorm.Apply(backend, k, _kGamma, new TensorShape(1, keys, _width));
-        using Tensor ctx = IdolAttention.Attend(backend, qn, kn, v, n, keys, _heads, _headDim, _scale);
+        using Tensor ctx = IdolAttention.Attend(backend, _attention, qn, kn, v, n, keys, _heads, _headDim);
         return Project(backend, ctx, _outW, _outB, _width);
     }
 
