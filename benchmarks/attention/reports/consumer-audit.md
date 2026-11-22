@@ -21,12 +21,12 @@ treat them as approximate.
 
 "Plain" means `softmax(q · k · scale + terms a standard entry takes) · V`.
 
-| Site | What it is | Status at `f9a0cedeb` |
+| Site | What it is | Status at `d5492a019` |
 |---|---|---|
 | Diffusion `Models/TextEncoders/GptOssEncoder.cs` | Causal or windowed, grouped heads, per-head sink; single-threaded | Migrated in #1005 (merged). Real Lens generation on the RTX 4090, CUDA: 24% less total time; the image is 32.0 dB from the base, the size a rounding-only control gives (31.7 dB) |
 | Diffusion `Models/Denoisers/DiTBlocks/WanAnimateFaceBlock.cs` | Frame-local cross-attention, 16 calls a step with CFG; single-threaded | Migrated in #1011 (merged). Real Wan Animate generation on the RTX 4090, CUDA, 5 frames at 480 by 480: 62% less request time; frames 25.2 dB from the base, where a rounding-only control is 19.9 dB from it |
 | Audio `Models/IndexTts/IndexTtsPerceiver.cs` | Unmasked; single-threaded | Migrated in #1010 (merged). Real runs on the RTX 4090, CUDA: on IndexTTS 1.5 the output is 56.35 dB from the base and two runs are bit-identical; on IndexTTS 2.5 it is identical to the base's, with the new calls shown executing |
-| Audio `Models/GptSoVits/SoVitsEncP.cs` `CrossAttention` | Unmasked, channels-first; single-threaded | Migrated in #1010 (merged). **No real run**: no reference clip with a transcript was on the RTX 4090 host. Unit tests only |
+| Audio `Models/GptSoVits/SoVitsEncP.cs` `CrossAttention` | Unmasked, channels-first; single-threaded | Migrated in #1010 (merged). Real run on the RTX 4090, CUDA, with a kept IndexTTS output as the reference clip: the output keeps its length and is 53.73 dB from the base, two runs are bit-identical, and the cross-attention call is shown executing |
 | Audio `Models/ControlFoley/ControlFoleyStyleEncoder.cs` | Unmasked self-attention over frames; single-threaded | Migrated in #1010 (merged). Real run on the RTX 4090, CUDA, with a reference clip: the new calls execute and the output is bit-identical to the base's; a video-only request does not reach this code |
 | Audio `Models/FishAudio/DacOps.cs` `RunTransformer` | Causal, window of 128 keys (512 in the encoder), host RoPE; single-threaded | Open (read by me). On CUDA the causal F32 route narrows to F16, a larger precision change than TF32 inside a codec, and no Fish Audio weights are on either test machine. Looked at again after #1026: its window as an additive bias would be a `t × t` tensor a call, where the loop is linear in `t` for its fixed window of 128 or 512 keys, so the two-sided-window route of #1026 is not a fit at codec lengths |
 | Audio `Models/BreezeTts/T5Gemma2TextEncoder.cs` `Encode` 87-112 | Two-sided window on some layers, grouped heads; single-threaded | Migrated in #1026 (merged): grouped heads go to the backend as they are (CUDA repeats K and V before its dense row), the two-sided window is an additive bias, and none is passed where the window covers the segment. Checked against the former loop on the CPU backend, CUDA and Vulkan, on the RTX 3060 and the RTX 4090; no real generation |
@@ -79,8 +79,9 @@ on Vulkan the result stays F32. **On CUDA the products become TF32**, as for eve
 the contract bound of 2e-3. Each keeps the former loop as its test oracle and names this change. The later ones (#1013,
 #1014, #1016) do the same and say so in their own text.
 
-Real generations before and after, run on the RTX 4090 on 2026-11-21 and 22 (and on the RTX 3060 for #1016) and
-recorded on each pull request with the expectations fixed beforehand:
+Real generations before and after, run on the RTX 4090 on 2026-11-21 and 22 (and on the RTX 3060 for #1016) and recorded
+on each pull request. Expectations were fixed beforehand where any were set; where a bound was missing, or was corrected
+after a miss, the entry says so:
 
 - **#1005, GPT-OSS encoder (Lens), merged.** Each arm's two images are identical, the new rows execute, total time
   is 24% lower. The image is 32.0 dB from the base where I had required 40 dB beforehand, so that gate was missed. A
@@ -107,10 +108,11 @@ recorded on each pull request with the expectations fixed beforehand:
   the RTX 3060 gives the same eight detections before and after on the CPU backend, CUDA and Vulkan, at the precision
   the CLI prints (scores to two decimals, boxes to whole pixels). Not run on the RTX 4090.
 
-What the four controls have in common: on each of these pipelines, changing only the order of a few sums in the old
-host loop moves the final image or audio by 20 to 32 dB, or changes its length. So a comparison of final outputs
-cannot tell a correct change to a conditioning encoder from a wrong one at that level. For such changes the bound
-belongs on the encoder's output, set against a rounding floor measured first.
+What the four rounding-only controls have in common (the Lens encoder of #1005, the IndexTTS 2.0 perceiver of #1010, the
+ControlFoley Swin stage of #1014 and the Wan Animate face adapter of #1011): on each of these pipelines, changing only
+the order of a few sums in the old host loop moves the final image or audio by 19.9 to 31.7 dB, or changes its length.
+So a comparison of final outputs cannot tell a correct change to a conditioning encoder from a wrong one at that level.
+For such changes the bound belongs on the encoder's output, set against a rounding floor measured first.
 
 ## Timing seen so far (smoke only, RTX 3060 box, attention alone)
 
