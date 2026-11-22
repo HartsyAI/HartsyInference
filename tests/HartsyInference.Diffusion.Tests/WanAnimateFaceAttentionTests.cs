@@ -21,6 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// with that weight widened to F32 by up to 2.1e-4 at outputs near 1, where the CPU backend gives no difference. The
 /// former block made the same Linear calls. That case is held to the contract bound for BF16 storage, 8e-3, on Vulkan,
 /// set after seeing the miss.</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class WanAnimateFaceAttentionTests
 {
     private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f, Bf16StorageTolerance = 8e-3f, Eps = 1e-6f;
