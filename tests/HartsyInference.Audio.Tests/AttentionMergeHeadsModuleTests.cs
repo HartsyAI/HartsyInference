@@ -217,6 +217,7 @@ public sealed class AttentionMergeHeadsModuleTests(ITestOutputHelper output)
         using CudaBackend backend = new(0, PtxDirectory());
         PocketForward(backend, 2, 3);
         int? before = CudaActivationCount();
+        Assert.NotNull(before);
         float[] actual = PocketForward(backend, 2, 3);
         int? after = CudaActivationCount();
         AssertClose(expected, actual, Tf32Tolerance, "Pocket-TTS decoder on CUDA");
@@ -285,6 +286,7 @@ public sealed class AttentionMergeHeadsModuleTests(ITestOutputHelper output)
         using CudaBackend backend = new(0, PtxDirectory());
         SelfAttentionForward(backend);
         int? before = CudaActivationCount();
+        Assert.NotNull(before);
         float[] actual = SelfAttentionForward(backend);
         int? after = CudaActivationCount();
         AssertClose(expected, actual, Tf32Tolerance, "ControlFoley self-attention on CUDA");
@@ -422,6 +424,7 @@ public sealed class AttentionMergeHeadsModuleTests(ITestOutputHelper output)
         using CudaBackend backend = new(0, PtxDirectory());
         SynchformerForward(backend);
         int? before = CudaActivationCount();
+        Assert.NotNull(before);
         float[] actual = SynchformerForward(backend);
         int? after = CudaActivationCount();
         AssertClose(expected, actual, Tf32Tolerance, "Synchformer on CUDA");

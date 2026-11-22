@@ -73,8 +73,8 @@ internal static unsafe class ControlFoleyVitOps
         (Tensor q, Tensor k, Tensor v) = SplitQkv(qkv, heads);
         using Tensor qd = q, kd = k, vd = v;
         AttentionLayer attention = AttentionLayer.Shared(heads, (int)q.Shape[3]);
-        Tensor ctx = attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
-        using Tensor merged = attention.MergeHeads(backend, ctx, new TensorShape((int)q.Shape[0], (int)q.Shape[2], heads * (int)q.Shape[3]));   // disposes ctx
+        using Tensor ctx = attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
+        using Tensor merged = attention.MergeHeads(backend, ctx, new TensorShape((int)q.Shape[0], (int)q.Shape[2], heads * (int)q.Shape[3]));   // consumes ctx; the using only covers a throw
         return ControlFoleyOps.Linear(backend, merged, projW, projB);
     }
 

@@ -153,9 +153,9 @@ internal sealed unsafe class PocketTtsMimiDecoder(string prefix = "mimi")
             ApplyRopeInterleaved(qMh, batch, NHeads, t, HeadDim, RopeMaxPeriod);
             ApplyRopeInterleaved(kMh, batch, NHeads, t, HeadDim, RopeMaxPeriod);
 
-            Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
+            using Tensor attn = _attention.AttendHeadMajorOperands(backend, qMh, kMh, vMh, new AttentionCallContext { Bias = mask });
 
-            Tensor attnFlat = _attention.MergeHeads(backend, attn, new TensorShape(batch, t, Dim));   // disposes attn
+            Tensor attnFlat = _attention.MergeHeads(backend, attn, new TensorShape(batch, t, Dim));   // consumes attn; the using only covers a throw
             Tensor outp = WhisperOps.ProjectLinear(backend, attnFlat, _outProjAttnW[i]!, null, batch, t, Dim, Dim);
             attnFlat.Dispose();
             AddScaled(cur, outp, _ls1[i]!, batch, t);   // cur += ls1 * outp
