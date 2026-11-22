@@ -151,16 +151,10 @@ public sealed class CoLa3DBlockAttendTests(ITestOutputHelper output)
         CoLa3DTestSupport.Dispose(tensors.Values);
         Assert.Equal(rows[0], rows[2]);
         Assert.Equal(rows[0], rows[1]);
-        if (formerRepeats)
-        {
-            Assert.True(layerMatches, "the layer path differs from the former body, which repeats bit for bit on this device");
-        }
-        else
-        {
-            // The kernel of this row is not deterministic on this device (the former body differs from itself), so the layer path may only
-            // differ by what two runs of the former body differ by, plus rounding slack.
-            Assert.True(layerSpread <= formerSpread * 4 + 1e-6f, $"the layer path differs by {layerSpread:g4}, two former runs differ by {formerSpread:g4}");
-        }
+        // The materialized row repeats bit for bit on this device, so the layer path must equal it exactly; a kernel that stopped
+        // repeating would fail here instead of being tolerated.
+        Assert.True(formerRepeats, "the former body no longer repeats bit for bit on this device");
+        Assert.True(layerMatches, "the layer path differs from the former body");
     }
 
     private static float MaxAbsDifference(ReadOnlySpan<float> a, ReadOnlySpan<float> b)

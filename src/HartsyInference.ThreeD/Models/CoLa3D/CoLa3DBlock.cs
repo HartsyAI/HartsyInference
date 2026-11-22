@@ -166,7 +166,7 @@ internal sealed class CoLa3DBlock : IDisposable
         return Residual(backend, x, delta);
     }
 
-    /// <summary>Scaled dot-product attention over head-major operands, returned flat as <c>[1, Lq, C]</c>; consumes q, k and v.</summary>
+    /// <summary>Scaled dot-product attention over head-major operands, returned flat as <c>[1, Lq, C]</c>; consumes q, k and v. Internal (not private) so that <c>CoLa3DBlockAttendTests</c> can call it.</summary>
     internal Tensor Attend(IBackend backend, Tensor qh, Tensor kh, Tensor vh, int lq)
     {
         Tensor att = _attention.AttendHeadMajorOperands(backend, qh, kh, vh, default);   // consumes qh, kh and vh
