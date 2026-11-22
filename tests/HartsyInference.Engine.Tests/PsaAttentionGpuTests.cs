@@ -90,7 +90,8 @@ public sealed class PsaAttentionGpuTests
             using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
             try { MatchesTheCpuBackend(backend, 1e-4f); }
             finally { ReportRows(evidence.Snapshot()); }
-            AssertServedByTheGpu(evidence.Snapshot(), "flash.scalar");
+            // Dense all-F32 attention at this head dim takes the query-tiled kernel by default on Vulkan (numerics.vkTiledAttention).
+            AssertServedByTheGpu(evidence.Snapshot(), "tiled.f32");
         }
     }
 
