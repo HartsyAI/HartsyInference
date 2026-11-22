@@ -358,12 +358,25 @@ public sealed partial class AttentionLayer
     }
 
     /// <summary>The permute back to <paramref name="flatShape"/> (<c>[B, S, heads·D]</c>) of a branch's head-major output, which is
-    /// disposed; the caller owns the result.</summary>
+    /// disposed, also when the permute throws (the new tensor is then disposed too, and the exception propagates); the caller owns
+    /// the result.</summary>
     public Tensor MergeHeads(IBackend backend, Tensor attnMh, TensorShape flatShape)
     {
         Tensor flat = new(flatShape, attnMh.DType);
-        backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
-        attnMh.Dispose();
+        try
+        {
+            backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attnMh.Dispose();
+        }
+
         return flat;
     }
 

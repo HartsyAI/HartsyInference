@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Detection.Blocks;
@@ -14,11 +15,9 @@ namespace HartsyInference.Vision.Detection.Blocks;
 /// <para>All three convs are BN-folded — qkv, proj, and pe each carry weight + bias after the
 /// Python converter runs. None of them use SiLU (the parent <see cref="PsaBlock"/> handles
 /// activations via its FFN).</para>
-/// <para>The matmul math (custom shapes: q/k have channel <c>kd</c> while v has channel
-/// <c>head_dim</c>) doesn't fit <see cref="IBackend.ScaledDotProductAttention"/>'s standard
-/// <c>[B,H,S,D]</c> contract, so we hand-code the softmax + matmuls. Sizes are small (N ≤ 1600
-/// at 640×640 input) so the inner loop performs adequately on CPU; a future GPU port can fold
-/// this into a fused kernel.</para></summary>
+/// <para>Q and K have <c>kd</c> channels a head where V has <c>head_dim</c>, which no attention entry takes as it is.
+/// The attention pads Q and K with zeros to the value's width and goes through the shared attention layer; the
+/// depthwise positional encoding stays a host loop.</para></summary>
 public sealed unsafe class PsaAttention
 {
     private readonly int _dim;
@@ -77,10 +76,9 @@ public sealed unsafe class PsaAttention
         Tensor qkv = new Tensor(new TensorShape(batch, qkvChannels, height, width), DType.F32);
         backend.Conv2D(qkv, input, _qkvWeight!, _qkvBias!, 1, 1, 0, 0);
 
-        // Compute attention manually. Allocate intermediates as managed arrays — the spatial
-        // dim N is small (≤ 1600 at 640²) so this scratch is cheap.
+        // The attention goes through the shared layer (Attend); the positional encoding is added on the host.
         Tensor attnOutCHW = new Tensor(new TensorShape(batch, _dim, height, width), DType.F32);
-        ComputeAttention(qkv, attnOutCHW, batch, height, width);
+        ComputeAttention(backend, qkv, attnOutCHW, batch, height, width);
         qkv.Dispose();
 
         Tensor projOut = new Tensor(new TensorShape(batch, _dim, height, width), DType.F32);
@@ -89,10 +87,47 @@ public sealed unsafe class PsaAttention
         return projOut;
     }
 
+    /// <summary>The attention through the shared attention layer, every batch item in one call. <paramref name="qkv"/> is
+    /// channel-major <c>[batch, heads · (2·keyDim + headDim), n]</c>: for each head its query, its key (<paramref name="keyDim"/> channels each)
+    /// and its value (<paramref name="headDim"/> channels). The value is wider than the query and key, which no attention
+    /// entry takes as it is, so Q and K are zero-padded to the value's width: the added zeros leave every <c>q · k</c>
+    /// unchanged, and <paramref name="scale"/> stays the one for <paramref name="keyDim"/>. The score product therefore runs
+    /// at the value's width, twice the multiplies of the key width at the usual ratio; an entry that took a value wider than
+    /// its keys would remove that. Writes channel-major <c>[batch, heads · headDim, n]</c> into
+    /// <paramref name="destination"/>.</summary>
+    internal static void Attend(IBackend backend, ReadOnlySpan<float> qkv, Span<float> destination, int batch, int heads, int keyDim,
+        int headDim, int n, float scale)
+    {
+        int slots = 2 * keyDim + headDim;
+        TensorShape shape = new(batch, heads, n, headDim);
+        Tensor q = new(shape, DType.F32), k = new(shape, DType.F32), v = new(shape, DType.F32);
+        Span<float> qs = q.AsSpan<float>(), ks = k.AsSpan<float>(), vs = v.AsSpan<float>();
+        qs.Clear();
+        ks.Clear();
+        for (int bh = 0; bh < batch * heads; bh++)
+            for (int i = 0; i < n; i++)
+            {
+                int row = (bh * n + i) * headDim, plane = bh * slots * n + i;
+                for (int d = 0; d < keyDim; d++)
+                {
+                    qs[row + d] = qkv[plane + d * n];
+                    ks[row + d] = qkv[plane + (keyDim + d) * n];
+                }
+                for (int d = 0; d < headDim; d++) vs[row + d] = qkv[plane + (2 * keyDim + d) * n];
+            }
+        // The layer takes q, k and v over and disposes them.
+        using Tensor attended = AttentionLayer.Shared(heads, headDim, scale, DType.F32).AttendHeadMajorOperands(backend, q, k, v, default);
+        ReadOnlySpan<float> a = attended.AsReadOnlySpan<float>();
+        for (int bh = 0; bh < batch * heads; bh++)
+            for (int i = 0; i < n; i++)
+                for (int d = 0; d < headDim; d++)
+                    destination[(bh * headDim + d) * n + i] = a[(bh * n + i) * headDim + d];
+    }
+
     /// <summary>Computes the attention output (including the depthwise PE on V added inline)
     /// into <paramref name="attnOut"/> shaped <c>[B, dim, H, W]</c>. <paramref name="qkv"/> is
     /// the projected QKV tensor shaped <c>[B, dim + 2*nh*kd, H, W]</c>.</summary>
-    private void ComputeAttention(Tensor qkv, Tensor attnOut, int batch, int height, int width)
+    private void ComputeAttention(IBackend backend, Tensor qkv, Tensor attnOut, int batch, int height, int width)
     {
         int n = height * width;
         int qkvChannels = (int)qkv.Shape[1];
@@ -107,6 +142,8 @@ public sealed unsafe class PsaAttention
         // For our flat layout, total per-head channels = kd*2 + head_dim, and channel index for
         // (head h, slot s) is h * (kd*2+head_dim) + s.
         int slotsPerHead = _keyDim * 2 + _headDim;
+        Attend(backend, new ReadOnlySpan<float>(qkvPtr, batch * qkvChannels * n), new Span<float>(outPtr, batch * _dim * n), batch, _numHeads,
+            _keyDim, _headDim, n, _scale);
 
         for (int b = 0; b < batch; b++)
         {
@@ -117,53 +154,11 @@ public sealed unsafe class PsaAttention
 
             for (int h = 0; h < _numHeads; h++)
             {
-                long headBase = (long)h * slotsPerHead * n;
-                float* qPlane = qkvBase + headBase;
-                float* kPlane = qPlane + (long)_keyDim * n;
-                float* vPlane = kPlane + (long)_keyDim * n;
+                // This head's value planes follow its query and key planes.
+                float* vPlane = qkvBase + (long)h * slotsPerHead * n + 2L * _keyDim * n;
 
-                // attn[i, j] = scale * sum_d(q[d, i] * k[d, j])
-                // Both indexed [d * N + i] (channel-major per head).
-                float[] attn = new float[n * n];
-                for (int i = 0; i < n; i++)
-                {
-                    for (int j = 0; j < n; j++)
-                    {
-                        float sum = 0f;
-                        for (int d = 0; d < _keyDim; d++)
-                            sum += qPlane[d * n + i] * kPlane[d * n + j];
-                        attn[i * n + j] = sum * _scale;
-                    }
-                    // Softmax over j (numerically stable).
-                    float max = float.NegativeInfinity;
-                    for (int j = 0; j < n; j++)
-                        if (attn[i * n + j] > max) max = attn[i * n + j];
-                    float sumExp = 0f;
-                    for (int j = 0; j < n; j++)
-                    {
-                        float e = MathF.Exp(attn[i * n + j] - max);
-                        attn[i * n + j] = e;
-                        sumExp += e;
-                    }
-                    float inv = sumExp > 0f ? 1f / sumExp : 0f;
-                    for (int j = 0; j < n; j++)
-                        attn[i * n + j] *= inv;
-                }
-
-                // out[d, i] = sum_j(v[d, j] * attn[i, j])  =  v @ attn^T
-                // Place into the output's channel block for this head: out channels h*head_dim .. h*head_dim+head_dim-1.
-                long outHeadOffset = (long)h * _headDim * n;
-                float* outHead = outBase + outHeadOffset;
-                for (int d = 0; d < _headDim; d++)
-                {
-                    for (int i = 0; i < n; i++)
-                    {
-                        float sum = 0f;
-                        for (int j = 0; j < n; j++)
-                            sum += vPlane[d * n + j] * attn[i * n + j];
-                        outHead[d * n + i] = sum;
-                    }
-                }
+                // The attention output for this head is already in place: out channels h*head_dim .. h*head_dim+head_dim-1.
+                float* outHead = outBase + (long)h * _headDim * n;
 
                 // Add depthwise PE on the V slice for this head. PE weight shape is [C, 1, 3, 3]
                 // — each output channel maps to exactly one input channel (the same index).

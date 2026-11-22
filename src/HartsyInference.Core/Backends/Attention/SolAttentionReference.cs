@@ -61,7 +61,7 @@ public static class SolAttentionReference
     /// <summary>Tokens per block.</summary>
     public const int Block = 64;
 
-    private const float Log2E = 1.4426950408889634f;
+    internal const float Log2E = 1.4426950408889634f;
 
     /// <summary>Blocks of a sequence of <paramref name="tokens"/> tokens.</summary>
     public static int Blocks(int tokens) => (tokens + Block - 1) / Block;
@@ -275,7 +275,7 @@ public static class SolAttentionReference
 
     /// <summary>Live rows per block: 64, or what is left in the last block; with lengths given, each clamped to 1 to 64
     /// and the last also to the rows that exist.</summary>
-    private static int[] LiveLengths(IReadOnlyList<int>? given, int tokens, int blocks)
+    internal static int[] LiveLengths(IReadOnlyList<int>? given, int tokens, int blocks)
     {
         int[] lengths = new int[blocks];
         for (int n = 0; n < blocks; n++)
@@ -297,7 +297,7 @@ public static class SolAttentionReference
 
     private static float Exp2(float x) => (float)Math.Pow(2.0, x);
 
-    private static void Check(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options)
+    internal static void Check(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options)
     {
         if (query.Shape.Rank != 4 || query.Shape != key.Shape || query.Shape != value.Shape || query.Shape != output.Shape)
             throw new ArgumentException(

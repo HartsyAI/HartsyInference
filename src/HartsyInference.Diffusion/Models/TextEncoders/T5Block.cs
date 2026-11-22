@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
 
@@ -121,9 +122,9 @@ public sealed unsafe class T5Block
         Tensor keyMh = new Tensor(mhShape, DType.F32);
         Tensor valueMh = new Tensor(mhShape, DType.F32);
 
-        ReshapeToMultiHead(queryMh, query, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(keyMh, key, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(valueMh, value, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(queryMh, query, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(keyMh, key, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(valueMh, value, batch, seqLen, _numHeads, _headDim);
         query.Dispose();
         key.Dispose();
         value.Dispose();
@@ -142,7 +143,7 @@ public sealed unsafe class T5Block
 
         // Reshape back: [B, numHeads, seqLen, headDim] → [B, seqLen, heads·d_kv]
         Tensor merged = new Tensor(innerShape, DType.F32);
-        ReshapeFromMultiHead(merged, attnOut, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeFromMultiHead(merged, attnOut, batch, seqLen, _numHeads, _headDim);
         attnOut.Dispose();
 
         Tensor attnProjected = new Tensor(hidShape, DType.F32);
@@ -263,49 +264,5 @@ public sealed unsafe class T5Block
         }
 
         return combined;
-    }
-
-    private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        outPtr[outOffset + d] = inPtr[inOffset + d];
-                    }
-                }
-            }
-        }
-    }
-
-    private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        outPtr[outOffset + d] = inPtr[inOffset + d];
-                    }
-                }
-            }
-        }
     }
 }

@@ -1,4 +1,6 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -371,6 +373,25 @@ public sealed class SolAttentionReferenceTests
         float[] clamped = operands.Output.AsReadOnlySpan<float>().ToArray();
         operands.Run(new SolAttentionOptions { BlockLengths = [64, 1, 1] });
         Assert.True(operands.Output.AsReadOnlySpan<float>().SequenceEqual(clamped));
+    }
+
+    /// <summary>The backend primitive on the CPU is the reference, routing report included.</summary>
+    [Fact]
+    public void TheCpuBackendRunsTheReference()
+    {
+        using Operands operands = new(1, 64 * 4 + 9, 2, 900);
+        SolAttentionOptions options = new() { TopKRatio = 0.4, SinkBlocks = (0, 1) };
+        bool[] expectedRouting = operands.Run(options);
+        float[] expected = operands.Output.AsReadOnlySpan<float>().ToArray();
+
+        using CpuBackend backend = new();
+        IBackend asBackend = backend;
+        Assert.True(asBackend.HasSolAttention);
+        operands.Output.AsSpan<float>().Clear();
+        bool[] routing = new bool[expectedRouting.Length];
+        asBackend.SolAttention(operands.Output, operands.Query, operands.Key, operands.Value, options, routing);
+        Assert.True(expected.AsSpan().SequenceEqual(operands.Output.AsReadOnlySpan<float>()));
+        Assert.Equal(expectedRouting, routing);
     }
 
     [Fact]

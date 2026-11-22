@@ -109,6 +109,16 @@ SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
     quant_int8_rowwise
+    rounded_ops_probe
+    int8_attn_quant_rows
+    int8_attn_key_mean
+    int8_attn_value_scales
+    int8_attn_quant_values
+    int8_attn_query_mean_dot
+    fma_rn_probe
+    exp2_fixed_probe
+    int8_attn_u8_tile
+    int8_attn_u8_drain
     dequant_recipe_bf16
     gated_residual_row_indexed
     guided_euler
@@ -261,6 +271,13 @@ compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=1 -- "_dev"
 compile_one "sdpa_flash_decode_lengths_split" -- ""
 compile_one "sdpa_flash_decode_lengths_combine" -- ""
 compile_one "sdpa_decode_merge" -- ""
+compile_one "sol_attn_summaries" -- ""
+compile_one "sol_attn_key_stats" -- ""
+compile_one "sol_attn_pooled" -- ""
+compile_one "sol_attn_route" -- ""
+compile_one "sol_attn_attend" -- ""
+compile_one "sol_attn_coarse_logits" -- ""
+compile_one "sol_attn_coarse" -- ""
 
 # sdpa_flash_wide: F32 unmasked FlashAttention with sinks or a soft-cap and head dims up to 1024 (AttentionFlashLowering).
 compile_one "sdpa_flash_wide" -- ""

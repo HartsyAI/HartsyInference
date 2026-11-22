@@ -16,6 +16,10 @@ real-weight converter**, *not* the DiT/backbone.
 
 ## Parity-debugging methodology
 
+Before trusting any test run on a GPU: a run whose test host crashed still ends in `Passed!`. See the entry on
+that under [Correctness & verification discipline](#correctness--verification-discipline); it applies to every
+backend and model.
+
 **The layer-by-layer bisect (the workhorse):**
 1. Build a Python reference (venv) that dumps: initial noise, text embeddings, per-step latents
    (binary + mean/std/min/max JSON), final latent. Run C# with Python's **saved** noise/embeddings —
@@ -948,6 +952,85 @@ run-by-run history is in git and in `ROADMAP.md` §3.
 - **Graph/step capture is model-dependent.** A Vulkan-native capture mechanism (persistent command pool +
   reusable command buffer + fence) was proven correct in isolation but did not fit the model's memory
   profile. Prove the mechanism separately from proving it helps.
+- **`dotnet test` prints `Passed!` after the test host crashes: a thread of the NVIDIA Vulkan driver.** Located,
+  and the engine now keeps off the path that sets it off (below). On the RTX 3060 (driver 610.88, Windows 11) the LLM GPU
+  lane (`--filter Category=GpuIntegration -f net10.0`) ended after about 10 seconds with `Passed! - Failed: 0,
+  Passed: 100, Skipped: 19, Total: 119` where the same filter and framework list 345 tests. Further up, the console
+  said `The active test run was aborted. Reason: Test host process crashed` and `Test Run Aborted.`; the TRX
+  outcome was `Failed` and the exit code 1. A search for failed tests finds none.
+  - **How often** (2026-11-21, one card shared with other sessions, so the rate moved with the load): the lane, about
+    2 of 25 runs. `AttentionPreparationEvidenceTests` alone in its process: 3 of 25, 1 of 29, 1 of 8, 0 of 12, 2 of
+    3, 3 of 11, then 1 of 28 once the machine was quiet. The test `--blame` names as running changes from crash to
+    crash, and has been a CUDA test and a test that computes on the host only.
+  - **What dies.** A native thread whose start routine is `nvoglv64.dll+0xA3D280`. Decoded from the DLL, it does
+    `mov rbx, rcx; ...; mov rcx, rbx; call qword ptr [rbx+10h]`: it calls a function pointer held in its argument
+    block, and that block holds garbage. So it faults at `nvoglv64.dll+0xA3D2A5` on a non-canonical address, or
+    jumps to `0`, to `0xFFF000000F7`, or to an address inside the block itself, as a freed heap block would give.
+    Its stack is `BaseThreadInitThunk` and `RtlUserThreadStart` and nothing else: no code of ours, so no managed
+    exception and nothing on stderr. Windows records each one in the Application log (source `.NET Runtime`, event
+    1026, `testhost.exe`, exception code `c0000005`). 32 crashed hosts were recorded from inside the process (see
+    below), every one with this signature.
+  - **What sets it off.** A process that creates a `VulkanBackend`, has it compile the cooperative-matrix attention
+    pipelines (`ScaledDotProductAttention` at head dim 64 with the F16 permission, on a pipeline cache that does not
+    already hold them) and destroys it, again and again, with no other Vulkan instance alive. That is necessary, not
+    sufficient: the same loop, every round on an empty cache directory of its own, crashed 5 of 5 while other jobs
+    shared the machine, 0 of 5 half an hour later when it was quiet, and 5 of 8 with every CPU core kept busy. The
+    lane crashed about 2 of 25 times on the shared cache file, 10 of 12 on a private empty directory during a busy
+    stretch, and 1 of 5 the same way on a quiet one. What the rate follows is not pinned down: load on the machine
+    is the best lead, and an empty cache alone is not it. One process per variant: that loop ended the process in 9
+    of 9 processes, at rounds 4 to 35, usually with the main thread inside `vkDestroyDevice`, twice while the next
+    backend was being created, once during the next attention call. A pause of 1 s before the destroy did not help.
+    The loop survived with only an instance (100 rounds), an instance and a device (100), a backend that ran nothing
+    (100), a backend that ran `Scale` (40), a backend that ran the scalar attention kernel (40), and one backend
+    reused for 200 cooperative-matrix calls. Reading the output back every round made it rarer: at 40 rounds the
+    host crashed in 1 of 3 processes with the read and 3 of 5 without.
+  - **What stops it.** One more Vulkan instance alive in the process. With an idle `VulkanInstance` held for the
+    whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it had cost up to
+    1.8 s. So `VulkanInstance` creates one more instance before the first and never destroys it
+    (`VulkanInstance.HoldsProcessInstance`); `diagnostics.vkKeepInstance` turns that off, and a process that never
+    touches Vulkan (no backend, no `VulkanContext` device count, which `auto` asks for only when CUDA is not taken)
+    never creates it. `VulkanBackendTeardownTests` is the loop, every round on an empty cache directory of its own:
+    alone in its process, interleaved over one afternoon, it crashed the host in 10 of 18 runs with the setting off
+    and 0 of 13 with it on. The lane, 5 runs each way on a quiet machine: 1 crashed with the setting off, 0 with it
+    on, which by itself separates nothing (the lane runs its classes in parallel, so another class usually has an
+    instance alive). A census of the threads that start inside `nvoglv64.dll` shows what the hold changes: with the
+    setting off every backend starts 5 threads at `+0xA3D280` and ends them when it is disposed; with it on, one of
+    those exists before the first backend and lives for the process, and each backend starts and ends 4. The same
+    threads start whatever the backend then runs, so that does not say why only the cooperative-matrix path
+    crashes, and that the crash runs into that one thread or its state is an inference, not something seen in the
+    driver. Not checked: other driver versions, the RTX 4090, other vendors, Linux.
+  - **Leads that did not hold** (the first was reported as the cause before it was checked):
+    - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
+      ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
+      to the end of a method before calling it a leak;
+    - a finalizer running after its device. The six Vulkan finalizers and `VulkanDevice.Dispose` were logged
+      through a crashed run: 61 devices disposed, no finalizer ran. A forced-collection repro crashed 3 of 3 in one
+      sitting and survived 6 of 6 an hour later on the same binaries, so it showed nothing about collection;
+    - the `VulkanPipelineCache: failed to persist cache ... being used by another process` warning just before
+      it, or a damaged cache file. The write is caught and logged, and nothing tied the file to the crash;
+    - OBS Studio's capture layer. `graphics-hook64.dll` is loaded into every Vulkan process on a machine with OBS
+      installed (the implicit layer `VK_LAYER_OBS_HOOK`), and it is on the stack of the thread inside
+      `vkDestroyDevice`. Interleaved A/B on the evidence class, the layer on against
+      `DISABLE_VULKAN_OBS_CAPTURE=1`: 3 crashed of 11 against 3 of 10, with the hook DLL confirmed absent in the
+      second arm. So the crash does not need the layer; whether the layer changes its rate, that sample cannot say.
+  - **How to capture a native crash like this one.**
+    - `--blame` names a test, which here was not the cause. `--blame-crash` writes no dump without procdump.
+    - `DOTNET_DbgEnableMiniDump=1` with `DOTNET_DbgMiniDumpType=2` fails on a process with a GPU context
+      (`MiniDumpWriteDump - Only part of a ReadProcessMemory or WriteProcessMemory request was completed`). Type `1`
+      writes a usable dump of about 300 MB, without the memory that names managed frames or the exception record.
+    - What named the thread: a first-chance vectored exception handler (`AddVectoredExceptionHandler`) installed
+      from a `[ModuleInitializer]` in the test assembly, with an `[UnmanagedCallersOnly]` callback. On an access
+      violation that is not a managed null dereference it appends to a file the instruction and its module, the
+      registers, `Environment.StackTrace` (the managed callers of the native call that faulted, when the thread has
+      any) and the module of every return address on the stack, then lets the exception continue. It was a scratch
+      file and is not in the tree; it is about 120 lines and worth making a test utility if a second native crash
+      turns up.
+    - Then a loop in one process per variant, each going one stage deeper, found the trigger in minutes where the
+      lane had taken hours.
+  - **A pass line alone is not a pass.** Compare the total with `dotnet test --list-tests` under the same
+    `--filter` and one `--framework` (the repo builds two, and an unscoped listing doubles the count; a theory
+    whose data cannot be serialized lists as one entry and runs as several, so allow for that), search the output
+    for `aborted`, and check the exit code: a crashed run exits 1.
 
 ### GEMM acceleration: what was tried, and what holds
 
