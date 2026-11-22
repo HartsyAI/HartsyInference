@@ -92,7 +92,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return (hits, misses);
     }
 
-    /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache; exposed for persist/reload tests.</summary>
+    /// <summary>Filesystem path of the on-disk pipeline cache; exposed for persist/reload tests.</summary>
     public string PipelineCachePath => _pipelineCache.CachePath;
 
     /// <summary>Bytes of on-disk cache handed to the driver when this backend started; 0 when there was none.</summary>
@@ -123,7 +123,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <remarks>The default is null, not 0, and the difference is the whole point: 0 pins the loader's first device,
     /// which on any box that also exposes a software rasterizer is not the GPU. Null is what makes the summary above
     /// true.</remarks>
-    public VulkanBackend(int? deviceOrdinal = null, string? spvDir = null)
+    public VulkanBackend(int? deviceOrdinal = null, string? spvDir = null) : this(deviceOrdinal, spvDir, null)
+    {
+    }
+
+    /// <summary>As the public constructor, with the pipeline-cache file in <paramref name="pipelineCacheDir"/> when one is given.</summary>
+    internal VulkanBackend(int? deviceOrdinal, string? spvDir, string? pipelineCacheDir)
     {
         _instance = new VulkanInstance();
         _vkDevice = VulkanDevice.Create(_instance, deviceOrdinal);
@@ -149,7 +154,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             _gpuOpTimer = new VulkanGpuOpTimer(_vkDevice.Handle, Vk.TimestampPeriod);
             _stream.WaitStats = new Dictionary<string, (long Count, double Ms)>(StringComparer.Ordinal);
         }
-        _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
+        _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk, pipelineCacheDir);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
         // A bulk release drains the stream on its own, which submits whatever was recorded; the batching count
@@ -1141,7 +1146,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Caches <paramref name="computed"/> as <paramref name="output"/>'s buffer, first dispatching a dtype cast when the compute dtype differs from the output's storage dtype. Takes ownership of <paramref name="computed"/> (freed after a cast, cached otherwise).</summary>
+    /// <summary>Caches <paramref name="computed"/> as <paramref name="output"/>'s buffer, first dispatching a dtype cast when the compute dtype differs from the output's storage dtype.</summary>
+    /// <remarks>Ownership of <paramref name="computed"/> passes here only when the call returns: it is then cached
+    /// as the output's buffer, or released to the transfer helper once the cast has been dispatched. When the call
+    /// throws, <paramref name="computed"/> is still the caller's and is not released here: each caller's own
+    /// <c>catch</c> disposes it, so releasing it here as well would free it twice. A new caller needs the same
+    /// <c>catch</c>.</remarks>
     private void CacheOutputCastingFrom(Tensor output, VulkanBuffer computed, DType computedDtype, string what)
     {
         if (output.DType == computedDtype)
@@ -1959,6 +1969,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
     private const int FlashMaxHeadDim = 128;
 
+    /// <summary>The score matrix the materialized path holds whole. Past it an unmasked call is tiled along the query axis; a call
+    /// with a bias cannot be, so the tiled kernel's admission reads the same limit.</summary>
+    private const ulong NaiveWholeScoreLimitBytes = 1UL << 30;
+
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) =>
         ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
 
@@ -2196,7 +2210,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Naive 3-pass SDPA: Q*K^T, mask add, softmax, *V — dispatched once per (B*H) head. FlashAttention-style fusion is a Phase-4 optimization.</summary>
-    private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
+    private void ScaledDotProductAttentionNaive(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale)
     {
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
@@ -2249,7 +2263,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         long Br = Sq;
         ulong fullScoreBytes = (ulong)(totalHeads * Sq * Skv) * (ulong)dtype.SizeInBytes;
         bool forceTile = EngineKnobs.SdpaForceTiled.Value;
-        if (mask is null && (forceTile || fullScoreBytes > (1UL << 30)))   // > 1 GiB score matrix → tile
+        if (mask is null && (forceTile || fullScoreBytes > NaiveWholeScoreLimitBytes))
         {
             long perRow = totalHeads * Skv * dtype.SizeInBytes;            // bytes per query row across all heads
             Br = Math.Max(1, (512L * 1024 * 1024) / Math.Max(1, perRow));  // ~512 MB score-tile budget

@@ -34,6 +34,27 @@ public sealed partial class CpuBackend
     }
 
     /// <inheritdoc/>
+    public bool HasDecodeMerge => true;
+
+    /// <inheritdoc/>
+    /// <remarks>The reference is the CPU's merge.</remarks>
+    public void DecodeTreeMerge(Tensor merged, Tensor prefixOutput, Tensor prefixLse, Tensor query, Tensor key, Tensor value,
+        ReadOnlySpan<int> mask, float? scale = null)
+    {
+        // The tensor form checks what the span form below cannot: the LSE's dtype, its shape and that it is no other operand.
+        DecodeMergeReference.CheckOperands(merged, prefixOutput, prefixLse, query, key, value, mask, scale);
+        DecodeMergeReference.TreeMerge(merged, prefixOutput, prefixLse.AsReadOnlySpan<float>(), query, key, value, mask, scale);
+    }
+
+    /// <inheritdoc/>
+    public bool HasSolAttention => true;
+
+    /// <inheritdoc/>
+    /// <remarks>The reference is the CPU's Sol-Attn, with every option.</remarks>
+    public void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default) =>
+        SolAttentionReference.Run(output, query, key, value, options, routed);
+
+    /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
         AttentionCall prepared = AttentionExecution.Prepare(in call);

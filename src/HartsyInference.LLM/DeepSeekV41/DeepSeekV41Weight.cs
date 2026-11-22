@@ -9,7 +9,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>One two-dimensional weight of the V4.1 host model, either as F32 values or in the form the checkpoint stores it (FP8 block-scaled, MXFP4, BF16, ...) decoded by row window while it is used.</summary>
 /// <remarks>A stored weight keeps only a borrowed view of the checkpoint tensor, so the checkpoint must outlive it. Products against a stored weight are bit-identical to the same product against its F32 widening,
-/// because each output element is the same sequential dot over the same decoded values.</remarks>
+/// because each output element is the same fixed-order dot over the same decoded values.</remarks>
 public sealed class DeepSeekV41Weight
 {
     // rows of a stored weight decoded at once; bounds the scratch buffer to about 16 MiB

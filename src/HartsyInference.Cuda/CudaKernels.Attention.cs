@@ -35,6 +35,7 @@ public sealed partial class CudaKernels
     // Optional modules: absence leaves the primitives unsupported on this backend instead of failing construction.
     private void LoadAttentionKernels()
     {
+        LoadSolAttentionKernels();
         string attentionPath = Ptx("latent_attention");
         if (CanLoad(attentionPath))
         {

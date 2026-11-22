@@ -114,6 +114,19 @@ public static class DecodeMergeReference
     private static void Check(Tensor merged, Tensor prefixOutput, ReadOnlySpan<float> prefixLse, Tensor query, Tensor key, Tensor value,
         ReadOnlySpan<int> mask, float? scale)
     {
+        CheckOperands(merged, prefixOutput, prefixLse.Length, query, key, value, mask, scale);
+        foreach (float lse in prefixLse)
+            if (float.IsNaN(lse) || float.IsPositiveInfinity(lse))
+                throw new ArgumentException($"A prefix LSE is finite or negative infinity; got {lse}.", nameof(prefixLse));
+    }
+
+    /// <summary>The shape, type, mask and scale rules of a merge, without reading a value: what a backend that keeps its
+    /// operands on a device checks before it launches.</summary>
+    /// <param name="lseCount">Values in the prefix LSE.</param>
+    /// <exception cref="ArgumentException">An operand does not fit the call.</exception>
+    internal static void CheckOperands(Tensor merged, Tensor prefixOutput, long lseCount, Tensor query, Tensor key, Tensor value,
+        ReadOnlySpan<int> mask, float? scale)
+    {
         if (query.Shape.Rank != 4 || key.Shape.Rank != 4 || key.Shape != value.Shape)
             throw new ArgumentException($"A merge takes Q [B, H, S, D] and K, V [B, Hkv, S, D]; got Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
         long batch = query.Shape[0], heads = query.Shape[1], rows = query.Shape[2], dim = query.Shape[3], kvHeads = key.Shape[1];
@@ -125,15 +138,24 @@ public static class DecodeMergeReference
             throw new ArgumentException($"The prefix output and the merged output are [B, S, H × D] = {output}; got {prefixOutput.Shape} and {merged.Shape}.");
         foreach (Tensor tensor in (ReadOnlySpan<Tensor>)[merged, prefixOutput, query, key, value])
             if (tensor.DType != DType.F32) throw new ArgumentException("The merge reference reads and writes F32.");
-        if (prefixLse.Length != batch * heads * rows)
-            throw new ArgumentException($"The prefix LSE holds {prefixLse.Length} values; [B, H, S] needs {batch * heads * rows}.", nameof(prefixLse));
+        if (lseCount != batch * heads * rows)
+            throw new ArgumentException($"The prefix LSE holds {lseCount} values; [B, H, S] needs {batch * heads * rows}.");
         if (mask.Length != rows) throw new ArgumentException($"The mask holds {mask.Length} rows; the step has {rows}.", nameof(mask));
         for (int r = 0; r < rows; r++)
             if (rows < 32 && (uint)mask[r] >> (int)rows != 0)
                 throw new ArgumentException($"Mask row {r} names a step row past the {rows} the step has.", nameof(mask));
         if (scale is { } s && !float.IsFinite(s)) throw new ArgumentException("The scale must be finite.", nameof(scale));
-        foreach (float lse in prefixLse)
-            if (float.IsNaN(lse) || float.IsPositiveInfinity(lse))
-                throw new ArgumentException($"A prefix LSE is finite or negative infinity; got {lse}.", nameof(prefixLse));
+    }
+
+    /// <summary><see cref="CheckOperands(Tensor, Tensor, long, Tensor, Tensor, Tensor, ReadOnlySpan{int}, float?)"/> for a prefix
+    /// LSE held in a tensor: F32 <c>[B, H, S]</c>, and not one of the other operands.</summary>
+    internal static void CheckOperands(Tensor merged, Tensor prefixOutput, Tensor prefixLse, Tensor query, Tensor key, Tensor value,
+        ReadOnlySpan<int> mask, float? scale)
+    {
+        CheckOperands(merged, prefixOutput, prefixLse.ElementCount, query, key, value, mask, scale);
+        if (prefixLse.DType != DType.F32 || prefixLse.Shape != new TensorShape(query.Shape[0], query.Shape[1], query.Shape[2]))
+            throw new ArgumentException($"The prefix LSE is F32 [B, H, S]; got {prefixLse.DType} {prefixLse.Shape}.", nameof(prefixLse));
+        if (ReferenceEquals(prefixLse, merged) || ReferenceEquals(prefixLse, prefixOutput))
+            throw new ArgumentException("The prefix LSE must not be the prefix output or the merged output.", nameof(prefixLse));
     }
 }
