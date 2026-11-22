@@ -248,8 +248,12 @@ on a GPU backend the host loop's device-to-host sync goes away.
     2.6e-07 at 11,203 / 11,139 / 11,043 MB). The 2.9e-07 seen in #1054 is therefore not a defect of the row: it is the tile
     following free memory, and, most likely, on the RTX 4090 a `materialized` call against a `tiled.f32` one (the planner takes the
     tiled row when the scores exceed half of free memory, and memory a finished call freed stays reserved by the stream-ordered
-    pool until trimmed, so the first call materializes and later ones tile); a rerun on the 4090 at the fix commit is pending. An
-    earlier version of this report called the row "not repeatable between identical calls"; that diagnosis was wrong. What
+    pool until trimmed, so the first call materializes and later ones tile). A rerun on the 4090 (Linux, driver 595.99.02) at
+    the fix commit (#1061, `a9b28061b` on `main`) supports that reading: the Trellis2 attention test class, run alone, passed 8
+    of 8; at 14,748 tokens, 12 heads, head dim 128 the free memory before the three runs was 22,270 / 22,206 / 22,110 MB, all
+    three took `materialized`, and the outputs are bit-identical. The reading is supported, not proven: the earlier failing run
+    did not print free memory or the row of its second call, and the rerun was the class alone, not inside a whole ThreeD
+    run. An earlier version of this report called the row "not repeatable between identical calls"; that diagnosis was wrong. What
     remains is an open product question, not a defect: the planner does not count pool-reserved memory as free, so repeated
     large attention calls on a card where the scores are between a quarter and a half of memory change kernel after the first
     call. Outputs agree to rounding. A whole TRELLIS.2 generation on CUDA is not bit-reproducible for that reason.
