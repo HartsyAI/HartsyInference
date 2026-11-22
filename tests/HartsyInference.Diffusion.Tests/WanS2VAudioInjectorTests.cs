@@ -22,6 +22,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// Against the former forward on the CPU the bound is 1e-4 on Vulkan and 2e-3 on CUDA, whose F32 dense row multiplies
 /// in TF32; it is asserted below dim 512 and reported at it, because at dim 512 with these random weights CUDA's
 /// forward is 8.7e-3 from the CPU whether batched or not (its five linears and the attention all multiply in TF32).</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class WanS2VAudioInjectorTests(ITestOutputHelper output)
 {
     private const float Tolerance = 1e-5f, GpuTolerance = 1e-4f, Tf32Tolerance = 2e-3f, AdaLnEps = 1e-5f, QkEps = 1e-6f;
