@@ -992,9 +992,13 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     never creates it. `VulkanBackendTeardownTests` is the loop, every round on an empty cache directory of its own:
     alone in its process, interleaved over one afternoon, it crashed the host in 10 of 18 runs with the setting off
     and 0 of 13 with it on. The lane, 5 runs each way on a quiet machine: 1 crashed with the setting off, 0 with it
-    on, which by itself separates nothing. That the driver tears process-wide state down with a process's last
-    instance is the inference from those runs, not something seen in the driver. Not checked: other driver versions,
-    the RTX 4090, other vendors, Linux.
+    on, which by itself separates nothing (the lane runs its classes in parallel, so another class usually has an
+    instance alive). A census of the threads that start inside `nvoglv64.dll` shows what the hold changes: with the
+    setting off every backend starts 5 threads at `+0xA3D280` and ends them when it is disposed; with it on, one of
+    those exists before the first backend and lives for the process, and each backend starts and ends 4. The same
+    threads start whatever the backend then runs, so that does not say why only the cooperative-matrix path
+    crashes, and that the crash runs into that one thread or its state is an inference, not something seen in the
+    driver. Not checked: other driver versions, the RTX 4090, other vendors, Linux.
   - **Leads that did not hold** (the first was reported as the cause before it was checked):
     - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
       ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
