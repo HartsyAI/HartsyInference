@@ -50,8 +50,6 @@ public sealed unsafe class OasisSpatioTemporalBlock
         });
     }
 
-    internal AttentionLayer AttentionStage => _attention;
-
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
         _sModW = w[$"{p}.s_adaLN_modulation.1.weight"]; w.TryGetValue($"{p}.s_adaLN_modulation.1.bias", out _sModB);

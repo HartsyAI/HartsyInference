@@ -48,8 +48,6 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         });
     }
 
-    internal AttentionLayer AttentionStage => _attention;
-
     public MiniMaxH3Config Config => _config;
 
     /// <summary>Residual-stream dtype. F32 by default and <b>F32 is what ships</b> — <c>MiniMaxH3Recipe</c> pins it

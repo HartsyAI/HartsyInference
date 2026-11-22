@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Idol;
@@ -15,7 +16,7 @@ internal sealed class IdolBlock : IDisposable
     private const float NormEps = 1e-6f;
 
     private readonly int _width, _heads, _headDim;
-    private readonly float _scale;
+    private readonly AttentionLayer _attention;
     private readonly bool _modulated;
     private readonly HeadRmsNorm _headNorm;
     private readonly Tensor? _shiftTable, _norm1W, _norm1B, _norm2W, _norm2B;
@@ -27,7 +28,7 @@ internal sealed class IdolBlock : IDisposable
         _width = config.ModelChannels;
         _heads = config.Heads;
         _headDim = config.HeadDim;
-        _scale = 1f / MathF.Sqrt(_headDim);
+        _attention = IdolAttention.Layer(_heads, _headDim);
         _modulated = modulated;
         _headNorm = new HeadRmsNorm(_headDim);
         _qkvW = weights[$"{prefix}.attn.qkv.weight"]; _qkvB = weights[$"{prefix}.attn.qkv.bias"];
@@ -150,7 +151,7 @@ internal sealed class IdolBlock : IDisposable
                 repo.Apply(backend, k, cos, sin);
                 qn = _headNorm.Apply(backend, q, _qGamma, new TensorShape(1, n, _width));   // consumes q
                 kn = _headNorm.Apply(backend, k, _kGamma, new TensorShape(1, n, _width));   // consumes k
-                ctx0 = IdolAttention.Attend(backend, qn, kn, v, n, n, _heads, _headDim, _scale);   // consumes qn, kn and v
+                ctx0 = IdolAttention.Attend(backend, _attention, qn, kn, v, n, n, _heads, _headDim);   // consumes qn, kn and v
             }
             catch
             {
