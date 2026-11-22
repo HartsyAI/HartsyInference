@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using static HartsyInference.ThreeD.Models.CoLa3D.CoLa3DOps;
 
@@ -10,7 +11,7 @@ namespace HartsyInference.ThreeD.Models.CoLa3D;
 internal sealed class CoLa3DBlock : IDisposable
 {
     private readonly int _heads, _headDim, _width;
-    private readonly float _scale;
+    private readonly AttentionLayer _attention;
     private readonly HeadRmsNorm _headNorm;
     private readonly Affine _qSelfNorm, _qReadNorm, _pReadNorm, _qFfnNorm, _pWriteNorm, _pFfnNorm;
     private readonly Dense _qSelfQkv, _qSelfOut, _qReadQuery, _pReadKv, _qReadOut, _qFfnUp, _qFfnDown;
@@ -25,7 +26,7 @@ internal sealed class CoLa3DBlock : IDisposable
         _heads = config.NumHeads;
         _headDim = config.HeadDim;
         _width = config.HiddenDim;
-        _scale = 1f / MathF.Sqrt(_headDim);
+        _attention = AttentionLayer.Shared(_heads, _headDim);   // scale 0 is 1/sqrt(headDim), no F16 permission: what the legacy call without a mask gave
         _headNorm = new HeadRmsNorm(_headDim);
 
         _qSelfNorm = LoadAffine(w, p + "qSelfNorm");
@@ -165,18 +166,11 @@ internal sealed class CoLa3DBlock : IDisposable
         return Residual(backend, x, delta);
     }
 
-    /// <summary>Scaled dot-product attention over head-major operands, returned flat as <c>[1, Lq, C]</c>; consumes q, k and v.</summary>
-    private Tensor Attend(IBackend backend, Tensor qh, Tensor kh, Tensor vh, int lq)
+    /// <summary>Scaled dot-product attention over head-major operands, returned flat as <c>[1, Lq, C]</c>; consumes q, k and v. Internal (not private) so that <c>CoLa3DBlockAttendTests</c> can call it.</summary>
+    internal Tensor Attend(IBackend backend, Tensor qh, Tensor kh, Tensor vh, int lq)
     {
-        Tensor att = Alloc(1, _heads, lq, _headDim);
-        backend.ScaledDotProductAttention(att, qh, kh, vh, null, _scale);
-        qh.Dispose();
-        kh.Dispose();
-        vh.Dispose();
-        Tensor flat = Alloc(1, lq, _width);
-        backend.Permute0213(flat, att, _heads, lq, _headDim);
-        att.Dispose();
-        return flat;
+        Tensor att = _attention.AttendHeadMajorOperands(backend, qh, kh, vh, default);   // consumes qh, kh and vh
+        return _attention.MergeHeads(backend, att, new TensorShape(1, lq, _width));   // consumes att
     }
 
     /// <summary>Columns <c>[offset, offset + C)</c> of a flat <c>[1, tokens, C]</c> tensor as <c>[1, tokens, H, D]</c>.</summary>
