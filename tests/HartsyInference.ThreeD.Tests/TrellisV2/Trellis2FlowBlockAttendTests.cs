@@ -103,8 +103,9 @@ public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
     }
 
     /// <summary>The CUDA backend at the shapes the real flows run (the two dense F32 rows: materialized and query-tiled). The head count is
-    /// small and the head dim is the real one, so the row choice is the real one. The former body runs twice to show that the call is
-    /// deterministic on this device; the layer path must then be bit-identical to it and take the same rows.</summary>
+    /// small and the head dim is the real one, so the row choice is the real one. The former body runs twice to measure how far two runs of
+    /// one call differ on this device (nothing, unless the query-tiled row's tile changes with free memory); the layer path must take the
+    /// same rows and differ by no more than that.</summary>
     [Theory]
     [Trait("Category", "GpuIntegration")]
     [InlineData(4096, 1029, 2, 128)]
@@ -128,8 +129,15 @@ public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
 
         Tensor[] results = new Tensor[3];
         string[] rows = new string[3];
+        long[] freeMb = new long[3];
         for (int run = 0; run < 3; run++)
         {
+            // The planner picks the query-tiled row when the scores exceed half of free device memory, and memory a finished call freed
+            // stays reserved by the stream-ordered pool, where it counts as used. Without the trim a score matrix between a quarter and a
+            // half of the card (this theory's largest case on 24 GB) is materialized by the first run and tiled by the next two. Another
+            // process taking device memory between the runs can still move the row; the line printed below shows it when it does.
+            backend.TrimMemoryPool();
+            freeMb[run] = backend.GetVramInfo().FreeBytes >> 20;
             Tensor q = Filled(qShape, 1), k = Filled(kvShape, 2), v = Filled(kvShape, 3);
             using AttentionEvidenceSession evidence = AttentionEvidence.Begin(256);
             results[run] = run < 2 ? Former(backend, q, k, v, queryTokens, heads, headDim, scale) : block.Attend(backend, q, k, v, queryTokens);
@@ -140,7 +148,8 @@ public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
         bool formerRepeats = first.SequenceEqual(second);
         bool layerMatches = first.SequenceEqual(layer);
         float formerSpread = MaxAbsDifference(first, second), layerSpread = Math.Max(MaxAbsDifference(first, layer), MaxAbsDifference(second, layer));
-        output.WriteLine($"q{queryTokens} k{keyTokens} h{heads} d{headDim}: rows [{rows[2]}]; former repeats bit for bit: {formerRepeats} "
+        output.WriteLine($"q{queryTokens} k{keyTokens} h{heads} d{headDim}: rows former [{rows[0]}], former again [{rows[1]}], layer [{rows[2]}]; "
+            + $"free device memory before each run {freeMb[0]}, {freeMb[1]}, {freeMb[2]} MB; former repeats bit for bit: {formerRepeats} "
             + $"(largest difference between two former runs {formerSpread:g4}); layer equals former: {layerMatches} (largest difference to either former run {layerSpread:g4})");
         foreach (Tensor t in results)
         {
@@ -156,8 +165,8 @@ public sealed class Trellis2FlowBlockAttendTests(ITestOutputHelper output)
         }
         else
         {
-            // The kernel of this row is not deterministic on this device (the former body differs from itself), so the layer path may only
-            // differ by what two runs of the former body differ by, plus rounding slack.
+            // The former body differs from itself. The query-tiled row sizes its tile from free device memory, and a different tile changes
+            // the summation order, so two runs agree to rounding only. The layer path may differ by what two former runs differ by, plus slack.
             Assert.True(layerSpread <= formerSpread * 4 + 1e-6f, $"the layer path differs by {layerSpread:g4}, two former runs differ by {formerSpread:g4}");
         }
     }
