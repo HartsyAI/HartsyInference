@@ -88,18 +88,18 @@ public sealed unsafe class WanAnimateFaceBlock(int dim, int heads, int headDim, 
                     {
                         long kOff = ((long)ti * n + j) * _dim + (long)h * _headDim;
                         float dot = 0;
-                        for (int d = 0; d < _headDim; d++) dot += qp[qOff + d] * kp[kOff + d];
+                        for (int d = _headDim - 1; d >= 0; d--) dot += qp[qOff + d] * kp[kOff + d];   // control: reversed order
                         scores[j] = dot * scale;
                         if (scores[j] > maxS) maxS = scores[j];
                     }
                     float sum = 0;
-                    for (int j = 0; j < n; j++) { scores[j] = MathF.Exp(scores[j] - maxS); sum += scores[j]; }
+                    for (int j = n - 1; j >= 0; j--) { scores[j] = MathF.Exp(scores[j] - maxS); sum += scores[j]; }   // control: reversed order
                     float invSum = 1f / sum;
                     long oOff = (long)qRow * _dim + (long)h * _headDim;
                     for (int d = 0; d < _headDim; d++)
                     {
                         float acc = 0;
-                        for (int j = 0; j < n; j++)
+                        for (int j = n - 1; j >= 0; j--)   // control: reversed order
                         {
                             long vOff = ((long)ti * n + j) * _dim + (long)h * _headDim;
                             acc += scores[j] * vp[vOff + d];
