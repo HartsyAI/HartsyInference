@@ -11,8 +11,8 @@ namespace HartsyInference.Diffusion.Tests;
 /// F16's range by damping it 1/32, and the damp rides on each weight's <see cref="Tensor.Fp8ScaleFactor"/>; a backend
 /// that drops the factor runs the stream at its natural scale, overflows, and the image comes out black. The tokens
 /// here are large enough that the undamped stream passes 65504 while the damped one stays under it. The tiny
-/// checkpoint's widths (8 and 12) are off the cooperative-matrix fragment, so a damped product here runs the tiled
-/// kernel. An undamped F32 product of at most sixteen rows takes the fused GEMV, which has no alpha; a damped weight
+/// checkpoint's widths (8 and 12) are off the cooperative-matrix fragment, so a damped product here runs coopmat2
+/// where the device has it and the tiled kernel elsewhere. An undamped F32 product of at most sixteen rows takes the fused GEMV, which has no alpha; a damped weight
 /// must never reach it. The cooperative-matrix kernels are covered by <c>VulkanGemmScaleParityTests</c>.</summary>
 public sealed class Flux2F16DampVulkanTests(ITestOutputHelper output)
 {

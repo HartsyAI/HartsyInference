@@ -1,5 +1,6 @@
-// matmul_coopmat2: GEMM via VK_NV_cooperative_matrix2 (workgroup scope), a different instruction and memory
-// path from the coopmat1 kernels rather than a different tiling of them.
+// matmul_coopmat2: C[M, N] = alpha · A[M, K] · B[N, K]ᵀ (+ bias[N]) via VK_NV_cooperative_matrix2 (workgroup scope), a
+// different instruction and memory path from the coopmat1 kernels rather than a different tiling of them. alpha scales
+// the product in the F32 accumulator before the bias is added, as in matmul_fp8_coopmat2; there is no beta · C term.
 //
 // Unlike every coopmat1 kernel here, this one needs no partial-tile handling: tensorLayoutNV addressing with
 // gl_CooperativeMatrixClampModeConstantNV clamps out-of-bounds reads to 0 and drops out-of-bounds writes, so
@@ -43,6 +44,8 @@ layout(push_constant) uniform Push {
     uint lda;
     uint ldb;
     uint ldc;
+    float alpha;
+    float beta;      // not read; the push block is the one every GEMM kernel shares
     uint aOffset;
     uint bOffset;
     uint cOffset;
@@ -131,6 +134,9 @@ void main() {
 
         sum = coopMatMulAdd(matA, matB, sum);
     }
+
+    // Unguarded: an alpha of 1 leaves every value as it was.
+    sum = sum * pc.alpha;
 
     if (HAS_BIAS) {
         // Broadcast tensor view: dims=(M,N) so clamp mode never zeroes a valid row, stride=(0,1) so every
