@@ -1,8 +1,9 @@
 # Blackwell gate: what ran on an RTX 5090 and what did not
 
-The plan makes a consumer Blackwell card the final CUDA and Vulkan gate. This records the two runs that reached a
-real RTX 5090 on 2026-11-22 and 2026-11-23. **The gate is partly met**: the CUDA lane ran on Blackwell and passed
-everywhere except where the pod lacked cuDNN. The **Vulkan half did not run on Blackwell**, because the NVIDIA
+The plan makes a consumer Blackwell card the final CUDA and Vulkan gate. This records the three runs that reached a
+real RTX 5090 on 2026-11-22 and 2026-11-23. **The gate is partly met**: on two cards the CUDA lane ran on Blackwell
+and passed everywhere except where the pod lacked cuDNN; on a third card the same commit raised
+`CUDA_ERROR_ILLEGAL_ADDRESS` in every test process (see the third pass), which is unexplained. The **Vulkan half did not run on Blackwell**, because the NVIDIA
 Vulkan driver never became visible in the pod. Stages 3 and 4 of the campaign
 ([blackwell-rental-campaign.md](blackwell-rental-campaign.md)) were not run.
 
@@ -54,12 +55,31 @@ test passed at every shape, including 14,748 tokens, and the Audio, Diffusion, V
 The 9 failed timing tests are all of the Vulkan A/B kind and give no timing. The CUDA timing rows ran; they were
 not compared across cards here.
 
+## Third pass: a card that faulted
+
+Pod `h5isulyrqg4d1o`, a third physical card (GPU UUID `3cb5d6d5-...`; the first two passes ran on others), same
+commit, 27 minutes of tests, about $0.72. **`CUDA_ERROR_ILLEGAL_ADDRESS` (error 700) appeared in every test process**:
+first in `SolAttentionGpuTests.OnCuda...` of the GPU lane, then in Core (`SdpaTiledGpuTests`, tile height 512), Audio,
+ThreeD, Engine PSA and the whole LLM run. After the first fault in a process, every later CUDA call in it fails.
+Counts against the earlier passes: LLM GPU lane 40 failed (24), LLM whole 81 (33), ThreeD 25 (8), Core 2 (1), Audio 6
+(0), Diffusion 2 (0), Engine PSA 1 (0). Passes 1 and 2 at the same commit had no such error.
+
+The cause is **not established**. It is either a faulty card or host, or an out-of-bounds access in a kernel that only
+some runs trigger; one card in three cannot tell them apart. The run did not carry a memory checker. Later passes were
+set up to run `compute-sanitizer` on the Sol attention tests if it recurs, but none reached a card.
+
+The same pass downloaded cuDNN 9.21.0.82 for CUDA 13 (915,264,756 bytes, sha256 and size matching NVIDIA's published
+manifest) and installed 0 files because the extraction step matched nothing; cuDNN stayed absent. That step was fixed
+afterwards and has not been run.
+
 ## Vulkan
 
 Expectation 2 (an NVIDIA Vulkan device visible) was put at about 60% and was **missed**. In pass 1 the loader logged
 `libXext.so.6: cannot open shared object file` while loading `libGLX_nvidia.so.0`. Pass 2 installed that library and
 the message changed to `Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0`:
-the container carries an NVIDIA GL library without a usable Vulkan entry point. `NVIDIA_DRIVER_CAPABILITIES=all` was
+the container carries an NVIDIA GL library without a usable Vulkan entry point. The third pod carried the full
+graphics library set (`libnvidia-glvkspirv`, `-eglcore`, `-glcore`, `-gpucomp`, `-rtcore`), `ldd` of `libGLX_nvidia` showed no
+missing library, and the loader still reported the same `vkCreateInstance` error, so the library set is not the cause. `NVIDIA_DRIVER_CAPABILITIES=all` was
 set when the pod was created and was unset in the SSH session. The rental campaign said that only if the device was
 still missing with that variable set would the campaign stop with the finding that the Vulkan half cannot be run at this
 provider. This is that finding, for this image. A different image or a host with the graphics capability injected is
@@ -75,7 +95,9 @@ the only route left; none was tried.
 
 ## Pod cost and incidents
 
-Two RTX PRO 4500 Blackwell pods (EU-CZ-1, $0.72/hr) and one RTX 5090 pod never answered SSH and were stopped with no
-test run (about $0.40 and $0.19). Both successful runs cost about $0.65. Total about $1.24 against the $9.73
-ceiling. Every pod is stopped, none was terminated, and no volume was touched. Several requests for a 5090 expired in
+Two RTX PRO 4500 Blackwell pods (EU-CZ-1, $0.72/hr) and four RTX 5090 pods never answered SSH and were stopped
+with no test run, about $1.50 in all; one of them ran about 40 minutes before it was stopped, because the queue
+answer that named it did not parse and the driving script lost its id (since fixed: it now finds and stops the running
+pod, and the watchdog stops an unreachable pod after about 10 minutes). The three runs that tested cost about
+$1.37. Total about $3.27 against the $9.73 ceiling. Every pod is stopped, none was terminated, and no volume was touched. Several requests for a 5090 expired in
 the queue over about a day before one deployed.
