@@ -22,7 +22,10 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
     public void Offline11sMatchesTheReference() => Check("offline_11s");
 
     [RealWeightsFact("VOICE_ISOLATOR_DIR")]
-    public void RealtimeWholeClip3sMatchesTheReferenceStream() => Check("realtime_stream_3s");
+    public void RealtimeStream3sMatchesTheReference() => Check("realtime_stream_3s");
+
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    public void RealtimeStream11sMatchesTheReference() => Check("realtime_stream_11s");
 
     private void Check(string name)
     {
@@ -30,8 +33,7 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
         string caseDir = root is null ? string.Empty : Path.Combine(root, "fixtures", name);
         if (root is null || !File.Exists(Path.Combine(caseDir, "meta.json")))
         {
-            Assert.False(Environment.GetEnvironmentVariable("HARTSY_REQUIRE_REAL_WEIGHTS") == "1",
-                $"VOICE_ISOLATOR_DIR does not hold fixtures/{name}; nothing was validated.");
+            Assert.Fail($"VOICE_ISOLATOR_DIR does not hold fixtures/{name}/meta.json; nothing was validated.");
             return;
         }
         using JsonDocument meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(caseDir, "meta.json")));

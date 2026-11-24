@@ -231,6 +231,20 @@ public sealed class VoiceIsolatorUnitTests : IDisposable
         Assert.Throws<InvalidDataException>(() => VoiceIsolatorNetwork.Load(path));
     }
 
+    [Fact]
+    public void ARenderIsOfflineOnlyAndIsolateChecksItsLookahead()
+    {
+        string causalPath = TinyVoiceIsolatorCheckpoint.Write(_dir, causal: true, seed: 23);
+        string offlinePath = TinyVoiceIsolatorCheckpoint.Write(_dir, causal: false, seed: 24);
+        using VoiceIsolatorNetwork causal = VoiceIsolatorNetwork.Load(causalPath);
+        using VoiceIsolatorNetwork offline = VoiceIsolatorNetwork.Load(offlinePath);
+        using CpuBackend backend = new();
+        float[] audio = Signal(1_200, 2);
+        Assert.Throws<ArgumentException>(() => VoiceIsolatorRenderer.Render(causal, backend, audio));
+        Assert.Throws<ArgumentException>(() => causal.Isolate(backend, audio, 3));
+        Assert.Throws<ArgumentException>(() => offline.Isolate(backend, audio, 2));
+    }
+
     private static float[] Signal(int n, int seed)
     {
         Random rng = new(seed);

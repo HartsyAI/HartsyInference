@@ -44,11 +44,11 @@ internal sealed class VoiceIsolatorMamba : IDisposable
         _skip = weights[$"{prefix}.D"];
         _outProj = weights[$"{prefix}.out_proj.weight"];
         Tensor aLog = weights[$"{prefix}.A_log"];
-        Expect(aLog, $"{prefix}.A_log", (long)config.MambaInner * config.MambaState);
-        Expect(_conv, $"{prefix}.conv1d.weight", (long)config.MambaInner * config.MambaConv);
-        Expect(_convBias, $"{prefix}.conv1d.bias", config.MambaInner);
-        Expect(_dtBias, $"{prefix}.dt_proj.bias", config.MambaInner);
-        Expect(_skip, $"{prefix}.D", config.MambaInner);
+        VoiceIsolatorOps.RequireF32(aLog, $"{prefix}.A_log", (long)config.MambaInner * config.MambaState);
+        VoiceIsolatorOps.RequireF32(_conv, $"{prefix}.conv1d.weight", (long)config.MambaInner * config.MambaConv);
+        VoiceIsolatorOps.RequireF32(_convBias, $"{prefix}.conv1d.bias", config.MambaInner);
+        VoiceIsolatorOps.RequireF32(_dtBias, $"{prefix}.dt_proj.bias", config.MambaInner);
+        VoiceIsolatorOps.RequireF32(_skip, $"{prefix}.D", config.MambaInner);
         _decay = new Tensor(aLog.Shape, DType.F32);
         float* src = (float*)aLog.DataPointer;
         float* dst = (float*)_decay.DataPointer;
@@ -91,14 +91,6 @@ internal sealed class VoiceIsolatorMamba : IDisposable
         Tensor output = WhisperOps.ProjectLinear(backend, y, _outProj, null, 1, (int)n, inner, width);
         y.Dispose();
         return output;
-    }
-
-    private static void Expect(Tensor tensor, string name, long count)
-    {
-        if (tensor.DType != DType.F32 || tensor.ElementCount != count)
-        {
-            throw new InvalidDataException($"{name} must be F32 with {count} elements, got {tensor.DType.Name} {tensor.ElementCount}.");
-        }
     }
 
     public void Dispose() => _decay.Dispose();

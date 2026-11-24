@@ -25,6 +25,10 @@ public sealed record VisionRequest
     /// <summary><see cref="VisionMode.Upscale"/> only: requested output height; see <see cref="TargetWidth"/>.</summary>
     public int? TargetHeight { get; init; }
 
+    /// <summary><see cref="VisionMode.MetricDepth"/> only: the camera's focal length in pixels of this image. Null lets the model estimate
+    /// it. The focal length the depth used comes back in <see cref="VisionResult.Camera"/>.</summary>
+    public double? FocalLengthPx { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 }

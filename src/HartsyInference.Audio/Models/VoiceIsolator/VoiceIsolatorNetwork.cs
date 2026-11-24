@@ -48,7 +48,7 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         }
         if (_lookaheadEmbedding is not null)
         {
-            RequireF32(_lookaheadEmbedding, "lookahead_embedding.weight", (long)config.LookaheadChoices.Count * config.Width);
+            VoiceIsolatorOps.RequireF32(_lookaheadEmbedding, "lookahead_embedding.weight", (long)config.LookaheadChoices.Count * config.Width);
         }
         _blocks = new object?[config.BlockTypes.Count];
         for (int i = 0; i < _blocks.Length; i++)
@@ -62,7 +62,6 @@ public sealed class VoiceIsolatorNetwork : IDisposable
 
     /// <summary>Architecture of the loaded checkpoint.</summary>
     public VoiceIsolatorConfig Config { get; }
-
 
     /// <summary>Number of bands.</summary>
     public int BandCount => _edges.Length;
@@ -101,6 +100,14 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(audio);
+        if (Config.Causal)
+        {
+            ValidateLookahead(lookahead);
+        }
+        else if (lookahead != 0)
+        {
+            throw new ArgumentException("An offline checkpoint has no look-ahead; pass 0.", nameof(lookahead));
+        }
         if (audio.Length == 0)
         {
             throw new ArgumentException("There is nothing to isolate in empty audio.", nameof(audio));
@@ -317,8 +324,8 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     {
         Tensor w = weights["denoise_decoder.condition.weight"];
         Tensor b = weights["denoise_decoder.condition.bias"];
-        RequireF32(w, "denoise_decoder.condition.weight", 2L * 2 * width);
-        RequireF32(b, "denoise_decoder.condition.bias", 2L * width);
+        VoiceIsolatorOps.RequireF32(w, "denoise_decoder.condition.weight", 2L * 2 * width);
+        VoiceIsolatorOps.RequireF32(b, "denoise_decoder.condition.bias", 2L * width);
         float[] scale = new float[width];
         float[] shift = new float[width];
         unsafe
@@ -333,14 +340,6 @@ public sealed class VoiceIsolatorNetwork : IDisposable
             }
         }
         return (scale, shift);
-    }
-
-    private static void RequireF32(Tensor tensor, string name, long count)
-    {
-        if (tensor.DType != DType.F32 || tensor.ElementCount != count)
-        {
-            throw new InvalidDataException($"{name} must be F32 with {count} elements, got {tensor.DType.Name} {tensor.ElementCount}.");
-        }
     }
 
     /// <summary>Checks a look-ahead against the positions the checkpoint trained at; each stream passes its own value.</summary>
