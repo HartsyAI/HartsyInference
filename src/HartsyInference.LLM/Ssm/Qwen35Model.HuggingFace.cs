@@ -12,8 +12,10 @@ public sealed unsafe partial class Qwen35Model
     /// <c>mlp.experts.{e}.*_proj.weight</c> tensors or from the fused <c>mlp.experts.gate_up_proj</c> / <c>down_proj</c>
     /// stacks; an untied model's head is <paramref name="lmHeadKey"/>, or none when it is null — for a caller that projects the
     /// hidden states itself (<see cref="ProjectLogits"/> then refuses).</summary>
+    /// <param name="loop">A SenseNova-Loop plan: the model then has one layer per execution slot, a repeated physical layer's tensors are
+    /// shared by every slot that runs it, and its hyper-connection routers (<c>mhc_attn</c>, <c>mhc_ffn</c>) are read from <paramref name="hf"/>.</param>
     public static Qwen35Model FromHuggingFace(IReadOnlyDictionary<string, Tensor> hf, Qwen35HfConfig cfg, int maxSequenceLength,
-        string prefix = "model.language_model", string? lmHeadKey = "lm_head.weight")
+        string prefix = "model.language_model", string? lmHeadKey = "lm_head.weight", SenseNovaLoopConfig? loop = null)
     {
         ArgumentNullException.ThrowIfNull(hf);
         ArgumentNullException.ThrowIfNull(cfg);
@@ -21,8 +23,13 @@ public sealed unsafe partial class Qwen35Model
         {
             throw new ArgumentException("Value heads must be a multiple of key heads.", nameof(cfg));
         }
+        if (loop is not null && (cfg.IsMoe || loop.PhysicalLayers != cfg.NumLayers))
+        {
+            throw new ArgumentException("A Loop plan needs a dense checkpoint whose layer count the plan was made for.", nameof(loop));
+        }
+        int slots = loop?.Slots ?? cfg.NumLayers;
         List<Tensor> owned = [];
-        MoeFeedForward?[] moe = new MoeFeedForward?[cfg.NumLayers];
+        MoeFeedForward?[] moe = new MoeFeedForward?[slots];
         try
         {
             Dictionary<string, Tensor> w = new(StringComparer.Ordinal)
@@ -34,11 +41,22 @@ public sealed unsafe partial class Qwen35Model
             {
                 w["output.weight"] = Require(hf, lmHeadKey);
             }
-            bool[] linear = new bool[cfg.NumLayers];
-            for (int i = 0; i < cfg.NumLayers; i++)
+            bool[] linear = new bool[slots];
+            for (int i = 0; i < slots; i++)
             {
-                string src = $"{prefix}.layers.{i}", dst = $"blk.{i}";
-                linear[i] = cfg.IsLinearLayer(i);
+                int physical = loop?.Plan[i] ?? i;
+                string src = $"{prefix}.layers.{physical}", dst = $"blk.{i}";
+                linear[i] = cfg.IsLinearLayer(physical);
+                if (loop is not null && loop.FirstSlot(physical) is int first && first != i)
+                {
+                    // A later visit of a repeated layer: the same tensors, its own slot (so its own cache and recurrent state).
+                    string firstPrefix = $"blk.{first}.";
+                    foreach (string key in w.Keys.Where(k => k.StartsWith(firstPrefix, StringComparison.Ordinal)).ToList())
+                    {
+                        w[dst + key[(firstPrefix.Length - 1)..]] = w[key];
+                    }
+                    continue;
+                }
                 w[$"{dst}.attn_norm.weight"] = OnePlus(Require(hf, $"{src}.input_layernorm.weight"), owned);
                 w[$"{dst}.post_attention_norm.weight"] = OnePlus(Require(hf, $"{src}.post_attention_layernorm.weight"), owned);
                 if (cfg.IsMoe)
@@ -75,13 +93,21 @@ public sealed unsafe partial class Qwen35Model
                     w[$"{dst}.attn_k_norm.weight"] = OnePlus(Require(hf, $"{sa}.k_norm.weight"), owned);
                 }
             }
-            Qwen35Model model = new(null, w, cfg.HiddenSize, cfg.NumLayers, cfg.VocabSize, cfg.RmsNormEps, cfg.FullAttentionInterval,
+            Qwen35Model model = new(null, w, cfg.HiddenSize, slots, cfg.VocabSize, cfg.RmsNormEps, cfg.FullAttentionInterval,
                 linear, cfg.NumHeads, cfg.NumKvHeads, cfg.HeadDim, cfg.RotaryDim, cfg.RopeTheta, cfg.LinearConvKernel,
                 cfg.LinearKeyHeadDim, cfg.LinearValueHeadDim, cfg.LinearNumKeyHeads, cfg.LinearNumValueHeads, moe, maxSequenceLength);
             model._ownedTensors.AddRange(owned);
             model._headless = !cfg.TieWordEmbeddings && lmHeadKey is null;
             model.MropeSection = cfg.MropeSection ?? DefaultMropeSection;
             model.MropeInterleaved = cfg.MropeInterleaved;
+            if (loop is not null)
+            {
+                model.ConfigureLoop(loop, ReadMhcRouters(hf, loop, prefix, cfg.HiddenSize, owned), cfg.RopeScaling);
+            }
+            else
+            {
+                model.ConfigureRope(cfg.RopeScaling);
+            }
             return model;
         }
         catch
@@ -89,6 +115,29 @@ public sealed unsafe partial class Qwen35Model
             foreach (Tensor t in owned) t.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The routers of every physical layer in the plan's hyper-connection range, as F32 arrays.</summary>
+    private static Dictionary<int, MhcRouterWeights> ReadMhcRouters(IReadOnlyDictionary<string, Tensor> hf, SenseNovaLoopConfig loop, string prefix,
+        int hidden, List<Tensor> owned)
+    {
+        int mix = 2 * loop.Streams + loop.Streams * loop.Streams;
+        long width = (long)loop.Streams * hidden;
+        float[] Read(string key, long expected)
+        {
+            Tensor t = Require(hf, key);
+            if (t.ElementCount != expected) throw new InvalidDataException($"'{key}' holds {t.ElementCount} values; the router needs {expected}.");
+            return ToF32(t, owned).AsReadOnlySpan<float>().ToArray();
+        }
+        Dictionary<int, MhcRouterWeights> routers = [];
+        for (int p = loop.MhcStart; p < loop.MhcEnd; p++)
+        {
+            string layer = $"{prefix}.layers.{p}";
+            routers[p] = new MhcRouterWeights(
+                Read($"{layer}.mhc_attn.weight", mix * width), Read($"{layer}.mhc_attn.bias", mix),
+                Read($"{layer}.mhc_ffn.weight", mix * width), Read($"{layer}.mhc_ffn.bias", mix));
+        }
+        return routers;
     }
 
     /// <summary>One MoE layer of a HuggingFace Qwen3.5-MoE checkpoint: the router, the routed experts (per-expert tensors, or the fused

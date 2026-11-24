@@ -26,6 +26,7 @@ git preserves removed history.
 | Hunyuan3D Paint (texturing): pins, hashes, licence, 2.5D UNet, renderer and bake, reuse map | [Research/HUNYUAN3D_PAINT_ARCHITECTURE.md](Research/HUNYUAN3D_PAINT_ARCHITECTURE.md) |
 | Hunyuan3D Part (P3-SAM segmentation, X-Part decomposition): pins, weights, licence, reuse map | [Research/HUNYUAN3D_PART_ARCHITECTURE.md](Research/HUNYUAN3D_PART_ARCHITECTURE.md) |
 | Haru-4B (full-duplex speech-to-speech): pins, constants, frame loop, codec key map, reuse map, evidence | [Research/HARU_ARCHITECTURE.md](Research/HARU_ARCHITECTURE.md) |
+| Kim_Vocal_2 vocal separator (UVR MDX-Net): pins, graph, pipeline constants, licence status, engine surface | [Research/KIM_VOCAL2_SEPARATOR.md](Research/KIM_VOCAL2_SEPARATOR.md) |
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
 | Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
 | 3D weights inventory: which files are linked, repacked and self-hosted, with the licence terms that bind a host | [Research/WEIGHTS_HOSTING_3D.md](Research/WEIGHTS_HOSTING_3D.md) |
@@ -35,6 +36,7 @@ git preserves removed history.
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
 | Idol, Idol-turbo and Budget3D (image to Gaussian splats, token budget): pins, files and hashes, pipeline constants, licences, settled reference questions | [Research/IDOL_BUDGET3D_ARCHITECTURE.md](Research/IDOL_BUDGET3D_ARCHITECTURE.md) |
 | SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
+| Sage S2.1 Flash (`glm5_next`: KDA + NoPE compressed-pool DSA layers under mHC, 288-expert clamped-SwiGLU MoE, MTP, vision, SciPerception projectors): pins, licence, key layout traps, FP8 quantized set | [Research/SAGE_S21_FLASH_ARCHITECTURE.md](Research/SAGE_S21_FLASH_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
 | Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |
