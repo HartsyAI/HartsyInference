@@ -168,9 +168,9 @@ public sealed class SciProjector
     private static float[] Take(IReadOnlyDictionary<string, Tensor> weights, string name, params int[] shape)
     {
         if (!weights.TryGetValue(name, out Tensor? t)) throw new InvalidDataException($"The projector has no tensor '{name}'.");
-        long expected = 1;
-        foreach (int d in shape) expected *= d;
-        if (t.ElementCount != expected) throw new InvalidDataException($"'{name}' holds {t.ElementCount} values; the projector config needs {expected}.");
+        if (t.Shape.Rank != shape.Length) throw new InvalidDataException($"'{name}' has rank {t.Shape.Rank}; the projector config needs {shape.Length}.");
+        for (int i = 0; i < shape.Length; i++)
+            if (t.Shape[i] != shape[i]) throw new InvalidDataException($"'{name}' has shape {t.Shape}; the projector config needs dimension {i} = {shape[i]}.");
         Tensor f32 = TensorCasts.EnsureF32(t);
         try
         {

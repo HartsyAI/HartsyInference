@@ -38,4 +38,15 @@ public sealed record Glm5NextVisionConfig
 
     /// <summary>Per-head width.</summary>
     public int HeadDim => Hidden / Heads;
+
+    /// <summary>Refuses a config the tower cannot run: the width must split evenly into heads, and each head's width must be a multiple of 4 for the
+    /// two-axis rope (each axis takes half the head, split into pairs).</summary>
+    /// <exception cref="InvalidDataException">The widths do not divide as the tower needs.</exception>
+    public void Validate()
+    {
+        if (Hidden <= 0 || Heads <= 0 || Hidden % Heads != 0)
+            throw new InvalidDataException($"Vision hidden_size {Hidden} must be a positive multiple of num_heads {Heads}.");
+        if (HeadDim % 4 != 0)
+            throw new InvalidDataException($"Vision head width {HeadDim} (hidden_size / num_heads) must be a multiple of 4 for the 2-D rope.");
+    }
 }
