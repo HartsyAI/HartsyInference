@@ -2668,6 +2668,44 @@ public static class ModelCatalog
                 },
             },
 
+            // Bria RMBG 3.0 (background removal, image). Not a segmentation net: Fibo 2.0 (8B flow-matching DiT, Qwen3-VL-4B, FLUX.2 VAE)
+            // tuned to draw an alpha matte as an edit of the source image in 4 steps, so it runs through Fibo2Recipe's edit path and
+            // shares the Fibo 2.0 encoder and VAE assets. The transformer is Bria's own ungated ComfyUI repack briaai/RMBG-3.0-Comfy
+            // @ 63880aa074782b09e7ae17184960dfd6de70ab85 (the original briaai/RMBG-3.0 is auto-gated); its safetensors header has
+            // the same keys and shapes as the Comfy-Org Fibo 2.0 files. Hashes are the Hugging Face LFS object ids. Not real-weight
+            // verified. Licence: CC BY-NC 4.0 (the repo LICENSE file; the Hub metadata says bria-fibo), non-commercial; the card says
+            // "Commercial use requires a separate agreement with Bria AI." Bria's separate video model VRMBG-3.0 is manually gated
+            // and not included.
+            new CatalogEntry
+            {
+                Id = "rmbg3", Modality = vis, DisplayName = "Bria RMBG 3.0 (background removal)",
+                Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "a5df048f799025510f29a743c0dca0d4f1362478ec00f6f7c86ee66d57b4e5d9" },
+                    SideModels.Fibo2Qwen3VL4B,
+                    SideModels.Fibo2Vae,
+                },
+            },
+            // RMBG 3.0 as Bria's int8_tensorwise + ConvRot build (8.41 GB) with the matching int8 Qwen3-VL-4B encoder; same recipe and licence.
+            new CatalogEntry
+            {
+                Id = "rmbg3-int8", Modality = vis, DisplayName = "Bria RMBG 3.0 (int8 ConvRot)",
+                Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_int8_convrot.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "bc29b9a87ed378596c5ca5bc0c5bdfaa8aabc8415d33f3c767f9a3cbd9fd566d" },
+                    SideModels.Fibo2Qwen3VL4BInt8,
+                    SideModels.Fibo2Vae,
+                },
+            },
+
             // Real-ESRGAN pixel-space super-resolution. The official release files live on GitHub, not HuggingFace;
             // these repos mirror them byte-for-byte — x4plus is the copy the ControlNet annotator bundle carries
             // (five independent HF uploads share its hash), anime6b's hash agrees across four uploads, x2plus is a

@@ -5,6 +5,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Vision;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -74,6 +75,8 @@ public sealed class VisionService : IVisionService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         VisionRequestValidator.Validate(request);
+        if (request.Mode is VisionMode.BackgroundRemoval or VisionMode.Matting && Rmbg3Matte.Handles(spec))
+            return Rmbg3(spec, request, cancel);
         return Task.Run(
             () =>
             {
@@ -348,6 +351,36 @@ public sealed class VisionService : IVisionService, IDisposable
         {
             pixels.Dispose();
         }
+    }
+
+    /// <summary>RMBG 3.0 (background removal or matting): the Fibo 2.0 edit path draws the matte (<see cref="Rmbg3Matte"/>), which
+    /// then takes the same two forms as RMBG-1.4's and BiRefNet's results. It runs through the image service, so the 8 B transformer
+    /// is cached and released with the image pipelines, not with this service's vision caches.</summary>
+    private async Task<VisionResult> Rmbg3(ModelSpec spec, VisionRequest request, CancellationToken cancel)
+    {
+        ImageData image = request.Image;
+        byte[] alpha = await Rmbg3Matte.AlphaAsync(_engine, spec, image, cancel).ConfigureAwait(false);
+        float[] coverage = new float[alpha.Length];
+        for (int i = 0; i < coverage.Length; i++)
+            coverage[i] = alpha[i] / 255f;
+        if (request.Mode == VisionMode.Matting)
+        {
+            return new VisionResult
+            {
+                Image = new ImageData { Rgb = image.Rgb, Width = image.Width, Height = image.Height, Alpha = alpha },
+                Matte = new VisionArray(coverage, image.Height, image.Width),
+            };
+        }
+        return new VisionResult
+        {
+            Image = new ImageData
+            {
+                Rgb = RmbgBackgroundRemover.CompositeOnGray(coverage, image.Rgb, image.Width, image.Height),
+                Width = image.Width,
+                Height = image.Height,
+                Alpha = alpha,
+            },
+        };
     }
 
     /// <summary>RMBG-1.4: foreground cutout composited onto neutral gray-0.5 in <see cref="ImageData.Rgb"/> (what the
