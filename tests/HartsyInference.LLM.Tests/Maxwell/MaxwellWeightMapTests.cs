@@ -60,6 +60,21 @@ public sealed class MaxwellWeightMapTests
         Assert.All(mtp, static k => Assert.True(MaxwellWeightMap.IsMtpKey(k)));
     }
 
+    [Fact]
+    public void TinyReferenceCheckpoint_ParsesAndMapsKeyForKey()
+    {
+        // Written by tools/maxwell-reference/dump_tiny.py from the release's own modeling code (float32, shrunk geometry).
+        string directory = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Maxwell");
+        MaxwellConfig tiny = MaxwellConfig.Parse(File.ReadAllText(Path.Combine(directory, "config.json")));
+        using BlockFp8CheckpointWeights weights = BlockFp8CheckpointWeights.Open(directory, "Maxwell");
+
+        CheckpointKeyCoverage coverage = MaxwellWeightMap.Check(tiny, weights.Names, mtp: true);
+
+        coverage.RequireComplete();
+        Assert.Equal(24, tiny.Sparse.DenseCausalLimit);
+        Assert.Equal(MaxwellWeightMap.ExpectedKeys(tiny).Count + MaxwellWeightMap.ExpectedMtpKeys(tiny).Count, coverage.Mapped);
+    }
+
     [RealWeightsFact("MAXWELL_INDEX_JSON")]
     [Trait("Category", "Integration")]
     public void RealIndex_MapsKeyForKey()
