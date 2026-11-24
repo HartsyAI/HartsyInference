@@ -100,4 +100,52 @@ public sealed class Hy4FlashModelHfDumpTests(ITestOutputHelper output)
         }
         Assert.Equal(40, state.Length);
     }
+
+    [Fact]
+    public void VisionTower_MatchesTheHfTowerAndMergerOutput()
+    {
+        Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(DataDir, "config.json"));
+        using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenFiles([Path.Combine(DataDir, "weights.safetensors")]);
+        using Hy4FlashVisionTower tower = new(new CpuBackend(), config.Vision, new SetSource(set));
+        float[] pixels = Npy("image__pixel_values");
+        float[] actual = tower.Forward(pixels, 4, 4);
+        float[] expected = Npy("image__vision_out");
+        Assert.Equal(tower.TokenCount(4, 4) * config.Vision.OutHiddenSize, actual.Length);
+        float diff = RelativeMax(expected, actual, config.Vision.OutHiddenSize, out int row);
+        output.WriteLine($"vision tokens: {diff:E2} (worst token {row})");
+        Assert.True(diff < 1e-5f, $"vision output: {diff:E2} at token {row}");
+    }
+
+    [Fact]
+    public void ImageSequence_MatchesEveryStageOfTheHfDump()
+    {
+        Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(DataDir, "config.json"));
+        using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenFiles([Path.Combine(DataDir, "weights.safetensors")]);
+        SetSource source = new(set);
+        CpuBackend backend = new();
+        float[] features;
+        using (Hy4FlashVisionTower tower = new(backend, config.Vision, source)) features = tower.Forward(Npy("image__pixel_values"), 4, 4);
+        using Hy4FlashModel model = new(backend, config, source, 64);
+        Dictionary<string, float[]> got = [];
+        model.Trace = (name, data) => got[name] = data;
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(DataDir, "inputs_image.json")));
+        int[] ids = [.. document.RootElement.GetProperty("input_ids").EnumerateArray().Select(static e => e.GetInt32())];
+        using Hy4FlashSequenceState state = model.CreateState();
+        model.Forward(ids, state, allRows: true, images: [new Hy4FlashImage(4, 4, features)]);
+
+        List<string> failures = [];
+        int h = config.HiddenSize, hc = config.HcMult;
+        foreach ((string stage, int stride) in new (string, int)[]
+        {
+            ("embed", h), ("layer_0_attn_out", h), ("layer_0_out", hc * h), ("engram_1_out", hc * h), ("layer_1_attn_out", h), ("layer_1_ffn_out", h), ("layer_1_out", hc * h),
+            ("layer_2_attn_out", h), ("layer_2_out", hc * h), ("hc_head_out", h), ("final_norm_out", h), ("logits", config.VocabSize),
+        })
+        {
+            float diff = RelativeMax(Npy("image__" + stage), got[stage], stride, out int row);
+            output.WriteLine($"image {stage,-18} max relative difference {diff:E2} (worst row {row})");
+            if (diff > 1e-5f) failures.Add($"{stage}: {diff:E2} at row {row}");
+        }
+        Assert.True(failures.Count == 0, string.Join("; ", failures));
+        Assert.Equal(11 + 10, state.NextPosition);
+    }
 }

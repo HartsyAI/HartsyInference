@@ -17,6 +17,12 @@ public sealed class Hy4FlashSequenceState : IDisposable
     /// <summary>Positions processed so far.</summary>
     public int Length { get; internal set; }
 
+    /// <summary>The rotary position the next text token takes: one past the largest position so far (an image jumps it ahead of the slot count).</summary>
+    public int NextPosition { get; internal set; }
+
+    /// <summary>Images consumed so far, so a later chunk takes the next one.</summary>
+    public int ImagesUsed { get; internal set; }
+
     /// <inheritdoc />
     public void Dispose()
     {
