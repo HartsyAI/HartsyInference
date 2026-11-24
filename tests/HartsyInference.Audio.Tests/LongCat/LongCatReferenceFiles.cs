@@ -73,6 +73,6 @@ public sealed class LongCatWeightsFactAttribute : FactAttribute
         string? weights = Environment.GetEnvironmentVariable(weightsVariable);
         Skip = string.IsNullOrWhiteSpace(weights) || !File.Exists(weights)
             ? $"SKIPPED: {weightsVariable} is unset or not an existing file; the real-weight comparison did not run."
-            : LongCatReferenceFiles.Missing(files);
+            : files.Length == 0 ? null : LongCatReferenceFiles.Missing(files);
     }
 }
