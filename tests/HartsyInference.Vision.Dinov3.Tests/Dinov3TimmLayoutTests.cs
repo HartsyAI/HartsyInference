@@ -238,6 +238,51 @@ public sealed unsafe class Dinov3TimmLayoutTests
     }
 
     [Fact]
+    public void PrefixResetBlocks_KeepTheIncomingPrefixAndFeedItToTheNextBlock()
+    {
+        Dinov2Preset preset = TimmPreset(gated: false) with { NumLayers = 3, ImageSize = 32 };
+        Dictionary<string, Tensor> timm = TimmWeights(preset, seed: 21, prefix: "");
+        Dictionary<string, Tensor> hf = Dinov3TimmKeys.ToHuggingFace(timm, "", preset);
+        try
+        {
+            Dinov3VisionEncoder encoder = new(preset);
+            encoder.LoadWeights(hf);
+            using Tensor pixels = Pixels(2, 32, 64, seed: 22);
+            int prefix = 1 + preset.NumRegisterTokens, hidden = preset.HiddenSize, seq = (int)(prefix + 2L * 4);
+            int prefixWidth = prefix * hidden;
+
+            using Tensor embed = encoder.EncodeBlocks(Backend, pixels, lastBlock: -1);
+            Tensor[] plain = encoder.EncodeIntermediates(Backend, pixels, [0, 1]);
+            Tensor[] reset = encoder.EncodeIntermediates(Backend, pixels, [0, 1], prefixResetBlocks: [0]);
+            try
+            {
+                for (int b = 0; b < 2; b++)
+                {
+                    int row = b * seq * hidden, rowEnd = (b + 1) * seq * hidden;
+                    // Block 0's prefix is the embeddings' prefix again; its patch tokens are the plain block output.
+                    Assert.Equal(embed.AsReadOnlySpan<float>().Slice(row, prefixWidth).ToArray(), reset[0].AsReadOnlySpan<float>().Slice(row, prefixWidth).ToArray());
+                    Assert.Equal(plain[0].AsReadOnlySpan<float>()[(row + prefixWidth)..rowEnd].ToArray(),
+                        reset[0].AsReadOnlySpan<float>()[(row + prefixWidth)..rowEnd].ToArray());
+                }
+
+                Assert.True(MaxAbsDiff(plain[0].AsReadOnlySpan<float>(), reset[0].AsReadOnlySpan<float>()) > 0, "the reset changed nothing");
+                Assert.True(MaxAbsDiff(plain[1].AsReadOnlySpan<float>(), reset[1].AsReadOnlySpan<float>()) > 1e-6, "block 1 did not see the reset prefix");
+            }
+            finally
+            {
+                foreach (Tensor t in plain) t.Dispose();
+                foreach (Tensor t in reset) t.Dispose();
+            }
+
+            Assert.Throws<ArgumentOutOfRangeException>(() => encoder.EncodeIntermediates(Backend, pixels, [0], prefixResetBlocks: [3]));
+        }
+        finally
+        {
+            Dispose(timm);
+        }
+    }
+
+    [Fact]
     public void LongSideRope_IsThePerAxisRopeOnASquareGrid()
     {
         (Tensor cosA, Tensor sinA) = Dinov3RopeTables.Build(1, 5, 4, 4, 64, roundPeriodsToBf16: false);
