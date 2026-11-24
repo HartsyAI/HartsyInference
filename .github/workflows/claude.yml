@@ -21,6 +21,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      # issue_comment events run on the default branch, so the workspace holds main, not the pull request. The action hashes every changed file of
+      # the pull request in that workspace and aborts when a file the PR adds does not exist ("git hash-object ... No such file or directory"),
+      # which made every review of a PR that adds files fail after about a second. Check out the PR head first.
+      - name: Check out the pull request head
+        if: github.event.issue.pull_request || github.event.pull_request
+        env:
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          git fetch --depth=1 origin "pull/${PR_NUMBER}/head"
+          git checkout --force FETCH_HEAD
+
       - uses: anthropics/claude-code-action@v1
         with:
           # Uses your Claude subscription instead of API billing.
