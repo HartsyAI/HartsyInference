@@ -140,6 +140,9 @@ sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a fil
   - `Track` and `Interpolate` take frames only.
   - Only `Depth`, `MetricDepth` and `Geometry` take views.
   - Each model then refuses what it cannot do itself, for example a single-view depth model given views.
+  - `FocalLengthPx` applies to `MetricDepth` only. The focal length the model used, given or estimated, comes back in
+    `VisionResult.Camera`. Depth Pro 2 views share one focal length and are predicted one at a time until its
+    cross-frame attention lands.
 - **Results.** Structured fields on `VisionResult` are init-only and nullable; existing fields keep their meaning.
   - **Depth:** a float map with a `VisionDepthKind` and an optional validity mask.
   - **Point maps and normals:** H×W×3.
