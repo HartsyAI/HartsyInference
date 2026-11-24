@@ -524,6 +524,7 @@ public static class GenerationDispatch
             Threshold = parameters.GetFloat("confidence", 0.25f),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
+            FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
         };
         VisionRequestValidator.Validate(request);
         VisionResult result = await engine.Vision.RunAsync(spec, request, cancel).ConfigureAwait(false);
@@ -636,6 +637,7 @@ public static class GenerationDispatch
                 ? [new VisionFramePrompt { FrameIndex = 0, ObjectId = 1, Text = query }]
                 : null,
             Threshold = parameters.GetFloat("confidence", 0.25f),
+            FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
         };
         VisionRequestValidator.Validate(request);
         string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), folder);
@@ -723,6 +725,7 @@ public static class GenerationDispatch
                 ? LoadAudioClip(drivingAudio)
                     ?? throw new FileNotFoundException($"Driving audio not found: {drivingAudio}")
                 : null,
+            SeparateDrivingVocals = parameters.GetBool("separate-vocals", false),
             Guides = VideoInputManifest.Guides(parameters),
             VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
             AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),
