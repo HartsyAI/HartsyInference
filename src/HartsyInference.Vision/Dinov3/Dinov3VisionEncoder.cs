@@ -250,7 +250,9 @@ public sealed unsafe class Dinov3VisionEncoder
         Tensor qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
         backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
         q.Dispose();
-        Tensor attended = attention.AttendCachedHeadMajor(backend, qMh, ring.Keys(block), ring.Values(block), new AttentionCacheView(live, 0, false));
+        // The live rows as exact-length operands take the dense attention entry, which is much faster on the CPU than the cache-view (flash) entry.
+        Tensor keys = LiveRows(ring.Keys(block), live), values = LiveRows(ring.Values(block), live);
+        Tensor attended = attention.AttendHeadMajorOperands(backend, qMh, keys, values, default);
         Tensor flat = attention.MergeHeads(backend, attended, new TensorShape(1, patches, hidden));
         using Tensor patchOut = layer.FinishAttention(backend, patchRows, flat);
 
@@ -259,6 +261,17 @@ public sealed unsafe class Dinov3VisionEncoder
         prefixRows.AsReadOnlySpan<float>().CopyTo(dst);
         patchOut.AsReadOnlySpan<float>().CopyTo(dst[(prefix * hidden)..]);
         return next;
+    }
+
+    // The first `rows` rows of every head of a head-major cache [1, heads, capacity, D], as a new [1, heads, rows, D].
+    private static Tensor LiveRows(Tensor cache, int rows)
+    {
+        int heads = (int)cache.Shape[1], capacity = (int)cache.Shape[2], dim = (int)cache.Shape[3];
+        Tensor live = new(new TensorShape(1, heads, rows, dim), DType.F32);
+        ReadOnlySpan<float> src = cache.AsReadOnlySpan<float>();
+        Span<float> dst = live.AsSpan<float>();
+        for (int h = 0; h < heads; h++) src.Slice(h * capacity * dim, rows * dim).CopyTo(dst.Slice(h * rows * dim, rows * dim));
+        return live;
     }
 
     // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero frames the patch rows
