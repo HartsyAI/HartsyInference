@@ -54,7 +54,7 @@ public static class OvbPrompts
         for (int i = 0; i < legend.Count; i++)
         {
             OvbLegendEntry entry = legend[i];
-            ValidateName(entry.Name, nameof(legend));
+            ValidateName(entry.Name, nameof(legend), allowApostrophe: style == OvbSemsegStyle.Quickstart);
             if (i > 0)
                 map.Append(", ");
             map.Append(style == OvbSemsegStyle.Quickstart ? '"' : '\'').Append(entry.Name).Append(style == OvbSemsegStyle.Quickstart ? '"' : '\'').Append(": ");
@@ -78,14 +78,16 @@ public static class OvbPrompts
     /// <see cref="ReferringColor"/>, everything else black.</summary>
     public static string ReferringSegmentation(string description)
     {
-        ValidateName(description, nameof(description));
+        ValidateName(description, nameof(description), allowApostrophe: true);
+        (byte r, byte g, byte b) = ReferringColor;
         return "[TASK: REFERRING_SEGMENTATION] Segment the region that best matches this description: \"" + description
-            + "\". Paint the matching region red [220, 30, 30] and leave everything else black [0, 0, 0]. "
+            + "\". Paint the matching region red [" + r + ", " + g + ", " + b + "] and leave everything else black [0, 0, 0]. "
             + "Output only the segmentation mask image.";
     }
 
-    /// <summary>Refuses a name that would break the prompt's own structure: it sits inside quotes inside a braced mapping.</summary>
-    internal static void ValidateName(string? name, string parameter)
+    /// <summary>Refuses a name that would break the prompt's own structure: it sits inside quotes inside a braced mapping. An
+    /// apostrophe only breaks the single-quoted spelling, so the double-quoted ones allow it.</summary>
+    internal static void ValidateName(string? name, string parameter, bool allowApostrophe = false)
     {
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("A class name or description cannot be empty.", parameter);
@@ -93,7 +95,7 @@ public static class OvbPrompts
             throw new ArgumentException($"'{name[..20]}...' is longer than {MaxNameLength} characters.", parameter);
         foreach (char c in name)
         {
-            if (c is '"' or '\'' or '\\' or '{' or '}' || char.IsControl(c))
+            if (c is '"' or '\\' or '{' or '}' || (c == '\'' && !allowApostrophe) || char.IsControl(c))
                 throw new ArgumentException($"'{name}' contains a character the prompt format cannot carry ({(char.IsControl(c) ? "a control character" : c.ToString())}).", parameter);
         }
     }

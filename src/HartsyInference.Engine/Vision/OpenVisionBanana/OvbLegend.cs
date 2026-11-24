@@ -4,7 +4,11 @@ namespace HartsyInference.Engine.Vision.OpenVisionBanana;
 /// code probes the model with): shuffle the 200-colour palette, take colours in that order that are at least
 /// <see cref="MinDeltaE"/> apart in CIELAB from every colour already chosen, then relax with the skipped ones if the legend is
 /// larger than the separated set. Python's shuffle is not reproduced: the model was trained on random draws, so any
-/// seeded draw is in distribution, and a fixed seed keeps a run repeatable.</summary>
+/// seeded draw is in distribution, and a fixed seed keeps a run repeatable.
+/// <para>Like the release's draw, this separates legend colours from each other and not from black, so a legend can hold one of the
+/// palette's dark entries (for example <c>27,36,49</c>, about 14 CIELAB lightness) that sits close to the black background target
+/// <see cref="OvbDecoder.SnapToLegend"/> decodes as ignore; such a class loses its darkest pixels to the background. Faithful to the
+/// release, and the reason a stable legend seed matters when comparing runs.</para></summary>
 public static class OvbLegend
 {
     /// <summary>The release's separation floor between two legend colours (CIE76 delta E).</summary>

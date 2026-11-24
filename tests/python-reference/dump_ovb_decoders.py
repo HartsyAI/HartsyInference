@@ -10,8 +10,9 @@ real-weight run also compares against the release's own pipeline outputs.
                                                                       evaluation/semseg/inference_partial_flux2_klein_img2img.py
   decode_surface_normals_rgb (vision_banana_x_left_red, min_norm)     common/surface_normal_encoding.py L123-L147
   depth read: PIL convert("L") / 255                                   evaluation/depth/inference_partial_flux2_klein_img2img.py L262
+  rgb_to_foreground (referring segmentation)                           evaluation/refseg/inference_flux2_klein_refseg.py L176-L188
 
-Run in the CPU reference container (numpy, pillow, torch for safetensors):
+Run in a CPU container with numpy, pillow and torch (for safetensors); the project's `hartsy-ref:cpu` image is local to the maintainers' machine, any equivalent works:
 
     bash .claude/run-outputs/refenv/run.sh -v "<worktree>:/wt" --       python /wt/tests/python-reference/dump_ovb_decoders.py --out /wt/tests/HartsyInference.Engine.Tests/Fixtures/ovb_decoders
 
@@ -34,11 +35,15 @@ H, W, K, PASSES = 20, 24, 5, 3
 IGNORE = 255
 
 
-def rgb_to_trainids_via_legend_with_dist(rgb, colors):
+def rgb_to_trainids_via_legend_with_dist(rgb, colors, class_ids=None):
+    # The release's legend is one colour per label of the whole taxonomy; a grouped pass (a legend over a subset of the classes)
+    # names its classes by their global id through class_ids, which this transcription adds to model that. merge_grouped_predictions
+    # documents its inputs as "already mapped to FULL-taxonomy ids".
     arr = np.array(rgb, dtype=np.int32)
     h, w, _ = arr.shape
     palette = np.array(list(colors) + [[0, 0, 0]], dtype=np.int32)
-    mapping = np.array(list(range(len(colors))) + [IGNORE], dtype=np.uint8)
+    ids_for_colors = list(range(len(colors))) if class_ids is None else list(class_ids)
+    mapping = np.array(ids_for_colors + [IGNORE], dtype=np.uint8)
     flat = arr.reshape(-1, 3)
     dist = ((flat[:, None, :] - palette[None, :, :]) ** 2).sum(axis=2)
     idx = dist.argmin(axis=1)
@@ -81,6 +86,15 @@ def make_selective_prompt(classes, colors):
         "Pixels that do not belong to one of these listed classes must be black [0, 0, 0] "
         "and must not be forced into a listed class. Output only the segmentation visualization image."
     )
+
+
+def rgb_to_foreground(rgb, fg_color):
+    # evaluation/refseg/inference_flux2_klein_refseg.py L176-L188: nearer to the paint colour than to black, strictly.
+    arr = np.asarray(rgb, dtype=np.int64)
+    fg = np.asarray(fg_color, dtype=np.int64)
+    d_fg = ((arr - fg) ** 2).sum(-1)
+    d_bg = (arr ** 2).sum(-1)
+    return (d_fg < d_bg).astype(np.uint8)
 
 
 def decode_normals(rgb, min_norm=0.05):
@@ -142,15 +156,46 @@ def main() -> None:
 
     # Depth read and normals decode on an arbitrary RGB image (not gray: the luma weights matter).
     free = nprng.integers(0, 256, size=(H, W, 3), dtype=np.uint8)
-    tensors["free_rgb"] = torch.tensor(free, dtype=torch.float32)
-    tensors["depth"] = torch.tensor(np.asarray(Image.fromarray(free).convert("L"), dtype=np.float32) / 255.0)
     # Some mid-grey pixels so the validity floor (norm < 0.05) is exercised.
     free[0, :6] = [128, 128, 128]
     tensors["free_rgb"] = torch.tensor(free, dtype=torch.float32)
+    tensors["depth"] = torch.tensor(np.asarray(Image.fromarray(free).convert("L"), dtype=np.float32) / 255.0)
     unit, valid = decode_normals(free)
     tensors["normals"] = torch.tensor(unit, dtype=torch.float32)
     tensors["normals_valid"] = torch.tensor(valid.astype(np.float32))
-    tensors["depth"] = torch.tensor(np.asarray(Image.fromarray(free).convert("L"), dtype=np.float32) / 255.0)
+
+    # Grouped protocol: three passes whose legends cover DISJOINT class sets (global ids g*4..g*4+3 of 12 classes), each painting
+    # only its own classes and black elsewhere, merged by snap distance.
+    GROUPS, PER = 3, 4
+    truth12 = np.full((H, W), 255, dtype=np.int64)
+    for c in range(GROUPS * PER):
+        y, x = nprng.integers(0, H - 5), nprng.integers(0, W - 7)
+        truth12[y:y + nprng.integers(3, 6), x:x + nprng.integers(4, 8)] = c
+    group_ids, group_dists = [], []
+    for g in range(GROUPS):
+        gcolors = [[int(v) for v in c] for c in nprng.choice(np.arange(8, 248, 16), size=(PER, 3))]
+        while len({tuple(c) for c in gcolors}) < PER:
+            gcolors = [[int(v) for v in c] for c in nprng.choice(np.arange(8, 248, 16), size=(PER, 3))]
+        gpaint = np.zeros((H, W, 3), dtype=np.int32)
+        for k in range(PER):
+            gpaint[truth12 == g * PER + k] = gcolors[k]
+        gpaint = np.clip(gpaint + nprng.integers(-14, 15, size=gpaint.shape), 0, 255).astype(np.uint8)
+        gids, gdist = rgb_to_trainids_via_legend_with_dist(gpaint, gcolors, class_ids=list(range(g * PER, g * PER + PER)))
+        group_ids.append(gids)
+        group_dists.append(gdist)
+        tensors[f"grp_legend{g}"] = torch.tensor(gcolors, dtype=torch.float32)
+        tensors[f"grp_rgb{g}"] = torch.tensor(gpaint, dtype=torch.float32)
+        tensors[f"grp_ids{g}"] = torch.tensor(gids.astype(np.float32))
+        tensors[f"grp_dist{g}"] = torch.tensor(gdist, dtype=torch.float32)
+    tensors["grp_merged"] = torch.tensor(np.asarray(merge_grouped_predictions(group_ids, group_dists), dtype=np.float32))
+
+    # Referring segmentation: a picture of red, black and in-between pixels, decoded against the paint colour.
+    refer = np.zeros((H, W, 3), dtype=np.uint8)
+    refer[:, : W // 2] = [220, 30, 30]
+    refer = np.clip(refer.astype(np.int32) + nprng.integers(-60, 61, size=refer.shape), 0, 255).astype(np.uint8)
+    refer[0, 0] = [110, 15, 15]  # exactly on the midpoint between red and black: a tie, which is background
+    tensors["refer_rgb"] = torch.tensor(refer, dtype=torch.float32)
+    tensors["refer_fg"] = torch.tensor(rgb_to_foreground(refer, [220, 30, 30]).astype(np.float32))
 
     quickstart_colors = legends[0]
     quickstart = (
