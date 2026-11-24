@@ -16,7 +16,7 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
     {
         /// <summary>Path to the input image, or a folder of images for frame and multi-view modes.</summary>
         [CommandArgument(0, "<image>")]
-        [Description("Path to the input image, or a folder of .png/.bmp images (sorted by name): the frames for track/interpolate, or the views for multi-view depth/metric-depth/geometry.")]
+        [Description("Path to the input image, or a folder of .png/.bmp images (sorted by name): the frames for track/interpolate (and metric-depth with --fps), or the views for multi-view depth/metric-depth/geometry.")]
         public string Image { get; init; } = "";
 
         /// <summary>Model id: clip (embed) or yolo8 / yolo11 (detect).</summary>
@@ -46,8 +46,23 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Frame modes: the input folder's frame rate.</summary>
         [CommandOption("--fps")]
-        [Description("track/interpolate: the input frames' rate (frame i is at i / fps seconds).")]
+        [Description("track/interpolate/metric-depth: the input frames' rate (frame i is at i / fps seconds). For metric-depth it makes a folder a video instead of views of one scene.")]
         public double? Fps { get; init; }
+
+        /// <summary>Video metric depth: frames attended together.</summary>
+        [CommandOption("--window")]
+        [Description("metric-depth video only: frames attended together, the clip length (buffered) or the cached frames with the current one (unbuffered). Default 16.")]
+        public int? Window { get; init; }
+
+        /// <summary>Video metric depth: frames shared by consecutive buffered clips.</summary>
+        [CommandOption("--overlap")]
+        [Description("metric-depth video only, buffered: frames shared by consecutive clips, cross-faded (default 4, below --window).")]
+        public int? Overlap { get; init; }
+
+        /// <summary>Video metric depth: predict each frame from itself and earlier frames only.</summary>
+        [CommandOption("--unbuffered")]
+        [Description("metric-depth video only: predict each frame as it arrives from itself and the frames before it (a key/value cache), instead of overlapping clips that also see later frames.")]
+        public bool Unbuffered { get; init; }
 
         /// <summary>Interpolate: output frames per input interval.</summary>
         [CommandOption("--factor")]
@@ -134,6 +149,18 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         if (settings.FocalPx is double focalPx)
         {
             parameters.Put("focal-px", focalPx.ToString("R", CultureInfo.InvariantCulture));
+        }
+        if (settings.Window is int window)
+        {
+            parameters.Put("window", window.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.Overlap is int overlap)
+        {
+            parameters.Put("overlap", overlap.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.Unbuffered)
+        {
+            parameters.Put("unbuffered", "true");
         }
 
         ModelSpec spec = ModelResolver.Resolve(model, settings.ModelPath, Modality.Vision);
