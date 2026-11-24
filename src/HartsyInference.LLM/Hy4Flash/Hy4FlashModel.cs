@@ -205,6 +205,7 @@ public sealed class Hy4FlashModel : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (Hy4FlashLayer? layer in _layers) layer?.Dispose();
+        foreach (Hy4FlashEngramLayer? engram in _engram) engram?.Dispose();
         foreach (Tensor t in _owned) t.Dispose();
         _owned.Clear();
     }

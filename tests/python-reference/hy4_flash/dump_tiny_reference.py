@@ -118,6 +118,7 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--allow-unpinned", action="store_true")
     parser.add_argument("--seed", type=int, default=20261124)
+    parser.add_argument("--engram-fp8", action="store_true", help="set engram_fp8_embedding true (same weights, a second reference for the in-layer round trip)")
     args = parser.parse_args()
     require_pinned_transformers(args.allow_unpinned)
 
@@ -129,6 +130,8 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     config_dict = json.loads((HERE / "tiny_config.json").read_text())
+    if args.engram_fp8:
+        config_dict["text_config"]["engram_fp8_embedding"] = True
     (out / "config.json").write_text(json.dumps(config_dict, indent=2))
     text, vision, root = config_dict["text_config"], config_dict["vision_config"], config_dict
 
