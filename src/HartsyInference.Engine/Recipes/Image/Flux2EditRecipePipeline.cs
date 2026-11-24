@@ -1,4 +1,5 @@
 using System.Globalization;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -34,19 +35,39 @@ public sealed class Flux2EditRecipePipeline(Flux2EditPipeline pipeline, Qwen3Tok
     /// <summary>The pixel area diffusers caps an input photo at before the VAE.</summary>
     public const int ReferenceArea = 1024 * 1024;
 
-    /// <summary>The size diffusers' <c>Flux2KleinPipeline</c> feeds the VAE: a photo above one megapixel is scaled to that area
-    /// (<c>int(side * sqrt(area / (w*h)))</c>, truncating), then each side is floored to a multiple of 16.</summary>
-    public static (int Width, int Height) ReferenceSize(int width, int height)
+    /// <summary>The photo's size after diffusers' area cap: above one megapixel it is scaled to that area
+    /// (<c>int(side * sqrt(area / (w*h)))</c>, truncating); otherwise unchanged.</summary>
+    public static (int Width, int Height) CappedSize(int width, int height)
     {
-        if ((long)width * height > ReferenceArea)
-        {
-            double scale = Math.Sqrt(ReferenceArea / ((double)width * height));
-            (width, height) = ((int)(width * scale), (int)(height * scale));
-        }
-        return (width / 16 * 16, height / 16 * 16);
+        if ((long)width * height <= ReferenceArea)
+            return (width, height);
+        double scale = Math.Sqrt(ReferenceArea / ((double)width * height));
+        return ((int)(width * scale), (int)(height * scale));
     }
 
-    /// <summary>The photo as the VAE reads it: area-capped with Lanczos, then cover-cropped to the 16-multiple size, RGB in [-1, 1].</summary>
+    /// <summary>The size diffusers' <c>Flux2KleinPipeline</c> feeds the VAE: the area-capped size with each side floored to a
+    /// multiple of 16.</summary>
+    public static (int Width, int Height) ReferenceSize(int width, int height)
+    {
+        (int w, int h) = CappedSize(width, height);
+        return (w / 16 * 16, h / 16 * 16);
+    }
+
+    /// <summary>diffusers' <c>VaeImageProcessor._resize_and_crop</c> geometry for a <paramref name="srcWidth"/>×<paramref name="srcHeight"/>
+    /// image into a <paramref name="width"/>×<paramref name="height"/> box: the image is resized so it covers the box (integer
+    /// floor division for the free side) and pasted centred at <c>(width//2 - w//2, height//2 - h//2)</c>, so a negative offset
+    /// is the amount cropped off the leading edge.</summary>
+    public static (int ScaledWidth, int ScaledHeight, int OffsetX, int OffsetY) CoverGeometry(int srcWidth, int srcHeight, int width, int height)
+    {
+        // ratio > src_ratio  <=>  width * srcHeight > srcWidth * height, in exact integers.
+        bool wider = (long)width * srcHeight > (long)srcWidth * height;
+        int scaledWidth = wider ? width : (int)((long)srcWidth * height / srcHeight);
+        int scaledHeight = !wider ? height : (int)((long)srcHeight * width / srcWidth);
+        return (scaledWidth, scaledHeight, width / 2 - scaledWidth / 2, height / 2 - scaledHeight / 2);
+    }
+
+    /// <summary>The photo as the VAE reads it: area-capped with Lanczos, then resized and centre-cropped to the 16-multiple size
+    /// by <see cref="CoverGeometry"/> (Lanczos again), RGB in [-1, 1].</summary>
     public static Tensor ToReferenceTensor(ImageData photo)
     {
         ArgumentNullException.ThrowIfNull(photo);
@@ -54,13 +75,29 @@ public sealed class Flux2EditRecipePipeline(Flux2EditPipeline pipeline, Qwen3Tok
         if (width < 16 || height < 16)
             throw new ArgumentException($"{Family} needs a photo of at least 16 pixels a side; got {photo.Width}x{photo.Height}.", nameof(photo));
         ImageData image = photo;
-        if ((long)photo.Width * photo.Height > ReferenceArea)
+        (int cappedWidth, int cappedHeight) = CappedSize(photo.Width, photo.Height);
+        if (cappedWidth != photo.Width || cappedHeight != photo.Height)
+            image = new ImageData { Rgb = FeatureImaging.ResizeRgb24Lanczos(photo, cappedWidth, cappedHeight), Width = cappedWidth, Height = cappedHeight };
+        if (image.Width != width || image.Height != height)
         {
-            double scale = Math.Sqrt(ReferenceArea / ((double)photo.Width * photo.Height));
-            int scaledW = (int)(photo.Width * scale), scaledH = (int)(photo.Height * scale);
-            image = new ImageData { Rgb = FeatureImaging.ResizeRgb24Lanczos(photo, scaledW, scaledH), Width = scaledW, Height = scaledH };
+            (int scaledWidth, int scaledHeight, int offsetX, int offsetY) = CoverGeometry(image.Width, image.Height, width, height);
+            byte[] scaled = scaledWidth == image.Width && scaledHeight == image.Height
+                ? image.Rgb : FeatureImaging.ResizeRgb24Lanczos(image, scaledWidth, scaledHeight);
+            byte[] cropped = new byte[(long)width * height * 3];
+            for (int y = 0; y < height; y++)
+            {
+                int sy = y - offsetY;
+                if ((uint)sy >= (uint)scaledHeight)
+                    continue;
+                for (int x = 0; x < width; x++)
+                {
+                    int sx = x - offsetX;
+                    if ((uint)sx < (uint)scaledWidth)
+                        Buffer.BlockCopy(scaled, (sy * scaledWidth + sx) * 3, cropped, (y * width + x) * 3, 3);
+                }
+            }
+            image = new ImageData { Rgb = cropped, Width = width, Height = height };
         }
-        image = FeatureImaging.CoverCrop(image, width, height);
         return FeatureImaging.RgbToTensorMinusOneOne(image.Rgb, width, height);
     }
 
@@ -75,8 +112,7 @@ public sealed class Flux2EditRecipePipeline(Flux2EditPipeline pipeline, Qwen3Tok
     private readonly MergedLoraStack? _loraStack = loraStack;
     private int _disposed;
 
-    /// <summary>The prompt's token ids exactly as Qwen3's chat template renders them (thinking off, as diffusers'
-    /// <c>enable_thinking=False</c>), right-padded to 512, and the real length the encoder masks to. No weighting grammar runs.</summary>
+    /// <summary>The prompt's token ids exactly as Qwen3's chat template renders them (<c>enable_thinking=False</c> as diffusers calls it, which renders Qwen3's empty think block after the assistant turn), right-padded to 512, and the real length the encoder masks to. No weighting grammar runs.</summary>
     public IrisZPrompt Tokenize(string prompt)
     {
         (int[] ids, int realLength) = _tokenizer.EncodeChatWithLength(prompt);
@@ -108,6 +144,8 @@ public sealed class Flux2EditRecipePipeline(Flux2EditPipeline pipeline, Qwen3Tok
         List<Tensor> references = new(ordered.Count);
         try
         {
+            if (ordered.Count > 0 && (request.Width is not null || request.Height is not null))
+                Logs.Info($"[{Family}] the output is the reference photo's size; the requested {request.Width}x{request.Height} is not used, as in diffusers.");
             foreach (ImageData photo in ordered) references.Add(ToReferenceTensor(photo));
             (int width, int height) = references.Count == 0
                 ? (settings.Width / 16 * 16, settings.Height / 16 * 16)

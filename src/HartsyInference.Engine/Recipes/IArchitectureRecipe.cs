@@ -41,6 +41,11 @@ public interface IArchitectureRecipe
     /// the pipeline ignores would leave the emphasis parens in the prompt as prose.</summary>
     Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.None;
 
+    /// <summary>The weighting mode of <paramref name="variant"/>: a build whose pipeline does not apply emphasis (a perception
+    /// model whose prompts carry parentheses as text) answers <see cref="Diffusion.Prompting.PromptWeightingMode.None"/>
+    /// even when its family weights; the default is the family-level <see cref="PromptWeighting"/>.</summary>
+    Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ResolvedModelVariant? variant) => PromptWeighting;
+
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null. Every recipe declares its own; there is no generic fallback.</summary>
     ImageDefaults Defaults { get; }
