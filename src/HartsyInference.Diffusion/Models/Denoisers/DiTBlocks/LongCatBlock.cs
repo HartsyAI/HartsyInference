@@ -36,23 +36,23 @@ public sealed class LongCatBlock : IStreamingBlock
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _adaWeight = w[$"{prefix}.adaLN_modulation.1.weight"];
-        _adaBias = w[$"{prefix}.adaLN_modulation.1.bias"];
+        _adaBias = TensorCasts.LoadF32(w, $"{prefix}.adaLN_modulation.1.bias");
         _qkv = w[$"{prefix}.attn.qkv.weight"];
-        _qkvBias = w[$"{prefix}.attn.qkv.bias"];
+        _qkvBias = TensorCasts.LoadF32(w, $"{prefix}.attn.qkv.bias");
         _qNorm = TensorCasts.LoadF32(w, $"{prefix}.attn.q_norm.weight");
         _kNorm = TensorCasts.LoadF32(w, $"{prefix}.attn.k_norm.weight");
         _proj = w[$"{prefix}.attn.proj.weight"];
-        _projBias = w[$"{prefix}.attn.proj.bias"];
+        _projBias = TensorCasts.LoadF32(w, $"{prefix}.attn.proj.bias");
         _crossNormWeight = TensorCasts.LoadF32(w, $"{prefix}.pre_crs_attn_norm.weight");
         _crossNormBias = TensorCasts.LoadF32(w, $"{prefix}.pre_crs_attn_norm.bias");
         _crossQ = w[$"{prefix}.cross_attn.q_linear.weight"];
-        _crossQBias = w[$"{prefix}.cross_attn.q_linear.bias"];
+        _crossQBias = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.q_linear.bias");
         _crossKv = w[$"{prefix}.cross_attn.kv_linear.weight"];
-        _crossKvBias = w[$"{prefix}.cross_attn.kv_linear.bias"];
+        _crossKvBias = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.kv_linear.bias");
         _crossQNorm = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.q_norm.weight");
         _crossKNorm = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.k_norm.weight");
         _crossProj = w[$"{prefix}.cross_attn.proj.weight"];
-        _crossProjBias = w[$"{prefix}.cross_attn.proj.bias"];
+        _crossProjBias = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.proj.bias");
         _w1 = w[$"{prefix}.ffn.w1.weight"];
         _w2 = w[$"{prefix}.ffn.w2.weight"];
         _w3 = w[$"{prefix}.ffn.w3.weight"];

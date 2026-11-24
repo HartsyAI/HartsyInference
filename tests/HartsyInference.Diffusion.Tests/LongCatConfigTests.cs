@@ -31,6 +31,16 @@ public sealed class LongCatConfigTests
         Assert.Equal(11008, new LongCatConfig().FfnHiddenDim);
     }
 
+    /// <summary>The key set and shapes against a number the repository publishes: the base DiT's F32 index declares
+    /// <c>total_size</c> 54,324,285,696 bytes (meituan-longcat/LongCat-Video @ 03b55529, dit/).</summary>
+    [Fact]
+    public void ExpectedShapesAddUpToTheBaseDitIndexTotal()
+    {
+        long bytes = LongCatCheckpoint.ExpectedShapes(new LongCatConfig()).Values.Sum(static shape => shape.ElementCount * 4L);
+
+        Assert.Equal(54_324_285_696L, bytes);
+    }
+
     [Fact]
     public void ZeroPadFlagFollowsTheJson()
     {

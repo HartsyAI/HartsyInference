@@ -59,17 +59,17 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         _patchW2d = WanDitOps.Reshape2d(w["x_embedder.proj.weight"], _config.HiddenSize, _config.PatchVector);
         _patchBias = TensorCasts.LoadF32(w, "x_embedder.proj.bias");
         _time1W = w["t_embedder.mlp.0.weight"];
-        _time1B = w["t_embedder.mlp.0.bias"];
+        _time1B = TensorCasts.LoadF32(w, "t_embedder.mlp.0.bias");
         _time2W = w["t_embedder.mlp.2.weight"];
-        _time2B = w["t_embedder.mlp.2.bias"];
+        _time2B = TensorCasts.LoadF32(w, "t_embedder.mlp.2.bias");
         _text1W = w["y_embedder.y_proj.0.weight"];
-        _text1B = w["y_embedder.y_proj.0.bias"];
+        _text1B = TensorCasts.LoadF32(w, "y_embedder.y_proj.0.bias");
         _text2W = w["y_embedder.y_proj.2.weight"];
-        _text2B = w["y_embedder.y_proj.2.bias"];
+        _text2B = TensorCasts.LoadF32(w, "y_embedder.y_proj.2.bias");
         _finalAdaW = w["final_layer.adaLN_modulation.1.weight"];
-        _finalAdaB = w["final_layer.adaLN_modulation.1.bias"];
+        _finalAdaB = TensorCasts.LoadF32(w, "final_layer.adaLN_modulation.1.bias");
         _finalW = w["final_layer.linear.weight"];
-        _finalB = w["final_layer.linear.bias"];
+        _finalB = TensorCasts.LoadF32(w, "final_layer.linear.bias");
         for (int i = 0; i < _blocks.Length; i++)
             _blocks[i].LoadWeights(w, $"blocks.{i}");
     }
