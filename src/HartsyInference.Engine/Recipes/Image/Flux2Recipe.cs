@@ -64,6 +64,12 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
 
     /// <inheritdoc/>
+    /// <remarks>Open Vision Banana's task prompts carry parentheses, brackets and braces as text and reach the encoder verbatim, so it
+    /// applies no weighting and must not advertise it.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ResolvedModelVariant? variant) =>
+        Flux2Variants.IsOpenVisionBanana(variant) ? Diffusion.Prompting.PromptWeightingMode.None : PromptWeighting;
+
+    /// <inheritdoc/>
     /// <remarks>Matches the catalog id <c>flux2-klein-4b</c> as well: the registry resolves a catalog entry by its id, and the
     /// variant still comes from the transformer's hidden size.</remarks>
     public bool Matches(string familyId) =>
@@ -158,13 +164,14 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             // Pre-cast BF16 → F16 on CPU (F16 keeps the same footprint as BF16 and F16↔F32 is supported on every op).
             // Quantized tensors stay native — they dequant transiently per-GEMM elsewhere, and a plain CastTo throws
             // for quantized dtypes (needs GgufDequantizer instead).
+            // Resolved before the cast: Open Vision Banana ships fp32 shards, which would sit at twice the bf16 footprint.
+            ResolvedModelVariant variant = context.ResolveVariant(Flux2Variants.Catalog);
             Dictionary<string, Tensor> castWeights = new Dictionary<string, Tensor>(source.Weights.Count);
             foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
-                castWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
+                castWeights[kvp.Key] = NarrowOnLoad(variant, kvp.Value);
             }
 
-            ResolvedModelVariant variant = context.ResolveVariant(Flux2Variants.Catalog);
             Flux2Config config = Flux2Variants.ConfigFor(variant);
             Logs.Info($"[Flux2Recipe] Architecture: hidden={config.HiddenSize}, depth={config.Depth} double + {config.DepthSingleBlocks} single → {DescribeConfig(config)}.");
 
@@ -184,10 +191,11 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             Tensor? irisEmptyPrompt = Flux2Variants.IsIrisZ(variant) ? LoadIrisZEmptyPrompt(context, variant, loaders) : null;
 
             transformer = new Flux2Transformer(config);
-            if (irisEmptyPrompt is not null)
+            if (irisEmptyPrompt is not null || Flux2Variants.IsOpenVisionBanana(variant))
             {
-                // An Iris-Z transformer owns its modality rows and segment layouts; the pipeline releases it with the
-                // loaders. The plain FLUX.2 pipelines keep theirs alive as before: its fixed buffers back a captured step graph.
+                // An Iris-Z or Open Vision Banana transformer is released with the loaders: neither captures a step graph, so
+                // nothing outlives the pipeline. The plain FLUX.2 pipelines keep theirs alive as before: its fixed buffers back
+                // a captured step graph.
                 loaders.Add(transformer);
             }
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
@@ -277,6 +285,18 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             new CompositeDisposable([qwenTokenizer, mistralTokenizer, encoder, transformer, .. loaders, checkpoint, loraStack]).Dispose();
             throw;
         }
+    }
+
+    /// <summary>The dtype a checkpoint tensor is held in after load: BF16 narrows to F16 (same footprint, supported by every op),
+    /// and an Open Vision Banana FP32 tensor does too, since its release is fp32 and was trained and evaluated in bf16, so a 4B
+    /// DiT stays 7.75 GB resident instead of 15.5 GB. Everything else, quantized tensors included, is kept as read.</summary>
+    internal static DType LoadedDType(ResolvedModelVariant variant, DType stored) =>
+        stored == DType.BF16 || (stored == DType.F32 && Flux2Variants.IsOpenVisionBanana(variant)) ? DType.F16 : stored;
+
+    private static Tensor NarrowOnLoad(ResolvedModelVariant variant, Tensor tensor)
+    {
+        DType target = LoadedDType(variant, tensor.DType);
+        return target == tensor.DType ? tensor : tensor.CastTo(target);
     }
 
     /// <summary>Picks the LlamaStyleEncoder preset + side-model asset for the variant. Klein 4B → Qwen3-4B; Klein 9B → Qwen3-8B (nvfp4-mixed, dequantized at load); Dev → Mistral-Small-3.</summary>
