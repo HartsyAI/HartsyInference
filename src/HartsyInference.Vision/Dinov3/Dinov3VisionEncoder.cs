@@ -92,7 +92,12 @@ public sealed unsafe class Dinov3VisionEncoder
     /// <summary>The token sequences after each block in <paramref name="blockIndices"/>, from one forward pass and before any final norm: the raw block
     /// outputs a multi-scale head (DPT-style) reads. The blocks must be distinct and in range; the result is in the order given and the caller owns every
     /// tensor. Blocks past the last one asked for are not run.</summary>
-    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> blockIndices)
+    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> blockIndices) =>
+        EncodeIntermediates(backend, pixelValues, blockIndices, prefixResetBlocks: default);
+
+    /// <summary><see cref="EncodeIntermediates(IBackend, Tensor, ReadOnlySpan{int})"/>, where the blocks in <paramref name="prefixResetBlocks"/> keep the CLS
+    /// and storage tokens they were given, so only the patch tokens move on: a lone frame through Depth Pro 2's cross-frame blocks.</summary>
+    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> prefixResetBlocks)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (blockIndices.IsEmpty) throw new ArgumentException("Name at least one block to tap.", nameof(blockIndices));
@@ -106,11 +111,14 @@ public sealed unsafe class Dinov3VisionEncoder
                 if (blockIndices[j] == block) throw new ArgumentException($"Block {block} is tapped twice.", nameof(blockIndices));
             last = Math.Max(last, block);
         }
+        foreach (int block in prefixResetBlocks)
+            if (block < 0 || block >= _layers.Length)
+                throw new ArgumentOutOfRangeException(nameof(prefixResetBlocks), block, $"Prefix-reset blocks must be in 0..{_layers.Length - 1}.");
 
         Tensor?[] taps = new Tensor?[_layers.Length];
         try
         {
-            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps);   // every kept tensor is in taps; the last block is tapped
+            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks);   // every kept tensor is in taps; the last block is tapped
             System.Diagnostics.Debug.Assert(ReferenceEquals(final, taps[last]), "the last block run must be a tapped block");
             Tensor[] result = new Tensor[blockIndices.Length];
             for (int i = 0; i < result.Length; i++)
@@ -128,7 +136,8 @@ public sealed unsafe class Dinov3VisionEncoder
 
     // Runs blocks 0..lastBlock. A block listed in tapBlocks has its output stored in taps[block] and is not disposed when the next block starts, so the
     // caller can keep it. Without taps the last block's output is returned for the caller to dispose; with taps it is the last tapped tensor, owned by taps.
-    private Tensor RunBlocks(IBackend backend, Tensor pixelValues, int lastBlock, ReadOnlySpan<int> tapBlocks, Tensor?[]? taps)
+    private Tensor RunBlocks(IBackend backend, Tensor pixelValues, int lastBlock, ReadOnlySpan<int> tapBlocks, Tensor?[]? taps,
+        ReadOnlySpan<int> prefixResetBlocks = default)
     {
         int p = _preset.PatchSize;
         if (pixelValues.Shape.Rank != 4 || pixelValues.Shape[1] != 3 || pixelValues.Shape[2] % p != 0 || pixelValues.Shape[3] % p != 0
@@ -151,6 +160,7 @@ public sealed unsafe class Dinov3VisionEncoder
             for (int i = 0; i <= lastBlock; i++)
             {
                 Tensor next = _layers[i].Forward(backend, h, cos, sin);
+                if (prefixResetBlocks.Contains(i)) CopyPrefix(next, h, batch, seqLen, prefix * hidden);
                 if (!hIsTap) h.Dispose();
                 h = next;
                 hIsTap = taps is not null && tapBlocks.Contains(i);
@@ -162,6 +172,19 @@ public sealed unsafe class Dinov3VisionEncoder
         {
             cos.Dispose();
             sin.Dispose();
+        }
+    }
+
+    // The first prefixWidth values of every batch item's sequence, from source to target.
+    private static void CopyPrefix(Tensor target, Tensor source, int batch, int seqLen, int prefixWidth)
+    {
+        int hidden = (int)source.Shape[2];
+        ReadOnlySpan<float> src = source.AsReadOnlySpan<float>();
+        Span<float> dst = target.AsSpan<float>();
+        for (int b = 0; b < batch; b++)
+        {
+            int start = b * seqLen * hidden;
+            src.Slice(start, prefixWidth).CopyTo(dst.Slice(start, prefixWidth));
         }
     }
 

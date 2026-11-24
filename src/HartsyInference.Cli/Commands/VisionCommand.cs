@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Engine.Vision;
+using HartsyInference.ModelAssets.Checkpoints;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -19,7 +21,7 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Model id: clip (embed) or yolo8 / yolo11 (detect).</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: clip (embed) or yolo8 / yolo11 (detect).")]
+        [Description("Model id: clip (embed), yolo8 / yolo11 (detect), or depthpro2-s / -b / -l / -h (metric depth; research-only weights).")]
         public string Model { get; init; } = "clip";
 
         /// <summary>Path to the model .safetensors.</summary>
@@ -67,6 +69,11 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         [Description("Upscale only: output height to fit to (derived from --width and the source aspect when omitted).")]
         public int? Height { get; init; }
 
+        /// <summary>Metric depth: the camera's focal length in pixels.</summary>
+        [CommandOption("--focal-px")]
+        [Description("metric-depth only: the camera's focal length in pixels (shared by every view of a folder). Omit it to estimate it (Depth Pro 2's focal estimator).")]
+        public double? FocalPx { get; init; }
+
         /// <summary>Text query for open-vocabulary detect/segment (Grounding DINO, CLIPSeg).</summary>
         [CommandOption("-p|--prompt")]
         [Description("Text query for open-vocabulary detect/segment (e.g. \"a fox\").")]
@@ -92,9 +99,14 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "-m", "--model-path", out exitCode))
             return exitCode;
 
-        ParamState parameters = new ParamState(Modality.Vision) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
+        // A Depth Pro 2 file named by --model-path alone (-m left at its clip default) is a metric-depth request, found by its own tensors.
+        string model = settings.Model;
+        bool depthPro2File = !model.Contains("depthpro2", StringComparison.OrdinalIgnoreCase) && IsDepthPro2File(settings.ModelPath);
+        if (depthPro2File && string.Equals(model, "clip", StringComparison.OrdinalIgnoreCase))
+            model = settings.ModelPath!;
+        ParamState parameters = new ParamState(Modality.Vision) { Backend = settings.Backend, Model = model, OutputDir = settings.Output };
         parameters.Put("confidence", settings.Confidence.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("mode", settings.Mode ?? InferMode(settings.Model));
+        parameters.Put("mode", settings.Mode ?? (depthPro2File ? "metric-depth" : InferMode(model)));
         if (!string.IsNullOrWhiteSpace(settings.Prompt))
         {
             parameters.Put("query", settings.Prompt);
@@ -119,18 +131,30 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         {
             parameters.Put("target-fps", targetFps.ToString(CultureInfo.InvariantCulture));
         }
+        if (settings.FocalPx is double focalPx)
+        {
+            parameters.Put("focal-px", focalPx.ToString("R", CultureInfo.InvariantCulture));
+        }
 
-        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Vision);
-        string label = CommandRunner.ResolveLabel(spec, settings.Model);
+        ModelSpec spec = ModelResolver.Resolve(model, settings.ModelPath, Modality.Vision);
+        string label = CommandRunner.ResolveLabel(spec, model);
 
         return CommandRunner.Run(Modality.Vision, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
     }
 
+    /// <summary>True when <paramref name="path"/> is an existing file whose tensors are a Depth Pro 2 depth network.</summary>
+    internal static bool IsDepthPro2File(string? path) =>
+        !string.IsNullOrWhiteSpace(path) && File.Exists(path) && DepthPro2Variants.IsDepthPro2(CheckpointProbe.Read(path));
+
     /// <summary>Picks the operation a model id implies: detect, segment, embed, or one of the single-image annotator modes.</summary>
-    private static string InferMode(string model)
+    internal static string InferMode(string model)
     {
         string id = model.ToLowerInvariant();
+        if (id.Contains("depthpro2") || id.Contains("depth-pro-2"))
+        {
+            return "metric-depth";
+        }
         if (id.Contains("clipseg") || id.Contains("sam"))
         {
             return "segment";
