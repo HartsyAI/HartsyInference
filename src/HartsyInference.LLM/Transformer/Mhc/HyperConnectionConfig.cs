@@ -30,6 +30,11 @@ public sealed record HyperConnectionConfig
     /// <summary>RMS form for the head pre-mix. ERNIE's head uses <see cref="RmsEpsPlacement.InsideSqrt"/> while its mixes use the other form; DeepSeek has no head projection.</summary>
     public required RmsEpsPlacement HeadRms { get; init; }
 
+    /// <summary>True when <c>comb[t, i, j]</c> weights input stream <c>j</c> into output stream <c>i</c> (SenseNova-Loop's <c>matmul(mix, residual)</c>);
+    /// false when <c>comb[t, j, i]</c> does (DeepSeek-V4.1 and ERNIE-5.5, the layout <see cref="HyperConnection.Expand"/> and the backend's
+    /// <c>HcPostMix</c> share). <see cref="HyperConnection.Expand"/> transposes the matrix first when this is set.</summary>
+    public bool TransposedMix { get; init; }
+
     /// <summary>DeepSeek-V4.1 hyper-connection: one <c>hc_eps</c> for both gates, eps inside the sqrt, post multiplier 2.</summary>
     /// <remarks><see cref="HeadRms"/> is unused: DeepSeek reads out through the last block's collapse and never calls <see cref="HyperConnection.Head"/>.</remarks>
     public static HyperConnectionConfig DeepSeekV41(int hc, int dim, int iters, float hcEps, float normEps) => new()
