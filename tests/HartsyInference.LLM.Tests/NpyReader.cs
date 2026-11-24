@@ -59,7 +59,7 @@ internal static class NpyReader
         string header = Encoding.ASCII.GetString(bytes, 10, headerLength);
         Assert.Contains(descr, header);
         Assert.Contains("'fortran_order': False", header);
-        Match shapeMatch = Regex.Match(header, @"'shape':s*(([^)]*))");
+        Match shapeMatch = Regex.Match(header, @"'shape':\s*\(([^)]*)\)");
         long[] shape = shapeMatch.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(long.Parse).ToArray();
         return (shape, bytes[dataOffset..]);
     }
