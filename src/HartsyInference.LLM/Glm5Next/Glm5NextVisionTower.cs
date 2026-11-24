@@ -26,32 +26,33 @@ public sealed class Glm5NextVisionTower : IDisposable
     private readonly Block[] _blocks;
 
     /// <summary>Loads the tower from <paramref name="source"/> (keys <c>model.visual.*</c>).</summary>
-    /// <exception cref="InvalidDataException">A tensor is missing or does not have the shape the config implies.</exception>
+    /// <exception cref="InvalidDataException">The config is not one the tower runs (see <see cref="Glm5NextVisionConfig.Validate"/>), or a tensor is
+    /// missing or does not have the shape the config implies.</exception>
     public Glm5NextVisionTower(IBackend backend, Glm5NextVisionConfig config, IErnie5WeightSource source, float ropeTheta = 10000f)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(source);
+        config.Validate();
         (_backend, _c, _ropeTheta) = (backend, config, ropeTheta);
         string v = Glm5NextWeightNames.Visual;
-        int h = config.Hidden, o = config.OutHidden, m = config.SpatialMergeSize;
+        int h = config.Hidden, o = config.OutHidden, m = config.SpatialMergeSize, inter = config.Intermediate, mi = config.MergerIntermediate;
         _blocks = new Block[config.Depth];
         try
         {
-            _patchW = Own(source.Read(v + "patch_embed.proj.weight"));
-            _patchW = Own(_patchW.Reshape(new TensorShape(h, PatchRowWidth)));
+            // The patch embedding is a Conv3d [h, 3, T, P, P] and the downsample a Conv2d [o, h, m, m]: their rows are the same values flattened.
+            _patchW = Own(Flat(source, v + "patch_embed.proj.weight", h, PatchRowWidth));
             _patchB = Host(source, v + "patch_embed.proj.bias", h);
             _postNorm = Own(HostTensor(source, v + "post_layernorm.weight", h));
-            _downW = Own(source.Read(v + "downsample.weight"));
-            _downW = Own(_downW.Reshape(new TensorShape(o, h * m * m)));
+            _downW = Own(Flat(source, v + "downsample.weight", o, h * m * m));
             _downB = Host(source, v + "downsample.bias", o);
-            _mergerProj = Own(source.Read(v + "merger.proj.weight"));
+            _mergerProj = Own(Matrix(source, v + "merger.proj.weight", o, o));
             _mergerNormW = Own(HostTensor(source, v + "merger.post_projection_norm.weight", o));
             _mergerNormB = Own(HostTensor(source, v + "merger.post_projection_norm.bias", o));
-            _mergerGate = Own(source.Read(v + "merger.gate_proj.weight"));
-            _mergerUp = Own(source.Read(v + "merger.up_proj.weight"));
-            _mergerDown = Own(source.Read(v + "merger.down_proj.weight"));
-            for (int i = 0; i < config.Depth; i++) _blocks[i] = LoadBlock(source, $"{v}blocks.{i}.");
+            _mergerGate = Own(Matrix(source, v + "merger.gate_proj.weight", mi, o));
+            _mergerUp = Own(Matrix(source, v + "merger.up_proj.weight", mi, o));
+            _mergerDown = Own(Matrix(source, v + "merger.down_proj.weight", o, mi));
+            for (int i = 0; i < config.Depth; i++) _blocks[i] = LoadBlock(source, $"{v}blocks.{i}.", h, inter, config.HeadDim);
         }
         catch
         {
@@ -68,7 +69,14 @@ public sealed class Glm5NextVisionTower : IDisposable
     /// <param name="grids">One <c>(t, h, w)</c> per image or clip, in patches; <c>h</c> and <c>w</c> are multiples of the merge size.</param>
     public float[] Forward(ReadOnlySpan<float> patches, IReadOnlyList<(int T, int H, int W)> grids)
     {
-        int h = _c.Hidden, heads = _c.Heads, hd = _c.HeadDim, m = _c.SpatialMergeSize;
+        float[] down = Downsample(patches, grids);
+        return Merge(down, down.Length / _c.OutHidden);
+    }
+
+    /// <summary>The tower up to the downsample, <c>[tokens / merge², OutHidden]</c>: transformers' <c>last_hidden_state</c>, before the merger.</summary>
+    internal float[] Downsample(ReadOnlySpan<float> patches, IReadOnlyList<(int T, int H, int W)> grids)
+    {
+        int h = _c.Hidden, hd = _c.HeadDim, m = _c.SpatialMergeSize;
         int tokens = 0;
         foreach ((int t, int gh, int gw) in grids)
         {
@@ -92,12 +100,12 @@ public sealed class Glm5NextVisionTower : IDisposable
                 for (int ch = 0; ch < h; ch++) folded[b * h * mm + ch * mm + r] = x[(b * mm + r) * h + ch];
         float[] down = HostOps.Project(_backend, folded, blocks, h * mm, _downW, o);
         AddBias(down, _downB, blocks);
-        return Merge(down, blocks);
+        return down;
     }
 
     private float[] RunBlock(Block b, float[] x, int tokens, Tensor cosT, Tensor sinT, List<(int Start, int Length)> segments)
     {
-        int h = _c.Hidden, heads = _c.Heads, hd = _c.HeadDim;
+        int h = _c.Hidden, hd = _c.HeadDim;
         float[] n1 = (float[])x.Clone();
         HostOps.RmsNorm(_backend, n1, h, b.Norm1, _c.RmsNormEps);
         float[] qkv = HostOps.Project(_backend, n1, tokens, h, b.Qkv, 3 * h);
@@ -210,17 +218,50 @@ public sealed class Glm5NextVisionTower : IDisposable
         return (cos, sin, segments);
     }
 
-    private Block LoadBlock(IErnie5WeightSource source, string p)
+    private Block LoadBlock(IErnie5WeightSource source, string p, int h, int inter, int hd) => new(
+        Norm1: Own(HostTensor(source, p + "norm1.weight", h)), Norm2: Own(HostTensor(source, p + "norm2.weight", h)),
+        Qkv: Own(Matrix(source, p + "attn.qkv.weight", 3 * h, h)), QkvBias: Host(source, p + "attn.qkv.bias", 3 * h),
+        Proj: Own(Matrix(source, p + "attn.proj.weight", h, h)), ProjBias: Host(source, p + "attn.proj.bias", h),
+        QNorm: Own(HostTensor(source, p + "attn.q_norm.weight", hd)), KNorm: Own(HostTensor(source, p + "attn.k_norm.weight", hd)),
+        Gate: Own(Matrix(source, p + "mlp.gate_proj.weight", inter, h)), GateBias: Host(source, p + "mlp.gate_proj.bias", inter),
+        Up: Own(Matrix(source, p + "mlp.up_proj.weight", inter, h)), UpBias: Host(source, p + "mlp.up_proj.bias", inter),
+        Down: Own(Matrix(source, p + "mlp.down_proj.weight", h, inter)), DownBias: Host(source, p + "mlp.down_proj.bias", h));
+
+    // A 2-D weight with exactly the shape the config implies.
+    private Tensor Matrix(IErnie5WeightSource source, string name, int rows, int cols)
     {
-        int h = _c.Hidden, inter = _c.Intermediate, hd = _c.HeadDim;
-        return new Block(
-            Norm1: Own(HostTensor(source, p + "norm1.weight", h)), Norm2: Own(HostTensor(source, p + "norm2.weight", h)),
-            Qkv: Own(source.Read(p + "attn.qkv.weight")), QkvBias: Host(source, p + "attn.qkv.bias", 3 * h),
-            Proj: Own(source.Read(p + "attn.proj.weight")), ProjBias: Host(source, p + "attn.proj.bias", h),
-            QNorm: Own(HostTensor(source, p + "attn.q_norm.weight", hd)), KNorm: Own(HostTensor(source, p + "attn.k_norm.weight", hd)),
-            Gate: Own(source.Read(p + "mlp.gate_proj.weight")), GateBias: Host(source, p + "mlp.gate_proj.bias", inter),
-            Up: Own(source.Read(p + "mlp.up_proj.weight")), UpBias: Host(source, p + "mlp.up_proj.bias", inter),
-            Down: Own(source.Read(p + "mlp.down_proj.weight")), DownBias: Host(source, p + "mlp.down_proj.bias", h));
+        Tensor t = Read(source, name);
+        if (t.Shape.Rank != 2 || t.Shape[0] != rows || t.Shape[1] != cols)
+        {
+            t.Dispose();
+            throw new InvalidDataException($"{name} must be [{rows}, {cols}]; got {t.Shape}.");
+        }
+        return t;
+    }
+
+    // A conv weight stored flat, with rows x cols values: the same values in the row-major [rows, cols] layout.
+    private Tensor Flat(IErnie5WeightSource source, string name, int rows, int cols)
+    {
+        Tensor t = Read(source, name);
+        if (t.ElementCount != (long)rows * cols)
+        {
+            t.Dispose();
+            throw new InvalidDataException($"{name} holds {t.ElementCount} values; the config implies {rows} x {cols}.");
+        }
+        return t.Reshape(new TensorShape(rows, cols));
+    }
+
+    // A checkpoint read that reports a missing tensor as the constructor documents.
+    private static Tensor Read(IErnie5WeightSource source, string name)
+    {
+        try
+        {
+            return source.Read(name);
+        }
+        catch (KeyNotFoundException ex)
+        {
+            throw new InvalidDataException($"The vision tower has no tensor {name}.", ex);
+        }
     }
 
     private Tensor Own(Tensor t)
@@ -244,7 +285,7 @@ public sealed class Glm5NextVisionTower : IDisposable
 
     private static float[] Host(IErnie5WeightSource source, string name, long elements)
     {
-        Tensor raw = source.Read(name);
+        Tensor raw = Read(source, name);
         Tensor f32 = TensorCasts.EnsureF32(raw);
         try
         {

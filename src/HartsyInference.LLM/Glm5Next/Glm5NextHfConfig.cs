@@ -92,7 +92,7 @@ public static class Glm5NextHfConfig
     {
         RequireString(v, "model_type", "glm5_next_vision");
         RequireString(v, "hidden_act", "silu");
-        return new Glm5NextVisionConfig
+        Glm5NextVisionConfig config = new()
         {
             Depth = Int(v, "depth"),
             Hidden = Int(v, "hidden_size"),
@@ -106,6 +106,8 @@ public static class Glm5NextHfConfig
             RmsNormEps = Float(v, "rms_norm_eps"),
             SwigluLimit = Float(v, "swiglu_limit"),
         };
+        config.Validate();
+        return config;
     }
 
     // layer_types spells DSA layers deepseek_sparse_attention (transformers 5.16-5.18), indexed_attention (5.19+) or full_attention; each
