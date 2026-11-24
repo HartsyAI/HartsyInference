@@ -65,6 +65,91 @@ public sealed class DepthPro2VisionServiceTests
     }
 
     [Fact]
+    public void MetricDepthTakesFramesWithTheVideoOptionsAndNothingElseDoes()
+    {
+        VisionBatchRequest frames = new()
+        {
+            Images = [Image(), Image(), Image()], Mode = VisionMode.MetricDepth, Kind = VisionSequenceKind.Frames, Fps = 24,
+            FrameWindow = 3, FrameOverlap = 1, FrameBuffering = VisionFrameBuffering.Buffered, FocalLengthPx = 300,
+        };
+        VisionRequestValidator.Validate(frames);
+        VisionRequestValidator.Validate(frames with { FrameOverlap = null, FrameBuffering = VisionFrameBuffering.Unbuffered });
+        VisionRequestValidator.Validate(frames with { FrameWindow = null, FrameOverlap = null, FrameBuffering = null });
+
+        string Refused(VisionBatchRequest request) => Assert.Throws<ArgumentException>(() => VisionRequestValidator.Validate(request)).Message;
+        Assert.Contains("exactly one of TimestampsSeconds and Fps", Refused(frames with { Fps = null }));
+        Assert.Contains("FrameOverlap", Refused(frames with { FrameOverlap = 3 }));
+        Assert.Contains("FrameOverlap", Refused(frames with { FrameOverlap = -1 }));
+        Assert.Contains("do not overlap", Refused(frames with { FrameBuffering = VisionFrameBuffering.Unbuffered }));
+        Assert.Contains("FrameWindow", Refused(frames with { FrameWindow = 0 }));
+        Assert.Contains("FrameWindow", Refused(frames with { FrameWindow = VisionRequestValidator.MaxFrameWindow + 1, FrameOverlap = null }));
+        Assert.Contains("Prompts only apply to Track", Refused(frames with { Prompts = [new VisionFramePrompt { FrameIndex = 0, Text = "a cup" }] }));
+        Assert.Contains("only applies to MetricDepth frames", Refused(frames with { Kind = VisionSequenceKind.Views, Fps = null }));
+        Assert.Contains("Frames are for Track, Interpolate and MetricDepth", Refused(frames with { Mode = VisionMode.Depth, FrameWindow = null,
+            FrameOverlap = null, FrameBuffering = null, FocalLengthPx = null }));
+        Assert.True(VisionRequestValidator.AcceptsFrames(VisionMode.MetricDepth));
+        Assert.False(VisionRequestValidator.IsSequenceOnly(VisionMode.MetricDepth));
+    }
+
+    [Fact]
+    public void FramesReachDepthPro2AndRefuseBeforeTheStreamStarts()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        VisionBatchRequest frames = new() { Images = [Image(), Image()], Mode = VisionMode.MetricDepth, Kind = VisionSequenceKind.Frames, Fps = 10 };
+
+        // Each refusal is thrown by the call itself, so an API can turn it into a status before any frame is sent.
+        FileNotFoundException missing = Assert.Throws<FileNotFoundException>(() => engine.Vision.RunFramesAsync(Spec("depthpro2-s"), frames));
+        Assert.Contains("depthpro2-s", missing.Message);
+        Assert.Throws<NotSupportedException>(() => engine.Vision.RunFramesAsync(Spec("depth-anything"), frames));
+        // The default window is 16, so an overlap of 16 passes the validator (which knows no model default) and is refused by the model.
+        Assert.Contains("below the frame window", Assert.Throws<ArgumentException>(() =>
+            engine.Vision.RunFramesAsync(Spec("depthpro2-s"), frames with { FrameOverlap = 16 })).Message);
+        Assert.Contains("at most 16 frames", Assert.Throws<ArgumentException>(() =>
+            engine.Vision.RunFramesAsync(Spec("depthpro2-s"), frames with { FrameWindow = 17 })).Message);
+    }
+
+    [Fact]
+    public void AMissingFocalEstimatorIsRefusedBeforeTheStreamStarts()
+    {
+        string depth = Path.GetTempFileName();
+        try
+        {
+            using InferenceEngine engine = new InferenceEngine("cpu");
+            ModelSpec spec = Spec("depthpro2-s") with
+            {
+                LocalPath = depth,
+                Aux = new Dictionary<string, string>
+                {
+                    [VisionService.DepthPro2FocalAuxKey] = Path.Combine(Path.GetTempPath(), "no-such-focal.safetensors"),
+                },
+            };
+            VisionBatchRequest frames = new()
+            {
+                Images = [Image(), Image()], Mode = VisionMode.MetricDepth, Kind = VisionSequenceKind.Frames, Fps = 10,
+            };
+
+            Assert.Contains("focal estimator", Assert.Throws<FileNotFoundException>(() => engine.Vision.RunFramesAsync(spec, frames)).Message);
+        }
+        finally
+        {
+            File.Delete(depth);
+        }
+    }
+
+    [Fact]
+    public async Task MoreViewsThanOneJointSetHoldsAreRefusedByName()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        VisionBatchRequest views = new()
+        {
+            Images = [.. Enumerable.Range(0, 17).Select(_ => Image())], Mode = VisionMode.MetricDepth, Kind = VisionSequenceKind.Views,
+        };
+
+        ArgumentException ex = await Assert.ThrowsAsync<ArgumentException>(() => engine.Vision.RunViewsAsync(Spec("depthpro2-s"), views));
+        Assert.Contains("at most 16 views", ex.Message);
+    }
+
+    [Fact]
     public async Task ASingleImageWithoutTheCheckpointNamesTheRow()
     {
         using InferenceEngine engine = new InferenceEngine("cpu");
