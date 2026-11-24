@@ -2,12 +2,13 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.LLM.Glm5Next.SciPerception;
 using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Glm5Next;
 
 /// <summary>The SciPerception projector against upstream's <c>AtomProjector</c> (<c>tools/parity/sciperception_reference.py</c>, SciPerception revision
 /// 7c228fc0, torch 2.7.1 CPU): four tiny random projectors with the option sets the released ones use, one forward pass each.</summary>
-public sealed class SciProjectorTests
+public sealed class SciProjectorTests(ITestOutputHelper output)
 {
     private static string Dir(string name) => Path.Combine(AppContext.BaseDirectory, "Fixtures", "Glm5Next", "sciperception", name);
 
@@ -34,7 +35,8 @@ public sealed class SciProjectorTests
         Assert.Equal(expected.Length, actual.Length);
         float worst = 0f;
         for (int i = 0; i < expected.Length; i++) worst = MathF.Max(worst, MathF.Abs(expected[i] - actual[i]));
-        Assert.True(worst < 2e-4f, $"{name}: max abs difference {worst}");
+        output.WriteLine($"{name}: max abs difference {worst:E3} over {expected.Length} values");
+        Assert.True(worst < 5e-6f, $"{name}: max abs difference {worst}");
     }
 
     [Fact]
