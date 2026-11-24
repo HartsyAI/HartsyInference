@@ -2601,6 +2601,11 @@ public static class ModelCatalog
                         TargetSubdir = "Vision/DepthAnything", Role = "transformer", Sha256 = null },
                 },
             },
+            // Depth Pro 2 metric depth: research-only weights (licence terms in DepthPro2Catalog), one row per size.
+            DepthPro2Catalog.Small(),
+            DepthPro2Catalog.Base(),
+            DepthPro2Catalog.Large(),
+            DepthPro2Catalog.HugePlus(),
             new CatalogEntry
             {
                 Id = "hed", Modality = vis, DisplayName = "HED (ControlNetHED soft-edge)", Architecture = "VGG16-style 5-block trunk", Status = ok,
