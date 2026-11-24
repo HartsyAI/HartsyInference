@@ -231,6 +231,9 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// rows <paramref name="ropeCos"/>/<paramref name="ropeSin"/> (host F32 <c>[1, seq, AttnHeadDim]</c>, split-half over the
     /// first <see cref="RotaryDim"/> channels) instead of the sequence positions: multimodal RoPE, where text after an image
     /// resumes at a position past its grid. Causality and the cache still follow the sequence index.</summary>
+    /// <remarks>The model does not rescale caller rows: they must already carry this model's RoPE scaling, which
+    /// <see cref="BuildMultimodalRope"/> applies. A YaRN model (SenseNova-Loop) given unscaled rows rotates without YaRN and gives wrong output
+    /// with no error, so build rows through <see cref="BuildMultimodalRope"/> rather than by hand.</remarks>
     public Tensor ForwardEmbedsHidden(IBackend backend, Tensor embeds, int seq, Tensor? ropeCos, Tensor? ropeSin)
     {
         ArgumentNullException.ThrowIfNull(embeds);
