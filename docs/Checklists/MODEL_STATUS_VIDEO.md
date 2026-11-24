@@ -69,7 +69,9 @@ Families both upstreams already recognise and this engine has no recipe for. Ver
   `HunyuanVideo` — `vision_in_dim` 1152 and `shift` 7.0, with `in_channels` 98 for the SR variant. So this is a
   variant of a family already ported here, and it is the only image-to-video Hunyuan class:
   `HunyuanVideoRecipe.Matches` takes `hunyuan-video`/`hunyuanvideo` only and drives the classic 13B T2V
-  checkpoint. Cheapest worthwhile addition on this list.
+  checkpoint. Cheapest worthwhile addition on this list. In progress as the base of MovieRoll (2026-11-24): the 54-block
+  8.3B DiT (`HunyuanVideo15Dit`, Tencent-name converter) matches a tiny-config reference on CPU; text encoders, 16x VAE,
+  pipeline and recipe are not built, and no checkpoint has run.
 - [ ] Wan conditioning variants ComfyUI ships that this tree does not: `WAN21_HuMo`, `WAN21_SCAIL` /
   `SCAIL2`, `WAN22_WanDancer` (music-driven dance, Wan2.1 backbone plus a `music_encoder` whose
   `self_attn.in_proj` splits into q/k/v at load), `WAN21_Camera` / `WAN22_Camera`, `WAN21_FunControl2V`,
