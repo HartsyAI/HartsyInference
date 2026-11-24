@@ -6,10 +6,10 @@ names (the C# loader reads it as it reads the real one), the saved inputs of eve
 
 Usage:
     python dump_longcat_dit.py --repo /path/to/LongCat-Video [--out DIR] [--seed 7]
-Needs torch >= 2.6 (CPU is enough), diffusers, einops, safetensors, numpy, and a checkout of meituan-longcat/LongCat-Video at
+Needs torch >= 2.6 (CPU is enough), einops, safetensors, numpy, and a checkout of meituan-longcat/LongCat-Video at
 58eb336edc5c8c63389838727e40b8c18434e54e. Does not need CUDA, triton, flash-attn, transformers or any real weight.
 
-Stubs, none of which touches the numerics: flash_attn (SDPA), the triton block-sparse module (never reached: enable_bsa is False),
+Stubs, none of which touches the numerics: flash_attn (SDPA), diffusers (only its config base classes), the triton block-sparse module (never reached: enable_bsa is False),
 audio_process.torch_utils (multi-speaker only), and ulysses_wrapper (identity: no context parallel). cp_split_hw is [1, 1] because the
 shipped null crashes the RoPE module's size check.
 """
@@ -75,6 +75,19 @@ def install_stubs(repo):
     torch_utils = types.ModuleType("longcat_video.audio_process.torch_utils")
     torch_utils.get_attn_map_with_target = refuse
     sys.modules["longcat_video.audio_process.torch_utils"] = torch_utils
+
+    # diffusers is only the config/model base class here: register_to_config just calls __init__, ModelMixin is nn.Module.
+    config_utils = types.ModuleType("diffusers.configuration_utils")
+    config_utils.ConfigMixin = type("ConfigMixin", (), {})
+    config_utils.register_to_config = lambda init: init
+    modeling_utils = types.ModuleType("diffusers.models.modeling_utils")
+    modeling_utils.ModelMixin = torch.nn.Module
+    models = types.ModuleType("diffusers.models")
+    diffusers = types.ModuleType("diffusers")
+    diffusers.ConfigMixin, diffusers.ModelMixin = config_utils.ConfigMixin, modeling_utils.ModelMixin
+    for name, module in (("diffusers", diffusers), ("diffusers.configuration_utils", config_utils), ("diffusers.models", models),
+                         ("diffusers.models.modeling_utils", modeling_utils)):
+        sys.modules.setdefault(name, module)
 
     ulysses = types.ModuleType("longcat_video.context_parallel.ulysses_wrapper")
     ulysses.ulysses_wrapper = lambda func: func

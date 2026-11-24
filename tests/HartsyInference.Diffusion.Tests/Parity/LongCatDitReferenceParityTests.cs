@@ -13,7 +13,10 @@ public sealed class LongCatDitReferenceParityTests
     [LongCatReferenceFact]
     public void EveryStageMatchesTheReference()
     {
-        (List<string> failures, List<string> passed) = LongCatReferenceDump.Compare(Environment.GetEnvironmentVariable(EnvName)!);
+        string dir = Environment.GetEnvironmentVariable(EnvName)!;
+        (List<string> failures, List<string> passed) = LongCatReferenceDump.Compare(dir);
+        File.WriteAllLines(Path.Combine(dir, "parity-report.txt"),
+            failures.Select(static l => "FAIL " + l).Concat(passed.Select(static l => "ok   " + l)));
 
         Assert.True(failures.Count == 0, $"{failures.Count} stage(s) off, {passed.Count} matched:\n{string.Join('\n', failures)}");
     }
