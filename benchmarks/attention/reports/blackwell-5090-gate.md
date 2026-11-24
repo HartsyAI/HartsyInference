@@ -72,6 +72,26 @@ The same pass downloaded cuDNN 9.21.0.82 for CUDA 13 (915,264,756 bytes, sha256 
 manifest) and installed 0 files because the extraction step matched nothing; cuDNN stayed absent. That step was fixed
 afterwards and has not been run.
 
+## Fifth pass: cuDNN now present, the fault did not recur
+
+Pod `z4enbbuqqhoj2g`, a fourth physical card (GPU UUID `0919cf68-...`, bus 21:00.0), same commit, 14 minutes of tests,
+about $0.38. The cuDNN fetch was approved and this time it installed: 27 files, `libcudnn.so.9` present, sha256 and size
+matching NVIDIA's manifest.
+
+- **cuDNN rows: no failures.** The 11 tests that failed on fallback in passes 1 and 2 pass with cuDNN present.
+- **No `CUDA_ERROR_ILLEGAL_ADDRESS` on this card.** The fault seen on the third card did not recur, which fits a faulty
+  card or host for that run; it does not prove it, because the fault was not reproduced on the third card either.
+- Failures left: Vulkan (only `llvmpipe` visible; every Vulkan-named failure is in this category), UniRig and CoLa3D
+  checkpoints (expected), Core preload out of VRAM (expected), and the Kimi packed-expert CUDA test (fails on 4090, 3060
+  passes, 5090 passes nothing; unexplained).
+- Passing: Audio 153/153, Diffusion 396/396, Vision 70/70, Engine PSA 2/2, Core 471/472, ThreeD 1,417/1,425 (ran), LLM
+  whole 793/815 passed.
+
+Vulkan on this pod: the NVIDIA ICD manifest is present and the loader opens `libGLX_nvidia.so.595.112.07` successfully
+(strace), but `vkCreateInstance` still cannot be resolved through `vk_icdGetInstanceProcAddr`. strace does not show the
+symbol lookup, so the cause is not identified. The only untested remedy is the NVIDIA installer's own driver userspace
+(423 MB, sha256 published), which is not downloaded.
+
 ## Vulkan
 
 Expectation 2 (an NVIDIA Vulkan device visible) was put at about 60% and was **missed**. In pass 1 the loader logged
