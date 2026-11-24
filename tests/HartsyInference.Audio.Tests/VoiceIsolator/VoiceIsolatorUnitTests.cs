@@ -185,6 +185,43 @@ public sealed class VoiceIsolatorUnitTests : IDisposable
         Assert.Equal(VoiceIsolatorRenderer.WindowStarts(4_100, 1_600, 400).Count, windows);
     }
 
+    [Fact]
+    public void TheCorrectionTouchesEveryBinOfALongClip()
+    {
+        const int frames = 300;
+        const int bins = 33;
+        Random rng = new(2);
+        float[] raw = new float[frames * bins * 4];
+        float[] re = new float[frames * bins];
+        float[] im = new float[frames * bins];
+        for (int i = 0; i < raw.Length; i++)
+        {
+            raw[i] = (float)(rng.NextDouble() * 4 - 2);
+        }
+        for (int i = 0; i < re.Length; i++)
+        {
+            re[i] = (float)(rng.NextDouble() * 2 - 1);
+            im[i] = (float)(rng.NextDouble() * 2 - 1);
+        }
+        float[] expectedRe = new float[re.Length];
+        float[] expectedIm = new float[im.Length];
+        for (int i = 0; i < re.Length; i++)
+        {
+            double mr = 2 * Math.Tanh(raw[i * 4]);
+            double mi = 2 * Math.Tanh(raw[i * 4 + 1]);
+            double rr = Math.Tanh(raw[i * 4 + 2]);
+            double ri = Math.Tanh(raw[i * 4 + 3]);
+            double scale = 0.5 * Math.Sqrt((double)re[i] * re[i] + (double)im[i] * im[i]) / Math.Max(Math.Sqrt(rr * rr + ri * ri), 1.0);
+            expectedRe[i] = (float)(re[i] * mr - im[i] * mi + rr * scale);
+            expectedIm[i] = (float)(re[i] * mi + im[i] * mr + ri * scale);
+        }
+        VoiceIsolatorNetwork.Correct(raw, re, im, frames, bins, 0.5f);
+        for (int i = 0; i < re.Length; i++)
+        {
+            Assert.True(Math.Abs(re[i] - expectedRe[i]) < 1e-5f && Math.Abs(im[i] - expectedIm[i]) < 1e-5f, $"bin {i} was not corrected");
+        }
+    }
+
     private static float[] Signal(int n, int seed)
     {
         Random rng = new(seed);

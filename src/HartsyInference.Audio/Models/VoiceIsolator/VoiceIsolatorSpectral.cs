@@ -83,6 +83,27 @@ public sealed class VoiceIsolatorSpectral
         });
     }
 
+    /// <summary>Spectrum of one frame whose <see cref="NFft"/> raw samples are <paramref name="samples"/> (the window is applied here),
+    /// written to <paramref name="re"/> and <paramref name="im"/> at frame row <paramref name="frame"/>.</summary>
+    public void AnalyzeFrame(ReadOnlySpan<float> samples, float[] re, float[] im, int frame)
+    {
+        if (samples.Length < NFft)
+        {
+            throw new ArgumentException($"A frame needs {NFft} samples.", nameof(samples));
+        }
+        float[] windowed = new float[NFft];
+        float[] work = new float[_plan.WorkLength];
+        float[] fr = new float[Bins];
+        float[] fi = new float[Bins];
+        for (int i = 0; i < NFft; i++)
+        {
+            windowed[i] = samples[i] * _window[i];
+        }
+        _plan.ForwardReal(windowed, fr, fi, work);
+        Array.Copy(fr, 0, re, (long)frame * Bins, Bins);
+        Array.Copy(fi, 0, im, (long)frame * Bins, Bins);
+    }
+
     /// <summary>Inverse of <see cref="Analyze"/>: <c>length</c> samples from <paramref name="frames"/> spectra
     /// (frame-major <c>[frames, bins]</c>), the overlap-add divided by the summed squared window.</summary>
     public float[] Synthesize(float[] re, float[] im, int frames, int length)

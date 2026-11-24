@@ -46,9 +46,10 @@ internal sealed class VoiceIsolatorAttentionBlock
     }
 
     /// <summary>Runs the block over band-major tokens <c>[bands * frames, width]</c>; returns a new tensor of the same layout.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, int bands, int frames, bool causal, float[] ropeCos, float[] ropeSin)
+    public Tensor Forward(IBackend backend, Tensor x, int bands, int frames, bool causal, float[] ropeCos, float[] ropeSin,
+        VoiceIsolatorAttentionLane? lane = null, VoiceIsolatorStreamAttention? stream = null)
     {
-        Tensor afterTime = TimeTransformer(backend, x, bands, frames, causal, ropeCos, ropeSin);
+        Tensor afterTime = TimeTransformer(backend, x, bands, frames, causal, ropeCos, ropeSin, lane, stream);
         int width = _config.Width;
         Tensor frameMajor = new(new TensorShape(frames, bands, width), DType.F32);
         VoiceIsolatorOps.SwapLeading(frameMajor, afterTime, bands, frames, width);
@@ -61,7 +62,8 @@ internal sealed class VoiceIsolatorAttentionBlock
         return bandMajor;
     }
 
-    private Tensor TimeTransformer(IBackend backend, Tensor x, int bands, int frames, bool causal, float[] ropeCos, float[] ropeSin)
+    private Tensor TimeTransformer(IBackend backend, Tensor x, int bands, int frames, bool causal, float[] ropeCos, float[] ropeSin,
+        VoiceIsolatorAttentionLane? lane, VoiceIsolatorStreamAttention? stream)
     {
         int width = _config.Width;
         int heads = _config.NumHeads;
@@ -76,12 +78,20 @@ internal sealed class VoiceIsolatorAttentionBlock
         Tensor v = new(headShape, DType.F32);
         VoiceIsolatorOps.SplitQkvToHeads(qkv, q, k, v, bands, frames, heads, hd);
         qkv.Dispose();
-        VoiceIsolatorOps.Rope(q, bands, heads, frames, hd, 0, ropeCos, ropeSin);
-        VoiceIsolatorOps.Rope(k, bands, heads, frames, hd, 0, ropeCos, ropeSin);
-        Tensor? mask = causal ? CausalMask(frames, _config.AttentionWindowFrames) : null;
-        Tensor attended = new(headShape, DType.F32);
-        backend.ScaledDotProductAttention(attended, q, k, v, mask, 1f / MathF.Sqrt(hd));
-        mask?.Dispose();
+        Tensor attended;
+        if (lane is not null && stream is not null)
+        {
+            attended = stream.Attend(backend, lane, q, k, v, bands, heads, frames, hd);
+        }
+        else
+        {
+            VoiceIsolatorOps.Rope(q, bands, heads, frames, hd, 0, ropeCos, ropeSin);
+            VoiceIsolatorOps.Rope(k, bands, heads, frames, hd, 0, ropeCos, ropeSin);
+            Tensor? mask = causal ? CausalMask(frames, _config.AttentionWindowFrames) : null;
+            attended = new Tensor(headShape, DType.F32);
+            backend.ScaledDotProductAttention(attended, q, k, v, mask, 1f / MathF.Sqrt(hd));
+            mask?.Dispose();
+        }
         q.Dispose();
         k.Dispose();
         if (_config.ExclusiveSelfAttention)

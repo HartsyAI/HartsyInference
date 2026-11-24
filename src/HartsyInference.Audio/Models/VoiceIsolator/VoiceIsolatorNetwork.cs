@@ -147,6 +147,44 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         return raw;
     }
 
+    /// <summary>A fresh lane for a stream: empty attention pasts and zero Mamba carries.</summary>
+    internal VoiceIsolatorLane NewLane()
+    {
+        VoiceIsolatorLane lane = new(_blocks.Length);
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            if (_blocks[i] is VoiceIsolatorAttentionBlock)
+            {
+                lane.Attention[i] = new VoiceIsolatorAttentionLane();
+            }
+            else
+            {
+                lane.Carry[i] = new VoiceIsolatorMambaCarry(
+                    VoiceIsolatorLane.Zeros(_edges.Length, Config.MambaConv - 1, Config.MambaInner),
+                    VoiceIsolatorLane.Zeros(_edges.Length, Config.MambaInner, Config.MambaState));
+            }
+        }
+        return lane;
+    }
+
+    /// <summary>The blocks over the new frames' tokens <paramref name="features"/> (not disposed) with <paramref name="lane"/>'s carried state.</summary>
+    internal Tensor StreamBlocks(IBackend backend, Tensor features, int frames, VoiceIsolatorLane lane, VoiceIsolatorStreamAttention attention)
+    {
+        Tensor x = features;
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            Tensor next = _blocks[i] is VoiceIsolatorAttentionBlock block
+                ? block.Forward(backend, x, _edges.Length, frames, true, attention.Cos, attention.Sin, lane.Attention[i], attention)
+                : ((VoiceIsolatorMambaBlock)_blocks[i]!).Forward(backend, x, _edges.Length, frames, lane.Carry[i]);
+            if (!ReferenceEquals(x, features))
+            {
+                x.Dispose();
+            }
+            x = next;
+        }
+        return x;
+    }
+
     /// <summary>Band tokens <c>[bands * frames, width]</c> of the spectra.</summary>
     internal unsafe Tensor Encode(IBackend backend, float[] re, float[] im, int frames)
     {
@@ -258,9 +296,9 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     internal static void Correct(float[] raw, float[] re, float[] im, int frames, int bins, float bound)
     {
         long total = (long)frames * bins;
-        CpuParallel.ForRanges(total, 4096, 16, (from, to) =>
+        CpuParallel.ForRanges(total, 4096, 16, (start, length) =>
         {
-            for (long i = from; i < to; i++)
+            for (long i = start; i < start + length; i++)
             {
                 float maskRe = 2f * MathF.Tanh(raw[i * 4]);
                 float maskIm = 2f * MathF.Tanh(raw[i * 4 + 1]);
