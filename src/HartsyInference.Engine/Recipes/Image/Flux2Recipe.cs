@@ -42,7 +42,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// the engine's guidance-free ones. It states nothing for Dev, nor for a Base Klein run with guidance, so only Klein 4B and 9B say none.</remarks>
     public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
         variant is null ? Prompt
-        : Flux2Variants.IsIrisZ(variant) ? Prompt!.ArchitectureOnly()
+        : Flux2Variants.IsIrisZ(variant) || Flux2Variants.IsOpenVisionBanana(variant) ? Prompt!.ArchitectureOnly()
         : variant.Is(Flux2Variants.Klein4B) || variant.Is(Flux2Variants.Klein9B) ? Prompt! with { Negative = "none" }
         : Prompt;
 
@@ -69,6 +69,8 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     public bool Matches(string familyId) =>
         string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "flux2-klein-4b", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, Flux2Variants.OpenVisionBanana4B.Id, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, Flux2Variants.OpenVisionBanana9B.Id, StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "iris-z-small", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "iris-z-big", StringComparison.OrdinalIgnoreCase);
 
@@ -84,7 +86,17 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     public static ImageDefaults IrisZBigDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
-    public ImageFeatures SupportsFor(ResolvedModelVariant? variant) => Flux2Variants.IsIrisZ(variant) ? IrisZSupports : Supports;
+    public ImageFeatures SupportsFor(ResolvedModelVariant? variant) =>
+        Flux2Variants.IsIrisZ(variant) ? IrisZSupports : Flux2Variants.IsOpenVisionBanana(variant) ? OpenVisionBananaSupports : Supports;
+
+    /// <summary>What Open Vision Banana applies: the photo is a reference the DiT reads at full strength (never a noised start),
+    /// and LoRAs merge as for Klein. Image-to-image, inpaint, regions, prompt scheduling and the refiner are not part of it,
+    /// and its prompts reach the encoder verbatim, so no prompt tag is honoured.</summary>
+    public const ImageFeatures OpenVisionBananaSupports = ImageFeatures.RefEdit | ImageFeatures.Lora;
+
+    /// <summary>Open Vision Banana's published sampling: 28 steps, CFG 3.5, seed 0, input size capped at 1 MP (README quickstart,
+    /// FunAILab/Open-Vision-Banana). Perception outputs carry no creative variation, so these are the values every task uses.</summary>
+    public static ImageDefaults OpenVisionBananaDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (SwarmUI <c>Model Support.md</c>, Flux.2: Flux Guidance defaults to 3.5, 4 is the optional tweak); the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
@@ -111,6 +123,10 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         if (Flux2Variants.IsIrisZ(variant))
         {
             return variant.Is(Flux2Variants.IrisZSmall) ? IrisZSmallDefaults : IrisZBigDefaults;
+        }
+        if (Flux2Variants.IsOpenVisionBanana(variant))
+        {
+            return OpenVisionBananaDefaults;
         }
         return Flux2Variants.ConfigFor(variant).GuidanceEmbed ? FamilyDefaults : KleinDefaults;
     }
@@ -225,11 +241,25 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 }
                 IrisZPipeline irisPipeline = new IrisZPipeline(
                     context.Backend, encoder, transformer, vae.Decoder, vae.Encoder, vae.BnMean, vae.BnVar, config, irisEmptyPrompt,
-                    IrisZSkyCeiling(variant), IrisZTextEncoderLayers(config));
+                    IrisZSkyCeiling(variant), TextEncoderLayers(config));
                 Logs.Info($"[Flux2Recipe] Iris-Z ready ({DescribeConfig(config)}).");
                 return new IrisZRecipePipeline(irisPipeline,
                     new Flux2PromptTokenizer(config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt), IrisZSkyCeiling(variant),
                     variant.Id, qwenTokenizer, mistralTokenizer, encoder, loaders, checkpoint, loraStack);
+            }
+
+            if (Flux2Variants.IsOpenVisionBanana(variant))
+            {
+                if (vae.Encoder is null)
+                {
+                    throw new NotSupportedException("Open Vision Banana reads the photo through the FLUX.2 VAE encoder; the VAE file found is decode-only.");
+                }
+                // bnEps is the VAE's batch_norm_eps (1e-4 in the FLUX.2 VAE config), which diffusers' pipeline reads.
+                Flux2EditPipeline editPipeline = new Flux2EditPipeline(
+                    context.Backend, encoder, transformer, vae.Decoder, vae.Encoder, vae.BnMean, vae.BnVar, config,
+                    TextEncoderLayers(config), bnEps: 1e-4f);
+                Logs.Info($"[Flux2Recipe] Open Vision Banana ready ({DescribeConfig(config)}, {variant.Id}).");
+                return new Flux2EditRecipePipeline(editPipeline, qwenTokenizer!, variant.Id, encoder, loaders, checkpoint, loraStack);
             }
 
             Flux2Pipeline pipeline = new Flux2Pipeline(
@@ -267,7 +297,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     private static float IrisZSkyCeiling(ResolvedModelVariant variant) => variant.Is(Flux2Variants.IrisZBig) ? 0.95f : 1.0f;
 
     /// <summary>The text-encoder taps the reference uses: 10/20/30 for Mistral-Small-3, 9/18/27 for Qwen3.</summary>
-    private static int[] IrisZTextEncoderLayers(Flux2Config config) =>
+    private static int[] TextEncoderLayers(Flux2Config config) =>
         config.TextEncoderType == Flux2TextEncoderType.Mistral ? [10, 20, 30] : [9, 18, 27];
 
     /// <summary>Loads the release's <c>empty_prompt</c> tensor as F32: the file beside the checkpoint when it is there, the
