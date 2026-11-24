@@ -31,6 +31,16 @@ public sealed unsafe class SenseNovaLoopGgufTests
     }
 
     [Fact]
+    public void Untile_IsTheIdentityWhenHeadCountsMatch()
+    {
+        using Tensor src = Matrix(SenseNovaLoopTests.Gaussian(new Random(8), 6 * 8, 1f), 6, 8);
+        List<Tensor> owned = [];
+        Assert.Same(src, Qwen35Model.UntileRows(src, 0, 2, 1, 3, owned));
+        Assert.Same(src, Qwen35Model.UntileColumns(src, 2, 1, 4, owned));
+        Assert.Empty(owned);
+    }
+
+    [Fact]
     public void Untile_RowsOfAQuantizedTensorMoveAsWholeRows()
     {
         const int keyHeads = 2, repeat = 2, rowsPerHead = 4, cols = 64, rows = keyHeads * repeat * rowsPerHead;

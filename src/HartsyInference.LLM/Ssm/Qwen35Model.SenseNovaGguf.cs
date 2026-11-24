@@ -40,11 +40,15 @@ public sealed unsafe partial class Qwen35Model
         {
             throw new NotSupportedException($"RoPE scaling '{type}' is not supported for Qwen3.5 GGUFs (none and yarn are).");
         }
+        double original = m.GetUInt32($"{arch}.rope.scaling.original_context_length");
+        float factor = m.GetFloat32($"{arch}.rope.scaling.factor", 1f);
+        if (original <= 0 || !(factor > 0))
+            throw new InvalidDataException("A YaRN GGUF needs a positive scaling factor and original_context_length.");
         return new RopeScaling
         {
             Type = RopeScalingType.Yarn,
-            Factor = m.GetFloat32($"{arch}.rope.scaling.factor", 1f),
-            OriginalContextLength = m.GetUInt32($"{arch}.rope.scaling.original_context_length"),
+            Factor = factor,
+            OriginalContextLength = original,
             TruncateYarnCorrectionRange = true,
         };
     }
@@ -59,8 +63,8 @@ public sealed unsafe partial class Qwen35Model
     /// Row permutations copy whole rows, so they are exact for quantized tensors; the <c>ssm_out</c> column permutation is not (it cuts through
     /// quantization blocks), so a quantized <c>ssm_out</c> is widened to F16 first. Later visits of a repeated layer then alias the first visit's tensors.</summary>
     /// <returns>The routers of each physical layer in the mHC range.</returns>
-    private static Dictionary<int, MhcRouterWeights> PrepareSenseNovaWeights(Dictionary<string, Tensor> w, SenseNovaLoopConfig loop, bool[] linear,
-        int numKHeads, int numVHeads, int headKDim, int headVDim, int convKernel, List<Tensor> owned)
+    private static Dictionary<int, MhcRouterWeights> PrepareSenseNovaWeights(Dictionary<string, Tensor> w, IReadOnlyDictionary<string, Tensor> source,
+        SenseNovaLoopConfig loop, bool[] linear, int numKHeads, int numVHeads, int headKDim, int headVDim, int convKernel, List<Tensor> owned)
     {
         int repeat = numVHeads % numKHeads == 0 ? numVHeads / numKHeads : throw new InvalidDataException("Value heads must be a multiple of key heads.");
         int keyWidth = numKHeads * headKDim;   // rows of the q block, and of the k block, in the qkv projection and its conv channels
@@ -74,16 +78,17 @@ public sealed unsafe partial class Qwen35Model
             {
                 Tensor fused = Take(w, $"{p}.attn_qkv_gate.weight");
                 int qkvRows = (int)fused.Shape[0] - numVHeads * headVDim;
-                w[$"{p}.attn_qkv.weight"] = UntileRows(fused.SliceRows(0, qkvRows), 2 * keyWidth, numKHeads, repeat, headVDim, owned);
-                w[$"{p}.attn_gate.weight"] = UntileRows(fused.SliceRows(qkvRows, numVHeads * headVDim), 0, numKHeads, repeat, headVDim, owned);
+                // The fused tensors are file-owned; row views taken from them stay valid after Take.
+                Put(w, $"{p}.attn_qkv.weight", UntileRows(fused.SliceRows(0, qkvRows), 2 * keyWidth, numKHeads, repeat, headVDim, owned), source);
+                Put(w, $"{p}.attn_gate.weight", UntileRows(fused.SliceRows(qkvRows, numVHeads * headVDim), 0, numKHeads, repeat, headVDim, owned), source);
                 Tensor ba = Take(w, $"{p}.ssm_beta_alpha.weight");
-                w[$"{p}.ssm_beta.weight"] = UntileRows(ba.SliceRows(0, numVHeads), 0, numKHeads, repeat, 1, owned);
-                w[$"{p}.ssm_alpha.weight"] = UntileRows(ba.SliceRows(numVHeads, numVHeads), 0, numKHeads, repeat, 1, owned);
-                w[$"{p}.ssm_a"] = UntileRows(w[$"{p}.ssm_a"], 0, numKHeads, repeat, 1, owned);
-                w[$"{p}.ssm_dt.bias"] = UntileRows(w[$"{p}.ssm_dt.bias"], 0, numKHeads, repeat, 1, owned);
+                Put(w, $"{p}.ssm_beta.weight", UntileRows(ba.SliceRows(0, numVHeads), 0, numKHeads, repeat, 1, owned), source);
+                Put(w, $"{p}.ssm_alpha.weight", UntileRows(ba.SliceRows(numVHeads, numVHeads), 0, numKHeads, repeat, 1, owned), source);
+                Put(w, $"{p}.ssm_a", UntileRows(w[$"{p}.ssm_a"], 0, numKHeads, repeat, 1, owned), source);
+                Put(w, $"{p}.ssm_dt.bias", UntileRows(w[$"{p}.ssm_dt.bias"], 0, numKHeads, repeat, 1, owned), source);
                 // The conv kernel is one row of ConvKernel taps per channel; the channels after q and k are the V heads.
-                w[$"{p}.ssm_conv1d.weight"] = UntileRows(w[$"{p}.ssm_conv1d.weight"], 2 * keyWidth, numKHeads, repeat, headVDim, owned, rowElements: convKernel);
-                w[$"{p}.ssm_out.weight"] = UntileColumns(w[$"{p}.ssm_out.weight"], numKHeads, repeat, headVDim, owned);
+                Put(w, $"{p}.ssm_conv1d.weight", UntileRows(w[$"{p}.ssm_conv1d.weight"], 2 * keyWidth, numKHeads, repeat, headVDim, owned, rowElements: convKernel), source);
+                Put(w, $"{p}.ssm_out.weight", UntileColumns(w[$"{p}.ssm_out.weight"], numKHeads, repeat, headVDim, owned), source);
             }
             if (physical >= loop.MhcStart && physical < loop.MhcEnd)
             {
@@ -102,7 +107,43 @@ public sealed unsafe partial class Qwen35Model
                 w[prefix + key[firstPrefix.Length..]] = w[key];
             }
         }
+        // The MTP draft block (slots past the plan) is not run; leaving it in the dictionary would preload it.
+        foreach (string key in w.Keys.Where(k => IsSlotBeyondPlan(k, loop.Slots)).ToList())
+        {
+            Drop(w, key, source);
+        }
         return routers;
+    }
+
+    /// <summary>True for <c>blk.N.*</c> keys with N at or past <paramref name="slots"/>.</summary>
+    private static bool IsSlotBeyondPlan(string key, int slots)
+    {
+        const string prefix = "blk.";
+        if (!key.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        int dot = key.IndexOf('.', prefix.Length);
+        return dot > prefix.Length && int.TryParse(key.AsSpan(prefix.Length, dot - prefix.Length), out int index) && index >= slots;
+    }
+
+    /// <summary>Replaces <paramref name="key"/>'s tensor; a superseded tensor the file does not own is disposed.</summary>
+    private static void Put(Dictionary<string, Tensor> w, string key, Tensor value, IReadOnlyDictionary<string, Tensor> source)
+    {
+        if (w.TryGetValue(key, out Tensor? old) && !ReferenceEquals(old, value) && !OwnedByFile(old, source))
+            old.Dispose();
+        w[key] = value;
+    }
+
+    /// <summary>Removes <paramref name="key"/>; a tensor the file does not own is disposed.</summary>
+    private static void Drop(Dictionary<string, Tensor> w, string key, IReadOnlyDictionary<string, Tensor> source)
+    {
+        if (!w.Remove(key, out Tensor? old)) return;
+        if (!OwnedByFile(old, source)) old.Dispose();
+    }
+
+    private static bool OwnedByFile(Tensor t, IReadOnlyDictionary<string, Tensor> source)
+    {
+        foreach (Tensor f in source.Values)
+            if (ReferenceEquals(f, t)) return true;
+        return false;
     }
 
     private static Tensor Take(Dictionary<string, Tensor> w, string key)
@@ -126,6 +167,7 @@ public sealed unsafe partial class Qwen35Model
     /// <paramref name="rowElements"/> is the row length when the tensor's shape does not say (a 1-D vector has one element per row).</summary>
     internal static Tensor UntileRows(Tensor src, int firstRow, int keyHeads, int repeat, int rowsPerHead, List<Tensor> owned, int rowElements = 0)
     {
+        if (repeat == 1) return src;   // equal head counts: the permutation is the identity, so no copy
         long cols = rowElements > 0 ? rowElements : src.Shape.Rank == 2 ? src.Shape[1] : 1;
         long rows = src.ElementCount / cols;
         long rowBytes = src.DType.ComputeByteCount(cols);
@@ -150,6 +192,7 @@ public sealed unsafe partial class Qwen35Model
     /// are moved from tiled to grouped order. A quantized matrix is widened to F16 first (the permutation cuts through blocks).</summary>
     internal static Tensor UntileColumns(Tensor src, int keyHeads, int repeat, int headCols, List<Tensor> owned)
     {
+        if (repeat == 1) return src;   // identity: keep the file's quantization, no widening
         Tensor source = src;
         if (src.DType.IsQuantized)
         {

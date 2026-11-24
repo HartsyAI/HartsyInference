@@ -1088,11 +1088,13 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   RWKV-6 rescale) and the SigLIP mmproj swap under [Weight layout](#weight-layout--transpose--converter-parity).
 - **Qwen3.5 Gated DeltaNet:** missing `q *= 1/√head_dim` before the recurrence produces fluent-looking
   word salad (not a crash).
-- **Qwen3.5-family GGUFs from llama.cpp store the Gated DeltaNet value heads TILED when there are more value than key heads**
-  (conversion/qwen.py `_LinearAttentionVReorderBase`: qkv V rows, z, a, b, `A_log`, `dt_bias`, conv V channels and the `out_proj`
-  columns); this engine's delta ops and transformers use GROUPED order (value head `h` reads key head `h / repeat`). Only the
-  SenseNova-Loop GGUF path un-tiles at load (`Qwen35Model.PrepareSenseNovaWeights`); a plain `qwen35` GGUF with unequal head counts
-  (9B-class, Clef) is not converted and is suspected wrong until checked against the HF route.
+- **Some llama.cpp Qwen3.5 GGUFs store the Gated DeltaNet value heads TILED when there are more value than key heads.** In the
+  SenseNova fork at 24ea7bb (conversion/qwen.py `_LinearAttentionVReorderBase`) that covers qkv V rows, z, a, b, `A_log`, `dt_bias`,
+  conv V channels and the `out_proj` columns. This engine and transformers use GROUPED order (value head `h` reads key head `h / repeat`).
+  The layout depends on the converter version, not on the architecture name, and the version history of upstream llama.cpp was not
+  checked. Only the SenseNova-Loop path un-tiles at load (`Qwen35Model.PrepareSenseNovaWeights`). A plain `qwen35` GGUF with unequal
+  head counts (9B-class, Clef) is not converted and is suspected wrong until checked against the HF route; detecting the layout will need
+  a signal in the file, since the architecture alone does not decide it.
 - **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
   row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
 - **A GGUF codec that agrees with its GPU kernel can still be wrong** — a kernel written to mirror the host
