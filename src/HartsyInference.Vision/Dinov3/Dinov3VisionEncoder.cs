@@ -110,7 +110,8 @@ public sealed unsafe class Dinov3VisionEncoder
         Tensor?[] taps = new Tensor?[_layers.Length];
         try
         {
-            _ = RunBlocks(backend, pixelValues, last, blockIndices, taps);   // every kept tensor is in taps; the last block is tapped
+            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps);   // every kept tensor is in taps; the last block is tapped
+            System.Diagnostics.Debug.Assert(ReferenceEquals(final, taps[last]), "the last block run must be a tapped block");
             Tensor[] result = new Tensor[blockIndices.Length];
             for (int i = 0; i < result.Length; i++)
             {

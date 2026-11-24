@@ -17,7 +17,9 @@ public static class Dinov3TimmKeys
     /// <param name="weights">The timm tensors by name.</param>
     /// <param name="prefix">Everything before <c>patch_embed.proj.weight</c> and the other keys, such as <c>encoder.</c>; empty for none.</param>
     /// <param name="preset">The network the weights belong to. <see cref="Dinov2Preset.GatedMlp"/> selects <c>fc1_g</c>/<c>fc1_x</c> (SwiGLU) over <c>fc1</c>,
-    /// <see cref="Dinov2Preset.AttentionQkvBias"/> whether <c>attn.qkv.bias</c> is read, <see cref="Dinov2Preset.HasFinalNorm"/> whether <c>norm.*</c> is.</param>
+    /// <see cref="Dinov2Preset.AttentionQkvBias"/> whether the query and value biases are read (fused <c>attn.qkv.bias</c> or timm's separate <c>attn.q_bias</c> and
+    /// <c>attn.v_bias</c>; a bias in the file with the flag off is refused), <see cref="Dinov2Preset.HasFinalNorm"/> whether <c>norm.*</c> is read (a final norm in the
+    /// file with the flag off is ignored: it changes no output).</param>
     /// <exception cref="InvalidOperationException">A weight is missing or has the wrong shape.</exception>
     public static Dictionary<string, Tensor> ToHuggingFace(IReadOnlyDictionary<string, Tensor> weights, string prefix, Dinov2Preset preset)
     {
@@ -77,12 +79,27 @@ public static class Dinov3TimmKeys
             Tensor qkvWeight = Get(timm + "attn.qkv.weight", 3 * d, d);
             for (int part = 0; part < 3; part++)
                 result[$"{hf}attention.{QkvNames[part]}.weight"] = qkvWeight.SliceRows(part * d, d);
-            if (preset.AttentionQkvBias)
+
+            bool fusedBias = weights.ContainsKey(prefix + timm + "attn.qkv.bias");
+            bool splitBias = weights.ContainsKey(prefix + timm + "attn.q_bias") || weights.ContainsKey(prefix + timm + "attn.v_bias");
+            if (!preset.AttentionQkvBias)
+            {
+                // A bias in the file means the preset is the wrong one; dropping it silently would load and give wrong numbers.
+                if (fusedBias || splitBias)
+                    throw new NotSupportedException($"timm DINOv3 '{prefix + timm}attn' has a q/k/v bias but the preset's attention has none; use a preset with AttentionQkvBias.");
+            }
+            else if (fusedBias)
             {
                 // The key bias is masked in the reference and the HF layout has none, so only the query and value slices are kept.
                 Tensor qkvBias = Get(timm + "attn.qkv.bias", 3 * d);
                 result[hf + "attention.q_proj.bias"] = qkvBias.SliceRows(0, d);
                 result[hf + "attention.v_proj.bias"] = qkvBias.SliceRows(2L * d, d);
+            }
+            else
+            {
+                // timm's EVA attention keeps the query and value biases as separate parameters (q_bias, v_bias); k_bias is a non-persistent buffer.
+                result[hf + "attention.q_proj.bias"] = Get(timm + "attn.q_bias", d);
+                result[hf + "attention.v_proj.bias"] = Get(timm + "attn.v_bias", d);
             }
         }
 

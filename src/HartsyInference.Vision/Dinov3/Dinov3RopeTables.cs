@@ -20,8 +20,8 @@ internal static class Dinov3RopeTables
         int tokens = prefix + gridH * gridW;
         int half = headDim / 2, quarter = headDim / 4;
         float[] periods = Periods(headDim, roundPeriodsToBf16);
-        int longSide = Math.Max(gridH, gridW);
-        float[] coordH = AxisCoords(gridH, normalizeByLongSide ? longSide : gridH), coordW = AxisCoords(gridW, normalizeByLongSide ? longSide : gridW);
+        int normH = normalizeByLongSide ? Math.Max(gridH, gridW) : gridH, normW = normalizeByLongSide ? normH : gridW;
+        float[] coordH = AxisCoords(gridH, normH), coordW = AxisCoords(gridW, normW);
 
         Tensor cos = new(new TensorShape(batch, tokens, headDim), DType.F32);
         Tensor sin = new(new TensorShape(batch, tokens, headDim), DType.F32);

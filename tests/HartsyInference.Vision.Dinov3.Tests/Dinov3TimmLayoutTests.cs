@@ -73,6 +73,66 @@ public sealed unsafe class Dinov3TimmLayoutTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TimmPath_RefusesABiasWhenThePresetHasNone(bool separateBiases)
+    {
+        Dinov2Preset biased = TimmPreset(gated: false) with { AttentionQkvBias = true };
+        Dinov2Preset biasFree = TimmPreset(gated: false);
+        Dictionary<string, Tensor> timm = TimmWeights(biased, seed: 23, prefix: "encoder.");
+        try
+        {
+            if (separateBiases)
+            {
+                for (int i = 0; i < biased.NumLayers; i++)
+                {
+                    timm.Remove($"encoder.blocks.{i}.attn.qkv.bias", out Tensor? fused);
+                    fused!.Dispose();
+                    timm[$"encoder.blocks.{i}.attn.q_bias"] = new Tensor(new TensorShape(128), DType.F32);
+                    timm[$"encoder.blocks.{i}.attn.v_bias"] = new Tensor(new TensorShape(128), DType.F32);
+                }
+            }
+
+            NotSupportedException error = Assert.Throws<NotSupportedException>(() => Dinov3TimmKeys.ToHuggingFace(timm, "encoder.", biasFree));
+            Assert.Contains("AttentionQkvBias", error.Message);
+        }
+        finally
+        {
+            Dispose(timm);
+        }
+    }
+
+    [Fact]
+    public void TimmSeparateQAndVBiases_AreRenamedWithoutSlicing()
+    {
+        Dinov2Preset preset = TimmPreset(gated: false) with { AttentionQkvBias = true };
+        Dictionary<string, Tensor> timm = TimmWeights(preset, seed: 24, prefix: "");
+        try
+        {
+            for (int i = 0; i < preset.NumLayers; i++)
+            {
+                timm.Remove($"blocks.{i}.attn.qkv.bias", out Tensor? fused);
+                fused!.Dispose();
+                Tensor q = new(new TensorShape(128), DType.F32), v = new(new TensorShape(128), DType.F32);
+                q.AsSpan<float>().Fill(0.25f + i);
+                v.AsSpan<float>().Fill(-0.5f - i);
+                timm[$"blocks.{i}.attn.q_bias"] = q;
+                timm[$"blocks.{i}.attn.v_bias"] = v;
+            }
+
+            Dictionary<string, Tensor> hf = Dinov3TimmKeys.ToHuggingFace(timm, "", preset);
+
+            Assert.Same(timm["blocks.1.attn.q_bias"], hf["layer.1.attention.q_proj.bias"]);
+            Assert.Same(timm["blocks.1.attn.v_bias"], hf["layer.1.attention.v_proj.bias"]);
+            Assert.False(hf.ContainsKey("layer.1.attention.k_proj.bias"));
+        }
+        finally
+        {
+            Dispose(timm);
+        }
+    }
+
     [Fact]
     public void Adapter_NamesAMissingOrMisshapenTensor()
     {
