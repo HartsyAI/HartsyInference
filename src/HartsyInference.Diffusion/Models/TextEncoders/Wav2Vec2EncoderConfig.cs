@@ -40,6 +40,14 @@ public sealed record Wav2Vec2EncoderConfig
     /// <summary>HF <c>do_normalize</c>: z-normalize the waveform (zero mean, unit unbiased variance) before the convs.</summary>
     public bool NormalizeInput { get; init; }
 
+    /// <summary>With <see cref="NormalizeInput"/>, divide by the biased variance (numpy <c>var()</c>, HF's feature extractor)
+    /// instead of the unbiased one (torch <c>var()</c>, ComfyUI's S2V front-end).</summary>
+    public bool BiasedNormalizeVariance { get; init; }
+
+    /// <summary>Use the exact erf GELU HF wav2vec2 specifies (<c>gelu</c>) instead of the backend's tanh approximation.
+    /// Off for the S2V presets, which were validated with the tanh form.</summary>
+    public bool ExactGelu { get; init; }
+
     /// <summary>Positional conv embedding kernel size.</summary>
     public int PosConvKernel { get; init; } = 128;
 
@@ -70,6 +78,11 @@ public sealed record Wav2Vec2EncoderConfig
         Hidden = 768, NumLayers = 12, NumHeads = 12, Intermediate = 3072,
         PosConvKernel = 128, PosConvGroups = 16,
     };
+
+    /// <summary>The front-end LongCat-Video-Avatar 1.0 builds from <c>TencentGameMate/chinese-wav2vec2-base</c>: the
+    /// <see cref="Base"/> shape with HF's exact GELU and a biased-variance z-normalized waveform (the reference constructs
+    /// <c>Wav2Vec2FeatureExtractor</c> with its default <c>do_normalize=True</c>).</summary>
+    public static Wav2Vec2EncoderConfig LongCatAvatarV10 => Base with { NormalizeInput = true, BiasedNormalizeVariance = true, ExactGelu = true };
 
     /// <summary>wav2vec2-large preset (the S2V front-end): hidden 1024, 24 layers, 16 heads, intermediate 4096,
     /// per-conv LayerNorm feature encoder with biases, stable (pre-norm) layers, normalized input.</summary>
