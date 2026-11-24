@@ -126,6 +126,7 @@ public sealed class HyperConnection
         using Tensor resT = HostMath.Tensor(residual, tokens, hc, Dim);
         using Tensor postT = HostMath.Tensor(post, tokens, hc);
         using Tensor combT = HostMath.Tensor(comb, tokens, hc, hc);
+        if (_config.TransposedMix) TransposeInPlace(combT.AsSpan<float>(), tokens, hc);
         using Tensor outT = new(new TensorShape(tokens, hc, Dim), DType.F32);
         _backend.HcPostMix(outT, subT, resT, postT, combT);
         outT.AsReadOnlySpan<float>().CopyTo(output);
@@ -181,6 +182,18 @@ public sealed class HyperConnection
     };
 
     private static float Sigmoid(float v) => 1f / (1f + MathF.Exp(-v));
+
+    /// <summary>Transposes every <c>[hc, hc]</c> matrix of <paramref name="comb"/> in place.</summary>
+    private static void TransposeInPlace(Span<float> comb, int tokens, int hc)
+    {
+        for (int t = 0; t < tokens; t++)
+        {
+            Span<float> m = comb.Slice(t * hc * hc, hc * hc);
+            for (int i = 0; i < hc; i++)
+                for (int j = i + 1; j < hc; j++)
+                    (m[i * hc + j], m[j * hc + i]) = (m[j * hc + i], m[i * hc + j]);
+        }
+    }
 
     private static void CheckSize(int length, int tokens, int perToken, string name)
     {

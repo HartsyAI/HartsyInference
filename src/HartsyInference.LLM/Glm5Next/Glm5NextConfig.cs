@@ -125,7 +125,8 @@ public sealed record Glm5NextConfig
     /// <summary>Whether <paramref name="layer"/> is an MTP layer.</summary>
     public bool IsMtpLayer(int layer) => layer >= Layers && layer < Layers + MtpLayers;
 
-    /// <summary>Whether the feed-forward block of <paramref name="layer"/> is MoE; an MTP layer always is.</summary>
+    /// <summary>Whether the feed-forward block of <paramref name="layer"/> is MoE. An MTP layer always is: this checkpoint's MTP layer is DSA + MoE
+    /// (the index test pins it), which is read from the checkpoint's layout rather than from a config field.</summary>
     public bool IsSparse(int layer) => IsMtpLayer(layer) || SparseMlp[layer];
 
     /// <summary>Whether <paramref name="layer"/> runs DSA; an MTP layer always does.</summary>
