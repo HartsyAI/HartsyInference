@@ -120,7 +120,7 @@ public sealed class ImagesService : IImagesService
                 {
                     recipeLease.Release();
                 }
-                result = BackgroundRemovalStage.Apply(_engine, resolved, result);
+                result = BackgroundRemovalStage.Apply(_engine, resolved, result, cancel);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted);
                 RecipeIdentity recipe = RecipeIdentity.For(InferenceEngine.FamilyIdFor(spec), defaults.Revision,
                     RecipeResolution.ResolveVariant(spec));

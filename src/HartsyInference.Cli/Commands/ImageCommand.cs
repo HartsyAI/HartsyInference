@@ -330,7 +330,8 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         public bool RemoveBackground { get; init; }
 
         [CommandOption("--remove-background-model")]
-        [Description("Matter for --remove-background: rmbg (RMBG-1.4, default), rmbg3 or rmbg3-int8 (Bria RMBG 3.0, non-commercial; runs after the generating model is released).")]
+        [Description("Matter for --remove-background: rmbg (RMBG-1.4, default), rmbg3 or rmbg3-int8 (Bria RMBG 3.0, non-commercial). "
+            + "RMBG 3.0 runs after the generator is released, so each image reloads both models unless the VRAM policy keeps them.")]
         public string? RemoveBackgroundModel { get; init; }
 
         [CommandOption("-o|--output")]
@@ -430,7 +431,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("slg-start", settings.SlgStart);
         parameters.PutIfSet("slg-stop", settings.SlgStop);
         parameters.PutIfSet("preview-output", settings.PreviewOutput);
-        if (settings.RemoveBackground)
+        if (settings.RemoveBackground || !string.IsNullOrWhiteSpace(settings.RemoveBackgroundModel))
         {
             parameters.Put("remove-background", "true");
         }

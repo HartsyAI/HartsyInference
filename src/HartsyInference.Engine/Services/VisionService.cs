@@ -75,8 +75,12 @@ public sealed class VisionService : IVisionService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         VisionRequestValidator.Validate(request);
-        if (request.Mode is VisionMode.BackgroundRemoval or VisionMode.Matting && Rmbg3Matte.Handles(spec))
+        if (Rmbg3Matte.Handles(spec))
+        {
+            if (request.Mode is not (VisionMode.BackgroundRemoval or VisionMode.Matting))
+                throw new NotSupportedException($"RMBG 3.0 ('{spec.Requested}') only does background removal and matting, not {request.Mode}.");
             return Rmbg3(spec, request, cancel);
+        }
         return Task.Run(
             () =>
             {
