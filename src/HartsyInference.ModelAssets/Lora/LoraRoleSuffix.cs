@@ -80,6 +80,7 @@ public static class LoraRoleSuffix
     /// A consumer reports these once per file rather than refusing, because a file may carry non-adapter tensors beside its adapter.</summary>
     public static bool IsUnrecognizedAdapterKey(string key) =>
         !TryStrip(key, out _, out _)
+        && !key.StartsWith(Mappers.LongCatLoraMapper.KeyPrefix, StringComparison.Ordinal)
         && (key.Contains(".lora_", StringComparison.Ordinal)
             || key.Contains(".hada_", StringComparison.Ordinal)
             || key.Contains(".lokr_", StringComparison.Ordinal));
