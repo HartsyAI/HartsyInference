@@ -115,11 +115,23 @@ internal static class FastFramesOps
         return row;
     }
 
-    /// <summary>A host copy of <paramref name="values"/> row <paramref name="row"/> from a <c>[rows, cols]</c> F32 tensor.</summary>
-    public static float[] HostRow(Tensor table, int row)
+    /// <summary>A fresh F32 tensor of <paramref name="shape"/> holding <paramref name="source"/>'s values, cast when the source is not
+    /// F32. It never aliases the source: the caller owns the result, and may dispose the source straight away.</summary>
+    /// <exception cref="ArgumentException">The element counts differ.</exception>
+    public static Tensor CopyF32(Tensor source, TensorShape shape)
     {
-        int cols = (int)(table.ElementCount / table.Shape[0]);
-        return table.AsReadOnlySpan<float>().Slice(row * cols, cols).ToArray();
+        ArgumentNullException.ThrowIfNull(source);
+        if (source.ElementCount != shape.ElementCount)
+            throw new ArgumentException($"A weight of {source.Shape} cannot be read as {shape}: the element counts differ.", nameof(shape));
+        Tensor target = new(shape, DType.F32);
+        if (source.DType == DType.F32)
+        {
+            source.AsReadOnlySpan<float>().CopyTo(target.AsSpan<float>());
+            return target;
+        }
+        using Tensor cast = source.CastTo(DType.F32);
+        cast.AsReadOnlySpan<float>().CopyTo(target.AsSpan<float>());
+        return target;
     }
 
     /// <summary>The transpose of layer <paramref name="layer"/> of a stacked <c>[layers, in, out]</c> weight as an F32
@@ -146,8 +158,4 @@ internal static class FastFramesOps
         using Tensor f32 = view.DType == DType.F32 ? view.Reshape(new TensorShape(width)) : view.CastTo(DType.F32);
         return Vector(f32.AsReadOnlySpan<float>());
     }
-
-    /// <summary>The tensor as F32 (a cast copy, or the tensor itself when it already is F32); the caller disposes the result only
-    /// when it is not the input.</summary>
-    public static Tensor AsF32(Tensor t) => TensorCasts.EnsureF32(t);
 }
