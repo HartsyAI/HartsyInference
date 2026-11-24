@@ -102,6 +102,12 @@ public sealed unsafe partial class Qwen35Model
                 w[prefix + key[firstPrefix.Length..]] = w[key];
             }
         }
+        // The MTP draft block (slots past the plan) is not run; leaving it in the dictionary would preload it.
+        foreach (string key in w.Keys.Where(k => k.StartsWith("blk.", StringComparison.Ordinal)
+            && int.TryParse(k.AsSpan(4, k.IndexOf('.', 4) - 4), out int index) && index >= loop.Slots).ToList())
+        {
+            w.Remove(key);
+        }
         return routers;
     }
 

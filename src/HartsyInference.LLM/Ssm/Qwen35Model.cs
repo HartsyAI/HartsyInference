@@ -283,7 +283,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         if (w.TryGetValue(stackedKey, out Tensor? stacked)) StackedExperts.Split(dst, stacked, targetFormat, e, outDim, inDim);
     }
 
-    public static Qwen35Model Load(string ggufPath)
+    /// <param name="maxSequenceLength">Tokens the full-attention KV caches hold; the default is the fixed 8192 every earlier caller got.</param>
+    public static Qwen35Model Load(string ggufPath, int maxSequenceLength = MaxAttnSeqLen)
     {
         // QUANT-RESIDENT load (2026-07-24): weights stay in their GGUF quantization so every
         // backend.Linear dispatches the fused quant GEMV / dp4a decode paths — the previous
@@ -400,7 +401,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
             Qwen35Model model = new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, recrOverride,
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
-                convK, headKvDim, headVDim, numKHeads, numVHeads, moe);
+                convK, headKvDim, headVDim, numKHeads, numVHeads, moe, maxSequenceLength);
             model._ownedTensors.AddRange(converted);
             if (loop is not null) model.ConfigureLoop(loop, routers!, ropeScaling);
             else model.ConfigureRope(ropeScaling);
@@ -1032,6 +1033,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _kvCache.Dispose();
+        _hostBackend?.Dispose();
         _handle?.Dispose();
         foreach (Tensor t in _ownedTensors) t.Dispose();
     }
