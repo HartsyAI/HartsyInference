@@ -34,6 +34,7 @@ public sealed class FastFramesKvRefiner : IDisposable
     private StemBlock[] _stem = [];
     private HeadLayer[] _heads = [];
     private int _disposed;
+    private bool _loaded;
 
     /// <summary>A refiner of the given shape; call <see cref="LoadWeights"/> before use.</summary>
     public FastFramesKvRefiner(FastFramesKvRefinerConfig config)
@@ -101,6 +102,9 @@ public sealed class FastFramesKvRefiner : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_loaded)
+            throw new InvalidOperationException("The refiner's weights are already loaded; a refiner loads once.");
         int dA = _config.AdapterDim, dim = _config.Dim, layers = _config.Layers;
         _tEmbed0W = Own(F32(weights, "t_embed.mlp.0.weight")); _tEmbed0B = Own(F32(weights, "t_embed.mlp.0.bias"));
         _tEmbed2W = Own(F32(weights, "t_embed.mlp.2.weight")); _tEmbed2B = Own(F32(weights, "t_embed.mlp.2.bias"));
@@ -136,12 +140,14 @@ public sealed class FastFramesKvRefiner : IDisposable
                 DV: Own(FastFramesOps.TransposedLayer(weights[g + "dV_w"], l)), DVB: Own(FastFramesOps.LayerVector(weights[g + "dV_b"], l)),
                 VScale: Own(ExpVector(weights[g + "v_logscale"], l)));
         }
+        _loaded = true;
     }
 
     /// <summary>The per-run conditioning of a refinement at timestep <paramref name="timestep"/> (833.33 in the released
     /// models): the timestep embedding and, for every layer, the head's modulation vectors. The caller disposes it.</summary>
     public Conditioning Prepare(IBackend backend, float timestep)
     {
+        RequireLoaded();
         int dA = _config.AdapterDim;
         using Tensor sinusoid = FastFramesOps.SinusoidalEmbedding(timestep, _config.FrequencyDim);
         using Tensor h0 = FastFramesOps.Linear(backend, sinusoid, _tEmbed0W, _tEmbed0B);
@@ -164,6 +170,7 @@ public sealed class FastFramesKvRefiner : IDisposable
     /// <c>[S, dim]</c>; the result is <c>[S, d_a]</c> after the stem's final norm; every layer's head consumes it through the shared <c>phi_proj</c>.</summary>
     public Tensor ComputePhi(IBackend backend, Tensor stemTokens, Conditioning conditioning)
     {
+        RequireLoaded();
         Tensor x = FastFramesOps.Linear(backend, stemTokens, _stemInW, _stemInB);
         foreach (StemBlock block in _stem)
         {
@@ -178,13 +185,18 @@ public sealed class FastFramesKvRefiner : IDisposable
 
     /// <summary>The shared <c>phi_proj</c> of the stem features <paramref name="phi"/> (<see cref="ComputePhi"/>'s result),
     /// <c>[S, d_a]</c>; every layer's head reads it, so it is computed once per frame. The caller disposes it.</summary>
-    public Tensor ProjectPhi(IBackend backend, Tensor phi) => FastFramesOps.Linear(backend, phi, _phiProjW, null);
+    public Tensor ProjectPhi(IBackend backend, Tensor phi)
+    {
+        RequireLoaded();
+        return FastFramesOps.Linear(backend, phi, _phiProjW, null);
+    }
 
     /// <summary>Refines layer <paramref name="layer"/>'s noisy keys and values (<c>[S, dim]</c> F32, as the generator's cache
     /// holds them after the frame's last step) into clean-context ones. The inputs are only read; the caller disposes both
     /// results and writes them back into the cache slot, converting to the slot's dtype.</summary>
     public (Tensor K, Tensor V) RepairLayer(IBackend backend, int layer, Tensor noisyK, Tensor noisyV, Tensor phiV, Conditioning conditioning)
     {
+        RequireLoaded();
         if (layer < 0 || layer >= _heads.Length)
             throw new ArgumentOutOfRangeException(nameof(layer), layer, $"The refiner has {_heads.Length} layers.");
         return RunHead(backend, _heads[layer], noisyK, noisyV, phiV, conditioning, layer);
@@ -301,10 +313,14 @@ public sealed class FastFramesKvRefiner : IDisposable
         return output;
     }
 
-    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key)
+    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
+        FastFramesOps.CopyF32(weights[key], weights[key].Shape);
+
+    private void RequireLoaded()
     {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t.Reshape(t.Shape) : t.CastTo(DType.F32);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (!_loaded)
+            throw new InvalidOperationException("The refiner has no weights yet; call LoadWeights first.");
     }
 
     private Tensor Own(Tensor t)
@@ -335,9 +351,14 @@ public sealed class FastFramesKvRefiner : IDisposable
         /// <summary>Each layer's <c>1 + scale</c> vector <c>[d_a]</c>.</summary>
         public Tensor[] ScalesPlusOne { get; } = scalesPlusOne;
 
+        private bool _disposed;
+
         /// <inheritdoc/>
         public void Dispose()
         {
+            if (_disposed)
+                return;
+            _disposed = true;
             Embedding.Dispose();
             foreach (Tensor t in Shifts)
                 t.Dispose();

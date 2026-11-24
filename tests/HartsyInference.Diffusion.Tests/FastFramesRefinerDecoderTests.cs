@@ -35,6 +35,11 @@ public sealed class FastFramesRefinerDecoderTests
         using CpuBackend backend = new();
         using FastFramesKvRefiner refiner = new(c);
         refiner.LoadWeights(weights);
+        // The refiner must not alias the checkpoint: the references were built before loading, so disposing the source now
+        // would leave any dangling view to read freed memory.
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+        weights.Clear();
         using FastFramesKvRefiner.Conditioning conditioning = refiner.Prepare(backend, timestep);
         using Tensor stemTokens = ToTensor(stem);
         using Tensor phi = refiner.ComputePhi(backend, stemTokens, conditioning);
@@ -289,6 +294,9 @@ public sealed class FastFramesRefinerDecoderTests
         using CpuBackend backend = new();
         using FastFramesPixelDecoder decoder = new(detected);
         decoder.LoadWeights(weights);
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+        weights.Clear();
         using FastFramesPixelDecoder.State state = decoder.CreateState();
         for (int f = 0; f < frames; f++)
         {
@@ -413,6 +421,56 @@ public sealed class FastFramesRefinerDecoderTests
         }
         Add(prefix + "fc_out.weight", 4 * 16 * 16 * 3, dim); Add(prefix + "fc_out.bias", 4 * 16 * 16 * 3);
         return w;
+    }
+
+    [Fact]
+    public void ARefinerLoadsOnceAndRefusesWorkBeforeItHasWeights()
+    {
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = RefinerWeights(TinyRefiner, seed: 9);
+        FastFramesKvRefiner refiner = new(TinyRefiner);
+        Assert.Throws<InvalidOperationException>(() => refiner.Prepare(backend, 833f));
+        refiner.LoadWeights(weights);
+        Assert.Throws<InvalidOperationException>(() => refiner.LoadWeights(weights));
+        refiner.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => refiner.Prepare(backend, 833f));
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+    }
+
+    [Fact]
+    public void ADecoderRefusesAFrameOfAnotherGridOrAWrongEmbedding()
+    {
+        FastFramesPixelDecoderConfig c = new(Dim: 8, InputDim: 8, LowBlocks: 1, HighBlocks: 1, FfnMultiplier: 4);
+        Dictionary<string, Tensor> weights = DecoderWeights(c, seed: 13, prefix: "");
+        using CpuBackend backend = new();
+        using FastFramesPixelDecoder decoder = new(c);
+        decoder.LoadWeights(weights);
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+        weights.Clear();
+        Random rng = new(14);
+        using Tensor first = ToTensor(RandomRows(rng, 6, 8));
+        using Tensor embedding = ToTensor([RandomRows(rng, 1, 8)[0]]);
+        using FastFramesPixelDecoder.State state = decoder.CreateState();
+        decoder.DecodeFrame(backend, first, embedding, 3, 2, state).Dispose();
+
+        // The same token count on a 2x3 grid is still a different grid: refused before anything is written.
+        using Tensor second = ToTensor(RandomRows(rng, 6, 8));
+        Assert.Throws<ArgumentException>(() => decoder.DecodeFrame(backend, second, embedding, 2, 3, state));
+        using Tensor wide = ToTensor([RandomRows(rng, 1, 16)[0]]);
+        Assert.Throws<ArgumentException>(() => decoder.DecodeFrame(backend, first, wide, 3, 2, state));
+        decoder.DecodeFrame(backend, second, embedding, 3, 2, state).Dispose();
+        state.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => decoder.DecodeFrame(backend, first, embedding, 3, 2, state));
+    }
+
+    [Fact]
+    public void ADisposedDecoderRefusesWork()
+    {
+        FastFramesPixelDecoder decoder = new(new FastFramesPixelDecoderConfig());
+        decoder.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => decoder.CreateState());
     }
 
     // ---------------------------------------------------------------- reference math (double precision)

@@ -26,6 +26,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
     private readonly FastFramesPixelDecoderConfig _config;
     private readonly List<Tensor> _owned = [];
     private Tensor? _bridge;
+    private bool _loaded;
     private Tensor _modulation = null!, _entryNormW = null!, _entryNormB = null!, _entryW = null!, _entryB = null!;
     private Tensor _outW = null!, _outB = null!;
     private Block[] _blocks = [];
@@ -94,6 +95,9 @@ public sealed class FastFramesPixelDecoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_loaded)
+            throw new InvalidOperationException("The decoder's weights are already loaded; a decoder loads once.");
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";
         int dim = _config.Dim;
         if (_config.HasBridge)
@@ -108,10 +112,15 @@ public sealed class FastFramesPixelDecoder : IDisposable
         for (int i = 0; i < _config.HighBlocks; i++)
             blocks.Add(LoadBlock(weights, $"{prefix}conv_high.{i}."));
         _blocks = [.. blocks];
+        _loaded = true;
     }
 
     /// <summary>A new decoding state for one clip: no frames seen, so the first frame's temporal padding is zeros.</summary>
-    public State CreateState() => new(_blocks.Length);
+    public State CreateState()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return new(_blocks.Length);
+    }
 
     /// <summary>Decodes one latent frame. <paramref name="hidden"/> is the generator's pre-head hidden states
     /// <c>[gridH·gridW, InputDim]</c>, <paramref name="temb"/> its head time embedding <c>[1, InputDim]</c>. Returns
@@ -120,11 +129,20 @@ public sealed class FastFramesPixelDecoder : IDisposable
     public Tensor DecodeFrame(IBackend backend, Tensor hidden, Tensor temb, int gridH, int gridW, State state)
     {
         ArgumentNullException.ThrowIfNull(state);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ObjectDisposedException.ThrowIf(state.IsDisposed, state);
+        if (!_loaded)
+            throw new InvalidOperationException("The decoder has no weights yet; call LoadWeights first.");
         int dim = _config.Dim, tokens = gridH * gridW;
         if (hidden.Shape.Rank != 2 || hidden.Shape[0] != tokens || hidden.Shape[1] != _config.InputDim)
             throw new ArgumentException($"hidden is {hidden.Shape}; expected [{tokens}, {_config.InputDim}].", nameof(hidden));
         if (state.Blocks != _blocks.Length)
             throw new ArgumentException("The state belongs to a different decoder.", nameof(state));
+        if (temb.Shape.Rank != 2 || temb.Shape[0] != 1 || temb.Shape[1] != _config.InputDim)
+            throw new ArgumentException($"temb is {temb.Shape}; expected [1, {_config.InputDim}].", nameof(temb));
+        if (state.Grid is { } grid && grid != (gridH, gridW))
+            throw new ArgumentException($"This state decodes {grid.H}x{grid.W} token grids; this frame is {gridH}x{gridW}.", nameof(state));
+        state.Grid = (gridH, gridW);
 
         Tensor x = ModulatedInput(backend, hidden, temb);
         Tensor entryNormed = FastFramesOps.LayerNormAffine(backend, x, _entryNormW, _entryNormB, _config.Eps);
@@ -235,7 +253,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
         return output.Reshape(new TensorShape(tokens, channels));
     }
 
-    /// <summary>Linear unpatchify (<c>fhwpqrc -&gt; cfphqwr</c> in the reference): token <c>(h, w)</c> channel
+    /// <summary>Linear unpatchify (the reference's <c>fhwpqrc -&gt; cfphqwr</c>; the result is frame-major <c>[PatchT, C, H, W]</c>): token <c>(h, w)</c> channel
     /// <c>((p·PatchH + q)·PatchW + r)·C + c</c> is output channel <c>c</c> of frame <c>p</c> at row <c>h·PatchH + q</c>, column
     /// <c>w·PatchW + r</c>.</summary>
     private Tensor Unpatchify(Tensor tokensOut, int gridH, int gridW)
@@ -287,19 +305,17 @@ public sealed class FastFramesPixelDecoder : IDisposable
     }
 
     /// <summary>A 1×1 Conv3d weight <c>[out, in, 1, 1, 1]</c> as the <c>[out, in]</c> Linear weight (the same bytes).</summary>
-    private static Tensor Matrix(IReadOnlyDictionary<string, Tensor> weights, string key, int outDim, int inDim)
-    {
-        Tensor t = weights[key];
-        if (t.ElementCount != (long)outDim * inDim)
-            throw new ArgumentException($"{key} is {t.Shape}; expected {outDim}×{inDim} values.");
-        Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-        return f32.Reshape(new TensorShape(outDim, inDim));
-    }
+    private static Tensor Matrix(IReadOnlyDictionary<string, Tensor> weights, string key, int outDim, int inDim) =>
+        FastFramesOps.CopyF32(weights[key], new TensorShape(outDim, inDim));
 
-    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key)
+    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
+        FastFramesOps.CopyF32(weights[key], weights[key].Shape);
+
+    private void RequireLoaded()
     {
-        Tensor t = weights[key];
-        return t.DType == DType.F32 ? t.Reshape(t.Shape) : t.CastTo(DType.F32);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (!_loaded)
+            throw new InvalidOperationException("The decoder has no weights yet; call LoadWeights first.");
     }
 
     private Tensor Own(Tensor t)
@@ -325,6 +341,12 @@ public sealed class FastFramesPixelDecoder : IDisposable
         /// <summary>Blocks the state covers.</summary>
         public int Blocks { get; } = blocks;
 
+        /// <summary>Whether this state has been disposed.</summary>
+        public bool IsDisposed { get; private set; }
+
+        /// <summary>The token grid of the frames decoded so far, height and width; null before the first frame.</summary>
+        internal (int H, int W)? Grid { get; set; }
+
         internal Tensor?[] Previous1 { get; } = new Tensor?[blocks];
 
         internal Tensor?[] Previous2 { get; } = new Tensor?[blocks];
@@ -332,6 +354,9 @@ public sealed class FastFramesPixelDecoder : IDisposable
         /// <inheritdoc/>
         public void Dispose()
         {
+            if (IsDisposed)
+                return;
+            IsDisposed = true;
             for (int i = 0; i < Blocks; i++)
             {
                 Previous1[i]?.Dispose();
