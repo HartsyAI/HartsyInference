@@ -17,6 +17,7 @@ public sealed class FrameKvCache : IDisposable
     private readonly Tensor?[][] _keys;
     private readonly Tensor?[][] _values;
     private int _disposed;
+    private int _channels = -1;
 
     /// <summary>A cache of <paramref name="layers"/> layers with room for <paramref name="maxFrames"/> frame slots each.</summary>
     public FrameKvCache(IBackend backend, int layers, int maxFrames)
@@ -67,12 +68,25 @@ public sealed class FrameKvCache : IDisposable
             values.Dispose();
             throw new ArgumentException($"Keys {keys.Shape} {keys.DType} and values {values.Shape} {values.DType} must match.");
         }
+        if (keys.Shape.Rank != 2)
+        {
+            keys.Dispose();
+            values.Dispose();
+            throw new ArgumentException($"A slot is token-major [S, C]; got {keys.Shape}.");
+        }
+        if (_channels >= 0 && keys.Shape[1] != _channels)
+        {
+            keys.Dispose();
+            values.Dispose();
+            throw new ArgumentException($"The slots hold {_channels} channels; this one holds {keys.Shape[1]}.");
+        }
         if (Volatile.Read(ref _disposed) != 0)
         {
             keys.Dispose();
             values.Dispose();
             throw new ObjectDisposedException(nameof(FrameKvCache));
         }
+        _channels = (int)keys.Shape[1];
         Release(layer, frame);
         _backend.PinActivation(keys);
         _backend.PinActivation(values);
@@ -117,22 +131,14 @@ public sealed class FrameKvCache : IDisposable
 
     private Tensor Join(Tensor[] parts)
     {
-        // The shape of one slot with the token axis widened to the whole prefix: axis 0 of a [S, C] slot (the Wan block's own layout), axis 1 after a batch axis.
-        int axis = parts[0].Shape.Rank == 2 ? 0 : 1;
-        long[] dims = new long[parts[0].Shape.Rank];
-        for (int d = 0; d < dims.Length; d++)
-            dims[d] = parts[0].Shape[d];
-        dims[axis] = 0;
+        // Set enforces token-major [S, C] slots with one channel count, so the prefix joins on the token axis, axis 0.
+        long tokens = 0;
         foreach (Tensor part in parts)
-        {
-            if (part.Shape.Rank != dims.Length || part.DType != parts[0].DType)
-                throw new InvalidOperationException($"Cached slots {part.Shape} {part.DType} and {parts[0].Shape} {parts[0].DType} do not join.");
-            dims[axis] += part.Shape[axis];
-        }
-        Tensor joined = new(new TensorShape(dims), parts[0].DType);
+            tokens += part.Shape[0];
+        Tensor joined = new(new TensorShape([tokens, parts[0].Shape[1]]), parts[0].DType);
         try
         {
-            _backend.Concat(joined, parts, axis);
+            _backend.Concat(joined, parts, 0);
         }
         catch
         {

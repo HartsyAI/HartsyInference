@@ -237,7 +237,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
                 DeviceMemoryTrace.RecordTo(vramLog, backend, $"wan fwd#{_fwdCounter} block 0");
             BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
-                imageContextLen: imageContextLen, dbg: "b0", textKv: textKv?[0], branchDType: act);
+                imageContextLen: imageContextLen, dbg: "b0", textKv: textKv?[0], branchDType: act, selfAttnMask: selfAttnMask);
             cur.Dispose();
             cur = block0;
             WanVideoDebugDump.Dump("blocks.0", cur);
@@ -321,10 +321,21 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     public FrameForward ForwardFrame(IBackend backend, Tensor latentFrame, Tensor encoder, float timestep, int frameIndex, FrameKvCache cache)
     {
         ArgumentNullException.ThrowIfNull(cache);
-        if (latentFrame.Shape.Rank != 5 || latentFrame.Shape[2] != _config.PatchSize.T)
+        if (latentFrame.Shape.Rank != 5 || latentFrame.Shape[0] != 1 || latentFrame.Shape[2] != _config.PatchSize.T)
             throw new ArgumentException($"A frame is [1, C, {_config.PatchSize.T}, H, W]; got {latentFrame.Shape}.", nameof(latentFrame));
         if (cache.Layers != _blocks.Length)
             throw new ArgumentException($"The cache spans {cache.Layers} layers; the model has {_blocks.Length}.", nameof(cache));
+        // Checked before anything is allocated or written: a bad call must leave the cache as it was.
+        if (frameIndex < 0 || frameIndex >= cache.MaxFrames)
+            throw new ArgumentOutOfRangeException(nameof(frameIndex), frameIndex, $"The cache holds {cache.MaxFrames} frames.");
+        for (int earlier = 0; earlier < frameIndex; earlier++)
+        {
+            for (int layer = 0; layer < cache.Layers; layer++)
+            {
+                if (!cache.Has(layer, earlier))
+                    throw new InvalidOperationException($"Frame {frameIndex} attends to frame {earlier}, which layer {layer} has not cached yet; run the earlier frames first.");
+            }
+        }
         if (OutputHead is not null)
             throw new NotSupportedException("A frame-wise forward does not run with a custom output head.");
         (int _, int ph, int pw) = _config.PatchSize;
@@ -337,6 +348,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, [timestep], _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
         (Tensor encoderProj, _) = GetOrBuildContext(backend, encoder, null, dim);
+        // On a GPU backend this runs the F16 attention and FFN branches; the F32 oracle (ForwardFrameCausal) does not cover that path.
         DType act = BranchActivation(backend, singleGroup: true);
         ConstantKvCache[]? textKv = _textKv is { } scope && scope.Activation == act ? scope.Caches : null;
 
@@ -363,7 +375,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     /// with one timestep per frame: frame <c>f</c> attends to frames up to <c>f</c> and every frame's keys come from its own
     /// timestep and latent. This is what the frame-by-frame <see cref="ForwardFrame"/> loop computes when each frame's cache slot
     /// holds the keys of its own pass, so it is the oracle for the cache and RoPE bookkeeping. F32 branches only.</summary>
-    internal Tensor ForwardFrameCausal(IBackend backend, Tensor latent, Tensor encoder, float[] frameTimesteps)
+    internal Tensor ForwardFrameCausal(IBackend backend, Tensor latent, Tensor encoder, float[] frameTimesteps, DeviceFeatureCache? stepCache = null)
     {
         int frames = (int)latent.Shape[2] / _config.PatchSize.T;
         int tokensPerFrame = (int)(latent.Shape[3] / _config.PatchSize.H * (latent.Shape[4] / _config.PatchSize.W));
@@ -371,7 +383,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         for (int f = 0; f < frames; f++)
             indices[f] = f;
         using Tensor mask = MatrixGame2Transformer.BuildBlockCausalMask(indices, tokensPerFrame, localAttnSize: 0, framesPerBlock: 1);
-        return ForwardCore(backend, latent, encoder, frameTimesteps, null, selfAttnMask: mask);
+        return ForwardCore(backend, latent, encoder, frameTimesteps, null, stepCache, selfAttnMask: mask);
     }
 
     /// <summary>Keeps every block's text cross-attention K/V, per backend and context, pinned across the per-step activation

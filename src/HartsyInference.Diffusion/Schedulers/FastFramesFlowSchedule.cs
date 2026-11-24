@@ -25,7 +25,8 @@ public sealed class FastFramesFlowSchedule
         _timesteps = new float[GridSize];
         for (int i = 0; i < GridSize; i++)
         {
-            // torch.linspace(1, 0, 1001)[:-1]: evaluated in double, stored as float32, as the reference stores it.
+            // torch.linspace(1, 0, 1001)[:-1], computed here in double and stored as float32. The reference computes it in float32,
+            // so an entry can differ by an ulp, which can move a nearest-entry tie; the tests allow for that.
             double s = 1.0 - (double)i / GridSize;
             _sigmas[i] = (float)(shift * s / (1.0 + (shift - 1.0) * s));
             _timesteps[i] = _sigmas[i] * GridSize;
