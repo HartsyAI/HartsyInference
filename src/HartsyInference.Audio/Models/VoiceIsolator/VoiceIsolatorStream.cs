@@ -43,8 +43,9 @@ public sealed class VoiceIsolatorStream : IDisposable
     /// <param name="cacheFrames">Frames of attention past each query keeps; null takes the checkpoint's attention window.</param>
     /// <param name="windowFrames">Window of the two-lane mode; null turns the windows off.</param>
     /// <param name="crossfadeFrames">Crossfade of the two-lane mode; required with <paramref name="windowFrames"/>.</param>
+    /// <param name="lookahead">Look-ahead in frames, one of the checkpoint trained positions; null takes its default.</param>
     public VoiceIsolatorStream(VoiceIsolatorNetwork network, IBackend backend, int blockFrames = 4, int? cacheFrames = null,
-        int? windowFrames = null, int? crossfadeFrames = null)
+        int? windowFrames = null, int? crossfadeFrames = null, int? lookahead = null)
     {
         ArgumentNullException.ThrowIfNull(network);
         ArgumentNullException.ThrowIfNull(backend);
@@ -72,7 +73,11 @@ public sealed class VoiceIsolatorStream : IDisposable
         _blockFrames = blockFrames;
         _windowFrames = windowFrames;
         _crossfadeFrames = crossfadeFrames ?? 0;
-        _lookahead = network.Lookahead;
+        _lookahead = network.ValidateLookahead(lookahead ?? _config.LookaheadFrames);
+        if (cacheFrames is { } cacheValue)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(cacheValue);
+        }
         int cache = cacheFrames ?? (_config.AttentionWindowFrames > 0
             ? _config.AttentionWindowFrames : Math.Max(1, (int)Math.Round(_config.ChunkSeconds * _config.SampleRate / _config.HopLength)));
         int lane = windowFrames is null ? 0 : windowFrames.Value + _crossfadeFrames;
@@ -186,7 +191,7 @@ public sealed class VoiceIsolatorStream : IDisposable
 
     private float[] RunBlock(float[] re, float[] im, int count)
     {
-        using Tensor features = _network.Encode(_backend, re, im, count);
+        using Tensor features = _network.Encode(_backend, re, im, count, _lookahead);
         if (_windowFrames is null)
         {
             return Decode(features, count, _laneA);
@@ -287,8 +292,9 @@ public sealed class VoiceIsolatorStream : IDisposable
         _raw.RemoveRange(0, (int)Math.Min(drop, _raw.Count));
         _spectra.RemoveRange(0, (int)Math.Min(drop, _spectra.Count));
         _pendingBase = _emitted;
-        // the overlap-add array is addressed as sample + n_fft / 2 - base; keep everything from the first unreleased sample
-        long keepFrom = _released + _config.NFft / 2 - _olaBase - _config.NFft / 2;
+        // The overlap-add index of sample s is s + n_fft / 2 - base, so keeping from _released - base keeps n_fft / 2
+        // entries before the first unreleased sample.
+        long keepFrom = _released - _olaBase;
         if (keepFrom > 0)
         {
             long remaining = _ola.Length - keepFrom;

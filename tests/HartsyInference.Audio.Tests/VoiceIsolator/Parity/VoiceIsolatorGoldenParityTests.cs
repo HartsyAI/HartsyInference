@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.VoiceIsolator;
 using HartsyInference.Core.Backends.Cpu;
@@ -12,17 +11,17 @@ namespace HartsyInference.Audio.Tests.VoiceIsolator.Parity;
 /// <summary>Parity of the released checkpoints against the golden renders shipped in <c>inworld-ai/voice-isolator</c> @ c73b3fab
 /// (<c>tests/fixtures/*</c>, made by the training-side reference on CPU in fp32). <c>VOICE_ISOLATOR_DIR</c> names a folder holding
 /// <c>denoiser.safetensors</c>, <c>denoiser_realtime.safetensors</c> and <c>fixtures/&lt;case&gt;/{meta.json,input.wav,expected.npy}</c>.
-/// Without it each test returns having checked nothing, and <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> turns that into a failure.</summary>
+/// Without it each test is reported as skipped; <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> makes a missing folder a failure.</summary>
 [Trait("Category", "Integration")]
 public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
 {
-    [Fact]
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void Offline3sMatchesTheReference() => Check("offline_3s");
 
-    [Fact]
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void Offline11sMatchesTheReference() => Check("offline_11s");
 
-    [Fact]
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void RealtimeWholeClip3sMatchesTheReferenceStream() => Check("realtime_stream_3s");
 
     private void Check(string name)
@@ -42,17 +41,13 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
         Assert.Equal(meta.RootElement.GetProperty("expected_sha256").GetString(), Sha256(Path.Combine(caseDir, "expected.npy")));
         double tolerance = meta.RootElement.GetProperty("tolerance").GetDouble();
         float[] input = WavFile.Read(Path.Combine(caseDir, "input.wav")).ToMono();
-        float[] expected = ReadFloat32Npy(Path.Combine(caseDir, "expected.npy"));
+        float[] expected = NpyFloat32.Read(Path.Combine(caseDir, "expected.npy"));
 
         using VoiceIsolatorNetwork network = VoiceIsolatorNetwork.Load(model);
-        if (network.Config.Causal)
-        {
-            network.SetLookahead(meta.RootElement.GetProperty("lookahead_frames").GetInt32());
-        }
         using CpuBackend backend = new();
         long started = Environment.TickCount64;
-        float[] actual = network.Config.Causal
-            ? network.Isolate(backend, input)
+        float[] actual = meta.RootElement.TryGetProperty("runner", out JsonElement runner)
+            ? Stream(network, backend, input, runner, meta.RootElement.GetProperty("lookahead_frames").GetInt32())
             : VoiceIsolatorRenderer.Render(network, backend, input,
                 meta.RootElement.GetProperty("chunk_seconds").GetDouble(), meta.RootElement.GetProperty("overlap_seconds").GetDouble());
         long elapsed = Environment.TickCount64 - started;
@@ -73,27 +68,30 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
         Assert.True(maxAbs <= tolerance, $"{name}: max abs error {maxAbs:E3} exceeds {tolerance:E1}");
     }
 
+    /// <summary>The reference's stateful runner: its block, cache and window settings, and the piece sizes it pushed, cycling.</summary>
+    private static float[] Stream(VoiceIsolatorNetwork network, CpuBackend backend, float[] input, JsonElement runner, int lookahead)
+    {
+        int block = runner.GetProperty("block_frames").GetInt32();
+        int cache = runner.GetProperty("cache_frames").GetInt32();
+        int window = runner.GetProperty("window_frames").GetInt32();
+        int crossfade = runner.GetProperty("crossfade_frames").GetInt32();
+        int[] pushes = runner.GetProperty("push").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        using VoiceIsolatorStream stream = new(network, backend, block, cache, window, crossfade, lookahead);
+        List<float> output = [];
+        int position = 0;
+        for (int index = 0; position < input.Length; index++)
+        {
+            int piece = Math.Min(pushes[index % pushes.Length], input.Length - position);
+            output.AddRange(stream.Push(input.AsSpan(position, piece)));
+            position += piece;
+        }
+        output.AddRange(stream.Flush());
+        return [.. output];
+    }
+
     private static string Sha256(string path)
     {
         using FileStream stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-    }
-
-    private static float[] ReadFloat32Npy(string path)
-    {
-        byte[] bytes = File.ReadAllBytes(path);
-        Assert.True(bytes.Length > 10 && bytes[0] == 0x93 && bytes[1] == (byte)'N', "not an .npy file");
-        int headerLength = bytes[6] == 1 ? BitConverter.ToUInt16(bytes, 8) : (int)BitConverter.ToUInt32(bytes, 8);
-        int dataStart = (bytes[6] == 1 ? 10 : 12) + headerLength;
-        string header = System.Text.Encoding.ASCII.GetString(bytes, bytes[6] == 1 ? 10 : 12, headerLength);
-        Assert.Contains("'<f4'", header);
-        Assert.Contains("'fortran_order': False", header);
-        Match shape = Regex.Match(header, @"'shape': \((\d+),?\)");
-        Assert.True(shape.Success, $"unexpected npy shape in {header}");
-        int count = int.Parse(shape.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-        Assert.Equal(count * 4, bytes.Length - dataStart);
-        float[] values = new float[count];
-        Buffer.BlockCopy(bytes, dataStart, values, 0, count * 4);
-        return values;
     }
 }

@@ -125,14 +125,15 @@ public sealed class VoiceIsolatorUnitTests : IDisposable
         {
             b[i] += 0.3f * MathF.Sin(i * 0.37f);
         }
-        float[] ya = network.Isolate(backend, a);
-        float[] yb = network.Isolate(backend, b);
+        const int lookahead = 2;
+        float[] ya = network.Isolate(backend, a, lookahead);
+        float[] yb = network.Isolate(backend, b, lookahead);
         int hop = TinyVoiceIsolatorCheckpoint.Hop;
         int half = TinyVoiceIsolatorCheckpoint.NFft / 2;
         int checkedSamples = 0;
         for (int s = 0; s < a.Length; s++)
         {
-            int lastFrame = ((s + half) / hop) + network.Lookahead;
+            int lastFrame = ((s + half) / hop) + lookahead;
             if (lastFrame * hop + half >= perturbFrom)
             {
                 break;
@@ -156,9 +157,9 @@ public sealed class VoiceIsolatorUnitTests : IDisposable
         {
             b[i] += 0.3f;
         }
-        float[] first = network.Isolate(backend, a);
-        float[] again = network.Isolate(backend, a);
-        float[] other = network.Isolate(backend, b);
+        float[] first = network.Isolate(backend, a, 0);
+        float[] again = network.Isolate(backend, a, 0);
+        float[] other = network.Isolate(backend, b, 0);
         Assert.Equal(first, again);
         Assert.All(first, v => Assert.True(float.IsFinite(v)));
         float earlyChange = 0f;
@@ -176,7 +177,7 @@ public sealed class VoiceIsolatorUnitTests : IDisposable
         using VoiceIsolatorNetwork network = VoiceIsolatorNetwork.Load(path);
         using CpuBackend backend = new();
         float[] shortClip = Signal(1_500, 2);
-        Assert.Equal(network.Isolate(backend, shortClip), VoiceIsolatorRenderer.Render(network, backend, shortClip));
+        Assert.Equal(network.Isolate(backend, shortClip, 0), VoiceIsolatorRenderer.Render(network, backend, shortClip));
         float[] longClip = Signal(4_100, 6);
         int windows = 0;
         float[] rendered = VoiceIsolatorRenderer.Render(network, backend, longClip, progress: (_, total) => windows = total);
@@ -220,6 +221,14 @@ public sealed class VoiceIsolatorUnitTests : IDisposable
         {
             Assert.True(Math.Abs(re[i] - expectedRe[i]) < 1e-5f && Math.Abs(im[i] - expectedIm[i]) < 1e-5f, $"bin {i} was not corrected");
         }
+    }
+
+    [Fact]
+    public void ARefusesWeightsThatDoNotMatchTheConfig()
+    {
+        // the metadata names three taps, the tensors four
+        string path = TinyVoiceIsolatorCheckpoint.Write(_dir, causal: false, seed: 17, metadataConv: 3);
+        Assert.Throws<InvalidDataException>(() => VoiceIsolatorNetwork.Load(path));
     }
 
     private static float[] Signal(int n, int seed)

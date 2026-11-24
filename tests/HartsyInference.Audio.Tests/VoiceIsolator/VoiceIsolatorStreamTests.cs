@@ -30,7 +30,7 @@ public sealed class VoiceIsolatorStreamTests : IDisposable
     public void APlainStreamEqualsTheWholeClipForward(int piece)
     {
         float[] audio = Signal(2_000, 8);
-        float[] whole = _network.Isolate(_backend, audio);
+        float[] whole = _network.Isolate(_backend, audio, 2);
         float[] streamed = Run(audio, piece, windowFrames: null, crossfadeFrames: null, cacheFrames: null);
         Assert.Equal(whole.Length, streamed.Length);
         Assert.True(MaxDiff(whole, streamed) < 2e-5f, $"max abs difference {MaxDiff(whole, streamed)}");
@@ -40,7 +40,7 @@ public sealed class VoiceIsolatorStreamTests : IDisposable
     public void ASmallCacheCompactsItsKeysAndStillMatches()
     {
         float[] audio = Signal(3_200, 3);
-        float[] whole = _network.Isolate(_backend, audio);
+        float[] whole = _network.Isolate(_backend, audio, 2);
         float[] streamed = Run(audio, 400, windowFrames: null, crossfadeFrames: null, cacheFrames: 6);
         Assert.True(MaxDiff(whole, streamed) < 5e-5f, $"max abs difference {MaxDiff(whole, streamed)}");
     }
@@ -49,8 +49,8 @@ public sealed class VoiceIsolatorStreamTests : IDisposable
     public void WindowedLanesSwapAtEveryBoundaryAndDoNotDependOnThePushes()
     {
         float[] audio = Signal(4_800, 5);
-        float[] a = Run(audio, 16, 40, 12, 40, out VoiceIsolatorStream? first);
-        Assert.Equal(new[] { 40, 80, 120, 160, 200 }, first!.Boundaries.Take(5).ToArray());
+        float[] a = Run(audio, 16, 40, 12, 40, out int[] boundaries);
+        Assert.Equal(new[] { 40, 80, 120, 160, 200 }, boundaries.Take(5).ToArray());
         float[] b = Run(audio, 500, 40, 12, 40, out _);
         float[] c = Run(audio, 1, 40, 12, 40, out _);
         Assert.Equal(audio.Length, a.Length);
@@ -72,18 +72,30 @@ public sealed class VoiceIsolatorStreamTests : IDisposable
         Assert.True(first.Length <= TinyVoiceIsolatorCheckpoint.Hop, "nothing beyond the look-ahead may be released early");
     }
 
+    [Fact]
+    public void ALookaheadBelongsToItsSession()
+    {
+        float[] audio = Signal(2_000, 4);
+        float[] before = Run(audio, 160, null, null, null);
+        float[] longer = Run(audio, 160, null, null, null, out _, 4);
+        float[] after = Run(audio, 160, null, null, null);
+        Assert.True(MaxDiff(before, longer) > 1e-6f, "a longer look-ahead must change the output");
+        Assert.True(MaxDiff(before, after) < 1e-9f, "a later session with the default look-ahead must match the first");
+    }
+
     private float[] Run(float[] audio, int piece, int? windowFrames, int? crossfadeFrames, int? cacheFrames) =>
         Run(audio, piece, windowFrames, crossfadeFrames, cacheFrames, out _);
 
-    private float[] Run(float[] audio, int piece, int? windowFrames, int? crossfadeFrames, int? cacheFrames, out VoiceIsolatorStream? stream)
+    private float[] Run(float[] audio, int piece, int? windowFrames, int? crossfadeFrames, int? cacheFrames, out int[] boundaries, int? lookahead = null)
     {
-        stream = new VoiceIsolatorStream(_network, _backend, blockFrames: 4, cacheFrames, windowFrames, crossfadeFrames);
+        using VoiceIsolatorStream stream = new(_network, _backend, blockFrames: 4, cacheFrames, windowFrames, crossfadeFrames, lookahead);
         List<float> output = [];
         for (int i = 0; i < audio.Length; i += piece)
         {
             output.AddRange(stream.Push(audio.AsSpan(i, Math.Min(piece, audio.Length - i))));
         }
         output.AddRange(stream.Flush());
+        boundaries = stream.Boundaries.ToArray();
         return [.. output];
     }
 

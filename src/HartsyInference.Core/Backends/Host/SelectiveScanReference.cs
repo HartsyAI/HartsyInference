@@ -8,6 +8,9 @@ namespace HartsyInference.Core.Backends.Host;
 /// stream exactly where the previous call stopped.</summary>
 public static class SelectiveScanReference
 {
+    /// <summary>States per channel the reference keeps on the stack.</summary>
+    public const int MaxStates = 256;
+
     /// <summary>Validates the operands of <see cref="IBackend.SelectiveScan"/>.</summary>
     public static void Validate(Tensor output, Tensor u, Tensor delta, Tensor a, Tensor b, Tensor c, Tensor d, Tensor? z,
         Tensor? state, int rows, int frames, int channels, int states)
@@ -19,6 +22,10 @@ public static class SelectiveScanReference
         ArgumentNullException.ThrowIfNull(b);
         ArgumentNullException.ThrowIfNull(c);
         ArgumentNullException.ThrowIfNull(d);
+        if (states > MaxStates)
+        {
+            throw new ArgumentOutOfRangeException(nameof(states), states, $"SelectiveScan holds at most {MaxStates} states per channel; got {states}.");
+        }
         if (rows < 1 || frames < 1 || channels < 1 || states < 1)
             throw new ArgumentException($"SelectiveScan needs positive dims, got rows={rows}, frames={frames}, channels={channels}, states={states}.");
         long perChannel = (long)rows * frames * channels;
