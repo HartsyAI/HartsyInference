@@ -102,7 +102,7 @@ public static class KdaLayer
         bool full = w.OutGateProj is not null, down = w.OutGateDown is not null, up = w.OutGateUp is not null;
         if (down != up || full == down)
             throw new ArgumentException("A KDA layer needs exactly one output gate form: OutGateProj, or OutGateDown with OutGateUp.", nameof(w));
-        if (down && (w.OutGateUp!.Shape.Rank != 2 || w.OutGateDown!.Shape.Rank != 2 || w.OutGateUp.Shape[1] != w.OutGateDown.Shape[0] || w.OutGateUp.Shape[0] != s.KeyDim))
+        if (down && (w.OutGateUp!.Shape.Rank != 2 || w.OutGateDown!.Shape.Rank != 2 || w.OutGateUp.Shape[1] != w.OutGateDown.Shape[0] || w.OutGateUp.Shape[0] != s.KeyDim || w.OutGateDown.Shape[1] != s.Hidden))
             throw new ArgumentException($"The low-rank output gate must be OutGateDown [rank, Hidden] and OutGateUp [KeyDim, rank]; got {w.OutGateDown!.Shape} and {w.OutGateUp!.Shape}.", nameof(w));
         int tokens = checked((int)(input.ElementCount / s.Hidden));
         int keyDim = s.KeyDim;

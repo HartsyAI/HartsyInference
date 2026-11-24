@@ -110,6 +110,9 @@ public sealed class KdaLayerTests
         Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateProj = null }, input, output, state));
         // a full gate with only one factor of a low-rank gate is refused, not run with the factor ignored
         Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateDown = Make(new float[Settings.Hidden], 1, Settings.Hidden) }, input, output, state));
+        // a low-rank gate whose first factor is not Hidden wide is refused by name
+        Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateProj = null,
+            OutGateDown = Make(new float[2 * (Settings.Hidden + 1)], 2, Settings.Hidden + 1), OutGateUp = Make(new float[Settings.KeyDim * 2], Settings.KeyDim, 2) }, input, output, state));
         // a low-rank gate whose factors disagree in rank is refused
         Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateProj = null,
             OutGateDown = Make(new float[2 * Settings.Hidden], 2, Settings.Hidden), OutGateUp = Make(new float[Settings.KeyDim * 3], Settings.KeyDim, 3) }, input, output, state));
