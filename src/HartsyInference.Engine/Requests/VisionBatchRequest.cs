@@ -45,6 +45,10 @@ public sealed record VisionBatchRequest
     /// this and <see cref="InterpolationFactor"/> is required.</summary>
     public double? TargetFps { get; init; }
 
+    /// <summary><see cref="VisionMode.MetricDepth"/> only: the focal length in pixels every image shares. Null lets the model estimate one
+    /// for all of them. The value used comes back in each result's <see cref="VisionResult.Camera"/>.</summary>
+    public double? FocalLengthPx { get; init; }
+
     /// <summary>Score threshold for detections, masks and tracks.</summary>
     public double Threshold { get; init; } = 0.25;
 
