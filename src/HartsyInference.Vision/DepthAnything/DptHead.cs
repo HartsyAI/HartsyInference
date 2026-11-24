@@ -183,6 +183,21 @@ public sealed class DptHead
         }
     }
 
+    /// <summary>DPT's residual conv unit, <c>x + conv2(relu(conv1(relu(x))))</c> with both convolutions 3×3, pad 1, keeping the width; Depth Pro 2's decoder
+    /// uses it too. The caller owns the result.</summary>
+    internal static Tensor ResidualConvUnit(IBackend backend, Tensor x, Tensor c1W, Tensor c1B, Tensor c2W, Tensor c2B)
+    {
+        using Tensor act = new(x.Shape, DType.F32);
+        backend.LeakyRelu(act, x, 0f);
+        using Tensor mid = new(x.Shape, DType.F32);
+        backend.Conv2D(mid, act, c1W, c1B, 1, 1, 1, 1);
+        backend.LeakyRelu(mid, mid, 0f);
+        Tensor output = new(x.Shape, DType.F32);
+        backend.Conv2D(output, mid, c2W, c2B, 1, 1, 1, 1);
+        backend.Add(output, output, x);
+        return output;
+    }
+
     /// <summary>One DPT feature-fusion block: optional skip through a residual conv unit, a second residual
     /// conv unit, bilinear <c>align_corners=True</c> resize to the target size, then a 1×1 out conv.</summary>
     private sealed class FusionBlock
@@ -234,26 +249,6 @@ public sealed class DptHead
             Tensor outp = new(up.Shape, DType.F32);
             backend.Conv2D(outp, up, _outW!, _outB!, 1, 1, 0, 0);
             up.Dispose();
-            return outp;
-        }
-
-        /// <summary><c>x + conv2(relu(conv1(relu(x))))</c> — both convs 3×3, pad 1.</summary>
-        private static Tensor ResidualConvUnit(IBackend backend, Tensor x, Tensor c1W, Tensor c1B, Tensor c2W, Tensor c2B)
-        {
-            Tensor a = new(x.Shape, DType.F32);
-            backend.LeakyRelu(a, x, 0f);
-            Tensor c1 = new(x.Shape, DType.F32);
-            backend.Conv2D(c1, a, c1W, c1B, 1, 1, 1, 1);
-            a.Dispose();
-            Tensor a2 = new(x.Shape, DType.F32);
-            backend.LeakyRelu(a2, c1, 0f);
-            c1.Dispose();
-            Tensor c2 = new(x.Shape, DType.F32);
-            backend.Conv2D(c2, a2, c2W, c2B, 1, 1, 1, 1);
-            a2.Dispose();
-            Tensor outp = new(x.Shape, DType.F32);
-            backend.Add(outp, c2, x);
-            c2.Dispose();
             return outp;
         }
     }
