@@ -33,6 +33,10 @@ public enum ActivationKind
     /// <summary>Clamped alpha-SwiGLU (MiniMax-M3): <c>(clamp(up, ±limit) + 1) · g · sigmoid(alpha · g)</c> with <c>g = min(gate, limit)</c>; alpha and limit come from the config.</summary>
     SwigluOai,
 
+    /// <summary>Plain SwiGLU with clamped inputs (Hy4 Flash routed experts): <c>silu(min(gate, limit)) · clamp(up, ±limit)</c>; the limit is the config's <c>SwigluLimit</c>.
+    /// A shared expert beside the routed ones runs unclamped SiLU. The device and offload expert kernels do not run it.</summary>
+    SwigluClamped,
+
     /// <summary>SiTU-GLU (ERNIE-5.5, MOSS-Image): gate <c>β · tanh(g / β) · sigmoid(g)</c> over the first half, value soft-capped to
     /// <c>β<sub>lin</sub> · tanh(u / β<sub>lin</sub>)</c> over the second; β and β<sub>lin</sub> come from the config. Gated FFNs only.</summary>
     Situ,

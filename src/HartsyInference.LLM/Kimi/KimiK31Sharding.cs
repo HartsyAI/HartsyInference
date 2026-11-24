@@ -80,7 +80,7 @@ public static class KimiK31Sharding
     internal static DsaAttentionWeights MlaShard(DsaAttentionWeights f, int rank, int ranks, List<Tensor> owned)
     {
         if (ranks == 1) return f;
-        DsaIndexerWeights ix = f.Indexer;
+        DsaIndexerWeights ix = f.Indexer ?? throw new ArgumentException("A Kimi layer carries indexer weights.", nameof(f));
         return new DsaAttentionWeights
         {
             QA = Replica(f.QA, owned, ranks),

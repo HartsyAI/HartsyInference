@@ -108,6 +108,12 @@ FP8 layout: `quantization_config` sits **inside `text_config`** (`quant_method f
 `q_b_proj`, `linear_gate` (`*.weight_scale_inv`, BF16). `modules_to_not_convert` (744 entries) keeps embed, head, hc fns, indexers, q_a/kv_a/kv_b, shared experts, router, engram, ViT in BF16. The scales are **BF16**, not the F32 grids the
 engine's `Fp8BlockLinear` reads today: needs a BF16 grid reader. `hc_*`, `gate.weight`, `e_score_correction_bias`, sinks, pooling projections and `intra_group_ape` are F32 in both checkpoints.
 
+## Shared pieces other models can use
+
+- `ActivationKind.SwigluClamped`: plain SwiGLU with `min(gate, limit)` and `clamp(up, +-limit)`; limit is `MoeConfig.SwigluLimit`. In `MoeFeedForward` it clamps the routed experts only, the shared expert runs plain SiLU. The device and offload expert kernels do not run it yet.
+- `IDsaKeySelector` / `DsaKeySelection`: `DsaAttention` takes a selector that picks each query's cache rows. `DsaIndexerSelector` is the ERNIE-5.5 and Kimi token top-k plus window (the old constructor builds it), `DsaWindowSelector` is window-only, `Hy4FlashGroupIndexer` is the Hy4 Flash pooled-group recall. `DsaAttentionSettings.Indexer` and `DsaAttentionWeights.Indexer` are now optional.
+- `Hy4FlashGroupIndexer` (kpool-4 gated pooling, relu head-weighted scores, whole-group recall, own group appended, dense up to `index_topk`) is checked against a NumPy transcription (`numpy_group_indexer.py`), not the HF class.
+
 ## Key map (checkpoint key to parameter)
 
 Per decoder layer `model.layers.N.`: `input_layernorm`, `post_attention_layernorm`, `hc_attn_layer.hc_pre.{hc_fn,hc_base,hc_scale}` and `hc_mlp_layer.hc_pre.*` (iHC, F32),
