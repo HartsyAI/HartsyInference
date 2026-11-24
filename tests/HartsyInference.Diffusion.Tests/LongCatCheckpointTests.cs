@@ -20,30 +20,7 @@ public sealed class LongCatCheckpointTests : IDisposable
     private Dictionary<string, Tensor> WriteCheckpoint(bool writeConfig, Func<string, bool>? skip = null, DType? storage = null)
     {
         Dictionary<string, Tensor> weights = LongCatTestData.Weights(_config, 9);
-        string[] keys = weights.Keys.Order(StringComparer.Ordinal).Where(key => skip?.Invoke(key) != true).ToArray();
-        string[] shardNames = ["diffusion_pytorch_model-00001-of-00002.safetensors", "diffusion_pytorch_model-00002-of-00002.safetensors"];
-        Dictionary<string, string> map = [];
-        long total = 0;
-        for (int shard = 0; shard < 2; shard++)
-        {
-            Dictionary<string, Tensor> part = [];
-            foreach (string key in keys.Where((_, i) => i % 2 == shard))
-            {
-                part[key] = storage is null ? weights[key] : weights[key].CastTo(storage.Value);
-                map[key] = shardNames[shard];
-                total += part[key].DType.ComputeByteCount(part[key].ElementCount);
-            }
-            SafeTensorsWriter.Save(Path.Combine(_directory, shardNames[shard]), part);
-        }
-        File.WriteAllText(Path.Combine(_directory, LongCatCheckpoint.IndexFileName),
-            JsonSerializer.Serialize(new Dictionary<string, object> { ["metadata"] = new Dictionary<string, long> { ["total_size"] = total }, ["weight_map"] = map }));
-        if (writeConfig)
-        {
-            File.WriteAllText(Path.Combine(_directory, "config.json"), $$"""
-                {"in_channels":4,"out_channels":4,"hidden_size":128,"depth":2,"num_heads":4,"caption_channels":48,"mlp_ratio":4,
-                 "adaln_tembed_dim":64,"frequency_embedding_size":64,"patch_size":[1,2,2],"text_tokens_zero_pad":true}
-                """);
-        }
+        LongCatTestData.WriteCheckpoint(_directory, weights, writeConfig, skip, storage);
         return weights;
     }
 
