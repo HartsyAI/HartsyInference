@@ -62,6 +62,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         };
         plan = ApplyH3VsaReleaseGate(plan);
         plan = ApplyH3ExpansionReleaseGate(plan, plannedRequest);
+        plan = ApplySeparateVocalsGate(plan, plannedRequest);
         if (!plan.IsValid)
         {
             return VideoRequestExecutionBinding.BindPlan(plan);
@@ -113,6 +114,58 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             plan = plan with { Issues = issues };
         }
         return VideoRequestExecutionBinding.BindPlan(plan);
+    }
+
+    /// <summary>Refuses <see cref="VideoRequest.SeparateDrivingVocals"/> when there is no driving audio to separate.</summary>
+    internal static VideoPlan ApplySeparateVocalsGate(VideoPlan plan, VideoRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(request);
+        VideoPlanIssue? issue = SeparateVocalsIssue(request);
+        if (issue is null)
+        {
+            return plan;
+        }
+        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues) { issue };
+        return plan with { Issues = issues };
+    }
+
+    /// <summary>The planning error for a vocal-separation request that has no driving audio; null when the request is fine.</summary>
+    internal static VideoPlanIssue? SeparateVocalsIssue(VideoRequest request) =>
+        request.SeparateDrivingVocals && request.VideoAudioReference is null
+            ? new VideoPlanIssue
+            {
+                Code = "video.separate_vocals.no_driving_audio",
+                Severity = VideoPlanIssueSeverity.Error,
+                Message = "Vocal separation applies to the driving audio, and this request has none.",
+                Field = nameof(VideoRequest.SeparateDrivingVocals),
+            }
+            : null;
+
+    /// <summary>Replaces the driving audio with its separated vocals (44.1 kHz stereo) so the recipe conditions on speech alone.</summary>
+    private async Task<VideoRequest> SeparateDrivingVocalsAsync(VideoRequest request, CancellationToken cancel)
+    {
+        AudioClip driving = request.VideoAudioReference
+            ?? throw new ArgumentException("SeparateDrivingVocals needs VideoAudioReference.", nameof(request));
+        double? seconds = DrivingAudioSeconds(request);
+        Logs.Info("[VideoAudio] Separating the driving audio's vocals on the CPU before generation"
+            + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
+        AudioClip vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, seconds, cancel).ConfigureAwait(false);
+        return request with { VideoAudioReference = vocals, SeparateDrivingVocals = false };
+    }
+
+    /// <summary>Seconds of driving audio the clip can use: its frame total over its rate, plus one second of margin as LongCat adds. Null when either is unknown, which separates the whole track.</summary>
+    internal static double? DrivingAudioSeconds(VideoRequest request)
+    {
+        // A total at or under Frames generates one chunk, so the clip is never shorter than Frames.
+        int? total = request.ChainTotalFrames ?? request.AnimateTotalFrames;
+        int? frames = total is null ? request.Frames : Math.Max(request.Frames ?? 0, total.Value);
+        if (frames is not > 0 || request.Fps is not > 0)
+        {
+            return null;
+        }
+        // The one second is LongCat's own margin; the separator also processes one extra chunk past the target when it crops.
+        return frames.Value / (double)request.Fps.Value + 1d;
     }
 
     /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.
@@ -295,6 +348,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         executionPlan.ThrowIfInvalid();
         VideoRequest effectiveRequest = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
+        if (effectiveRequest.SeparateDrivingVocals)
+        {
+            effectiveRequest = await SeparateDrivingVocalsAsync(effectiveRequest, cancel).ConfigureAwait(false);
+        }
 
         return await Task.Run(
             () =>

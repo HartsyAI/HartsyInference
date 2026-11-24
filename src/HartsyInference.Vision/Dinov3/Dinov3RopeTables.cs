@@ -14,12 +14,14 @@ internal static class Dinov3RopeTables
 
     /// <summary>Builds <c>[batch, prefix + gridH·gridW, headDim]</c> cos and sin tables; the caller disposes both.
     /// <paramref name="roundPeriodsToBf16"/> follows the reference the checkpoint is compared with, see <see cref="Periods"/>.</summary>
-    public static unsafe (Tensor Cos, Tensor Sin) Build(int batch, int prefix, int gridH, int gridW, int headDim, bool roundPeriodsToBf16 = true)
+    public static unsafe (Tensor Cos, Tensor Sin) Build(int batch, int prefix, int gridH, int gridW, int headDim, bool roundPeriodsToBf16 = true,
+        bool normalizeByLongSide = false)
     {
         int tokens = prefix + gridH * gridW;
         int half = headDim / 2, quarter = headDim / 4;
         float[] periods = Periods(headDim, roundPeriodsToBf16);
-        float[] coordH = AxisCoords(gridH), coordW = AxisCoords(gridW);
+        int normH = normalizeByLongSide ? Math.Max(gridH, gridW) : gridH, normW = normalizeByLongSide ? normH : gridW;
+        float[] coordH = AxisCoords(gridH, normH), coordW = AxisCoords(gridW, normW);
 
         Tensor cos = new(new TensorShape(batch, tokens, headDim), DType.F32);
         Tensor sin = new(new TensorShape(batch, tokens, headDim), DType.F32);
@@ -67,12 +69,14 @@ internal static class Dinov3RopeTables
         return periods;
     }
 
-    /// <summary>Cell centres of <paramref name="n"/> cells mapped to [-1, 1] in float32, as the reference computes them.</summary>
-    private static float[] AxisCoords(int n)
+    /// <summary>Cell centres of <paramref name="n"/> cells mapped to [-1, 1] in float32, as the reference computes them. <paramref name="norm"/> is the
+    /// length they are divided by: <paramref name="n"/> itself per axis, or the longer grid side when both axes share one scale (timm's <c>max</c> mode, which
+    /// maps the shorter axis into a sub-range of [-1, 1]).</summary>
+    private static float[] AxisCoords(int n, int norm)
     {
         float[] coords = new float[n];
         for (int i = 0; i < n; i++)
-            coords[i] = 2f * ((i + 0.5f) / n) - 1f;
+            coords[i] = 2f * ((i + 0.5f) / norm) - 1f;
         return coords;
     }
 
