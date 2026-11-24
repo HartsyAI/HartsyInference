@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Vision.DepthAnything;
 
 namespace HartsyInference.Vision.DepthPro2;
 
@@ -91,13 +92,23 @@ public sealed class DepthPro2Head
                 using Tensor grid = channelsFirst.Reshape(new TensorShape(1, _backboneWidth, gridH, gridW));
                 string p = $"encoder.reassemble.{i}.";
                 Tensor projected = Conv(backend, grid, W(p + "0.weight", _dims[i], _backboneWidth, 1, 1), W(p + "0.bias", _dims[i]), 1, 0);
-                levels[i] = i switch
+                if (i == 2)
                 {
-                    0 => ThenDispose(projected, ConvTranspose(backend, projected, W(p + "1.weight", _dims[0], _dims[0], 4, 4), W(p + "1.bias", _dims[0]), 4)),
-                    1 => ThenDispose(projected, ConvTranspose(backend, projected, W(p + "1.weight", _dims[1], _dims[1], 2, 2), W(p + "1.bias", _dims[1]), 2)),
-                    2 => projected,
-                    _ => ThenDispose(projected, Conv(backend, projected, W(p + "1.weight", _dims[3], _dims[3], 3, 3), W(p + "1.bias", _dims[3]), 2, 1)),
-                };
+                    levels[i] = projected;
+                }
+                else
+                {
+                    using (projected)
+                    {
+                        levels[i] = i switch
+                        {
+                            0 => ConvTranspose(backend, projected, W(p + "1.weight", _dims[0], _dims[0], 4, 4), W(p + "1.bias", _dims[0]), 4),
+                            1 => ConvTranspose(backend, projected, W(p + "1.weight", _dims[1], _dims[1], 2, 2), W(p + "1.bias", _dims[1]), 2),
+                            _ => Conv(backend, projected, W(p + "1.weight", _dims[3], _dims[3], 3, 3), W(p + "1.bias", _dims[3]), 2, 1),
+                        };
+                    }
+                }
+
                 made++;
             }
 
@@ -170,17 +181,12 @@ public sealed class DepthPro2Head
         return Conv(backend, up, W(p + "out_conv.weight", _decoder, _decoder, 1, 1), W(p + "out_conv.bias", _decoder), 1, 0);
     }
 
-    // x + conv(relu(conv(relu(x)))), both 3 x 3 with bias.
+    // DPT's residual conv unit, shared with Depth-Anything's head.
     private Tensor Residual(IBackend backend, Tensor x, string prefix)
     {
         int d = _decoder;
-        using Tensor act = new(x.Shape, DType.F32);
-        backend.LeakyRelu(act, x, 0f);
-        using Tensor mid = Conv(backend, act, W(prefix + "residual.1.weight", d, d, 3, 3), W(prefix + "residual.1.bias", d), 1, 1);
-        backend.LeakyRelu(mid, mid, 0f);
-        Tensor output = Conv(backend, mid, W(prefix + "residual.3.weight", d, d, 3, 3), W(prefix + "residual.3.bias", d), 1, 1);
-        backend.Add(output, output, x);
-        return output;
+        return DptHead.ResidualConvUnit(backend, x, W(prefix + "residual.1.weight", d, d, 3, 3), W(prefix + "residual.1.bias", d),
+            W(prefix + "residual.3.weight", d, d, 3, 3), W(prefix + "residual.3.bias", d));
     }
 
     private static Tensor Conv(IBackend backend, Tensor x, Tensor weight, Tensor? bias, int stride, int pad)
@@ -197,12 +203,6 @@ public sealed class DepthPro2Head
         Tensor output = new(new TensorShape(x.Shape[0], weight.Shape[1], x.Shape[2] * k, x.Shape[3] * k), DType.F32);
         backend.ConvTranspose2d(output, x, weight, bias, k, k, 0, 0);
         return output;
-    }
-
-    private static Tensor ThenDispose(Tensor consumed, Tensor result)
-    {
-        consumed.Dispose();
-        return result;
     }
 
     private Tensor W(string key, params long[] shape)

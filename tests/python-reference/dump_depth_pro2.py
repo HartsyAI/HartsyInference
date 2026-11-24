@@ -1,9 +1,11 @@
 """Reference dump for the Depth Pro 2 head and focal estimator (phase A2), fp32 on CPU.
 
-Writes every stage the C# parity test (tests/HartsyInference.Vision.Tests/DepthPro2/Parity/DepthPro2ParityTests.cs) compares:
+Writes the stages the C# parity test (tests/HartsyInference.Vision.Tests/DepthPro2/Parity/DepthPro2ParityTests.cs) compares:
 saved inputs, RoPE tables, embeddings, every block output, the four taps, the reassembled pyramid, every fusion output,
 the decoder output, inverse depth, metric depth, and the focal estimator's resized input, taps, head stages, logits,
-field of view and focal length. Each tensor is raw little-endian float32 with its shape in meta.json.
+field of view and focal length. Each tensor is raw little-endian float32 with its shape in meta.json. The embeddings, decoder
+output, padded head output and metric depth are not compared in A2; they are kept for bisecting and for the metric-depth
+phase (A3).
 
 Reference: apple-aiml-research/ml-depth-pro-2 at the pinned commit below (fetched into --src), timm 1.0.27, torch >= 2.7.
 Runs in the hartsy-ref:cpu Docker image, never on the Windows host:
@@ -74,7 +76,7 @@ class Dump:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
-    parser.add_argument("--src", default="/work/ml-depth-pro-2")
+    parser.add_argument("--src", default="/tmp/ml-depth-pro-2")
     parser.add_argument("--depth", default="/models/Vision/DepthPro2-S/model.safetensors")
     parser.add_argument("--focal", default="/models/Vision/DepthPro2-focal/model.safetensors")
     args = parser.parse_args()
@@ -198,7 +200,7 @@ def main() -> None:
     # Which names a biased timm DINOv3 stores its attention biases under (the C# adapter takes fused or separate).
     biased = timm.create_model("vit_small_patch16_dinov3_qkvb", pretrained=False, num_classes=0)
     dump.meta["_timm_qkvb_attn_keys"] = [k for k in biased.state_dict() if k.startswith("blocks.0.attn.")]
-    dump.meta["_versions"] ={"torch": torch.__version__, "timm": timm.__version__, "ml_depth_pro_2": COMMIT}
+    dump.meta["_versions"] = {"torch": torch.__version__, "timm": timm.__version__, "ml_depth_pro_2": COMMIT}
     (out / "meta.json").write_text(json.dumps(dump.meta, indent=1))
     print("wrote", len(dump.meta) - 1, "tensors to", out)
 

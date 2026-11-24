@@ -16,7 +16,7 @@ public sealed class DepthPro2FocalEstimator
 {
     private const int MaxShortSide = 512;
     private const int SizeMultiple = 32;
-    private const double MaxAspect = 1.7778;
+    private const double MaxAspect = 1.7778;   // upstream fov.py's MAX_ASPECT literal, not 16.0 / 9; keep it as written
     private const double MinFovDegrees = 1.0, MaxFovDegrees = 179.0;
     private static readonly int[] TappedBlocks = [2, 5, 8, 11];
     private static readonly int[] PrefixResetBlocks = [5, 7, 9, 11];
@@ -93,7 +93,8 @@ public sealed class DepthPro2FocalEstimator
             : 0.5 * height / Math.Tan(v[lower] * Math.PI / 180.0 / 2.0);
     }
 
-    /// <summary>The resize target of a frame before any crop: the short side at most 512, both sides rounded to multiples of 32, never upsampled.</summary>
+    /// <summary>The resize target of a frame before any crop: the short side at most 512, both sides rounded to multiples of 32. A frame is
+    /// not upsampled, except that each side is at least 32.</summary>
     public static (int Height, int Width) InputSize(int height, int width)
     {
         if (height <= 0 || width <= 0) throw new ArgumentOutOfRangeException(nameof(height), "The frame size must be positive.");
@@ -121,6 +122,7 @@ public sealed class DepthPro2FocalEstimator
     {
         double fx = cropW / 2 / Math.Tan(crop.HorizontalDegrees * Math.PI / 360.0);
         double fy = cropH / 2 / Math.Tan(crop.VerticalDegrees * Math.PI / 360.0);
+        // Upstream computes in float32 at least and returns the input dtype (float32), so the angles are rounded to float like its output.
         return new DepthPro2FieldOfView((float)(2 * Math.Atan(width / 2 / fx) * 180.0 / Math.PI), (float)(2 * Math.Atan(height / 2 / fy) * 180.0 / Math.PI));
     }
 
