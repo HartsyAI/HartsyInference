@@ -26,6 +26,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\Shared\RealWeightsFactAttribute.cs" Link="Shared\RealWeightsFactAttribute.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.API\HartsyInference.API.csproj" />
   </ItemGroup>
 
