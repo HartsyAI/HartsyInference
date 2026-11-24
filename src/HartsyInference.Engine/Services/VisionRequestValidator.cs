@@ -13,6 +13,7 @@ namespace HartsyInference.Engine.Services;
 /// <item><term>Track</term><description><see cref="VisionBatchRequest"/> with <see cref="VisionSequenceKind.Frames"/>, timestamps or fps, at least one non-empty in-bounds prompt; no interpolation fields.</description></item>
 /// <item><term>Interpolate</term><description><see cref="VisionBatchRequest"/> with <see cref="VisionSequenceKind.Frames"/>, at least 2 frames, timestamps or fps, exactly one of factor or target fps; no prompts.</description></item>
 /// </list>
+/// A focal length in pixels applies to MetricDepth only and must be a positive finite number.
 /// </remarks>
 public static class VisionRequestValidator
 {
@@ -55,6 +56,7 @@ public static class VisionRequestValidator
             throw new ArgumentException($"A target size only applies to Upscale, not {request.Mode}.");
         if (request.TargetWidth is <= 0 || request.TargetHeight is <= 0)
             throw new ArgumentException("A target width or height must be positive.");
+        CheckFocalLength(request.FocalLengthPx, request.Mode);
     }
 
     /// <summary>Throws <see cref="ArgumentException"/> naming the first rule <paramref name="request"/> breaks.</summary>
@@ -77,6 +79,7 @@ public static class VisionRequestValidator
             }
         }
         CheckThreshold(request.Threshold);
+        CheckFocalLength(request.FocalLengthPx, request.Mode);
         bool interpolationSet = request.InterpolationFactor is not null || request.TargetFps is not null;
         if (request.Mode != VisionMode.Interpolate && interpolationSet)
             throw new ArgumentException($"An interpolation factor or target fps only applies to Interpolate, not {request.Mode}.");
@@ -190,5 +193,15 @@ public static class VisionRequestValidator
     {
         if (!double.IsFinite(threshold) || threshold < 0 || threshold > 1)
             throw new ArgumentException($"Threshold must be in [0, 1]; got {threshold}.");
+    }
+
+    private static void CheckFocalLength(double? focalLengthPx, VisionMode mode)
+    {
+        if (focalLengthPx is not { } focal)
+            return;
+        if (mode != VisionMode.MetricDepth)
+            throw new ArgumentException($"A focal length only applies to MetricDepth, not {mode}.");
+        if (!double.IsFinite(focal) || focal <= 0)
+            throw new ArgumentException($"FocalLengthPx must be a positive number of pixels; got {focal}.");
     }
 }

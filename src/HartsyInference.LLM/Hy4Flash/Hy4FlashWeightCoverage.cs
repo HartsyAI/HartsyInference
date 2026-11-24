@@ -10,8 +10,9 @@ namespace HartsyInference.LLM.Hy4Flash;
 /// <param name="Missing">Parameters with no key; any one fails the load.</param>
 /// <param name="ShapeMismatches">Tensors whose shape differs from the config's.</param>
 /// <param name="ScaleMismatches">FP8 weights without a correctly shaped scale grid, or a grid beside a weight that is not FP8.</param>
+/// <param name="DtypeMismatches">Tensors whose storage dtype is not one the layout allows (F32 for the hyper-connections, sinks, indexer pooling and router bias; I32 for the Engram token map).</param>
 public sealed record Hy4FlashWeightCoverage(int Mapped, int ScaleCompanions, int SkippedDrafter, IReadOnlyList<string> Unmapped,
-    IReadOnlyList<string> Missing, IReadOnlyList<string> ShapeMismatches, IReadOnlyList<string> ScaleMismatches)
+    IReadOnlyList<string> Missing, IReadOnlyList<string> ShapeMismatches, IReadOnlyList<string> ScaleMismatches, IReadOnlyList<string> DtypeMismatches)
 {
     /// <summary>Every key the coverage saw.</summary>
     public int Total => Mapped + ScaleCompanions + SkippedDrafter + Unmapped.Count;
@@ -20,10 +21,11 @@ public sealed record Hy4FlashWeightCoverage(int Mapped, int ScaleCompanions, int
     /// <exception cref="InvalidDataException">The checkpoint and the config do not match.</exception>
     public void RequireComplete()
     {
-        if (Unmapped.Count == 0 && Missing.Count == 0 && ShapeMismatches.Count == 0 && ScaleMismatches.Count == 0) return;
+        if (Unmapped.Count == 0 && Missing.Count == 0 && ShapeMismatches.Count == 0 && ScaleMismatches.Count == 0 && DtypeMismatches.Count == 0) return;
         throw new InvalidDataException(string.Create(CultureInfo.InvariantCulture,
             $"The Hy4 Flash checkpoint does not match the config: {Unmapped.Count} unmapped key(s) [{string.Join(", ", Unmapped.Take(6))}], "
             + $"{Missing.Count} missing [{string.Join(", ", Missing.Take(6))}], {ShapeMismatches.Count} shape mismatch(es) "
-            + $"[{string.Join("; ", ShapeMismatches.Take(4))}], {ScaleMismatches.Count} scale mismatch(es) [{string.Join("; ", ScaleMismatches.Take(4))}]."));
+            + $"[{string.Join("; ", ShapeMismatches.Take(4))}], {ScaleMismatches.Count} scale mismatch(es) [{string.Join("; ", ScaleMismatches.Take(4))}], "
+            + $"{DtypeMismatches.Count} dtype mismatch(es) [{string.Join("; ", DtypeMismatches.Take(4))}]."));
     }
 }
