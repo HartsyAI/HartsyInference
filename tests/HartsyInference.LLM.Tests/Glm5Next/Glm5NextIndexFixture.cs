@@ -6,7 +6,7 @@ internal static class Glm5NextIndexFixture
 {
     internal static string Path(string name) => System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "Glm5Next", name);
 
-    internal static string ConfigJson() => File.ReadAllText(Path("sage-s21-flash-config.json"));
+    internal static string ConfigJson() => File.ReadAllText(Path("sage-s21-flash-config.json")).Replace("\r\n", "\n");
 
     internal static HashSet<string> Load(string name)
     {
