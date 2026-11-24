@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Diffusion.Utilities;
 using Xunit;
 using static HartsyInference.Diffusion.Tests.TinyWanCheckpoint;
 
@@ -79,8 +80,8 @@ public sealed class FastFramesFrameWiseTests
         using FrameKvCache cache = new(backend, layers: 1, maxFrames: 3);
         for (int f = 0; f < 2; f++)
         {
-            Tensor k = new(new TensorShape([1L, 2, 4]), DType.F32);
-            Tensor v = new(new TensorShape([1L, 2, 4]), DType.F32);
+            Tensor k = new(new TensorShape([2L, 4]), DType.F32);
+            Tensor v = new(new TensorShape([2L, 4]), DType.F32);
             k.AsSpan<float>().Fill(f + 1);
             v.AsSpan<float>().Fill(-(f + 1));
             cache.Set(0, f, k, v);
@@ -90,7 +91,7 @@ public sealed class FastFramesFrameWiseTests
         using (keys)
         using (values)
         {
-            Assert.Equal(new TensorShape([1L, 4, 4]), keys.Shape);
+            Assert.Equal(new TensorShape([4L, 4]), keys.Shape);
             Assert.Equal([1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 2f, 2f, 2f, 2f, 2f, 2f, 2f, 2f], keys.AsReadOnlySpan<float>().ToArray());
             Assert.Equal(-2f, values.AsReadOnlySpan<float>()[15]);
         }
@@ -129,7 +130,7 @@ public sealed class FastFramesFrameWiseTests
         using CpuBackend backend = new();
         using FrameKvCache cache = new(backend, layers: 1, maxFrames: 1);
 
-        Assert.Throws<ArgumentException>(() => cache.Set(0, 0, new Tensor(new TensorShape([1L, 2, 4]), DType.F32), new Tensor(new TensorShape([1L, 3, 4]), DType.F32)));
+        Assert.Throws<ArgumentException>(() => cache.Set(0, 0, new Tensor(new TensorShape([2L, 4]), DType.F32), new Tensor(new TensorShape([3L, 4]), DType.F32)));
     }
 
     [Fact]
@@ -157,6 +158,54 @@ public sealed class FastFramesFrameWiseTests
         // The reference looks timestep 0 up on the grid, which ends at σ ≈ 0.005 (timestep ≈ 4.98), not at 0.
         Assert.Equal(999, schedule.GridIndex(0f));
         Assert.InRange(schedule.Sigma(0f), 0.0049f, 0.0051f);
+    }
+
+    [Fact]
+    public void ASlotMustBeTokenMajorWithOneChannelCountAndTheCacheRefusesWorkAfterDisposal()
+    {
+        using CpuBackend backend = new();
+        FrameKvCache cache = new(backend, layers: 1, maxFrames: 2);
+        Assert.Throws<ArgumentException>(() => cache.Set(0, 0, new Tensor(new TensorShape([1L, 2, 4]), DType.F32), new Tensor(new TensorShape([1L, 2, 4]), DType.F32)));
+        cache.Set(0, 0, new Tensor(new TensorShape([2L, 4]), DType.F32), new Tensor(new TensorShape([2L, 4]), DType.F32));
+        Assert.Throws<ArgumentException>(() => cache.Set(0, 1, new Tensor(new TensorShape([2L, 3]), DType.F32), new Tensor(new TensorShape([2L, 3]), DType.F32)));
+        cache.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => cache.Set(0, 1, new Tensor(new TensorShape([2L, 4]), DType.F32), new Tensor(new TensorShape([2L, 4]), DType.F32)));
+    }
+
+    /// <summary>A frame whose earlier frame is not cached is refused before anything is written: the cache is as it was, and the
+    /// frame's own slot stays empty, so a later correct call still works.</summary>
+    [Fact]
+    public void AFrameWithAnUncachedEarlierFrameIsRefusedBeforeAnythingIsWritten()
+    {
+        using Rig rig = new();
+        Tensor[] frames = rig.RandomFrames(3, seed: 51);
+        using FrameKvCache cache = new(rig.Backend, Layers, 3);
+        Assert.Throws<InvalidOperationException>(() => rig.Transformer.ForwardFrame(rig.Backend, frames[2], rig.Text, 625f, 2, cache));
+        for (int layer = 0; layer < Layers; layer++)
+            Assert.False(cache.Has(layer, 2));
+        Assert.Throws<ArgumentOutOfRangeException>(() => rig.Transformer.ForwardFrame(rig.Backend, frames[0], rig.Text, 1000f, 3, cache));
+        Dispose(rig.Transformer.ForwardFrame(rig.Backend, frames[0], rig.Text, 1000f, 0, cache));
+        Dispose(rig.Transformer.ForwardFrame(rig.Backend, frames[1], rig.Text, 833f, 1, cache));
+        Dispose(rig.Transformer.ForwardFrame(rig.Backend, frames[2], rig.Text, 625f, 2, cache));
+        foreach (Tensor frame in frames)
+            frame.Dispose();
+    }
+
+    /// <summary>The step-cache path is the one that passed no self-attention mask to block 0. With an empty step cache it computes
+    /// every block, so it must equal the plain masked forward.</summary>
+    [Fact]
+    public void TheStepCachePathKeepsTheMask()
+    {
+        float[] timesteps = [1000f, 833.3333f, 625f];
+        using Rig rig = new();
+        Tensor[] frames = rig.RandomFrames(Frames, seed: 41);
+        using Tensor clip = Stack(frames);
+        using Tensor plain = rig.Transformer.ForwardFrameCausal(rig.Backend, clip, rig.Text, timesteps);
+        using DeviceFeatureCache stepCache = new();
+        using Tensor cached = rig.Transformer.ForwardFrameCausal(rig.Backend, clip, rig.Text, timesteps, stepCache);
+        AssertClose(plain.AsReadOnlySpan<float>().ToArray(), cached.AsReadOnlySpan<float>(), "step-cache path against the plain masked forward");
+        foreach (Tensor frame in frames)
+            frame.Dispose();
     }
 
     private static void Dispose(WanVideoTransformer.FrameForward step)
