@@ -31,30 +31,41 @@ public static partial class HunyuanVideo15Prompt
     /// <summary>ByT5 token window (<c>byt5_max_length</c> 256).</summary>
     public const int ByT5MaxTokens = 256;
 
+    private static readonly Dictionary<string, int> ChatSpecialTokens = new()
+    {
+        ["<|im_start|>"] = Qwen2Tokenizer.ImStartId,
+        ["<|im_end|>"] = Qwen2Tokenizer.ImEndId,
+    };
+
     /// <summary>Chat-template token ids for <paramref name="prompt"/> (system message, user turn, generation prompt), truncated on the right to
     /// <see cref="MaxTextTokens"/> plus the template prefix, with the crop point: the number of leading template tokens to drop from the hidden
-    /// states. Mirrors <c>text2tokens</c>: <c>apply_chat_template(add_generation_prompt=True)</c>, <c>max_length = text_len + crop_start</c>.</summary>
+    /// states. Mirrors <c>text2tokens</c>: <c>apply_chat_template(add_generation_prompt=True)</c>, <c>max_length = text_len + crop_start</c>.
+    /// <para>Encoded with <see cref="Qwen2Tokenizer.EncodeExact"/>, which matches the HuggingFace tokenizer (every newline is token 198).
+    /// <see cref="Qwen2Tokenizer.EncodeChat"/> goes through the legacy path that drops bare newlines and is not used here. Like the reference's
+    /// <c>truncation=True</c>, a prompt longer than the window loses the end of the template, the generation prompt included.</para></summary>
     public static (int[] Ids, int CropStart) Tokenize(Qwen2Tokenizer tokenizer, string prompt)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(prompt);
-        int[] full = tokenizer.EncodeChat(prompt, SystemPrompt, addGenerationPrompt: true);
+        string text = $"<|im_start|>system\n{SystemPrompt}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+        int[] full = tokenizer.EncodeExact(text, ChatSpecialTokens);
         int crop = FindCropStart(full, tokenizer);
         int length = Math.Min(full.Length, MaxTextTokens + crop);
         return (full[..length], crop);
     }
 
-    /// <summary>The index just past the first <c>&lt;|im_start|&gt;user\n</c> marker, or 0 when the marker is absent (the reference then
-    /// falls back to a tokenizer special token naming the user role, which Qwen does not have, so it crops nothing).</summary>
+    /// <summary>The index just past the first <c>&lt;|im_start|&gt;user\n</c> marker (three ids: start, <c>user</c>, newline), or 0 when the
+    /// marker is absent (the reference then falls back to a tokenizer special token naming the user role, which Qwen does not have, so it
+    /// crops nothing).</summary>
     public static int FindCropStart(ReadOnlySpan<int> ids, Qwen2Tokenizer tokenizer)
     {
-        IReadOnlyList<int> userTokens = tokenizer.EncodeRaw("user\n");
-        int markerLength = userTokens.Count + 1;
+        int[] userTokens = tokenizer.EncodeExact("user\n");
+        int markerLength = userTokens.Length + 1;
         for (int i = 0; i + markerLength <= ids.Length; i++)
         {
             if (ids[i] != Qwen2Tokenizer.ImStartId) continue;
             bool match = true;
-            for (int j = 0; j < userTokens.Count && match; j++) match = ids[i + 1 + j] == userTokens[j];
+            for (int j = 0; j < userTokens.Length && match; j++) match = ids[i + 1 + j] == userTokens[j];
             if (match) return i + markerLength;
         }
         return 0;
@@ -70,7 +81,12 @@ public static partial class HunyuanVideo15Prompt
         foreach (Match match in QuotedSpan().Matches(prompt))
             texts.Add(match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value);
         if (texts.Count <= 1) return texts;
-        return texts.Distinct(StringComparer.Ordinal).ToList();
+        // dict.fromkeys in the reference: first occurrence wins, order of appearance kept.
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        List<string> unique = [];
+        foreach (string text in texts)
+            if (seen.Add(text)) unique.Add(text);
+        return unique;
     }
 
     /// <summary>The ByT5 input for <paramref name="prompt"/>: <c>Text "…". </c> per glyph text (no color or font tokens, the reference passes
