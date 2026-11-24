@@ -1132,8 +1132,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         Tensor gate = new(ff, DType.F32);
         GenericTransformer.Project(backend, gate, x, gateW, null, _lowVram);
         Tensor comb;
-        // The clamp belongs to the routed experts; a shared expert beside them is plain SiLU.
-        ActivationKind activation = shared && _moe.Activation == ActivationKind.SwigluClamped ? ActivationKind.Silu : _moe.Activation;
+        // The clamp belongs to the routed experts unless ClampSharedExpert says otherwise; a shared expert beside them is then plain SiLU.
+        ActivationKind activation = shared && !_moe.ClampSharedExpert && _moe.Activation == ActivationKind.SwigluClamped ? ActivationKind.Silu : _moe.Activation;
         if (activation is ActivationKind.SwigluOai or ActivationKind.SwigluClamped or ActivationKind.Situ)
         {
             Tensor gatedUp = new(ff, DType.F32);

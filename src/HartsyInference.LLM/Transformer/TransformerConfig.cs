@@ -109,6 +109,9 @@ public sealed record MoeConfig
     /// <summary>Expert/shared-expert FFN activation; default SiLU (SwiGLU: Qwen-MoE/Mixtral/DeepSeek), Gemma-4's MoE layers use <see cref="ActivationKind.GeluTanh"/> (GeGLU), matching its dense FFN.</summary>
     public ActivationKind Activation { get; init; } = ActivationKind.Silu;
 
+    /// <summary>Whether the shared expert takes the <see cref="ActivationKind.SwigluClamped"/> clamp too; false (Hy4 Flash) runs it as plain SiLU, true (Glm5Next) clamps it like the routed experts.</summary>
+    public bool ClampSharedExpert { get; init; }
+
     /// <summary>Sigmoid gain of <see cref="ActivationKind.SwigluOai"/>.</summary>
     public float SwigluAlpha { get; init; }
 
