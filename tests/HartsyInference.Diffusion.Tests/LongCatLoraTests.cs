@@ -234,6 +234,22 @@ public sealed class LongCatLoraTests : IDisposable
     }
 
     [Fact]
+    public void AModuleWithoutAlphaScaleIsRefused()
+    {
+        const string Module = "lora___lorahyphen___blocks___lorahyphen___0___lorahyphen___attn___lorahyphen___proj";
+        Dictionary<string, Tensor> tensors = new()
+        {
+            [Module + ".lora_down.weight"] = LongCatTestData.Random(new TensorShape(2, 8), 9),
+            [Module + ".lora_up.weight"] = LongCatTestData.Random(new TensorShape(8, 2), 10),
+        };
+        SafeTensorsWriter.Save(PathOf("noalpha.safetensors"), tensors);
+
+        Assert.Contains("no alpha_scale", Assert.ThrowsAny<Exception>(() => LoraFile.Load(PathOf("noalpha.safetensors"))).Message);
+        foreach (Tensor t in tensors.Values)
+            t.Dispose();
+    }
+
+    [Fact]
     public void NonCanonicalBlockIndexIsRefused()
     {
         const string Module = "lora___lorahyphen___blocks___lorahyphen___0___lorahyphen___attn___lorahyphen___qkv";

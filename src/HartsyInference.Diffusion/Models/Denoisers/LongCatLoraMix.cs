@@ -8,7 +8,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <see cref="LongCatTransformer.LoadWeights"/>, and wrap every step's forward in <see cref="ForStep"/>. A single always-on LoRA (the base distill or
 /// refinement LoRA) needs only one <see cref="AdjunctGate"/> and no mix.</summary>
 /// <remarks>The gate state is read on every GEMM, so the caller serializes generations that share the weights, and a host that captures a graph
-/// of a step must key the capture on which gate is live.</remarks>
+/// of a step must key the capture on which gate is live. Not thread-safe: the gates are plain fields with one owner, and two threads that
+/// enable them race on the same weights.</remarks>
 public sealed class LongCatLoraMix
 {
     /// <summary>Creates a mix that hands over from the first LoRA to the second at step <paramref name="mixSteps"/>.</summary>

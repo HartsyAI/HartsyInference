@@ -1,5 +1,4 @@
 using System.Globalization;
-using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -49,8 +48,8 @@ public static class LongCatLoraMapper
     }
 
     /// <summary>Builds one layer per adapted module on <see cref="LoraTarget.Transformer"/>. Tensors the mapper allocates (a
-    /// block-diagonal up matrix, a negated one)
-    /// are added to <paramref name="ownedTensors"/> for the file to dispose.</summary>
+    /// block-diagonal up matrix, a negated one) are added to <paramref name="ownedTensors"/> for the file to dispose.</summary>
+    /// <remarks>Not thread-safe: the mapper and the file it returns are single-owner, and the layers borrow the file's mapping.</remarks>
     public static IReadOnlyList<LoraLayer> ParseLayers(SafeTensorsLoader loader, List<Tensor> ownedTensors)
     {
         ArgumentNullException.ThrowIfNull(loader);
@@ -99,8 +98,8 @@ public static class LongCatLoraMapper
             throw new InvalidDataException($"LongCat LoRA '{target}': up {up.Shape} does not pair with down {down.Shape}.");
 
         if (module.Alpha is null)
-            Logs.Warning($"LongCat LoRA module '{target}' has no alpha_scale; applying it at scale 1.");
-        float scale = module.Alpha is null ? 1f : ReadScalar(loader, module.Alpha);
+            throw new InvalidDataException($"LongCat LoRA module '{target}' has no alpha_scale. The reference always saves it, so a file without it is truncated or from another trainer.");
+        float scale = ReadScalar(loader, module.Alpha);
         if (!float.IsFinite(scale))
             throw new InvalidDataException($"LongCat LoRA '{module.Alpha}' is not finite.");
         if (scale < 0f)
