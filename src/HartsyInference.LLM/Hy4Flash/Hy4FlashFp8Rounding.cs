@@ -11,16 +11,19 @@ public static class Hy4FlashFp8Rounding
     {
         if (float.IsNaN(value)) return value;
         float magnitude = MathF.Min(MathF.Abs(value), E4M3Max);
-        int best = 0;
-        float bestDistance = float.PositiveInfinity;
-        for (int code = 0; code < Values.Length; code++)
+        // Values ascend with their codes, so the first code at or above the magnitude is found by bisection; the nearest is it or its neighbour below.
+        int lo = 0, hi = Values.Length - 1;
+        while (lo < hi)
         {
-            float distance = MathF.Abs(Values[code] - magnitude);
-            if (distance < bestDistance || (distance == bestDistance && (code & 1) == 0))
-            {
-                best = code;
-                bestDistance = distance;
-            }
+            int mid = (lo + hi) >> 1;
+            if (Values[mid] < magnitude) lo = mid + 1;
+            else hi = mid;
+        }
+        int best = lo;
+        if (lo > 0)
+        {
+            float below = magnitude - Values[lo - 1], above = Values[lo] - magnitude;
+            if (below < above || (below == above && ((lo - 1) & 1) == 0)) best = lo - 1;
         }
         return value < 0f ? -Values[best] : Values[best];
     }
