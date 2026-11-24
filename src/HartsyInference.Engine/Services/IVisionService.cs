@@ -16,9 +16,9 @@ public interface IVisionService
     Task<VisionResult> RunViewsAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default) =>
         throw new NotSupportedException($"{GetType().Name} does not run multi-view requests.");
 
-    /// <summary>Streams a frame operation (<see cref="VisionSequenceKind.Frames"/>: tracking, interpolation), one
+    /// <summary>Streams a frame operation (<see cref="VisionSequenceKind.Frames"/>: tracking, interpolation, video metric depth), one
     /// <see cref="VisionFrameResult"/> per output frame in time order. Stopping the enumeration early, or cancelling,
-    /// stops the model and frees what it holds.</summary>
+    /// stops the model and frees what it holds. Depth Pro 2 MetricDepth is the one implementation in this build.</summary>
     IAsyncEnumerable<VisionFrameResult> RunFramesAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default) =>
         throw new NotSupportedException($"{GetType().Name} does not run frame sequences.");
 }
