@@ -44,6 +44,26 @@ public sealed class Glm5NextKpoolIndexerTests
         Assert.True(s.Counts[Tokens - 1] < Tokens, "The last query must not see every token, or the test selects nothing.");
     }
 
+    [Fact]
+    public void LastSlotOfAPool_KeepsItsOwnCompletedPool_WhenTheTopKHasRoomForIt()
+    {
+        // A query on the last slot of a pool has no tail, and its own pool has just ended. The reference (get_visible_tokens on the pool's last
+        // token) makes that pool selectable, and it is taken by score like any other, so with room for every pool it must be in the row.
+        Glm5NextConfig c = Config() with { IndexTopK = 1000 };
+        Random rng = new(5);
+        using Glm5NextKpoolIndexer indexer = Build(c, rng);
+        float[] x = Randoms(rng, Tokens * Hidden, 1f), qLatent = Randoms(rng, Tokens * QRank, 1f);
+        using Tensor store = new(new TensorShape(Tokens, indexer.KeyWidth), DType.F32);
+        indexer.Append(x, Tokens, 0, store);
+        int[] positions = [.. Enumerable.Range(0, Tokens)];
+
+        DsaKeySelection s = indexer.Select(x, qLatent, positions, Tokens, store);
+
+        int p = 7;
+        int[] row = s.Rows.AsSpan(p * s.Width, s.Counts[p]).ToArray();
+        Assert.Equal(Enumerable.Range(0, p + 1), row.Order());
+    }
+
     private static Glm5NextConfig Config()
     {
         string json = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Glm5Next", "tiny", "config.json"));

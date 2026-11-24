@@ -13,7 +13,7 @@ namespace HartsyInference.LLM.Glm5Next;
 /// <c>post_attention_layernorm</c>, clamped dense or MoE MLP, expand. Host F32 activations over <see cref="IBackend"/> ops.</summary>
 public sealed class Glm5NextLayer : IDisposable
 {
-    private const float L2NormEps = 1e-6f, IndexerKeyNormEps = 1e-6f;
+    private const float L2NormEps = 1e-6f;
 
     private readonly IBackend _backend;
     private readonly Glm5NextConfig _c;
@@ -198,7 +198,8 @@ public sealed class Glm5NextLayer : IDisposable
         return t;
     }
 
-    private static Tensor F32(IErnie5WeightSource source, string name, long elements)
+    /// <summary>Reads a vector as an F32 host tensor of <paramref name="elements"/> values, whatever dtype the checkpoint stores it in.</summary>
+    internal static Tensor F32(IErnie5WeightSource source, string name, long elements)
     {
         float[] v = Host(source, name, elements);
         return HostMath.Tensor(v, v.Length);
