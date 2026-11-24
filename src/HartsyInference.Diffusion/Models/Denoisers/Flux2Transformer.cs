@@ -186,6 +186,57 @@ public sealed unsafe class Flux2Transformer : IDisposable
         return velocity;
     }
 
+    /// <summary>Velocity of <c>[target grid, reference grid 0, ...]</c> under one shared noise level: the FLUX.2 Klein
+    /// reference-edit layout, where the reference latents are appended to the image tokens, share the timestep embedding,
+    /// and sit at their own RoPE T coordinate (<paramref name="gridTimes"/>, the target first at 0, then 10, 20, ... in
+    /// diffusers). Every grid covers the same <paramref name="hPacked"/> × <paramref name="wPacked"/> patches. Returns
+    /// the velocity of every token; the caller keeps the first grid. Batch 1; no modality embedding is involved.</summary>
+    /// <param name="packedTokens"><c>[1, grids·H·W, in_channels]</c>, the target grid first.</param>
+    public Tensor ForwardWithReferences(IBackend backend, Tensor packedTokens, Tensor textEmbeddings, float sigma,
+        int hPacked, int wPacked, ReadOnlySpan<float> gridTimes)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(packedTokens);
+        ArgumentNullException.ThrowIfNull(textEmbeddings);
+        if (gridTimes.Length < 1)
+            throw new ArgumentException("At least the target grid is required.", nameof(gridTimes));
+        long expected = (long)gridTimes.Length * hPacked * wPacked;
+        if (packedTokens.Shape.Rank != 3 || packedTokens.Shape[0] != 1 || packedTokens.Shape[1] != expected
+            || packedTokens.Shape[2] != _config.InChannels)
+        {
+            throw new ArgumentException(
+                $"{gridTimes.Length} grids of {hPacked}x{wPacked} need packed tokens [1, {expected}, {_config.InChannels}], got {packedTokens.Shape}.",
+                nameof(packedTokens));
+        }
+        Tensor temb = ComputeTimestepEmbedding(backend, sigma, 0f, 1);
+        try
+        {
+            return ForwardWithTemb(backend, packedTokens, textEmbeddings, temb, hPacked, wPacked, null, null, gridTimes.ToArray());
+        }
+        finally
+        {
+            temb.Dispose();
+        }
+    }
+
+    /// <summary>Rope tables for <c>[text, grids...]</c> at the given T coordinates, rebuilt only when the key changes. A
+    /// plain or multi-grid forward in between leaves its own signature, so the tables are never mistaken for these.</summary>
+    private void EnsureReferenceRope(int txtSeqLen, int hPacked, int wPacked, float[] gridTimes)
+    {
+        HashCode hash = new HashCode();
+        hash.Add(txtSeqLen);
+        hash.Add(hPacked);
+        hash.Add(wPacked);
+        foreach (float time in gridTimes) hash.Add(time);
+        long sig = ((long)hash.ToHashCode() << 20) ^ 0x5EF0_0000_0000L ^ gridTimes.Length;
+        if (sig == _ropeSig)
+            return;
+        _ropeSig = long.MinValue;
+        using Tensor posIds = Flux2PosEmbed.BuildGridPositionIds(txtSeqLen, hPacked, wPacked, gridTimes);
+        _rope.Precompute(posIds);
+        _ropeSig = sig;
+    }
+
     /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
     /// path computes temb inside the capture from a fixed device sin buffer). Does NOT dispose temb.
     /// <para><paramref name="stepCache"/> = the original FBCache target shape: double block 0 always runs and
@@ -193,7 +244,8 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// block0Img + the previous step's img-portion residual (stored against the pre-final-layer img hidden,
     /// which has block0Img's exact shape/dtype). Null = byte-identical uncached forward.</para></summary>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor textEmbeddings, Tensor temb,
-        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null,
+        float[]? gridTimes = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -234,7 +286,10 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
         // ── 4. Precompute 4-axis RoPE — sig-cached (Precompute rebuilds host tables + re-uploads the GPU
         //       cos/sin tables; it ran EVERY forward before) ──
-        EnsureRope(txtSeqLen, hPacked, wPacked);
+        if (gridTimes is null)
+            EnsureRope(txtSeqLen, hPacked, wPacked);
+        else
+            EnsureReferenceRope(txtSeqLen, hPacked, wPacked, gridTimes);
 
         // ── 5. Double-stream blocks (text + image as two parallel streams sharing joint attn) ──
         // Across-step First-Block cache: double block 0 always runs; its img stream is the gate indicator.
