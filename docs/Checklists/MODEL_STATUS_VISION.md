@@ -39,14 +39,17 @@ called with a `.Reshape` view as the write target orphans the CUDA activation-ca
 caller reads back, producing silent all-zero output. Fixed in `NormalBaeModel.cs` (`SqueezeExcite`,
 `RefineHead`) and `UperNetSegModel.cs` (`LayerNormChannelsFirst`, `MbConvBlock.Forward`) by allocating the
 output already in the written shape and reshaping only on the way out.
-**YOLO8, YOLO11, YOLOv8-Face, and
-ArcFace stay blocked** — not gated access, a distribution-format gap: HF hosts these only as raw Ultralytics
-`.pt` (a full pickled `nn.Module` object graph the engine's safe-subset pickle VM can't resolve) or, for
-ArcFace, raw ONNX (a graph format neither loader reads). No ungated pre-folded-safetensors mirror was found
-for any of the four (checked 2026-07-22). The architectures above are already real-weight parity-verified —
-the gap is purely that the one-time offline conversion (`convert_arcface_onnx.py`, and the analogous YOLO
-`-folded.safetensors` step) isn't something the Assets auto-download system can perform; it needs a local
-Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.cs` for the per-model detail.
+**YOLO8, YOLO11 and YOLOv8-Face stay blocked** — not gated access, a distribution-format gap: HF hosts these only
+as raw Ultralytics `.pt` (a full pickled `nn.Module` object graph the engine's safe-subset pickle VM can't resolve).
+No ungated pre-folded-safetensors mirror was found (checked 2026-07-22). The architectures above are already
+real-weight parity-verified — the gap is purely that the one-time offline `-folded.safetensors` conversion isn't
+something the Assets auto-download system can perform; it needs a local Python step outside the engine. See
+`src/HartsyInference.Cli/Infra/ModelCatalog.cs` for the per-model detail.
+
+**ArcFace is not blocked on a loader.** It is verified in the table above, and the engine reads raw ONNX itself:
+`OnnxWeightLoader` (`ModelAssets/Onnx`) parses initializers and the node list, with integer and float attributes,
+without ONNX Runtime. ArcFace still goes through its offline conversion (`convert_arcface_onnx.py`); the audio side already
+binds ONNX weights without it (CosyVoice2, g2pW, Silero, and Kim_Vocal_2 by walking the node list; see [MODEL_STATUS_AUDIO.md](MODEL_STATUS_AUDIO.md)).
 
 ## Runs end-to-end, parity pending (⚠️)
 

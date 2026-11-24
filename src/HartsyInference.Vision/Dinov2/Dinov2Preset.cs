@@ -51,6 +51,19 @@ public sealed record Dinov2Preset
     /// <summary>DINOv3 only: the MLP is SwiGLU (<c>silu(gate_proj(x)) · up_proj(x)</c>, the ViT-H+) and not the plain GELU one. <c>Dinov3Layer</c> requires <c>mlp.gate_proj</c> in every layer when this is set and refuses a checkpoint that has it when it is not, so a preset and a file that disagree fail at load.</summary>
     public bool GatedMlp { get; init; }
 
+    /// <summary>DINOv3 only: the query and value projections carry a bias (the HF layout and every <c>facebook/dinov3</c> checkpoint). False for a timm
+    /// <c>qkv_bias=False</c> backbone such as Depth Pro 2's, whose attention has no q/k/v bias at all; <c>Dinov3Layer</c> then requires none and a file
+    /// that carries one fails at load. The key projection never has a bias.</summary>
+    public bool AttentionQkvBias { get; init; } = true;
+
+    /// <summary>DINOv3 only: the encoder ends in a LayerNorm (<c>norm.weight</c>, <c>norm.bias</c>). False for a backbone whose taps are raw block outputs
+    /// (Depth Pro 2): the loader then reads no final norm, and <c>Dinov3VisionEncoder.Encode</c> returns the last block's output unchanged.</summary>
+    public bool HasFinalNorm { get; init; } = true;
+
+    /// <summary>DINOv3 only: normalise both RoPE axes by the longer side of the patch grid (<c>2·(i+0.5)/max(h,w) − 1</c>, timm's <c>max</c> coordinate mode, which
+    /// keeps the aspect ratio), not each axis by its own length. Identical for a square grid.</summary>
+    public bool RopeNormalizesByLongSide { get; init; }
+
     /// <summary>LayerNorm epsilon (1e-6 for DINOv2; 1e-5 for the DINOv3 ViT-S/B/L checkpoints).</summary>
     public float LayerNormEps { get; init; } = 1e-6f;
 
