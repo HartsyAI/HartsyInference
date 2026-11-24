@@ -6,10 +6,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>LongCat-Video DiT block (<c>LongCatSingleStreamBlock</c>, meituan-longcat/LongCat-Video @ 58eb336). B=1 over <c>[S, dim]</c> with a per-frame
-/// modulation: (1) self-attention with fused QKV and per-head QK RMSNorm and 3D RoPE, run as the segments the caller plans, gated; (2) ungated text
-/// cross-attention on the noisy rows only, after an affine LayerNorm; (3) SwiGLU FFN, gated. Every weight is used through <see cref="IBackend.Linear"/>
-/// or <see cref="IBackend.LinearWeightRows"/>, which apply a runtime LoRA adjunct on any projection; no path casts or fuses a weight past that.</summary>
+/// <summary>LongCat-Video DiT block (<c>LongCatSingleStreamBlock</c>, meituan-longcat/LongCat-Video @ 58eb336). B=1 over <c>[S, dim]</c> with a
+/// per-frame modulation: (1) self-attention with fused QKV, per-head QK RMSNorm and 3D RoPE, run as the segments the caller plans, gated;
+/// (2) ungated text cross-attention on the noisy rows only, after an affine LayerNorm; (3) SwiGLU FFN, gated. Every weight is used through
+/// <see cref="IBackend.Linear"/> or <see cref="IBackend.LinearWeightRows"/>, which apply a runtime LoRA adjunct on any projection, and no
+/// path casts or fuses a weight past that.</summary>
 public sealed class LongCatBlock : IStreamingBlock
 {
     private readonly LongCatConfig _config;
@@ -89,7 +90,8 @@ public sealed class LongCatBlock : IStreamingBlock
         _crossAttention = new AttentionLayer(cross, new AttentionNormWeights(_crossQNorm, _crossKNorm, LongCatConfig.NormEps, LongCatConfig.NormEps));
     }
 
-    /// <summary>One forward over the F32 residual stream <paramref name="hidden"/> <c>[S, dim]</c>, which stays the caller's. <paramref name="text"/> is the
+    /// <summary>One forward over the F32 residual stream <paramref name="hidden"/> <c>[S, dim]</c>, which stays the caller's.
+    /// <paramref name="text"/> is the
     /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
     /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
@@ -179,10 +181,13 @@ public sealed class LongCatBlock : IStreamingBlock
         if (condRows == 0)
             return LongCatOps.Add(backend, x, update);
 
-        using Tensor padded = new(new TensorShape(s, dim), DType.F32);
-        using Tensor zeros = LongCatOps.Zeros(new TensorShape(condRows, dim));
-        backend.Concat(padded, [zeros, update], 0);
-        return LongCatOps.Add(backend, x, padded);
+        // Conditioning rows pass through untouched: only the noisy rows take the update, joined back on device.
+        using Tensor conditioning = SliceRows(backend, x, 0, condRows, dim);
+        using Tensor noisy = SliceRows(backend, x, condRows, noisyRows, dim);
+        using Tensor updatedNoisy = LongCatOps.Add(backend, noisy, update);
+        Tensor joined = new(new TensorShape(s, dim), DType.F32);
+        backend.Concat(joined, [conditioning, updatedNoisy], 0);
+        return joined;
     }
 
     private Tensor CrossAttention(IBackend backend, Tensor queryInput, Tensor text)

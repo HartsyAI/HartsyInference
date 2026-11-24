@@ -2,7 +2,8 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests.Parity;
 
-/// <summary>Every stage of the tiny LongCat DiT against the pinned reference modules (tests/python-reference/longcat_dit/dump_longcat_dit.py), CPU F32.
+/// <summary>Every stage of the tiny LongCat DiT against the pinned reference modules
+/// (tests/python-reference/longcat_dit/dump_longcat_dit.py), CPU F32.
 /// Skipped, and so not evidence, until HARTSY_LONGCAT_DIT_DIR names the dump directory.</summary>
 [Trait("Category", "Integration")]
 public sealed class LongCatDitReferenceParityTests

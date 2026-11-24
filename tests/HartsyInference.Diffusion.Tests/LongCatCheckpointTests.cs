@@ -8,6 +8,7 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The sharded diffusers-named index the base and avatar repositories ship, written tiny and read back through the loader.</summary>
+[Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatCheckpointTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "longcat-ckpt-" + Guid.NewGuid().ToString("N"));
@@ -114,7 +115,8 @@ public sealed class LongCatCheckpointTests : IDisposable
         }
     }
 
-    private float[] Forward(CpuBackend backend, IReadOnlyDictionary<string, Tensor> weights, Tensor latent, Tensor text, LongCatConditioning conditioning)
+    private float[] Forward(CpuBackend backend, IReadOnlyDictionary<string, Tensor> weights, Tensor latent, Tensor text,
+        LongCatConditioning conditioning)
     {
         using LongCatTransformer transformer = new(_config);
         transformer.LoadWeights(weights);

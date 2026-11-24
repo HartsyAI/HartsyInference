@@ -36,12 +36,14 @@ public static class ConditionedAttentionPlan
         if (condFrames <= 1)
             return ForConditionedFrames(tokensPerFrame, frames, condFrames);
         if (refFrames == 0)
-            throw new ArgumentException("A multi-frame context needs a reference slot; the reference grid places the context after it.", nameof(refFrames));
+            throw new ArgumentException(
+                "A multi-frame context needs a reference slot; the reference grid places the context after it.", nameof(refFrames));
 
         int total = tokensPerFrame * frames;
         int refRows = tokensPerFrame * refFrames;
         int cond = tokensPerFrame * condFrames;
-        List<AttentionSegment> plan = [new AttentionSegment(0, refRows, 0, refRows), new AttentionSegment(refRows, cond - refRows, refRows, cond - refRows)];
+        List<AttentionSegment> plan =
+            [new AttentionSegment(0, refRows, 0, refRows), new AttentionSegment(refRows, cond - refRows, refRows, cond - refRows)];
         int noisyFrames = frames - condFrames;
         if (noisyFrames == 0)
             return [.. plan];

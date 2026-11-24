@@ -20,7 +20,8 @@ internal static class LongCatTestData
         Dictionary<string, Tensor> weights = new(StringComparer.Ordinal);
         foreach ((string key, TensorShape shape) in LongCatCheckpoint.ExpectedShapes(config))
         {
-            bool normScale = key.EndsWith("norm.weight", StringComparison.Ordinal) || key.EndsWith("pre_crs_attn_norm.weight", StringComparison.Ordinal);
+            bool normScale = key.EndsWith("norm.weight", StringComparison.Ordinal)
+                || key.EndsWith("pre_crs_attn_norm.weight", StringComparison.Ordinal);
             Tensor t = new(shape, DType.F32);
             Span<float> span = t.AsSpan<float>();
             for (int i = 0; i < span.Length; i++)
@@ -30,7 +31,8 @@ internal static class LongCatTestData
         return weights;
     }
 
-    /// <summary>Writes <paramref name="weights"/> as the two-shard diffusers-named index the real checkpoints use, optionally leaving keys out or storing another dtype.</summary>
+    /// <summary>Writes <paramref name="weights"/> as the two-shard diffusers-named index the real checkpoints use, optionally
+    /// leaving keys out or storing another dtype.</summary>
     public static void WriteCheckpoint(string directory, Dictionary<string, Tensor> weights, bool writeConfig = true, Func<string, bool>? skip = null,
         DType? storage = null)
     {
@@ -50,7 +52,10 @@ internal static class LongCatTestData
             SafeTensorsWriter.Save(Path.Combine(directory, shardNames[shard]), part);
         }
         File.WriteAllText(Path.Combine(directory, LongCatCheckpoint.IndexFileName),
-            JsonSerializer.Serialize(new Dictionary<string, object> { ["metadata"] = new Dictionary<string, long> { ["total_size"] = total }, ["weight_map"] = map }));
+            JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["metadata"] = new Dictionary<string, long> { ["total_size"] = total }, ["weight_map"] = map,
+            }));
         if (writeConfig)
         {
             File.WriteAllText(Path.Combine(directory, "config.json"), """

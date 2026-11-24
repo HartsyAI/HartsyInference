@@ -43,7 +43,8 @@ public sealed record LongCatConfig
     /// <summary>Patch size (T, H, W); the temporal patch is 1.</summary>
     public (int T, int H, int W) PatchSize { get; init; } = (1, 2, 2);
 
-    /// <summary>Text rows past the valid length are zeroed after the caption projection and still attended (both shipped configs set this); off drops them.</summary>
+    /// <summary>Text rows past the valid length are zeroed after the caption projection and still attended (both shipped configs
+    /// set this); off drops them.</summary>
     public bool TextTokensZeroPad { get; init; } = true;
 
     /// <summary>Width of one attention head.</summary>
@@ -103,11 +104,11 @@ public sealed record LongCatConfig
     public static LongCatConfig FromShapes(Func<string, TensorShape?> shapeOf, int depth, (int T, int H, int W) patch, bool textTokensZeroPad)
     {
         TensorShape patchShape = shapeOf("x_embedder.proj.weight") ?? throw new ArgumentException("The checkpoint has no x_embedder.proj.weight.");
-        TensorShape qNorm = shapeOf("blocks.0.attn.q_norm.weight") ?? throw new ArgumentException("The checkpoint has no blocks.0.attn.q_norm.weight.");
-        TensorShape caption = shapeOf("y_embedder.y_proj.0.weight") ?? throw new ArgumentException("The checkpoint has no y_embedder.y_proj.0.weight.");
-        TensorShape adaln = shapeOf("blocks.0.adaLN_modulation.1.weight") ?? throw new ArgumentException("The checkpoint has no blocks.0.adaLN_modulation.1.weight.");
+        TensorShape qNorm = Required(shapeOf, "blocks.0.attn.q_norm.weight");
+        TensorShape caption = Required(shapeOf, "y_embedder.y_proj.0.weight");
+        TensorShape adaln = Required(shapeOf, "blocks.0.adaLN_modulation.1.weight");
         TensorShape timeIn = shapeOf("t_embedder.mlp.0.weight") ?? throw new ArgumentException("The checkpoint has no t_embedder.mlp.0.weight.");
-        TensorShape finalLinear = shapeOf("final_layer.linear.weight") ?? throw new ArgumentException("The checkpoint has no final_layer.linear.weight.");
+        TensorShape finalLinear = Required(shapeOf, "final_layer.linear.weight");
         int hidden = (int)patchShape[0], headDim = (int)qNorm[0];
         int patchVolume = patch.T * patch.H * patch.W;
         LongCatConfig config = new()
@@ -126,6 +127,9 @@ public sealed record LongCatConfig
         config.Validate();
         return config;
     }
+
+    private static TensorShape Required(Func<string, TensorShape?> shapeOf, string key) =>
+        shapeOf(key) ?? throw new ArgumentException($"The checkpoint has no {key}.");
 
     private static int Int(JsonElement root, string name, int fallback) =>
         root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Number ? value.GetInt32() : fallback;

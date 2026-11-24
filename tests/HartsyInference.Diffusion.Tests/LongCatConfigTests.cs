@@ -44,7 +44,8 @@ public sealed class LongCatConfigTests
         LongCatConfig tiny = LongCatTestData.Tiny;
         Dictionary<string, TensorShape> shapes = LongCatCheckpoint.ExpectedShapes(tiny);
 
-        LongCatConfig derived = LongCatConfig.FromShapes(name => shapes.TryGetValue(name, out TensorShape s) ? s : null, tiny.Depth, tiny.PatchSize, true);
+        LongCatConfig derived = LongCatConfig.FromShapes(name => shapes.TryGetValue(name, out TensorShape s) ? s : null, tiny.Depth,
+            tiny.PatchSize, true);
 
         Assert.Equal(tiny, derived);
     }

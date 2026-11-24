@@ -4,7 +4,8 @@ using Xunit;
 namespace HartsyInference.Core.Tests.Layers;
 
 /// <summary>The segment lists of LongCat's conditioning-aware attention, with the numbers worked by hand from the reference's slicing
-/// (<c>Attention.forward</c> in LongCat-Video @ 58eb336: <c>start = ref - range - cond + refCount</c>, <c>end = ref + range - cond + refCount + 1</c>).</summary>
+/// (<c>Attention.forward</c> in LongCat-Video @ 58eb336: <c>start = ref - range - cond + refCount</c>, <c>end = ref + range -
+/// cond + refCount + 1</c>).</summary>
 public sealed class ConditionedAttentionPlanTests
 {
     [Fact]

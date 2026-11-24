@@ -7,6 +7,7 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
+[Trait("Category", "SyntheticSmoke")]
 public sealed unsafe class LongCatBlockTests
 {
     private const int Frames = 5, GridH = 2, GridW = 3, TextRows = 4;

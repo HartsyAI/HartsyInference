@@ -20,10 +20,11 @@ Scenarios: `t2v` (no conditioning, non-square grid, distinct per-frame timesteps
 `avatar_ref_i2v` (reference as the single conditioning frame). The avatar cases swap the avatar model's `Attention` (with its `ref_img_index` RoPE
 and `mask_frame_range` skip) into the same blocks; the audio cross-attention is not part of this dump.
 
-Stages per scenario: `x_embedder`, `t_embedder`, `y_embedder` (after the zero-pad mask), `rope_cos`/`rope_sin`, and per block `modulation`, `attn_in`,
+Stages per scenario: `t_freq` (the sinusoidal features, before the MLP), `x_embedder`, `t_embedder`, `y_embedder` (after the zero-pad mask), `rope_cos`/`rope_sin`, and per block `modulation`, `attn_in`,
 `self_attn`, `after_self`, `cross_attn_full` (zeros on the conditioning rows; the C# probe is the noisy rows only), `after_cross`, `ffn`, `out`, then
 block 0's `q`/`k` after norm and RoPE and `v`, `final_layer` and `velocity`.
 
 C# side: set `HARTSY_LONGCAT_DIT_DIR` to the output directory and run
 `dotnet test tests/HartsyInference.Diffusion.Tests --filter FullyQualifiedName~LongCatDitReferenceParityTests`. Tolerance relRMS 1e-5 per stage (1e-6
-for the RoPE tables). The test is skipped, and so is not evidence, until that variable is set. This dumper has not been run yet.
+for the RoPE tables), checked twice: cumulatively (the whole C# forward) and isolated (each block fed the reference's own saved inputs), so the
+report names where a difference starts. The test is skipped, and so is not evidence, until that variable is set. This dumper has not been run yet.

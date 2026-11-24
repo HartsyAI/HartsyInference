@@ -6,8 +6,10 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>LongCat-Video DiT (<c>LongCatVideoTransformer3DModel</c>, meituan-longcat/LongCat-Video @ 58eb336): Conv3d patch embedding, a per-frame timestep MLP,
-/// the caption MLP, <see cref="LongCatConfig.Depth"/> <see cref="LongCatBlock"/>s and a per-frame adaLN final layer. B=1. The audio cross-attention of the avatar
+/// <summary>LongCat-Video DiT (<c>LongCatVideoTransformer3DModel</c>, meituan-longcat/LongCat-Video @ 58eb336): Conv3d patch
+/// embedding, a per-frame timestep MLP,
+/// the caption MLP, <see cref="LongCatConfig.Depth"/> <see cref="LongCatBlock"/>s and a per-frame adaLN final layer. B=1. The
+/// audio cross-attention of the avatar
 /// models belongs to <see cref="LongCatBlock"/> in the phase that adds it; the forward here is the shape it extends.</summary>
 public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
 {
@@ -38,7 +40,8 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     /// <summary>The geometry.</summary>
     public LongCatConfig Config => _config;
 
-    /// <summary>Receives named intermediate stages (<c>x_embedder</c>, <c>t_embedder</c>, <c>y_embedder</c>, <c>rope_cos</c>, <c>blockN.*</c>, <c>final_layer</c>, <c>velocity</c>) when set.</summary>
+    /// <summary>Receives named intermediate stages (<c>x_embedder</c>, <c>t_embedder</c>, <c>y_embedder</c>, <c>rope_cos</c>,
+    /// <c>blockN.*</c>, <c>final_layer</c>, <c>velocity</c>) when set.</summary>
     public Action<string, Tensor>? Probe { get; set; }
 
     /// <inheritdoc/>
@@ -93,9 +96,11 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     }
 
     /// <summary>Velocity prediction (the model output, before the sampler's sign flip). <paramref name="latent"/> is <c>[1, z, T, H, W]</c>;
-    /// <paramref name="encoder"/> the umT5 features <c>[L, captionChannels]</c>; <paramref name="frameTimesteps"/> one timestep for all frames or one per
+    /// <paramref name="encoder"/> the umT5 features <c>[L, captionChannels]</c>; <paramref name="frameTimesteps"/> one timestep
+    /// for all frames or one per
     /// latent frame (<see cref="LongCatConditioning.FrameTimesteps"/>); <paramref name="validTextTokens"/> the unpadded caption length, default all.
-    /// Rows past it are zeroed after the caption projection and still attended when <see cref="LongCatConfig.TextTokensZeroPad"/> is set, else dropped.
+    /// Rows past it are zeroed after the caption projection and still attended when <see cref="LongCatConfig.TextTokensZeroPad"/>
+    /// is set, else dropped.
     /// Returns <c>[1, z, T, H, W]</c>.</summary>
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, ReadOnlySpan<float> frameTimesteps, in LongCatConditioning conditioning,
         int validTextTokens = -1)
@@ -108,7 +113,8 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             throw new ArgumentException($"The latent {latent.Shape} does not tile into {_config.PatchSize} patches.", nameof(latent));
         int gridH = height / ph, gridW = width / pw, hw = gridH * gridW, dim = _config.HiddenSize;
         if (frameTimesteps.Length != 1 && frameTimesteps.Length != frames)
-            throw new ArgumentException($"Give one timestep or one per latent frame ({frames}); got {frameTimesteps.Length}.", nameof(frameTimesteps));
+            throw new ArgumentException(
+                $"Give one timestep or one per latent frame ({frames}); got {frameTimesteps.Length}.", nameof(frameTimesteps));
         conditioning.Validate(frames);
 
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
@@ -127,10 +133,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             Probe("rope_cos", cos);
             Probe("rope_sin", sin);
         }
-        AttentionSegment[] segments = conditioning.NumRefLatents > 0
-            ? ConditionedAttentionPlan.ForReferencedFrames(hw, frames, conditioning.NumCondLatents, conditioning.NumRefLatents,
-                conditioning.RefImgIndex, conditioning.MaskFrameRange)
-            : ConditionedAttentionPlan.ForConditionedFrames(hw, frames, conditioning.NumCondLatents);
+        AttentionSegment[] segments = conditioning.AttentionPlan(hw, frames);
         LongCatBlockInputs inputs = new(frames, hw, conditioning.NumCondLatents, cos, sin, segments, FrameRowIndex(frames, hw));
 
         Tensor cur = hidden;
@@ -163,6 +166,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             using Tensor row = sinusoid.SliceRows(f, 1);
             DiTUtils.SinusoidalTimestepEmbedding(row, timesteps.Length == 1 ? timesteps[0] : timesteps[f], 1, features, 10000f);
         }
+        Probe?.Invoke("t_freq", sinusoid);
         using Tensor first = new(new TensorShape(frames, _config.AdalnTembedDim), DType.F32);
         backend.Linear(first, sinusoid, _time1W!, _time1B);
         using Tensor activated = new(first.Shape, DType.F32);

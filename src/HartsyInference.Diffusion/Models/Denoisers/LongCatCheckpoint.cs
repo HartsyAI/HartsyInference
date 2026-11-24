@@ -4,7 +4,8 @@ using HartsyInference.ModelAssets.SafeTensors;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>A LongCat-Video DiT checkpoint folder: the diffusers-named sharded safetensors index (bf16 or F32 shards, reference key names) and its
-/// <c>config.json</c>. Tensors are borrowed views of the shard mappings and live until this is disposed. The INT8 layout (<c>.weight_int8</c> keys) is a
+/// <c>config.json</c>. Tensors are borrowed views of the shard mappings and live until this is disposed. The INT8 layout
+/// (<c>.weight_int8</c> keys) is a
 /// separate loader.</summary>
 public sealed class LongCatCheckpoint : IDisposable
 {
@@ -29,19 +30,21 @@ public sealed class LongCatCheckpoint : IDisposable
     /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors.</summary>
     public static LongCatCheckpoint Open(string directory)
     {
-        ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, indexFileName: IndexFileName);
+        ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, IndexFileName);
         try
         {
             Dictionary<string, TensorShape> shapes = new(shards.Inventory.Count, StringComparer.Ordinal);
             foreach ((string name, TensorLocation location) in shards.Inventory)
                 shapes[name] = location.Shape;
             if (shapes.Keys.Any(static key => key.EndsWith(".weight_int8", StringComparison.Ordinal)))
-                throw new NotSupportedException($"'{directory}' is the per-row INT8 layout, which its own loader reads; point this at the bf16 or F32 folder.");
+                throw new NotSupportedException(
+                    $"'{directory}' is the per-row INT8 layout, which its own loader reads; point this at the bf16 or F32 folder.");
 
             string configPath = Path.Combine(directory, "config.json");
             LongCatConfig config = File.Exists(configPath)
                 ? LongCatConfig.FromJson(File.ReadAllText(configPath))
-                : LongCatConfig.FromShapes(name => shapes.TryGetValue(name, out TensorShape shape) ? shape : null, CountBlocks(shapes), (1, 2, 2), true);
+                : LongCatConfig.FromShapes(name => shapes.TryGetValue(name, out TensorShape shape) ? shape : null, CountBlocks(shapes),
+                    (1, 2, 2), true);
             Validate(config, shapes);
 
             Dictionary<string, Tensor> weights = new(shards.Inventory.Count, StringComparer.Ordinal);
@@ -110,7 +113,8 @@ public sealed class LongCatCheckpoint : IDisposable
         return shapes;
     }
 
-    /// <summary>Throws, naming the first offenders, unless every expected tensor is present with its shape. Extra tensors (the avatar's audio keys) are allowed.</summary>
+    /// <summary>Throws, naming the first offenders, unless every expected tensor is present with its shape. Extra tensors (the
+    /// avatar's audio keys) are allowed.</summary>
     public static void Validate(LongCatConfig config, IReadOnlyDictionary<string, TensorShape> actual)
     {
         List<string> problems = [];
@@ -124,7 +128,9 @@ public sealed class LongCatCheckpoint : IDisposable
                 break;
         }
         if (problems.Count > 0)
-            throw new InvalidDataException($"The checkpoint does not match the LongCat DiT geometry ({config.Depth} blocks, hidden {config.HiddenSize}): {string.Join("; ", problems)}.");
+            throw new InvalidDataException(
+                $"The checkpoint does not match the LongCat DiT geometry ({config.Depth} blocks, hidden {config.HiddenSize}): "
+                + $"{string.Join("; ", problems)}.");
     }
 
     /// <summary>Blocks present: the highest <c>blocks.N</c> index plus one.</summary>

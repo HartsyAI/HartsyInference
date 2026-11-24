@@ -7,6 +7,7 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>A runtime LoRA term on any LongCat linear must act exactly as the same delta merged into the weight, on every path the block takes:
 /// the fused QKV, the windowed fused KV, the adaLN projections and the SwiGLU matrices.</summary>
+[Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatAdjunctTests : IDisposable
 {
     private const int Frames = 9, Height = 4, Width = 4, TextRows = 6, Rank = 3;

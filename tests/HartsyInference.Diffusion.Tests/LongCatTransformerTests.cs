@@ -8,6 +8,7 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The LongCat DiT on a tiny random checkpoint. The reference transcription runs in tests/python-reference/longcat_dit; these pin the
 /// properties the reference's layout implies and that a Python run cannot see go wrong silently.</summary>
+[Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatTransformerTests : IDisposable
 {
     private const int Frames = 9, Height = 4, Width = 4, TextRows = 7;
@@ -23,12 +24,14 @@ public sealed class LongCatTransformerTests : IDisposable
         _backend.Dispose();
     }
 
-    private float[] Velocity(IReadOnlyDictionary<string, Tensor> weights, Tensor latent, Tensor text, in LongCatConditioning conditioning, float timestep = 600f,
+    private float[] Velocity(IReadOnlyDictionary<string, Tensor> weights, Tensor latent, Tensor text, in LongCatConditioning conditioning,
+        float timestep = 600f,
         int validText = -1, LongCatConfig? config = null)
     {
         using LongCatTransformer transformer = new(config ?? _config);
         transformer.LoadWeights(weights);
-        using Tensor velocity = transformer.Forward(_backend, latent, text, conditioning.FrameTimesteps(timestep, Frames), in conditioning, validText);
+        using Tensor velocity = transformer.Forward(_backend, latent, text, conditioning.FrameTimesteps(timestep, Frames), in conditioning,
+            validText);
         return velocity.AsReadOnlySpan<float>().ToArray();
     }
 
@@ -85,6 +88,34 @@ public sealed class LongCatTransformerTests : IDisposable
         for (int c = 0; c < _config.OutChannels; c++)
             Assert.True(LongCatTestData.RelRms(b.AsSpan(c * Frames * perFrame, 3 * perFrame), a.AsSpan(c * Frames * perFrame, 3 * perFrame)) < 1e-6);
         Assert.True(LongCatTestData.RelRms(b, a) > 1e-3);
+    }
+
+    [Fact]
+    public void ConditioningFramesTrackOnlyTheirOwnTimestep()
+    {
+        LongCatConditioning conditioning = new(NumCondLatents: 2);
+        using Tensor latent = LongCatTestData.Latent(_config, Frames, Height, Width, 2);
+        using Tensor text = LongCatTestData.Encoder(_config, TextRows, 3);
+        int condLength = 2 * Height * Width;
+        float[] atNoisy600 = Velocity(_weights, latent, text, in conditioning, timestep: 600f);
+        float[] atNoisy300 = Velocity(_weights, latent, text, in conditioning, timestep: 300f);
+
+        using LongCatTransformer transformer = new(_config);
+        transformer.LoadWeights(_weights);
+        float[] steps = conditioning.FrameTimesteps(600f, Frames);
+        steps[0] = 120f;
+        using Tensor shifted = transformer.Forward(_backend, latent, text, steps, in conditioning);
+        float[] shiftedValues = shifted.AsReadOnlySpan<float>().ToArray();
+
+        for (int c = 0; c < _config.OutChannels; c++)
+        {
+            int start = c * Frames * Height * Width;
+            Assert.True(LongCatTestData.RelRms(atNoisy300.AsSpan(start, condLength), atNoisy600.AsSpan(start, condLength)) < 1e-6,
+                "a conditioning frame (timestep 0) moved when only the noisy timestep changed");
+            Assert.True(LongCatTestData.RelRms(shiftedValues.AsSpan(start, condLength), atNoisy600.AsSpan(start, condLength)) > 1e-3,
+                "a conditioning frame ignored its own timestep");
+        }
+        Assert.True(LongCatTestData.RelRms(atNoisy300, atNoisy600) > 1e-3);
     }
 
     [Fact]
@@ -170,13 +201,19 @@ public sealed class LongCatTransformerTests : IDisposable
         Assert.Equal(21, streamable.GetBlock(0).EnumerateWeights().Count());
     }
 
+    private static void CaptureRope(Dictionary<string, float[]> stages, string name, Tensor table)
+    {
+        if (name.StartsWith("rope_", StringComparison.Ordinal))
+            stages[name] = table.AsReadOnlySpan<float>().ToArray();
+    }
+
     [Fact]
     public void RopeTablesFollowThePinnedFormula()
     {
         using Tensor latent = LongCatTestData.Latent(_config, Frames, Height, Width, 2);
         using Tensor text = LongCatTestData.Encoder(_config, TextRows, 3);
         Dictionary<string, float[]> stages = [];
-        using LongCatTransformer transformer = new(_config) { Probe = (name, t) => { if (name.StartsWith("rope_")) stages[name] = t.AsReadOnlySpan<float>().ToArray(); } };
+        using LongCatTransformer transformer = new(_config) { Probe = (name, t) => CaptureRope(stages, name, t) };
         transformer.LoadWeights(_weights);
         LongCatConditioning conditioning = new(2, 1, 5, 0);
         using Tensor velocity = transformer.Forward(_backend, latent, text, conditioning.FrameTimesteps(600f, Frames), in conditioning);

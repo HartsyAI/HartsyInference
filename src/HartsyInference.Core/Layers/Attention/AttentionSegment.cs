@@ -7,7 +7,8 @@ public readonly record struct AttentionSegment(int QueryStart, int QueryCount, i
     /// <summary>The segment that attends every token to every token.</summary>
     public static AttentionSegment Dense(int tokens) => new(0, tokens, 0, tokens);
 
-    /// <summary>Throws unless <paramref name="segments"/> tile the query rows <c>[0, tokens)</c> in order and every key window lies inside the sequence.</summary>
+    /// <summary>Throws unless <paramref name="segments"/> tile the query rows <c>[0, tokens)</c> in order and every key window
+    /// lies inside the sequence.</summary>
     public static void Validate(ReadOnlySpan<AttentionSegment> segments, int tokens)
     {
         if (segments.IsEmpty)
@@ -16,7 +17,8 @@ public readonly record struct AttentionSegment(int QueryStart, int QueryCount, i
         foreach (AttentionSegment s in segments)
         {
             if (s.QueryStart != next || s.QueryCount <= 0)
-                throw new ArgumentException($"Segments must tile the query rows in order; expected a segment at row {next}, got {s}.", nameof(segments));
+                throw new ArgumentException(
+                    $"Segments must tile the query rows in order; expected a segment at row {next}, got {s}.", nameof(segments));
             if (s.KeyStart < 0 || s.KeyCount <= 0 || (long)s.KeyStart + s.KeyCount > tokens)
                 throw new ArgumentException($"Segment {s} has a key window outside the {tokens}-token sequence.", nameof(segments));
             next += s.QueryCount;

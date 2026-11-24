@@ -6,8 +6,10 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests.Parity;
 
-/// <summary>The reference-dump reader and comparer, exercised on a dump the C# forward writes itself in the dumper's file format. It proves the plumbing
+/// <summary>The reference-dump reader and comparer, exercised on a dump the C# forward writes itself in the dumper's file format.
+/// It proves the plumbing
 /// (file layout, shapes, the cross-attention row slice, scenario fields), not the model: the Python dump is what proves that.</summary>
+[Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatReferenceDumpHarnessTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "longcat-dump-" + Guid.NewGuid().ToString("N"));
@@ -25,9 +27,11 @@ public sealed class LongCatReferenceDumpHarnessTests : IDisposable
         (List<string> failures, List<string> passed) = LongCatReferenceDump.Compare(_dir);
 
         Assert.Empty(failures);
-        Assert.Contains(passed, static line => line.StartsWith("avatar_ref_skip/block1.cross_attn:", StringComparison.Ordinal));
-        Assert.Contains(passed, static line => line.StartsWith("avatar_ref_skip/block0.q:", StringComparison.Ordinal));
-        Assert.DoesNotContain(passed, static line => line.StartsWith("t2v/block0.q:", StringComparison.Ordinal));
+        Assert.Contains(passed, static line => line.StartsWith("cumulative avatar_ref_skip/block1.cross_attn:", StringComparison.Ordinal));
+        Assert.Contains(passed, static line => line.StartsWith("isolated avatar_ref_skip/block1.cross_attn:", StringComparison.Ordinal));
+        Assert.Contains(passed, static line => line.StartsWith("isolated avatar_ref_skip/block0.q:", StringComparison.Ordinal));
+        Assert.Contains(passed, static line => line.StartsWith("cumulative t2v/t_freq:", StringComparison.Ordinal));
+        Assert.DoesNotContain(passed, static line => line.Contains(" t2v/block0.q:", StringComparison.Ordinal));
 
         string ffn = Path.Combine(_dir, "t2v.block1.ffn.f32");
         byte[] bytes = File.ReadAllBytes(ffn);
@@ -35,8 +39,8 @@ public sealed class LongCatReferenceDumpHarnessTests : IDisposable
         File.WriteAllBytes(ffn, bytes);
         (List<string> tampered, _) = LongCatReferenceDump.Compare(_dir);
 
-        Assert.Single(tampered);
-        Assert.StartsWith("t2v/block1.ffn:", tampered[0]);
+        Assert.Equal(2, tampered.Count);   // the cumulative and the isolated comparison of that stage
+        Assert.All(tampered, static line => Assert.Contains(" t2v/block1.ffn:", line));
     }
 
     private readonly record struct DumpCase(string Name, int Frames, int H, int W, int Cond, int Ref, int RefIndex, int Range);
@@ -98,7 +102,8 @@ public sealed class LongCatReferenceDumpHarnessTests : IDisposable
                 ["mask_range"] = c.Range, ["timesteps"] = timesteps, ["valid_text"] = 5, ["text_len"] = 7,
             };
         }
-        File.WriteAllText(Path.Combine(_dir, "meta.json"), JsonSerializer.Serialize(new Dictionary<string, object> { ["tensors"] = shapes, ["scenarios"] = scenarios }));
+        File.WriteAllText(Path.Combine(_dir, "meta.json"),
+            JsonSerializer.Serialize(new Dictionary<string, object> { ["tensors"] = shapes, ["scenarios"] = scenarios }));
         LongCatTestData.DisposeAll(weights);
     }
 }

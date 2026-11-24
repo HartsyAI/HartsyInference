@@ -45,18 +45,22 @@ public sealed class ShardedSafeTensorSet : IDisposable
     /// <summary>How many shards are currently memory-mapped.</summary>
     public int MappedShardCount => Shards.Count(static shard => shard.IsMapped);
 
-    /// <summary>Opens the shards listed by <c>model.safetensors.index.json</c> in <paramref name="directory"/>, or by
-    /// <paramref name="indexFileName"/> when the checkpoint names its index otherwise (diffusers: <c>diffusion_pytorch_model.safetensors.index.json</c>).</summary>
-    public static ShardedSafeTensorSet OpenIndex(string directory, ShardSetOptions? options = null, string? indexFileName = null)
+    /// <summary>Opens the shards listed by <c>model.safetensors.index.json</c> in <paramref name="directory"/>.</summary>
+    public static ShardedSafeTensorSet OpenIndex(string directory, ShardSetOptions? options = null) =>
+        OpenIndex(directory, options, IndexFileName);
+
+    /// <summary>Opens the shards listed by the index file <paramref name="indexFileName"/> in <paramref name="directory"/>, for a checkpoint
+    /// that names its index otherwise (diffusers: <c>diffusion_pytorch_model.safetensors.index.json</c>).</summary>
+    public static ShardedSafeTensorSet OpenIndex(string directory, ShardSetOptions? options, string indexFileName)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
+        ArgumentException.ThrowIfNullOrEmpty(indexFileName);
+        if (indexFileName != Path.GetFileName(indexFileName))
+            throw new ArgumentException($"'{indexFileName}' is not a plain file name beside the shards.", nameof(indexFileName));
         ShardSetOptions resolved = options ?? new ShardSetOptions();
-        string indexName = indexFileName ?? IndexFileName;
-        if (indexName != Path.GetFileName(indexName))
-            throw new ArgumentException($"'{indexName}' is not a plain file name beside the shards.", nameof(indexFileName));
-        string indexPath = Path.Combine(directory, indexName);
+        string indexPath = Path.Combine(directory, indexFileName);
         if (!File.Exists(indexPath))
-            throw new FileNotFoundException($"'{directory}' has no {indexName}; pass the shard files to OpenFiles instead.", indexPath);
+            throw new FileNotFoundException($"'{directory}' has no {indexFileName}; pass the shard files to OpenFiles instead.", indexPath);
 
         (Dictionary<string, string> weightMap, long? totalSize) = ReadIndex(indexPath);
         if (weightMap.Count == 0)
@@ -66,7 +70,7 @@ public sealed class ShardedSafeTensorSet : IDisposable
         if (missing.Count > 0)
         {
             throw new HartsyInferenceException(
-                $"{indexName} in '{directory}' lists {fileNames.Count} shard files but {missing.Count} are missing on disk: "
+                $"{indexFileName} in '{directory}' lists {fileNames.Count} shard files but {missing.Count} are missing on disk: "
                 + $"{Examples(missing)}. Re-run the download to fetch them.");
         }
 

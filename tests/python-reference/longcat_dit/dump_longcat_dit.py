@@ -213,6 +213,7 @@ def run_scenario(state, scenario, out_dir, meta, seed):
 
     name = scenario["name"]
     cos, sin = rope_tables(holder, scenario)
+    rec.put("t_freq", model.t_embedder.timestep_embedding(timesteps.flatten().float(), CONFIG["frequency_embedding_size"]))
     rec.put("rope_cos", cos)
     rec.put("rope_sin", sin)
     rec.put("y_embedder", torch.from_numpy(rec.tensors["y_embedder_raw"]) * mask[0, :, None])

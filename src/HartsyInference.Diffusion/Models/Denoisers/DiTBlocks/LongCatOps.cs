@@ -30,8 +30,10 @@ internal static class LongCatOps
         return output;
     }
 
-    /// <summary><c>residual + gate · value</c> with the gate of each token's frame, read from <paramref name="packed"/> at <paramref name="gateOffset"/>.</summary>
-    public static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor packed, int gateOffset, int width, Tensor frameRowIndex)
+    /// <summary><c>residual + gate · value</c> with the gate of each token's frame, read from <paramref name="packed"/> at
+    /// <paramref name="gateOffset"/>.</summary>
+    public static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor packed, int gateOffset, int width,
+        Tensor frameRowIndex)
     {
         using Tensor gates = new(new TensorShape(packed.Shape[0], width), DType.F32);
         backend.SliceLastDim(gates, packed, gateOffset);
