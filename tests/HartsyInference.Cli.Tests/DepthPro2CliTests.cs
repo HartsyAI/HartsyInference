@@ -15,7 +15,8 @@ using Xunit;
 namespace HartsyInference.Cli.Tests;
 
 /// <summary><c>hartsy vision --mode metric-depth</c>: the mode a Depth Pro 2 id implies, the depth preview of an infinite pixel, and (with
-/// <c>HARTSY_DEPTHPRO2_WEIGHTS</c> and <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> set) a single image and a folder of views through the CLI dispatch on CPU.</summary>
+/// <c>HARTSY_DEPTHPRO2_WEIGHTS</c> and <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> set) a single image, a folder of views and a folder of video frames (buffered and
+/// unbuffered) through the CLI dispatch on CPU.</summary>
 public sealed class DepthPro2CliTests : IDisposable
 {
     private const string WeightsVariable = "HARTSY_DEPTHPRO2_WEIGHTS";
@@ -83,7 +84,7 @@ public sealed class DepthPro2CliTests : IDisposable
         Assert.Equal(500, camera.GetProperty("fx").GetDouble());
         Assert.Equal(Width / 2.0, camera.GetProperty("cx").GetDouble());
         Assert.Equal(Height / 2.0, camera.GetProperty("cy").GetDouble());
-        // Depth scales with the focal length: f / (W · inverse depth).
+        // Depth scales with the focal length: f / (W Â· inverse depth).
         float[] a = Depth(estimated, ""), b = Depth(given, "");
         for (int i = 0; i < a.Length; i++)
         {
@@ -108,7 +109,32 @@ public sealed class DepthPro2CliTests : IDisposable
         Assert.Equal(Width * Height, Depth(dir, "view-01.").Length);
     }
 
-    private async Task<string> RunAsync(InferenceEngine engine, string input, double? focalPx)
+    [RealWeightsFact(WeightsVariable, FocalVariable)]
+    public async Task AFolderWithFpsIsAVideoWithOneDepthPerFrameBufferedOrNot()
+    {
+        string clip = Directory.CreateDirectory(Path.Combine(_folder, "clip")).FullName;
+        for (int i = 0; i < 5; i++) File.Move(WriteScene($"f{i}.png", mirror: false, shift: 4 * i), Path.Combine(clip, $"f{i}.png"));
+        using InferenceEngine engine = new("cpu");
+
+        foreach (string[] options in new[] { new[] { "window", "3", "overlap", "1" }, new[] { "window", "3", "unbuffered", "true" } })
+        {
+            string dir = await RunAsync(engine, clip, focalPx: null, options);
+
+            using JsonDocument index = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(dir, "frames.json")));
+            JsonElement[] frames = [.. index.RootElement.EnumerateArray()];
+            Assert.Equal(5, frames.Length);
+            double focal = Camera(dir, "frame-00000.").GetProperty("fx").GetDouble();
+            for (int i = 0; i < 5; i++)
+            {
+                Assert.Equal(i, frames[i].GetProperty("index").GetInt32());
+                Assert.Equal(i / 10.0, frames[i].GetProperty("timestampSeconds").GetDouble(), 1e-9);
+                Assert.Equal(focal, Camera(dir, $"frame-{i:D5}.").GetProperty("fx").GetDouble());
+                Assert.Equal(Width * Height, Depth(dir, $"frame-{i:D5}.").Length);
+            }
+        }
+    }
+
+    private async Task<string> RunAsync(InferenceEngine engine, string input, double? focalPx, string[]? video = null)
     {
         ModelSpec spec = ModelResolver.Resolve("depthpro2-s", Environment.GetEnvironmentVariable(WeightsVariable), Modality.Vision) with
         {
@@ -117,6 +143,11 @@ public sealed class DepthPro2CliTests : IDisposable
         ParamState parameters = new(Modality.Vision);
         parameters.Put("mode", VisionCommand.InferMode("depthpro2-s"));
         if (focalPx is double f) parameters.Put("focal-px", f.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (video is not null)
+        {
+            parameters.Put("fps", "10");
+            for (int i = 0; i < video.Length; i += 2) parameters.Put(video[i], video[i + 1]);
+        }
         string output = Directory.CreateDirectory(Path.Combine(_folder, "run-" + Guid.NewGuid().ToString("N"))).FullName;
 
         await GenerationDispatch.RunAsync(engine, spec, input, parameters, output, quiet: true, CancellationToken.None);
@@ -136,13 +167,13 @@ public sealed class DepthPro2CliTests : IDisposable
     }
 
     /// <summary>A floor-and-wall scene: a horizontal gradient wall above a textured floor that darkens towards the bottom, with a box.</summary>
-    private string WriteScene(string name, bool mirror)
+    private string WriteScene(string name, bool mirror, int shift = 0)
     {
         byte[] rgb = new byte[Width * Height * 3];
         for (int y = 0; y < Height; y++)
             for (int x = 0; x < Width; x++)
             {
-                int sx = mirror ? Width - 1 - x : x, p = (y * Width + x) * 3;
+                int sx = (mirror ? Width - 1 - x : x) + shift, p = (y * Width + x) * 3;
                 bool floor = y > Height / 2, box = sx > 30 && sx < 55 && y > 25 && y < 50;
                 rgb[p] = (byte)(box ? 200 : floor ? 90 + (sx * 7 + y * 3) % 40 : 150 + sx / 2);
                 rgb[p + 1] = (byte)(box ? 60 : floor ? 70 + y : 170);

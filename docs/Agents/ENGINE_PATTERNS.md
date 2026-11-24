@@ -137,12 +137,15 @@ sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a fil
 - **Requests.** A single image goes in a `VisionRequest`. Several images go in a `VisionBatchRequest`, either `Views`
   (one scene, no time order) or `Frames` (time order, with `TimestampsSeconds` or `Fps`). `VisionRequestValidator`
   holds the per-mode rules, and the service, CLI and API all call it before any model loads:
-  - `Track` and `Interpolate` take frames only.
+  - `Track` and `Interpolate` take frames only. `MetricDepth` takes frames too (video depth), as well as one image or
+    views.
   - Only `Depth`, `MetricDepth` and `Geometry` take views.
   - Each model then refuses what it cannot do itself, for example a single-view depth model given views.
   - `FocalLengthPx` applies to `MetricDepth` only. The focal length the model used, given or estimated, comes back in
-    `VisionResult.Camera`. Depth Pro 2 views share one focal length and are predicted one at a time until its
-    cross-frame attention lands.
+    `VisionResult.Camera`. Depth Pro 2 views run as one unordered set through its cross-frame attention and share one
+    focal length.
+  - `FrameWindow`, `FrameOverlap` and `FrameBuffering` apply to `MetricDepth` frames only. Overlap is below the window
+    and buffered only. A video without a given focal length keeps the estimate over its first window.
 - **Results.** Structured fields on `VisionResult` are init-only and nullable; existing fields keep their meaning.
   - **Depth:** a float map with a `VisionDepthKind` and an optional validity mask.
   - **Point maps and normals:** H×W×3.
@@ -151,9 +154,10 @@ sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a fil
   - **Poses, faces and tracks:** one record each.
   - **Multi-view:** one `VisionResult` per view in `Views`.
 - **Streams.** A frame model returns `IAsyncEnumerable<VisionFrameResult>` built with `VisionFrameStream.Run`. The
-  producer may run at most `capacity` frames ahead. Breaking out, cancelling or a producer error stops the producer,
-  awaits it, and disposes its state (tracker memory, frame buffers) before the enumerator ends. Interpolated frames
-  carry their exact output time.
+  producer may run at most `capacity` frames ahead. A model that finishes frames a clip at a time (buffered video
+  depth) sets the capacity to at least its window. Breaking out, cancelling or a producer error stops the producer,
+  awaits it, and disposes its state (tracker memory, frame buffers) before the enumerator ends. Refusals throw before
+  the stream starts. Interpolated frames carry their exact output time.
 - **Conventions.** These apply to every structured field:
   - The camera frame is OpenCV's: x right, y down, z forward.
   - Pixel centres are at +0.5.
