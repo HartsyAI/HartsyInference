@@ -32,6 +32,8 @@ TINY = dict(
     block_sparse_gqa_indexer_n_heads=2, block_sparse_gqa_indexer_head_dim=16, block_sparse_gqa_block_size=4,
     block_sparse_gqa_prefix_window_size=8, block_sparse_gqa_local_window_size=8, block_sparse_gqa_num_remote_blocks=2,
     block_sparse_gqa_query_chunk_size=8, num_residual_streams=4, mhc_sinkhorn_iterations=20, mtp_num_layers=1,
+    block_sparse_gqa_layer_freq=[1] * 5, block_sparse_gqa_total_support_blocks=6, block_sparse_gqa_topk_blocks=2,
+    block_sparse_gqa_group_reduction="per_group_max",
     bos_token_id=1, eos_token_id=2, pad_token_id=3,
 )
 SEQ_LEN, PREFILL = 40, 30
@@ -47,7 +49,7 @@ def load_model_classes(hf_dir):
     sys.path.insert(0, package)
     config_module = importlib.import_module("maxwell_hf.configuration_maxwell_moe")
     model_module = importlib.import_module("maxwell_hf.modeling_maxwell_moe")
-    return config_module.MaxwellMoeConfig, model_module.MaxwellMoeForCausalLM, model_module
+    return config_module.MaxwellMoeConfig, model_module.MaxwellMoeForCausalLM
 
 
 def randomize(model, generator):
@@ -82,7 +84,7 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    config_class, model_class, _ = load_model_classes(args.hf_dir)
+    config_class, model_class = load_model_classes(args.hf_dir)
     config = config_class(**TINY)
     config._attn_implementation = "eager"
     torch.manual_seed(0)
@@ -94,7 +96,6 @@ def main():
     with torch.no_grad():
         full = model(input_ids=input_ids, use_cache=False, output_hidden_states=True, output_mtp_logits=True, return_dict=True)
 
-        cache = None
         step_logits = []
         out = model(input_ids=input_ids[:, :PREFILL], use_cache=True, return_dict=True)
         cache = out.past_key_values
@@ -127,10 +128,6 @@ def main():
     save_file(state, os.path.join(args.out, "model.safetensors"))
     cfg = {k: v for k, v in config.to_dict().items() if not k.startswith("_") and k not in ("transformers_version",)}
     cfg["model_type"] = "maxwell_moe"
-    cfg["block_sparse_gqa_layer_freq"] = [1] * TINY["num_hidden_layers"]
-    cfg["block_sparse_gqa_total_support_blocks"] = 6
-    cfg["block_sparse_gqa_topk_blocks"] = 2
-    cfg["block_sparse_gqa_group_reduction"] = "per_group_max"
     with open(os.path.join(args.out, "config.json"), "w") as f:
         json.dump(cfg, f, indent=2, sort_keys=True)
 
