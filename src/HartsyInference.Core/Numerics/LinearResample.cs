@@ -12,12 +12,14 @@ public static class LinearResample
         int destinationFrames)
     {
         if (sourceFrames < 1) throw new ArgumentOutOfRangeException(nameof(sourceFrames), sourceFrames, "Needs at least one source frame.");
-        if (destinationFrames < 1) throw new ArgumentOutOfRangeException(nameof(destinationFrames), destinationFrames, "Needs at least one output frame.");
+        if (destinationFrames < 1)
+            throw new ArgumentOutOfRangeException(nameof(destinationFrames), destinationFrames, "Needs at least one output frame.");
         if (channels < 1) throw new ArgumentOutOfRangeException(nameof(channels), channels, "Needs at least one channel.");
         if (source.Length != (long)sourceFrames * channels)
             throw new ArgumentException($"source has {source.Length} values, expected {(long)sourceFrames * channels}.", nameof(source));
         if (destination.Length != (long)destinationFrames * channels)
-            throw new ArgumentException($"destination has {destination.Length} values, expected {(long)destinationFrames * channels}.", nameof(destination));
+            throw new ArgumentException(
+                $"destination has {destination.Length} values, expected {(long)destinationFrames * channels}.", nameof(destination));
 
         float scale = destinationFrames > 1 ? (float)(sourceFrames - 1) / (destinationFrames - 1) : 0f;
         for (int i = 0; i < destinationFrames; i++)

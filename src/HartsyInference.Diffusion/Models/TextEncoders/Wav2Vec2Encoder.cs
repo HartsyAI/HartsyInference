@@ -230,7 +230,7 @@ public sealed unsafe class Wav2Vec2Encoder
         for (int i = 0; i < samples; i++) p[i] = (float)((p[i] - mean) * inv);
     }
 
-    /// <summary>In-place GELU, the exact erf form HF wav2vec2 uses when <see cref="Wav2Vec2EncoderConfig.ExactGelu"/>, else the backend's tanh form.</summary>
+    /// <summary>In-place GELU: exact erf when <see cref="Wav2Vec2EncoderConfig.ExactGelu"/> (HF wav2vec2), else the backend's tanh form.</summary>
     private void Activate(IBackend backend, Tensor x)
     {
         if (_config.ExactGelu) backend.GeluErf(x, x);

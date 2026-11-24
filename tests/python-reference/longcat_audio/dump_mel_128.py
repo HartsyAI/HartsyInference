@@ -27,7 +27,7 @@ def main():
     extractor = AutoFeatureExtractor.from_pretrained(args.whisper_dir)
     assert extractor.feature_size == 128, extractor.feature_size
     chunks = [
-        extractor(speech[i : i + MEL_CHUNK], sampling_rate=16000, return_tensors="pt").input_features[0].numpy()
+        extractor(speech[i : i + MEL_CHUNK], sampling_rate=16000, return_tensors="np").input_features[0]
         for i in range(0, len(speech), MEL_CHUNK)
     ]
     write_f32(args.out, "speech16k", speech)
@@ -35,10 +35,9 @@ def main():
     try:
         import torch
 
-        set_meta(args.out, "mel_extractor_backend", "torch.stft" if hasattr(extractor, "_torch_extract_fbank_features") else "numpy")
-        set_meta(args.out, "torch", torch.__version__)
+        set_meta(args.out, "torch", torch.__version__)  # with torch present HF computes the STFT in torch (F32)
     except ImportError:
-        set_meta(args.out, "mel_extractor_backend", "numpy")
+        set_meta(args.out, "torch", None)  # numpy path: F64 STFT
     import transformers
 
     set_meta(args.out, "transformers", transformers.__version__)

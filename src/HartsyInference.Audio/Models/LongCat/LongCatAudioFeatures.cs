@@ -25,7 +25,8 @@ public static class LongCatAudioFeatures
         if (channels < 1) throw new ArgumentOutOfRangeException(nameof(channels), channels, "Needs at least one channel.");
         long expectedIn = (long)frames * WhisperStateCount * channels;
         if (states.Length != expectedIn)
-            throw new ArgumentException($"states has {states.Length} values, expected {expectedIn} for [{frames}, {WhisperStateCount}, {channels}].", nameof(states));
+            throw new ArgumentException(
+                $"states has {states.Length} values, expected {expectedIn} for [{frames}, {WhisperStateCount}, {channels}].", nameof(states));
         long expectedOut = (long)frames * WhisperBlockCount * channels;
         if (pooled.Length != expectedOut)
             throw new ArgumentException($"pooled has {pooled.Length} values, expected {expectedOut}.", nameof(pooled));

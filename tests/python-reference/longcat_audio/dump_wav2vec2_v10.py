@@ -5,11 +5,10 @@ UNSEEDED -45 dBFS noise floor and a 3 kHz Butterworth low-pass, then Wav2Vec2Fea
 because the reference builds it with the constructor, not from_pretrained). The noise is unseeded upstream, so this script
 seeds numpy and SAVES the preprocessed waveform and the extractor's input_values: the C# side starts from those.
 
-Also converts the bundled pickle (pytorch_model.bin, 'wav2vec2.' prefix) to a safetensors file next to the dumps, because the
-TencentGameMate repo ships no safetensors and the engine reads safetensors.
+The engine reads the pickle (pytorch_model.bin) itself; HARTSY_LONGCAT_W2V_CHECKPOINT names it for the C# test.
 
 Usage: dump_wav2vec2_v10.py --longcat-repo CHECKOUT_AT_58eb336 --w2v-dir DIR_WITH_pytorch_model.bin_and_config.json [--out DIR]
-Needs torch >= 2.6, transformers (4.41 pinned upstream), scipy, pyloudnorm, safetensors. Input: speech16k.f32 from dump_mel_128.py.
+Needs torch >= 2.6, transformers (4.41 pinned upstream), scipy, pyloudnorm. Input: speech16k.f32 from dump_mel_128.py.
 """
 import argparse
 import importlib.util
@@ -56,7 +55,6 @@ def main():
     args = ap.parse_args()
 
     import pyloudnorm as pyln
-    from safetensors.torch import save_file
     from transformers import Wav2Vec2FeatureExtractor
 
     mod = load_reference_wav2vec2(args.longcat_repo)
@@ -89,13 +87,6 @@ def main():
     write_f32(args.out, "w2v_state0", out.hidden_states[0][0])
     set_meta(args.out, "w2v_video_length", int(video_length))
     dump_layout(args.out, "w2vr", emb, stride=2, segments=args.segments)
-
-    # safetensors twin of the pickle, 'wav2vec2.' prefix stripped, the engine's key names
-    state = torch.load(os.path.join(args.w2v_dir, "pytorch_model.bin"), map_location="cpu", weights_only=True)
-    twin = {k[len("wav2vec2."):]: v.float().contiguous() for k, v in state.items() if k.startswith("wav2vec2.")}
-    save_file(twin, os.path.join(args.out, "chinese-wav2vec2-base.safetensors"))
-    missing = [k for k in encoder.model.state_dict() if k not in twin]
-    set_meta(args.out, "w2v_state_dict_keys_missing_from_twin", missing[:20])
     print("video frames", int(video_length), "->", args.out)
 
 

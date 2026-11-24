@@ -66,6 +66,7 @@ public static class LongCatWhisperFeatures
                 foreach (Tensor state in states) state.Dispose();
             }
         }
-        return LongCatAudioFeatures.ResampleFrames(pooled.AsSpan(0, done * blockValues), done, LongCatAudioFeatures.WhisperBlockCount, channels, videoFrames);
+        return LongCatAudioFeatures.ResampleFrames(
+            pooled.AsSpan(0, done * blockValues), done, LongCatAudioFeatures.WhisperBlockCount, channels, videoFrames);
     }
 }

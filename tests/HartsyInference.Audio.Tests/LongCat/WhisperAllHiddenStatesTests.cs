@@ -17,6 +17,13 @@ public sealed class WhisperAllHiddenStatesTests
         return mel;
     }
 
+    private static void Release(Tensor[] states, WhisperEncoder encoder, List<Tensor> weights)
+    {
+        foreach (Tensor state in states) state.Dispose();
+        encoder.Dispose();
+        foreach (Tensor w in weights) w.Dispose();
+    }
+
     [Fact]
     public void ReturnsLayersPlusOneStates_AndTheLastIsTheNormedForwardOutput()
     {
@@ -33,42 +40,35 @@ public sealed class WhisperAllHiddenStatesTests
         Assert.Equal(final.AsReadOnlySpan<float>().ToArray(), states[^1].AsReadOnlySpan<float>().ToArray());
         for (int i = 0; i + 1 < states.Length; i++)
             Assert.NotEqual(states[i].AsReadOnlySpan<float>().ToArray(), states[i + 1].AsReadOnlySpan<float>().ToArray());
-        foreach (Tensor state in states) state.Dispose();
-        encoder.Dispose();
-        foreach (Tensor w in weights) w.Dispose();
+        Release(states, encoder, weights);
     }
 
     [Fact]
-    public void TheSecondToLastStateIsNotNormed_AsHfHiddenStatesAreNot()
+    public void ALayerOutputAppearsUnnormedInTheNextSlot_AndNormedAtTheEnd()
     {
-        // The last layer's raw output never appears; the final LayerNorm of the last layer's input-to-output step does.
-        // With the norm's gamma at 1 and beta at 0, a normed row has zero mean and unit variance; a raw residual stream does not.
-        WhisperConfig cfg = TinyWhisperEncoder.Config(layers: 2);
-        (WhisperEncoder encoder, List<Tensor> weights) = TinyWhisperEncoder.Build(cfg);
+        // HF puts layer i's output in slot i + 1 raw, except the last, which is replaced by its normed form. So
+        // LayerNorm(slot 1 of a 2-layer encoder) is the last slot of a 1-layer encoder with the same first layer.
+        WhisperConfig two = TinyWhisperEncoder.Config(layers: 2);
+        WhisperConfig one = TinyWhisperEncoder.Config(layers: 1);
+        (WhisperEncoder twoLayers, List<Tensor> twoWeights) = TinyWhisperEncoder.Build(two);
+        (WhisperEncoder oneLayer, List<Tensor> oneWeights) = TinyWhisperEncoder.Build(one);
         IBackend backend = new CpuBackend();
-        using Tensor mel = Mel(cfg, 16);
+        using Tensor mel = Mel(two, 16);
 
-        Tensor[] states = encoder.ForwardAllHiddenStates(backend, mel);
+        Tensor[] twoStates = twoLayers.ForwardAllHiddenStates(backend, mel);
+        Tensor[] oneStates = oneLayer.ForwardAllHiddenStates(backend, mel);
 
-        ReadOnlySpan<float> last = states[^1].AsReadOnlySpan<float>();
-        ReadOnlySpan<float> before = states[^2].AsReadOnlySpan<float>();
-        (double meanLast, double varLast) = RowStats(last[..cfg.HiddenSize]);
-        (double meanBefore, double varBefore) = RowStats(before[..cfg.HiddenSize]);
-        Assert.InRange(meanLast, -1e-5, 1e-5);
-        Assert.InRange(varLast, 0.99, 1.0001);
-        Assert.False(Math.Abs(meanBefore) < 1e-5 && Math.Abs(varBefore - 1) < 1e-3, "the second-to-last state looks normed");
-        foreach (Tensor state in states) state.Dispose();
-        encoder.Dispose();
-        foreach (Tensor w in weights) w.Dispose();
-    }
+        using Tensor gamma = new(new TensorShape(two.HiddenSize), DType.F32);
+        gamma.AsSpan<float>().Fill(1f);
+        using Tensor beta = new(new TensorShape(two.HiddenSize), DType.F32);
+        beta.AsSpan<float>().Clear();
+        using Tensor normed = new(twoStates[1].Shape, DType.F32);
+        backend.LayerNorm(normed, twoStates[1], gamma, beta, two.LayerNormEps);
 
-    private static (double Mean, double Variance) RowStats(ReadOnlySpan<float> row)
-    {
-        double mean = 0;
-        foreach (float v in row) mean += v;
-        mean /= row.Length;
-        double variance = 0;
-        foreach (float v in row) variance += (v - mean) * (v - mean);
-        return (mean, variance / row.Length);
+        Assert.Equal(oneStates[0].AsReadOnlySpan<float>().ToArray(), twoStates[0].AsReadOnlySpan<float>().ToArray());
+        Assert.Equal(oneStates[1].AsReadOnlySpan<float>().ToArray(), normed.AsReadOnlySpan<float>().ToArray());
+        Assert.NotEqual(normed.AsReadOnlySpan<float>().ToArray(), twoStates[1].AsReadOnlySpan<float>().ToArray());
+        Release(twoStates, twoLayers, twoWeights);
+        Release(oneStates, oneLayer, oneWeights);
     }
 }
