@@ -150,7 +150,9 @@ internal static class VisionOutputWriter
             {
                 float v = array.Data[p * channels + (channels == 3 ? c : 0)];
                 float unit = kind == Preview.Normals ? (v + 1) * 0.5f : (v - lo) * scale;
-                rgb[p * 3 + c] = (byte)Math.Clamp((int)MathF.Round(unit * 255f), 0, 255);
+                // Clamp before the int cast: infinite depth (sky) is the far end, white; NaN is black.
+                unit = float.IsNaN(unit) ? 0f : Math.Clamp(unit, 0f, 1f);
+                rgb[p * 3 + c] = (byte)MathF.Round(unit * 255f);
             }
         }
         return rgb;
