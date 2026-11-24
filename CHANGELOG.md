@@ -5,7 +5,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.446
 
-- Added Bria RMBG 3.0 background removal (`rmbg3`, `rmbg3-int8`; CC BY-NC 4.0): `hartsy vision removebg` and matting draw the alpha matte with the Fibo 2.0 editor. Not yet run on real weights.
+- Added Bria RMBG 3.0 background removal (`rmbg3`, `rmbg3-int8`; CC BY-NC 4.0): `hartsy vision removebg` and matting draw the alpha matte with the Fibo 2.0 editor. `--remove-background-model rmbg3` also uses it as the cutout step of an image generation (RMBG-1.4 stays the default). Not yet run on real weights.
 
 ## alpha.445
 

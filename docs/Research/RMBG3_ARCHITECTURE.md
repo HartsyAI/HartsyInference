@@ -55,5 +55,5 @@ download path and no repo LICENSE file, so there is nothing to repack. Its code 
 - Whether `Fibo2EditImages` (ComfyUI's crop and 768 px grid) equals diffusers' `image_processor.py` to a few 8-bit levels.
 - Memory and speed on a 12 GB card; the int8 ConvRot kernels on sm_86.
 - The `bria-fibo` licence name against the CC BY-NC 4.0 text.
-- The background-removal post step of an image generation still uses RMBG-1.4: the generating model stays resident while it runs, so adding an 8B matter
-  needs the generator released first.
+- `ImageRequest.RemoveBackgroundModel = rmbg3` runs after the generating pipeline's lease is released (`ImagesService`), so the 8B matter can load; whether the
+  generator is actually evicted on a 12 GB card, and the round trip speed, are unmeasured.

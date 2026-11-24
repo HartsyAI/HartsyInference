@@ -329,6 +329,10 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Cut the subject out with RMBG-1.4 after generation; the saved PNG carries a real alpha channel.")]
         public bool RemoveBackground { get; init; }
 
+        [CommandOption("--remove-background-model")]
+        [Description("Matter for --remove-background: rmbg (RMBG-1.4, default), rmbg3 or rmbg3-int8 (Bria RMBG 3.0, non-commercial; runs after the generating model is released).")]
+        public string? RemoveBackgroundModel { get; init; }
+
         [CommandOption("-o|--output")]
         [Description("Directory to save the image (defaults to the output root).")]
         public string? Output { get; init; }
@@ -430,6 +434,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         {
             parameters.Put("remove-background", "true");
         }
+        parameters.PutIfSet("remove-background-model", settings.RemoveBackgroundModel);
         if (settings.NoModelEnhancements)
         {
             parameters.Put("no-model-enhancements", "true");

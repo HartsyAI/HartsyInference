@@ -72,6 +72,9 @@ public sealed record ImageRequest
     /// <summary>Cut the subject out of the finished image: RMBG-1.4's matte lands in <see cref="ImageResult.Alpha"/> and the RGB pixels are left untouched, so the caller composites it wherever it likes. Runs after every other stage (refiner, segment refinement) and is family-independent — no recipe has to declare it.</summary>
     public bool? RemoveBackground { get; init; }
 
+    /// <summary>Which matter <see cref="RemoveBackground"/> uses: <c>rmbg</c> (RMBG-1.4, the default when null), <c>rmbg3</c> or <c>rmbg3-int8</c> (Bria RMBG 3.0, an 8 B model that runs after the generating pipeline is released). Setting it without <see cref="RemoveBackground"/> is refused.</summary>
+    public string? RemoveBackgroundModel { get; init; }
+
     /// <summary>Number of images to generate in one batch.</summary>
     public int Batch { get; init; } = 1;
 

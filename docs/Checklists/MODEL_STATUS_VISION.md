@@ -124,7 +124,7 @@ Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). Full
 
 Wired, not run. `rmbg3` (bf16) and `rmbg3-int8` are Vision catalog entries on Bria's ungated `briaai/RMBG-3.0-Comfy` repack; the Fibo 2.0 encoder and VAE are shared. `VisionMode.BackgroundRemoval` and `VisionMode.Matting` for these ids run the Fibo 2.0 edit path through the image service (the fixed instruction, 4 steps, no guidance, the trained size for the source aspect, the diffusers dynamic sigma shift), then turn the picture into 8-bit alpha at the source size with PIL's luma and Lanczos (`Rmbg3Matte`). Files: `src/HartsyInference.Engine/Features/Rmbg3Matte.cs`, `Recipes/Image/Fibo2Variants.cs` and `Fibo2Recipe.cs`. Pins, licence and the reference differences: [RMBG3_ARCHITECTURE.md](../Research/RMBG3_ARCHITECTURE.md).
 
-**Open:** real-weight parity against diffusers on saved noise; a GPU run (the Fibo 2.0 edit path and its int8 builds have none); whether 12 GB holds the int8 transformer after the encoder is released; `ImageRequest.RemoveBackground` still uses RMBG-1.4 (the generating model is resident during that step). Not included: `briaai/VRMBG-3.0`, the video model, whose weights need a commercial agreement.
+**Open:** real-weight parity against diffusers on saved noise; a GPU run (the Fibo 2.0 edit path and its int8 builds have none); whether 12 GB holds the int8 transformer after the encoder is released; the `ImageRequest.RemoveBackgroundModel` choice (`rmbg3` as the post-generation matter, RMBG-1.4 stays the default; CLI `--remove-background-model`) releases the generating pipeline first and is untested on a GPU. Not included: `briaai/VRMBG-3.0`, the video model, whose weights need a commercial agreement.
 
 ### Real-ESRGAN
 
