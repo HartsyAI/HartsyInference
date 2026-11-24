@@ -56,6 +56,17 @@ public sealed class LongCatInt8ConverterTests
     }
 
     [Fact]
+    public void APerRowScaleShapedAsAColumnKeepsOneScalePerRow()
+    {
+        Dictionary<string, Tensor> source = Source();
+        source["blocks.0.attn.qkv.weight_scale"] = Make(DType.F32, 6, 1);
+
+        QuantWeightInfo info = LongCatInt8Converter.Convert(source)["blocks.0.attn.qkv.weight"].QuantInfo!;
+
+        Assert.Equal(6, info.RowScale!.ElementCount);
+    }
+
+    [Fact]
     public void MissingScaleIsRefused()
     {
         Dictionary<string, Tensor> source = Source();
