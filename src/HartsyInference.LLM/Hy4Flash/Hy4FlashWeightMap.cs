@@ -18,6 +18,10 @@ public static class Hy4FlashWeightMap
     public const string VisionPrefix = "vit.";
 
     private const string Fp8Dtype = "F8_E4M3";
+    private const int BlockEdge = 128;
+    private static readonly string[] F32Only = ["F32"];
+    private static readonly string[] I32Only = ["I32"];
+    private static readonly string[] ScaleDtypes = ["BF16", "F32"];
 
     /// <summary>Prefix of decoder layer <paramref name="layer"/>, without a trailing dot.</summary>
     public static string Layer(int layer) => string.Create(CultureInfo.InvariantCulture, $"model.layers.{layer}");
@@ -34,24 +38,24 @@ public static class Hy4FlashWeightMap
         list.Add(new("model.embed_tokens.weight", [c.VocabSize, h]));
         list.Add(new("model.norm.weight", [h]));
         list.Add(new("lm_head.weight", [c.VocabSize, h]));
-        list.Add(new("model.hc_head.hc_head_fn", [hc, hc * h]));
-        list.Add(new("model.hc_head.hc_head_base", [hc]));
-        list.Add(new("model.hc_head.hc_head_scale", [1]));
+        list.Add(new("model.hc_head.hc_head_fn", [hc, hc * h], F32Only));
+        list.Add(new("model.hc_head.hc_head_base", [hc], F32Only));
+        list.Add(new("model.hc_head.hc_head_scale", [1], F32Only));
         for (int layer = 0; layer < c.NumHiddenLayers; layer++) AddLayer(c, layer, list);
         if (includeVision) AddVision(c.Vision, list);
         return list;
     }
 
-    /// <summary>Classifies and shape-checks <paramref name="tensors"/> (a header inventory) against <paramref name="config"/>.</summary>
+    /// <summary>Classifies, shape-checks and dtype-checks <paramref name="tensors"/> (a header inventory) against <paramref name="config"/>.</summary>
     public static Hy4FlashWeightCoverage Check(Hy4FlashConfig config, IEnumerable<Hy4FlashTensorInfo> tensors, bool includeVision = true)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(tensors);
-        Dictionary<string, long[]> expected = Expected(config, includeVision)
-            .ToDictionary(static e => e.Key, static e => e.Shape, StringComparer.Ordinal);
+        Dictionary<string, Hy4FlashExpectedTensor> expected = Expected(config, includeVision)
+            .ToDictionary(static e => e.Key, static e => e, StringComparer.Ordinal);
         Dictionary<string, Hy4FlashTensorInfo> all = tensors.ToDictionary(static t => t.Name, StringComparer.Ordinal);
         HashSet<string> seen = new(StringComparer.Ordinal);
-        List<string> unmapped = [], shapes = [], scales = [];
+        List<string> unmapped = [], shapes = [], scales = [], dtypes = [];
         int mapped = 0, companions = 0, drafter = 0;
         foreach (Hy4FlashTensorInfo t in all.Values)
         {
@@ -62,7 +66,7 @@ public static class Hy4FlashWeightMap
             }
             bool companion = t.Name.EndsWith(ScaleSuffix, StringComparison.Ordinal);
             string weight = companion ? t.Name[..^ScaleSuffix.Length] : t.Name;
-            if (!expected.TryGetValue(weight, out long[]? shape))
+            if (!expected.TryGetValue(weight, out Hy4FlashExpectedTensor entry))
             {
                 unmapped.Add(t.Name);
                 continue;
@@ -70,18 +74,20 @@ public static class Hy4FlashWeightMap
             if (companion)
             {
                 companions++;
-                CheckScale(t, all.TryGetValue(weight, out Hy4FlashTensorInfo w) ? w : null, shape, scales);
+                CheckScale(t, all.TryGetValue(weight, out Hy4FlashTensorInfo w) ? w : null, entry.Shape, scales);
                 continue;
             }
             mapped++;
             seen.Add(t.Name);
-            if (!t.Shape.AsSpan().SequenceEqual(shape))
-                shapes.Add($"{t.Name} is [{string.Join(", ", t.Shape)}], expected [{string.Join(", ", shape)}]");
+            if (!t.Shape.AsSpan().SequenceEqual(entry.Shape))
+                shapes.Add($"{t.Name} is [{string.Join(", ", t.Shape)}], expected [{string.Join(", ", entry.Shape)}]");
+            if (entry.Dtypes is { } allowed && !allowed.Contains(t.DType, StringComparer.Ordinal))
+                dtypes.Add($"{t.Name} is {t.DType}, expected {string.Join(" or ", allowed)}");
             if (string.Equals(t.DType, Fp8Dtype, StringComparison.Ordinal) && !all.ContainsKey(ScaleKey(t.Name)))
                 scales.Add($"{t.Name} is FP8 with no scale grid");
         }
         List<string> missing = [.. expected.Keys.Where(k => !seen.Contains(k))];
-        return new Hy4FlashWeightCoverage(mapped, companions, drafter, unmapped, missing, shapes, scales);
+        return new Hy4FlashWeightCoverage(mapped, companions, drafter, unmapped, missing, shapes, scales, dtypes);
     }
 
     /// <summary>Which storage class a checkpoint key belongs to.</summary>
@@ -110,13 +116,20 @@ public static class Hy4FlashWeightMap
 
     private static void CheckScale(Hy4FlashTensorInfo scale, Hy4FlashTensorInfo? weight, long[] weightShape, List<string> problems)
     {
-        if (weight is not { } w || !string.Equals(w.DType, Fp8Dtype, StringComparison.Ordinal))
+        if (weight is not { } w)
         {
-            problems.Add($"{scale.Name} sits beside a weight that is not FP8");
+            problems.Add($"{scale.Name} has no weight beside it");
             return;
         }
+        if (!string.Equals(w.DType, Fp8Dtype, StringComparison.Ordinal))
+        {
+            problems.Add($"{scale.Name} sits beside a weight that is {w.DType}, not FP8");
+            return;
+        }
+        if (!ScaleDtypes.Contains(scale.DType, StringComparer.Ordinal))
+            problems.Add($"{scale.Name} is {scale.DType}, expected BF16 or F32");
         long[] grid = new long[weightShape.Length];
-        for (int i = 0; i < grid.Length; i++) grid[i] = i < grid.Length - 2 ? weightShape[i] : (weightShape[i] + 127) / 128;
+        for (int i = 0; i < grid.Length; i++) grid[i] = i < grid.Length - 2 ? weightShape[i] : (weightShape[i] + BlockEdge - 1) / BlockEdge;
         if (!scale.Shape.AsSpan().SequenceEqual(grid))
             problems.Add($"{scale.Name} is [{string.Join(", ", scale.Shape)}], expected [{string.Join(", ", grid)}]");
     }
@@ -130,9 +143,9 @@ public static class Hy4FlashWeightMap
         list.Add(new($"{p}.post_attention_layernorm.weight", [h]));
         foreach (string module in (string[])["hc_attn_layer", "hc_mlp_layer"])
         {
-            list.Add(new($"{p}.{module}.hc_pre.hc_fn", [2 * hc, hc * h]));
-            list.Add(new($"{p}.{module}.hc_pre.hc_base", [2 * hc]));
-            list.Add(new($"{p}.{module}.hc_pre.hc_scale", [2]));
+            list.Add(new($"{p}.{module}.hc_pre.hc_fn", [2 * hc, hc * h], F32Only));
+            list.Add(new($"{p}.{module}.hc_pre.hc_base", [2 * hc], F32Only));
+            list.Add(new($"{p}.{module}.hc_pre.hc_scale", [2], F32Only));
         }
         string a = $"{p}.self_attn";
         list.Add(new($"{a}.q_a_proj.weight", [qr, h]));
@@ -143,7 +156,7 @@ public static class Hy4FlashWeightMap
         list.Add(new($"{a}.kv_b_proj.weight", [heads * (nope + v), kvr]));
         list.Add(new($"{a}.o_proj.weight", [h, heads * v]));
         list.Add(new($"{a}.linear_gate.weight", [heads * v, h]));
-        list.Add(new($"{a}.learnable_sink_param", [heads]));
+        list.Add(new($"{a}.learnable_sink_param", [heads], F32Only));
         list.Add(new($"{a}.post_proj_norm.weight", [h]));
         if (c.LayerKinds[layer] == Hy4FlashLayerKind.Indexed)
         {
@@ -153,10 +166,10 @@ public static class Hy4FlashWeightMap
             list.Add(new($"{i}.head_weight_projection.weight", [nh, h]));
             list.Add(new($"{i}.token_key_projection.weight", [hd, h]));
             list.Add(new($"{i}.token_key_norm.weight", [hd]));
-            list.Add(new($"{i}.key_value_projection.weight", [hd, hd]));
-            list.Add(new($"{i}.key_gate_projection.weight", [hd, hd]));
-            list.Add(new($"{i}.key_norm.weight", [hd]));
-            list.Add(new($"{i}.intra_group_ape", [c.IndexKpool, hd]));
+            list.Add(new($"{i}.key_value_projection.weight", [hd, hd], F32Only));
+            list.Add(new($"{i}.key_gate_projection.weight", [hd, hd], F32Only));
+            list.Add(new($"{i}.key_norm.weight", [hd], F32Only));
+            list.Add(new($"{i}.intra_group_ape", [c.IndexKpool, hd], F32Only));
         }
         if (c.SparseFfn[layer]) AddMoe(c, p, list);
         else
@@ -174,7 +187,7 @@ public static class Hy4FlashWeightMap
     {
         long h = c.HiddenSize, e = c.NRoutedExperts, mi = c.MoeIntermediateSize, mh = c.MoeHiddenSize, shared = mi * c.NSharedExperts;
         list.Add(new($"{p}.mlp.gate.weight", [e, h]));
-        list.Add(new($"{p}.mlp.gate.e_score_correction_bias", [e]));
+        list.Add(new($"{p}.mlp.gate.e_score_correction_bias", [e], F32Only));
         list.Add(new($"{p}.mlp.routed_expert_down_proj.weight", [mh, h]));
         list.Add(new($"{p}.mlp.routed_expert_up_proj.weight", [h, mh]));
         list.Add(new($"{p}.mlp.experts.gate_up_proj", [e, 2 * mi, mh]));
@@ -190,7 +203,7 @@ public static class Hy4FlashWeightMap
         string e = $"{Layer(layer)}.engram_layer";
         long h = c.HiddenSize, hc = c.HcMult, width = (long)(c.EngramMaxNgramSize - 1) * c.EngramEmbedPerNgram;
         long headDim = c.EngramEmbedPerNgram / c.EngramHeadsPerNgram;
-        list.Add(new($"{e}.lookup_table", [c.EngramLookupTableSize]));
+        list.Add(new($"{e}.lookup_table", [c.EngramLookupTableSize], I32Only));
         list.Add(new($"{e}.multi_head_embedding.embedding.weight", [c.EngramTableRows(layer + 1), headDim]));
         for (int head = 0; head < c.EngramHashHeads; head++)
             list.Add(new(string.Create(CultureInfo.InvariantCulture, $"{e}.lookup_per_head_norms.{head}.weight"), [headDim]));

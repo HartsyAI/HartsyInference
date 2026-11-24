@@ -7,6 +7,9 @@ it, the C# side is checked only against a transcription, and no parity row may b
     pip install torch numpy safetensors "transformers[torch,vision] @ git+https://github.com/huggingface/transformers.git@eb1d5db464b0df81793f914849142e9b82e056c7"
     python dump_tiny_reference.py --out ./out
 
+The image case writes its placeholder run bare: the released processor also wraps it in image_start_token_id and image_end_token_id, so
+this dump is a stage reference, not a prompt-format template.
+
 The tiny config is tiny_config.json next to this file (shipped legacy key names, read by Hy4FlashConfig too). Two cases are dumped:
 
   text:   40 token ids (not a multiple of the kpool, longer than index_topk and the sliding window, ids past the 250-long lookup map, the pad id
@@ -99,9 +102,7 @@ def perturb(model, torch, seed):
                 p.add_(noise(p, 0.5))
             elif re.search(r"\.(attn_hc|ffn_hc)\.scale$", name) or name.endswith("hc_head.hc_scale"):
                 p.copy_(0.5 + torch.rand(p.shape, generator=gen))
-            elif p.ndim == 1 and name.endswith("weight") and ("norm" in name or name.endswith("unified_pre_gamma")):
-                p.add_(noise(p, 0.3))
-            elif name.endswith("unified_pre_gamma"):
+            elif p.ndim == 1 and (name.endswith("weight") and "norm" in name or name.endswith("unified_pre_gamma")):
                 p.add_(noise(p, 0.3))
         for name, b in model.named_buffers():
             if name.endswith("e_score_correction_bias"):
@@ -136,10 +137,12 @@ def main():
     model = HYV4FlashForConditionalGeneration(HYV4FlashConfig(**json.loads(json.dumps(config_dict)))).to(torch.float32).eval()
     perturb(model, torch, args.seed + 1)
 
-    sd = {checkpoint_key(k): v.detach().to(torch.float32).contiguous() for k, v in model.state_dict().items() if not k.endswith("lookup_table")}
+    # Only floating-point tensors are cast; the Engram token map keeps its int32 storage. Non-persistent buffers (the hash moduli
+    # and multipliers) are not in state_dict, so they never reach the checkpoint.
+    sd = {}
     for k, v in model.state_dict().items():
-        if k.endswith("lookup_table"):
-            sd[checkpoint_key(k)] = v.detach().to(torch.int32).contiguous()
+        v = v.detach().contiguous()
+        sd[checkpoint_key(k)] = v.to(torch.float32).contiguous() if v.is_floating_point() else v.to(torch.int32).contiguous()
     save_file(sd, str(out / "weights.safetensors"))
 
     rng = np.random.default_rng(args.seed)
