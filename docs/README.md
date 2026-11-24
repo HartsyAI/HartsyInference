@@ -37,6 +37,7 @@ git preserves removed history.
 | Bria RMBG 3.0 (background removal as a Fibo 2.0 edit): pins, weights layout, fixed instruction, dynamic shift, licence, why VRMBG-3.0 is out | [Research/RMBG3_ARCHITECTURE.md](Research/RMBG3_ARCHITECTURE.md) |
 | Idol, Idol-turbo and Budget3D (image to Gaussian splats, token budget): pins, files and hashes, pipeline constants, licences, settled reference questions | [Research/IDOL_BUDGET3D_ARCHITECTURE.md](Research/IDOL_BUDGET3D_ARCHITECTURE.md) |
 | SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
+| Sage S2.1 Flash (`glm5_next`: KDA + NoPE compressed-pool DSA layers under mHC, 288-expert clamped-SwiGLU MoE, MTP, vision, SciPerception projectors): pins, licence, key layout traps, FP8 quantized set | [Research/SAGE_S21_FLASH_ARCHITECTURE.md](Research/SAGE_S21_FLASH_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
 | Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |
