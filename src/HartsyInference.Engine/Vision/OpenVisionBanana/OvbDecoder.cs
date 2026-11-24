@@ -10,14 +10,27 @@ public static class OvbDecoder
 
     /// <summary>Snaps every pixel to its nearest legend colour by squared RGB distance, with black as an extra target that
     /// decodes to <see cref="Ignore"/> so the model's background never lands on a dark class. A tie goes to the lowest class,
-    /// and to a class over black. Returns the label map and the squared distance to the winning target.</summary>
+    /// and to a class over black. Returns the label map and the squared distance to the winning target.
+    /// <para>The label of colour <c>i</c> is <c>i</c>, or <c>classIds[i]</c> when given. A legend that covers only a group of a larger
+    /// taxonomy must pass the classes' GLOBAL ids, because <see cref="MergeGrouped"/> merges labels across groups and the release
+    /// documents its inputs as already mapped to the full taxonomy.</para></summary>
     public static (byte[] Labels, float[] Distance) SnapToLegend(ReadOnlySpan<byte> rgb, int width, int height,
-        IReadOnlyList<(byte R, byte G, byte B)> colors)
+        IReadOnlyList<(byte R, byte G, byte B)> colors, IReadOnlyList<byte>? classIds = null)
     {
         ArgumentNullException.ThrowIfNull(colors);
         CheckRgb(rgb, width, height);
         if (colors.Count is < 1 or >= Ignore)
             throw new ArgumentOutOfRangeException(nameof(colors), colors.Count, $"A legend holds 1 to {Ignore - 1} colours.");
+        if (classIds is not null)
+        {
+            if (classIds.Count != colors.Count)
+                throw new ArgumentException($"{classIds.Count} class ids for {colors.Count} legend colours.", nameof(classIds));
+            foreach (byte id in classIds)
+            {
+                if (id == Ignore)
+                    throw new ArgumentException($"A class id cannot be {Ignore}: it is the ignore label.", nameof(classIds));
+            }
+        }
         int targets = colors.Count + 1;
         int[] palette = new int[targets * 3];
         for (int i = 0; i < colors.Count; i++)
@@ -39,7 +52,7 @@ public static class OvbDecoder
                     best = t;
                 }
             }
-            labels[p] = best == colors.Count ? Ignore : (byte)best;
+            labels[p] = best == colors.Count ? Ignore : classIds is null ? (byte)best : classIds[best];
             distance[p] = bestDistance;
         }
         return (labels, distance);
@@ -95,7 +108,8 @@ public static class OvbDecoder
 
     /// <summary>Merges single-group decodes into one label map: per pixel the pass that decoded a real class with the smallest
     /// snap distance wins (the first pass on a tie); a pixel void in every pass stays <see cref="Ignore"/>. This is the grouped
-    /// protocol for taxonomies larger than one prompt can legend.</summary>
+    /// protocol for taxonomies larger than one prompt can legend. The maps must carry GLOBAL class ids: decode each group with
+    /// <see cref="SnapToLegend"/>'s <c>classIds</c>, or two groups' local label 0 would be merged as one class.</summary>
     public static byte[] MergeGrouped(IReadOnlyList<byte[]> labelMaps, IReadOnlyList<float[]> distanceMaps)
     {
         ArgumentNullException.ThrowIfNull(labelMaps);
@@ -103,6 +117,11 @@ public static class OvbDecoder
         if (labelMaps.Count == 0 || labelMaps.Count != distanceMaps.Count)
             throw new ArgumentException("Grouped merging needs one distance map per label map, and at least one.", nameof(distanceMaps));
         int pixels = labelMaps[0].Length;
+        for (int pass = 0; pass < labelMaps.Count; pass++)
+        {
+            if (labelMaps[pass].Length != pixels || distanceMaps[pass].Length != pixels)
+                throw new ArgumentException("Grouped merging over maps of different sizes.", nameof(labelMaps));
+        }
         byte[] merged = new byte[pixels];
         for (int p = 0; p < pixels; p++)
         {
@@ -110,8 +129,6 @@ public static class OvbDecoder
             float best = float.PositiveInfinity;
             for (int pass = 0; pass < labelMaps.Count; pass++)
             {
-                if (labelMaps[pass].Length != pixels || distanceMaps[pass].Length != pixels)
-                    throw new ArgumentException("Grouped merging over maps of different sizes.", nameof(labelMaps));
                 if (labelMaps[pass][p] != Ignore && distanceMaps[pass][p] < best)
                 {
                     best = distanceMaps[pass][p];
@@ -121,6 +138,22 @@ public static class OvbDecoder
             merged[p] = label;
         }
         return merged;
+    }
+
+    /// <summary>The pixels nearer to <paramref name="paint"/> than to black (strictly: an exact tie is background), as 0/1, which
+    /// is how the release decodes a referring-segmentation answer (<c>rgb_to_foreground</c>).</summary>
+    public static byte[] ForegroundAgainst(ReadOnlySpan<byte> rgb, int width, int height, (byte R, byte G, byte B) paint)
+    {
+        CheckRgb(rgb, width, height);
+        byte[] foreground = new byte[width * height];
+        for (int p = 0; p < foreground.Length; p++)
+        {
+            int r = rgb[p * 3], g = rgb[p * 3 + 1], b = rgb[p * 3 + 2];
+            int toPaint = (r - paint.R) * (r - paint.R) + (g - paint.G) * (g - paint.G) + (b - paint.B) * (b - paint.B);
+            int toBlack = r * r + g * g + b * b;
+            foreground[p] = toPaint < toBlack ? (byte)1 : (byte)0;
+        }
+        return foreground;
     }
 
     /// <summary>The relative inverse depth in <c>[0, 1]</c>, closer is larger: the painted image's luma over 255, as the

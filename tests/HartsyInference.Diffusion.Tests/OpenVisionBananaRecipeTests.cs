@@ -1,5 +1,6 @@
 using System.Text;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -153,6 +154,111 @@ public sealed class OpenVisionBananaRecipeTests
         Assert.True(fullLength > 512, $"{fullLength} tokens: this legend must overflow for the test to mean anything");
         Assert.Equal(512, realLength);
         Assert.Equal(full[..512], ids);
+    }
+
+    [Theory]
+    [InlineData(3072, "OVB-4B-zeroshot", "open-vision-banana-4b", null)]
+    [InlineData(3072, "OVB-4B-zeroshot", "open-vision-banana-4b", "flux.2-klein-4b")]
+    [InlineData(4096, "OVB-9B-zeroshot", "open-vision-banana-9b", "flux.2-klein-9b")]
+    [InlineData(3072, "Open-Vision-Banana-ovb-4b-checkpoint", "open-vision-banana-4b", null)]
+    [InlineData(3072, "flux-2-klein-4b", "klein-4b", null)]
+    [InlineData(4096, "flux-2-klein-9b", "klein-9b", "flux.2-klein-9b")]
+    public void ALocalFolderNamedForTheFineTuneSelectsItEvenWhenTheHostOnlyKnowsTheBaseClass(int hidden, string folder, string expected, string? hint)
+    {
+        ResolvedModelVariant variant = ModelVariantResolver.Classify(Flux2Variants.Catalog, Probe(hidden, folder), hint is null ? [] : [hint]);
+
+        Assert.Equal(expected, variant.Id);
+        if (expected.StartsWith("open-vision-banana", StringComparison.Ordinal))
+            Assert.Equal(ModelVariantSource.Filename, variant.Source);
+    }
+
+    [Fact]
+    public void AnExplicitHintForTheFineTuneStillWinsOverAFolderNamedForTheBase()
+    {
+        ResolvedModelVariant variant = ModelVariantResolver.Classify(Flux2Variants.Catalog, Probe(3072, "flux-2-klein-4b"), ["open-vision-banana-4b"]);
+
+        Assert.Equal("open-vision-banana-4b", variant.Id);
+        Assert.Equal(ModelVariantSource.CallerHint, variant.Source);
+    }
+
+    [Fact]
+    public void ItAppliesNoPromptWeightingAndDoesNotAdvertiseIt()
+    {
+        Flux2Recipe recipe = new();
+        ResolvedModelVariant ovb = Resolved(Flux2Variants.OpenVisionBanana4B);
+        ResolvedModelVariant klein = Resolved(Flux2Variants.Klein4B);
+
+        Assert.Equal(PromptWeightingMode.None, recipe.PromptWeightingFor(ovb));
+        Assert.Equal(PromptWeightingMode.CondScale, recipe.PromptWeightingFor(klein));
+        Assert.Equal(PromptWeightingMode.CondScale, recipe.PromptWeightingFor(null));
+        Assert.DoesNotContain(ImageFeatures.PromptWeighting, Enumerate(HartsyInference.Engine.Catalog.RecipeResolution.ImageFeaturesFor(recipe, ovb)));
+        Assert.Contains(ImageFeatures.PromptWeighting, Enumerate(HartsyInference.Engine.Catalog.RecipeResolution.ImageFeaturesFor(recipe, klein)));
+    }
+
+    /// <summary>What <c>ImagesService</c> does to a prompt before the pipeline sees it, under the mode OVB declares: the README task
+    /// prompts come through unchanged, parentheses, brackets, braces and all.</summary>
+    [Theory]
+    [InlineData(DepthPrompt)]
+    [InlineData(NormalsPrompt)]
+    [InlineData("[TASK: SEMANTIC_SEGMENTATION] Generate a semantic segmentation visualization of the input image, using this color mapping: {\"road\": [8,4,249], \"sky\": [2,204,254]} Color each pixel of a listed class with its color and leave everything else black.")]
+    [InlineData("[TASK: REFERRING_SEGMENTATION] Segment the region that best matches this description: \"table in the room\". Paint the matching region red [220, 30, 30] and leave everything else black [0, 0, 0].")]
+    public void TheServiceLeavesTaskPromptsUntouched(string prompt)
+    {
+        PromptWeightingMode mode = new Flux2Recipe().PromptWeightingFor(Resolved(Flux2Variants.OpenVisionBanana4B));
+
+        Assert.Equal(prompt, PromptFeatureFlattening.Prepare(prompt, mode, preserveScheduling: false));
+    }
+
+    [Theory]
+    [InlineData("F32", true, "F16")]
+    [InlineData("BF16", true, "F16")]
+    [InlineData("F16", true, "F16")]
+    [InlineData("F32", false, "F32")]
+    [InlineData("BF16", false, "F16")]
+    public void FloatTensorsNarrowOnLoadAndOnlyOvbNarrowsFp32(string stored, bool ovb, string expected)
+    {
+        ResolvedModelVariant variant = Resolved(ovb ? Flux2Variants.OpenVisionBanana9B : Flux2Variants.Klein9B);
+
+        Assert.Equal(DTypeNamed(expected), Flux2Recipe.LoadedDType(variant, DTypeNamed(stored)));
+    }
+
+    [Theory]
+    [InlineData(647, 489, 640, 480, 640, 483, 0, -1)]   // diffusers: 489*640//647 = 483, pasted one row up
+    [InlineData(489, 647, 480, 640, 483, 640, -1, 0)]
+    [InlineData(1000, 500, 992, 496, 992, 496, 0, 0)]
+    [InlineData(640, 480, 640, 480, 640, 480, 0, 0)]
+    public void TheCoverGeometryIsDiffusersResizeAndCrop(int srcW, int srcH, int w, int h, int scaledW, int scaledH, int offsetX, int offsetY)
+    {
+        Assert.Equal((scaledW, scaledH, offsetX, offsetY), Flux2EditRecipePipeline.CoverGeometry(srcW, srcH, w, h));
+    }
+
+    [Fact]
+    public void ThePhotoBecomesAOneByThreeByHeightByWidthTensorAtTheFlooredSize()
+    {
+        byte[] rgb = new byte[647 * 489 * 3];
+        for (int i = 0; i < rgb.Length; i++) rgb[i] = (byte)(i % 251);
+
+        using Tensor tensor = Flux2EditRecipePipeline.ToReferenceTensor(new HartsyInference.Engine.Requests.ImageData { Rgb = rgb, Width = 647, Height = 489 });
+
+        Assert.Equal(new TensorShape(1, 3, 480, 640), tensor.Shape);
+        ReadOnlySpan<float> values = tensor.AsReadOnlySpan<float>();
+        Assert.All(values.ToArray(), v => Assert.InRange(v, -1f, 1f));
+    }
+
+    private static DType DTypeNamed(string name) =>
+        (DType)(typeof(DType).GetProperty(name)?.GetValue(null) ?? typeof(DType).GetField(name)!.GetValue(null)!);
+
+    private static IEnumerable<ImageFeatures> Enumerate(ImageFeatures features) =>
+        Enum.GetValues<ImageFeatures>().Where(f => f != ImageFeatures.None && (features & f) == f);
+
+    private static CheckpointProbe Probe(int hidden, string folder)
+    {
+        Dictionary<string, TensorShape> shapes = new(StringComparer.Ordinal)
+        {
+            ["x_embedder.weight"] = new TensorShape(hidden, 128),
+        };
+        return new CheckpointProbe(new HashSet<string>(shapes.Keys, StringComparer.Ordinal), shapes,
+            new Dictionary<string, string>(), [folder, "diffusion_pytorch_model-00001-of-00002"]);
     }
 
     private static ResolvedModelVariant Resolved(ModelVariant variant) =>

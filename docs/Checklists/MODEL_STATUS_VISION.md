@@ -78,6 +78,11 @@ Distilled from the retired PHASE_6_VISION plan. Items now ✅ above (SAM 2 / Mob
 Grounding DINO, YOLO-Face, YOLO-seg, SigLIP 2) are omitted.
 See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
 
+### Open Vision Banana (generative perception)
+
+Built as an image-recipe variant (see [MODEL_STATUS_IMAGE.md](MODEL_STATUS_IMAGE.md#open-vision-banana)); `OvbPerception` turns its painted answers into labels, depth and normals. **Not yet routed through `VisionService`**:
+mapping onto `VisionResult` (masks, depth map, normals), `VisionMode` routing and the CLI/API vision commands wait for the Depth Pro 2 and RMBG-3 contract changes to merge. No real-weight run, so no row in the tables above.
+
 ### Deferred stretch models
 - [x] DINOv3 ViT-L/16 encoder with RoPE at 448 px (encoder parity in the table above; consumers still open).
 - [ ] EVA-CLIP / EVA-02 vision tower (RoPE + SwiGLU + sub-LN).
