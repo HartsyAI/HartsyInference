@@ -27,6 +27,7 @@ git preserves removed history.
 | Hunyuan3D Part (P3-SAM segmentation, X-Part decomposition): pins, weights, licence, reuse map | [Research/HUNYUAN3D_PART_ARCHITECTURE.md](Research/HUNYUAN3D_PART_ARCHITECTURE.md) |
 | Haru-4B (full-duplex speech-to-speech): pins, constants, frame loop, codec key map, reuse map, evidence | [Research/HARU_ARCHITECTURE.md](Research/HARU_ARCHITECTURE.md) |
 | Duo v1 weights (inclusionAI): pins and hashes, distributed-checkpoint format, qkv and fc1 layout traps, merge numerics, AdaLN tables, licence terms | [Research/DUO_V1_WEIGHTS.md](Research/DUO_V1_WEIGHTS.md) |
+| Kim_Vocal_2 vocal separator (UVR MDX-Net): pins, graph, pipeline constants, licence status, engine surface | [Research/KIM_VOCAL2_SEPARATOR.md](Research/KIM_VOCAL2_SEPARATOR.md) |
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
 | Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
 | 3D weights inventory: which files are linked, repacked and self-hosted, with the licence terms that bind a host | [Research/WEIGHTS_HOSTING_3D.md](Research/WEIGHTS_HOSTING_3D.md) |

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -121,8 +122,14 @@ public sealed unsafe class Wav2Vec2Encoder
     }
 
     /// <summary>Encodes a mono 16 kHz waveform <c>[samples]</c> → all hidden states stacked <c>[T, numHiddenStates, hidden]</c>.</summary>
-    public Tensor EncodeAllLayers(IBackend backend, ReadOnlySpan<float> waveform)
+    public Tensor EncodeAllLayers(IBackend backend, ReadOnlySpan<float> waveform) => EncodeAllLayers(backend, waveform, featureFrames: 0);
+
+    /// <summary><see cref="EncodeAllLayers(IBackend, ReadOnlySpan{float})"/> with the conv features first resampled to
+    /// <paramref name="featureFrames"/> frames (<c>align_corners=True</c> linear, before the feature projection), the way
+    /// LongCat-Video-Avatar 1.0's wrapper sets the feature rate; 0 keeps the conv rate. The result has that many frames.</summary>
+    public Tensor EncodeAllLayers(IBackend backend, ReadOnlySpan<float> waveform, int featureFrames)
     {
+        if (featureFrames < 0) throw new ArgumentOutOfRangeException(nameof(featureFrames), featureFrames, "Feature frame count is negative.");
         int samples = waveform.Length;
         Tensor feat = new Tensor(new TensorShape(1, 1, samples), DType.F32);
         fixed (float* wp = waveform) Buffer.MemoryCopy(wp, (float*)feat.DataPointer, (long)samples * 4, (long)samples * 4);
@@ -155,13 +162,21 @@ public sealed unsafe class Wav2Vec2Encoder
                 conv = TokensToChannels(lnTokens, outC, tout);
                 lnTokens.Dispose();
             }
-            backend.Gelu(conv, conv);
+            Activate(backend, conv);
             feat = conv;
         }
 
         int t = (int)feat.Shape[2], cdim = (int)feat.Shape[1];
         // 2. [1,512,T] → [T,512], feature projection LN + Linear → [T,hidden].
         Tensor seq = ChannelsToTokens(feat, cdim, t); feat.Dispose();
+        if (featureFrames > 0 && featureFrames != t)
+        {
+            Tensor resampled = new Tensor(new TensorShape(featureFrames, cdim), DType.F32);
+            LinearResample.AlignCorners(seq.AsReadOnlySpan<float>(), t, cdim, resampled.AsSpan<float>(), featureFrames);
+            seq.Dispose();
+            seq = resampled;
+            t = featureFrames;
+        }
         Tensor normed = new Tensor(seq.Shape, DType.F32); backend.LayerNorm(normed, seq, _fpNormW!, _fpNormB!, _config.Eps); seq.Dispose();
         Tensor hidden = new Tensor(new TensorShape(t, _config.Hidden), DType.F32); backend.Linear(hidden, normed, _fpProjW!, _fpProjB); normed.Dispose();
 
@@ -203,15 +218,23 @@ public sealed unsafe class Wav2Vec2Encoder
         return stacked;
     }
 
-    /// <summary>Unbiased z-normalization of the raw waveform (HF <c>do_normalize</c>; torch <c>var()</c> is unbiased).</summary>
-    private static void NormalizeWaveform(Tensor feat, int samples)
+    /// <summary>Z-normalization of the raw waveform: unbiased variance as torch <c>var()</c> (ComfyUI's S2V front-end), or the
+    /// biased variance of numpy's <c>var()</c> that HF's <c>Wav2Vec2FeatureExtractor</c> uses.</summary>
+    private void NormalizeWaveform(Tensor feat, int samples)
     {
         float* p = (float*)feat.DataPointer;
         double mean = 0; for (int i = 0; i < samples; i++) mean += p[i]; mean /= samples;
         double var = 0; for (int i = 0; i < samples; i++) { double d = p[i] - mean; var += d * d; }
-        var /= Math.Max(1, samples - 1);
+        var /= _config.BiasedNormalizeVariance ? Math.Max(1, samples) : Math.Max(1, samples - 1);
         float inv = 1f / MathF.Sqrt((float)var + 1e-7f);
         for (int i = 0; i < samples; i++) p[i] = (float)((p[i] - mean) * inv);
+    }
+
+    /// <summary>In-place GELU: exact erf when <see cref="Wav2Vec2EncoderConfig.ExactGelu"/> (HF wav2vec2), else the backend's tanh form.</summary>
+    private void Activate(IBackend backend, Tensor x)
+    {
+        if (_config.ExactGelu) backend.GeluErf(x, x);
+        else backend.Gelu(x, x);
     }
 
     private void AddPositionalConv(IBackend backend, Tensor hidden, int t)
@@ -225,7 +248,7 @@ public sealed unsafe class Wav2Vec2Encoder
         chFirst.Dispose();
         // "same" padding: drop the last frame when the kernel is even.
         int keep = t;
-        backend.Gelu(pos, pos);
+        Activate(backend, pos);
         float* pp = (float*)pos.DataPointer, hp = (float*)hidden.DataPointer;
         for (int ti = 0; ti < keep; ti++)
             for (int d = 0; d < dim; d++) hp[(long)ti * dim + d] += pp[(long)d * tout + ti];   // pos is [dim,tout] channels-first
@@ -243,7 +266,7 @@ public sealed unsafe class Wav2Vec2Encoder
         Tensor n2 = new Tensor(h1.Shape, DType.F32); backend.LayerNorm(n2, h1, l.FinalNormW!, l.FinalNormB!, _config.Eps);
         int inter = (int)l.FfInW!.Shape[0];
         Tensor ff1 = new Tensor(new TensorShape(t, inter), DType.F32); backend.Linear(ff1, n2, l.FfInW!, l.FfInB); n2.Dispose();
-        backend.Gelu(ff1, ff1);
+        Activate(backend, ff1);
         Tensor ff2 = new Tensor(new TensorShape(t, dim), DType.F32); backend.Linear(ff2, ff1, l.FfOutW!, l.FfOutB); ff1.Dispose();
         Tensor outT = AddRows(h1, ff2, t, dim); h1.Dispose(); ff2.Dispose();
         return outT;
@@ -258,7 +281,7 @@ public sealed unsafe class Wav2Vec2Encoder
 
         int inter = (int)l.FfInW!.Shape[0];
         Tensor ff1 = new Tensor(new TensorShape(t, inter), DType.F32); backend.Linear(ff1, n1, l.FfInW!, l.FfInB);
-        backend.Gelu(ff1, ff1);
+        Activate(backend, ff1);
         Tensor ff2 = new Tensor(new TensorShape(t, dim), DType.F32); backend.Linear(ff2, ff1, l.FfOutW!, l.FfOutB); ff1.Dispose();
         Tensor h2 = AddRows(n1, ff2, t, dim); n1.Dispose(); ff2.Dispose();
         Tensor outT = new Tensor(h2.Shape, DType.F32); backend.LayerNorm(outT, h2, l.FinalNormW!, l.FinalNormB!, _config.Eps); h2.Dispose();

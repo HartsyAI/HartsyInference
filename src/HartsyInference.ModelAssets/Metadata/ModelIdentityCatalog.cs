@@ -194,6 +194,9 @@ public static class ModelIdentityCatalog
             Audio("rvc", "rvc_clone", "RVC v2", "RVC-Project", "mit", "clone"),
             Audio("openvoice", "openvoice_clone", "OpenVoice V2", "MyShell", "mit", "clone"),
             Audio("demucs", "demucs_fx", "Demucs", "Meta", "mit", "fx"),
+            // Kim_Vocal_2 states no licence anywhere it is distributed (the UVR GUI code is MIT; nothing says the weights are), so it is
+            // "other" until the terms are confirmed with the UVR project.
+            Audio("kim-vocal-2", "kim_vocal_2_fx", "Kim_Vocal_2", "Ultimate Vocal Remover", "other", "fx", "meituan-longcat/LongCat-Video-Avatar-1.6"),
             Audio("resemble-enhance", "resemble_enhance_fx", "Resemble-Enhance", "Resemble AI", "mit", "fx"),
         ];
         Dictionary<string, ArtifactIdentity> byId = new(rows.Length, StringComparer.OrdinalIgnoreCase);

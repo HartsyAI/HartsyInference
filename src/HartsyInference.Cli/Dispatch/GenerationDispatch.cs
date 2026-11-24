@@ -722,6 +722,7 @@ public static class GenerationDispatch
                 ? LoadAudioClip(drivingAudio)
                     ?? throw new FileNotFoundException($"Driving audio not found: {drivingAudio}")
                 : null,
+            SeparateDrivingVocals = parameters.GetBool("separate-vocals", false),
             Guides = VideoInputManifest.Guides(parameters),
             VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
             AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),
