@@ -17,4 +17,4 @@ pre-separated 16 kHz mono vocals; the separator is not part of this comparison. 
 the dumper seeds it and saves the preprocessed waveform and the extractor's `input_values`.
 
 Environment: pin `transformers==4.41.0` (the reference's wrapper calls `_autoset_attn_implementation`, which later releases changed) and torch >= 2.6.
-`dump_mel_128.py` runs on numpy alone, but with torch installed HF computes the STFT in torch F32; `meta.json` records which. None of these scripts has been run yet.
+`dump_mel_128.py` runs on numpy alone, but with torch installed HF computes the STFT in torch F32; `meta.json` records which. Run 2026-11-24 in a CPU container (`python:3.11-slim`, torch 2.6.0+cpu, transformers 4.41.0, numpy 1.26.4) with `/work` the scripts, `/out` the dump directory and the weights mounted read-only; the clip was the JFK sample from openai/whisper (`tests/jfk.flac`). The C# test variables: `HARTSY_LONGCAT_AUDIO_DIR`, `HARTSY_LONGCAT_WHISPER_SAFETENSORS`, `HARTSY_LONGCAT_W2V_CHECKPOINT`.
