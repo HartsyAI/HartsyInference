@@ -121,22 +121,26 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(request);
-        if (!request.SeparateDrivingVocals || request.VideoAudioReference is not null)
+        VideoPlanIssue? issue = SeparateVocalsIssue(request);
+        if (issue is null)
         {
             return plan;
         }
-        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues)
-        {
-            new VideoPlanIssue
+        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues) { issue };
+        return plan with { Issues = issues };
+    }
+
+    /// <summary>The planning error for a vocal-separation request that has no driving audio; null when the request is fine.</summary>
+    internal static VideoPlanIssue? SeparateVocalsIssue(VideoRequest request) =>
+        request.SeparateDrivingVocals && request.VideoAudioReference is null
+            ? new VideoPlanIssue
             {
                 Code = "video.separate_vocals.no_driving_audio",
                 Severity = VideoPlanIssueSeverity.Error,
                 Message = "Vocal separation applies to the driving audio, and this request has none.",
                 Field = nameof(VideoRequest.SeparateDrivingVocals),
-            },
-        };
-        return plan with { Issues = issues };
-    }
+            }
+            : null;
 
     /// <summary>Replaces the driving audio with its separated vocals (mono, 16 kHz) so the recipe conditions on speech alone.</summary>
     private async Task<VideoRequest> SeparateDrivingVocalsAsync(VideoRequest request, CancellationToken cancel)
