@@ -51,7 +51,7 @@ public sealed class Hy4FlashEngramTests
             PerHcScales = [.. Enumerable.Range(0, hc).Select(i => T($"unified_per_hc_scales.{i}"))],
         };
         int[] lookup = T("lookup_table").AsReadOnlySpan<int>().ToArray();
-        Hy4FlashEngramLayer engram = new(new CpuBackend(), config, layerId, weights, new Hy4FlashEngramRows(T("multi_head_embedding.embedding.weight")), lookup, F32Eps);
+        Hy4FlashEngramLayer engram = new(new CpuBackend(), config, layerId, weights, new Hy4FlashRowTable(T("multi_head_embedding.embedding.weight")), lookup, F32Eps);
 
         int[] ids = Ids(inputs);
         (int[] ngram, bool[] mask) = Hy4FlashEngramLayer.BuildInputs(config, ids, 0, ids.Length);

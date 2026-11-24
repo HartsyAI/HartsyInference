@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Hy4Flash;
 
-/// <summary>The dense weights of one Hy4 Flash Engram layer; the embedding table is read through <see cref="Hy4FlashEngramRows"/>. Linear weights are
+/// <summary>The dense weights of one Hy4 Flash Engram layer; the embedding table is read through <see cref="Hy4FlashRowTable"/>. Linear weights are
 /// <c>[out, in]</c> in any dtype <c>IBackend.Linear</c> takes; norm gains, biases and scales are F32.</summary>
 public sealed record Hy4FlashEngramWeights
 {

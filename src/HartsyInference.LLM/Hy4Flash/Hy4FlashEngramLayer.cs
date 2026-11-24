@@ -18,7 +18,7 @@ public sealed class Hy4FlashEngramLayer
     private readonly IBackend _backend;
     private readonly Hy4FlashConfig _cfg;
     private readonly Hy4FlashEngramWeights _w;
-    private readonly Hy4FlashEngramRows _rows;
+    private readonly Hy4FlashRowTable _rows;
     private readonly int[] _lookup;
     private readonly long[] _multipliers;
     private readonly long[] _moduli;
@@ -34,7 +34,7 @@ public sealed class Hy4FlashEngramLayer
     /// <param name="rows">The embedding table of this layer.</param>
     /// <param name="lookupTable">The frozen token map stored with the layer, <c>engram_lookup_table_size</c> entries.</param>
     /// <param name="normEps">Epsilon of every Engram RMS norm.</param>
-    public Hy4FlashEngramLayer(IBackend backend, Hy4FlashConfig config, int layerId, Hy4FlashEngramWeights weights, Hy4FlashEngramRows rows,
+    public Hy4FlashEngramLayer(IBackend backend, Hy4FlashConfig config, int layerId, Hy4FlashEngramWeights weights, Hy4FlashRowTable rows,
         int[] lookupTable, float normEps)
     {
         ArgumentNullException.ThrowIfNull(backend);
