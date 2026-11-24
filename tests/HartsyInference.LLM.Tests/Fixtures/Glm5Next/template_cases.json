@@ -1,0 +1,157 @@
+[
+ {
+  "name": "user_only",
+  "messages": [
+   {
+    "role": "user",
+    "content": "hello"
+   }
+  ],
+  "add_generation_prompt": true,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hello<|assistant|><think>"
+ },
+ {
+  "name": "system_user",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Be brief."
+   },
+   {
+    "role": "user",
+    "content": "hi"
+   }
+  ],
+  "add_generation_prompt": true,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>Be brief.<|user|>hi<|assistant|><think>"
+ },
+ {
+  "name": "multi_turn",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is 2+2?"
+   },
+   {
+    "role": "assistant",
+    "content": "4",
+    "reasoning_content": "Add the numbers."
+   },
+   {
+    "role": "user",
+    "content": "And 3+3?"
+   }
+  ],
+  "add_generation_prompt": true,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>What is 2+2?<|assistant|><think>Add the numbers.</think>4<|user|>And 3+3?<|assistant|><think>"
+ },
+ {
+  "name": "no_generation_prompt",
+  "messages": [
+   {
+    "role": "user",
+    "content": "hi"
+   },
+   {
+    "role": "assistant",
+    "content": "hello"
+   }
+  ],
+  "add_generation_prompt": false,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>hi<|assistant|><think></think>hello"
+ },
+ {
+  "name": "tools_offered",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Weather in Paris?"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ],
+  "add_generation_prompt": true,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"get_weather\", \"description\": \"Weather for a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>Weather in Paris?<|assistant|><think>"
+ },
+ {
+  "name": "tool_round_trip",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Weather in Paris?"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "arguments": {
+        "city": "Paris"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "18 C, clear"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Weather for a city",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      },
+      "required": [
+       "city"
+      ]
+     }
+    }
+   }
+  ],
+  "add_generation_prompt": true,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"name\": \"get_weather\", \"description\": \"Weather for a city\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\"}}, \"required\": [\"city\"]}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call><|user|>Weather in Paris?<|assistant|><think></think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call><|observation|><tool_response>18 C, clear</tool_response><|assistant|><think>"
+ },
+ {
+  "name": "control_spelling_in_content",
+  "messages": [
+   {
+    "role": "user",
+    "content": "say <|user|> and </think> literally"
+   }
+  ],
+  "add_generation_prompt": true,
+  "rendered": "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>say <|user|> and </think> literally<|assistant|><think>"
+ }
+]

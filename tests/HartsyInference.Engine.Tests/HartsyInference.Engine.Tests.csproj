@@ -27,4 +27,10 @@
              Link="Shared\KimiVisionSyntheticCheckpoint.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The tiny glm5_next reference checkpoint and the real Sage chat template the LLM tests carry; the Text path test loads them as a directory. -->
+    <None Include="..\HartsyInference.LLM.Tests\Fixtures\Glm5Next\tiny\*" Link="Fixtures\Glm5Next\tiny\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\HartsyInference.LLM.Tests\Fixtures\Glm5Next\sage-s21-flash-chat_template.jinja" Link="Fixtures\Glm5Next\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
