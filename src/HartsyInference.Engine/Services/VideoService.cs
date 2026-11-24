@@ -142,21 +142,14 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             }
             : null;
 
-    /// <summary>Replaces the driving audio with its separated vocals (mono, 16 kHz) so the recipe conditions on speech alone.</summary>
+    /// <summary>Replaces the driving audio with its separated vocals (44.1 kHz stereo) so the recipe conditions on speech alone.</summary>
     private async Task<VideoRequest> SeparateDrivingVocalsAsync(VideoRequest request, CancellationToken cancel)
     {
         AudioClip driving = request.VideoAudioReference
             ?? throw new ArgumentException("SeparateDrivingVocals needs VideoAudioReference.", nameof(request));
-        float[] vocals = await _engine.FxInternal.SeparateVocalsMonoAsync(null, driving, SeparatedVocalsSampleRate, null, cancel)
-            .ConfigureAwait(false);
-        return request with
-        {
-            VideoAudioReference = new AudioClip { Data = AudioClipCodec.EncodeWav(vocals, null, SeparatedVocalsSampleRate), Format = "wav" },
-            SeparateDrivingVocals = false,
-        };
+        AudioClip vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, null, cancel).ConfigureAwait(false);
+        return request with { VideoAudioReference = vocals, SeparateDrivingVocals = false };
     }
-
-    private const int SeparatedVocalsSampleRate = 16_000;
 
     /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.
     /// ComfySol64V1 (Kijai's consolidated FastH3 checkpoint, hash 7221ae65...) cleared a real-weight generation

@@ -48,8 +48,8 @@ something the Assets auto-download system can perform; it needs a local Python s
 
 **ArcFace is not blocked on a loader.** It is verified in the table above, and the engine reads raw ONNX itself:
 `OnnxWeightLoader` (`ModelAssets/Onnx`) parses initializers and the node list, with integer and float attributes,
-without ONNX Runtime. ArcFace still goes through its offline conversion (`convert_arcface_onnx.py`); Kim_Vocal_2
-is the first model bound straight from its `.onnx` (see [MODEL_STATUS_AUDIO.md](MODEL_STATUS_AUDIO.md)).
+without ONNX Runtime. ArcFace still goes through its offline conversion (`convert_arcface_onnx.py`); the audio side already
+binds ONNX weights without it (CosyVoice2, g2pW, Silero, and Kim_Vocal_2 by walking the node list; see [MODEL_STATUS_AUDIO.md](MODEL_STATUS_AUDIO.md)).
 
 ## Runs end-to-end, parity pending (⚠️)
 

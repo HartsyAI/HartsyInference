@@ -128,6 +128,25 @@ public sealed class FxService : IFxService
         }, cancel);
     }
 
+    /// <summary>The vocals of <paramref name="audio"/> as a 44.1 kHz stereo WAV clip (16-bit PCM, as <see cref="AudioClipCodec.EncodeWav(float[], float[]?, int)"/> writes), for the video driving-audio pre-step: the recipe decodes it to the rate and channels it needs.</summary>
+    internal Task<AudioClip> SeparateVocalsClipAsync(AudioClip audio, double? maxSeconds, CancellationToken cancel)
+    {
+        ArgumentNullException.ThrowIfNull(audio);
+        AudioModelSelector selector = new(FxCatalog.KimVocal2Id, FxCatalog.KimVocal2Id, null);
+        IBackend backend = _cpuBackend.Value;
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, FxCatalog.KimVocal2Id), async ct =>
+        {
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(audio, MdxSampleRate);
+            if (left.Length == 0)
+            {
+                throw new ArgumentException("The driving audio decoded to no samples.", nameof(audio));
+            }
+            MdxVocalRunner runner = await LoadKimVocal2Async(selector, FxCatalog.KimVocal2Id, backend, ct).ConfigureAwait(false);
+            float[][] vocals = runner.Separate(left, right, null, maxSeconds, LogProgress, ct);
+            return new AudioClip { Data = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate), Format = "wav" };
+        }, cancel);
+    }
+
     private const int MdxSampleRate = 44_100;
 
     private Task<MdxVocalRunner> LoadKimVocal2Async(AudioModelSelector selector, string cacheKey, IBackend backend, CancellationToken cancel) =>

@@ -56,10 +56,10 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
 ## Engine surface
 
 - `hartsy fx separate <wav> -m kim-vocal-2` returns one `vocals` stem (44.1 kHz stereo, normalized to 0.9). Demucs-only options (`Shifts`, `Segment`) are refused; `Overlap` is honoured (default 0.25).
-- `VideoRequest.SeparateDrivingVocals` / `hartsy video --driving-audio <wav> --separate-vocals`: `VideoService` replaces the driving audio with the vocals (mono, 16 kHz) before the recipe runs. A request without driving
+- `VideoRequest.SeparateDrivingVocals` / `hartsy video --driving-audio <wav> --separate-vocals`: `VideoService` replaces the driving audio with the vocals stem (44.1 kHz stereo, 16-bit PCM WAV) before the recipe runs; the recipe decodes it to the rate and channels it needs. The 16 kHz mono form LongCat feeds Whisper is `MdxVocalRunner.SeparateMono`, for the Avatar recipe (B5). A request without driving
   audio is refused at planning (`video.separate_vocals.no_driving_audio`); a recipe without driving-audio support refuses the audio itself. Any soundtrack a recipe attaches from the driving clip is then the separated vocals;
   a caller who wants the original mix heard passes it as `VideoAudioInput`.
-- The network runs on the CPU backend like Demucs. Measured on 8 logical cores: 37 s per chunk (one chunk covers 5.9 s of audio at 25% overlap), peak working set 1.8 GB. No GPU run is claimed.
+- The network runs on the CPU backend like Demucs (the transpose writes through reshaped views, which is only safe on CPU). One chunk is 261,120 samples and the window advances 195,840 (4.44 s); a clip of N seconds takes about ⌈(N · 44100 + 3840 + pad) / 195,840⌉ chunks (3 for the 8 s test clip). The network alone took 37 s per chunk on 8 logical cores in a Release build on random input, peak working set 1.8 GB. No GPU run is claimed.
 - Weights are read from the `.onnx` at load (about a tenth of a second); the Hartsy-hosted safetensors repack of decision D1 is not made, and nothing was uploaded.
 
 ## Evidence (2026-11-23, CPU F32, Debug build of the CLI)
@@ -70,6 +70,6 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
 | Network vs plain-loop reference | relRMS < 1e-5, random small config (`KimVocal2NetworkTests`); this checks wiring and layout, not the real weights |
 | STFT front end vs numpy | chunk-0 spectrogram of the test mix against a float64 `numpy.fft.rfft` implementation of `torch.stft`: relRMS 1.6e-7 |
 | Overlap-add | identity network returns the input at relRMS < 2e-5 over several overlapping chunks (`MdxSeparatorTests`) |
-| Real mixed clip | `hartsy fx separate mix.wav -m kim-vocal-2`: 8 s stereo mix = clean speech (a Haru reply) + synthetic backing (chord pad, bass, kick, hat). SI-SDR of the vocals stem against the clean speech 17.10 dB (the mix itself: 0.51 dB), correlation 0.990, against the backing 0.01. Backing is synthetic and the speech is generated, so this shows the net and the loop separate; it is not a benchmark |
-| Cost | 5 m 58 s for the 8 s clip on a Debug CLI build (3 chunks); 37 s per chunk in a Release build; peak working set 1.8 GB |
+| Constructed mixed clip | `hartsy fx separate mix.wav -m kim-vocal-2`: 8 s stereo mix constructed from known stems = clean speech (a Haru reply) + synthetic backing (chord pad, bass, kick, hat). SI-SDR of the vocals stem against the clean speech 17.10 dB (the mix itself: 0.51 dB), correlation 0.990, against the backing 0.01. Backing is synthetic and the speech is generated, so this shows the net and the loop separate; it is not a benchmark |
+| Cost | 5 m 58 s for the 8 s clip (3 chunks) through a Debug CLI build; the network alone was 37 s per chunk in a Release build on random input; peak working set 1.8 GB |
 | **Not run** | per-stage and output match against onnxruntime (`tests/python-reference/kim_vocal2_reference/` plus `KimVocal2ParityTests`, thresholds set before any run), the `--separate-vocals` video path end to end (no driving-audio video model was run), any GPU backend |

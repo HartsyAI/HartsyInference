@@ -7,13 +7,17 @@ for chunk 0, the stereo stem, and the 16 kHz mono vocals that LongCat feeds to W
 Environment (WSL or a pod; never the Windows venv, and onnxruntime never enters the engine):
     pip install "audio-separator[cpu]==0.30.2" onnx numpy librosa
     git clone https://github.com/meituan-longcat/LongCat-Video && git -C LongCat-Video checkout 58eb336edc5c8c63389838727e40b8c18434e54e
-    PYTHONPATH=LongCat-Video python dump_kim_vocal2_reference.py --onnx Kim_Vocal_2.onnx --wav clip.wav --out ref_dir
+    python dump_kim_vocal2_reference.py --longcat LongCat-Video --onnx vocal_separator/Kim_Vocal_2.onnx --wav clip.wav --out ref_dir
 
-The vocal_separator folder next to the .onnx may hold only the .onnx; audio-separator finds the model by file name and
-reads the n_fft / dim_f / compensate row for it from its own mdx_model_data.json (md5 970b3f9492014d18fefeedfe4773cb42).
+Put the whole vocal_separator folder of LongCat-Video-Avatar-1.6 (the .onnx plus download_checks.json, mdx_model_data.json and
+vr_model_data.json) in one directory and point --onnx into it. audio-separator keys the model's n_fft / dim_f / compensate row by the md5
+of the file's last 10,240,000 bytes (970b3f9492014d18fefeedfe4773cb42) in mdx_model_data.json, and may try to fetch missing JSONs from
+GitHub, so either have network access or place all three files. LongCat's vocal_separator.py is loaded by file path: importing it through
+the longcat_video package would run package __init__ files that pull in unrelated model dependencies.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -61,6 +65,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx", required=True)
     parser.add_argument("--wav", required=True)
+    parser.add_argument("--longcat", required=True, help="LongCat-Video checkout at the pinned commit")
     parser.add_argument("--out", required=True)
     parser.add_argument("--duration", type=float, default=None, help="seconds, as LongCat's audio_process_duration; default whole clip")
     args = parser.parse_args()
@@ -76,7 +81,11 @@ def main():
     import torch
     from audio_separator.separator import Separator
     from audio_separator.separator.uvr_lib_v5 import spec_utils
-    from longcat_video.audio_process.vocal_separator import _demix_batched, separate_vocals
+    module_path = os.path.join(args.longcat, "longcat_video", "audio_process", "vocal_separator.py")
+    module_spec = importlib.util.spec_from_file_location("longcat_vocal_separator", module_path)
+    longcat = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(longcat)
+    _demix_batched, separate_vocals = longcat._demix_batched, longcat.separate_vocals
 
     separator = Separator(
         output_dir=os.path.join(args.out, "separator_tmp"),
@@ -86,6 +95,8 @@ def main():
     separator.onnx_execution_provider = ["CPUExecutionProvider"]
     separator.load_model(os.path.basename(args.onnx))
     model = separator.model_instance
+    assert (model.n_fft, model.dim_f, model.dim_t) == (7680, 3072, 256), (model.n_fft, model.dim_f, model.dim_t)
+    assert abs(model.compensate - 1.009) < 1e-9, model.compensate
     settings = dict(n_fft=model.n_fft, dim_f=model.dim_f, dim_t=model.dim_t, compensate=model.compensate,
                     hop=model.hop_length, segment=model.segment_size, overlap=model.overlap,
                     sample_rate=model.sample_rate, normalization_threshold=model.normalization_threshold)

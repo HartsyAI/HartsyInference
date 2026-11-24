@@ -12,7 +12,9 @@ namespace HartsyInference.Audio.Models.Separation;
 ///   out = conv1x1(transpose(x))
 ///   TFC-TDF(x): h = 3 × relu(conv3x3(h)); y = relu(affine(Linear2(relu(affine(Linear1(h)))))) ; h + y   # Linear over F
 /// </code>
-/// Weight names are those <c>KimVocal2OnnxConverter</c> writes. The affines are the inference BatchNorms after each TDF MatMul.</summary>
+/// Weight names are those <c>KimVocal2OnnxConverter</c> writes. The affines are the inference BatchNorms after each TDF MatMul.
+/// <para>The frequency/time transpose writes through reshaped views, which is only safe on the CPU backend (a view as the write target of a
+/// GPU op can drop the result); the engine runs this network on the CPU backend and no GPU run is claimed.</para></summary>
 public sealed class KimVocal2Network : IDisposable
 {
     private const int TfcLayers = 3;
@@ -161,11 +163,10 @@ public sealed class KimVocal2Network : IDisposable
         Tensor midLinear = _weights[$"{prefix}.tdf.0.weight"];
         long mid = midLinear.Shape[0];
         Tensor a = new(new TensorShape(1, channels, time, mid), DType.F32);
-        backend.Linear(a.Reshape(new TensorShape(channels * time, mid)), h.Reshape(new TensorShape(channels * time, freq)), midLinear, null);
+        backend.Linear(a, h, midLinear, null);
         AffineRelu(backend, a, $"{prefix}.tdf.1");
         Tensor b = new(h.Shape, DType.F32);
-        backend.Linear(b.Reshape(new TensorShape(channels * time, freq)), a.Reshape(new TensorShape(channels * time, mid)),
-            _weights[$"{prefix}.tdf.2.weight"], null);
+        backend.Linear(b, a, _weights[$"{prefix}.tdf.2.weight"], null);
         a.Dispose();
         AffineRelu(backend, b, $"{prefix}.tdf.3");
         return b;

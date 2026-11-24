@@ -174,7 +174,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         /// <summary>Separate the driving audio's vocals before using it.</summary>
         [CommandOption("--separate-vocals")]
         [Description("Run --driving-audio through the Kim_Vocal_2 vocal separator first, so the video follows the vocals only. "
-            + "Runs on the CPU and takes about half a minute per 6 seconds of audio.")]
+            + "Runs on the CPU and is slow: minutes for a clip of a few seconds.")]
         public bool SeparateVocals { get; init; }
 
         /// <summary>Arbitrary image guides expressed as FRAME=PATH.</summary>
