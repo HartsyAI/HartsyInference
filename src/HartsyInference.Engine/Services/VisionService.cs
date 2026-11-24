@@ -5,15 +5,19 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Variants;
 using HartsyInference.Engine.Vision;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Annotators;
 using HartsyInference.Vision.Clip;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.DepthAnything;
+using HartsyInference.Vision.DepthPro2;
 using HartsyInference.Vision.Dinov2;
 using HartsyInference.Vision.Embeddings;
 using HartsyInference.Vision.Matting.BiRefNet;
@@ -31,6 +35,9 @@ public sealed class VisionService : IVisionService, IDisposable
 
     /// <summary>Catalog id of the BiRefNet matting checkpoint, the only model <see cref="VisionMode.Matting"/> runs.</summary>
     public const string BiRefNetMattingId = "birefnet-matting";
+
+    /// <summary>Aux key a caller may set on <see cref="ModelSpec"/> to point at a specific Depth Pro 2 focal estimator checkpoint.</summary>
+    public const string DepthPro2FocalAuxKey = "focal-path";
 
     /// <summary>Input-space tile edge for Real-ESRGAN. 256 px in → 1024 px out per tile on x4: the 64-channel
     /// activations of one tile stay near a quarter gigabyte, and a 1024² source is 25 tiles rather than the 121 the
@@ -61,6 +68,8 @@ public sealed class VisionService : IVisionService, IDisposable
     private readonly Dictionary<string, BriaRmbg> _rmbgCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, BiRefNetMatter> _birefnetCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UpscalePipeline> _upscaleCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DepthPro2Model> _depthPro2Cache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DepthPro2FocalEstimator> _depthPro2FocalCache = new(StringComparer.Ordinal);
     // All five load via PytorchPickleLoader (raw .pth/.pt), whose Dispose() also disposes its tensors — the
     // loader must stay open for as long as the cached model is used, same as _embedLoaders above.
     private readonly List<PytorchPickleLoader> _annotatorLoaders = new();
@@ -91,6 +100,7 @@ public sealed class VisionService : IVisionService, IDisposable
                     VisionMode.BackgroundRemoval => BackgroundRemoval(spec, request),
                     VisionMode.Matting => Matting(spec, request),
                     VisionMode.Upscale => Upscale(spec, request, cancel),
+                    VisionMode.MetricDepth when IsDepthPro2(spec) => MetricDepth(spec, request, cancel),
                     _ => throw NoModelFor(request.Mode, spec),
                 };
             },
@@ -98,12 +108,15 @@ public sealed class VisionService : IVisionService, IDisposable
     }
 
     /// <inheritdoc/>
-    /// <remarks>No model in this build declares multi-view input, so a valid request is refused by name.</remarks>
+    /// <remarks>Depth Pro 2 is the only multi-view model: MetricDepth views share one focal length, and each view's depth is predicted on its own
+    /// (cross-frame attention between views is not implemented yet). Any other model or mode is refused by name.</remarks>
     public Task<VisionResult> RunViewsAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(spec);
         CheckBatch(request, VisionSequenceKind.Views);
-        throw NoModelFor(request.Mode, spec, "multi-view ");
+        if (request.Mode != VisionMode.MetricDepth || !IsDepthPro2(spec))
+            throw NoModelFor(request.Mode, spec, "multi-view ");
+        return Task.Run(() => MetricDepthViews(spec, request, cancel), cancel);
     }
 
     /// <inheritdoc/>
@@ -263,6 +276,100 @@ public sealed class VisionService : IVisionService, IDisposable
         {
             pixels.Dispose();
         }
+    }
+
+    /// <summary>Depth Pro 2: metric depth in metres with its validity mask and the camera whose focal length it used (the caller's, else the estimate).</summary>
+    private VisionResult MetricDepth(ModelSpec spec, VisionRequest request, CancellationToken cancel)
+    {
+        ImageData image = request.Image;
+        DepthPro2Prediction prediction = PredictDepthPro2(spec, [image.Rgb], image.Width, image.Height, request.FocalLengthPx, cancel);
+        return MetricDepthResult(prediction, prediction.Maps[0]);
+    }
+
+    /// <summary>Depth Pro 2 over the views of one scene: one result per view, all with one focal length.</summary>
+    private VisionResult MetricDepthViews(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel)
+    {
+        Logs.Info($"[Vision] Depth Pro 2: {request.Images.Count} views share one focal length; each view's depth is predicted on its own "
+            + "(cross-frame attention between views is not implemented yet).");
+        ImageData first = request.Images[0];
+        DepthPro2Prediction prediction = PredictDepthPro2(
+            spec, [.. request.Images.Select(view => view.Rgb)], first.Width, first.Height, request.FocalLengthPx, cancel);
+        return new VisionResult { Views = [.. prediction.Maps.Select(map => MetricDepthResult(prediction, map))] };
+    }
+
+    private DepthPro2Prediction PredictDepthPro2(ModelSpec spec, IReadOnlyList<byte[]> images, int width, int height, double? focalLengthPx,
+        CancellationToken cancel)
+    {
+        string path = RequirePath(spec, spec.Catalog?.Id ?? DepthPro2Variants.Small.Id);
+        DepthPro2Model model = GetOrLoad(_depthPro2Cache, path, () => LoadDepthPro2(spec, path));
+        DepthPro2FocalEstimator? estimator = focalLengthPx is null ? DepthPro2Focal(spec, path) : null;
+        return model.Predict(Backend, images, width, height, focalLengthPx, estimator, cancel);
+    }
+
+    /// <summary>Loads a Depth Pro 2 depth checkpoint with the preset its own backbone width names.</summary>
+    private DepthPro2Model LoadDepthPro2(ModelSpec spec, string path)
+    {
+        ResolvedModelVariant variant = ModelVariantResolver.Resolve(
+            DepthPro2Variants.Catalog, new ModelVariantEvidence(path, [spec.Variant, spec.Catalog?.Id, spec.Requested]));
+        if (variant.Source != ModelVariantSource.Structure)
+        {
+            throw new InvalidDataException(
+                $"'{path}' is not a Depth Pro 2 depth checkpoint (no encoder.blocks.0.attn.qkv.weight of a known width and head.4.weight).");
+        }
+        SafeTensorsLoader loader = new SafeTensorsLoader();
+        loader.Load(path);
+        _embedLoaders.Add(loader);
+        Logs.Info($"[Vision] Depth Pro 2 {variant.Id} loaded from {path}");
+        return new DepthPro2Model(new DepthPro2Network(DepthPro2Variants.PresetFor(variant), loader.GetAllTensors()));
+    }
+
+    /// <summary>The focal estimator: the caller's <see cref="DepthPro2FocalAuxKey"/> path, else the catalog location, else a <c>DepthPro2-focal</c> folder beside the depth checkpoint's.</summary>
+    private DepthPro2FocalEstimator DepthPro2Focal(ModelSpec spec, string depthPath)
+    {
+        ModelAsset asset = DepthPro2Catalog.Focal();
+        string? path = spec.Aux.TryGetValue(DepthPro2FocalAuxKey, out string? aux) && File.Exists(aux) ? aux
+            : ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true);
+        if (path is null)
+        {
+            string sibling = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(depthPath))) ?? ".", "DepthPro2-focal", asset.FileName);
+            path = File.Exists(sibling) ? sibling : null;
+        }
+        if (path is null)
+        {
+            throw new FileNotFoundException(
+                $"Depth Pro 2 needs its focal estimator ({asset.Repo}/{asset.RepoPath}) when no focal length is given. Fetch it with "
+                + "`hartsy pull depthpro2-s`, place it in a 'DepthPro2-focal' folder beside the depth model's folder, or give a focal length in pixels.");
+        }
+        return GetOrLoad(_depthPro2FocalCache, path, () =>
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(path);
+            _embedLoaders.Add(loader);
+            return new DepthPro2FocalEstimator(loader.GetAllTensors());
+        });
+    }
+
+    /// <summary>True when <paramref name="spec"/> names a Depth Pro 2 catalog row or a checkpoint whose tensors are one.</summary>
+    private static bool IsDepthPro2(ModelSpec spec) =>
+        spec.Catalog?.Id is { } id && DepthPro2Variants.Catalog.Find(id) is not null
+        || spec.Catalog is null && spec.LocalPath is { } path && File.Exists(path) && DepthPro2Variants.IsDepthPro2(CheckpointProbe.Read(path));
+
+    private static VisionResult MetricDepthResult(DepthPro2Prediction prediction, DepthPro2Map map)
+    {
+        int width = prediction.Width, height = prediction.Height;
+        return new VisionResult
+        {
+            DepthMap = new VisionDepthMap
+            {
+                Values = new VisionArray(map.DepthMeters, height, width),
+                Kind = VisionDepthKind.MetricMeters,
+                ValidMask = Array.IndexOf(map.ValidMask, 0f) < 0 ? null : new VisionArray(map.ValidMask, height, width),
+            },
+            Camera = new VisionCamera
+            {
+                Fx = prediction.FocalLengthPx, Fy = prediction.FocalLengthPx, Cx = width / 2.0, Cy = height / 2.0, Width = width, Height = height,
+            },
+        };
     }
 
     /// <summary>HED: ControlNet-style soft-edge map (black background, white edges). No resize constraint.</summary>
@@ -793,6 +900,8 @@ public sealed class VisionService : IVisionService, IDisposable
             _rmbgCache.Clear();
             _birefnetCache.Clear();
             _upscaleCache.Clear();
+            _depthPro2Cache.Clear();
+            _depthPro2FocalCache.Clear();
             _embedLoaders.Clear();
             _annotatorLoaders.Clear();
         }
@@ -806,7 +915,8 @@ public sealed class VisionService : IVisionService, IDisposable
             lock (_embedLock)
             {
                 return _clipCache.Count + _siglipCache.Count + _dinov2Cache.Count + _depthCache.Count + _hedCache.Count + _lineartCache.Count + _normalBaeCache.Count
-                    + _upernetCache.Count + _rmbgCache.Count + _birefnetCache.Count + _upscaleCache.Count + _embedLoaders.Count + _annotatorLoaders.Count;
+                    + _upernetCache.Count + _rmbgCache.Count + _birefnetCache.Count + _upscaleCache.Count + _depthPro2Cache.Count + _depthPro2FocalCache.Count
+                    + _embedLoaders.Count + _annotatorLoaders.Count;
             }
         }
     }

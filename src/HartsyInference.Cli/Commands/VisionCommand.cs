@@ -19,7 +19,7 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Model id: clip (embed) or yolo8 / yolo11 (detect).</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: clip (embed) or yolo8 / yolo11 (detect).")]
+        [Description("Model id: clip (embed), yolo8 / yolo11 (detect), or depthpro2-s / -b / -l / -h (metric depth; research-only weights).")]
         public string Model { get; init; } = "clip";
 
         /// <summary>Path to the model .safetensors.</summary>
@@ -66,6 +66,11 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         [CommandOption("--height")]
         [Description("Upscale only: output height to fit to (derived from --width and the source aspect when omitted).")]
         public int? Height { get; init; }
+
+        /// <summary>Metric depth: the camera's focal length in pixels.</summary>
+        [CommandOption("--focal-px")]
+        [Description("metric-depth only: the camera's focal length in pixels (shared by every view of a folder). Omit it to estimate it (Depth Pro 2's focal estimator).")]
+        public double? FocalPx { get; init; }
 
         /// <summary>Text query for open-vocabulary detect/segment (Grounding DINO, CLIPSeg).</summary>
         [CommandOption("-p|--prompt")]
@@ -119,6 +124,10 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         {
             parameters.Put("target-fps", targetFps.ToString(CultureInfo.InvariantCulture));
         }
+        if (settings.FocalPx is double focalPx)
+        {
+            parameters.Put("focal-px", focalPx.ToString("R", CultureInfo.InvariantCulture));
+        }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Vision);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
@@ -128,9 +137,13 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
     }
 
     /// <summary>Picks the operation a model id implies: detect, segment, embed, or one of the single-image annotator modes.</summary>
-    private static string InferMode(string model)
+    internal static string InferMode(string model)
     {
         string id = model.ToLowerInvariant();
+        if (id.Contains("depthpro2") || id.Contains("depth-pro-2"))
+        {
+            return "metric-depth";
+        }
         if (id.Contains("clipseg") || id.Contains("sam"))
         {
             return "segment";
