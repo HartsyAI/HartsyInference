@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.446
+
+- Added support for Depth Pro 2 S (`hartsy vision -m depthpro2-s`): metric depth in metres with an estimated or given focal length, for one image,
+  several views of one scene and video frames, on CPU, CUDA and Vulkan.
+
 ## alpha.445
 
 - Added a `prompt` block to the recipe descriptors (`GET /v1/native/recipes`, `POST /v1/native/recipes/describe`) saying what shapes each model's
