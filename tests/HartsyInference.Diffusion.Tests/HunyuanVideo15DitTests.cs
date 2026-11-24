@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -87,6 +86,83 @@ public sealed class HunyuanVideo15DitTests
         Assert.Throws<ArgumentException>(() => fixture.Dit.Forward(fixture.Backend, wrong, 1f, fixture.Loader.GetTensor("in.qwen")));
     }
 
+    [Fact]
+    public void ForwardRejectsA16BitLatent()
+    {
+        using Fixture fixture = new();
+        using Tensor half = new(new TensorShape([1L, 4, 3, 2, 3]), DType.F16);
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => fixture.Dit.Forward(fixture.Backend, half, 1f, fixture.Loader.GetTensor("in.qwen")));
+        Assert.Equal("latent", error.ParamName);
+    }
+
+    [Fact]
+    public void ForwardRejectsConditioningWithTheWrongLayout()
+    {
+        using Fixture fixture = new();
+        // Same element count as the real conditioning block, wrong axis order.
+        using Tensor misplaced = new(new TensorShape([1L, 3, 5, 2, 3]), DType.F32);
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => fixture.Dit.Forward(
+            fixture.Backend, fixture.Loader.GetTensor("in.latent"), 1f, fixture.Loader.GetTensor("in.qwen"), null, misplaced));
+        Assert.Equal("conditioning", error.ParamName);
+    }
+
+    [Fact]
+    public void ForwardRejectsEmptyOrMisshapenText()
+    {
+        using Fixture fixture = new();
+        Tensor latent = fixture.Loader.GetTensor("in.latent");
+        using Tensor empty = new(new TensorShape(1, 0, 24), DType.F32);
+        using Tensor batched = new(new TensorShape(2, 3, 24), DType.F32);
+        using Tensor wrongWidth = new(new TensorShape(1, 3, 99), DType.F32);
+
+        Assert.Equal("qwen", Assert.Throws<ArgumentException>(() => fixture.Dit.Forward(fixture.Backend, latent, 1f, empty)).ParamName);
+        Assert.Equal("qwen", Assert.Throws<ArgumentException>(() => fixture.Dit.Forward(fixture.Backend, latent, 1f, batched)).ParamName);
+        Assert.Equal("byt5", Assert.Throws<ArgumentException>(() => fixture.Dit.Forward(fixture.Backend, latent, 1f, fixture.Loader.GetTensor("in.qwen"), wrongWidth)).ParamName);
+    }
+
+    [Fact]
+    public void VelocityIsAnOwnedFiveDimensionalTensor()
+    {
+        using Fixture fixture = new();
+        using Tensor velocity = fixture.Run(withByT5: true, conditioned: false);
+
+        Assert.Equal(new TensorShape([1L, 4, 3, 2, 3]), velocity.Shape);
+    }
+
+    [Fact]
+    public void ConstructorRejectsRopeAxesThatDoNotSumToTheHeadDim()
+    {
+        HunyuanVideo15Config bad = TinyConfig() with { RopeAxesDim = [4, 6, 8] };
+
+        Assert.Throws<ArgumentException>(() => new HunyuanVideo15Dit(bad));
+    }
+
+    [Theory]
+    [InlineData("guidance_in.mlp.0.weight")]
+    [InlineData("vision_in.proj.0.weight")]
+    [InlineData("txt_in.individual_token_refiner.blocks.0.self_attn_q_norm.weight")]
+    public void ConverterRefusesTensorsItDoesNotConsume(string key)
+    {
+        using Fixture fixture = new();
+        Dictionary<string, Tensor> extra = new(fixture.Weights) { [key] = new Tensor(new TensorShape(2), DType.F32) };
+
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => HunyuanVideo15CheckpointConverter.Convert(extra, Blocks, Hidden));
+        Assert.Contains(key, error.Message);
+    }
+
+    [Fact]
+    public void ConverterConsumesEverythingInTheFixture()
+    {
+        using Fixture fixture = new();
+
+        Dictionary<string, Tensor> converted = HunyuanVideo15CheckpointConverter.Convert(fixture.Weights, Blocks, Hidden);
+
+        Assert.Contains("transformer_blocks.1.attn.add_v_proj.bias", converted.Keys);
+        Assert.Contains("txt_in.individual_token_refiner.blocks.1.self_attn.qkv.weight", converted.Keys);
+    }
+
     private static void AssertClose(Tensor expected, Tensor actual, string label)
     {
         Assert.Equal(expected.Shape, actual.Shape);
@@ -107,13 +183,9 @@ public sealed class HunyuanVideo15DitTests
                 .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal))
                 .ToDictionary(pair => pair.Key, pair => pair.Value);
             Backend = new CpuBackend();
-            // The block loop here runs F32; the 16-bit hot path has no CPU kernels.
-            _knobs = KnobProfile.Create("hy15-dit-test").With(EngineKnobs.DitF16, false).Push();
             Dit = new HunyuanVideo15Dit(TinyConfig());
             Dit.LoadWeights(HunyuanVideo15CheckpointConverter.Convert(Weights, Blocks, Hidden));
         }
-
-        private readonly IDisposable _knobs;
 
         public SafeTensorsLoader Loader { get; }
         public Dictionary<string, Tensor> Weights { get; }
@@ -131,7 +203,6 @@ public sealed class HunyuanVideo15DitTests
         {
             Dit.Dispose();
             Backend.Dispose();
-            _knobs.Dispose();
             Loader.Dispose();
         }
     }

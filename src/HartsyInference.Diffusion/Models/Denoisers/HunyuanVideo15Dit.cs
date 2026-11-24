@@ -31,6 +31,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <summary>Creates the DiT; call <see cref="LoadWeights"/> before <see cref="Forward"/>.</summary>
     public HunyuanVideo15Dit(HunyuanVideo15Config config)
     {
+        if (config.RopeAxesDim.Sum() != config.HeadDim)
+            throw new ArgumentException($"RopeAxesDim {string.Join('+', config.RopeAxesDim)} must sum to the head dim {config.HeadDim}.", nameof(config));
         _config = config;
         _blocks = new HunyuanImageBlock[config.NumBlocks];
         for (int i = 0; i < _blocks.Length; i++)
@@ -92,9 +94,19 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <param name="conditioning">Optional <c>[1, 33, T, H, W]</c> (conditioning latent then mask); null feeds zeros (text-to-video).</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
     {
+        RequireF32(latent, nameof(latent));
         if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.LatentChannels)
             throw new ArgumentException($"latent must be [1, {_config.LatentChannels}, T, H, W], got {latent.Shape}.", nameof(latent));
         int frames = (int)latent.Shape[2], height = (int)latent.Shape[3], width = (int)latent.Shape[4];
+        ValidateText(qwen, byt5);
+        if (conditioning is not null)
+        {
+            RequireF32(conditioning, nameof(conditioning));
+            int extra = _config.ImgInChannels - _config.LatentChannels;
+            if (conditioning.Shape.Rank != 5 || conditioning.Shape[0] != 1 || conditioning.Shape[1] != extra
+                || conditioning.Shape[2] != frames || conditioning.Shape[3] != height || conditioning.Shape[4] != width)
+                throw new ArgumentException($"conditioning must be [1, {extra}, {frames}, {height}, {width}], got {conditioning.Shape}.", nameof(conditioning));
+        }
         int tokens = frames * height * width;
         int hidden = _config.HiddenSize;
 
@@ -138,7 +150,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         Tensor tokenMajor = new(new TensorShape(tokens, _config.ImgInChannels), DType.F32);
         backend.Transpose2D(tokenMajor, channelsFirst, _config.ImgInChannels, tokens);
         channelsFirst.Dispose();
-        Tensor tokenMajor3 = tokenMajor.Reshape(new TensorShape(1, tokens, _config.ImgInChannels));
+        using Tensor tokenMajor3 = tokenMajor.Reshape(new TensorShape(1, tokens, _config.ImgInChannels));
         Tensor img = new(new TensorShape(1, tokens, _config.HiddenSize), DType.F32);
         backend.Linear(img, tokenMajor3, _imgInW!, _imgInB!);
         tokenMajor.Dispose();
@@ -236,10 +248,28 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
         using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
         backend.Linear(projected, flat, _finalW!, _finalB!);
-        Tensor channelsFirst = new(new TensorShape(channels, tokens), DType.F32);
-        backend.Transpose2D(channelsFirst, projected, tokens, channels);
-        Tensor velocity = channelsFirst.Reshape(new TensorShape([1L, channels, frames, height, width]));
+        // An owned [1, C, T, H, W] tensor (not a Reshape view, which would leave its parent to the finalizer once per step).
+        Tensor velocity = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
+        backend.Transpose2D(velocity, projected, tokens, channels);
         return velocity;
+    }
+
+    /// <summary>The token tensors are read as raw floats (the refiner's mean pool, the channel copy), so they must be F32 and have the expected layout.</summary>
+    private void ValidateText(Tensor qwen, Tensor? byt5)
+    {
+        RequireF32(qwen, nameof(qwen));
+        if (qwen.Shape.Rank != 3 || qwen.Shape[0] != 1 || qwen.Shape[1] < 1 || qwen.Shape[2] != _config.TextDim)
+            throw new ArgumentException($"qwen must be [1, L > 0, {_config.TextDim}], got {qwen.Shape}.", nameof(qwen));
+        if (byt5 is null) return;
+        RequireF32(byt5, nameof(byt5));
+        if (byt5.Shape.Rank != 3 || byt5.Shape[0] != 1 || byt5.Shape[1] < 1 || byt5.Shape[2] != _config.ByT5Dim)
+            throw new ArgumentException($"byt5 must be [1, L > 0, {_config.ByT5Dim}], got {byt5.Shape}.", nameof(byt5));
+    }
+
+    private static void RequireF32(Tensor tensor, string name)
+    {
+        if (tensor.DType != DType.F32)
+            throw new ArgumentException($"{name} must be F32, got {tensor.DType}.", name);
     }
 
     private static Tensor F32(IReadOnlyDictionary<string, Tensor> w, string key) =>

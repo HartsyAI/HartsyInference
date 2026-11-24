@@ -189,10 +189,8 @@ def main():
         tensors["ref.velocity"] = velocity_text.contiguous()
         velocity_cond = model(torch.cat([latent, cond], 1), t, qwen, byt5, {})
         tensors["ref.velocity_conditioned"] = velocity_cond.contiguous()
-        no_byt5_stages = {}
         # Without byT5 tokens the text stream is the refined Qwen rows alone.
-        model_nb = model
-        velocity_no_byt5 = _forward_without_byt5(model_nb, torch.cat([latent, zero_cond], 1), t, qwen, no_byt5_stages)
+        velocity_no_byt5 = _forward_without_byt5(model, torch.cat([latent, zero_cond], 1), t, qwen)
         tensors["ref.velocity_no_byt5"] = velocity_no_byt5.contiguous()
     tensors["in.latent"] = latent
     tensors["in.qwen"] = qwen
@@ -205,7 +203,7 @@ def main():
     print("wrote", args.out, len(tensors), "tensors")
 
 
-def _forward_without_byt5(model, x65, t, qwen, stages):
+def _forward_without_byt5(model, x65, t, qwen):
     thw = [FRAMES, HEIGHT, WIDTH]
     img = model.img_in(x65)
     vec = model.time_in(t)
