@@ -18,6 +18,15 @@ public sealed class OnnxNode
     public required string Name { get; init; }
     public required string[] Inputs { get; init; }
     public required string[] Outputs { get; init; }
+
+    /// <summary>Integer attributes (<c>i</c> and <c>ints</c>) by name — strides, pads, groups, perm; empty when the node has none. Float, string and tensor attributes are not decoded.</summary>
+    public IReadOnlyDictionary<string, long[]> IntAttributes { get; init; } = EmptyAttributes;
+
+    /// <summary>Scalar float attributes (<c>f</c>) by name, such as BatchNormalization's <c>epsilon</c>; empty when the node has none.</summary>
+    public IReadOnlyDictionary<string, float> FloatAttributes { get; init; } = EmptyFloatAttributes;
+
+    private static readonly Dictionary<string, long[]> EmptyAttributes = [];
+    private static readonly Dictionary<string, float> EmptyFloatAttributes = [];
 }
 
 /// <summary>A graph nested inside a node's attribute — the <c>then_branch</c>/<c>else_branch</c> of an <c>If</c>, or a loop <c>body</c>.
@@ -55,8 +64,11 @@ public sealed class OnnxModel
     private const int NodeAttribute = 5;
     // AttributeProto field numbers.
     private const int AttrName = 1;
+    private const int AttrFloat = 2;
+    private const int AttrInt = 3;
     private const int AttrTensor = 5;
     private const int AttrGraph = 6;
+    private const int AttrInts = 8;
     // TensorProto field numbers.
     private const int TensorDims = 1;
     private const int TensorDataType = 2;
@@ -118,6 +130,8 @@ public sealed class OnnxModel
         List<string> inputs = [], outputs = [];
         string name = "", opType = "";
         List<(int Off, int Len)> attributes = [];
+        Dictionary<string, long[]>? intAttributes = null;
+        Dictionary<string, float>? floatAttributes = null;
         ProtoReader r = new(buffer, start, end);
         while (r.TryReadTag(out int field, out int wire))
         {
@@ -135,28 +149,51 @@ public sealed class OnnxModel
         // the op type is known, and protobuf does not promise field order.
         foreach ((int off, int len) in attributes)
         {
-            ParseAttribute(buffer, off, off + len, name, opType, subgraphs, constants);
+            ParseAttribute(buffer, off, off + len, name, opType, subgraphs, constants, ref intAttributes, ref floatAttributes);
         }
-        return new OnnxNode { OpType = opType, Name = name, Inputs = [.. inputs], Outputs = [.. outputs] };
+        return new OnnxNode
+        {
+            OpType = opType,
+            Name = name,
+            Inputs = [.. inputs],
+            Outputs = [.. outputs],
+            IntAttributes = intAttributes ?? new Dictionary<string, long[]>(),
+            FloatAttributes = floatAttributes ?? new Dictionary<string, float>(),
+        };
     }
 
     private static void ParseAttribute(ReadOnlySpan<byte> buffer, int start, int end,
-        string nodeName, string opType, List<OnnxSubgraph> subgraphs, List<OnnxTensor>? constants)
+        string nodeName, string opType, List<OnnxSubgraph> subgraphs, List<OnnxTensor>? constants,
+        ref Dictionary<string, long[]>? intAttributes, ref Dictionary<string, float>? floatAttributes)
     {
         string attrName = "";
         (int Off, int Len)? tensor = null;
         (int Off, int Len)? graph = null;
+        List<long> ints = [];
+        float? scalarFloat = null;
         ProtoReader r = new(buffer, start, end);
         while (r.TryReadTag(out int field, out int wire))
         {
             switch (field)
             {
                 case AttrName when wire == ProtoReader.WireLengthDelimited: attrName = r.ReadString(); break;
+                case AttrFloat when wire == ProtoReader.WireFixed32: scalarFloat = r.ReadFloat(); break;
+                case AttrInt when wire == ProtoReader.WireVarint: ints.Add((long)r.ReadVarint()); break;
+                case AttrInts when wire == ProtoReader.WireVarint: ints.Add((long)r.ReadVarint()); break;
+                case AttrInts when wire == ProtoReader.WireLengthDelimited:
+                {
+                    (int po, int pl) = r.ReadLengthDelimited();
+                    ProtoReader packed = new(buffer, po, po + pl);
+                    while (packed.HasMore) ints.Add((long)packed.ReadVarint());
+                    break;
+                }
                 case AttrTensor when wire == ProtoReader.WireLengthDelimited: tensor = r.ReadLengthDelimited(); break;
                 case AttrGraph when wire == ProtoReader.WireLengthDelimited: graph = r.ReadLengthDelimited(); break;
                 default: r.Skip(wire); break;
             }
         }
+        if (ints.Count > 0) (intAttributes ??= [])[attrName] = [.. ints];
+        if (scalarFloat is not null) (floatAttributes ??= [])[attrName] = scalarFloat.Value;
         if (tensor is not null && constants is not null && opType == "Constant" && attrName == "value")
         {
             constants.Add(ParseTensor(buffer, tensor.Value.Off, tensor.Value.Off + tensor.Value.Len));
