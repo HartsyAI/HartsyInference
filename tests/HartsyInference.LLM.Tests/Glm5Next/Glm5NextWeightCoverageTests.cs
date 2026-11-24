@@ -56,6 +56,16 @@ public sealed class Glm5NextWeightCoverageTests
     }
 
     [Fact]
+    public void KeysOfLayersTheConfigDoesNotName_AreNotFp8OrMtp()
+    {
+        // A checkpoint key can name any layer; the predicates answer false for a number the config does not have instead of throwing.
+        Assert.False(Glm5NextWeightNames.IsFp8Weight(Config, "model.language_model.layers.99.mlp.gate_proj.weight"));
+        Assert.False(Glm5NextWeightNames.IsMtpKey(Config, "model.language_model.layers.99.enorm.weight"));
+        Assert.False(Glm5NextWeightNames.IsFp8Weight(Config, "model.language_model.layers.x.mlp.gate_proj.weight"));
+        Assert.False(Glm5NextWeightNames.IsMtpKey(Config, "model.language_model.embed_tokens.weight"));
+    }
+
+    [Fact]
     public void ExpertKeys_GateComesBeforeUp()
     {
         Assert.Equal(["gate_proj", "up_proj", "down_proj"], Glm5NextWeightNames.ExpertProjections);
