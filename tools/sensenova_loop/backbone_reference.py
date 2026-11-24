@@ -18,6 +18,9 @@ release, out = Path(sys.argv[1]), Path(sys.argv[2])
 spec = importlib.util.spec_from_file_location("modeling_sensenova_loop", release / "modeling_sensenova_loop.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+# The checkpoint code targets transformers 5.18; later releases renamed the output class it returns. Same fields, so alias it.
+if not hasattr(mod.hf, "Qwen3_5ModelOutputWithPast"):
+    mod.hf.Qwen3_5ModelOutputWithPast = mod.hf.BaseModelOutputWithPast
 
 cfg = json.load(open(release / "config.json"))
 t = cfg["text_config"]
@@ -25,9 +28,10 @@ t.update(hidden_size=64, intermediate_size=96, num_hidden_layers=12,
          layer_types=(["linear_attention"] * 3 + ["full_attention"]) * 3,
          head_dim=16, num_attention_heads=4, num_key_value_heads=2, linear_key_head_dim=8, linear_value_head_dim=8,
          linear_num_key_heads=2, linear_num_value_heads=4, vocab_size=80, max_position_embeddings=256,
-         eos_token_id=1, mtp_num_hidden_layers=0)
+         eos_token_id=1, pad_token_id=0, mtp_num_hidden_layers=0)
 # YaRN stays on, with an original length small enough that the frequency blend is not a no-op over the 4 rotary pairs.
 t["rope_parameters"].update(original_max_position_embeddings=128, factor=2.0)
+cfg.update(pad_token_id=0, eos_token_id=1, image_token_id=2, video_token_id=3, vision_start_token_id=4, vision_end_token_id=5)
 cfg["loop_settings"] = dict(start=4, end=8, eval_count=2, counts=[2])
 cfg["mhc"] = dict(start=4, end=8, fixed_identity=False, iterations=20, pre_scale=1.0, streams=2)
 cfg["vision_config"].update(depth=1, hidden_size=32, intermediate_size=48, num_heads=2, out_hidden_size=64,

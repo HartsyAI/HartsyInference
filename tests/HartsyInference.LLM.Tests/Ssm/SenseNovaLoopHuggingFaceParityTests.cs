@@ -39,7 +39,7 @@ public sealed unsafe class SenseNovaLoopHuggingFaceParityTests
             num += (expected[i] - got[i]) * (double)(expected[i] - got[i]);
             den += (double)expected[i] * expected[i];
         }
-        Assert.True(Math.Sqrt(num / den) < 1e-4, $"hidden states relRMS {Math.Sqrt(num / den)}");
+        Assert.True(Math.Sqrt(num / den) < 2e-5, $"hidden states relRMS {Math.Sqrt(num / den)}");
         // The reference's own cache path (prefill plus steps) agrees with its full forward; so must ours.
         int hidden = cfg.HiddenSize;
         ReadOnlySpan<float> last = new((void*)stepped.DataPointer, hidden);
