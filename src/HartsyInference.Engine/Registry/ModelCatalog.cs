@@ -1323,7 +1323,7 @@ public static class ModelCatalog
                 // licence terms as the 4B. Klein 9B has never run on real weights here, so this inherits that risk.
                 Id = "open-vision-banana-9b", Modality = img, DisplayName = "Open Vision Banana 9B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
                 Status = vp,
-                CliDrivable = true,
+                CliDrivable = false,
                 Assets = new ModelAsset[]
                 {
                     OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 1, 4, "88eba535a98b57af3196ff325cfaacb029e24cf6083dd6fe839cf6bdd7a65ae3"),

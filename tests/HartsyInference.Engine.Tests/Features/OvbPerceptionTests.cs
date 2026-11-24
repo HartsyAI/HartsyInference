@@ -131,6 +131,53 @@ public sealed partial class OvbPerceptionTests
     }
 
     [Fact]
+    public async Task TheResultCarriesTheLegendTheFirstPictureWasPaintedWith()
+    {
+        List<ImageRequest> sent = [];
+
+        OvbSegmentation result = await OvbPerception.SegmentAsync(Painter(sent, TruthByHalf), Photo(), ["road", "sky"], legends: 2, seed: 3, OvbSemsegStyle.Quickstart, default);
+
+        // The legend is the one in the FIRST request's prompt, so the picture can be read back with it.
+        Assert.Equal(["road", "sky"], result.PaintedLegend.Select(e => e.Name));
+        string[] expected = [.. LegendEntry().Matches(sent[0].Prompt).Select(m => $"{m.Groups[2].Value},{m.Groups[3].Value},{m.Groups[4].Value}")];
+        Assert.Equal(expected, result.PaintedLegend.Select(e => $"{e.R},{e.G},{e.B}"));
+        (byte[] snapped, _) = OvbDecoder.SnapToLegend(result.Painted.Rgb, result.Width, result.Height,
+            result.PaintedLegend.Select(e => (e.R, e.G, e.B)).ToArray());
+        Assert.Equal(0, snapped[0]);
+        Assert.Equal(1, snapped[(SourceHeight - 1) * SourceWidth]);
+    }
+
+    [Fact]
+    public async Task MoreClassesThanThePaletteHoldsAreRefusedAtTheCallersArgument()
+    {
+        string[] tooMany = Enumerable.Range(0, 201).Select(i => $"class {i}").ToArray();
+
+        ArgumentOutOfRangeException error = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            OvbPerception.SegmentAsync(Painter([], TruthByHalf), Photo(), tooMany, 1, 0, OvbSemsegStyle.Quickstart, default));
+        Assert.Equal("classes", error.ParamName);
+        Assert.Contains("200", error.Message);
+        // 200 is allowed: the draw can legend every palette colour.
+        await OvbPerception.SegmentAsync((request, cancel) => Task.FromResult(Flat(0, 0, 0)), Photo(), tooMany[..200], 1, 0, OvbSemsegStyle.Quickstart, default);
+    }
+
+    [Fact]
+    public async Task TheReferringMaskIsStrictlyNearerTheRedThanBlackAsTheReleaseDecodesIt()
+    {
+        // (110,15,15) is exactly half way between red and black: background. (112,16,16) is nearer red: foreground.
+        (byte[] mask, _) = await OvbPerception.ReferAsync((request, cancel) =>
+        {
+            byte[] rgb = new byte[PaintedWidth * PaintedHeight * 3];
+            (rgb[0], rgb[1], rgb[2]) = (110, 15, 15);
+            (rgb[3], rgb[4], rgb[5]) = (112, 16, 16);
+            return Task.FromResult(new ImageResult { Rgb = rgb, Width = PaintedWidth, Height = PaintedHeight });
+        }, Photo(), "a cat", 0, default);
+
+        Assert.Equal(0, mask[0]);
+        Assert.Equal(0, mask[1]);       // nearest-neighbour upscale: two photo pixels per painted pixel along x
+        Assert.Equal(255, mask[2]);
+    }
+
+    [Fact]
     public async Task ARequestForTooManyOrNoLegendsIsRefused()
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>

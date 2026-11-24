@@ -6,9 +6,12 @@ using HartsyInference.Engine.Vision.OpenVisionBanana;
 namespace HartsyInference.Engine.Features;
 
 /// <summary>A semantic segmentation by Open Vision Banana: one label per source pixel (an index into <see cref="Classes"/>, or
-/// <see cref="OvbDecoder.Ignore"/> for background), with the share of legend draws that agreed on it.</summary>
+/// <see cref="OvbDecoder.Ignore"/> for background). <see cref="Agreement"/> is the winner's share among the legend draws that did
+/// not abstain on that pixel (0 where all did): a stability diagnostic, not a probability. <see cref="Painted"/> is the FIRST
+/// draw's picture at the photo's size and <see cref="PaintedLegend"/> the colours that draw was asked to use, so a caller can read
+/// the picture back; with several draws it is one of them, not the voted <see cref="Labels"/>.</summary>
 public sealed record OvbSegmentation(IReadOnlyList<string> Classes, byte[] Labels, float[] Agreement, int Width, int Height,
-    ImageData Painted);
+    ImageData Painted, IReadOnlyList<OvbLegendEntry> PaintedLegend);
 
 /// <summary>A relative inverse-depth map in <c>[0, 1]</c>, closer is larger, one value per source pixel, row-major.</summary>
 public sealed record OvbDepth(float[] InverseDepth, int Width, int Height, ImageData Painted);
@@ -50,12 +53,14 @@ public static class OvbPerception
         ArgumentNullException.ThrowIfNull(generate);
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(classes);
-        if (classes.Count is < 1 or >= OvbDecoder.Ignore)
-            throw new ArgumentOutOfRangeException(nameof(classes), classes.Count, "Name between 1 and 254 classes.");
+        int maxClasses = Math.Min(OvbPalette.Count, OvbDecoder.Ignore - 1);
+        if (classes.Count < 1 || classes.Count > maxClasses)
+            throw new ArgumentOutOfRangeException(nameof(classes), classes.Count, $"Name between 1 and {maxClasses} classes: the legend draws distinct colours from a {OvbPalette.Count}-colour palette.");
         if (legends is < 1 or > 32)
             throw new ArgumentOutOfRangeException(nameof(legends), legends, "Legend draws are 1 to 32.");
         List<byte[]> maps = new(legends);
         ImageData? first = null;
+        IReadOnlyList<OvbLegendEntry>? firstLegend = null;
         for (int draw = 0; draw < legends; draw++)
         {
             cancel.ThrowIfCancellationRequested();
@@ -64,12 +69,23 @@ public static class OvbPerception
             // The README resizes a mask back with NEAREST, so painted colours stay exact for the snap.
             ImageData painted = NearestTo(result, image.Width, image.Height);
             first ??= painted;
+            firstLegend ??= legend;
             (byte[] labels, _) = OvbDecoder.SnapToLegend(painted.Rgb, painted.Width, painted.Height,
                 legend.Select(e => (e.R, e.G, e.B)).ToArray());
             maps.Add(labels);
         }
         (byte[] voted, float[] agreement) = OvbDecoder.MajorityVote(maps, classes.Count);
-        return new OvbSegmentation(classes, voted, agreement, image.Width, image.Height, first!);
+        return new OvbSegmentation(classes, voted, agreement, image.Width, image.Height, first!, firstLegend!);
+    }
+
+    /// <summary>The region of <paramref name="image"/> that matches <paramref name="description"/>, as a 0/255 mask the size of the
+    /// photo, run on <paramref name="spec"/>'s model.</summary>
+    public static async Task<(byte[] Mask, ImageData Painted)> ReferAsync(InferenceEngine engine, ModelSpec spec, ImageData image,
+        string description, CancellationToken cancel)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        RequireHandled(spec);
+        return await ReferAsync(Generator(engine, spec), image, description, Seed, cancel).ConfigureAwait(false);
     }
 
     /// <summary>The region of <paramref name="image"/> that matches <paramref name="description"/>, as a 0/255 mask the size of
@@ -81,10 +97,10 @@ public static class OvbPerception
         ArgumentNullException.ThrowIfNull(image);
         ImageResult result = await generate(Request(OvbPrompts.ReferringSegmentation(description), image, seed), cancel).ConfigureAwait(false);
         ImageData painted = NearestTo(result, image.Width, image.Height);
-        (byte R, byte G, byte B) red = OvbPrompts.ReferringColor;
-        (byte[] labels, _) = OvbDecoder.SnapToLegend(painted.Rgb, painted.Width, painted.Height, [red]);
-        byte[] mask = new byte[labels.Length];
-        for (int i = 0; i < mask.Length; i++) mask[i] = labels[i] == 0 ? (byte)255 : (byte)0;
+        // The release's rgb_to_foreground: nearer to the paint colour than to black, strictly (it has no further threshold).
+        byte[] foreground = OvbDecoder.ForegroundAgainst(painted.Rgb, painted.Width, painted.Height, OvbPrompts.ReferringColor);
+        byte[] mask = new byte[foreground.Length];
+        for (int i = 0; i < mask.Length; i++) mask[i] = foreground[i] != 0 ? (byte)255 : (byte)0;
         return (mask, painted);
     }
 
