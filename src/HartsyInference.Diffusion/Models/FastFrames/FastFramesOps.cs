@@ -122,18 +122,6 @@ internal static class FastFramesOps
         return table.AsReadOnlySpan<float>().Slice(row * cols, cols).ToArray();
     }
 
-    /// <summary>Slices <paramref name="count"/> columns from <paramref name="start"/> of a row-major <c>[S, C]</c> tensor.</summary>
-    public static Tensor SliceColumns(Tensor x, int start, int count)
-    {
-        int rows = (int)x.Shape[0], cols = (int)x.Shape[1];
-        Tensor output = new(new TensorShape(rows, count), DType.F32);
-        ReadOnlySpan<float> source = x.AsReadOnlySpan<float>();
-        Span<float> target = output.AsSpan<float>();
-        for (int r = 0; r < rows; r++)
-            source.Slice(r * cols + start, count).CopyTo(target.Slice(r * count, count));
-        return output;
-    }
-
     /// <summary>The transpose of layer <paramref name="layer"/> of a stacked <c>[layers, in, out]</c> weight as an F32
     /// <c>[out, in]</c> tensor (the engine's Linear layout), converting from BF16 or F16 on the way.</summary>
     public static Tensor TransposedLayer(Tensor stacked, int layer)

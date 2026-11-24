@@ -258,9 +258,11 @@ public sealed class FastFramesKvRefiner : IDisposable
 
         using Tensor h = FastFramesOps.Modulate(backend, x, shift1, scale1, LayerNormEps);
         using Tensor qkv = FastFramesOps.Linear(backend, h, block.QkvW, block.QkvB);   // [S, 3·dA], q | k | v per token
-        using Tensor q = HeadMajor(backend, FastFramesOps.SliceColumns(qkv, 0, dA), tokens, heads, headDim);
-        using Tensor k = HeadMajor(backend, FastFramesOps.SliceColumns(qkv, dA, dA), tokens, heads, headDim);
-        using Tensor v = HeadMajor(backend, FastFramesOps.SliceColumns(qkv, 2 * dA, dA), tokens, heads, headDim);
+        Tensor[] parts = [new(new TensorShape(tokens, dA), DType.F32), new(new TensorShape(tokens, dA), DType.F32), new(new TensorShape(tokens, dA), DType.F32)];
+        backend.Split(parts, qkv, 1);
+        using Tensor q = HeadMajor(backend, parts[0], tokens, heads, headDim);
+        using Tensor k = HeadMajor(backend, parts[1], tokens, heads, headDim);
+        using Tensor v = HeadMajor(backend, parts[2], tokens, heads, headDim);
         using Tensor attended = new(new TensorShape(1, heads, tokens, headDim), DType.F32);
         backend.ScaledDotProductAttention(attended, q, k, v, null, 1f / MathF.Sqrt(headDim));
         using Tensor merged = new(new TensorShape(1, tokens, heads, headDim), DType.F32);
