@@ -195,7 +195,10 @@ def main() -> None:
             depth = model.infer(x[0], f_px=f_px)["depth"]
             dump(f"{name}_depth", torch.where(torch.isinf(depth), torch.zeros_like(depth), depth))
 
-    dump.meta["_versions"] = {"torch": torch.__version__, "timm": timm.__version__, "ml_depth_pro_2": COMMIT}
+    # Which names a biased timm DINOv3 stores its attention biases under (the C# adapter takes fused or separate).
+    biased = timm.create_model("vit_small_patch16_dinov3_qkvb", pretrained=False, num_classes=0)
+    dump.meta["_timm_qkvb_attn_keys"] = [k for k in biased.state_dict() if k.startswith("blocks.0.attn.")]
+    dump.meta["_versions"] ={"torch": torch.__version__, "timm": timm.__version__, "ml_depth_pro_2": COMMIT}
     (out / "meta.json").write_text(json.dumps(dump.meta, indent=1))
     print("wrote", len(dump.meta) - 1, "tensors to", out)
 

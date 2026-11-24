@@ -92,9 +92,12 @@ public sealed unsafe class Dinov3VisionEncoder
     /// <summary>The token sequences after each block in <paramref name="blockIndices"/>, from one forward pass and before any final norm: the raw block
     /// outputs a multi-scale head (DPT-style) reads. The blocks must be distinct and in range; the result is in the order given and the caller owns every
     /// tensor. Blocks past the last one asked for are not run.</summary>
-    /// <param name="prefixResetBlocks">Blocks whose output keeps the CLS and storage tokens the block was given, so only the patch tokens move on: a lone frame
-    /// through Depth Pro 2's cross-frame blocks. Empty for a plain DINOv3.</param>
-    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> prefixResetBlocks = default)
+    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> blockIndices) =>
+        EncodeIntermediates(backend, pixelValues, blockIndices, prefixResetBlocks: default);
+
+    /// <summary><see cref="EncodeIntermediates(IBackend, Tensor, ReadOnlySpan{int})"/>, where the blocks in <paramref name="prefixResetBlocks"/> keep the CLS
+    /// and storage tokens they were given, so only the patch tokens move on: a lone frame through Depth Pro 2's cross-frame blocks.</summary>
+    public Tensor[] EncodeIntermediates(IBackend backend, Tensor pixelValues, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> prefixResetBlocks)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (blockIndices.IsEmpty) throw new ArgumentException("Name at least one block to tap.", nameof(blockIndices));

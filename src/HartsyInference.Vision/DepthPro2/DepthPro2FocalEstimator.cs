@@ -68,7 +68,7 @@ public sealed class DepthPro2FocalEstimator
         return CropAnglesToFull(new DepthPro2FieldOfView(hfov, vfov), cropH * (double)height / fullH, cropW * (double)width / fullW, height, width);
     }
 
-    /// <summary>The focal length in pixels of one frame of <paramref name="height"/> x <paramref name="width"/>.</summary>
+    /// <summary>The focal length in pixels of one frame of normalised pixels <c>[1, 3, H, W]</c>.</summary>
     public double FocalLengthPx(IBackend backend, Tensor pixels) =>
         FocalLengthPx([Estimate(backend, pixels)], (int)pixels.Shape[2], (int)pixels.Shape[3]);
 
