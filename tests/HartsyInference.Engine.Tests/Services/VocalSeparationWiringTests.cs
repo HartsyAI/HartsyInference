@@ -41,6 +41,8 @@ public sealed class VocalSeparationWiringTests
 
     [Theory]
     [InlineData(93, 25, null, null, 4.72)]
+    [InlineData(121, 24, 97, null, 6.04)]
+    [InlineData(121, 24, null, 97, 6.04)]
     [InlineData(93, 25, 186, null, 8.44)]
     [InlineData(93, 25, null, 200, 9.0)]
     [InlineData(null, 25, null, null, null)]

@@ -157,11 +157,14 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     /// <summary>Seconds of driving audio the clip can use: its frame total over its rate, plus one second of margin as LongCat adds. Null when either is unknown, which separates the whole track.</summary>
     internal static double? DrivingAudioSeconds(VideoRequest request)
     {
-        int? frames = request.ChainTotalFrames ?? request.AnimateTotalFrames ?? request.Frames;
+        // A total at or under Frames generates one chunk, so the clip is never shorter than Frames.
+        int? total = request.ChainTotalFrames ?? request.AnimateTotalFrames;
+        int? frames = total is null ? request.Frames : Math.Max(request.Frames ?? 0, total.Value);
         if (frames is not > 0 || request.Fps is not > 0)
         {
             return null;
         }
+        // The one second is LongCat's own margin; the separator also processes one extra chunk past the target when it crops.
         return frames.Value / (double)request.Fps.Value + 1d;
     }
 
