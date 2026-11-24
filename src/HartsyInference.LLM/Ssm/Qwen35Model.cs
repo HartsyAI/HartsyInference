@@ -329,7 +329,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
             string arch = (m.GetString("general.architecture") ?? "qwen35").ToLowerInvariant();
             int dModel = (int)m.GetUInt32($"{arch}.embedding_length");
             // block_count includes the appended MTP/NextN block(s); exclude them from the executed trunk.
-            int nextn = (int)m.GetUInt32($"{arch}.nextn.predict_layers", 0u);
+            int nextn = (int)m.GetUInt32($"{arch}.nextn_predict_layers", m.GetUInt32($"{arch}.nextn.predict_layers", 0u));
             int layers = (int)m.GetUInt32($"{arch}.block_count") - nextn;
             int vocab = (int)w["token_embd.weight"].Shape[0];   // relabeled to [vocab, dModel]
             float eps = m.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon", 1e-6f);
@@ -384,9 +384,25 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 }
             }
 
+            // SenseNova-Loop: execution slots with shared weights, hyper-connection routers, tiled value heads and fused projections.
+            SenseNovaLoopConfig? loop = null;
+            Dictionary<int, MhcRouterWeights>? routers = null;
+            List<Tensor> converted = [];
+            if (arch == SenseNovaLoopArchitecture)
+            {
+                loop = ReadSenseNovaLoop(m, arch, layers);
+                bool[] linear = new bool[layers];
+                for (int i = 0; i < layers; i++) linear[i] = recrOverride is { Length: > 0 } ? recrOverride[i] : (i + 1) % fullAttnInterval != 0;
+                routers = PrepareSenseNovaWeights(w, loop, linear, numKHeads, numVHeads, headKvDim, headVDim, convK, converted);
+            }
+            RopeScaling ropeScaling = ReadGgufRopeScaling(m, arch);
+
             Qwen35Model model = new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, recrOverride,
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
                 convK, headKvDim, headVDim, numKHeads, numVHeads, moe);
+            model._ownedTensors.AddRange(converted);
+            if (loop is not null) model.ConfigureLoop(loop, routers!, ropeScaling);
+            else model.ConfigureRope(ropeScaling);
             int[]? sections = m.GetIntArray($"{arch}.rope.dimension_sections");
             if (sections is { Length: > 0 })
                 model.MropeSection = Array.FindAll(sections, static s => s > 0);

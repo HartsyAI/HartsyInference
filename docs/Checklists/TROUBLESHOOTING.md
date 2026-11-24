@@ -1088,6 +1088,11 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   RWKV-6 rescale) and the SigLIP mmproj swap under [Weight layout](#weight-layout--transpose--converter-parity).
 - **Qwen3.5 Gated DeltaNet:** missing `q *= 1/√head_dim` before the recurrence produces fluent-looking
   word salad (not a crash).
+- **Qwen3.5-family GGUFs from llama.cpp store the Gated DeltaNet value heads TILED when there are more value than key heads**
+  (conversion/qwen.py `_LinearAttentionVReorderBase`: qkv V rows, z, a, b, `A_log`, `dt_bias`, conv V channels and the `out_proj`
+  columns); this engine's delta ops and transformers use GROUPED order (value head `h` reads key head `h / repeat`). Only the
+  SenseNova-Loop GGUF path un-tiles at load (`Qwen35Model.PrepareSenseNovaWeights`); a plain `qwen35` GGUF with unequal head counts
+  (9B-class, Clef) is not converted and is suspected wrong until checked against the HF route.
 - **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
   row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
 - **A GGUF codec that agrees with its GPU kernel can still be wrong** — a kernel written to mirror the host

@@ -19,7 +19,7 @@ public sealed class SenseNovaLoopTests
           "mhc": { "end": 28, "fixed_identity": false, "iterations": 20, "pre_scale": 1.0, "start": 4, "streams": 2 } }
         """;
 
-    private static string TinyConfig(int streams) => $$"""
+    internal static string TinyConfig(int streams) => $$"""
         { "loop_settings": { "counts": [2], "end": 3, "eval_count": 2, "start": 1 },
           "mhc": { "end": 3, "fixed_identity": false, "iterations": 20, "pre_scale": 1.0, "start": 1, "streams": {{streams}} },
           "text_config": {
@@ -147,7 +147,7 @@ public sealed class SenseNovaLoopTests
 
     // ---- synthetic checkpoint ----------------------------------------------------------------------------------------------
 
-    private static (Dictionary<string, float[]> Raw, Dictionary<string, Tensor> Weights) TinyWeights(int seed, int streams)
+    internal static (Dictionary<string, float[]> Raw, Dictionary<string, Tensor> Weights) TinyWeights(int seed, int streams)
     {
         Random rng = new(seed);
         Dictionary<string, float[]> w = new();
@@ -233,7 +233,7 @@ public sealed class SenseNovaLoopTests
         _ => throw new ArgumentException($"No row count for {name}."),
     };
 
-    private static float[] Gaussian(Random rng, int count, float std)
+    internal static float[] Gaussian(Random rng, int count, float std)
     {
         float[] v = new float[count];
         for (int i = 0; i < count; i++)
