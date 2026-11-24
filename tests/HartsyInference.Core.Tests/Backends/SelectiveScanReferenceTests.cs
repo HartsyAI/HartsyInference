@@ -64,6 +64,16 @@ public sealed unsafe class SelectiveScanReferenceTests
             SelectiveScanReference.Apply(o.Output, o.U, o.Delta, o.A, wrong, o.C, o.D, null, null, Rows, Frames, Channels, States));
     }
 
+    [Fact]
+    public void RefusesMoreStatesThanTheStackHolds()
+    {
+        const int wide = SelectiveScanReference.MaxStates + 1;
+        Tensor one = new(new TensorShape(1), DType.F32);
+        Tensor wideTensor = new(new TensorShape(wide), DType.F32);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            SelectiveScanReference.Apply(one, one, one, wideTensor, wideTensor, wideTensor, one, null, null, 1, 1, 1, wide));
+    }
+
     private static float[] Naive(Operands o, float[]? initial, out float[] last)
     {
         float* u = (float*)o.U.DataPointer;

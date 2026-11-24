@@ -11,17 +11,17 @@ namespace HartsyInference.Audio.Tests.VoiceIsolator.Parity;
 /// <summary>Parity of the released checkpoints against the golden renders shipped in <c>inworld-ai/voice-isolator</c> @ c73b3fab
 /// (<c>tests/fixtures/*</c>, made by the training-side reference on CPU in fp32). <c>VOICE_ISOLATOR_DIR</c> names a folder holding
 /// <c>denoiser.safetensors</c>, <c>denoiser_realtime.safetensors</c> and <c>fixtures/&lt;case&gt;/{meta.json,input.wav,expected.npy}</c>.
-/// Without it each test returns having checked nothing, and <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> turns that into a failure.</summary>
+/// Without it each test is reported as skipped; <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> makes a missing folder a failure.</summary>
 [Trait("Category", "Integration")]
 public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
 {
-    [Fact]
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void Offline3sMatchesTheReference() => Check("offline_3s");
 
-    [Fact]
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void Offline11sMatchesTheReference() => Check("offline_11s");
 
-    [Fact]
+    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void RealtimeWholeClip3sMatchesTheReferenceStream() => Check("realtime_stream_3s");
 
     private void Check(string name)
@@ -44,14 +44,10 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
         float[] expected = NpyFloat32.Read(Path.Combine(caseDir, "expected.npy"));
 
         using VoiceIsolatorNetwork network = VoiceIsolatorNetwork.Load(model);
-        if (network.Config.Causal)
-        {
-            network.SetLookahead(meta.RootElement.GetProperty("lookahead_frames").GetInt32());
-        }
         using CpuBackend backend = new();
         long started = Environment.TickCount64;
-        float[] actual = network.Config.Causal
-            ? network.Isolate(backend, input)
+        float[] actual = meta.RootElement.TryGetProperty("runner", out JsonElement runner)
+            ? Stream(network, backend, input, runner, meta.RootElement.GetProperty("lookahead_frames").GetInt32())
             : VoiceIsolatorRenderer.Render(network, backend, input,
                 meta.RootElement.GetProperty("chunk_seconds").GetDouble(), meta.RootElement.GetProperty("overlap_seconds").GetDouble());
         long elapsed = Environment.TickCount64 - started;
@@ -70,6 +66,27 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
         output.WriteLine($"{name}: {expected.Length} samples, max abs error {maxAbs:E3} (tolerance {tolerance:E1}), "
             + $"relRMS {Math.Sqrt(squares / reference):E3}, {elapsed} ms on CPU");
         Assert.True(maxAbs <= tolerance, $"{name}: max abs error {maxAbs:E3} exceeds {tolerance:E1}");
+    }
+
+    /// <summary>The reference's stateful runner: its block, cache and window settings, and the piece sizes it pushed, cycling.</summary>
+    private static float[] Stream(VoiceIsolatorNetwork network, CpuBackend backend, float[] input, JsonElement runner, int lookahead)
+    {
+        int block = runner.GetProperty("block_frames").GetInt32();
+        int cache = runner.GetProperty("cache_frames").GetInt32();
+        int window = runner.GetProperty("window_frames").GetInt32();
+        int crossfade = runner.GetProperty("crossfade_frames").GetInt32();
+        int[] pushes = runner.GetProperty("push").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+        using VoiceIsolatorStream stream = new(network, backend, block, cache, window, crossfade, lookahead);
+        List<float> output = [];
+        int position = 0;
+        for (int index = 0; position < input.Length; index++)
+        {
+            int piece = Math.Min(pushes[index % pushes.Length], input.Length - position);
+            output.AddRange(stream.Push(input.AsSpan(position, piece)));
+            position += piece;
+        }
+        output.AddRange(stream.Flush());
+        return [.. output];
     }
 
     private static string Sha256(string path)

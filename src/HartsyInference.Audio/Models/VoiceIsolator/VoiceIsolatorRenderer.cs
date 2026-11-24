@@ -40,7 +40,7 @@ public static class VoiceIsolatorRenderer
         if (n <= chunk)
         {
             progress?.Invoke(1, 1);
-            return network.Isolate(backend, audio);
+            return network.Isolate(backend, audio, 0);
         }
         List<int> starts = WindowStarts(n, chunk, overlap);
         float[] output = new float[n];
@@ -51,7 +51,7 @@ public static class VoiceIsolatorRenderer
             cancel.ThrowIfCancellationRequested();
             int start = starts[index];
             FillWindow(window, starts, index, chunk, overlap, n);
-            float[] rendered = network.Isolate(backend, audio.AsSpan(start, chunk).ToArray());
+            float[] rendered = network.Isolate(backend, audio.AsSpan(start, chunk).ToArray(), 0);
             for (int i = 0; i < chunk; i++)
             {
                 output[start + i] += rendered[i] * window[i];

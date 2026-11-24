@@ -27,6 +27,13 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         _loader = loader;
         Config = config;
         _weights = loader.GetAllTensors();
+        foreach (Tensor tensor in _weights.Values)
+        {
+            if (tensor.DType != DType.F32)
+            {
+                throw new InvalidDataException($"Voice isolator weights are F32; a tensor is {tensor.DType.Name}.");
+            }
+        }
         _edges = VoiceIsolatorBands.Edges(config);
         _spectral = new VoiceIsolatorSpectral(config.NFft, config.HopLength);
         _bandEmbedding = _weights["band_embedding"];
@@ -39,6 +46,10 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         {
             throw new InvalidDataException("lookahead_frames_choices and lookahead_embedding.weight must be present together.");
         }
+        if (_lookaheadEmbedding is not null)
+        {
+            RequireF32(_lookaheadEmbedding, "lookahead_embedding.weight", (long)config.LookaheadChoices.Count * config.Width);
+        }
         _blocks = new object?[config.BlockTypes.Count];
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -47,14 +58,11 @@ public sealed class VoiceIsolatorNetwork : IDisposable
                 : new VoiceIsolatorMambaBlock(config, _weights, $"blocks.{i}");
         }
         (_decoderScale, _decoderShift) = DecoderCondition(_weights, config.Width);
-        Lookahead = config.LookaheadFrames;
     }
 
     /// <summary>Architecture of the loaded checkpoint.</summary>
     public VoiceIsolatorConfig Config { get; }
 
-    /// <summary>Look-ahead in frames the causal checkpoint runs at; zero offline.</summary>
-    public int Lookahead { get; private set; }
 
     /// <summary>Number of bands.</summary>
     public int BandCount => _edges.Length;
@@ -86,20 +94,10 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         }
     }
 
-    /// <summary>Selects one of the look-ahead positions the checkpoint was trained at.</summary>
-    public void SetLookahead(int frames)
-    {
-        if (!Config.Causal || !Config.LookaheadChoices.Contains(frames))
-        {
-            throw new ArgumentException($"Look-ahead {frames} is not a trained position of this checkpoint ({string.Join(", ", Config.LookaheadChoices)}).");
-        }
-        Lookahead = frames;
-    }
-
     /// <summary>Isolates the voice of <paramref name="audio"/> (mono, at <see cref="VoiceIsolatorConfig.SampleRate"/>) in one pass.
     /// The offline checkpoint pads the edges by reflection as the reference's <c>forward</c> does; the causal checkpoint pads with
     /// zeros, as its stream frames the start and end of its input, and reads the look-ahead frames of the decoder.</summary>
-    public float[] Isolate(IBackend backend, float[] audio)
+    internal float[] Isolate(IBackend backend, float[] audio, int lookahead)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(audio);
@@ -112,10 +110,10 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         float[] re = new float[(long)frames * bins];
         float[] im = new float[(long)frames * bins];
         _spectral.Analyze(audio, re, im, reflect: !Config.Causal);
-        float[] raw = Backbone(backend, re, im, frames);
-        if (Config.Causal && Lookahead > 0)
+        float[] raw = Backbone(backend, re, im, frames, lookahead);
+        if (Config.Causal && lookahead > 0)
         {
-            raw = ReadAhead(raw, frames, bins, Lookahead);
+            raw = ReadAhead(raw, frames, bins, lookahead);
         }
         Correct(raw, re, im, frames, bins, Config.CorrectionBound);
         float[] delta = _spectral.Synthesize(re, im, frames, audio.Length);
@@ -127,12 +125,12 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     }
 
     /// <summary>The backbone and decoder over spectra <c>[frames, bins]</c>: raw decoder output <c>[frames, bins, 4]</c>.</summary>
-    internal float[] Backbone(IBackend backend, float[] re, float[] im, int frames)
+    internal float[] Backbone(IBackend backend, float[] re, float[] im, int frames, int lookahead)
     {
         int width = Config.Width;
         int bands = _edges.Length;
         (float[] cos, float[] sin) = VoiceIsolatorOps.RopeTables(frames, Config.HeadDim);
-        Tensor x = Encode(backend, re, im, frames);
+        Tensor x = Encode(backend, re, im, frames, lookahead);
         bool causal = Config.Causal;
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -186,7 +184,7 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     }
 
     /// <summary>Band tokens <c>[bands * frames, width]</c> of the spectra.</summary>
-    internal unsafe Tensor Encode(IBackend backend, float[] re, float[] im, int frames)
+    internal unsafe Tensor Encode(IBackend backend, float[] re, float[] im, int frames, int lookahead)
     {
         int width = Config.Width;
         int bins = _spectral.Bins;
@@ -194,7 +192,7 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         float* tokenP = (float*)tokens.DataPointer;
         float* embeddingP = (float*)_bandEmbedding.DataPointer;
         float* lookaheadP = _lookaheadEmbedding is null ? null
-            : (float*)_lookaheadEmbedding.DataPointer + (long)Config.LookaheadChoices.ToList().IndexOf(Lookahead) * width;
+            : (float*)_lookaheadEmbedding.DataPointer + (long)LookaheadRow(lookahead) * width;
         for (int band = 0; band < _edges.Length; band++)
         {
             (int start, int end) = _edges[band];
@@ -319,6 +317,8 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     {
         Tensor w = weights["denoise_decoder.condition.weight"];
         Tensor b = weights["denoise_decoder.condition.bias"];
+        RequireF32(w, "denoise_decoder.condition.weight", 2L * 2 * width);
+        RequireF32(b, "denoise_decoder.condition.bias", 2L * width);
         float[] scale = new float[width];
         float[] shift = new float[width];
         unsafe
@@ -333,6 +333,40 @@ public sealed class VoiceIsolatorNetwork : IDisposable
             }
         }
         return (scale, shift);
+    }
+
+    private static void RequireF32(Tensor tensor, string name, long count)
+    {
+        if (tensor.DType != DType.F32 || tensor.ElementCount != count)
+        {
+            throw new InvalidDataException($"{name} must be F32 with {count} elements, got {tensor.DType.Name} {tensor.ElementCount}.");
+        }
+    }
+
+    /// <summary>Checks a look-ahead against the positions the checkpoint trained at; each stream passes its own value.</summary>
+    internal int ValidateLookahead(int frames)
+    {
+        IReadOnlyList<int> choices = Config.LookaheadChoices;
+        bool trained = choices.Count > 0 ? choices.Contains(frames) : frames == Config.LookaheadFrames;
+        if (!Config.Causal || !trained)
+        {
+            throw new ArgumentException($"Look-ahead {frames} is not a trained position of this checkpoint.");
+        }
+        return frames;
+    }
+
+    /// <summary>Row of the look-ahead embedding for a trained position.</summary>
+    private int LookaheadRow(int lookahead)
+    {
+        IReadOnlyList<int> choices = Config.LookaheadChoices;
+        for (int row = 0; row < choices.Count; row++)
+        {
+            if (choices[row] == lookahead)
+            {
+                return row;
+            }
+        }
+        throw new ArgumentException($"Look-ahead {lookahead} is not a trained position of this checkpoint.");
     }
 
     public void Dispose()

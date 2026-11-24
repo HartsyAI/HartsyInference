@@ -14,7 +14,7 @@ internal static unsafe class TinyVoiceIsolatorCheckpoint
     public const int Hop = 16;
     public const int State = 4;
 
-    public static string ConfigJson(bool causal) => JsonSerializer.Serialize(new Dictionary<string, object>
+    public static string ConfigJson(bool causal, int conv = 4) => JsonSerializer.Serialize(new Dictionary<string, object>
     {
         ["width"] = Width,
         ["block_types"] = new[] { "transformer", "mamba", "transformer" },
@@ -29,7 +29,7 @@ internal static unsafe class TinyVoiceIsolatorCheckpoint
         ["exclusive_self_attention"] = true,
         ["exclusive_axes"] = "time",
         ["mamba_state"] = State,
-        ["mamba_conv"] = 4,
+        ["mamba_conv"] = conv,
         ["mamba_expand"] = 2,
         ["causal"] = causal,
         ["lookahead_frames"] = causal ? 2 : 0,
@@ -37,7 +37,7 @@ internal static unsafe class TinyVoiceIsolatorCheckpoint
         ["attention_window_frames"] = causal ? 6 : 0,
     });
 
-    public static string Write(string directory, bool causal, int seed)
+    public static string Write(string directory, bool causal, int seed, int metadataConv = 4)
     {
         VoiceIsolatorConfig config = VoiceIsolatorConfig.FromJson(ConfigJson(causal));
         (int Start, int End)[] edges = VoiceIsolatorBands.Edges(config);
@@ -87,7 +87,7 @@ internal static unsafe class TinyVoiceIsolatorCheckpoint
             }
         }
         string path = Path.Combine(directory, causal ? "tiny_causal.safetensors" : "tiny_offline.safetensors");
-        SafeTensorsWriter.Save(path, t, new Dictionary<string, string> { ["config"] = ConfigJson(causal) });
+        SafeTensorsWriter.Save(path, t, new Dictionary<string, string> { ["config"] = ConfigJson(causal, metadataConv) });
         foreach (Tensor tensor in t.Values)
         {
             tensor.Dispose();

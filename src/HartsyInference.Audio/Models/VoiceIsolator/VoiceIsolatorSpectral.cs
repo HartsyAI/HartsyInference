@@ -154,7 +154,7 @@ public sealed class VoiceIsolatorSpectral
             inRe[NFft - k] = re[baseIndex + k];
             inIm[NFft - k] = im[baseIndex + k];
         }
-        // FftPlan.Forward shares one work buffer, so concurrent frames take the stateless transform
+        // FftPlan.Forward shares one work buffer across calls; Fft.Transform keeps no state, so concurrent frames can use it.
         Fft.Transform(inRe, inIm, NFft);
         float scale = 1f / NFft;
         for (int i = 0; i < NFft; i++)
