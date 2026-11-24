@@ -50,22 +50,10 @@ public sealed record HyperConnectionConfig
         HeadRms = RmsEpsPlacement.InsideSqrt,
     };
 
-    /// <summary>GLM-5.3-Flash (<c>glm5_next</c>) hyper-connection: DeepSeek-V4.1's gates and Sinkhorn with the mix norm at <c>rms_norm_eps</c>
-    /// rather than <c>hc_eps</c>; the final read-out is an unweighted mean of the streams, so <see cref="HyperConnection.Head"/> is unused.</summary>
-    /// <param name="hcEps">Config <c>hc_eps</c>: pre-gate and Sinkhorn epsilon.</param>
-    /// <param name="rmsNormEps">Config <c>rms_norm_eps</c>: epsilon of the unweighted RMS norm over the flattened streams.</param>
-    public static HyperConnectionConfig GlmFlash(int hc, int dim, int iters, float hcEps, float rmsNormEps) => new()
-    {
-        Hc = hc,
-        Dim = dim,
-        SinkhornIters = iters,
-        SinkhornEps = hcEps,
-        PreEps = hcEps,
-        PostMultiplier = 2f,
-        NormEps = rmsNormEps,
-        MixRms = RmsEpsPlacement.InsideSqrt,
-        HeadRms = RmsEpsPlacement.InsideSqrt,
-    };
+    /// <summary>GLM-5.3-Flash (<c>glm5_next</c>) hyper-connection. GLM uses the DeepSeek-V4.1 formulas unchanged (its mix norm takes <c>rms_norm_eps</c>,
+    /// as DeepSeek's callers pass it), so it is the same preset. The final read-out is an unweighted mean of the streams, so <see cref="HyperConnection.Head"/> is unused.</summary>
+    public static HyperConnectionConfig GlmFlash(int hc, int dim, int iters, float hcEps, float rmsNormEps) =>
+        DeepSeekV41(hc, dim, iters, hcEps, rmsNormEps);
 
     /// <summary>ERNIE-5.5 hyper-connection: eps outside the sqrt for the mixes (vLLM <c>mhc_kernels.py</c>).</summary>
     /// <param name="sinkhornEps">Config <c>hc_sinkhorn_eps</c>.</param>

@@ -19,6 +19,7 @@ public static class Glm5NextHfConfig
         RequireString(t, "scoring_func", "sigmoid");
         RequireString(t, "topk_method", "noaux_tc");
         JsonElement lin = Object(t, "linear_attn_config");
+        bool hasVision = root.TryGetProperty("vision_config", out _);
 
         int layers = Int(t, "num_hidden_layers");
         int heads = Int(t, "num_attention_heads");
@@ -77,10 +78,10 @@ public static class Glm5NextHfConfig
             RmsNormEps = Float(t, "rms_norm_eps"),
             EosTokenIds = eos,
             PadTokenId = Int(t, "pad_token_id"),
-            Vision = root.TryGetProperty("vision_config", out JsonElement vc) ? ParseVision(vc) : null,
+            Vision = hasVision ? ParseVision(root.GetProperty("vision_config")) : null,
             // A vision tower needs its placeholder ids; text-only configs have none.
-            ImageTokenId = root.TryGetProperty("vision_config", out _) ? Int(root, "image_token_id") : IntOr(root, "image_token_id"),
-            VideoTokenId = root.TryGetProperty("vision_config", out _) ? Int(root, "video_token_id") : IntOr(root, "video_token_id"),
+            ImageTokenId = hasVision ? Int(root, "image_token_id") : IntOr(root, "image_token_id"),
+            VideoTokenId = hasVision ? Int(root, "video_token_id") : IntOr(root, "video_token_id"),
         };
     }
 
