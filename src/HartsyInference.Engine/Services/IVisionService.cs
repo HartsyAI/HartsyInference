@@ -11,7 +11,8 @@ public interface IVisionService
     Task<VisionResult> RunAsync(ModelSpec spec, VisionRequest request, CancellationToken cancel = default);
 
     /// <summary>Runs a multi-view operation (<see cref="VisionSequenceKind.Views"/>): one result whose
-    /// <see cref="VisionResult.Views"/> holds a result per view, in input order.</summary>
+    /// <see cref="VisionResult.Views"/> holds a result per view, in input order. Depth Pro 2 MetricDepth is the one
+    /// implementation in this build.</summary>
     Task<VisionResult> RunViewsAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default) =>
         throw new NotSupportedException($"{GetType().Name} does not run multi-view requests.");
 

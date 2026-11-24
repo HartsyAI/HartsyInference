@@ -11,15 +11,17 @@ internal sealed unsafe class Dinov3Layer
 {
     private readonly int _hidden, _numHeads, _headDim, _inter;
     private readonly float _eps;
-    private readonly bool _gated;
+    private readonly bool _gated, _qvBias;
     private Tensor? _n1W, _n1B, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2;
     private Tensor? _gateW, _gateB;   // SwiGLU only: silu(gate_proj(x)) * up_proj(x)
     private AttentionLayer? _attn;
     private Tensor? _qW, _qB, _kW, _vW, _vB, _oW, _oB;
 
-    public Dinov3Layer(int hidden, int numHeads, int inter, float eps, bool gated)
+    /// <param name="qvBias">Whether the query and value projections carry a bias (every <c>facebook/dinov3</c> checkpoint). False reads none and
+    /// refuses a checkpoint that has one, as <paramref name="gated"/> does for the MLP.</param>
+    public Dinov3Layer(int hidden, int numHeads, int inter, float eps, bool gated, bool qvBias = true)
     {
-        _hidden = hidden; _numHeads = numHeads; _headDim = hidden / numHeads; _inter = inter; _eps = eps; _gated = gated;
+        _hidden = hidden; _numHeads = numHeads; _headDim = hidden / numHeads; _inter = inter; _eps = eps; _gated = gated; _qvBias = qvBias;
     }
 
     /// <summary>Loads one block from the HF DINOv3 layout under <paramref name="prefix"/> (e.g. <c>layer.3</c>).</summary>
@@ -31,10 +33,21 @@ internal sealed unsafe class Dinov3Layer
         _n1W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.weight", h));
         _n1B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.bias", h));
         _qW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.weight", h, h));
-        _qB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.bias", h));
         _kW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.k_proj.weight", h, h));
         _vW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.weight", h, h));
-        _vB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.bias", h));
+        if (_qvBias)
+        {
+            _qB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.bias", h));
+            _vB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.bias", h));
+        }
+        else if (w.ContainsKey($"{prefix}.attention.q_proj.bias") || w.ContainsKey($"{prefix}.attention.v_proj.bias"))
+        {
+            throw new NotSupportedException($"'{prefix}.attention' has a q or v bias but the preset's attention has none; use a preset with AttentionQkvBias.");
+        }
+        else
+        {
+            _qB = _vB = null;
+        }
         _oW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.weight", h, h));
         _oB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.bias", h));
         _ls1 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale1.lambda1", h));
