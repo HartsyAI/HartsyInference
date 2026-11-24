@@ -45,14 +45,18 @@ public sealed class ShardedSafeTensorSet : IDisposable
     /// <summary>How many shards are currently memory-mapped.</summary>
     public int MappedShardCount => Shards.Count(static shard => shard.IsMapped);
 
-    /// <summary>Opens the shards listed by <c>model.safetensors.index.json</c> in <paramref name="directory"/>.</summary>
-    public static ShardedSafeTensorSet OpenIndex(string directory, ShardSetOptions? options = null)
+    /// <summary>Opens the shards listed by <c>model.safetensors.index.json</c> in <paramref name="directory"/>, or by
+    /// <paramref name="indexFileName"/> when the checkpoint names its index otherwise (diffusers: <c>diffusion_pytorch_model.safetensors.index.json</c>).</summary>
+    public static ShardedSafeTensorSet OpenIndex(string directory, ShardSetOptions? options = null, string? indexFileName = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
         ShardSetOptions resolved = options ?? new ShardSetOptions();
-        string indexPath = Path.Combine(directory, IndexFileName);
+        string indexName = indexFileName ?? IndexFileName;
+        if (indexName != Path.GetFileName(indexName))
+            throw new ArgumentException($"'{indexName}' is not a plain file name beside the shards.", nameof(indexFileName));
+        string indexPath = Path.Combine(directory, indexName);
         if (!File.Exists(indexPath))
-            throw new FileNotFoundException($"'{directory}' has no {IndexFileName}; pass the shard files to OpenFiles instead.", indexPath);
+            throw new FileNotFoundException($"'{directory}' has no {indexName}; pass the shard files to OpenFiles instead.", indexPath);
 
         (Dictionary<string, string> weightMap, long? totalSize) = ReadIndex(indexPath);
         if (weightMap.Count == 0)
@@ -62,7 +66,7 @@ public sealed class ShardedSafeTensorSet : IDisposable
         if (missing.Count > 0)
         {
             throw new HartsyInferenceException(
-                $"{IndexFileName} in '{directory}' lists {fileNames.Count} shard files but {missing.Count} are missing on disk: "
+                $"{indexName} in '{directory}' lists {fileNames.Count} shard files but {missing.Count} are missing on disk: "
                 + $"{Examples(missing)}. Re-run the download to fetch them.");
         }
 
