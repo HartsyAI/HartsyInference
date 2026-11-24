@@ -145,6 +145,7 @@ public sealed class VisionService : IVisionService, IDisposable
             throw new ArgumentException($"Depth Pro 2 attends at most {DepthPro2Model.MaxJointFrames} frames together; got a window of {window}.");
         if (overlap >= window)
             throw new ArgumentException($"FrameOverlap {overlap} must be below the frame window of {window}.");
+        DepthPro2Model.CheckSize(request.Images[0].Width, request.Images[0].Height);
         string path = RequirePath(spec, spec.Catalog?.Id ?? DepthPro2Variants.Small.Id);
         if (request.FocalLengthPx is null)
             DepthPro2FocalPath(spec, path);
