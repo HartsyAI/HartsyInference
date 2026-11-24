@@ -15,6 +15,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly LongCatConfig _config;
     private readonly LongCatBlock[] _blocks;
+    private readonly List<Tensor> _owned = [];
     private readonly WanRope _rope;
     private readonly WanForwardCaches _caches = new();
     private readonly Dictionary<(int Frames, int TokensPerFrame), Tensor> _frameIndexes = [];
@@ -56,22 +57,28 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     /// <summary>Reads every tensor from the checkpoint dictionary (reference key names).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
+        foreach (Tensor stale in _owned)
+            stale.Dispose();
+        _owned.Clear();
+        if (w["x_embedder.proj.weight"].DType == DType.I8)
+            throw new InvalidDataException("The x_embedder projection must be dense; a quantized one has no patchify path.");
         _patchW2d = WanDitOps.Reshape2d(w["x_embedder.proj.weight"], _config.HiddenSize, _config.PatchVector);
-        _patchBias = TensorCasts.LoadF32(w, "x_embedder.proj.bias");
+        _owned.Add(_patchW2d);
+        _patchBias = LongCatOps.WidenF32(w, "x_embedder.proj.bias", _owned);
         _time1W = w["t_embedder.mlp.0.weight"];
-        _time1B = TensorCasts.LoadF32(w, "t_embedder.mlp.0.bias");
+        _time1B = LongCatOps.WidenF32(w, "t_embedder.mlp.0.bias", _owned);
         _time2W = w["t_embedder.mlp.2.weight"];
-        _time2B = TensorCasts.LoadF32(w, "t_embedder.mlp.2.bias");
+        _time2B = LongCatOps.WidenF32(w, "t_embedder.mlp.2.bias", _owned);
         _text1W = w["y_embedder.y_proj.0.weight"];
-        _text1B = TensorCasts.LoadF32(w, "y_embedder.y_proj.0.bias");
+        _text1B = LongCatOps.WidenF32(w, "y_embedder.y_proj.0.bias", _owned);
         _text2W = w["y_embedder.y_proj.2.weight"];
-        _text2B = TensorCasts.LoadF32(w, "y_embedder.y_proj.2.bias");
+        _text2B = LongCatOps.WidenF32(w, "y_embedder.y_proj.2.bias", _owned);
         _finalAdaW = w["final_layer.adaLN_modulation.1.weight"];
-        _finalAdaB = TensorCasts.LoadF32(w, "final_layer.adaLN_modulation.1.bias");
+        _finalAdaB = LongCatOps.WidenF32(w, "final_layer.adaLN_modulation.1.bias", _owned);
         _finalW = w["final_layer.linear.weight"];
-        _finalB = TensorCasts.LoadF32(w, "final_layer.linear.bias");
+        _finalB = LongCatOps.WidenF32(w, "final_layer.linear.bias", _owned);
         for (int i = 0; i < _blocks.Length; i++)
-            _blocks[i].LoadWeights(w, $"blocks.{i}");
+            _blocks[i].LoadWeights(w, $"blocks.{i}", _owned);
     }
 
     /// <summary>Every weight: the shared ones, then each block's.</summary>
@@ -230,7 +237,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         return index;
     }
 
-    /// <summary>Drops the references; the weight tensors belong to the checkpoint that supplied them.</summary>
+    /// <summary>Disposes the widened copies and cached indexes it owns; the checkpoint's own tensors are not touched.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -238,6 +245,9 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             foreach (Tensor index in _frameIndexes.Values)
                 index.Dispose();
             _frameIndexes.Clear();
+            foreach (Tensor owned in _owned)
+                owned.Dispose();
+            _owned.Clear();
             _patchW2d = _patchBias = _time1W = _time1B = _time2W = _time2B = _text1W = _text1B = _text2W = _text2B = null;
             _finalAdaW = _finalAdaB = _finalW = _finalB = null;
         }

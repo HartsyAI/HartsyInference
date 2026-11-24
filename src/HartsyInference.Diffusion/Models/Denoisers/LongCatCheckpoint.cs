@@ -26,7 +26,8 @@ public sealed class LongCatCheckpoint : IDisposable
         IsInt8 = isInt8;
     }
 
-    /// <summary>True for the per-row INT8 release: its linears are I8 tensors carrying <see cref="Tensor.QuantInfo"/>.</summary>
+    /// <summary>True for the per-row INT8 release: its linears are I8 tensors carrying <see cref="Tensor.QuantInfo"/>. Those need
+    /// <c>QuantizedWeightPolicy.PrepareForBackends</c> (or a backend with a resident int8 path) before a forward.</summary>
     public bool IsInt8 { get; }
 
     /// <summary>The geometry read from <c>config.json</c>, or derived from the tensor shapes when the folder has none.</summary>
@@ -35,7 +36,8 @@ public sealed class LongCatCheckpoint : IDisposable
     /// <summary>Every tensor by checkpoint key.</summary>
     public IReadOnlyDictionary<string, Tensor> Weights { get; }
 
-    /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors.</summary>
+    /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors. When both index
+    /// files are present the dense one is used; the INT8 index is read only in a folder that has no dense one.</summary>
     public static LongCatCheckpoint Open(string directory)
     {
         string indexName = File.Exists(Path.Combine(directory, IndexFileName)) || !File.Exists(Path.Combine(directory, Int8IndexFileName))
