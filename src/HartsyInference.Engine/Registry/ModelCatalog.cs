@@ -733,6 +733,26 @@ public static class ModelCatalog
                 },
             },
 
+            // SenseNova-Loop-9B (SenseTime, Apache-2.0: "Licensed under the Apache License, Version 2.0"; no territory or commercial limit found).
+            // Qwen3.5 trunk with layers 4-27 run twice (own cache per visit), two-stream mHC and YaRN. The official GGUF (OpenSenseNova/llama.cpp
+            // layout, sensenova_loop) at sensenova/SenseNova-Loop-9B-GGUF @ b489b15c; the official AWQ build has no reader and is not offered.
+            // Pending until the real-weight run is green.
+            new CatalogEntry
+            {
+                Id = "sensenova-loop-9b", Modality = txt, DisplayName = "SenseNova-Loop-9B (looped Qwen3.5 + mHC, text and image)",
+                Architecture = "Qwen3.5 Gated-DeltaNet + full-attn hybrid, layers 4-27 looped x2, two-stream mHC, YaRN (+Qwen3-VL vision)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "sensenova/SenseNova-Loop-9B-GGUF", RepoPath = "SenseNova-Loop-9B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/sensenova-loop-9b", Role = "transformer",
+                        Sha256 = "5528b06c41a92d0a2413e827ab08531be56b10f881606c6659361b5da507eeed" },
+                    new() { Repo = "sensenova/SenseNova-Loop-9B-GGUF", RepoPath = "mmproj-SenseNova-Loop-9B-F16.gguf",
+                        TargetSubdir = "LLM/sensenova-loop-9b", Role = "mmproj",
+                        Sha256 = "1bb6afd085020f555b3dca73b6d2139f3a7b28455228b0f07285d0f0ebc61481" },
+                },
+            },
+
             // Text / LLM — dense families. `hartsy text -m <id>` verified end-to-end 2026-07-22 (CLI catalog
             // pass) on the 3060 (--low-vram-quant) unless noted; see MODEL_STATUS_LLM.md for the exact
             // prompt/output per model and PARITY_VERIFICATION.md for the full session record.
