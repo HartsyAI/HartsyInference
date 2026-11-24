@@ -300,10 +300,11 @@ public sealed class VisionService : IVisionService, IDisposable
     private DepthPro2Prediction PredictDepthPro2(ModelSpec spec, IReadOnlyList<byte[]> images, int width, int height, double? focalLengthPx,
         CancellationToken cancel)
     {
+        DepthPro2Model.CheckSize(width, height);
         string path = RequirePath(spec, spec.Catalog?.Id ?? DepthPro2Variants.Small.Id);
         DepthPro2Model model = GetOrLoad(_depthPro2Cache, path, () => LoadDepthPro2(spec, path));
         DepthPro2FocalEstimator? estimator = focalLengthPx is null ? DepthPro2Focal(spec, path) : null;
-        return model.Predict(Backend, images, width, height, focalLengthPx, estimator, cancel);
+        return model.Predict(Backend, images, width, height, focalLengthPx, estimator, cancel, keepInverseDepth: false);
     }
 
     /// <summary>Loads a Depth Pro 2 depth checkpoint with the preset its own backbone width names.</summary>
@@ -357,7 +358,8 @@ public sealed class VisionService : IVisionService, IDisposable
         });
     }
 
-    /// <summary>True when <paramref name="spec"/> names a Depth Pro 2 catalog row or a checkpoint whose tensors are one.</summary>
+    /// <summary>True when <paramref name="spec"/> names a Depth Pro 2 catalog row or, with no catalog row, a checkpoint whose tensors are one. A
+    /// file under another model's row is that model's request and is not re-routed by its structure.</summary>
     private static bool IsDepthPro2(ModelSpec spec) =>
         spec.Catalog?.Id is { } id && DepthPro2Variants.Catalog.Find(id) is not null
         || spec.Catalog is null && spec.LocalPath is { } path && File.Exists(path) && DepthPro2Variants.IsDepthPro2(CheckpointProbe.Read(path));

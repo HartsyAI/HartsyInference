@@ -50,6 +50,18 @@ public sealed class DepthPro2PreprocessorTests
     }
 
     [Theory]
+    [InlineData(2048, 2048, true)]
+    [InlineData(4096, 1024, true)]
+    [InlineData(2049, 2048, false)]   // padded to 2080 x 2048: 16640 tokens
+    [InlineData(3840, 2160, false)]
+    public void CheckSize_CapsThePatchTokensOfOneImage(int width, int height, bool allowed)
+    {
+        Exception? error = Record.Exception(() => DepthPro2Model.CheckSize(width, height));
+        if (allowed) Assert.Null(error);
+        else Assert.Contains("Downscale", Assert.IsType<ArgumentException>(error).Message);
+    }
+
+    [Theory]
     [InlineData(0.0)]
     [InlineData(-5.0)]
     [InlineData(double.NaN)]

@@ -53,8 +53,9 @@ public sealed class DepthPro2ModelParityTests(ITestOutputHelper output)
         DepthPro2Model model = new(new DepthPro2Network(DepthPro2Preset.Small, loader.GetAllTensors()));
         using CpuBackend backend = new();
 
-        DepthPro2Prediction prediction = model.Predict(backend, [rgb], width, height, focal, focalEstimator: null);
+        DepthPro2Prediction prediction = model.Predict(backend, [rgb], width, height, focal, focalEstimator: null, keepInverseDepth: false);
 
+        Assert.Null(prediction.Maps[0].InverseDepth);
         Assert.False(prediction.FocalEstimated);
         Assert.Equal(focal, prediction.FocalLengthPx);
         CompareDepth("a (given f_px)", prediction.Maps[0], reference.Read("a_depth", out _));

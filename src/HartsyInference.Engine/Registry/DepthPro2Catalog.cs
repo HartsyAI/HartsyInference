@@ -3,7 +3,8 @@ namespace HartsyInference.Engine.Registry;
 /// <summary>
 /// The <c>depthpro2-s|b|l|h</c> rows: Apple's Depth Pro 2 metric depth (<c>apple-aiml-research/ml-depth-pro-2</c> at aa389cbb), one ungated F32 safetensors
 /// repo per size, each row also carrying the focal estimator (<c>apple/DepthPro2-focal</c>) it needs when the caller gives no focal length. The sizes are the
-/// variants of <see cref="Vision.DepthPro2Variants"/>; a row downloads only its own size and the estimator. The sha256 pins verify the bytes, since an asset
+/// variants of <see cref="Vision.DepthPro2Variants"/>; a row downloads only its own size and the estimator. The estimator is a required asset on purpose
+/// (<c>MissingAssets</c> and <c>hartsy pull</c> fetch it with the row): a request without a focal length, the default, needs it. The sha256 pins verify the bytes, since an asset
 /// cannot name a revision (S at 903a1c1ade918831d138adcc4aedbcc8f4da0078).
 /// <para>Licence: the weights ship under the "Apple Machine Learning Research Model License Agreement", use "exclusively for Research Purposes" (non-commercial
 /// research, excluding "any commercial exploitation, product development or use in any commercial product or service"); it is personal, non-transferable and

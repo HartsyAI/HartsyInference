@@ -2,11 +2,14 @@ using System.Text.Json;
 using HartsyInference.Cli.Commands;
 using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests;
 using Xunit;
 
 namespace HartsyInference.Cli.Tests;
@@ -28,6 +31,23 @@ public sealed class DepthPro2CliTests : IDisposable
     [InlineData("DepthPro2-H", "metric-depth")]
     [InlineData("depth-anything", "depth")]
     public void TheModelIdImpliesTheMode(string model, string mode) => Assert.Equal(mode, VisionCommand.InferMode(model));
+
+    [Fact]
+    public void AModelPathToADepthPro2FileIsFoundByItsTensors()
+    {
+        string depth = Path.Combine(_folder, "dp2.safetensors"), other = Path.Combine(_folder, "other.safetensors");
+        using (Tensor qkv = new(new TensorShape(3 * 384, 384), DType.F32))
+        using (Tensor head = new(new TensorShape(1, 32, 1, 1), DType.F32))
+        {
+            SafeTensorsWriter.Save(depth, new Dictionary<string, Tensor> { ["encoder.blocks.0.attn.qkv.weight"] = qkv, ["head.4.weight"] = head });
+            SafeTensorsWriter.Save(other, new Dictionary<string, Tensor> { ["trunk.blocks.0.attn.qkv.weight"] = qkv });
+        }
+
+        Assert.True(VisionCommand.IsDepthPro2File(depth));
+        Assert.False(VisionCommand.IsDepthPro2File(other));
+        Assert.False(VisionCommand.IsDepthPro2File(Path.Combine(_folder, "missing.safetensors")));
+        Assert.False(VisionCommand.IsDepthPro2File(null));
+    }
 
     [Fact]
     public void TheDepthPreviewDrawsInfiniteDepthAsTheFarEnd()

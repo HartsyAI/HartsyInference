@@ -1,9 +1,10 @@
 using Xunit;
 
-namespace HartsyInference.Cli.Tests;
+namespace HartsyInference.Tests;
 
 /// <summary>A <see cref="FactAttribute"/> that is reported as <i>skipped</i> (never passed) when any named environment variable is unset or does not point at
-/// an existing file. xunit 2.x has no runtime skip, so the skip is set at discovery, which is when xunit reads it.</summary>
+/// an existing file. xunit 2.x has no runtime skip, so the skip is set at discovery, which is when xunit reads it. Test projects link this file
+/// (<c>&lt;Compile Include="..\Shared\RealWeightsFactAttribute.cs" Link="Shared\RealWeightsFactAttribute.cs" /&gt;</c>) rather than copying it.</summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class RealWeightsFactAttribute : FactAttribute
 {

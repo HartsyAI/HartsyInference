@@ -55,6 +55,16 @@ public sealed class DepthPro2VisionServiceTests
     }
 
     [Fact]
+    public async Task AnImageOverTheTokenCapIsRefusedBeforeAnyLoad()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        ImageData uhd = new() { Rgb = new byte[3840 * 2160 * 3], Width = 3840, Height = 2160 };
+        ArgumentException ex = await Assert.ThrowsAsync<ArgumentException>(() =>
+            engine.Vision.RunAsync(Spec("depthpro2-s"), new VisionRequest { Image = uhd, Mode = VisionMode.MetricDepth }));
+        Assert.Contains("Downscale", ex.Message);
+    }
+
+    [Fact]
     public async Task ASingleImageWithoutTheCheckpointNamesTheRow()
     {
         using InferenceEngine engine = new InferenceEngine("cpu");
