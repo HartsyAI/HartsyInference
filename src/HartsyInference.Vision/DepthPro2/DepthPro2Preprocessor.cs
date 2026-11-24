@@ -30,6 +30,26 @@ public static class DepthPro2Preprocessor
         return pixels;
     }
 
+    /// <summary><see cref="Normalize"/> of every frame (RGB24, all <paramref name="width"/> × <paramref name="height"/>) stacked into a new F32
+    /// <c>[T, 3, H, W]</c> tensor the caller owns.</summary>
+    public static Tensor NormalizeFrames(IReadOnlyList<byte[]> frames, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        if (frames.Count == 0) throw new ArgumentException("Name at least one frame.", nameof(frames));
+        int size = 3 * width * height;
+        for (int t = 0; t < frames.Count; t++)
+            if (width <= 0 || height <= 0 || frames[t]?.Length != size)
+                throw new ArgumentException($"Frame {t} must carry {width}x{height}x3 RGB bytes.", nameof(frames));
+        Tensor stacked = new(new TensorShape(frames.Count, 3, height, width), DType.F32);
+        for (int t = 0; t < frames.Count; t++)
+        {
+            using Tensor one = Normalize(frames[t], width, height);
+            one.AsReadOnlySpan<float>().CopyTo(stacked.AsSpan<float>().Slice(t * size, size));
+        }
+
+        return stacked;
+    }
+
     /// <summary>
     /// Metric depth in metres along the optical axis, <c>f_px / (W · inverseDepth)</c> in float32 as upstream computes it, with <paramref name="width"/> the
     /// unpadded image width. Where the inverse depth is not above zero (sky, infinitely far) the depth is positive infinity, as upstream leaves it, and the
