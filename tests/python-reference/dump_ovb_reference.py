@@ -1,8 +1,8 @@
 """Dump a diffusers Flux2KleinPipeline reference for Open Vision Banana (and plain Klein edit), for C# parity.
 
-NOT RUN: there is no Linux Python on the development box, so this script has never executed. Run it on WSL or a
-user-started pod with torch, diffusers (record the exact version printed in meta.json; OVB's configs say 0.39.0),
-transformers, numpy and pillow, then compare with the C# Flux2EditPipeline (tests/HartsyInference.Diffusion.Tests).
+NOT RUN against real weights yet: that needs the OVB 4B checkpoint (15.5 GB) and a GPU, which have not been available. Its tiny-model
+counterpart, dump_flux2_edit_tiny.py, has run (CPU, diffusers 0.43.0) and is what the C# parity tests use. Needs torch, diffusers (record the
+version printed in meta.json; OVB's configs say 0.39.0), transformers, numpy and pillow, then compare with the C# Flux2EditPipeline.
 
 Saved inputs, not seeds: the initial latents are drawn once here and saved, so the C# side feeds the same noise
 (TextToImageRequest.InitialNoise, shape [1, 128, H/16, W/16]).

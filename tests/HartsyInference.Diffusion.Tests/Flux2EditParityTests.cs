@@ -64,7 +64,7 @@ public sealed class Flux2EditParityTests
         using Tensor refTokens = reference.GetTensor("ref_tokens");
         using Tensor cond = reference.GetTensor("cond");
         using Tensor packed = Flux2LatentOps.Pack(noise);
-        int grid = packed.Shape[1] > 0 ? (int)packed.Shape[1] : 0;
+        Assert.Equal(6, packed.Shape[1]);
 
         using Tensor both = Concat(backend, packed, refTokens);
         using Tensor velocity = transformer.ForwardWithReferences(backend, both, cond, 0.6f, 2, 3, [0f, 10f]);
@@ -76,7 +76,6 @@ public sealed class Flux2EditParityTests
         using Tensor aloneVelocity = transformer.ForwardWithReferences(backend, packed, cond, 0.6f, 2, 3, [0f]);
         using Tensor aloneExpected = reference.GetTensor("velocity_noref_sigma0p6");
         AssertRelRms("target-only velocity", aloneVelocity, aloneExpected, ForwardTolerance);
-        Assert.Equal(6, grid);
     }
 
     [Fact]

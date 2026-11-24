@@ -92,18 +92,22 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         bool guided = CfgHelper.IsGuidanceActive(request.CfgScale);
         if (guided && negative is null)
             throw new ArgumentException($"{Family} needs a negative prompt when CfgScale is {request.CfgScale} (above 1).", nameof(negative));
+        // Text first: the encoder cannot sit beside a resident transformer. The cache owns both tensors. A failure after the encode
+        // reclaims in EditFromTokens; one inside the encode reclaims here.
+        Tensor cond;
+        Tensor? uncond = null;
         try
         {
-            // Text first: the encoder cannot sit beside a resident transformer. The cache owns both tensors.
-            Tensor cond = EncodePrompt(prompt, CondSlot);
-            Tensor? uncond = guided ? EncodePrompt(negative!, UncondSlot) : null;
-            return EditEncoded(cond, uncond, references, request, onProgress);
+            cond = EncodePrompt(prompt, CondSlot);
+            if (guided)
+                uncond = EncodePrompt(negative!, UncondSlot);
         }
         catch
         {
             ReclaimAfterFailure();
             throw;
         }
+        return EditEncoded(cond, uncond, references, request, onProgress);
     }
 
     /// <summary><see cref="Edit"/> from already-encoded conditioning: <paramref name="cond"/> and
@@ -123,6 +127,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         int width = patW * factor, height = patH * factor;
         foreach (Tensor reference in references)
         {
+            ArgumentNullException.ThrowIfNull(reference, nameof(references));
             if (reference.Shape.Rank != 4 || reference.Shape[0] != 1 || reference.Shape[1] != 3
                 || reference.Shape[2] != height || reference.Shape[3] != width)
             {

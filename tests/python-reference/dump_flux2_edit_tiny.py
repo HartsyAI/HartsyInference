@@ -4,11 +4,10 @@ Builds a random tiny diffusers `Flux2Transformer2DModel` (hidden 32, 1 double + 
 names the Open Vision Banana release ships), runs it the way `Flux2KleinPipeline` does with one reference image
 (target ids T=0, reference ids T=10, shared timestep, CFG against a second prompt, FlowMatchEuler with the base repo's
 scheduler config and compute_empirical_mu), and saves the weights, inputs, per-call velocities, per-step latents and
-the sigma schedules. Run in the CPU reference container:
+the sigma schedules. Run in a CPU container with torch, safetensors and diffusers (`pip install 'diffusers>=0.37'`; the project's `hartsy-ref:cpu` image is local to
+the maintainers' machine, any equivalent works):
 
-    bash .claude/run-outputs/refenv/run.sh -v "<worktree>:/wt" -- sh -c \
-      "pip install -q --target /work/pylib 'diffusers>=0.37' && PYTHONPATH=/work/pylib python /wt/tests/python-reference/dump_flux2_edit_tiny.py \
-       --out /wt/tests/HartsyInference.Diffusion.Tests/Fixtures/flux2_edit_tiny"
+    python tests/python-reference/dump_flux2_edit_tiny.py --out tests/HartsyInference.Diffusion.Tests/Fixtures/flux2_edit_tiny
 
 Everything is float32 on CPU. meta.json records the torch and diffusers versions used.
 """
