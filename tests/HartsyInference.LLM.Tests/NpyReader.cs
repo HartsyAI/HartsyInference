@@ -42,6 +42,15 @@ internal static class NpyReader
         return (shape, data);
     }
 
+    /// <summary>Reads a little-endian int32 <c>.npy</c> (<c>&lt;i4</c>, C order).</summary>
+    public static (long[] Shape, int[] Data) ReadInt32(string path)
+    {
+        (long[] shape, byte[] raw) = ReadRaw(path, "'<i4'");
+        int[] data = new int[raw.Length / sizeof(int)];
+        Buffer.BlockCopy(raw, 0, data, 0, raw.Length);
+        return (shape, data);
+    }
+
     private static (long[] Shape, byte[] Data) ReadRaw(string path, string descr)
     {
         byte[] bytes = File.ReadAllBytes(path);
@@ -50,7 +59,7 @@ internal static class NpyReader
         string header = Encoding.ASCII.GetString(bytes, 10, headerLength);
         Assert.Contains(descr, header);
         Assert.Contains("'fortran_order': False", header);
-        Match shapeMatch = Regex.Match(header, @"'shape':\s*\(([^)]*)\)");
+        Match shapeMatch = Regex.Match(header, @"'shape':s*(([^)]*))");
         long[] shape = shapeMatch.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(long.Parse).ToArray();
         return (shape, bytes[dataOffset..]);
     }
