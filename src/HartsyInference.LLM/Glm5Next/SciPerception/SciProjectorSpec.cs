@@ -55,7 +55,9 @@ public sealed record SciProjectorSpec
             throw new InvalidDataException("Projector option 'block_exit_norm' is not supported.");
         int classes = IntOr(p, "readout_classes", 0);
         if (classes > 1) throw new InvalidDataException("Only per-row binary readouts (readout_classes 1) are supported.");
-        if (classes == 1 && p.TryGetProperty("readout_uses_side", out JsonElement u) && u.ValueKind == JsonValueKind.True)
+        // Upstream defaults readout_uses_side to true, so an absent key reads the side measurements too.
+        bool readoutUsesSide = !p.TryGetProperty("readout_uses_side", out JsonElement u) || u.ValueKind != JsonValueKind.False;
+        if (classes == 1 && readoutUsesSide && IntOr(p, "side_dim", 0) > 0)
             throw new InvalidDataException("A readout that reads the side measurements is not supported.");
         List<int> sizes = [];
         if (p.TryGetProperty("discrete_sizes", out JsonElement ds) && ds.ValueKind == JsonValueKind.Array)
