@@ -465,7 +465,30 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// <c>start + max(T, H, W)</c> of the image grid, which is below the number of rows consumed. Set by the multimodal generator after its
     /// prefill, so single-token decode rotates by the right position; <see cref="ResetState"/> zeroes it. Ignored by graph decode, which a
     /// multimodal generator does not use.</summary>
-    public int RopePositionOffset { get; set; }
+    public int RopePositionOffset { get; internal set; }
+
+    /// <summary>Cos/sin rows of tokens <c>[first, first + count)</c> of multimodal positions (axis-major <c>[3 · tokens]</c>, see
+    /// <see cref="MRopePositions"/>), with this model's M-RoPE sections, interleaving and RoPE scaling. Every caller of multimodal rows goes
+    /// through here, so an image prompt and a text encode rotate the same way.</summary>
+    public (Tensor Cos, Tensor Sin) BuildMultimodalRope(ReadOnlySpan<int> positions, int tokens, int first, int count)
+    {
+        int rotaryDim = RotaryDim;
+        byte[] pairAxes = MRopePairAxes.Build([.. MropeSection], rotaryDim / 2, MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+        int maxPosition = 0;
+        foreach (int p in positions) maxPosition = Math.Max(maxPosition, p);
+        (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(rotaryDim, RopeTheta, _ropeScaling, maxPosition + 1);
+        return MRopeTable.BuildTensors(positions, tokens, first, count, invFreq, scaling, pairAxes, AttnHeadDim, rotaryDim);
+    }
+
+    /// <summary><see cref="ForwardEmbedsLastLogits(IBackend, Tensor, int, Tensor, Tensor)"/> and then sets <see cref="RopePositionOffset"/> so that
+    /// single-token decode continues at <paramref name="nextRopePosition"/> (the position a following token takes, from
+    /// <see cref="MRopePositions.Build"/>) rather than at the sequence index.</summary>
+    public float[] ForwardEmbedsLastLogits(IBackend backend, Tensor embeds, int seq, Tensor ropeCos, Tensor ropeSin, int nextRopePosition)
+    {
+        float[] logits = ForwardEmbedsLastLogits(backend, embeds, seq, ropeCos, ropeSin);
+        RopePositionOffset = nextRopePosition - seq;
+        return logits;
+    }
 
     private Tensor RunTrunk(IBackend backend, Tensor h, int seq, Tensor? ropeCos = null, Tensor? ropeSin = null)
     {

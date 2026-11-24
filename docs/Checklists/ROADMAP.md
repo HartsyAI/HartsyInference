@@ -178,6 +178,8 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 
 ## 12. Cleanup follow-ups
 
+- [ ] Plain `qwen35` / `qwen35moe` GGUFs whose value heads may be stored tiled (converter-version dependent, 9B-class and Clef): decide the detection signal, then un-tile at load or refuse. Until then the output is suspected wrong for those files (TROUBLESHOOTING).
+- [ ] Qwen3.5-VL image input squashes every image to the tower's fixed 768x768 (576 merged tokens) where transformers resizes by aspect ratio; add aspect-ratio grids (the encoder returns its own H and W) before real image use.
 - [ ] Re-run analyzer diagnostics before acting on the historical snapshot; judge config/API mirrors individually.
 - [ ] LtGemmExecutor consolidation only after Fp4 block-scale attributes are supported.
 - [ ] Vulkan spec/push-constant builders only if parameterization improves the actual differing contracts.

@@ -36,6 +36,8 @@ public sealed unsafe class Qwen35MultimodalRopeTests
         model.EmbedLookup(embeds, ids);
         int rotaryDim = model.RotaryDim;
         byte[] pairAxes = MRopePairAxes.Build([.. model.MropeSection], rotaryDim / 2, model.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+        // The frequencies are built with a length of 64 here, and the decode path builds them per position (posStart + t). YaRN's table does
+        // not depend on the length, so both agree; under dynamic scaling they would not, and this test would need the same length on both sides.
         (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(rotaryDim, model.RopeTheta, model.RopeScaling, 64);
 
         // One pass over all seven rows.
@@ -51,10 +53,10 @@ public sealed unsafe class Qwen35MultimodalRopeTests
         using Tensor prefix = new(new TensorShape(1, 6, model.DModel), DType.F32);
         new ReadOnlySpan<float>((void*)embeds.DataPointer, 6 * model.DModel).CopyTo(prefix.AsSpan<float>());
         model.ResetState();
-        model.ForwardEmbedsLastLogits(backend, prefix, 6, cosPre, sinPre);
+        model.ForwardEmbedsLastLogits(backend, prefix, 6, cosPre, sinPre, nextAfterPrefix);
         cosPre.Dispose();
         sinPre.Dispose();
-        model.RopePositionOffset = nextAfterPrefix - 6;
+        Assert.Equal(nextAfterPrefix - 6, model.RopePositionOffset);
         float[] got = model.ForwardLastLogits(backend, [ids[6]]);
         Assert.True(RelRms(want, got) < 1e-5, $"decode after an image vs one pass: relRMS {RelRms(want, got)}");
 

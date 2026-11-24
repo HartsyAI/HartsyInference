@@ -73,19 +73,12 @@ public sealed class Qwen35VlGenerator
             int[] layout = new int[seqLen];
             for (int i = 0; i < seqLen; i++) layout[i] = i >= pre.Length && i < pre.Length + imgTokens ? placeholder : 0;
             int[] positions = MRopePositions.Build(layout, placeholder, [new MRopeImageGrid(1, side, side)], out int nextPosition);
-            int rotaryDim = _model.RotaryDim;
-            byte[] pairAxes = MRopePairAxes.Build([.. _model.MropeSection], rotaryDim / 2,
-                _model.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
-            int maxPosition = 0;
-            foreach (int p in positions) maxPosition = Math.Max(maxPosition, p);
-            (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(rotaryDim, _model.RopeTheta, _model.RopeScaling, maxPosition + 1);
-            (Tensor cos, Tensor sin) = MRopeTable.BuildTensors(positions, seqLen, 0, seqLen, invFreq, scaling, pairAxes, _model.AttnHeadDim, rotaryDim);
+            (Tensor cos, Tensor sin) = _model.BuildMultimodalRope(positions, seqLen, 0, seqLen);
             using (cos)
             using (sin)
             {
-                logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen, cos, sin);
+                logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen, cos, sin, nextPosition);
             }
-            _model.RopePositionOffset = nextPosition - seqLen;
         }
         int token = sampler.Next(new Span<float>(logits), history);
 
