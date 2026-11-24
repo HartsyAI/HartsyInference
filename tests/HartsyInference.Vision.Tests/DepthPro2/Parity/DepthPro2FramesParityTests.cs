@@ -8,11 +8,11 @@ using Xunit.Abstractions;
 namespace HartsyInference.Vision.Tests.DepthPro2.Parity;
 
 /// <summary>
-/// Depth Pro 2 S cross-frame attention and video on CPU F32 against <c>tests/python-reference/dump_depth_pro2_frames.py</c> (official ml-depth-pro-2 at
-/// aa389cbb, timm 1.0.27, fp32): a T = 3 joint forward block by block and through <c>infer</c>, buffered <c>infer_video</c> (window 4, overlap 2) on 6, 7 and 3
-/// frames, and unbuffered <c>infer_video</c> with a 16-frame cache (partial caches only) and a 3-frame cache (the ring wraps) on 6 frames. The frames are
-/// 100 x 150 (replicate-padded to 128 x 160). Needs <c>HARTSY_DEPTHPRO2_WEIGHTS</c>, <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> and
-/// <c>HARTSY_DEPTHPRO2_FRAMES_REF</c> (the dump's <c>meta.json</c>); otherwise reported as skipped.
+/// Depth Pro 2 S cross-frame attention and video on CPU F32 against <c>tests/python-reference/dump_depth_pro2_frames.py</c> (official
+/// ml-depth-pro-2 at aa389cbb, timm 1.0.27, fp32): a T = 3 joint forward block by block and through <c>infer</c>, buffered <c>infer_video</c>
+/// (window 4, overlap 2) on 6, 7 and 3 frames, and unbuffered <c>infer_video</c> with a 16-frame cache (partial caches only) and a 3-frame cache
+/// (the ring wraps) on 6 frames. The frames are 100 x 150 (replicate-padded to 128 x 160). Needs <c>HARTSY_DEPTHPRO2_WEIGHTS</c>,
+/// <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> and <c>HARTSY_DEPTHPRO2_FRAMES_REF</c> (the dump's <c>meta.json</c>); otherwise reported as skipped.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class DepthPro2FramesParityTests(ITestOutputHelper output)
@@ -82,6 +82,9 @@ public sealed class DepthPro2FramesParityTests(ITestOutputHelper output)
     public void Buffered_MatchesInferVideo_ShorterThanOneWindow() => RunVideo("buffered3", 3, 4, 2, DepthPro2VideoMode.Buffered);
 
     [RealWeightsFact(WeightsVariable, FocalVariable, ReferenceVariable)]
+    public void Buffered_MatchesInferVideo_NoOverlapShortTailClip() => RunVideo("buffered6k0", 6, 4, 0, DepthPro2VideoMode.Buffered);
+
+    [RealWeightsFact(WeightsVariable, FocalVariable, ReferenceVariable)]
     public void Unbuffered_MatchesInferVideo_PartialCaches() => RunVideo("unbuffered16", 6, 16, 0, DepthPro2VideoMode.Unbuffered);
 
     [RealWeightsFact(WeightsVariable, FocalVariable, ReferenceVariable)]
@@ -112,6 +115,8 @@ public sealed class DepthPro2FramesParityTests(ITestOutputHelper output)
             IReadOnlyList<DepthPro2Map> rest = stream.Flush();
             emits.Add("flush " + rest.Count.ToString(System.Globalization.CultureInfo.InvariantCulture));
             maps.AddRange(rest);
+            Assert.Throws<InvalidOperationException>(() => stream.Step(frames[0]));
+            Assert.Throws<InvalidOperationException>(() => stream.Flush());
         }
 
         output.WriteLine($"{name}: maps per step {string.Join(", ", emits)}");

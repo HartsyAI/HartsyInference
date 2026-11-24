@@ -4,17 +4,22 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Vision.DepthPro2;
 
 /// <summary>
-/// Depth Pro 2 metric depth (upstream <c>DepthPro2.infer</c>) for one image or several views of one scene taken with one camera: the images are normalised at
-/// their native size (<see cref="DepthPro2Preprocessor"/>) and run through <see cref="DepthPro2Network"/> as one clip, so the views attend to each other in the
-/// cross-frame blocks (an unordered set: the result does not depend on their order), and the depth in metres is <c>f_px / (W · inverseDepth)</c>. The focal
-/// length is the caller's when given, else the lower median of <see cref="DepthPro2FocalEstimator"/>'s angles over the images, so every view shares one focal
-/// length as upstream's clips do. Video runs through <see cref="DepthPro2VideoStream"/>.
+/// Depth Pro 2 metric depth (upstream <c>DepthPro2.infer</c>) for one image or several views of one scene taken with one camera: the images are
+/// normalised at their native size (<see cref="DepthPro2Preprocessor"/>) and run through <see cref="DepthPro2Network"/> as one clip, so the views
+/// attend to each other in the cross-frame blocks (an unordered set: the result does not depend on their order), and the depth in metres is
+/// <c>f_px / (W · inverseDepth)</c>. The focal length is the caller's when given, else the lower median of
+/// <see cref="DepthPro2FocalEstimator"/>'s angles over the images, so every view shares one focal length as upstream's clips do. Video runs
+/// through <see cref="DepthPro2VideoStream"/>.
 /// </summary>
 public sealed class DepthPro2Model
 {
     /// <summary>The most patch tokens (16 × 16 pixels each, after padding to 32) one image may have: 2048 × 2048. The network runs at the image's own size
     /// with global attention over every token, so a larger image is refused rather than left to exhaust memory deep inside attention.</summary>
     public const int MaxPatchTokens = 16384;
+
+    /// <summary>The most frames or views run as one joint set: upstream's training clip length. Cross-frame attention cost grows with the
+    /// square of the joint token count, so longer sets are refused rather than run.</summary>
+    public const int MaxJointFrames = 16;
 
     private readonly DepthPro2Network _network;
 
@@ -38,6 +43,8 @@ public sealed class DepthPro2Model
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(images);
         if (images.Count == 0) throw new ArgumentException("Name at least one image.", nameof(images));
+        if (images.Count > MaxJointFrames)
+            throw new ArgumentException($"At most {MaxJointFrames} views run together; got {images.Count}.", nameof(images));
         CheckSize(width, height);
         CheckFocal(focalLengthPx, focalEstimator);
 

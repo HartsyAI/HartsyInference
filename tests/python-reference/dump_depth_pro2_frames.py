@@ -6,7 +6,8 @@ float32 with its shape in meta.json:
 - joint:     a T = 3 clip through ``infer`` (one joint forward), with every block's output of the unrolled encoder, the inverse depth,
              the estimated focal length and the metric depth.
 - buffered:  ``infer_video`` with window 4 and overlap 2 on 6 frames (two clips, one cross-fade), on 7 frames (the flush pulls the last
-             clip back over frames already returned) and on 3 frames (shorter than one window).
+             clip back over frames already returned) and on 3 frames (shorter than one window); window 4 with no overlap on 6
+             frames (the flush runs the last 2 frames as a short clip of their own).
 - unbuffered: ``infer_video(mode="unbuffered")`` with window 16 on 6 frames (partial caches only) and window 3 on 6 frames (the ring
              wraps and overwrites its oldest slot).
 
@@ -109,6 +110,7 @@ def main() -> None:
     video("buffered6", 6, 4, 2, "buffered")
     video("buffered7", 7, 4, 2, "buffered")
     video("buffered3", 3, 4, 2, "buffered")
+    video("buffered6k0", 6, 4, 0, "buffered")
     video("unbuffered16", 6, 16, 0, "unbuffered")
     video("unbuffered3", 6, 3, 0, "unbuffered")
 

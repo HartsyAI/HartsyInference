@@ -107,10 +107,11 @@ public sealed unsafe class Dinov3VisionEncoder
     }
 
     /// <summary>
-    /// <see cref="EncodeIntermediates(IBackend, Tensor, ReadOnlySpan{int})"/> over the frames of one clip or the views of one scene, <c>[T, 3, H, W]</c>: the
-    /// blocks in <paramref name="crossFrameBlocks"/> run every frame as one sequence (<see cref="CrossFrameTokens"/>), each frame keeping its prefix tokens,
-    /// and the others run each frame on its own. With a <paramref name="ring"/> the input is one frame (<c>T = 1</c>) whose patches in the cross-frame blocks
-    /// attend to the frames the ring holds as well (<see cref="CrossFrameKvRing"/>). Taps are <c>[T, prefix + patches, hidden]</c>; the caller owns them.
+    /// <see cref="EncodeIntermediates(IBackend, Tensor, ReadOnlySpan{int})"/> over the frames of one clip or the views of one scene,
+    /// <c>[T, 3, H, W]</c>: the blocks in <paramref name="crossFrameBlocks"/> run every frame as one sequence (<see cref="CrossFrameTokens"/>),
+    /// each frame keeping its prefix tokens, and the others run each frame on its own. With a <paramref name="ring"/> the input is one frame
+    /// (<c>T = 1</c>) whose patches in the cross-frame blocks attend to the frames the ring holds as well (<see cref="CrossFrameKvRing"/>).
+    /// Taps are <c>[T, prefix + patches, hidden]</c>; the caller owns them.
     /// </summary>
     public Tensor[] EncodeFrameIntermediates(IBackend backend, Tensor frames, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> crossFrameBlocks,
         CrossFrameKvRing? ring = null)
@@ -149,7 +150,8 @@ public sealed unsafe class Dinov3VisionEncoder
         Tensor?[] taps = new Tensor?[_layers.Length];
         try
         {
-            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks, crossFrameBlocks, ring);   // the last block is tapped
+            // The last block run is always tapped, so every kept tensor is in taps.
+            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks, crossFrameBlocks, ring);
             System.Diagnostics.Debug.Assert(ReferenceEquals(final, taps[last]), "the last block run must be a tapped block");
             Tensor[] result = new Tensor[blockIndices.Length];
             for (int i = 0; i < result.Length; i++)
@@ -229,29 +231,38 @@ public sealed unsafe class Dinov3VisionEncoder
         src[..(prefix * hidden)].CopyTo(prefixRows.AsSpan<float>());
         src[(prefix * hidden)..].CopyTo(patchRows.AsSpan<float>());
 
-        (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, rope.Cos, rope.Sin);
         int live;
+        Tensor? qMh = null, keys = null, values = null;
         try
         {
-            using Tensor pooled = ring.UpdatePrefix(block, prefixRows);
-            (Tensor pq, Tensor pk, Tensor pv) = layer.ProjectAttention(backend, pooled, null, null);
-            pq.Dispose();
-            using (pk)
-            using (pv)
-                live = ring.Update(block, k, v, pk, pv);
+            (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, rope.Cos, rope.Sin);
+            using (q)
+            using (k)
+            using (v)
+            {
+                using Tensor pooled = ring.UpdatePrefix(block, prefixRows);
+                (Tensor pq, Tensor pk, Tensor pv) = layer.ProjectAttention(backend, pooled, null, null);
+                pq.Dispose();
+                using (pk)
+                using (pv)
+                    live = ring.Update(block, k, v, pk, pv);
+                qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
+                backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
+            }
+
+            // Exact-length copies of the live rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
+            keys = LiveRows(ring.Keys(block), live);
+            values = LiveRows(ring.Values(block), live);
         }
-        finally
+        catch
         {
-            k.Dispose();
-            v.Dispose();
+            qMh?.Dispose();
+            keys?.Dispose();
+            values?.Dispose();
+            throw;
         }
 
         AttentionLayer attention = layer.Attention;
-        Tensor qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
-        backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
-        q.Dispose();
-        // The live rows as exact-length operands take the dense attention entry, which is much faster on the CPU than the cache-view (flash) entry.
-        Tensor keys = LiveRows(ring.Keys(block), live), values = LiveRows(ring.Values(block), live);
         Tensor attended = attention.AttendHeadMajorOperands(backend, qMh, keys, values, default);
         Tensor flat = attention.MergeHeads(backend, attended, new TensorShape(1, patches, hidden));
         using Tensor patchOut = layer.FinishAttention(backend, patchRows, flat);
@@ -274,14 +285,15 @@ public sealed unsafe class Dinov3VisionEncoder
         return live;
     }
 
-    // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero frames the patch rows
-    // alone, which a cached frame's patches take.
+    // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero
+    // frames the patch rows alone, which a cached frame's patches take.
     private sealed class CrossFrameRope : IDisposable
     {
         public CrossFrameRope(Dinov3VisionEncoder encoder, int frames, int prefix, int gridH, int gridW)
         {
             Dinov2Preset preset = encoder._preset;
-            (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(1, 0, gridH, gridW, HeadDim, preset.RoundRopePeriodsToBf16, preset.RopeNormalizesByLongSide);
+            (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(1, 0, gridH, gridW, HeadDim, preset.RoundRopePeriodsToBf16,
+                preset.RopeNormalizesByLongSide);
             if (frames == 0)
             {
                 (Cos, Sin) = (cos, sin);

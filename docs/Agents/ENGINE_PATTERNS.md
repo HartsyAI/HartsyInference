@@ -143,7 +143,7 @@ sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a fil
   - Each model then refuses what it cannot do itself, for example a single-view depth model given views.
   - `FocalLengthPx` applies to `MetricDepth` only. The focal length the model used, given or estimated, comes back in
     `VisionResult.Camera`. Depth Pro 2 views run as one unordered set through its cross-frame attention and share one
-    focal length.
+    focal length; it takes at most 16 views, and a frame window of at most 16.
   - `FrameWindow`, `FrameOverlap` and `FrameBuffering` apply to `MetricDepth` frames only. Overlap is below the window
     and buffered only. A video without a given focal length keeps the estimate over its first window.
 - **Results.** Structured fields on `VisionResult` are init-only and nullable; existing fields keep their meaning.

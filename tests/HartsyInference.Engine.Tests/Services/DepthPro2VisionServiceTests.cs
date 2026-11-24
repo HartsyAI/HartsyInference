@@ -104,6 +104,49 @@ public sealed class DepthPro2VisionServiceTests
         // The default window is 16, so an overlap of 16 passes the validator (which knows no model default) and is refused by the model.
         Assert.Contains("below the frame window", Assert.Throws<ArgumentException>(() =>
             engine.Vision.RunFramesAsync(Spec("depthpro2-s"), frames with { FrameOverlap = 16 })).Message);
+        Assert.Contains("at most 16 frames", Assert.Throws<ArgumentException>(() =>
+            engine.Vision.RunFramesAsync(Spec("depthpro2-s"), frames with { FrameWindow = 17 })).Message);
+    }
+
+    [Fact]
+    public void AMissingFocalEstimatorIsRefusedBeforeTheStreamStarts()
+    {
+        string depth = Path.GetTempFileName();
+        try
+        {
+            using InferenceEngine engine = new InferenceEngine("cpu");
+            ModelSpec spec = Spec("depthpro2-s") with
+            {
+                LocalPath = depth,
+                Aux = new Dictionary<string, string>
+                {
+                    [VisionService.DepthPro2FocalAuxKey] = Path.Combine(Path.GetTempPath(), "no-such-focal.safetensors"),
+                },
+            };
+            VisionBatchRequest frames = new()
+            {
+                Images = [Image(), Image()], Mode = VisionMode.MetricDepth, Kind = VisionSequenceKind.Frames, Fps = 10,
+            };
+
+            Assert.Contains("focal estimator", Assert.Throws<FileNotFoundException>(() => engine.Vision.RunFramesAsync(spec, frames)).Message);
+        }
+        finally
+        {
+            File.Delete(depth);
+        }
+    }
+
+    [Fact]
+    public async Task MoreViewsThanOneJointSetHoldsAreRefusedByName()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        VisionBatchRequest views = new()
+        {
+            Images = [.. Enumerable.Range(0, 17).Select(_ => Image())], Mode = VisionMode.MetricDepth, Kind = VisionSequenceKind.Views,
+        };
+
+        ArgumentException ex = await Assert.ThrowsAsync<ArgumentException>(() => engine.Vision.RunViewsAsync(Spec("depthpro2-s"), views));
+        Assert.Contains("at most 16 views", ex.Message);
     }
 
     [Fact]

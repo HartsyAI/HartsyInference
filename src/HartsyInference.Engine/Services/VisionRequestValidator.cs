@@ -14,8 +14,8 @@ namespace HartsyInference.Engine.Services;
 /// <item><term>Interpolate</term><description><see cref="VisionBatchRequest"/> with <see cref="VisionSequenceKind.Frames"/>, at least 2 frames, timestamps or fps, exactly one of factor or target fps; no prompts.</description></item>
 /// <item><term>MetricDepth</term><description>also <see cref="VisionBatchRequest"/> with <see cref="VisionSequenceKind.Frames"/>, timestamps or fps, no prompts; optional frame window (1 to <see cref="MaxFrameWindow"/>), overlap (0 to window - 1, buffered only) and buffering.</description></item>
 /// </list>
-/// A focal length in pixels applies to MetricDepth only and must be a positive finite number. The frame window, overlap and buffering apply to MetricDepth
-/// frames only.
+/// A focal length in pixels applies to MetricDepth only and must be a positive finite number. The frame window, overlap and buffering apply
+/// to MetricDepth frames only.
 /// </remarks>
 public static class VisionRequestValidator
 {
@@ -43,7 +43,8 @@ public static class VisionRequestValidator
     /// <summary>True when <paramref name="mode"/> only accepts a frame sequence.</summary>
     public static bool IsSequenceOnly(VisionMode mode) => SequenceOnlyModes.Contains(mode);
 
-    /// <summary>True when <paramref name="mode"/> may take the frames of a video (<see cref="IsSequenceOnly"/> modes and video metric depth).</summary>
+    /// <summary>True when <paramref name="mode"/> may take the frames of a video (<see cref="IsSequenceOnly"/> modes and video metric
+    /// depth).</summary>
     public static bool AcceptsFrames(VisionMode mode) => FrameModes.Contains(mode);
 
     /// <summary>True when <paramref name="mode"/> may take several views of one scene.</summary>
@@ -104,8 +105,8 @@ public static class VisionRequestValidator
             throw new ArgumentException($"Unknown sequence kind {(int)request.Kind}.");
         if (!AcceptsFrames(request.Mode))
         {
-            throw new ArgumentException(
-                $"{request.Mode} does not take a frame sequence: send each frame as a VisionRequest. Frames are for Track, Interpolate and MetricDepth.");
+            throw new ArgumentException($"{request.Mode} does not take a frame sequence: send each frame as a VisionRequest. "
+                + "Frames are for Track, Interpolate and MetricDepth.");
         }
         if (images.Count > MaxFrames)
             throw new ArgumentException($"{images.Count} frames is over the limit of {MaxFrames}.");
@@ -124,7 +125,10 @@ public static class VisionRequestValidator
         if (request.FrameWindow is null && request.FrameOverlap is null && request.FrameBuffering is null)
             return;
         if (request.Mode != VisionMode.MetricDepth || request.Kind != VisionSequenceKind.Frames)
-            throw new ArgumentException($"A frame window, overlap or buffering only applies to MetricDepth frames, not {request.Mode} {request.Kind.ToString().ToLowerInvariant()}.");
+        {
+            throw new ArgumentException(
+                $"A frame window, overlap or buffering only applies to MetricDepth frames, not {request.Mode} {request.Kind}.");
+        }
         if (request.FrameBuffering is { } buffering && !Enum.IsDefined(buffering))
             throw new ArgumentException($"Unknown frame buffering {(int)buffering}.");
         if (request.FrameWindow is { } window && (window < 1 || window > MaxFrameWindow))
@@ -133,8 +137,8 @@ public static class VisionRequestValidator
             return;
         if (request.FrameBuffering == VisionFrameBuffering.Unbuffered)
             throw new ArgumentException("Unbuffered frames do not overlap: FrameOverlap only applies to buffered frames.");
-        if (overlap < 0 || request.FrameWindow is { } w && overlap >= w)
-            throw new ArgumentException($"FrameOverlap must be from 0 to below the frame window; got {overlap} with a window of {request.FrameWindow}.");
+        if (overlap < 0 || overlap >= (request.FrameWindow ?? int.MaxValue))
+            throw new ArgumentException($"FrameOverlap must be from 0 to below the frame window ({request.FrameWindow}); got {overlap}.");
     }
 
     private static void ValidateViews(VisionBatchRequest request, int count)

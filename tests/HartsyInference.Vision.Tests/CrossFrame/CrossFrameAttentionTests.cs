@@ -1,4 +1,4 @@
-﻿using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.CrossFrame;
 using HartsyInference.Vision.DepthPro2;
@@ -8,9 +8,9 @@ using HartsyInference.Vision.Dinov3;
 namespace HartsyInference.Vision.Tests.CrossFrame;
 
 /// <summary>
-/// Cross-frame attention on a tiny random DINOv3 (64 wide, one head, three blocks, the middle and last attending across frames): the frame order does not
-/// matter, the frames do see each other, one frame alone is the per-frame path bit for bit, and the unbuffered ring's first frame (and every frame of a
-/// one-frame ring) is that frame alone.
+/// Cross-frame attention on a tiny random DINOv3 (64 wide, one head, three blocks, the middle and last attending across frames): the frame order
+/// does not matter, the frames do see each other, one frame alone is the per-frame path bit for bit, and the unbuffered ring's first frame (and
+/// every frame of a one-frame ring) is that frame alone.
 /// </summary>
 public sealed class CrossFrameAttentionTests : IDisposable
 {

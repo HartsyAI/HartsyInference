@@ -117,26 +117,38 @@ public sealed class VisionService : IVisionService, IDisposable
         CheckBatch(request, VisionSequenceKind.Views);
         if (request.Mode != VisionMode.MetricDepth || !IsDepthPro2(spec))
             throw NoModelFor(request.Mode, spec, "multi-view ");
+        if (request.Images.Count > DepthPro2Model.MaxJointFrames)
+        {
+            throw new ArgumentException($"Depth Pro 2 attends at most {DepthPro2Model.MaxJointFrames} views together; got {request.Images.Count}. "
+                + "Send fewer views, or the frames of a video with an fps.");
+        }
         return Task.Run(() => MetricDepthViews(spec, request, cancel), cancel);
     }
 
     /// <inheritdoc/>
-    /// <remarks>Depth Pro 2 MetricDepth is the one frame model in this build (no tracking or interpolation model yet). A model's stream runs through
-    /// <see cref="VisionFrameStream"/> so its buffering, cancellation and cleanup follow one contract. Refusals (mode, model, options, a missing checkpoint)
-    /// throw here, before the stream starts.</remarks>
+    /// <remarks>Depth Pro 2 MetricDepth is the one frame model in this build (no tracking or interpolation model yet). A model's stream runs
+    /// through <see cref="VisionFrameStream"/> so its buffering, cancellation and cleanup follow one contract. Refusals of the request (mode, model,
+    /// options, a missing depth checkpoint or focal estimator) throw here, before the stream starts; a file that fails to load ends the stream with
+    /// its error.</remarks>
     public IAsyncEnumerable<VisionFrameResult> RunFramesAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(spec);
         CheckBatch(request, VisionSequenceKind.Frames);
         if (request.Mode != VisionMode.MetricDepth || !IsDepthPro2(spec))
             throw NoModelFor(request.Mode, spec);
-        DepthPro2VideoMode mode = request.FrameBuffering == VisionFrameBuffering.Unbuffered ? DepthPro2VideoMode.Unbuffered : DepthPro2VideoMode.Buffered;
+        DepthPro2VideoMode mode = request.FrameBuffering == VisionFrameBuffering.Unbuffered
+            ? DepthPro2VideoMode.Unbuffered : DepthPro2VideoMode.Buffered;
         int window = request.FrameWindow ?? DepthPro2VideoStream.DefaultWindow;
-        int overlap = mode == DepthPro2VideoMode.Unbuffered ? 0 : request.FrameOverlap ?? Math.Min(DepthPro2VideoStream.DefaultOverlap, window - 1);
+        int overlap = mode == DepthPro2VideoMode.Unbuffered ? 0
+            : request.FrameOverlap ?? Math.Min(DepthPro2VideoStream.DefaultOverlap, window - 1);
+        if (window > DepthPro2Model.MaxJointFrames)
+            throw new ArgumentException($"Depth Pro 2 attends at most {DepthPro2Model.MaxJointFrames} frames together; got a window of {window}.");
         if (overlap >= window)
             throw new ArgumentException($"FrameOverlap {overlap} must be below the frame window of {window}.");
         string path = RequirePath(spec, spec.Catalog?.Id ?? DepthPro2Variants.Small.Id);
-        // The first emit needs a full window of predictions, so the consumer must be able to hold that many.
+        if (request.FocalLengthPx is null)
+            DepthPro2FocalPath(spec, path);
+        // A buffered clip finishes up to a window of frames at once; this capacity hands them all off without blocking the producer.
         return VisionFrameStream.Run(
             (writer, ct) => MetricDepthFramesAsync(spec, path, request, window, overlap, mode, writer, ct), state: null,
             capacity: Math.Max(VisionFrameStream.DefaultCapacity, window), cancel);
@@ -308,10 +320,10 @@ public sealed class VisionService : IVisionService, IDisposable
         return new VisionResult { Views = [.. prediction.Maps.Select(map => MetricDepthResult(prediction, map))] };
     }
 
-    /// <summary>Depth Pro 2 over the frames of a video (upstream <c>infer_video</c>): one result per frame in order, written as each is finished. Without a
-    /// given focal length, the estimate over the first window is kept for every frame.</summary>
-    private async Task MetricDepthFramesAsync(ModelSpec spec, string path, VisionBatchRequest request, int window, int overlap, DepthPro2VideoMode mode,
-        ChannelWriter<VisionFrameResult> writer, CancellationToken cancel)
+    /// <summary>Depth Pro 2 over the frames of a video (upstream <c>infer_video</c>): one result per frame in order, written as each is
+    /// finished. Without a given focal length, the estimate over the first window is kept for every frame.</summary>
+    private async Task MetricDepthFramesAsync(ModelSpec spec, string path, VisionBatchRequest request, int window, int overlap,
+        DepthPro2VideoMode mode, ChannelWriter<VisionFrameResult> writer, CancellationToken cancel)
     {
         DepthPro2Model model = GetOrLoad(_depthPro2Cache, path, () => LoadDepthPro2(spec, path));
         int width = request.Images[0].Width, height = request.Images[0].Height;
@@ -333,7 +345,8 @@ public sealed class VisionService : IVisionService, IDisposable
             await writer.WriteAsync(FrameResult(request, index++, map, focal, width, height), cancel).ConfigureAwait(false);
     }
 
-    private static VisionFrameResult FrameResult(VisionBatchRequest request, int index, DepthPro2Map map, double focal, int width, int height) => new()
+    private static VisionFrameResult FrameResult(VisionBatchRequest request, int index, DepthPro2Map map, double focal, int width,
+        int height) => new()
     {
         Index = index, TimestampSeconds = request.TimeOf(index) ?? 0, SourceIndex = index, Result = MetricDepthResult(map, focal, width, height),
     };
@@ -369,6 +382,19 @@ public sealed class VisionService : IVisionService, IDisposable
     /// <c>DepthPro2-focal</c> folder beside the depth checkpoint's.</summary>
     private DepthPro2FocalEstimator DepthPro2Focal(ModelSpec spec, string depthPath)
     {
+        string path = DepthPro2FocalPath(spec, depthPath);
+        return GetOrLoad(_depthPro2FocalCache, path, () =>
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(path);
+            _embedLoaders.Add(loader);
+            return new DepthPro2FocalEstimator(loader.GetAllTensors());
+        });
+    }
+
+    /// <summary>Where <see cref="DepthPro2Focal"/> loads the estimator from; throws when it is nowhere.</summary>
+    private static string DepthPro2FocalPath(ModelSpec spec, string depthPath)
+    {
         ModelAsset asset = DepthPro2Catalog.Focal();
         string? path;
         if (spec.Aux.TryGetValue(DepthPro2FocalAuxKey, out string? aux))
@@ -390,13 +416,7 @@ public sealed class VisionService : IVisionService, IDisposable
                 + "`hartsy pull depthpro2-s`, place it in a 'DepthPro2-focal' folder beside the depth model's folder, "
                 + "or give a focal length in pixels.");
         }
-        return GetOrLoad(_depthPro2FocalCache, path, () =>
-        {
-            SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            _embedLoaders.Add(loader);
-            return new DepthPro2FocalEstimator(loader.GetAllTensors());
-        });
+        return path;
     }
 
     /// <summary>True when <paramref name="spec"/> names a Depth Pro 2 catalog row or, with no catalog row, a checkpoint whose tensors are one. A

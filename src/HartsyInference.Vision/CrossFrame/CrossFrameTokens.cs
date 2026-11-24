@@ -3,16 +3,17 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Vision.CrossFrame;
 
 /// <summary>
-/// Cross-frame attention without new parameters, as Depth Pro 2 runs it (upstream <c>MultiViewEncoder.cross_frame_attention</c>): the <c>T</c> frames of a clip
-/// (or the views of one scene) go through an ordinary ViT block as one sequence, <c>[mean over frames of the prefix tokens, every frame's patch tokens]</c>, with
-/// the per-frame patch RoPE repeated once per frame, and each frame keeps the prefix tokens it went in with. Frames carry no position of their own, so the result
-/// is equivariant to the frame order. These helpers pack and unpack that sequence; the block itself is the caller's.
+/// Cross-frame attention without new parameters, as Depth Pro 2 runs it (upstream <c>MultiViewEncoder.cross_frame_attention</c>): the <c>T</c>
+/// frames of a clip (or the views of one scene) go through an ordinary ViT block as one sequence, <c>[mean over frames of the prefix tokens, every
+/// frame's patch tokens]</c>, with the per-frame patch RoPE repeated once per frame, and each frame keeps the prefix tokens it went in with. Frames
+/// carry no position of their own, so the result is equivariant to the frame order. These helpers pack and unpack that sequence; the block itself
+/// is the caller's.
 /// </summary>
 public static class CrossFrameTokens
 {
     /// <summary>
-    /// The joint sequence <c>[1, prefix + T·N, C]</c> of <paramref name="frames"/> <c>[T, prefix + N, C]</c>: the prefix rows averaged over the frames, then
-    /// every frame's patch rows in frame order. The caller owns the result.
+    /// The joint sequence <c>[1, prefix + T·N, C]</c> of <paramref name="frames"/> <c>[T, prefix + N, C]</c>: the prefix rows averaged over the
+    /// frames, then every frame's patch rows in frame order. The caller owns the result.
     /// </summary>
     public static Tensor Join(Tensor frames, int prefix)
     {
@@ -38,8 +39,8 @@ public static class CrossFrameTokens
     }
 
     /// <summary>
-    /// The frames <c>[T, prefix + N, C]</c> of a joint block output <paramref name="joint"/> <c>[1, prefix + T·N, C]</c>: each frame's patch rows from it, and
-    /// its prefix rows from <paramref name="input"/> (the frames as they went into the block). The caller owns the result.
+    /// The frames <c>[T, prefix + N, C]</c> of a joint block output <paramref name="joint"/> <c>[1, prefix + T·N, C]</c>: each frame's patch rows
+    /// from it, and its prefix rows from <paramref name="input"/> (the frames as they went into the block). The caller owns the result.
     /// </summary>
     public static Tensor Split(Tensor joint, Tensor input, int prefix)
     {
@@ -47,7 +48,8 @@ public static class CrossFrameTokens
         int patches = seq - prefix, prefixWidth = prefix * width, patchWidth = patches * width;
         if (joint.DType != DType.F32 || joint.Shape.Rank != 3 || joint.Shape[0] != 1 || joint.Shape[1] != prefix + (long)count * patches
             || joint.Shape[2] != width)
-            throw new ArgumentException($"The joint output must be F32 [1, {prefix + (long)count * patches}, {width}]; got {joint.DType} {joint.Shape}.", nameof(joint));
+            throw new ArgumentException(
+                $"The joint output must be F32 [1, {prefix + (long)count * patches}, {width}]; got {joint.DType} {joint.Shape}.", nameof(joint));
         Tensor frames = new(input.Shape, DType.F32);
         ReadOnlySpan<float> j = joint.AsReadOnlySpan<float>(), x = input.AsReadOnlySpan<float>();
         Span<float> dst = frames.AsSpan<float>();
@@ -62,9 +64,9 @@ public static class CrossFrameTokens
     }
 
     /// <summary>
-    /// A RoPE table for the joint sequence: <paramref name="prefix"/> rows of <paramref name="prefixValue"/> (1 for the cosine table, 0 for the sine table, so the
-    /// prefix is not rotated), then the per-frame patch table <paramref name="patchTable"/> <c>[1, N, D]</c> repeated <paramref name="frames"/> times. The caller
-    /// owns the result.
+    /// A RoPE table for the joint sequence: <paramref name="prefix"/> rows of <paramref name="prefixValue"/> (1 for the cosine table, 0 for the
+    /// sine table, so the prefix is not rotated), then the per-frame patch table <paramref name="patchTable"/> <c>[1, N, D]</c> repeated
+    /// <paramref name="frames"/> times. The caller owns the result.
     /// </summary>
     public static Tensor TileRope(Tensor patchTable, int frames, int prefix, float prefixValue)
     {
@@ -86,7 +88,8 @@ public static class CrossFrameTokens
     {
         ArgumentNullException.ThrowIfNull(frames);
         if (frames.DType != DType.F32 || frames.Shape.Rank != 3 || frames.Shape[0] < 1 || frames.Shape[1] <= prefix || prefix < 0)
-            throw new ArgumentException($"Frames must be F32 [T, prefix + N, C] with N > 0 past {prefix} prefix rows; got {frames.DType} {frames.Shape}.", nameof(frames));
+            throw new ArgumentException(
+                $"Frames must be F32 [T, prefix + N, C] with N > 0 past {prefix} prefix rows; got {frames.DType} {frames.Shape}.", nameof(frames));
         return ((int)frames.Shape[0], (int)frames.Shape[1], (int)frames.Shape[2]);
     }
 }

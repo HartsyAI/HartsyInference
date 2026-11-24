@@ -54,16 +54,17 @@ public sealed class DepthPro2Network
     }
 
     /// <summary>
-    /// Focal-normalised inverse depth <c>[T, 1, H, W]</c> for the normalised frames <c>[T, 3, H, W]</c> of one clip or the views of one scene (upstream
-    /// <c>predict_inverse_depth</c> on a clip): the frames attend to each other in the cross-frame blocks, so the result is equivariant to their order but not
-    /// per-frame independent. With a <paramref name="ring"/> the input is one frame that attends to the frames the ring holds as well, and is then stored in it
-    /// (unbuffered video).
+    /// Focal-normalised inverse depth <c>[T, 1, H, W]</c> for the normalised frames <c>[T, 3, H, W]</c> of one clip or the views of one scene
+    /// (upstream <c>predict_inverse_depth</c> on a clip): the frames attend to each other in the cross-frame blocks, so the result is equivariant
+    /// to their order but not per-frame independent. With a <paramref name="ring"/> the input is one frame that attends to the frames the ring
+    /// holds as well, and is then stored in it (unbuffered video).
     /// </summary>
     public Tensor PredictInverseDepthFrames(IBackend backend, Tensor frames, CrossFrameKvRing? ring = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(frames);
-        if (frames.DType != DType.F32 || frames.Shape.Rank != 4 || frames.Shape[0] < 1 || frames.Shape[1] != 3 || frames.Shape[2] < 1 || frames.Shape[3] < 1)
+        if (frames.DType != DType.F32 || frames.Shape.Rank != 4 || frames.Shape[0] < 1 || frames.Shape[1] != 3
+            || frames.Shape[2] < 1 || frames.Shape[3] < 1)
             throw new ArgumentException($"frames must be F32 [T, 3, H, W]; got {frames.DType} {frames.Shape}.", nameof(frames));
         int height = (int)frames.Shape[2], width = (int)frames.Shape[3];
         using Tensor? padded = PadToMultiple(backend, frames);

@@ -514,6 +514,8 @@ public static class GenerationDispatch
         {
             return await VisionBatchAsync(engine, spec, inputPath, visionMode, parameters, outputDir, cancel).ConfigureAwait(false);
         }
+        if (parameters.Get("window") is not null || parameters.Get("overlap") is not null || parameters.Get("unbuffered") is not null)
+            throw new ArgumentException("--window, --overlap and --unbuffered apply to a folder of video frames (with --fps), not a single image.");
         ImageData image = LoadImage(prompt);
         VisionRequest request = new VisionRequest
         {

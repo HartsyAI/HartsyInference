@@ -3,13 +3,19 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Vision.CrossFrame;
 
 /// <summary>
-/// The unbuffered form of <see cref="CrossFrameTokens"/> (upstream <c>KVCache</c>): per cross-frame block, a FIFO of the last <see cref="Window"/> frames, the
-/// current one included. Each block keeps a ring of the frames' prefix tokens and a head-major key/value cache <c>[1, heads, prefix + Window·N, D]</c> whose
-/// first <c>prefix</c> rows hold the keys and values of the pooled prefix (the mean of the visible frames' prefixes) and whose slot <c>s</c> holds the patch
-/// keys and values of a frame. The current frame's patches attend to the first <see cref="LiveRows"/> rows. Slots fill in arrival order and then wrap, so the
-/// oldest frame is overwritten; attention has no temporal position, so slot order changes only rounding. Per frame and block, call
-/// <see cref="UpdatePrefix"/>, then <see cref="Update"/>.
+/// The unbuffered form of <see cref="CrossFrameTokens"/> (upstream <c>KVCache</c>): per cross-frame block, a FIFO of the last <see cref="Window"/>
+/// frames, the current one included. Each block keeps a ring of the frames' prefix tokens and a head-major key/value cache <c>[1, heads, prefix +
+/// Window·N, D]</c> whose first <c>prefix</c> rows hold the keys and values of the pooled prefix (the mean of the visible frames' prefixes) and
+/// whose slot <c>s</c> holds the patch keys and values of a frame. The current frame's patches attend to the first <see cref="LiveRows"/> rows.
+/// Slots fill in arrival order and then wrap, so the oldest frame is overwritten; attention has no temporal position, so slot order changes only
+/// rounding. Per frame and block, call <see cref="UpdatePrefix"/>, then <see cref="Update"/>.
 /// </summary>
+/// <remarks>
+/// A frame that fails part-way leaves some blocks one frame ahead of the others; the ring is then unusable and must be replaced
+/// (<c>DepthPro2VideoStream</c> refuses further frames after such a failure). MatrixGame2's sliding window is not reused here: it re-encodes its
+/// context frames each step under a block-causal mask with temporal RoPE positions and keeps no key/value rows, while this ring keeps
+/// position-free frame slots behind a pooled-prefix block that is rewritten every frame.
+/// </remarks>
 public sealed class CrossFrameKvRing : IDisposable
 {
     private readonly Dictionary<int, Entry> _blocks = [];
@@ -29,8 +35,8 @@ public sealed class CrossFrameKvRing : IDisposable
     public int Seen(int block) => _blocks.TryGetValue(block, out Entry? entry) ? entry.Seen : 0;
 
     /// <summary>
-    /// Stores the current frame's prefix tokens <paramref name="prefix"/> <c>[1, P, C]</c> in block <paramref name="block"/>'s ring and returns the pooled
-    /// prefix, their mean <c>[1, P, C]</c> over the frames visible to this one (the caller owns it).
+    /// Stores the current frame's prefix tokens <paramref name="prefix"/> <c>[1, P, C]</c> in block <paramref name="block"/>'s ring and returns the
+    /// pooled prefix, their mean <c>[1, P, C]</c> over the frames visible to this one (the caller owns it).
     /// </summary>
     public Tensor UpdatePrefix(int block, Tensor prefix)
     {
@@ -45,7 +51,8 @@ public sealed class CrossFrameKvRing : IDisposable
         }
         else if (entry.Prefixes.Shape[1] != prefix.Shape[1] || entry.Prefixes.Shape[2] != prefix.Shape[2])
         {
-            throw new ArgumentException($"Block {block} caches prefixes of [{entry.Prefixes.Shape[1]}, {entry.Prefixes.Shape[2]}]; got {prefix.Shape}.", nameof(prefix));
+            throw new ArgumentException(
+                $"Block {block} caches prefixes of [{entry.Prefixes.Shape[1]}, {entry.Prefixes.Shape[2]}]; got {prefix.Shape}.", nameof(prefix));
         }
 
         int width = (int)prefix.ElementCount;
@@ -66,9 +73,9 @@ public sealed class CrossFrameKvRing : IDisposable
     }
 
     /// <summary>
-    /// Stores the current frame's patch keys and values (token-major <c>[1, N, heads, D]</c>) in its slot and the pooled prefix's
-    /// (<c>[1, P, heads, D]</c>) ahead of the slots, then counts the frame as seen. Returns how many rows of <see cref="Keys"/> and <see cref="Values"/> the
-    /// frame attends to.
+    /// Stores the current frame's patch keys and values (token-major <c>[1, N, heads, D]</c>) in its slot and the pooled prefix's (<c>[1, P, heads,
+    /// D]</c>) ahead of the slots, then counts the frame as seen. Returns how many rows of <see cref="Keys"/> and <see cref="Values"/> the frame
+    /// attends to.
     /// </summary>
     public int Update(int block, Tensor key, Tensor value, Tensor pooledKey, Tensor pooledValue)
     {
@@ -80,7 +87,8 @@ public sealed class CrossFrameKvRing : IDisposable
         if (!value.Shape.Equals(key.Shape) || value.DType != DType.F32)
             throw new ArgumentException($"The values must match the keys {key.Shape}; got {value.DType} {value.Shape}.", nameof(value));
         if (!pooledValue.Shape.Equals(pooledKey.Shape) || pooledValue.DType != DType.F32)
-            throw new ArgumentException($"The pooled values must match the pooled keys {pooledKey.Shape}; got {pooledValue.DType} {pooledValue.Shape}.", nameof(pooledValue));
+            throw new ArgumentException(
+                $"The pooled values must match the pooled keys {pooledKey.Shape}; got {pooledValue.DType} {pooledValue.Shape}.", nameof(pooledValue));
         int patches = (int)key.Shape[1], heads = (int)key.Shape[2], dim = (int)key.Shape[3], prefix = (int)pooledKey.Shape[1];
         if (pooledKey.Shape[2] != heads || pooledKey.Shape[3] != dim)
             throw new ArgumentException($"The pooled keys must have {heads} heads of {dim}; got {pooledKey.Shape}.", nameof(pooledKey));
@@ -94,7 +102,9 @@ public sealed class CrossFrameKvRing : IDisposable
         }
         else if (entry.Patches != patches || entry.Prefix != prefix || entry.Keys.Shape[1] != heads || entry.Keys.Shape[3] != dim)
         {
-            throw new ArgumentException($"Block {block} caches {entry.Prefix} + {Window} x {entry.Patches} rows of {entry.Keys.Shape[1]} heads; got {key.Shape}.", nameof(key));
+            throw new ArgumentException(
+                $"Block {block} caches {entry.Prefix} + {Window} x {entry.Patches} rows of {entry.Keys.Shape[1]} heads; got {key.Shape}.",
+                nameof(key));
         }
 
         int slot = entry.Seen % Window;

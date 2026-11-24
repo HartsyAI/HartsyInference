@@ -15,8 +15,8 @@ using Xunit;
 namespace HartsyInference.Cli.Tests;
 
 /// <summary><c>hartsy vision --mode metric-depth</c>: the mode a Depth Pro 2 id implies, the depth preview of an infinite pixel, and (with
-/// <c>HARTSY_DEPTHPRO2_WEIGHTS</c> and <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> set) a single image, a folder of views and a folder of video frames (buffered and
-/// unbuffered) through the CLI dispatch on CPU.</summary>
+/// <c>HARTSY_DEPTHPRO2_WEIGHTS</c> and <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> set) a single image, a folder of views and a folder of video frames
+/// (buffered and unbuffered) through the CLI dispatch on CPU.</summary>
 public sealed class DepthPro2CliTests : IDisposable
 {
     private const string WeightsVariable = "HARTSY_DEPTHPRO2_WEIGHTS";

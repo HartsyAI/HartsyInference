@@ -5,12 +5,12 @@ using HartsyInference.Vision.CrossFrame;
 namespace HartsyInference.Vision.DepthPro2;
 
 /// <summary>
-/// Depth Pro 2 over one video (upstream <c>DepthStream</c>): <see cref="Step"/> takes each frame and <see cref="Flush"/> ends the video; both return the maps
-/// they finish, in frame order, each exactly once and never revised. Buffered mode predicts clips of <see cref="Window"/> frames that overlap by
-/// <see cref="Overlap"/> and cross-fades the inverse depth of the overlapping frames linearly with no scale fit, so a frame is returned once its clip is done and
-/// has also seen later frames. Unbuffered mode predicts each frame as it arrives, its patches attending to the <c>Window - 1</c> frames before it through a
-/// <see cref="CrossFrameKvRing"/>. The focal length is fixed for the stream (upstream <c>infer_video</c> takes the first window's estimate up front, see
-/// <see cref="DepthPro2Model.EstimateFocal"/>).
+/// Depth Pro 2 over one video (upstream <c>DepthStream</c>): <see cref="Step"/> takes each frame and <see cref="Flush"/> ends the video; both
+/// return the maps they finish, in frame order, each exactly once and never revised. Buffered mode predicts clips of <see cref="Window"/> frames
+/// that overlap by <see cref="Overlap"/> and cross-fades the inverse depth of the overlapping frames linearly with no scale fit, so a frame is
+/// returned once its clip is done and has also seen later frames. Unbuffered mode predicts each frame as it arrives, its patches attending to the
+/// <c>Window - 1</c> frames before it through a <see cref="CrossFrameKvRing"/>. The focal length is fixed for the stream (upstream
+/// <c>infer_video</c> takes the first window's estimate up front, see <see cref="DepthPro2Model.EstimateFocal"/>).
 /// </summary>
 public sealed class DepthPro2VideoStream : IDisposable
 {
@@ -28,21 +28,24 @@ public sealed class DepthPro2VideoStream : IDisposable
     private readonly Queue<byte[]> _frames = new();   // the last _clip frames; the last _held.Count + _new are not yet returned
     private readonly List<float[]> _held = [];        // predicted, not yet returned
     private int _new;
+    private bool _flushed, _faulted;
 
-    /// <param name="window">Frames attended together: the clip length (buffered) or the cache size with the current frame (unbuffered); at least 1.</param>
+    /// <param name="window">Frames attended together: the clip length (buffered) or the cache size with the current frame (unbuffered); 1 to
+    /// <see cref="DepthPro2Model.MaxJointFrames"/>.</param>
     /// <param name="overlap">Frames shared by consecutive buffered clips, 0 to <paramref name="window"/> - 1; must be 0 for unbuffered.</param>
-    public DepthPro2VideoStream(DepthPro2Network network, IBackend backend, int width, int height, double focalLengthPx, int window = DefaultWindow,
-        int overlap = DefaultOverlap, DepthPro2VideoMode mode = DepthPro2VideoMode.Buffered)
+    public DepthPro2VideoStream(DepthPro2Network network, IBackend backend, int width, int height, double focalLengthPx,
+        int window = DefaultWindow, int overlap = DefaultOverlap, DepthPro2VideoMode mode = DepthPro2VideoMode.Buffered)
     {
         ArgumentNullException.ThrowIfNull(network);
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(window, DepthPro2Model.MaxJointFrames);
         if (!double.IsFinite(focalLengthPx) || focalLengthPx <= 0)
-            throw new ArgumentOutOfRangeException(nameof(focalLengthPx), $"The focal length must be a positive number of pixels; got {focalLengthPx}.");
+            throw new ArgumentOutOfRangeException(nameof(focalLengthPx), $"The focal length must be positive pixels; got {focalLengthPx}.");
         if (mode == DepthPro2VideoMode.Buffered && (overlap < 0 || overlap >= window))
-            throw new ArgumentOutOfRangeException(nameof(overlap), $"The overlap must be from 0 to window - 1 = {window - 1}; got {overlap}.");
+            throw new ArgumentOutOfRangeException(nameof(overlap), $"The overlap must be from 0 to {window - 1}; got {overlap}.");
         if (mode == DepthPro2VideoMode.Unbuffered && overlap != 0)
             throw new ArgumentOutOfRangeException(nameof(overlap), "Unbuffered frames do not overlap; give 0.");
         if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown video mode.");
@@ -63,27 +66,34 @@ public sealed class DepthPro2VideoStream : IDisposable
     public double FocalLengthPx => _focal;
 
     /// <summary>Adds the next frame (RGB24 at the stream's size); returns the maps it finishes.</summary>
+    /// <exception cref="InvalidOperationException">The stream was flushed, or an earlier step failed part-way (its cache is then
+    /// inconsistent).</exception>
     public IReadOnlyList<DepthPro2Map> Step(byte[] rgb)
     {
         ArgumentNullException.ThrowIfNull(rgb);
         if (rgb.Length != (long)_width * _height * 3)
             throw new ArgumentException($"Every frame must be {_width}x{_height}x3 RGB bytes; got {rgb.Length}.", nameof(rgb));
+        CheckUsable();
         _frames.Enqueue(rgb);
         if (_frames.Count > _clip) _frames.Dequeue();
         _new++;
-        return _held.Count + _new < _clip ? [] : Predict(_frames.Count, _overlap);
+        return _held.Count + _new < _clip ? [] : Guarded(() => Predict(_frames.Count, _overlap));
     }
 
-    /// <summary>Ends the video; returns the maps not yet returned. With overlap, a short last clip is pulled back to a full window over frames already returned.</summary>
+    /// <summary>Ends the video; returns the maps not yet returned. With overlap, a short last clip is pulled back to a full window over frames
+    /// already returned; without, the last frames run as a shorter clip of their own. The stream takes no frame after this.</summary>
     public IReadOnlyList<DepthPro2Map> Flush()
     {
+        CheckUsable();
+        _flushed = true;
         if (_new == 0) return Emit(_held.Count);
-        return Predict(_overlap > 0 ? _frames.Count : _new, keep: 0);
+        return Guarded(() => Predict(_overlap > 0 ? _frames.Count : _new, keep: 0));
     }
 
     public void Dispose() => _ring?.Dispose();
 
-    /// <summary>Upstream <c>blend_ramp</c>: <c>torch.linspace(1, 0, length + 2)[1:-1]</c> in float32, weights from 1 to 0 with both endpoints dropped.</summary>
+    /// <summary>Upstream <c>blend_ramp</c>: <c>torch.linspace(1, 0, length + 2)[1:-1]</c> in float32, weights from 1 to 0 with both endpoints
+    /// dropped.</summary>
     public static float[] BlendRamp(int length)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(length);
@@ -94,6 +104,26 @@ public sealed class DepthPro2VideoStream : IDisposable
         for (int i = 1; i <= length; i++)
             ramp[i - 1] = i < halfway ? 1f + step * i : 0f - step * (steps - i - 1);   // torch's two-sided linspace
         return ramp;
+    }
+
+    private void CheckUsable()
+    {
+        if (_faulted) throw new InvalidOperationException("An earlier frame failed part-way; open a new stream.");
+        if (_flushed) throw new InvalidOperationException("The stream was flushed; open a new stream for another video.");
+    }
+
+    // A prediction that throws can leave the cache with some blocks a frame ahead of others, so the stream refuses every later call.
+    private List<DepthPro2Map> Guarded(Func<List<DepthPro2Map>> predict)
+    {
+        try
+        {
+            return predict();
+        }
+        catch
+        {
+            _faulted = true;
+            throw;
+        }
     }
 
     // Predicts the last `length` frames and returns those finished, all but the last `keep`.
