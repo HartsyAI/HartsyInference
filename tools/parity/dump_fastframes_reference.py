@@ -32,7 +32,9 @@ from pathlib import Path
 
 def configure(upstream: Path, precision: str):
     import torch
-    import safetensors.torch  # noqa: F401  bind its dtype table before torch.bfloat16 is aliased
+    # A --precision fp32 run replaces torch.bfloat16 process-wide. safetensors must be imported first, so that its dtype table is
+    # bound to the real dtype before the alias exists; a BF16 checkpoint then still loads as BF16.
+    import safetensors.torch  # noqa: F401
 
     if precision == "fp32":
         torch.bfloat16 = torch.float32  # before any upstream module binds a dtype default or builds a tensor
@@ -172,6 +174,10 @@ def checkpoint(args):
     config = spec.config.__class__(**{**spec.config.__dict__, "num_frames": frames, "num_pixel_frames": 4 * frames - 3,
                                       "decoder_dtype": dtype, "autocast": False, "fast_ops": False, "allow_tf32": False})
     prompt_embeds = load_file(args.prompt_embeds)["prompt_embeds"].to(dtype)
+    if prompt_embeds.shape[0] < wan.text_len:
+        # The C# side takes the umT5 output already zero-padded to the generator's text length, as upstream does.
+        pad = prompt_embeds.new_zeros(wan.text_len - prompt_embeds.shape[0], prompt_embeds.shape[1])
+        prompt_embeds = torch.cat([prompt_embeds, pad])
     generator = torch.Generator().manual_seed(args.seed)
     height, width = config.latent_size
     noise = torch.randn(1, frames, 16, height, width, generator=generator).to(dtype)

@@ -23,49 +23,23 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
 {
     private const int Frames = 3, Channels = 16, Height = 8, Width = 12;
 
-    private static readonly FastFramesConfig Tiny = new("tiny", [1000f, 937.5f, 833.3333129882812f, 625f], [1000f, 833.3333129882812f],
-        833.3333129882812f, Channels, Height, Width, Frames);
+    /// <summary>The released S recipe at the fixture's latent size: the same timesteps, so the test ties to what ships.</summary>
+    private static readonly FastFramesConfig Tiny = FastFramesConfig.S with { Name = "tiny", LatentHeight = Height, LatentWidth = Width };
 
     [Fact]
     public void TheRolloutMatchesUpstreamsFp32Run()
     {
-        string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fastframes_tiny");
-        using CheckpointSource generatorSource = CheckpointSource.Open(Path.Combine(dir, "generator.safetensors"));
-        using CheckpointSource refinerSource = CheckpointSource.Open(Path.Combine(dir, "refiner.safetensors"));
-        using CheckpointSource decoderSource = CheckpointSource.Open(Path.Combine(dir, "decoder.safetensors"));
-        using CheckpointSource ioSource = CheckpointSource.Open(Path.Combine(dir, "io.safetensors"));
-
-        WanVideoConfig wan = new()
-        {
-            NumHeads = 2, HeadDim = 32, NumLayers = 2, FfnDim = 32, InChannels = Channels, OutChannels = Channels,
-            VaeLatentChannels = Channels, TextDim = 16, FreqDim = 256, VaeSpatialCompression = 8,
-        };
-        WanVideoCheckpointConverter.ConvertedWeights converted = WanVideoCheckpointConverter.Convert(generatorSource.Weights, generatorSource.Header.Metadata);
-        using WanVideoTransformer transformer = new(wan);
-        transformer.LoadWeights(converted.Transformer);
-
-        FastFramesKvRefinerConfig refinerConfig = FastFramesKvRefiner.DetectConfig(refinerSource.Weights, heads: 2) with { StemHeads = 8, FrequencyDim = 256 };
-        using FastFramesKvRefiner refiner = new(refinerConfig);
-        refiner.LoadWeights(refinerSource.Weights);
-
-        FastFramesPixelDecoderConfig decoderConfig = FastFramesPixelDecoder.DetectConfig(decoderSource.Weights);
-        Assert.True(decoderConfig.HasBridge);
-        using FastFramesPixelDecoder decoder = new(decoderConfig);
-        decoder.LoadWeights(decoderSource.Weights);
-
-        IReadOnlyDictionary<string, Tensor> io = ioSource.Weights;
-        float[] promptValues = io["prompt_embeds"].CastTo(DType.F32).AsReadOnlySpan<float>().ToArray();
-        using Tensor prompt = new(new TensorShape(8, 16), DType.F32);
-        promptValues.CopyTo(prompt.AsSpan<float>());
-        SavedNoise noise = new(io["noise"], io["transition"]);
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
 
         using CpuBackend backend = new();
-        FastFramesPipeline pipeline = new(backend, transformer, refiner, decoder, Tiny);
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
         List<FastFramesFrame> frames = pipeline.Rollout(prompt, noise, Frames).ToList();
 
         Assert.Equal(Frames, frames.Count);
-        float[] referenceLatents = io["latents"].AsReadOnlySpan<float>().ToArray();   // [3, 16, 8, 12]
-        float[] referencePixels = io["pixels"].AsReadOnlySpan<float>().ToArray();     // [9, 3, 64, 96]
+        float[] referenceLatents = model.Io["latents"].AsReadOnlySpan<float>().ToArray();   // [3, 16, 8, 12]
+        float[] referencePixels = model.Io["pixels"].AsReadOnlySpan<float>().ToArray();     // [9, 3, 64, 96]
         int frameValues = Channels * Height * Width;
         for (int f = 0; f < Frames; f++)
             AssertClose(referenceLatents.AsSpan(f * frameValues, frameValues), frames[f].Latent, $"latent frame {f}", 1e-5);
@@ -80,27 +54,13 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
     [Fact]
     public void GenerateFramesYieldsTheEightBitFramesWithTheLeadingOnesDropped()
     {
-        string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fastframes_tiny");
-        using CheckpointSource generatorSource = CheckpointSource.Open(Path.Combine(dir, "generator.safetensors"));
-        using CheckpointSource refinerSource = CheckpointSource.Open(Path.Combine(dir, "refiner.safetensors"));
-        using CheckpointSource decoderSource = CheckpointSource.Open(Path.Combine(dir, "decoder.safetensors"));
-        WanVideoConfig wan = new()
-        {
-            NumHeads = 2, HeadDim = 32, NumLayers = 2, FfnDim = 32, InChannels = Channels, OutChannels = Channels,
-            VaeLatentChannels = Channels, TextDim = 16, FreqDim = 256, VaeSpatialCompression = 8,
-        };
-        using WanVideoTransformer transformer = new(wan);
-        transformer.LoadWeights(WanVideoCheckpointConverter.Convert(generatorSource.Weights, generatorSource.Header.Metadata).Transformer);
-        using FastFramesKvRefiner refiner = new(FastFramesKvRefiner.DetectConfig(refinerSource.Weights, heads: 2) with { StemHeads = 8, FrequencyDim = 256 });
-        refiner.LoadWeights(refinerSource.Weights);
-        using FastFramesPixelDecoder decoder = new(FastFramesPixelDecoder.DetectConfig(decoderSource.Weights));
-        decoder.LoadWeights(decoderSource.Weights);
+        using TinyModel model = new();
         using Tensor prompt = new(new TensorShape(8, 16), DType.F32);
         for (int i = 0; i < prompt.ElementCount; i++)
             prompt.AsSpan<float>()[i] = (i % 7 - 3) * 0.2f;
 
         using CpuBackend backend = new();
-        FastFramesPipeline pipeline = new(backend, transformer, refiner, decoder, Tiny);
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
         List<VideoFrame> video = pipeline.GenerateFrames(prompt, new FastFramesSeededNoise(11, Tiny), Frames).ToList();
 
         Assert.Equal(9, video.Count);
@@ -111,6 +71,65 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         List<VideoFrame> again = pipeline.GenerateFrames(prompt, new FastFramesSeededNoise(11, Tiny), Frames).ToList();
         Assert.True(video[4].Rgb.AsSpan().SequenceEqual(again[4].Rgb));
     }
+
+    /// <summary>The constructor refuses a recipe or a component that does not fit the others, naming both sides, before any frame runs.</summary>
+    [Fact]
+    public void ThePipelineRefusesComponentsThatDoNotFitItsRecipe()
+    {
+        using TinyModel model = new();
+        using CpuBackend backend = new();
+        Assert.Throws<ArgumentException>(() => new FastFramesPipeline(backend, model.Transformer, model.Refiner, model.Decoder,
+            Tiny with { LatentChannels = 8 }));
+        Assert.Throws<ArgumentException>(() => new FastFramesPipeline(backend, model.Transformer, model.Refiner, model.Decoder,
+            Tiny with { LatentHeight = 9 }));
+        using FastFramesKvRefiner threeLayers = new(model.Refiner.Config with { Layers = 3 });
+        Assert.Throws<ArgumentException>(() => new FastFramesPipeline(backend, model.Transformer, threeLayers, model.Decoder, Tiny));
+    }
+
+    /// <summary>The arguments are checked when the call is made, not when the consumer first asks for a frame.</summary>
+    [Fact]
+    public void TheArgumentsAreCheckedWhenTheCallIsMade()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+        Assert.Throws<ArgumentOutOfRangeException>(() => pipeline.Rollout(prompt, noise, 0));
+        Assert.Throws<ArgumentNullException>(() => pipeline.GenerateFrames(null!, noise, Frames));
+    }
+
+    /// <summary>A rollout cancelled after its first frame leaves nothing behind that stops the next one: the same pipeline then
+    /// generates a full clip.</summary>
+    [Fact]
+    public void ACancelledRolloutLeavesThePipelineUsable()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        using CancellationTokenSource cancel = new();
+        Assert.Throws<OperationCanceledException>(() => pipeline.Rollout(prompt, new FastFramesSeededNoise(11, Tiny), Frames,
+            (done, _) => { if (done == 1) cancel.Cancel(); }, cancel.Token).ToList());
+
+        List<VideoFrame> video = pipeline.GenerateFrames(prompt, new FastFramesSeededNoise(11, Tiny), Frames).ToList();
+        Assert.Equal(9, video.Count);
+    }
+
+    /// <summary>A diverged rollout (non-finite pixels) is refused, not rendered as black.</summary>
+    [Fact]
+    public void ANonFiniteRolloutIsRefusedNotRendered()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        Assert.Throws<InvalidOperationException>(() => pipeline.GenerateFrames(prompt, new NaNNoise(), Frames).ToList());
+    }
+
+    private static Tensor PaddedPrompt(TinyModel model) =>
+        // An owned copy: the fixture's prompt embeddings are already padded to the generator's 8 rows.
+        FastFramesOps.CopyF32(model.Io["prompt_embeds"], new TensorShape(8, 16));
 
     private void AssertClose(ReadOnlySpan<float> expected, ReadOnlySpan<float> actual, string what, double tolerance)
     {
@@ -130,6 +149,55 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         Assert.True(relative < tolerance, $"{what}: relative RMS error {relative:E2} (max abs {maxAbs:E2}) against upstream, tolerance {tolerance:E1}");
     }
 
+    /// <summary>The fixture's checkpoints, loaded once per test. The sources stay open until the components are gone, because a
+    /// loaded component may read the checkpoint's memory.</summary>
+    private sealed class TinyModel : IDisposable
+    {
+        private readonly CheckpointSource _generator, _refinerSource, _decoderSource, _io;
+
+        public TinyModel()
+        {
+            string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fastframes_tiny");
+            _generator = CheckpointSource.Open(Path.Combine(dir, "generator.safetensors"));
+            _refinerSource = CheckpointSource.Open(Path.Combine(dir, "refiner.safetensors"));
+            _decoderSource = CheckpointSource.Open(Path.Combine(dir, "decoder.safetensors"));
+            _io = CheckpointSource.Open(Path.Combine(dir, "io.safetensors"));
+
+            WanVideoConfig wan = new()
+            {
+                NumHeads = 2, HeadDim = 32, NumLayers = 2, FfnDim = 32, InChannels = Channels, OutChannels = Channels,
+                VaeLatentChannels = Channels, TextDim = 16, FreqDim = 256, VaeSpatialCompression = 8,
+            };
+            Transformer = new WanVideoTransformer(wan);
+            Transformer.LoadWeights(WanVideoCheckpointConverter.Convert(_generator.Weights, _generator.Header.Metadata).Transformer);
+            Refiner = new FastFramesKvRefiner(FastFramesKvRefiner.DetectConfig(_refinerSource.Weights, heads: 2) with { StemHeads = 8, FrequencyDim = 256 });
+            Refiner.LoadWeights(_refinerSource.Weights);
+            FastFramesPixelDecoderConfig decoderConfig = FastFramesPixelDecoder.DetectConfig(_decoderSource.Weights);
+            Assert.True(decoderConfig.HasBridge);
+            Decoder = new FastFramesPixelDecoder(decoderConfig);
+            Decoder.LoadWeights(_decoderSource.Weights);
+        }
+
+        public WanVideoTransformer Transformer { get; }
+
+        public FastFramesKvRefiner Refiner { get; }
+
+        public FastFramesPixelDecoder Decoder { get; }
+
+        public IReadOnlyDictionary<string, Tensor> Io => _io.Weights;
+
+        public void Dispose()
+        {
+            Decoder.Dispose();
+            Refiner.Dispose();
+            Transformer.Dispose();
+            _io.Dispose();
+            _decoderSource.Dispose();
+            _refinerSource.Dispose();
+            _generator.Dispose();
+        }
+    }
+
     private sealed class SavedNoise(Tensor initial, Tensor transition) : IFastFramesNoise
     {
         private readonly float[] _initial = initial.AsReadOnlySpan<float>().ToArray();       // [frames, 16, 8, 12]
@@ -139,5 +207,12 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         public float[] Initial(int frame) => _initial.AsSpan(frame * FrameValues, FrameValues).ToArray();
 
         public float[] Transition(int step, int frame) => _transition.AsSpan((step * Frames + frame) * FrameValues, FrameValues).ToArray();
+    }
+
+    private sealed class NaNNoise : IFastFramesNoise
+    {
+        public float[] Initial(int frame) => Enumerable.Repeat(float.NaN, Channels * Height * Width).ToArray();
+
+        public float[] Transition(int step, int frame) => Enumerable.Repeat(float.NaN, Channels * Height * Width).ToArray();
     }
 }
