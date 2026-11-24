@@ -46,6 +46,9 @@ public sealed record MaxwellSparseConfig
         };
         if (r.OptionalString("block_sparse_gqa_group_reduction") != "per_group_max")
             throw new HartsyInferenceException("Maxwell config: only block_sparse_gqa_group_reduction per_group_max is wired.");
+        // The selection reads num_remote_blocks; topk_blocks must agree or the config names two different routes.
+        if (r.Int("block_sparse_gqa_topk_blocks") != sparse.RemoteBlocks)
+            throw new HartsyInferenceException($"Maxwell config: topk_blocks must equal num_remote_blocks ({sparse.RemoteBlocks}).");
         int support = r.Int("block_sparse_gqa_total_support_blocks");
         if (support != sparse.PrefixBlocks + sparse.LocalBlocks + sparse.RemoteBlocks)
             throw new HartsyInferenceException($"Maxwell config: total_support_blocks {support} is not prefix + local + remote blocks.");

@@ -43,7 +43,7 @@ public sealed class BlockFp8CheckpointWeights : IModelWeightSource, IDisposable
             HfWeightStorage.Plain => checkpoint.Borrow(name),
             HfWeightStorage.Fp8Block => ReadFp8(checkpoint, name),
             _ => throw new InvalidDataException(
-                $"'{name}' is stored as {weight.Storage}; a {_model} checkpoint holds only float and block-FP8 weights."),
+                $"'{name}' is stored as {weight.Storage}; the {_model} checkpoint holds only float and 128x128 block-FP8 weights."),
         };
     }
 

@@ -77,6 +77,10 @@ public sealed class MaxwellConfigTests
     [InlineData("block_sparse_gqa_total_support_blocks", "30", "total_support_blocks")]
     [InlineData("block_sparse_gqa_prefix_window_size", "1000", "whole blocks")]
     [InlineData("num_residual_streams", "9", "num_residual_streams")]
+    [InlineData("rope_scaling", "{\"type\": \"yarn\", \"factor\": 4.0}", "rope_scaling")]
+    [InlineData("block_sparse_gqa_topk_blocks", "8", "topk_blocks")]
+    [InlineData("num_key_value_heads", "0", "must be positive")]
+    [InlineData("num_experts_per_tok", "300", "must be positive")]
     public void UnsupportedVariant_IsRefusedByName(string field, string value, string expected)
     {
         string json = Json(r => r[field] = JsonNode.Parse(value));
@@ -91,6 +95,15 @@ public sealed class MaxwellConfigTests
         string json = Json(r => r["block_sparse_gqa_layer_freq"] = JsonNode.Parse($"[0,{string.Join(",", Enumerable.Repeat(1, 44))}]"));
 
         Assert.Contains("block-sparse", Assert.Throws<HartsyInferenceException>(() => MaxwellConfig.Parse(json)).Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MissingLayerFrequency_NamesTheField()
+    {
+        string json = Json(r => r.Remove("block_sparse_gqa_layer_freq"));
+
+        Assert.Contains("block_sparse_gqa_layer_freq", Assert.Throws<HartsyInferenceException>(() => MaxwellConfig.Parse(json)).Message,
             StringComparison.Ordinal);
     }
 

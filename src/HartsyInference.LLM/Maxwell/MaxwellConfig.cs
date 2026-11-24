@@ -91,6 +91,9 @@ public sealed record MaxwellConfig
         string modelType = r.OptionalString("model_type") ?? string.Empty;
         if (!string.Equals(modelType, ModelType, StringComparison.Ordinal))
             throw new HartsyInferenceException($"Maxwell config: model_type is '{modelType}', expected '{ModelType}'.");
+        // A context-extension scaling (YaRN, NTK) changes the RoPE frequencies, which the engine does not compute.
+        if (root.TryGetProperty("rope_scaling", out JsonElement scaling) && scaling.ValueKind != JsonValueKind.Null)
+            throw new HartsyInferenceException("Maxwell config: unsupported rope_scaling; the engine computes only the plain RoPE table.");
         MaxwellConfig config = new()
         {
             VocabSize = r.Int("vocab_size"),
@@ -121,6 +124,10 @@ public sealed record MaxwellConfig
     // The features the engine does not run are named, so a variant fails here and not in a forward.
     private void RequireSupported(HfConfigFields r)
     {
+        if (NumHiddenLayers < 1 || VocabSize < 1 || HiddenSize < 1 || HeadDim < 1 || NumAttentionHeads < 1 || NumKeyValueHeads < 1
+            || IntermediateSize < 1 || MoeIntermediateSize < 1 || NumExperts < 1 || NumExpertsPerTok < 1 || NumExpertsPerTok > NumExperts
+            || SharedExpertIntermediateSize < 0 || MtpLayers < 0)
+            throw new HartsyInferenceException("Maxwell config: layer, width, head and expert counts must be positive, and experts per token at most the expert count.");
         List<string> unsupported = [];
         if (r.OptionalString("attention_variant") != "block_sparse_gqa") unsupported.Add("attention_variant other than block_sparse_gqa");
         if (r.OptionalString("hidden_act") != "silu") unsupported.Add("hidden_act other than silu");
@@ -131,12 +138,13 @@ public sealed record MaxwellConfig
         if (r.Bool("use_shared_expert_gate", false)) unsupported.Add("a gated shared expert");
         if (r.Bool("tie_word_embeddings", false)) unsupported.Add("tied embeddings");
         if (r.OptionalString("moe_router_dtype") is { } routerDtype && routerDtype != "fp32") unsupported.Add($"router dtype {routerDtype}");
-        if (r.Ints("block_sparse_gqa_layer_freq") is { } freq && (freq.Length != NumHiddenLayers || freq.Any(static f => f != 1)))
-            unsupported.Add("layers without block-sparse attention");
+        int[] freq = r.Ints("block_sparse_gqa_layer_freq");
+        if (freq.Length != NumHiddenLayers || freq.Any(static f => f != 1)) unsupported.Add("layers without block-sparse attention");
         if (unsupported.Count != 0)
             throw new HartsyInferenceException($"Maxwell config: unsupported {string.Join(", ", unsupported)}.");
         if (NumAttentionHeads % NumKeyValueHeads != 0 || Sparse.IndexerGroups != NumKeyValueHeads)
             throw new HartsyInferenceException("Maxwell config: the indexer needs one group per key/value head, and the heads must divide evenly.");
+        // The device stream kernels hold at most eight residual streams per thread (HcReference.MaxHc).
         if (HcMult < 1 || HcMult > 8) throw new HartsyInferenceException($"Maxwell config: num_residual_streams {HcMult} is outside 1..8.");
     }
 
