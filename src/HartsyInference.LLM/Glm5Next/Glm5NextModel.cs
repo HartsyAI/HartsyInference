@@ -24,20 +24,29 @@ public sealed class Glm5NextModel : IDisposable
         _backend = backend;
         _c = config;
         _layers = new Glm5NextLayer[config.Layers];
-        _embedding = source.Read(Glm5NextWeightNames.Embedding);
-        _finalNorm = source.Read(Glm5NextWeightNames.FinalNorm);
-        _lmHead = source.Read(Glm5NextWeightNames.LmHead);
-        RequireShape(_embedding, config.Vocab, config.Hidden, "embed_tokens");
-        RequireShape(_lmHead, config.Vocab, config.Hidden, "lm_head");
+        Tensor? embedding = null, finalNorm = null, lmHead = null;
         try
         {
+            embedding = source.Read(Glm5NextWeightNames.Embedding);
+            RequireShape(embedding, config.Vocab, config.Hidden, "embed_tokens");
+            // The final norm is read as F32 whatever the checkpoint stores: the norm kernel reads its weight as F32.
+            finalNorm = Glm5NextLayer.F32(source, Glm5NextWeightNames.FinalNorm, config.Hidden);
+            lmHead = source.Read(Glm5NextWeightNames.LmHead);
+            RequireShape(lmHead, config.Vocab, config.Hidden, "lm_head");
             for (int i = 0; i < config.Layers; i++) _layers[i] = new Glm5NextLayer(backend, config, i, source);
         }
         catch
         {
-            Dispose();
+            // Everything this constructor took ownership of is released here; the fields are assigned only once the load has succeeded.
+            embedding?.Dispose();
+            finalNorm?.Dispose();
+            lmHead?.Dispose();
+            foreach (Glm5NextLayer? l in _layers) l?.Dispose();
             throw;
         }
+        _embedding = embedding;
+        _finalNorm = finalNorm;
+        _lmHead = lmHead;
     }
 
     /// <summary>The decoder's shape.</summary>

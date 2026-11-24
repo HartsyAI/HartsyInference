@@ -21,6 +21,9 @@ namespace HartsyInference.LLM.Glm5Next;
 /// </remarks>
 public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
 {
+    /// <summary>Epsilon of the key LayerNorm (transformers <c>k_norm</c>).</summary>
+    internal const float KeyNormEps = 1e-6f;
+
     private readonly IBackend _backend;
     private readonly Glm5NextConfig _c;
     private readonly Tensor _wqB, _wk, _kNormW, _kNormB, _weightsProj, _gate, _ape;
@@ -61,7 +64,7 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
         if (keyStore.DType != DType.F32 || keyStore.Shape.Rank != 2 || keyStore.Shape[1] != width || startPos + tokens > keyStore.Shape[0])
             throw new ArgumentException("keyStore must be F32 [capacity, 2 * HeadDim] with room for these positions.", nameof(keyStore));
         float[] k = HostOps.Project(_backend, x, tokens, _dim, _wk, hd);
-        HostOps.LayerNorm(_backend, k, hd, _kNormW, _kNormB, 1e-6f);
+        HostOps.LayerNorm(_backend, k, hd, _kNormW, _kNormB, KeyNormEps);
         float[] gate = HostOps.Project(_backend, x, tokens, _dim, _gate, hd);
         Span<float> store = keyStore.AsSpan<float>();
         for (int t = 0; t < tokens; t++)
