@@ -206,6 +206,9 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   4090 reading the checkpoint from a network volume is bound by that volume's read speed. Missing: MTP speculative decoding in the Text
   path (draft, verify, MTP cache rollback), MTP parity on real weights, parity beyond 2,308 tokens, and a host or device memory guard. Reference code is in `baidu/vLLM-ERNIE` (`src/vllm_ernie/models/ernie5_5/`). License excludes
   the EU, UK and South Korea.
+- [ ] Hy4 Flash (`hy4-flash`, `hy4-flash-fp8`, `hy4-flash-base`; Tencent, 220B MoE with 12B active, `model_type` `hy_v4_flash`, text and image input): config reader and key map only. `Hy4FlashConfig` and `Hy4FlashWeightMap` check every key,
+  shape and FP8 scale grid of the three real header inventories (`Hy4FlashWeightMapTests`, headers only). No forward yet. Architecture, licence (Tencent Hy License 1.0: separate licence for MaaS above US$50M revenue or 100M MAU, no territory limit) and plan:
+  [HY4_FLASH_ARCHITECTURE.md](../Research/HY4_FLASH_ARCHITECTURE.md). Bar for this model is tiny-config CPU parity; a real run (287 GB FP8) is not planned. Reference is an unmerged transformers PR; the HF-class dump script is written and not run.
 - [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types
   it widens to F32, then an A/B against llama.cpp CUDA ([details](#muse-spark-open)).
 
