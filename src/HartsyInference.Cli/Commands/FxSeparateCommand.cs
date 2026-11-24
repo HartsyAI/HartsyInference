@@ -18,7 +18,7 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
 
         /// <summary>Model id, optionally with a variant (e.g. demucs:htdemucs_6s).</summary>
         [CommandOption("-m|--model")]
-        [Description("Model: demucs, optionally 'demucs:<variant>' (htdemucs, htdemucs_6s, htdemucs_ft).")]
+        [Description("Model: demucs, optionally 'demucs:<variant>' (htdemucs, htdemucs_6s, htdemucs_ft); kim-vocal-2; voice-isolator or voice-isolator-realtime (voice and background stems).")]
         public string Model { get; init; } = "demucs";
 
         /// <summary>Path to a local htdemucs checkpoint (.th/.safetensors).</summary>
@@ -29,7 +29,7 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         /// <summary>Compute backend selector; Demucs always runs on CPU regardless of this setting.</summary>
         /// <remarks>Its STFT/ISTFT has no CUDA/Vulkan implementation yet, so any GPU selector here would just throw.</remarks>
         [CommandOption("-b|--backend")]
-        [Description("Backend selector (always overridden to CPU: Demucs' STFT has no GPU implementation yet).")]
+        [Description("Backend selector (overridden to CPU except for the voice isolators: Demucs' STFT has no GPU implementation yet).")]
         public string Backend { get; init; } = "auto";
 
         /// <summary>Directory to write the stems into.</summary>
@@ -51,8 +51,9 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
 
         // Demucs' STFT/ISTFT (DemucsSpec.Spec) only has a CPU implementation (CudaBackend.Stft throws
         // NotSupportedException) — force CPU here so the default `hartsy fx separate <wav>` invocation works
-        // instead of erroring, regardless of what -b was passed.
-        const string backend = "cpu";
+        // instead of erroring, regardless of what -b was passed. The voice isolator keeps its STFT on the host and
+        // runs its network on the selected backend.
+        string backend = settings.Model.StartsWith("voice-isolator", StringComparison.OrdinalIgnoreCase) ? settings.Backend : "cpu";
         ParamState parameters = new ParamState(Modality.Fx) { Backend = backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "separate");
 

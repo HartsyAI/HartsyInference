@@ -2459,6 +2459,21 @@ public static class ModelCatalog
                 // onnxruntime yet, hence ValidationPending (docs/Checklists/MODEL_STATUS_AUDIO.md).
             },
 
+            new CatalogEntry
+            {
+                Id = "voice-isolator", Modality = fx, DisplayName = "Inworld Voice Isolator (offline)", Architecture = "Band-split dual-path attention and Mamba speech isolator, 48 kHz, 64M", Status = vp,
+                CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator` writes a `voice` and a `background` stem (mono, 48 kHz).
+                // Weights: inworld/voice-isolator denoiser.safetensors (256,260,128 bytes, sha256 pinned in FxCatalog). Licence: Apache-2.0 for code and
+                // weights; trained on Inworld first-party data plus VocalSet (CC BY 4.0), IndicVoices-R (CC BY 4.0) and VCTK (ODC-By 1.0), credited in the
+                // upstream NOTICE. Matches the upstream PyTorch network on tiny random weights; real-weight parity pending (docs/Checklists/MODEL_STATUS_AUDIO.md).
+            },
+            new CatalogEntry
+            {
+                Id = "voice-isolator-realtime", Modality = fx, DisplayName = "Inworld Voice Isolator (realtime)", Architecture = "Causal band-split dual-path attention and Mamba speech isolator, 48 kHz, 58M, look-ahead 0/20/40 ms", Status = vp,
+                CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator-realtime` runs the causal stream over the clip (look-ahead 20 ms, about 63 ms latency).
+                // Weights: inworld/voice-isolator denoiser_realtime.safetensors (232,780,800 bytes, sha256 pinned in FxCatalog); same licence as the offline model.
+            },
+
             // Vision
             new CatalogEntry
             {

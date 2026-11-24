@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.VoiceIsolator;
 using HartsyInference.Core.Backends.Cpu;
@@ -42,7 +41,7 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
         Assert.Equal(meta.RootElement.GetProperty("expected_sha256").GetString(), Sha256(Path.Combine(caseDir, "expected.npy")));
         double tolerance = meta.RootElement.GetProperty("tolerance").GetDouble();
         float[] input = WavFile.Read(Path.Combine(caseDir, "input.wav")).ToMono();
-        float[] expected = ReadFloat32Npy(Path.Combine(caseDir, "expected.npy"));
+        float[] expected = NpyFloat32.Read(Path.Combine(caseDir, "expected.npy"));
 
         using VoiceIsolatorNetwork network = VoiceIsolatorNetwork.Load(model);
         if (network.Config.Causal)
@@ -77,23 +76,5 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
     {
         using FileStream stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-    }
-
-    private static float[] ReadFloat32Npy(string path)
-    {
-        byte[] bytes = File.ReadAllBytes(path);
-        Assert.True(bytes.Length > 10 && bytes[0] == 0x93 && bytes[1] == (byte)'N', "not an .npy file");
-        int headerLength = bytes[6] == 1 ? BitConverter.ToUInt16(bytes, 8) : (int)BitConverter.ToUInt32(bytes, 8);
-        int dataStart = (bytes[6] == 1 ? 10 : 12) + headerLength;
-        string header = System.Text.Encoding.ASCII.GetString(bytes, bytes[6] == 1 ? 10 : 12, headerLength);
-        Assert.Contains("'<f4'", header);
-        Assert.Contains("'fortran_order': False", header);
-        Match shape = Regex.Match(header, @"'shape': \((\d+),?\)");
-        Assert.True(shape.Success, $"unexpected npy shape in {header}");
-        int count = int.Parse(shape.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-        Assert.Equal(count * 4, bytes.Length - dataStart);
-        float[] values = new float[count];
-        Buffer.BlockCopy(bytes, dataStart, values, 0, count * 4);
-        return values;
     }
 }
