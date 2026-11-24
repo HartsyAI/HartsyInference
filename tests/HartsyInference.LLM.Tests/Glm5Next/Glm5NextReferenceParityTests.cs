@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Glm5Next;
 using Xunit;
@@ -34,6 +36,69 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
         for (int l = 0; l < c.Layers; l++) Report($"layer {l} stream", streams[l], Npy($"layer_{l}_stream.npy"), 2e-4f);
         Report("final hidden", hidden, Npy("final_hidden.npy"), 2e-4f);
         Report("logits", logits, Npy("logits.npy"), 5e-4f);
+    }
+
+    [Fact]
+    public void Bf16Checkpoint_MatchesTheSameWeightsRoundedAndRunInF32()
+    {
+        // The real checkpoint is BF16, norms included. Stored as BF16, a tensor must read exactly as its rounded values run in F32: a misread
+        // dtype (such as the final norm once was) shows as an error of whole units here. The tiny random model is itself very sensitive to
+        // rounding (embedding rounding alone moves its logits by about 1), so the comparison is against the rounded F32 run, not the original.
+        Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        int[] ids = [.. NpyReader.ReadInt64(Path.Combine(Dir, "input_ids.npy")).Data.Select(v => (int)v)];
+        float[] rounded = Logits(c, ids, new Bf16Source(Ernie5CheckpointWeights.Open(Dir), storeBf16: false));
+        float[] stored = Logits(c, ids, new Bf16Source(Ernie5CheckpointWeights.Open(Dir), storeBf16: true));
+        float worst = 0f;
+        for (int i = 0; i < rounded.Length; i++) worst = MathF.Max(worst, MathF.Abs(rounded[i] - stored[i]));
+        output.WriteLine($"BF16-stored vs rounded-F32 logits: max abs difference {worst:E3}");
+        Assert.True(worst < 1e-4f, $"BF16 storage reads differently from its rounded values: {worst}.");
+    }
+
+    [Fact]
+    public void WrongEmbeddingShape_IsRefusedByName_AndNoTensorIsLeftOpen()
+    {
+        // The constructor releases what it has read when a shape is refused; the refusal itself is the observable part here.
+        Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        using Ernie5CheckpointWeights inner = Ernie5CheckpointWeights.Open(Dir);
+        InvalidDataException ex = Assert.Throws<InvalidDataException>(() => new Glm5NextModel(new CpuBackend(), c, new WrongEmbedding(inner)));
+        Assert.Contains("embed_tokens", ex.Message);
+    }
+
+    // Replaces the embedding with a tensor of the wrong shape and passes every other read through.
+    private sealed class WrongEmbedding(IErnie5WeightSource inner) : IErnie5WeightSource
+    {
+        public IEnumerable<string> Names => inner.Names;
+
+        public Tensor Read(string name) => name == Glm5NextWeightNames.Embedding
+            ? HostMath.Tensor(new float[8], 2, 4)
+            : inner.Read(name);
+    }
+
+    private static float[] Logits(Glm5NextConfig c, int[] ids, IErnie5WeightSource source)
+    {
+        using IDisposable owned = (IDisposable)source;
+        using Glm5NextModel model = new(new CpuBackend(), c, source);
+        return model.Forward(ids, new Glm5NextState(c, ids.Length));
+    }
+
+    // Presents every F32 tensor of an inner source rounded to BF16: kept as BF16 storage, or read back as F32 holding the rounded values.
+    private sealed class Bf16Source(IErnie5WeightSource inner, bool storeBf16) : IErnie5WeightSource, IDisposable
+    {
+        public IEnumerable<string> Names => inner.Names;
+
+        public Tensor Read(string name)
+        {
+            Tensor raw = inner.Read(name);
+            if (raw.DType != DType.F32) return raw;
+            Tensor bf16 = raw.CastTo(DType.BF16);
+            raw.Dispose();
+            if (storeBf16) return bf16;
+            Tensor f32 = bf16.CastTo(DType.F32);
+            bf16.Dispose();
+            return f32;
+        }
+
+        public void Dispose() => (inner as IDisposable)?.Dispose();
     }
 
     [Fact]
