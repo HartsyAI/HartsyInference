@@ -111,7 +111,15 @@ public sealed class LongCatLoraTests : IDisposable
         float[] expected = fixture.Delta("blocks.0.attn.proj", 1f);
         ReadOnlySpan<float> got = full.AsReadOnlySpan<float>();
         for (int i = 0; i < expected.Length; i += 97)
-            Assert.Equal(expected[i], 0.3f * got[i], 5);
+            Assert.True(MathF.Abs(expected[i] - 0.3f * got[i]) < 1e-5f, $"proj[{i}]: {expected[i]} vs {0.3f * got[i]}");
+
+        LoraLayer split = file.Layers.Single(static l => l.TargetKey == "blocks.0.attn.qkv.weight");
+        using Tensor fullSplit = split.Delta.ComputeF32(_backend);
+        float[] expectedSplit = fixture.Delta("blocks.0.attn.qkv", 1f);
+        ReadOnlySpan<float> gotSplit = fullSplit.AsReadOnlySpan<float>();
+        Assert.Equal(0.3f, split.Delta.Scale, 6);
+        for (int i = 0; i < expectedSplit.Length; i += 89)
+            Assert.True(MathF.Abs(expectedSplit[i] - 0.3f * gotSplit[i]) < 1e-5f, $"qkv[{i}]: {expectedSplit[i]} vs {0.3f * gotSplit[i]}");
     }
 
     [Fact]
@@ -209,6 +217,38 @@ public sealed class LongCatLoraTests : IDisposable
         Assert.Equal(Forward(_dense), after);
         Dispose(mergedA, _dense);
         Dispose(mergedB, _dense);
+    }
+
+    [Fact]
+    public void OverlappingStepScopesAreRefused()
+    {
+        LongCatLoraMix mix = new(2);
+        using (mix.ForStep(0))
+        {
+            Assert.Throws<InvalidOperationException>(() => mix.ForStep(2));
+        }
+        using (mix.ForStep(2))
+        {
+            Assert.True(mix.Second.Enabled);
+        }
+    }
+
+    [Fact]
+    public void NonCanonicalBlockIndexIsRefused()
+    {
+        const string Module = "lora___lorahyphen___blocks___lorahyphen___0___lorahyphen___attn___lorahyphen___qkv";
+        Dictionary<string, Tensor> tensors = new()
+        {
+            [Module + ".lora_down.weight"] = LongCatTestData.Random(new TensorShape(6, 8), 5),
+            [Module + ".lora_up.blocks.0.weight"] = LongCatTestData.Random(new TensorShape(8, 2), 6),
+            [Module + ".lora_up.blocks.01.weight"] = LongCatTestData.Random(new TensorShape(8, 2), 7),
+            [Module + ".lora_up.blocks.2.weight"] = LongCatTestData.Random(new TensorShape(8, 2), 8),
+        };
+        SafeTensorsWriter.Save(PathOf("zeropad.safetensors"), tensors);
+
+        Assert.ThrowsAny<Exception>(() => LoraFile.Load(PathOf("zeropad.safetensors")));
+        foreach (Tensor t in tensors.Values)
+            t.Dispose();
     }
 
     [Fact]

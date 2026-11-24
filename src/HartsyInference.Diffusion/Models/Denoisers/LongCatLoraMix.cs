@@ -37,5 +37,13 @@ public sealed class LongCatLoraMix
     /// <summary>Enables the gate of <paramref name="step"/> at <paramref name="strength"/> until the scope is disposed; the other
     /// gate stays off.</summary>
     /// <param name="strength">A finite, non-negative multiplier on the LoRA's own stored scale (a negative stored scale is folded at load).</param>
-    public IDisposable ForStep(int step, float strength = 1f) => GateFor(step).Enable(strength);
+    /// <remarks>Refuses to enable a gate while the other one is live, which is what a step scope left open from an earlier step would look like.</remarks>
+    public IDisposable ForStep(int step, float strength = 1f)
+    {
+        AdjunctGate gate = GateFor(step);
+        AdjunctGate other = ReferenceEquals(gate, First) ? Second : First;
+        if (other.Enabled)
+            throw new InvalidOperationException("The other LoRA gate is still enabled; a scope from an earlier step was not disposed.");
+        return gate.Enable(strength);
+    }
 }

@@ -1,3 +1,5 @@
+using System.Globalization;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -96,12 +98,17 @@ public static class LongCatLoraMapper
         if (up.Shape.Rank != 2 || up.Shape[1] != down.Shape[0])
             throw new InvalidDataException($"LongCat LoRA '{target}': up {up.Shape} does not pair with down {down.Shape}.");
 
+        if (module.Alpha is null)
+            Logs.Warning($"LongCat LoRA module '{target}' has no alpha_scale; applying it at scale 1.");
         float scale = module.Alpha is null ? 1f : ReadScalar(loader, module.Alpha);
         if (!float.IsFinite(scale))
             throw new InvalidDataException($"LongCat LoRA '{module.Alpha}' is not finite.");
         if (scale < 0f)
         {
-            up = Negated(up, ownedTensors);
+            if (split)
+                Negate(up);
+            else
+                up = Negated(up, ownedTensors);
             scale = -scale;
         }
         return new LoraLayer
@@ -154,6 +161,14 @@ public static class LongCatLoraMapper
         return up;
     }
 
+    /// <summary>Negates a mapper-owned F32 tensor in place.</summary>
+    private static unsafe void Negate(Tensor owned)
+    {
+        Span<float> values = owned.AsSpan<float>();
+        for (int i = 0; i < values.Length; i++)
+            values[i] = -values[i];
+    }
+
     private static unsafe Tensor Negated(Tensor up, List<Tensor> ownedTensors)
     {
         using Tensor f32 = up.CastTo(DType.F32);
@@ -182,7 +197,9 @@ public static class LongCatLoraMapper
         if (at < 0 || !key.EndsWith(".weight", StringComparison.Ordinal))
             return false;
         ReadOnlySpan<char> number = key.AsSpan(at + UpBlockMarker.Length, key.Length - at - UpBlockMarker.Length - ".weight".Length);
-        if (!int.TryParse(number, out index) || index < 0)
+        // Canonical decimal only: "blocks.01" would otherwise parse to block 1 and collide with it silently.
+        if (!int.TryParse(number, NumberStyles.None, CultureInfo.InvariantCulture, out index) || index < 0
+            || index.ToString(CultureInfo.InvariantCulture) != number.ToString())
             return false;
         module = key[..at];
         return true;
