@@ -108,6 +108,10 @@ public sealed class LongCatAudioFeaturesTests
         => Assert.Equal(expected, LongCatAudioFeatures.SegmentStartFrame(segment, LongCatAudioLayout.Whisper));
 
     [Fact]
+    public void SegmentStartFrame_RejectsANullLayout()
+        => Assert.Throws<ArgumentNullException>(() => LongCatAudioFeatures.SegmentStartFrame(0, null!));
+
+    [Fact]
     public void SegmentStartFrame_ScalesWithTheStride()
         => Assert.Equal(160, LongCatAudioFeatures.SegmentStartFrame(1, LongCatAudioLayout.Wav2Vec2));
 

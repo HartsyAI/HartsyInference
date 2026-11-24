@@ -73,7 +73,9 @@ def main():
     speech = ss.lfilter(b, a, speech)
     write_f32(args.out, "w2v_waveform", speech)
 
-    extractor = Wav2Vec2FeatureExtractor(args.w2v_dir, local_files_only=True)  # the reference's construction
+    # As upstream (audio_process/__init__.py L15-16): the path lands in the constructor's first positional parameter, feature_size,
+    # so preprocessor_config.json is never read and do_normalize keeps its default True. Do not "fix" this to from_pretrained.
+    extractor = Wav2Vec2FeatureExtractor(args.w2v_dir, local_files_only=True)
     set_meta(args.out, "w2v_do_normalize", bool(extractor.do_normalize))
     values = np.squeeze(extractor(speech, sampling_rate=16000).input_values)
     write_f32(args.out, "w2v_input_values", values)

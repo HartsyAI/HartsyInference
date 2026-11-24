@@ -20,16 +20,24 @@ namespace HartsyInference.Audio.Tests.LongCat;
 public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
 {
     private const double Tolerance = 1e-5;
+
+    // The mel front end documents a 1e-4 per-element target; HF computes its STFT in torch F32, so the first run sets what holds.
+    private const double MelTolerance = 1e-4;
     private readonly List<(string Stage, double RelRms)> _stages = [];
 
-    private void Stage(string name, ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
-        => _stages.Add((name, Files.RelRms(actual, expected)));
+    private readonly Dictionary<string, double> _limits = [];
+
+    private void Stage(string name, ReadOnlySpan<float> actual, ReadOnlySpan<float> expected, double limit = Tolerance)
+    {
+        _stages.Add((name, Files.RelRms(actual, expected)));
+        _limits[name] = limit;
+    }
 
     private void AssertStages()
     {
         foreach ((string stage, double rms) in _stages) output.WriteLine($"{stage}: relRMS {rms:E2}");
-        string[] failed = _stages.Where(s => !(s.RelRms < Tolerance)).Select(s => s.Stage).ToArray();
-        Assert.True(failed.Length == 0, "above 1e-5: " + string.Join(", ", failed));
+        string[] failed = _stages.Where(s => !(s.RelRms < _limits[s.Stage])).Select(s => s.Stage).ToArray();
+        Assert.True(failed.Length == 0, "above the stage limit: " + string.Join(", ", failed));
     }
 
     private void StageLayout(string tag, LongCatAudioLayout layout, float[] features, int frames, int segments)
@@ -89,7 +97,7 @@ public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
             float maxAbs = 0;
             for (int i = 0; i < actual.Length; i++) maxAbs = Math.Max(maxAbs, Math.Abs(actual[i] - reference[i]));
             output.WriteLine($"mel128 chunk {c}: max |diff| {maxAbs:E2}");
-            Stage($"mel128 chunk {c}", actual, reference);
+            Stage($"mel128 chunk {c}", actual, reference, MelTolerance);
         }
         AssertStages();
     }
@@ -131,6 +139,7 @@ public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
     public void Wav2Vec2V10Features_MatchTheReference()
     {
         float[] waveform = Files.Read("w2v_waveform.f32");
+        Assert.True(Files.MetaBool("w2v_do_normalize"), "the reference extractor did not normalise: NormalizeInput must be off");
         float[] inputValues = Files.Read("w2v_input_values.f32");
         int frames = Files.MetaInt("w2v_video_length");
         IBackend backend = new CpuBackend();

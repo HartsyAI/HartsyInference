@@ -16,6 +16,12 @@ public static class LongCatAudioFeatures
     /// <summary>Whisper blocks per frame after pooling.</summary>
     public const int WhisperBlockCount = 5;
 
+    /// <summary>Video frames one segment renders (<c>num_frames</c>).</summary>
+    public const int SegmentFrames = 93;
+
+    /// <summary>Frames a continuation segment shares with the previous one (<c>num_cond_frames</c>).</summary>
+    public const int OverlapFrames = 13;
+
     /// <summary>Mean of <c>[0,8)</c>, <c>[8,16)</c>, <c>[16,24)</c> and <c>[24,32)</c> of the 33 hidden states, then state
     /// 32 alone (the post-LayerNorm output), per encoder frame. <paramref name="states"/> is
     /// <c>[frames, 33, channels]</c>, <paramref name="pooled"/> <c>[frames, 5, channels]</c>.</summary>
@@ -105,8 +111,10 @@ public static class LongCatAudioFeatures
     }
 
     /// <summary>Feature frame a segment's windows start at: <c>segment * stride * (framesPerSegment - overlapFrames)</c>.</summary>
-    public static int SegmentStartFrame(int segment, LongCatAudioLayout layout, int framesPerSegment = 93, int overlapFrames = 13)
+    public static int SegmentStartFrame(
+        int segment, LongCatAudioLayout layout, int framesPerSegment = SegmentFrames, int overlapFrames = OverlapFrames)
     {
+        ValidateLayout(layout);
         if (segment < 0) throw new ArgumentOutOfRangeException(nameof(segment), segment, "Segment index is negative.");
         if (overlapFrames < 0 || overlapFrames >= framesPerSegment)
             throw new ArgumentOutOfRangeException(nameof(overlapFrames), overlapFrames, "Overlap must be below the segment length.");
