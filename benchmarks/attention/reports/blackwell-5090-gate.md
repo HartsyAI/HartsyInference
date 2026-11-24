@@ -92,6 +92,26 @@ Vulkan on this pod: the NVIDIA ICD manifest is present and the loader opens `lib
 symbol lookup, so the cause is not identified. The only untested remedy is the NVIDIA installer's own driver userspace
 (423 MB, sha256 published), which is not downloaded.
 
+## Vulkan diagnosis, 2026-11-24: what was tested and ruled out
+
+Vulkan has not run on NVIDIA hardware on any RunPod pod tried (two 5090 and two 4090 passes plus diagnostic pods).
+Tested and ruled out as the cause:
+
+- **Loader version:** Ubuntu's libvulkan1 1.3.275 is what the image ships. Ubuntu's own libvulkan1 1.4.341 (archive
+  sha256 `b4aca7a5...`, 157,194 bytes) was used in place of it, and the loader log shows 1.4.341 in use. The same
+  failure follows.
+- **Missing entry points:** both the injected `libGLX_nvidia.so.0` and the installer's `libGLX_nvidia.so.595.112.07`
+  export `vkCreateInstance`, `vk_icdGetInstanceProcAddr` and `vk_icdNegotiateLoaderICDInterfaceVersion`.
+- **Environment:** with `NVIDIA_DRIVER_CAPABILITIES=all` and `NVIDIA_VISIBLE_DEVICES=all` set explicitly, both ICDs fail
+  the same way. The container's startup environment has `NVIDIA_DRIVER_CAPABILITIES=all` and `NVIDIA_VISIBLE_DEVICES=void`.
+
+What remains: the ICD reports that `vk_icdGetInstanceProcAddr` cannot return `vkCreateInstance`, and strace shows it
+never opens `/dev/nvidiactl` or a DRM node before failing. The cause inside the driver is not identified, and it is
+not decided by the image, the loader or the environment as tested. A different image would not change the injected
+driver libraries, so an image rebuild alone is not expected to help.
+
+Vulkan is therefore recorded as unvalidated on Blackwell. Stages 3 and 4 were not run.
+
 ## Vulkan
 
 Expectation 2 (an NVIDIA Vulkan device visible) was put at about 60% and was **missed**. In pass 1 the loader logged
