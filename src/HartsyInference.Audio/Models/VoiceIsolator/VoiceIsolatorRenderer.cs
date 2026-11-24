@@ -33,6 +33,10 @@ public static class VoiceIsolatorRenderer
     {
         ArgumentNullException.ThrowIfNull(network);
         ArgumentNullException.ThrowIfNull(audio);
+        if (network.Config.Causal)
+        {
+            throw new ArgumentException("The offline renderer takes the two-sided checkpoint; stream a causal one with VoiceIsolatorStream.", nameof(network));
+        }
         VoiceIsolatorConfig config = network.Config;
         (int chunk, int overlap) = WindowSamples(chunkSeconds ?? config.ChunkSeconds, overlapSeconds ?? config.OverlapSeconds,
             config.SampleRate, config.HopLength);

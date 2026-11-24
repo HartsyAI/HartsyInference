@@ -8,6 +8,15 @@ namespace HartsyInference.Audio.Models.VoiceIsolator;
 /// <summary>Layout and elementwise steps of the isolator that no backend op covers, as parallel host loops over F32 tensors.</summary>
 internal static unsafe class VoiceIsolatorOps
 {
+    /// <summary>Requires a tensor read through a raw pointer to be F32 with exactly <paramref name="count"/> elements.</summary>
+    internal static void RequireF32(Tensor tensor, string name, long count)
+    {
+        if (tensor.DType != DType.F32 || tensor.ElementCount != count)
+        {
+            throw new InvalidDataException($"{name} must be F32 with {count} elements, got {tensor.DType.Name} {tensor.ElementCount}.");
+        }
+    }
+
     /// <summary>Swaps the two leading axes of <c>[a, b, w]</c> into <c>[b, a, w]</c>.</summary>
     public static void SwapLeading(Tensor output, Tensor input, int a, int b, int w)
     {

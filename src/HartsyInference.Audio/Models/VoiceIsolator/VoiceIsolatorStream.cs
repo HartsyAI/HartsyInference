@@ -38,7 +38,7 @@ public sealed class VoiceIsolatorStream : IDisposable
     private long _released;
     private bool _closed;
 
-    /// <summary>Starts a session on a causal network at its current look-ahead.</summary>
+    /// <summary>Starts a session on a causal network, at the look-ahead given or the checkpoint default.</summary>
     /// <param name="blockFrames">Frames computed together: a throughput knob that adds no latency.</param>
     /// <param name="cacheFrames">Frames of attention past each query keeps; null takes the checkpoint's attention window.</param>
     /// <param name="windowFrames">Window of the two-lane mode; null turns the windows off.</param>
