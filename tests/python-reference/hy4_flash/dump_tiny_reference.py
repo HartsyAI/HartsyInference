@@ -1,16 +1,27 @@
 """Reference dump for the Hy4 Flash tiny config: the real Hugging Face classes, CPU, float32, saved inputs.
 
 STATUS: written against transformers PR 50903 at eb1d5db464b0df81793f914849142e9b82e056c7 and NOT RUN (no Python with torch on the
-authoring machine). Run it on WSL or a pod the user starts, see tests/python-reference/hy4_flash/README.md. Until its output is
-committed and a C# test compares against it, the C# side is checked only against a transcription, and no parity row may be written.
+authoring machine). Run it on WSL or a pod the user starts, see README.md. Until its output is committed and a C# test compares against
+it, the C# side is checked only against a transcription, and no parity row may be written.
 
-    pip install "transformers[torch,vision] @ git+https://github.com/huggingface/transformers.git@eb1d5db464b0df81793f914849142e9b82e056c7" safetensors numpy
+    pip install torch numpy safetensors "transformers[torch,vision] @ git+https://github.com/huggingface/transformers.git@eb1d5db464b0df81793f914849142e9b82e056c7"
     python dump_tiny_reference.py --out ./out
 
-Outputs (all float32 .npy unless noted): config.json (the shipped legacy key names, readable by Hy4FlashConfig), weights.safetensors (the
-checkpoint key names, so Hy4FlashWeightMap.Check applies to its header), inputs.json (token ids and positions), and one .npy per stage:
-embed, layer_{i}_out (the [tokens, hc, hidden] stream after each decoder layer), engram_{layerIndex}_out, indexer_{i}_mask (bool, kept keys per
-query), router_{i}_topk_index (int64) and router_{i}_topk_weight, hc_head_out, final_norm_out, logits. manifest.json lists sha256 of every file.
+The tiny config is tiny_config.json next to this file (shipped legacy key names, read by Hy4FlashConfig too). Two cases are dumped:
+
+  text:   40 token ids (not a multiple of the kpool, longer than index_topk and the sliding window, ids past the 250-long lookup map, the pad id
+          mid-sequence), one full forward, then the same ids as a 37-token prefill and three single-token cached steps.
+  image:  8 text ids, a 4x4-patch image (2x2 merged grid, 6 placeholder tokens), 10 text ids, one full forward.
+
+Weights are perturbed so every term matters: router bias, sinks, indexer APE, hyper-connection bases and scales, every norm gain, and a many-to-one
+Engram lookup table whose hash multipliers are redrawn from max(table)+1 as the reference does after loading.
+
+Outputs: config.json, weights.safetensors (checkpoint key names, so Hy4FlashWeightMap.Check applies to its header), then per case
+inputs_<case>.json and <case>__<stage>.npy (float32 unless noted): embed, layer_{i}_out (the [tokens, hc, hidden] stream), layer_{i}_attn_hc_post and
+_attn_hc_in, layer_{i}_attn_out, layer_{i}_ffn_hc_post and _ffn_hc_in, layer_{i}_ffn_out, layer_{i}_q_latent, engram_{i}_out, indexer_{i}_token_keys,
+indexer_{i}_group_keys, indexer_{i}_keep (bool, kept keys per query), router_{i}_topk_index (int64; compare as sets, the reference top-k is unsorted)
+and router_{i}_topk_weight, vision_out, hc_head_out, final_norm_out, logits. Cached steps are logits and layer outputs prefixed cached_prefill__
+and cached_step{n}__. manifest.json lists sha256 of every file.
 """
 
 import argparse
@@ -22,49 +33,13 @@ import sys
 from pathlib import Path
 
 PINNED_SHA = "eb1d5db464b0df81793f914849142e9b82e056c7"
-
-# The tiny config follows the upstream tester (tests/models/hy_v4_flash/test_modeling_hy_v4_flash.py at the pin), spelled in the
-# shipped checkpoint's legacy names so one dict feeds both the Hugging Face config and the C# reader. Three layers: two indexed (the
-# second carries the Engram memory) and one sliding; layer 0 has the dense FFN. index_topk 16 over kpool 4 makes the indexer select once
-# a context passes 16 keys; sliding_window 4 is shorter than the sequences.
-TINY_TEXT = {
-    "vocab_size": 256, "hidden_size": 48, "num_hidden_layers": 3, "intermediate_size": 96, "moe_intermediate_size": 32,
-    "routed_expert_hidden_size": 24, "n_routed_experts": 4, "n_shared_experts": 1, "num_experts_per_tok": 2, "n_group": 1,
-    "topk_group": 1, "norm_topk_prob": True, "routed_scaling_factor": 3.998, "swiglu_limit": 10.0,
-    "num_attention_heads": 4, "num_key_value_heads": 4, "head_dim": 8, "qk_nope_head_dim": 8, "qk_rope_head_dim": 8, "v_head_dim": 8,
-    "q_lora_rank": 32, "kv_lora_rank": 16, "swa_num_attention_heads": 8, "swa_qk_nope_head_dim": 8, "swa_qk_rope_head_dim": 8,
-    "swa_v_head_dim": 8, "sliding_window": 4, "learnable_sink_init": 0.0,
-    "layer_types": ["deepseek_sparse_attention", "deepseek_sparse_attention", "sliding_attention"],
-    "mlp_layer_types": ["dense", "sparse", "sparse"],
-    "compressed_indexer_compress_ratio": 4, "index_topk": 16, "index_n_heads": 2, "index_head_dim": 8,
-    "hc_mult": 2, "hc_eps": 1e-6, "hc_magnitude": 2.0,
-    "engram_layer_ids": [2], "engram_max_ngram_size": 3, "engram_n_head_per_ngram": 2, "engram_n_embed_per_ngram": 16,
-    "engram_layer_head_vocab_sizes": {"2": [[101, 103], [107, 109]]}, "engram_pad_id": 0, "engram_seed": 0,
-    "engram_fp8_embedding": False, "engram_lookup_table_size": 250,
-    "rope_parameters": {
-        "deepseek_sparse_attention": {"rope_type": "default", "rope_theta": 1e7, "mrope_section": [2, 1, 1], "mrope_interleaved": True},
-        "sliding_attention": {"rope_type": "default", "rope_theta": 1e4, "mrope_section": [2, 1, 1], "mrope_interleaved": True},
-    },
-    "rms_norm_eps": 1e-5, "max_position_embeddings": 4096, "tie_word_embeddings": False, "hidden_act": "silu",
-    "bos_token_id": 1, "eos_token_id": 2, "pad_token_id": 0, "model_type": "hy_v4_flash",
-}
-TINY_VISION = {
-    "hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 3, "num_attention_heads": 2, "out_hidden_size": 48,
-    "patch_size": 4, "spatial_merge_size": 2, "max_image_size": 64, "rms_norm_eps": 1e-5, "hidden_act": "gelu",
-    "model_type": "hy_v4_flash",
-}
-TINY_ROOT = {
-    "architectures": ["HYV4FlashForConditionalGeneration"], "model_type": "hy_v4_flash", "image_token_id": 250, "image_start_token_id": 251,
-    "image_end_token_id": 252, "image_newline_token_id": 253, "video_token_id": 254, "video_start_token_id": 255, "video_end_token_id": 249,
-    "vision_start_token_id": 251, "spatial_merge_size": 2,
-}
+HERE = Path(__file__).resolve().parent
 
 # Hugging Face module names back to checkpoint names (the inverse of conversion_mapping.py "hy_v4_flash" + "hy_v4_vl").
 RENAMES = [
     (r"\.self_attn\.sinks$", ".self_attn.learnable_sink_param"),
     (r"\.self_attn\.gate_proj\.weight$", ".self_attn.linear_gate.weight"),
     (r"\.post_self_attn_layernorm\.weight$", ".self_attn.post_proj_norm.weight"),
-    (r"\.mlp\.post_mlp_layernorm\.weight$", ".mlp.post_fc2_norm.weight"),
     (r"^(model\.language_model\.layers\.\d+)\.post_mlp_layernorm\.weight$", r"\1.mlp.post_fc2_norm.weight"),
     (r"\.mlp\.pre_expert_proj\.weight$", ".mlp.routed_expert_down_proj.weight"),
     (r"\.mlp\.post_expert_proj\.weight$", ".mlp.routed_expert_up_proj.weight"),
@@ -109,6 +84,35 @@ def sha256(path):
     return h.hexdigest()
 
 
+def perturb(model, torch, seed):
+    """Make every term of the forward matter: random init leaves gates near 0.5, norm gains at 1 and biases at 0."""
+    gen = torch.Generator().manual_seed(seed)
+
+    def noise(t, scale):
+        return torch.randn(t.shape, generator=gen) * scale
+
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if name.endswith(".sinks") or "intra_group_ape" in name or "unified_per_hc_scales" in name:
+                p.add_(noise(p, 0.5))
+            elif re.search(r"\.(attn_hc|ffn_hc)\.base$", name) or name.endswith("hc_head.hc_base"):
+                p.add_(noise(p, 0.5))
+            elif re.search(r"\.(attn_hc|ffn_hc)\.scale$", name) or name.endswith("hc_head.hc_scale"):
+                p.copy_(0.5 + torch.rand(p.shape, generator=gen))
+            elif p.ndim == 1 and name.endswith("weight") and ("norm" in name or name.endswith("unified_pre_gamma")):
+                p.add_(noise(p, 0.3))
+            elif name.endswith("unified_pre_gamma"):
+                p.add_(noise(p, 0.3))
+        for name, b in model.named_buffers():
+            if name.endswith("e_score_correction_bias"):
+                b.add_(noise(b, 0.5))
+        for module in model.modules():
+            if type(module).__name__ == "HYV4FlashEngramLayer":
+                table = (torch.arange(module.lookup_table.shape[0], dtype=torch.int32) // 2).to(torch.int32)
+                module.lookup_table.copy_(table)
+                module.hash_multipliers.copy_(module.draw_hash_multipliers(int(table.max()) + 1))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
@@ -124,74 +128,123 @@ def main():
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    config_dict = {**TINY_ROOT, "text_config": TINY_TEXT, "vision_config": TINY_VISION}
+    config_dict = json.loads((HERE / "tiny_config.json").read_text())
     (out / "config.json").write_text(json.dumps(config_dict, indent=2))
+    text, vision, root = config_dict["text_config"], config_dict["vision_config"], config_dict
 
     torch.manual_seed(args.seed)
-    config = HYV4FlashConfig(**json.loads(json.dumps(config_dict)))
-    model = HYV4FlashForConditionalGeneration(config).to(torch.float32).eval()
-    # Random init leaves the router bias, sinks, gates and Engram scales near their defaults; perturb them so every term matters.
-    gen = torch.Generator().manual_seed(args.seed + 1)
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if any(k in name for k in ("e_score_correction_bias", "sinks", "intra_group_ape", "unified_per_hc_scales", "hc_base")):
-                p.add_(torch.randn(p.shape, generator=gen) * 0.5)
-            if "lookup_table" in name:
-                continue
-    sd = {checkpoint_key(k): v.detach().to(torch.float32).contiguous() for k, v in model.state_dict().items()}
-    for k, v in model.named_buffers():
+    model = HYV4FlashForConditionalGeneration(HYV4FlashConfig(**json.loads(json.dumps(config_dict)))).to(torch.float32).eval()
+    perturb(model, torch, args.seed + 1)
+
+    sd = {checkpoint_key(k): v.detach().to(torch.float32).contiguous() for k, v in model.state_dict().items() if not k.endswith("lookup_table")}
+    for k, v in model.state_dict().items():
         if k.endswith("lookup_table"):
             sd[checkpoint_key(k)] = v.detach().to(torch.int32).contiguous()
     save_file(sd, str(out / "weights.safetensors"))
 
-    # Inputs: 40 tokens, not a multiple of the kpool (the C# side prefills 37 and decodes 3), longer than index_topk and the sliding window,
-    # with ids past the 250-long lookup map (250..255 minus the placeholders that carry no n-gram) to exercise the padding rule.
     rng = np.random.default_rng(args.seed)
     ids = rng.integers(3, 250, size=40).astype(np.int64)
-    ids[5], ids[17], ids[18] = 255, 249, 249
-    (out / "inputs.json").write_text(json.dumps({"input_ids": ids.tolist(), "prefill_length": 37}))
-    input_ids = torch.from_numpy(ids)[None]
+    ids[5], ids[11], ids[17], ids[18], ids[30] = 255, 0, 249, 250, 0  # past the map, pad mid-sequence, past the map
+    ids_text = ids
 
-    captured = {}
-
-    def save(name, tensor):
-        captured[name] = tensor.detach().float().cpu().numpy() if tensor.dtype.is_floating_point else tensor.detach().cpu().numpy()
+    grid = [1, 4, 4]  # t, h, w in patches; patch 4, merge 2 -> a 2x2 merged grid, 2 * (2 + 1) = 6 placeholder tokens
+    patch = vision["patch_size"]
+    num_patches = grid[1] * grid[2]
+    pixels = torch.from_numpy(rng.standard_normal((num_patches, 3 * patch * patch)).astype(np.float32))
+    n_image = (grid[1] // 2) * (grid[2] // 2 + 1)
+    ids_image = np.concatenate([rng.integers(3, 249, size=8), np.full(n_image, root["image_token_id"]), rng.integers(3, 249, size=10)]).astype(np.int64)
 
     lm = model.model.language_model
-    handles = [lm.embed_tokens.register_forward_hook(lambda m, i, o: save("embed", o))]
-    for index, layer in enumerate(lm.layers):
-        handles.append(layer.register_forward_hook(lambda m, i, o, n=index: save(f"layer_{n}_out", o)))
-        if layer.engram_layer is not None:
-            handles.append(layer.engram_layer.register_forward_hook(lambda m, i, o, n=index: save(f"engram_{n}_out", o)))
-        if layer.self_attn.compressed_indexer is not None:
-            def indexer_hook(m, i, o, n=index):
-                save(f"indexer_{n}_mask", o > torch.finfo(o.dtype).min / 2)
+    state = {"prefix": "", "detailed": True, "captured": {}}
 
-            handles.append(layer.self_attn.compressed_indexer.register_forward_hook(indexer_hook))
+    def save(name, tensor):
+        if not state["detailed"] and not (name.startswith("layer_") and name.endswith("_out")) and name != "logits":
+            return
+        t = tensor.detach()
+        state["captured"][state["prefix"] + name] = t.float().cpu().numpy() if t.dtype.is_floating_point else t.cpu().numpy()
+
+    handles = [lm.embed_tokens.register_forward_hook(lambda m, i, o: save("embed", o))]
+    for n, layer in enumerate(lm.layers):
+        handles.append(layer.register_forward_hook(lambda m, i, o, n=n: save(f"layer_{n}_out", o)))
+        def hc_hook(prefix, n=n):
+            def hook(m, i, o):
+                save(f"layer_{n}_{prefix}_post", o[0])
+                save(f"layer_{n}_{prefix}_in", o[1])
+
+            return hook
+
+        handles.append(layer.attn_hc.register_forward_hook(hc_hook("attn_hc")))
+        handles.append(layer.ffn_hc.register_forward_hook(hc_hook("ffn_hc")))
+        handles.append(layer.self_attn.register_forward_hook(lambda m, i, o, n=n: save(f"layer_{n}_attn_out", o[0])))
+        handles.append(layer.self_attn.q_a_layernorm.register_forward_hook(lambda m, i, o, n=n: save(f"layer_{n}_q_latent", o)))
+        handles.append(layer.mlp.register_forward_hook(lambda m, i, o, n=n: save(f"layer_{n}_ffn_out", o)))
+        if layer.engram_layer is not None:
+            handles.append(layer.engram_layer.register_forward_hook(lambda m, i, o, n=n: save(f"engram_{n}_out", o)))
+        indexer = layer.self_attn.compressed_indexer
+        if indexer is not None:
+            handles.append(indexer.token_key_norm.register_forward_hook(lambda m, i, o, n=n: save(f"indexer_{n}_token_keys", o)))
+            original_pool = indexer.pool_groups
+
+            def pool(token_keys, n=n, original=original_pool):
+                groups = original(token_keys)
+                save(f"indexer_{n}_group_keys", groups)
+                return groups
+
+            indexer.pool_groups = pool
+            handles.append(indexer.register_forward_hook(lambda m, i, o, n=n: save(f"indexer_{n}_keep", o > torch.finfo(o.dtype).min / 2)))
         gate = getattr(layer.mlp, "gate", None)
         if gate is not None:
-            def router_hook(m, i, o, n=index):
+            def router(m, i, o, n=n):
                 save(f"router_{n}_topk_weight", o[1])
                 save(f"router_{n}_topk_index", o[2])
 
-            handles.append(gate.register_forward_hook(router_hook))
+            handles.append(gate.register_forward_hook(router))
+    handles.append(model.model.vision_tower.register_forward_hook(lambda m, i, o: save("vision_out", o.pooler_output[0] if isinstance(o.pooler_output, (list, tuple)) else o.pooler_output)))
     handles.append(lm.hc_head.register_forward_hook(lambda m, i, o: save("hc_head_out", o)))
     handles.append(lm.norm.register_forward_hook(lambda m, i, o: save("final_norm_out", o)))
 
     with torch.no_grad():
-        logits = model(input_ids=input_ids, use_cache=False).logits
-    save("logits", logits)
+        state["prefix"] = "text__"
+        logits = model(input_ids=torch.from_numpy(ids_text)[None], use_cache=False).logits
+        save("logits", logits)
+        (out / "inputs_text.json").write_text(json.dumps({"input_ids": ids_text.tolist(), "prefill_length": 37}))
+
+        # Cached run: engram n-grams reach back into the history, so the full-history windows are passed explicitly.
+        state["detailed"] = False
+        full = torch.from_numpy(ids_text)[None]
+        ngram, mask = model.model.build_engram_inputs(full, None)
+        state["prefix"] = "cached_prefill__"
+        first = model(input_ids=full[:, :37], ngram_tokens=ngram[:, :37], engram_mask=mask[:, :37], use_cache=True)
+        save("logits", first.logits)
+        cache = first.cache
+        for step in range(3):
+            end = 38 + step
+            state["prefix"] = f"cached_step{step}__"
+            result = model(input_ids=full[:, end - 1:end], ngram_tokens=ngram[:, end - 1:end], engram_mask=mask[:, end - 1:end], cache=cache, use_cache=True)
+            save("logits", result.logits)
+            cache = result.cache
+
+        state["detailed"] = True
+        state["prefix"] = "image__"
+        grid_t = torch.tensor([grid])
+        ids_t = torch.from_numpy(ids_image)[None]
+        image_logits = model(input_ids=ids_t, pixel_values=pixels, image_grid_thw=grid_t,
+                             mm_token_type_ids=(ids_t == root["image_token_id"]).long(), use_cache=False).logits
+        save("logits", image_logits)
+        (out / "inputs_image.json").write_text(json.dumps({"input_ids": ids_image.tolist(), "image_grid_thw": grid,
+                                                           "pixel_values_shape": list(pixels.shape)}))
+        np.save(out / "image__pixel_values.npy", pixels.numpy())
     for handle in handles:
         handle.remove()
 
     manifest = {"transformers_pin": PINNED_SHA, "torch": torch.__version__, "seed": args.seed, "files": {}}
-    for name, array in captured.items():
+    for name, array in state["captured"].items():
         np.save(out / f"{name}.npy", array)
     for path in sorted(out.iterdir()):
         if path.name != "manifest.json":
             manifest["files"][path.name] = sha256(path)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    print(f"wrote {len(captured)} stages to {out}")
+    print(f"wrote {len(state['captured'])} stages to {out}")
 
 
 if __name__ == "__main__":

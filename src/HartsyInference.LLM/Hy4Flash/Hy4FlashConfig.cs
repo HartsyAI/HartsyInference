@@ -53,6 +53,15 @@ public sealed record Hy4FlashConfig
     /// <summary>Keys a sliding layer attends, its own position included (<c>sliding_window</c>).</summary>
     public required int SlidingWindow { get; init; }
 
+    /// <summary>Per-head no-position query/key width of a sliding layer (<c>swa_qk_nope_head_dim</c>); must equal <see cref="QkNopeHeadDim"/>.</summary>
+    public int SlidingQkNopeHeadDim { get; init; }
+
+    /// <summary>Per-head rotated width of a sliding layer (<c>swa_qk_rope_head_dim</c>); must equal <see cref="QkRopeHeadDim"/>.</summary>
+    public int SlidingQkRopeHeadDim { get; init; }
+
+    /// <summary>Per-head value width of a sliding layer (<c>swa_v_head_dim</c>); must equal <see cref="VHeadDim"/>.</summary>
+    public int SlidingVHeadDim { get; init; }
+
     /// <summary>Initial per-head sink logit (<c>learnable_sink_init</c>).</summary>
     public double LearnableSinkInit { get; init; }
 
@@ -137,8 +146,8 @@ public sealed record Hy4FlashConfig
     /// <summary>Seed of the per-layer hash multiplier draw (<c>engram_seed</c>).</summary>
     public int EngramSeed { get; init; }
 
-    /// <summary>Whether looked-up rows take an FP8 round trip (<c>engram_fp8_embedding</c>); true in the base config, false in the instruct ones.</summary>
-    public bool EngramFp8Embedding { get; init; }
+    /// <summary>Whether looked-up rows take an FP8 round trip (<c>engram_fp8_embedding</c>); true is the reference default and the base config's value, false in the instruct ones.</summary>
+    public bool EngramFp8Embedding { get; init; } = true;
 
     /// <summary>Length of the frozen token map (<c>engram_lookup_table_size</c>, default 120,818 as in the reference).</summary>
     public int EngramLookupTableSize { get; init; } = 120818;
@@ -254,6 +263,9 @@ public sealed record Hy4FlashConfig
             QkNopeHeadDim = nope,
             QkRopeHeadDim = rope,
             VHeadDim = t.Int("v_head_dim"),
+            SlidingQkNopeHeadDim = t.Int("swa_qk_nope_head_dim", nope),
+            SlidingQkRopeHeadDim = t.Int("swa_qk_rope_head_dim", rope),
+            SlidingVHeadDim = t.Int("swa_v_head_dim", t.Int("v_head_dim")),
             SlidingWindow = t.Int("sliding_window", 512),
             LearnableSinkInit = t.Double("learnable_sink_init", 0.0),
             IntermediateSize = t.Int("intermediate_size"),
@@ -284,7 +296,7 @@ public sealed record Hy4FlashConfig
             EngramEmbedPerNgram = t.Int("engram_n_embed_per_ngram", 768),
             EngramPadId = t.Int("engram_pad_id", 120002),
             EngramSeed = t.Int("engram_seed", 0),
-            EngramFp8Embedding = t.Bool("engram_fp8_embedding", false),
+            EngramFp8Embedding = t.Bool("engram_fp8_embedding", true),
             EngramLookupTableSize = t.Int("engram_lookup_table_size", 120818),
             EngramHeadVocabSizes = ReadEngramVocab(text),
             RmsNormEps = t.Double("rms_norm_eps", 1e-6),
@@ -332,6 +344,8 @@ public sealed record Hy4FlashConfig
         if (LayerKinds.Count != NumHiddenLayers || SparseFfn.Count != NumHiddenLayers)
             throw Bad("layer_types and mlp_layer_types must each list num_hidden_layers entries.");
         if (HcMult < 1) throw Bad($"hc_mult must be positive, got {HcMult}.");
+        if (SlidingQkNopeHeadDim != QkNopeHeadDim || SlidingQkRopeHeadDim != QkRopeHeadDim || SlidingVHeadDim != VHeadDim)
+            throw Bad("sliding layers with head widths different from the indexed layers' are not supported (only the head count differs in every shipped file).");
         if (EngramLayerIds.Count > 0)
         {
             if (EngramPadId >= EngramLookupTableSize)

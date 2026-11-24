@@ -65,6 +65,30 @@ public sealed class Hy4FlashWeightMapTests
     }
 
     [Fact]
+    public void TinyConfigOfTheReferenceDump_ParsesAndYieldsEveryKindOfLayer()
+    {
+        Hy4FlashConfig c = Hy4FlashConfig.Load(Fixture("tiny_config.json"));
+        Assert.Equal([Hy4FlashLayerKind.Indexed, Hy4FlashLayerKind.Indexed, Hy4FlashLayerKind.Sliding], c.LayerKinds);
+        Assert.Equal([false, true, true], c.SparseFfn);
+        Assert.Equal([1], Enumerable.Range(0, 3).Where(c.HasEngram));
+        Assert.Equal(4, c.IndexKpool);
+        Assert.Equal(16, c.IndexTopk);
+        Assert.Equal(8, c.HeadsFor(2));
+        Assert.Equal(4, c.EngramHashHeads);
+        IReadOnlyList<Hy4FlashExpectedTensor> keys = Hy4FlashWeightMap.Expected(c);
+        Assert.Contains(keys, static k => k.Key == "model.layers.1.engram_layer.multi_head_embedding.embedding.weight" && k.Shape[0] == 101 + 103 + 107 + 109);
+        Assert.Contains(keys, static k => k.Key == "model.layers.2.self_attn.o_proj.weight" && k.Shape[0] == 48 && k.Shape[1] == 64);
+        Assert.DoesNotContain(keys, static k => k.Key.Contains("layers.2.self_attn.compressed_indexer", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_RefusesSlidingHeadWidthsThatDifferFromTheIndexedOnes()
+    {
+        Hy4FlashConfig c = Config("instruct");
+        Assert.Throws<HartsyInferenceException>(() => (c with { SlidingVHeadDim = 128 }).Validate());
+    }
+
+    [Fact]
     public void Fp8Config_CarriesItsQuantizationInsideTheTextConfig()
     {
         Hy4FlashConfig c = Config("fp8");
