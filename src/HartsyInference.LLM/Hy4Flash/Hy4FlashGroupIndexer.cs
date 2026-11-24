@@ -76,7 +76,35 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
     {
         int tokens = positions.Length;
         if (length <= _s.TopK) return Dense(positions);
-        int hd = _s.HeadDim, nh = _s.Heads, kpool = _s.Kpool, groups = length / kpool;
+        int kpool = _s.Kpool;
+        float[] scores = Scores(x, qLatent, positions, length, keyStore, out int groups);
+        int recalled = Math.Min(_s.RecalledGroups, groups);
+        List<int>[] rows = new List<int>[tokens];
+        int width = 0;
+        for (int t = 0; t < tokens; t++)
+        {
+            int slot = positions[t], own = slot / kpool;
+            HashSet<int> chosen = [own];
+            foreach (int g in TopGroups(scores.AsSpan(t * groups, groups), recalled)) chosen.Add(g);
+            List<int> list = [];
+            foreach (int g in chosen.Order())
+                for (int i = 0; i < kpool; i++)
+                {
+                    int token = g * kpool + i;
+                    if (token <= slot && token < length) list.Add(token);
+                }
+            rows[t] = list;
+            width = Math.Max(width, list.Count);
+        }
+        return Pack(rows, width);
+    }
+
+    /// <summary>The group scores of every query, <c>[tokens, groups]</c>, with groups at or after the query own group at -inf. Only meaningful past <c>TopK</c> keys.</summary>
+    internal float[] Scores(ReadOnlySpan<float> x, ReadOnlySpan<float> qLatent, ReadOnlySpan<int> positions, int length, Tensor keyStore, out int groups)
+    {
+        int tokens = positions.Length;
+        int hd = _s.HeadDim, nh = _s.Heads, kpool = _s.Kpool;
+        groups = length / kpool;
         int lastPosition = 0;
         foreach (int p in positions) lastPosition = Math.Max(lastPosition, p);
         if (lastPosition >= _rope.Length || (groups - 1) * kpool >= _rope.Length)
@@ -91,19 +119,15 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
         PartialRotary.Rotate(_backend, _rope, _s.RopeDim, q, [1, tokens, nh, hd], positions.ToArray(), inverse: false, RotaryPairing.Interleaved);
         float[] weights = HostOps.Project(_backend, x, tokens, _dim, _w.HeadWeightProjection, nh);
         float weightScale = MathF.Pow(nh, -0.5f) * MathF.Pow(hd, -0.5f);
-
-        int recalled = Math.Min(_s.RecalledGroups, groups);
-        List<int>[] rows = new List<int>[tokens];
-        int width = 0;
-        float[] scores = new float[groups];
+        float[] scores = new float[tokens * groups];
         for (int t = 0; t < tokens; t++)
         {
-            int slot = positions[t], own = slot / kpool;
+            int own = positions[t] / kpool;
             for (int g = 0; g < groups; g++)
             {
                 if (g >= own)
                 {
-                    scores[g] = float.NegativeInfinity;
+                    scores[t * groups + g] = float.NegativeInfinity;
                     continue;
                 }
                 float sum = 0f;
@@ -113,21 +137,10 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
                     for (int d = 0; d < hd; d++) dot += q[(t * nh + h) * hd + d] * groupKeys[g * hd + d];
                     if (dot > 0f) sum += weights[t * nh + h] * weightScale * dot;
                 }
-                scores[g] = sum;
+                scores[t * groups + g] = sum;
             }
-            HashSet<int> chosen = [own];
-            foreach (int g in TopGroups(scores, recalled)) chosen.Add(g);
-            List<int> list = [];
-            foreach (int g in chosen.Order())
-                for (int i = 0; i < kpool; i++)
-                {
-                    int token = g * kpool + i;
-                    if (token <= slot && token < length) list.Add(token);
-                }
-            rows[t] = list;
-            width = Math.Max(width, list.Count);
         }
-        return Pack(rows, width);
+        return scores;
     }
 
     /// <inheritdoc />
@@ -163,10 +176,11 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
     }
 
     // The best groups by score, ties to the lower index; groups scored -inf are taken last, as the reference top-k does when fewer groups are valid.
-    private static IEnumerable<int> TopGroups(float[] scores, int count)
+    internal static IEnumerable<int> TopGroups(ReadOnlySpan<float> scores, int count)
     {
-        int[] order = [.. Enumerable.Range(0, scores.Length)];
-        Array.Sort(order, (a, b) => scores[a] != scores[b] ? scores[b].CompareTo(scores[a]) : a.CompareTo(b));
+        float[] copy = scores.ToArray();
+        int[] order = [.. Enumerable.Range(0, copy.Length)];
+        Array.Sort(order, (a, b) => copy[a] != copy[b] ? copy[b].CompareTo(copy[a]) : a.CompareTo(b));
         return order.Take(count);
     }
 
