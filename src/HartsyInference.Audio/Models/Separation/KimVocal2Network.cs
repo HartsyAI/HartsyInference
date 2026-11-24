@@ -31,6 +31,9 @@ public sealed class KimVocal2Network : IDisposable
     /// <summary>Encoder levels; the time axis is divided by two at each.</summary>
     public int Levels => _levels;
 
+    /// <summary>Parity probe: called with each TFC-TDF block's output (<c>[1, C, T, F]</c>, borrowed for the call) and its name, in graph order.</summary>
+    public Action<string, Tensor>? StageProbe { get; set; }
+
     /// <summary>Validates <paramref name="weights"/> (every layer present, shapes consistent) and borrows the F32 tensors; the caller keeps them alive.</summary>
     public KimVocal2Network(IReadOnlyDictionary<string, Tensor> weights)
     {
@@ -147,6 +150,7 @@ public sealed class KimVocal2Network : IDisposable
         Tensor tdf = Tdf(backend, h, prefix);
         backend.Add(tdf, h, tdf);
         h.Dispose();
+        StageProbe?.Invoke(prefix, tdf);
         return tdf;
     }
 

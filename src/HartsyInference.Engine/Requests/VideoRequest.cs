@@ -78,6 +78,9 @@ public sealed record VideoRequest
     /// <summary>Optional reference audio driving audio-conditioned video (e.g. speech-to-video).</summary>
     public AudioClip? VideoAudioReference { get; init; }
 
+    /// <summary>Runs <see cref="VideoAudioReference"/> through the Kim_Vocal_2 vocal separator first and drives the video with the vocals alone (mono, 16 kHz). Needs driving audio; a recipe without driving-audio support refuses the request as it does for the audio itself. A soundtrack the recipe attaches from the driving clip is then the separated vocals, not the original mix.</summary>
+    public bool SeparateDrivingVocals { get; init; }
+
     /// <summary>Reference images a reference-conditioned family should carry identity/style from; null for none. Distinct from <see cref="InitImage"/>, which pins an actual frame rather than describing subject matter.</summary>
     public IReadOnlyList<ImageData>? ReferenceImages { get; init; }
 

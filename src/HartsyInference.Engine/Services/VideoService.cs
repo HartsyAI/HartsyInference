@@ -62,6 +62,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         };
         plan = ApplyH3VsaReleaseGate(plan);
         plan = ApplyH3ExpansionReleaseGate(plan, plannedRequest);
+        plan = ApplySeparateVocalsGate(plan, plannedRequest);
         if (!plan.IsValid)
         {
             return VideoRequestExecutionBinding.BindPlan(plan);
@@ -114,6 +115,44 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         }
         return VideoRequestExecutionBinding.BindPlan(plan);
     }
+
+    /// <summary>Refuses <see cref="VideoRequest.SeparateDrivingVocals"/> when there is no driving audio to separate.</summary>
+    internal static VideoPlan ApplySeparateVocalsGate(VideoPlan plan, VideoRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(request);
+        if (!request.SeparateDrivingVocals || request.VideoAudioReference is not null)
+        {
+            return plan;
+        }
+        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues)
+        {
+            new VideoPlanIssue
+            {
+                Code = "video.separate_vocals.no_driving_audio",
+                Severity = VideoPlanIssueSeverity.Error,
+                Message = "Vocal separation applies to the driving audio, and this request has none.",
+                Field = nameof(VideoRequest.SeparateDrivingVocals),
+            },
+        };
+        return plan with { Issues = issues };
+    }
+
+    /// <summary>Replaces the driving audio with its separated vocals (mono, 16 kHz) so the recipe conditions on speech alone.</summary>
+    private async Task<VideoRequest> SeparateDrivingVocalsAsync(VideoRequest request, CancellationToken cancel)
+    {
+        AudioClip driving = request.VideoAudioReference
+            ?? throw new ArgumentException("SeparateDrivingVocals needs VideoAudioReference.", nameof(request));
+        float[] vocals = await _engine.FxInternal.SeparateVocalsMonoAsync(null, driving, SeparatedVocalsSampleRate, null, cancel)
+            .ConfigureAwait(false);
+        return request with
+        {
+            VideoAudioReference = new AudioClip { Data = AudioClipCodec.EncodeWav(vocals, null, SeparatedVocalsSampleRate), Format = "wav" },
+            SeparateDrivingVocals = false,
+        };
+    }
+
+    private const int SeparatedVocalsSampleRate = 16_000;
 
     /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.
     /// ComfySol64V1 (Kijai's consolidated FastH3 checkpoint, hash 7221ae65...) cleared a real-weight generation
@@ -295,6 +334,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         executionPlan.ThrowIfInvalid();
         VideoRequest effectiveRequest = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
+        if (effectiveRequest.SeparateDrivingVocals)
+        {
+            effectiveRequest = await SeparateDrivingVocalsAsync(effectiveRequest, cancel).ConfigureAwait(false);
+        }
 
         return await Task.Run(
             () =>

@@ -26,6 +26,10 @@ public sealed class FxService : IFxService
     {
         ArgumentNullException.ThrowIfNull(request);
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
+        if (IsKimVocal2(selector, request))
+        {
+            return SeparateVocalsAsync(selector, request, cancel);
+        }
         string modelName = string.IsNullOrWhiteSpace(request.Model) ? selector.Variant : request.Model;
         // The runner is cached by what identifies its weights: an explicit local checkpoint, else the model name
         // (EnsureDemucsPathAsync resolves the same path for the same pair). The job carries the same key so the
@@ -64,6 +68,87 @@ public sealed class FxService : IFxService
                 SampleRate = runner.SampleRate,
             };
         }, cancel);
+    }
+
+    private static bool IsKimVocal2(AudioModelSelector selector, FxSeparateRequest request) =>
+        string.Equals(request.Model, FxCatalog.KimVocal2Id, StringComparison.OrdinalIgnoreCase)
+        || (string.IsNullOrWhiteSpace(request.Model) && string.Equals(selector.Id, FxCatalog.KimVocal2Id, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The network runs on the CPU backend like Demucs; no GPU run is claimed.</summary>
+    private Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
+    {
+        RejectDemucsOnlyKnobs(request);
+        string cacheKey = selector.LocalPath ?? FxCatalog.KimVocal2Id;
+        IBackend backend = _cpuBackend.Value;
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, cacheKey), async ct =>
+        {
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(request.Audio, MdxSampleRate);
+            if (left.Length == 0)
+            {
+                throw new ArgumentException("The audio to separate decoded to no samples.", nameof(request));
+            }
+            ct.ThrowIfCancellationRequested();
+            MdxVocalRunner runner = await LoadKimVocal2Async(selector, cacheKey, backend, ct).ConfigureAwait(false);
+            long started = Environment.TickCount64;
+            float[][] vocals = runner.Separate(left, right, request.Overlap, progress: LogProgress, cancel: ct);
+            Logs.Verbose($"[Audio][Kim-Vocal-2] Separated {AudioClipCodec.Seconds(left.Length, MdxSampleRate):0.0}s in {Environment.TickCount64 - started}ms.");
+            return new StemsResult
+            {
+                Stems = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+                {
+                    ["vocals"] = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate),
+                },
+                Format = "wav",
+                SampleRate = runner.SampleRate,
+            };
+        }, cancel);
+    }
+
+    /// <summary>The vocals of <paramref name="audio"/> as mono PCM at <paramref name="targetRate"/>, for a consumer that conditions on speech (the video driving-audio pre-step). <paramref name="maxSeconds"/> limits the work to the first seconds, as the reference does.</summary>
+    internal Task<float[]> SeparateVocalsMonoAsync(ModelSpec? spec, AudioClip audio, int targetRate, double? maxSeconds, CancellationToken cancel)
+    {
+        ArgumentNullException.ThrowIfNull(audio);
+        AudioModelSelector selector = spec is null ? new AudioModelSelector(FxCatalog.KimVocal2Id, FxCatalog.KimVocal2Id, null) : AudioModelSelector.Parse(spec);
+        string cacheKey = selector.LocalPath ?? FxCatalog.KimVocal2Id;
+        IBackend backend = _cpuBackend.Value;
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, cacheKey), async ct =>
+        {
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(audio, MdxSampleRate);
+            if (left.Length == 0)
+            {
+                throw new ArgumentException("The driving audio decoded to no samples.", nameof(audio));
+            }
+            MdxVocalRunner runner = await LoadKimVocal2Async(selector, cacheKey, backend, ct).ConfigureAwait(false);
+            float[] mono = runner.SeparateMono(left, right, targetRate, maxSeconds, LogProgress, ct);
+            if (mono.Length == 0)
+            {
+                throw new InvalidOperationException("No vocals were found in the driving audio.");
+            }
+            return mono;
+        }, cancel);
+    }
+
+    private const int MdxSampleRate = 44_100;
+
+    private Task<MdxVocalRunner> LoadKimVocal2Async(AudioModelSelector selector, string cacheKey, IBackend backend, CancellationToken cancel) =>
+        _engine.AudioRuntime.Mdx.GetOrLoadAsync(cacheKey, async ct =>
+        {
+            string path = await FxCatalog.EnsureKimVocal2PathAsync(selector.LocalPath, ct).ConfigureAwait(false);
+            return FxCatalog.LoadKimVocal2(path, backend);
+        }, cancel);
+
+    private static void LogProgress(int done, int total) => Logs.Verbose($"[Audio][Kim-Vocal-2] chunk {done}/{total}");
+
+    private static void RejectDemucsOnlyKnobs(FxSeparateRequest request)
+    {
+        if (request.Shifts != 0 || request.Segment is not null)
+        {
+            throw new ArgumentException("Shifts and Segment are Demucs options; Kim_Vocal_2 takes only Overlap.", nameof(request));
+        }
+        if (request.Overlap is < 0 or >= 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Overlap must be in [0, 1).");
+        }
     }
 
     /// <inheritdoc/>
