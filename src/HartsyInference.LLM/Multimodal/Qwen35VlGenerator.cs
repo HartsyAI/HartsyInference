@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Ssm;
@@ -61,7 +62,31 @@ public sealed class Qwen35VlGenerator
         System.Text.StringBuilder sb = new();
 
         _model.ResetState();
-        float[] logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen);
+        float[] logits;
+        {
+            // Multimodal RoPE: the image's placeholder run takes (start + t, start + row, start + col) over its merged grid and the text after it
+            // resumes at start + max(T, H, W), not at the sequence index. The decode steps below follow that offset.
+            int side = (int)Math.Round(Math.Sqrt(imgTokens));
+            if (side * side != imgTokens)
+                throw new NotSupportedException($"The image encoder returned {imgTokens} tokens, which is not a square merged grid.");
+            const int placeholder = -1;
+            int[] layout = new int[seqLen];
+            for (int i = 0; i < seqLen; i++) layout[i] = i >= pre.Length && i < pre.Length + imgTokens ? placeholder : 0;
+            int[] positions = MRopePositions.Build(layout, placeholder, [new MRopeImageGrid(1, side, side)], out int nextPosition);
+            int rotaryDim = _model.RotaryDim;
+            byte[] pairAxes = MRopePairAxes.Build([.. _model.MropeSection], rotaryDim / 2,
+                _model.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+            int maxPosition = 0;
+            foreach (int p in positions) maxPosition = Math.Max(maxPosition, p);
+            (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(rotaryDim, _model.RopeTheta, _model.RopeScaling, maxPosition + 1);
+            (Tensor cos, Tensor sin) = MRopeTable.BuildTensors(positions, seqLen, 0, seqLen, invFreq, scaling, pairAxes, _model.AttnHeadDim, rotaryDim);
+            using (cos)
+            using (sin)
+            {
+                logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen, cos, sin);
+            }
+            _model.RopePositionOffset = nextPosition - seqLen;
+        }
         int token = sampler.Next(new Span<float>(logits), history);
 
         for (int step = 0; step < maxTokens && !stops.Contains(token); step++)

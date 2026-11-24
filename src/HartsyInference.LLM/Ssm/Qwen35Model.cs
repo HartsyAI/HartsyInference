@@ -207,6 +207,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Array.Clear(_stateOnDevice);
         _kvCache.Reset();
         _pos = 0;
+        RopePositionOffset = 0;
     }
 
     /// <summary>Gathers token embeddings for <paramref name="ids"/> into <paramref name="dst"/> (<c>[1, ids.Count, DModel]</c>, host F32) from the F32 embedding copy — the text-token half of a VLM's spliced <c>[pre][image][post]</c> embedding sequence (image rows are memcpy'd in by the caller).</summary>
@@ -448,6 +449,22 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
     /// <summary>Shared decode core: consumes an initial hidden state <paramref name="h"/> (owned — disposed here), runs every layer (Gated-DeltaNet or full-attention), final RMSNorm, and projects the last position to vocab logits; the ids-in and embeds-in entry points differ only in how <paramref name="h"/> is seeded.</summary>
     private float[] ForwardFromHidden(IBackend backend, Tensor h, int seq) => ProjectLast(backend, RunTrunk(backend, h, seq), seq);
+
+    /// <summary><see cref="ForwardEmbedsLastLogits(IBackend, Tensor, int)"/> with the full-attention layers rotated by caller-built multimodal rows
+    /// (host F32 <c>[1, seq, AttnHeadDim]</c>, see <see cref="ForwardEmbedsHidden(IBackend, Tensor, int, Tensor?, Tensor?)"/>).</summary>
+    public float[] ForwardEmbedsLastLogits(IBackend backend, Tensor embeds, int seq, Tensor ropeCos, Tensor ropeSin)
+    {
+        int d = DModel;
+        Tensor h = new(new TensorShape(1, seq, d), DType.F32);
+        Buffer.MemoryCopy((void*)embeds.DataPointer, (void*)h.DataPointer, (long)seq * d * 4, (long)seq * d * 4);
+        return ProjectLast(backend, RunTrunk(backend, h, seq, ropeCos, ropeSin), seq);
+    }
+
+    /// <summary>How far the RoPE position of the next token lies behind the sequence index: after an image the text resumes at
+    /// <c>start + max(T, H, W)</c> of the image grid, which is below the number of rows consumed. Set by the multimodal generator after its
+    /// prefill, so single-token decode rotates by the right position; <see cref="ResetState"/> zeroes it. Ignored by graph decode, which a
+    /// multimodal generator does not use.</summary>
+    public int RopePositionOffset { get; set; }
 
     private Tensor RunTrunk(IBackend backend, Tensor h, int seq, Tensor? ropeCos = null, Tensor? ropeSin = null)
     {
@@ -708,6 +725,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
         int half = rdim / 2;
+        posStart += RopePositionOffset;
         (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, _ropeScaling, posStart + t);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
