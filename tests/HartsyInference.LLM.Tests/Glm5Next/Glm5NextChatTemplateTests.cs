@@ -23,9 +23,7 @@ public sealed class Glm5NextChatTemplateTests
     [MemberData(nameof(CaseNames))]
     public void Rendered_prompt_equals_the_transformers_render(string name)
     {
-        JinjaEngine engine = new(File.ReadAllText(Path.Combine(Fixtures, "sage-s21-flash-chat_template.jinja")).Replace("
-", "
-"), hfWhitespace: true);
+        JinjaEngine engine = new(File.ReadAllText(Path.Combine(Fixtures, "sage-s21-flash-chat_template.jinja")).Replace("\r\n", "\n"), hfWhitespace: true);
         using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(Fixtures, "template_cases.json")));
         JsonElement c = doc.RootElement.EnumerateArray().Single(e => e.GetProperty("name").GetString() == name);
         Dictionary<string, object?> context = new()
@@ -39,9 +37,7 @@ public sealed class Glm5NextChatTemplateTests
         };
 
         // A Windows checkout may hand the template and the expected strings CRLF line endings; the reference was rendered from LF.
-        Assert.Equal(c.GetProperty("rendered").GetString()!.Replace("
-", "
-"), engine.Render(context));
+        Assert.Equal(c.GetProperty("rendered").GetString()!.Replace("\r\n", "\n"), engine.Render(context));
     }
 
     private static object? Plain(JsonElement e) => e.ValueKind switch
