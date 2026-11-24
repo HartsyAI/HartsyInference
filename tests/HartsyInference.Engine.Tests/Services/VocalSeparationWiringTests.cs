@@ -39,6 +39,21 @@ public sealed class VocalSeparationWiringTests
         Assert.True(with.HasFlag(VideoFeatures.DrivingAudio));
     }
 
+    [Theory]
+    [InlineData(93, 25, null, null, 4.72)]
+    [InlineData(93, 25, 186, null, 8.44)]
+    [InlineData(93, 25, null, 200, 9.0)]
+    [InlineData(null, 25, null, null, null)]
+    [InlineData(93, null, null, null, null)]
+    public void OnlyTheClipLengthOfDrivingAudioIsSeparated(int? frames, int? fps, int? chain, int? animate, double? expected)
+    {
+        double? seconds = VideoService.DrivingAudioSeconds(new VideoRequest
+        {
+            Prompt = "p", Frames = frames, Fps = fps, ChainTotalFrames = chain, AnimateTotalFrames = animate,
+        });
+        Assert.Equal(expected, seconds is null ? null : Math.Round(seconds.Value, 2));
+    }
+
     [Fact]
     public async Task DemucsOnlyOptionsAreRefusedForKimVocal2()
     {

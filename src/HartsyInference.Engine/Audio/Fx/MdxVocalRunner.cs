@@ -15,17 +15,6 @@ internal sealed class MdxVocalRunner(KimVocal2Network network, Dictionary<string
         Action<int, int>? progress = null, CancellationToken cancel = default) =>
         Build(overlap).Separate(left, right, durationSeconds, progress, cancel);
 
-    /// <summary>Separates the vocals and returns them as mono at <paramref name="targetRate"/> (mean of the channels, SoXR-HQ stand-in resample),
-    /// cropped to <paramref name="durationSeconds"/> of source when given.</summary>
-    internal float[] SeparateMono(float[] left, float[] right, int targetRate, double? durationSeconds = null,
-        Action<int, int>? progress = null, CancellationToken cancel = default)
-    {
-        MdxSeparator separator = Build(null);
-        float[][] vocals = separator.Separate(left, right, durationSeconds, progress, cancel);
-        int? crop = durationSeconds is null ? null : (int)Math.Min(Math.Ceiling(durationSeconds.Value * SampleRate), left.Length);
-        return separator.ToMono(vocals, targetRate, crop);
-    }
-
     private MdxSeparator Build(double? overlap)
     {
         MdxSettings settings = overlap is null ? MdxSettings.KimVocal2 : MdxSettings.KimVocal2 with { Overlap = overlap.Value };

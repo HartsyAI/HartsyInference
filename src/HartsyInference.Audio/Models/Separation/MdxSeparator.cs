@@ -53,7 +53,7 @@ public sealed class MdxSeparator
         return stem;
     }
 
-    /// <summary>Averages the channels, resamples to <paramref name="targetRate"/> with the SoXR-HQ stand-in, and crops to
+    /// <summary>Not used by the engine path (the video pre-step keeps the stereo stem); LongCat's own 16 kHz mono input for the Avatar recipe and the parity harness use it. Averages the channels, resamples to <paramref name="targetRate"/> with the SoXR-HQ stand-in, and crops to
     /// <c>ceil(samples × targetRate / sourceRate)</c> when <paramref name="targetSamplesAtSourceRate"/> is given.</summary>
     public float[] ToMono(float[][] stereo, int targetRate, int? targetSamplesAtSourceRate = null)
     {
@@ -96,7 +96,7 @@ public sealed class MdxSeparator
                 padded[c].AsSpan(start, actual).CopyTo(part[c]);
             }
             RunChunk(part, predicted);
-            double[] weights = SymmetricHann(actual);
+            double[] weights = _settings.Overlap == 0 ? Ones(actual) : SymmetricHann(actual);
             for (int i = 0; i < actual; i++)
             {
                 float w = (float)weights[i];
@@ -182,6 +182,9 @@ public sealed class MdxSeparator
             }
         });
     }
+
+    /// <summary>No blending window, as the reference uses when chunks do not overlap: a Hann window would zero the outermost sample of each chunk.</summary>
+    private static double[] Ones(int m) => Enumerable.Repeat(1d, m).ToArray();
 
     /// <summary><c>numpy.hanning(m)</c>: the symmetric window, <c>0.5 − 0.5·cos(2πn/(m−1))</c>.</summary>
     internal static double[] SymmetricHann(int m)

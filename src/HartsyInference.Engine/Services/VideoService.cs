@@ -147,8 +147,22 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     {
         AudioClip driving = request.VideoAudioReference
             ?? throw new ArgumentException("SeparateDrivingVocals needs VideoAudioReference.", nameof(request));
-        AudioClip vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, null, cancel).ConfigureAwait(false);
+        double? seconds = DrivingAudioSeconds(request);
+        Logs.Info("[VideoAudio] Separating the driving audio's vocals on the CPU before generation"
+            + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
+        AudioClip vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, seconds, cancel).ConfigureAwait(false);
         return request with { VideoAudioReference = vocals, SeparateDrivingVocals = false };
+    }
+
+    /// <summary>Seconds of driving audio the clip can use: its frame total over its rate, plus one second of margin as LongCat adds. Null when either is unknown, which separates the whole track.</summary>
+    internal static double? DrivingAudioSeconds(VideoRequest request)
+    {
+        int? frames = request.ChainTotalFrames ?? request.AnimateTotalFrames ?? request.Frames;
+        if (frames is not > 0 || request.Fps is not > 0)
+        {
+            return null;
+        }
+        return frames.Value / (double)request.Fps.Value + 1d;
     }
 
     /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.

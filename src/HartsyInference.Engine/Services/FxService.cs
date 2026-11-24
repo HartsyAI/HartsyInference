@@ -104,30 +104,6 @@ public sealed class FxService : IFxService
         }, cancel);
     }
 
-    /// <summary>The vocals of <paramref name="audio"/> as mono PCM at <paramref name="targetRate"/>, for a consumer that conditions on speech (the video driving-audio pre-step). <paramref name="maxSeconds"/> limits the work to the first seconds, as the reference does.</summary>
-    internal Task<float[]> SeparateVocalsMonoAsync(ModelSpec? spec, AudioClip audio, int targetRate, double? maxSeconds, CancellationToken cancel)
-    {
-        ArgumentNullException.ThrowIfNull(audio);
-        AudioModelSelector selector = spec is null ? new AudioModelSelector(FxCatalog.KimVocal2Id, FxCatalog.KimVocal2Id, null) : AudioModelSelector.Parse(spec);
-        string cacheKey = selector.LocalPath ?? FxCatalog.KimVocal2Id;
-        IBackend backend = _cpuBackend.Value;
-        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, cacheKey), async ct =>
-        {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(audio, MdxSampleRate);
-            if (left.Length == 0)
-            {
-                throw new ArgumentException("The driving audio decoded to no samples.", nameof(audio));
-            }
-            MdxVocalRunner runner = await LoadKimVocal2Async(selector, cacheKey, backend, ct).ConfigureAwait(false);
-            float[] mono = runner.SeparateMono(left, right, targetRate, maxSeconds, LogProgress, ct);
-            if (mono.Length == 0)
-            {
-                throw new InvalidOperationException("No vocals were found in the driving audio.");
-            }
-            return mono;
-        }, cancel);
-    }
-
     /// <summary>The vocals of <paramref name="audio"/> as a 44.1 kHz stereo WAV clip (16-bit PCM, as <see cref="AudioClipCodec.EncodeWav(float[], float[]?, int)"/> writes), for the video driving-audio pre-step: the recipe decodes it to the rate and channels it needs.</summary>
     internal Task<AudioClip> SeparateVocalsClipAsync(AudioClip audio, double? maxSeconds, CancellationToken cancel)
     {

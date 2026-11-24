@@ -101,6 +101,7 @@ public sealed class KimVocal2Network : IDisposable
 
         List<Tensor> skips = [];
         Tensor x = ConvRelu(backend, spec, "first_conv", 1, 0, relu: true);
+        Tensor? up = null, skip = null, gated = null;
         try
         {
             x = Replace(x, Transpose(backend, x));
@@ -115,15 +116,16 @@ public sealed class KimVocal2Network : IDisposable
             for (int i = 0; i < _levels; i++)
             {
                 string prefix = $"decoding_blocks.{i}";
-                Tensor up = ConvTransposeRelu(backend, x, prefix + ".up");
+                up = ConvTransposeRelu(backend, x, prefix + ".up");
                 x.Dispose();
-                Tensor skip = skips[^1];
+                skip = skips[^1];
                 skips.RemoveAt(skips.Count - 1);
-                Tensor gated = new(up.Shape, DType.F32);
+                gated = new Tensor(up.Shape, DType.F32);
                 backend.Mul(gated, up, skip);
                 up.Dispose();
                 skip.Dispose();
                 x = Replace(gated, TfcTdf(backend, gated, prefix));
+                up = skip = gated = null;
             }
             x = Replace(x, Transpose(backend, x));
             Tensor result = ConvRelu(backend, x, "final_conv", 1, 0, relu: false);
@@ -133,6 +135,9 @@ public sealed class KimVocal2Network : IDisposable
         catch
         {
             x.Dispose();
+            up?.Dispose();
+            skip?.Dispose();
+            gated?.Dispose();
             foreach (Tensor s in skips) s.Dispose();
             throw;
         }

@@ -25,8 +25,8 @@ public sealed class OnnxNode
     /// <summary>Scalar float attributes (<c>f</c>) by name, such as BatchNormalization's <c>epsilon</c>; empty when the node has none.</summary>
     public IReadOnlyDictionary<string, float> FloatAttributes { get; init; } = EmptyFloatAttributes;
 
-    private static readonly Dictionary<string, long[]> EmptyAttributes = [];
-    private static readonly Dictionary<string, float> EmptyFloatAttributes = [];
+    internal static readonly Dictionary<string, long[]> EmptyAttributes = [];
+    internal static readonly Dictionary<string, float> EmptyFloatAttributes = [];
 }
 
 /// <summary>A graph nested inside a node's attribute — the <c>then_branch</c>/<c>else_branch</c> of an <c>If</c>, or a loop <c>body</c>.
@@ -157,8 +157,8 @@ public sealed class OnnxModel
             Name = name,
             Inputs = [.. inputs],
             Outputs = [.. outputs],
-            IntAttributes = intAttributes ?? new Dictionary<string, long[]>(),
-            FloatAttributes = floatAttributes ?? new Dictionary<string, float>(),
+            IntAttributes = intAttributes ?? OnnxNode.EmptyAttributes,
+            FloatAttributes = floatAttributes ?? OnnxNode.EmptyFloatAttributes,
         };
     }
 

@@ -82,6 +82,7 @@ public static class KimVocal2OnnxConverter
                 widths.Add(width);
                 break;
             }
+            if (skips.Count == 0) throw Fail("the graph has no encoder levels");
             if (widths[0] != firstWidth) throw Fail($"first conv width {firstWidth} does not match the first block width {widths[0]}");
 
             for (int i = 0; i < skips.Count; i++)
@@ -141,9 +142,9 @@ public static class KimVocal2OnnxConverter
             OnnxNode node = Next("Conv");
             Chained(node, 0);
             ExpectInts(node, "kernel_shape", kernel, kernel);
-            ExpectInts(node, "strides", stride, stride);
-            ExpectInts(node, "pads", pad, pad, pad, pad);
-            ExpectInts(node, "dilations", 1, 1);
+            ExpectInts(node, "strides", 1, [stride, stride]);
+            ExpectInts(node, "pads", 0, [pad, pad, pad, pad]);
+            ExpectInts(node, "dilations", 1, [1, 1]);
             if (node.IntAttributes.TryGetValue("group", out long[]? g) && g[0] != 1) throw Fail($"{node.Name}: grouped convs are not part of this model");
             Tensor weight = Init(node, 1);
             Tensor bias = Init(node, 2);
@@ -184,8 +185,11 @@ public static class KimVocal2OnnxConverter
             OnnxNode node = Next("ConvTranspose");
             Chained(node, 0);
             ExpectInts(node, "kernel_shape", 2, 2);
-            ExpectInts(node, "strides", 2, 2);
-            ExpectInts(node, "pads", 0, 0, 0, 0);
+            ExpectInts(node, "strides", 1, [2, 2]);
+            ExpectInts(node, "pads", 0, [0, 0, 0, 0]);
+            ExpectInts(node, "dilations", 1, [1, 1]);
+            ExpectInts(node, "output_padding", 0, [0, 0]);
+            if (node.IntAttributes.TryGetValue("group", out long[]? g) && g[0] != 1) throw Fail($"{node.Name}: grouped transposed convs are not part of this model");
             Tensor weight = Init(node, 1);
             Tensor bias = Init(node, 2);
             if (weight.Shape.Rank != 4) throw Fail($"{node.Name}: ConvTranspose weight {weight.Shape} is not rank 4");
@@ -294,9 +298,16 @@ public static class KimVocal2OnnxConverter
             return t;
         }
 
-        private void ExpectInts(OnnxNode node, string attribute, params long[] expected)
+        /// <summary>Checks an integer attribute; an absent one counts as the ONNX default (<paramref name="defaultValue"/>, or none when the attribute is required).</summary>
+        private void ExpectInts(OnnxNode node, string attribute, params long[] expected) => ExpectInts(node, attribute, null, expected);
+
+        private void ExpectInts(OnnxNode node, string attribute, long? defaultValue, long[] expected)
         {
-            if (!node.IntAttributes.TryGetValue(attribute, out long[]? actual)) throw Fail($"{node.OpType} '{node.Name}' has no {attribute}");
+            if (!node.IntAttributes.TryGetValue(attribute, out long[]? actual))
+            {
+                if (defaultValue is null) throw Fail($"{node.OpType} '{node.Name}' has no {attribute}");
+                actual = [.. Enumerable.Repeat(defaultValue.Value, expected.Length)];
+            }
             if (!actual.AsSpan().SequenceEqual(expected))
                 throw Fail($"{node.OpType} '{node.Name}' {attribute} is [{string.Join(",", actual)}], expected [{string.Join(",", expected)}]");
         }

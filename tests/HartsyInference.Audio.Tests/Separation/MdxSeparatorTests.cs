@@ -72,6 +72,18 @@ public sealed class MdxSeparatorTests
     }
 
     [Fact]
+    public void NoOverlapKeepsEveryChunkBoundarySample()
+    {
+        MdxSeparator separator = new(Small() with { Overlap = 0 }, new IdentityModel());
+        float[] left = Tones(9000, 0.5);
+
+        float[][] stem = separator.Separate(left, left);
+
+        Assert.True(RelRms(left, stem[0]) < 2e-5, $"relRMS {RelRms(left, stem[0]):E2}");
+        Assert.DoesNotContain(Enumerable.Range(0, left.Length), i => stem[0][i] == 0f && left[i] != 0f);
+    }
+
+    [Fact]
     public void ChunkCountFollowsPaddingAndStep()
     {
         IdentityModel model = new();

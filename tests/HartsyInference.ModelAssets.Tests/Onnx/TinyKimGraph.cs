@@ -11,6 +11,7 @@ internal sealed class TinyKimGraph
 
     private readonly OnnxFixtureBuilder _b = new();
     private readonly Random _rng;
+    private readonly bool _omitDefaults;
     private int _id;
     private string _cur = "input";
 
@@ -23,8 +24,9 @@ internal sealed class TinyKimGraph
     public string FirstUpPrefix { get; private set; } = "";
     public string FirstUpWeight { get; private set; } = "";
 
-    public TinyKimGraph(int seed, bool swapSkip = false)
+    public TinyKimGraph(int seed, bool swapSkip = false, bool omitDefaults = false)
     {
+        _omitDefaults = omitDefaults;
         _rng = new Random(seed);
         Conv("first", InChannels, Widths[0], 1);
         Relu();
@@ -83,14 +85,22 @@ internal sealed class TinyKimGraph
         string w = Anonymous(), bias = Anonymous(), outName = output ?? Next();
         Add(w, [cout, cin, kernel, kernel]);
         Add(bias, [cout]);
-        _b.AddNode("Conv", $"Conv_{_id}", [_cur, w, bias], [outName], new Dictionary<string, long[]>
+        Dictionary<string, long[]> attributes = new()
         {
             ["kernel_shape"] = [kernel, kernel],
             ["strides"] = [stride, stride],
             ["pads"] = [pad, pad, pad, pad],
             ["dilations"] = [1, 1],
             ["group"] = [1],
-        });
+        };
+        if (_omitDefaults)
+        {
+            attributes.Remove("dilations");
+            attributes.Remove("group");
+            if (stride == 1) attributes.Remove("strides");
+            if (pad == 0) attributes.Remove("pads");
+        }
+        _b.AddNode("Conv", $"Conv_{_id}", [_cur, w, bias], [outName], attributes);
         _cur = outName;
     }
 
@@ -100,14 +110,21 @@ internal sealed class TinyKimGraph
         Add(w, [cin, cout, 2, 2]);
         Add(bias, [cout]);
         if (FirstUpPrefix.Length == 0) { FirstUpPrefix = prefix; FirstUpWeight = w; }
-        _b.AddNode("ConvTranspose", $"ConvTranspose_{_id}", [_cur, w, bias], [outName], new Dictionary<string, long[]>
+        Dictionary<string, long[]> attributes = new()
         {
             ["kernel_shape"] = [2, 2],
             ["strides"] = [2, 2],
             ["pads"] = [0, 0, 0, 0],
             ["dilations"] = [1, 1],
             ["group"] = [1],
-        });
+        };
+        if (_omitDefaults)
+        {
+            attributes.Remove("dilations");
+            attributes.Remove("group");
+            attributes.Remove("pads");
+        }
+        _b.AddNode("ConvTranspose", $"ConvTranspose_{_id}", [_cur, w, bias], [outName], attributes);
         _cur = outName;
     }
 

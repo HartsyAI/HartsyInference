@@ -147,6 +147,23 @@ public sealed unsafe class KimVocal2OnnxConverterTests
     }
 
     [Fact]
+    public void AbsentDefaultAttributesCountAsTheirDefaults()
+    {
+        TinyKimGraph graph = new(7, omitDefaults: true);
+        Dictionary<string, Tensor> bound = Load(graph, out KimVocal2Geometry geometry, out List<Tensor> owners);
+        try
+        {
+            Assert.Equal(TinyKimGraph.Widths, geometry.Widths);
+            Assert.Equal(72, bound.Count);
+        }
+        finally
+        {
+            foreach (Tensor t in bound.Values) t.Dispose();
+            foreach (Tensor t in owners) t.Dispose();
+        }
+    }
+
+    [Fact]
     public void MiswiredSkipFailsTheLoad()
     {
         TinyKimGraph graph = new(6, swapSkip: true);
