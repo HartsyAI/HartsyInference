@@ -4,11 +4,11 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Vision.DepthPro2;
 
 /// <summary>
-/// Depth Pro 2 metric depth (upstream <c>DepthPro2.infer</c>) for one image or several views of one scene taken with one camera: each image is normalised at
-/// its native size (<see cref="DepthPro2Preprocessor"/>), <see cref="DepthPro2Network"/> predicts focal-normalised inverse depth, and the depth in metres is
-/// <c>f_px / (W · inverseDepth)</c>. The focal length is the caller's when given, else the lower median of <see cref="DepthPro2FocalEstimator"/>'s angles over
-/// the images, so every view shares one focal length as upstream's clips do. Each view's depth is predicted on its own: the cross-frame attention upstream
-/// applies between the images of a clip is not implemented yet.
+/// Depth Pro 2 metric depth (upstream <c>DepthPro2.infer</c>) for one image or several views of one scene taken with one camera: the images are normalised at
+/// their native size (<see cref="DepthPro2Preprocessor"/>) and run through <see cref="DepthPro2Network"/> as one clip, so the views attend to each other in the
+/// cross-frame blocks (an unordered set: the result does not depend on their order), and the depth in metres is <c>f_px / (W · inverseDepth)</c>. The focal
+/// length is the caller's when given, else the lower median of <see cref="DepthPro2FocalEstimator"/>'s angles over the images, so every view shares one focal
+/// length as upstream's clips do. Video runs through <see cref="DepthPro2VideoStream"/>.
 /// </summary>
 public sealed class DepthPro2Model
 {
@@ -39,32 +39,18 @@ public sealed class DepthPro2Model
         ArgumentNullException.ThrowIfNull(images);
         if (images.Count == 0) throw new ArgumentException("Name at least one image.", nameof(images));
         CheckSize(width, height);
-        if (focalLengthPx is { } given && (!double.IsFinite(given) || given <= 0))
-            throw new ArgumentOutOfRangeException(nameof(focalLengthPx), $"The focal length must be a positive number of pixels; got {given}.");
-        if (focalLengthPx is null && focalEstimator is null)
-            throw new ArgumentException("Give a focal length or a focal estimator.", nameof(focalEstimator));
+        CheckFocal(focalLengthPx, focalEstimator);
 
-        float[][] inverse = new float[images.Count][];
-        DepthPro2FieldOfView[]? angles = focalLengthPx is null ? new DepthPro2FieldOfView[images.Count] : null;
-        for (int i = 0; i < images.Count; i++)
-        {
-            cancel.ThrowIfCancellationRequested();
-            using Tensor pixels = DepthPro2Preprocessor.Normalize(images[i], width, height);
-            using (Tensor map = _network.PredictInverseDepth(backend, pixels))
-                inverse[i] = map.AsReadOnlySpan<float>().ToArray();
-            if (angles is not null) angles[i] = focalEstimator!.Estimate(backend, pixels);
-        }
+        cancel.ThrowIfCancellationRequested();
+        float[][] inverse;
+        using (Tensor frames = DepthPro2Preprocessor.NormalizeFrames(images, width, height))
+        using (Tensor maps = _network.PredictInverseDepthFrames(backend, frames))
+            inverse = SplitFrames(maps, images.Count);
 
-        double focal = focalLengthPx ?? DepthPro2FocalEstimator.FocalLengthPx(angles!, height, width);
-        DepthPro2Map[] maps = new DepthPro2Map[images.Count];
-        for (int i = 0; i < images.Count; i++)
-        {
-            float[] depth = keepInverseDepth ? new float[inverse[i].Length] : inverse[i], valid = new float[inverse[i].Length];
-            DepthPro2Preprocessor.ToMetric(inverse[i], width, focal, depth, valid);
-            maps[i] = new DepthPro2Map(keepInverseDepth ? inverse[i] : null, depth, valid);
-        }
-
-        return new DepthPro2Prediction(maps, focal, focalLengthPx is null, width, height);
+        double focal = focalLengthPx ?? EstimateFocal(backend, images, images.Count, width, height, focalEstimator!, cancel);
+        DepthPro2Map[] result = new DepthPro2Map[images.Count];
+        for (int i = 0; i < images.Count; i++) result[i] = ToMap(inverse[i], width, focal, keepInverseDepth);
+        return new DepthPro2Prediction(result, focal, focalLengthPx is null, width, height);
     }
 
     /// <summary>Throws when a <paramref name="width"/> × <paramref name="height"/> image is over <see cref="MaxPatchTokens"/> once padded to 32.</summary>
@@ -79,5 +65,55 @@ public sealed class DepthPro2Model
                 $"A {width}x{height} image is {tokens} patch tokens; Depth Pro 2 runs at the image's own size with global attention and this build takes at "
                 + $"most {MaxPatchTokens} (2048x2048 or an equal area). Downscale the image first.");
         }
+    }
+
+    /// <summary>
+    /// The focal length a video gets when none is given (upstream <c>infer_video</c>): the lower median of the estimator's angles over the first
+    /// <paramref name="window"/> frames (all of them when fewer), kept for every frame.
+    /// </summary>
+    public static double EstimateFocal(IBackend backend, IReadOnlyList<byte[]> frames, int window, int width, int height,
+        DepthPro2FocalEstimator focalEstimator, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        ArgumentNullException.ThrowIfNull(focalEstimator);
+        int count = Math.Min(window, frames.Count);
+        if (count < 1) throw new ArgumentException("Name at least one frame.", nameof(frames));
+        DepthPro2FieldOfView[] angles = new DepthPro2FieldOfView[count];
+        for (int i = 0; i < count; i++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            using Tensor pixels = DepthPro2Preprocessor.Normalize(frames[i], width, height);
+            angles[i] = focalEstimator.Estimate(backend, pixels);
+        }
+
+        return DepthPro2FocalEstimator.FocalLengthPx(angles, height, width);
+    }
+
+    /// <summary>The metric map of one frame's inverse depth (taken over) at <paramref name="focalLengthPx"/>; without
+    /// <paramref name="keepInverseDepth"/> the buffer is converted to metres in place.</summary>
+    public static DepthPro2Map ToMap(float[] inverseDepth, int width, double focalLengthPx, bool keepInverseDepth = true)
+    {
+        ArgumentNullException.ThrowIfNull(inverseDepth);
+        float[] depth = keepInverseDepth ? new float[inverseDepth.Length] : inverseDepth, valid = new float[inverseDepth.Length];
+        DepthPro2Preprocessor.ToMetric(inverseDepth, width, focalLengthPx, depth, valid);
+        return new DepthPro2Map(keepInverseDepth ? inverseDepth : null, depth, valid);
+    }
+
+    /// <summary>Each frame of <c>[T, 1, H, W]</c> as its own array.</summary>
+    internal static float[][] SplitFrames(Tensor maps, int count)
+    {
+        int plane = (int)(maps.ElementCount / count);
+        ReadOnlySpan<float> all = maps.AsReadOnlySpan<float>();
+        float[][] frames = new float[count][];
+        for (int i = 0; i < count; i++) frames[i] = all.Slice(i * plane, plane).ToArray();
+        return frames;
+    }
+
+    private static void CheckFocal(double? focalLengthPx, DepthPro2FocalEstimator? focalEstimator)
+    {
+        if (focalLengthPx is { } given && (!double.IsFinite(given) || given <= 0))
+            throw new ArgumentOutOfRangeException(nameof(focalLengthPx), $"The focal length must be a positive number of pixels; got {given}.");
+        if (focalLengthPx is null && focalEstimator is null)
+            throw new ArgumentException("Give a focal length or a focal estimator.", nameof(focalEstimator));
     }
 }
