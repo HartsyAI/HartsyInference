@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using System.Numerics;
 using HartsyInference.Core.Tensors;
 
@@ -55,8 +56,8 @@ public static class DuoLoraMerge
                 ushort* row = (ushort*)weightAddress + target;
                 for (long j = 0; j < inDim; j++)
                 {
-                    float delta = BF16ToF32(TensorCasts.F32ToBf16BitsRoundNearestEven(acc[j] * scale));
-                    row[j] = TensorCasts.F32ToBf16BitsRoundNearestEven(BF16ToF32(row[j]) + delta);
+                    float delta = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(acc[j] * scale));
+                    row[j] = BFloat16Bits.FromFloat(BFloat16Bits.ToFloat(row[j]) + delta);
                 }
             }
             else
@@ -68,7 +69,6 @@ public static class DuoLoraMerge
         }, _ => { });
     }
 
-    private static float BF16ToF32(ushort bits) => BitConverter.UInt32BitsToSingle((uint)bits << 16);
 
     private static unsafe void AddScaled(float[] acc, float* source, float coefficient)
     {

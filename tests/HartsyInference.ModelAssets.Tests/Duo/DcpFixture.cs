@@ -19,7 +19,7 @@ internal static class DcpFixture
     {
         byte[] bytes = new byte[values.Length * 2];
         for (int i = 0; i < values.Length; i++)
-            BitConverter.GetBytes(HartsyInference.Core.Tensors.TensorCasts.F32ToBf16BitsRoundNearestEven(values[i])).CopyTo(bytes, i * 2);
+            BitConverter.GetBytes(HartsyInference.Core.Numerics.BFloat16Bits.FromFloat(values[i])).CopyTo(bytes, i * 2);
         return new Tensor1(DType.BF16, shape, bytes);
     }
 

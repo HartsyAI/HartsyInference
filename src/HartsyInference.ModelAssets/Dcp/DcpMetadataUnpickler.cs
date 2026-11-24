@@ -52,7 +52,7 @@ internal sealed class DcpMetadataUnpickler
         {
             return RunCore();
         }
-        catch (Exception error) when (error is InvalidCastException or IndexOutOfRangeException or ArgumentOutOfRangeException
+        catch (Exception error) when (error is InvalidCastException or NullReferenceException or IndexOutOfRangeException or ArgumentException or ArgumentOutOfRangeException
             or OverflowException or FormatException or DecoderFallbackException)
         {
             throw new InvalidDataException($"The metadata pickle is malformed near byte {_i}: {error.Message}", error);
@@ -161,6 +161,7 @@ internal sealed class DcpMetadataUnpickler
         if (Peek() is not DcpObject target) return;
         if (state is DcpDict fields) Assign(target, fields);
         else if (state is object?[] { Length: 2 } pair && pair[0] is DcpDict first) Assign(target, first);
+        else if (state is object?[] { Length: 2 } slots && slots[1] is DcpDict slotFields) Assign(target, slotFields);
         else if (state is object?[] tuple) target.State = tuple;
     }
 
@@ -188,6 +189,7 @@ internal sealed class DcpMetadataUnpickler
 
     private void Memoize(int idx)
     {
+        if (idx < 0 || idx > _b.Length) throw new InvalidDataException($"A memo index {idx} is larger than the metadata itself.");
         while (_memo.Count <= idx) _memo.Add(null);
         _memo[idx] = Peek();
     }

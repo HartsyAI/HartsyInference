@@ -45,17 +45,23 @@ public sealed class DuoRepackerTests : IDisposable
     private sealed record Fixture(string Backbone, string Dcp, float[] Qkv, float[] OutProj, float[] Fc1, float[] Fc2, float[] PatchProj,
         Dictionary<string, (float[] A, float[] B)> Lora);
 
-    private Fixture Build(bool extraModule = false, string? strayModule = null)
+    private Fixture Build(bool extraModule = false, string? strayModule = null, bool qkvBias = false)
     {
         string backbone = Path.Combine(_root, "backbone"), dcp = Path.Combine(_root, "dcp");
         Directory.CreateDirectory(backbone);
         float[] qkv = Ints(3 * Inner * Hidden, 1), outProj = Ints(Inner * Hidden, 2), fc1 = Ints(8 * Hidden, 3), fc2 = Ints(Hidden * 8, 4);
         float[] patch = Ints(Hidden * 3, 5), adaln = Small(12 * 5, 6), w1 = Small(6 * 8, 7), b1 = Small(6, 8), w2 = Small(5 * 6, 9), b2 = Small(5, 10);
 
-        WriteShard(Path.Combine(backbone, "model-00001-of-00002.safetensors"),
+        List<(string, DcpFixture.Tensor1)> shard1 =
+        [
             ("blocks.0.attn.qkv_proj.weight", DcpFixture.Bf16([3 * Inner, Hidden], qkv)),
             ("blocks.0.attn.out_proj.weight", DcpFixture.Bf16([Inner, Hidden], outProj)),
-            ("blocks.0.mlp.fc1.weight", DcpFixture.Bf16([8, Hidden], fc1)));
+            ("blocks.0.mlp.fc1.weight", DcpFixture.Bf16([8, Hidden], fc1)),
+            ("blocks.0.attn.q_norm.weight", DcpFixture.F32([HeadDim], Small(HeadDim, 40))),
+            ("token_refiner.blocks.0.attn.qkv_proj.weight", DcpFixture.Bf16([3 * Inner, Hidden], qkv)),
+        ];
+        if (qkvBias) shard1.Add(("blocks.0.attn.qkv_proj.bias", DcpFixture.F32([3 * Inner], Ints(3 * Inner, 41))));
+        WriteShard(Path.Combine(backbone, "model-00001-of-00002.safetensors"), [.. shard1]);
         WriteShard(Path.Combine(backbone, "model-00002-of-00002.safetensors"),
             ("blocks.0.mlp.fc2.weight", DcpFixture.Bf16([Hidden, 8], fc2)),
             ("video_patch_proj.weight", DcpFixture.F32([Hidden, 3], patch)),
@@ -225,6 +231,52 @@ public sealed class DuoRepackerTests : IDisposable
         (float[] pa, float[] pb) = fx.Lora["proj_in"];
         float[] delta = Delta(pa, pb, Rank);
         Assert.Equal(fx.PatchProj.Select((v, i) => v + delta[i] * 0.5f).ToArray(), ReadAsF32(second, "video_patch_proj.weight"));
+    }
+
+    [Fact]
+    public void MergeBackbone_ReordersTheTokenRefinerQkvLikeTheTrunk()
+    {
+        Fixture fx = Build();
+        string output = Path.Combine(_root, "merged");
+        using (DuoLoraSource lora = DuoLoraSource.FromDcp(fx.Dcp))
+        {
+            DuoRepacker.MergeBackbone(fx.Backbone, lora, output, new DuoMergeOptions { Heads = Heads, HeadDim = HeadDim });
+        }
+        using SafeTensorsLoader first = new();
+        first.Load(Path.Combine(output, "model-00001-of-00002.safetensors"));
+
+        // The refiner has no LoRA, so its reordered qkv is the source rows in block order.
+        float[] expected = new float[3 * Inner * Hidden];
+        for (int p = 0; p < 3; p++)
+            for (int h = 0; h < Heads; h++)
+                for (int d = 0; d < HeadDim; d++)
+                    for (int c = 0; c < Hidden; c++)
+                        expected[((p * Heads + h) * HeadDim + d) * Hidden + c] = fx.Qkv[((h * 3 + p) * HeadDim + d) * Hidden + c];
+        Assert.Equal(expected, ReadAsF32(first, "token_refiner.blocks.0.attn.qkv_proj.weight"));
+    }
+
+    [Fact]
+    public void MergeBackbone_RefusesAHeadCountAndHeadDimPairWithTheSameProductBeforeWriting()
+    {
+        Fixture fx = Build();
+        using DuoLoraSource lora = DuoLoraSource.FromDcp(fx.Dcp);
+        string output = Path.Combine(_root, "wrong-geometry");
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() =>
+            DuoRepacker.MergeBackbone(fx.Backbone, lora, output, new DuoMergeOptions { Heads = 1, HeadDim = 4 }));
+        Assert.Contains("q_norm", error.Message);
+        Assert.False(Directory.Exists(output), "nothing is written before the check");
+    }
+
+    [Fact]
+    public void MergeBackbone_RefusesAFusedQkvBiasInPerHeadOrderBeforeWriting()
+    {
+        Fixture fx = Build(qkvBias: true);
+        using DuoLoraSource lora = DuoLoraSource.FromDcp(fx.Dcp);
+        string output = Path.Combine(_root, "bias");
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() =>
+            DuoRepacker.MergeBackbone(fx.Backbone, lora, output, new DuoMergeOptions { Heads = Heads, HeadDim = HeadDim }));
+        Assert.Contains("qkv_proj.bias", error.Message);
+        Assert.False(Directory.Exists(output), "nothing is written before the check");
     }
 
     [Fact]

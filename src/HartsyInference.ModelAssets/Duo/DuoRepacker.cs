@@ -60,18 +60,50 @@ public static class DuoRepacker
         if (unmapped.Count > 0)
             throw new InvalidDataException($"{unmapped.Count} LoRA module(s) have no backbone weight to merge into, for example '{unmapped[0]}'.");
 
-        HashSet<string> present = new(StringComparer.Ordinal);
+        Dictionary<string, TensorShape> shapes = new(StringComparer.Ordinal);
         foreach (string shard in shards)
         {
             using SafeTensorsLoader header = new();
             header.Load(shard);
-            present.UnionWith(header.Descriptors.Keys);
+            foreach (KeyValuePair<string, SafeTensorDescriptor> tensor in header.Descriptors)
+            {
+                if (!shapes.TryAdd(tensor.Key, tensor.Value.Shape))
+                    throw new InvalidDataException($"Tensor '{tensor.Key}' is in more than one shard; the repack would be ambiguous. Nothing was written.");
+                if (tensor.Key.EndsWith(".attn.qkv_proj.bias", StringComparison.Ordinal) && options.InputQkv == DuoQkvInput.HeadInterleaved)
+                    throw new InvalidDataException(
+                        $"'{tensor.Key}' is a fused qkv bias in per-head order, which this repack does not reorder; refusing rather than write a mismatched bias. Nothing was written.");
+            }
         }
-        KeyValuePair<string, List<(string Module, DuoLoraTarget Target)>> absent = byKey.FirstOrDefault(entry => !present.Contains(entry.Key));
-        if (absent.Key is not null)
-            throw new InvalidDataException(
-                $"LoRA module '{absent.Value[0].Module}' targets '{absent.Key}', which no backbone shard holds; the shards are not the Duo backbone. Nothing was written.");
 
+        Dictionary<string, long[]> loraShapes = lora.Describe().ToDictionary(t => t.Key, t => t.Shape, StringComparer.Ordinal);
+        foreach ((string key, List<(string Module, DuoLoraTarget Target)> modules) in byKey)
+        {
+            if (!shapes.TryGetValue(key, out TensorShape weight))
+                throw new InvalidDataException(
+                    $"LoRA module '{modules[0].Module}' targets '{key}', which no backbone shard holds; the shards are not the Duo backbone. Nothing was written.");
+            if (weight.Rank != 2)
+                throw new InvalidDataException($"'{key}' must be a matrix, got {weight}. Nothing was written.");
+            foreach ((string module, DuoLoraTarget target) in modules)
+            {
+                long[] a = loraShapes[module + DuoLoraKeyMap.LoraASuffix], b = loraShapes[module + DuoLoraKeyMap.LoraBSuffix];
+                bool fits = a.Length == 2 && b.Length == 2 && a[0] == b[1] && a[1] == weight[1]
+                    && weight[0] % target.Slots == 0 && b[0] == weight[0] / target.Slots;
+                if (!fits)
+                    throw new InvalidDataException(
+                        $"LoRA module '{module}' (A [{string.Join(", ", a)}], B [{string.Join(", ", b)}]) does not fit '{key}' {weight}; "
+                        + $"expected B with {weight[0] / target.Slots} rows and A with {weight[1]} columns. Nothing was written.");
+            }
+            if (key.EndsWith(".attn.qkv_proj.weight", StringComparison.Ordinal) && options.InputQkv == DuoQkvInput.HeadInterleaved)
+            {
+                if (weight[0] != 3L * options.Heads * options.HeadDim)
+                    throw new InvalidDataException(
+                        $"'{key}' has {weight[0]} rows, not 3 * {options.Heads} heads * {options.HeadDim}; check --heads and --head-dim. Nothing was written.");
+                string norm = key[..^"qkv_proj.weight".Length] + "q_norm.weight";
+                if (shapes.TryGetValue(norm, out TensorShape qNorm) && (qNorm.Rank != 1 || qNorm[0] != options.HeadDim))
+                    throw new InvalidDataException(
+                        $"'{norm}' has {qNorm} elements, not the head dim {options.HeadDim}; check --heads and --head-dim. Nothing was written.");
+            }
+        }
         Directory.CreateDirectory(outputDir);
         HashSet<string> merged = new(StringComparer.Ordinal);
         Dictionary<string, string> weightMap = new(StringComparer.Ordinal);

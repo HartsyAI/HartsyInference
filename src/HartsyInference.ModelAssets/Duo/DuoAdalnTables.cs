@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Duo;
@@ -69,7 +70,7 @@ public static class DuoAdalnTables
         {
             float x = embeddings[i];
             float silu = x / (1f + MathF.Exp(-x));
-            activation[i] = roundBf16 ? BF16ToF32(TensorCasts.F32ToBf16BitsRoundNearestEven(silu)) : silu;
+            activation[i] = roundBf16 ? BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(silu)) : silu;
         }
 
         float[]? biasValues = bias is null ? null : ToF32(bias);
@@ -84,7 +85,7 @@ public static class DuoAdalnTables
             if (weightBf16)
             {
                 ushort* src = (ushort*)weightAddress + n * embedDim;
-                for (int k = 0; k < embedDim; k++) row[k] = BF16ToF32(src[k]);
+                for (int k = 0; k < embedDim; k++) row[k] = BFloat16Bits.ToFloat(src[k]);
             }
             else
             {
@@ -97,14 +98,13 @@ public static class DuoAdalnTables
                 int offset = t * embedDim;
                 for (int k = 0; k < embedDim; k++) sum += (double)activation[offset + k] * row[k];
                 float value = (float)sum;
-                output[t * outDim + n] = roundBf16 ? BF16ToF32(TensorCasts.F32ToBf16BitsRoundNearestEven(value)) : value;
+                output[t * outDim + n] = roundBf16 ? BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(value)) : value;
             }
             return row;
         }, _ => { });
         return result;
     }
 
-    private static float BF16ToF32(ushort bits) => BitConverter.UInt32BitsToSingle((uint)bits << 16);
 
     private static unsafe float[] ToF32(Tensor tensor)
     {
@@ -116,7 +116,7 @@ public static class DuoAdalnTables
         else if (tensor.DType == DType.BF16)
         {
             ReadOnlySpan<ushort> bits = tensor.AsReadOnlySpan<ushort>();
-            for (int i = 0; i < values.Length; i++) values[i] = BF16ToF32(bits[i]);
+            for (int i = 0; i < values.Length; i++) values[i] = BFloat16Bits.ToFloat(bits[i]);
         }
         else
         {

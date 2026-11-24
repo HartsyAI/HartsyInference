@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Duo;
 using Xunit;
@@ -8,7 +9,7 @@ public sealed class DuoLoraMergeTests
 {
     private static float Bf16(ushort bits) => BitConverter.UInt32BitsToSingle((uint)bits << 16);
 
-    private static ushort Bf16Bits(float value) => TensorCasts.F32ToBf16BitsRoundNearestEven(value);
+    private static ushort Bf16Bits(float value) => BFloat16Bits.FromFloat(value);
 
     private static Tensor F32(long rows, long cols, params float[] values)
     {
