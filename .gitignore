@@ -73,6 +73,7 @@ Desktop.ini
 !/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MuseSpark/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Flint/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/tiny/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MiniMaxM3/*.safetensors
 !/tests/HartsyInference.ModelAssets.Tests/Fixtures/GgmlCodecs/*.safetensors
 !/tests/HartsyInference.ModelAssets.Tests/Fixtures/MiniMaxM3/*.safetensors
