@@ -130,7 +130,7 @@ public sealed unsafe class SenseNovaLoopGgufTests
 
     /// <summary>Writes the tiny checkpoint the way the fork's converter lays out a GGUF, with Q8_0 where a row length allows when
     /// <paramref name="quantize"/> is set.</summary>
-    private static void WriteTinyGguf(string path, Dictionary<string, float[]> hf, bool quantize)
+    internal static void WriteTinyGguf(string path, Dictionary<string, float[]> hf, bool quantize, bool quantizeSsmOut = true)
     {
         const string root = "model.language_model";
         int[] plan = [0, 1, 2, 1, 2, 3];
@@ -214,7 +214,7 @@ public sealed unsafe class SenseNovaLoopGgufTests
                 Add($"{dst}.ssm_dt.bias", TileRows(hf[$"{src}.linear_attn.dt_bias"], 1, 0, 1, KeyHeads, repeat), 0, 0, false);
                 Add($"{dst}.ssm_norm.weight", hf[$"{src}.linear_attn.norm.weight"], 0, 0, false);
                 float[] outTiled = TileColumns(hf[$"{src}.linear_attn.out_proj.weight"], Hidden, ValueDim, KeyHeads, repeat);
-                Add($"{dst}.ssm_out.weight", outTiled, Hidden, ValueHeads * ValueDim, true);
+                Add($"{dst}.ssm_out.weight", outTiled, Hidden, ValueHeads * ValueDim, quantizeSsmOut);
             }
             else
             {
