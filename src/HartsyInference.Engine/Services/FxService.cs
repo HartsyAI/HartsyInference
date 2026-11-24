@@ -93,8 +93,14 @@ public sealed class FxService : IFxService
         {
             throw new ArgumentException("LookaheadFrames applies to voice-isolator-realtime only.", nameof(request));
         }
+        if (request.LookaheadFrames is { } trained && Array.IndexOf(FxCatalog.VoiceIsolatorRealtimeLookaheads, trained) < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), trained,
+                $"LookaheadFrames must be one of {string.Join(", ", FxCatalog.VoiceIsolatorRealtimeLookaheads)}.");
+        }
         string cacheKey = selector.LocalPath ?? (realtime ? FxCatalog.VoiceIsolatorRealtimeId : FxCatalog.VoiceIsolatorId);
-        IBackend backend = _engine.Backend;
+        // CPU for now: the STFT, the per-band layers and the scan reference run on the host, and the GPU route has not been run.
+        IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Isolator, cacheKey), async ct =>
         {
             float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.VoiceIsolatorSampleRate);
@@ -105,7 +111,7 @@ public sealed class FxService : IFxService
             ct.ThrowIfCancellationRequested();
             string path = await FxCatalog.EnsureVoiceIsolatorPathAsync(realtime, selector.LocalPath, ct).ConfigureAwait(false);
             VoiceIsolatorRunner runner = await _engine.AudioRuntime.Isolator
-                .GetOrLoadAsync(cacheKey, _ => Task.FromResult(FxCatalog.LoadVoiceIsolator(path)), ct).ConfigureAwait(false);
+                .GetOrLoadAsync(cacheKey, _ => Task.FromResult(FxCatalog.LoadVoiceIsolator(path, realtime)), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
             (float[] voice, float[] background) = runner.Isolate(backend, mono, request.LookaheadFrames, LogIsolatorProgress, ct);
             Logs.Verbose($"[Audio][Voice-Isolator] Isolated {AudioClipCodec.Seconds(mono.Length, FxCatalog.VoiceIsolatorSampleRate):0.0}s "

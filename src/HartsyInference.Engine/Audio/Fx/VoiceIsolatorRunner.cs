@@ -37,11 +37,8 @@ internal sealed class VoiceIsolatorRunner(VoiceIsolatorNetwork network) : IDispo
 
     private float[] Stream(IBackend backend, float[] audio, int? lookaheadFrames, CancellationToken cancel)
     {
-        if (lookaheadFrames is { } frames)
-        {
-            network.SetLookahead(frames);
-        }
-        using VoiceIsolatorStream stream = new(network, backend, windowFrames: StreamWindowFrames, crossfadeFrames: StreamCrossfadeFrames);
+        using VoiceIsolatorStream stream = new(network, backend, windowFrames: StreamWindowFrames,
+            crossfadeFrames: StreamCrossfadeFrames, lookahead: lookaheadFrames);
         int piece = (int)(StreamPieceSeconds * network.Config.SampleRate);
         List<float> output = new(audio.Length);
         for (int i = 0; i < audio.Length; i += piece)

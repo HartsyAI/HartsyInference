@@ -38,6 +38,9 @@ internal static class FxCatalog
     /// <summary>Catalog id of the causal, streaming Inworld Voice Isolator (<c>-m voice-isolator-realtime</c>).</summary>
     internal const string VoiceIsolatorRealtimeId = "voice-isolator-realtime";
 
+    /// <summary>Look-ahead positions the realtime checkpoint was trained at, in frames of 10 ms.</summary>
+    internal static readonly int[] VoiceIsolatorRealtimeLookaheads = [0, 2, 4];
+
     /// <summary>Sample rate the voice isolator runs at.</summary>
     internal const int VoiceIsolatorSampleRate = 48_000;
 
@@ -203,13 +206,18 @@ internal static class FxCatalog
     }
 
     /// <summary>Reads a voice isolator checkpoint; its architecture comes from the file's own metadata.</summary>
-    internal static VoiceIsolatorRunner LoadVoiceIsolator(string path)
+    internal static VoiceIsolatorRunner LoadVoiceIsolator(string path, bool realtime)
     {
         if (!File.Exists(path))
         {
             throw new FileNotFoundException($"Voice isolator weights not found: '{path}'.", path);
         }
         VoiceIsolatorNetwork network = VoiceIsolatorNetwork.Load(path);
+        if (network.Config.Causal != realtime)
+        {
+            network.Dispose();
+            throw new ArgumentException($"'{Path.GetFileName(path)}' is the {(network.Config.Causal ? "realtime" : "offline")} checkpoint; the requested model is the {(realtime ? "realtime" : "offline")} one.", nameof(path));
+        }
         Logs.Info($"[Audio][Voice-Isolator] Loaded '{Path.GetFileName(path)}' ({(network.Config.Causal ? "realtime" : "offline")}, "
             + $"{network.BandCount} bands, width {network.Config.Width}, F32).");
         return new VoiceIsolatorRunner(network);

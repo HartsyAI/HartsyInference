@@ -31,6 +31,15 @@ public sealed class VoiceIsolatorWiringTests
         await Assert.ThrowsAsync<ArgumentException>(() => engine.Fx.SeparateAsync(spec, new FxSeparateRequest { Audio = Clip, LookaheadFrames = 2 }));
     }
 
+    [Fact]
+    public async Task LookaheadOutsideTheTrainedPositionsIsRefusedBeforeAnyDownload()
+    {
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = new() { Requested = "voice-isolator-realtime", Modality = Modality.Fx };
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => engine.Fx.SeparateAsync(spec, new FxSeparateRequest { Audio = Clip, LookaheadFrames = 3 }));
+    }
+
     [Theory]
     [InlineData("voice-isolator")]
     [InlineData("voice-isolator-realtime")]
