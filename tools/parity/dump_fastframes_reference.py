@@ -103,7 +103,7 @@ def tiny(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     wan = model.WanConfig(dim=64, ffn_dim=32, num_heads=2, num_layers=2, text_len=8, text_dim=16)
-    frames, height, width = args.frames, 8, 8
+    frames, height, width = args.frames, 8, 12   # non-square on purpose: the released grid is 30x52
     config = pipeline.FastFramesConfig(
         name="tiny", wan_model="tiny", first_frame_timesteps=(1000.0, 937.5, 833.3333129882812, 625.0),
         timesteps=(1000.0, 833.3333129882812), refine_timestep=833.3333129882812, noise="sequential",

@@ -21,7 +21,7 @@ namespace HartsyInference.Diffusion.Tests;
 [Trait("Category", "SyntheticSmoke")]
 public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutputHelper output)
 {
-    private const int Frames = 3, Channels = 16, Height = 8, Width = 8;
+    private const int Frames = 3, Channels = 16, Height = 8, Width = 12;
 
     private static readonly FastFramesConfig Tiny = new("tiny", [1000f, 937.5f, 833.3333129882812f, 625f], [1000f, 833.3333129882812f],
         833.3333129882812f, Channels, Height, Width, Frames);
@@ -64,15 +64,15 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         List<FastFramesFrame> frames = pipeline.Rollout(prompt, noise, Frames).ToList();
 
         Assert.Equal(Frames, frames.Count);
-        float[] referenceLatents = io["latents"].AsReadOnlySpan<float>().ToArray();   // [3, 16, 8, 8]
-        float[] referencePixels = io["pixels"].AsReadOnlySpan<float>().ToArray();     // [9, 3, 64, 64]
+        float[] referenceLatents = io["latents"].AsReadOnlySpan<float>().ToArray();   // [3, 16, 8, 12]
+        float[] referencePixels = io["pixels"].AsReadOnlySpan<float>().ToArray();     // [9, 3, 64, 96]
         int frameValues = Channels * Height * Width;
         for (int f = 0; f < Frames; f++)
             AssertClose(referenceLatents.AsSpan(f * frameValues, frameValues), frames[f].Latent, $"latent frame {f}", 1e-5);
 
         // 12 decoded frames, the first 3 dropped (upstream's align_frames).
         float[] decoded = frames.SelectMany(fr => fr.Pixels).ToArray();
-        int pixelFrameValues = 3 * 64 * 64;
+        int pixelFrameValues = 3 * 64 * 96;
         AssertClose(referencePixels, decoded.AsSpan(3 * pixelFrameValues), "pixels (9 frames)", 1e-5);
         Assert.Equal(9, pipeline.PixelFrameCount(Frames));
     }
@@ -104,7 +104,7 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         List<VideoFrame> video = pipeline.GenerateFrames(prompt, new FastFramesSeededNoise(11, Tiny), Frames).ToList();
 
         Assert.Equal(9, video.Count);
-        Assert.All(video, f => Assert.Equal(64 * 64 * 3, f.Rgb.Length));
+        Assert.All(video, f => Assert.Equal(64 * 96 * 3, f.Rgb.Length));
         Assert.Equal(Enumerable.Range(0, 9), video.Select(f => f.Index));
         Assert.Contains(video, f => f.Rgb.Distinct().Count() > 1);
         // Seeded noise is deterministic.
@@ -132,8 +132,8 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
 
     private sealed class SavedNoise(Tensor initial, Tensor transition) : IFastFramesNoise
     {
-        private readonly float[] _initial = initial.AsReadOnlySpan<float>().ToArray();       // [frames, 16, 8, 8]
-        private readonly float[] _transition = transition.AsReadOnlySpan<float>().ToArray(); // [3, frames, 16, 8, 8]
+        private readonly float[] _initial = initial.AsReadOnlySpan<float>().ToArray();       // [frames, 16, 8, 12]
+        private readonly float[] _transition = transition.AsReadOnlySpan<float>().ToArray(); // [3, frames, 16, 8, 12]
         private const int FrameValues = Channels * Height * Width;
 
         public float[] Initial(int frame) => _initial.AsSpan(frame * FrameValues, FrameValues).ToArray();
