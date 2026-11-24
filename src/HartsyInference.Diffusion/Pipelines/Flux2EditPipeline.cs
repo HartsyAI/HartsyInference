@@ -131,23 +131,14 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
                     nameof(references));
             }
         }
-        int steps = request.Steps;
-        float cfg = request.CfgScale;
-        bool guided = CfgHelper.IsGuidanceActive(cfg);
-        if (guided && uncond is null)
-            throw new ArgumentException($"{Family} needs unconditional conditioning when CfgScale is {cfg} (above 1).", nameof(uncond));
-        int seed = request.Seed ?? SeedGenerator.RandomSeed();
-        int gridTokens = patH * patW;
-        Logs.Info($"{Family}: {width}x{height}, {references.Count} reference(s), {steps} steps, cfg={cfg}, seed={seed}");
-        Stopwatch sw = Stopwatch.StartNew();
-
-        Tensor? latent = null;
+        if (CfgHelper.IsGuidanceActive(request.CfgScale) && uncond is null)
+        {
+            throw new ArgumentException(
+                $"{Family} needs unconditional conditioning when CfgScale is {request.CfgScale} (above 1).", nameof(uncond));
+        }
         ReferenceLatentTokens[]? referenceTokens = null;
         try
         {
-            DenoiserProbe.Condition("cond", cond);
-            DenoiserProbe.Condition("uncond", uncond);
-
             if (references.Count > 0)
             {
                 Backend.PreloadWeights(_vaeEncoder.EnumerateWeights());
@@ -163,6 +154,57 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
                     Backend.FreeActivations();
                 }
             }
+            return EditFromTokens(cond, uncond, referenceTokens ?? [], request, onProgress);
+        }
+        finally
+        {
+            if (referenceTokens is not null)
+            {
+                foreach (ReferenceLatentTokens reference in referenceTokens) reference.Tokens.Dispose();
+            }
+        }
+    }
+
+    /// <summary><see cref="EditEncoded"/> from reference tokens that are already packed and BatchNorm-normalized
+    /// (<see cref="Flux2ReferenceEncoder"/>'s output): each is <c>[1, H·W, in_channels]</c> on the target's patch grid. They
+    /// stay the caller's.</summary>
+    public (byte[] Rgb, int Width, int Height, int Seed) EditFromTokens(Tensor cond, Tensor? uncond,
+        IReadOnlyList<ReferenceLatentTokens> referenceTokens, TextToImageRequest request, Action<GenerationProgress>? onProgress = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(cond);
+        ArgumentNullException.ThrowIfNull(referenceTokens);
+        ArgumentNullException.ThrowIfNull(request);
+        int factor = _config.VaeDownscaleFactor;
+        int patW = request.Width / factor, patH = request.Height / factor;
+        if (patW < 1 || patH < 1)
+            throw new ArgumentException($"{Family} needs at least {factor} pixels on a side; got {request.Width}x{request.Height}.");
+        int width = patW * factor, height = patH * factor;
+        foreach (ReferenceLatentTokens reference in referenceTokens)
+        {
+            reference.Validate(_config.InChannels, Family);
+            if (reference.Height != patH || reference.Width != patW)
+            {
+                throw new ArgumentException(
+                    $"{Family} reference tokens must cover the target's {patH}x{patW} patch grid; got {reference.Height}x{reference.Width}.",
+                    nameof(referenceTokens));
+            }
+        }
+        int steps = request.Steps;
+        float cfg = request.CfgScale;
+        bool guided = CfgHelper.IsGuidanceActive(cfg);
+        if (guided && uncond is null)
+            throw new ArgumentException($"{Family} needs unconditional conditioning when CfgScale is {cfg} (above 1).", nameof(uncond));
+        int seed = request.Seed ?? SeedGenerator.RandomSeed();
+        int gridTokens = patH * patW;
+        Logs.Info($"{Family}: {width}x{height}, {referenceTokens.Count} reference(s), {steps} steps, cfg={cfg}, seed={seed}");
+        Stopwatch sw = Stopwatch.StartNew();
+
+        Tensor? latent = null;
+        try
+        {
+            DenoiserProbe.Condition("cond", cond);
+            DenoiserProbe.Condition("uncond", uncond);
 
             TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
             using (Tensor noise = TakeOrCreateNoise(request, noiseShape, seed))
@@ -174,8 +216,8 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
             scheduler.SetTimesteps(steps);
             ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, Family);
 
-            float[] gridTimes = GridTimes(referenceTokens?.Length ?? 0);
-            Tensor[] referenceParts = referenceTokens?.Select(r => r.Tokens).ToArray() ?? [];
+            float[] gridTimes = GridTimes(referenceTokens.Count);
+            Tensor[] referenceParts = referenceTokens.Select(r => r.Tokens).ToArray();
             Backend.PreloadWeights(_transformer.EnumerateWeights());
             _ditResident = true;
             DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(PredictionType.FlowVelocity, (x, sigma, _) =>
@@ -231,10 +273,6 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         finally
         {
             latent?.Dispose();
-            if (referenceTokens is not null)
-            {
-                foreach (ReferenceLatentTokens reference in referenceTokens) reference.Tokens.Dispose();
-            }
         }
     }
 
