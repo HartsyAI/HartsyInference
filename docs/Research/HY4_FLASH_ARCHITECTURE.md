@@ -74,7 +74,7 @@ Class `HYV4FlashForConditionalGeneration`, `model_type` `hy_v4_flash` (HF remaps
   hashed as `XOR_k(compressed[pos-k] * multiplier_k) % prime_head` (pads before the sequence start; image/video/pad positions masked to zero). **Multipliers**:
   `numpy.random.default_rng(engram_seed + 10007*layer_id).integers(0, int64_max // compressed_vocab // 2, size=3, dtype=int64) * 2 + 1`, `compressed_vocab = max(lookup_table)+1`. Then per-head RMSNorm(96), flatten to 1536,
   per hc stream `key = RMSNorm(key_projs[i](emb) + bias)`, `query = RMSNorm(stream_i)`, `d = (key.query) * 3072^-0.5`, `gate = sigmoid(sqrt|d| * sign(d))`, `main = unified_pre_gamma * RMSNormNoAffine(value_proj(emb))`,
-  `out_i = gate_i * main + unified_per_hc_scales[i] * main`, added to the four streams before attention. `engram_fp8_embedding` is **false** (the reference's fp8 round trip is off).
+  `out_i = gate_i * main + unified_per_hc_scales[i] * main`, added to the four streams before attention. `engram_fp8_embedding` is **false** in the instruct and FP8 configs (the base config sets it true).
 - **DFly2 drafter** (`model.dfly_layers.*`, 5 layers, 0.85B): tensors are in the checkpoint, ignored by the reference loader. Out of scope for the first series.
 
 ### Vision (HY4-VL tower reused; checkpoint prefix `vit.*`)
@@ -106,7 +106,7 @@ The header inventories of all three repos are committed as `tests/HartsyInferenc
 FP8 layout: `quantization_config` sits **inside `text_config`** (`quant_method fp8`, `fmt e4m3`, `weight_block_size [128,128]`, dynamic activation). The routed experts are FP8 on every MoE layer
 (`experts.gate_up_proj` F8_E4M3 `[512,3072,1536]` + `experts.gate_up_proj_scale_inv` BF16 `[512,24,12]`; `experts.down_proj` + `down_proj_scale_inv` `[512,12,12]`), and on layers 1-41 also `self_attn.o_proj`,
 `q_b_proj`, `linear_gate` (`*.weight_scale_inv`, BF16). `modules_to_not_convert` (744 entries) keeps embed, head, hc fns, indexers, q_a/kv_a/kv_b, shared experts, router, engram, ViT in BF16. The scales are **BF16**, not the F32 grids the
-engine's `Fp8BlockLinear` reads today: needs a BF16 grid reader. `hc_*`, `gate.weight`, `e_score_correction_bias`, sinks, pooling projections and `intra_group_ape` are F32 in both checkpoints.
+engine's `Fp8BlockLinear` reads today: needs a BF16 grid reader. `hc_*`, `e_score_correction_bias`, sinks, the indexer pooling projections, key norm and `intra_group_ape` are F32 in both checkpoints; the router `mlp.gate.weight`, the Engram tables and the small Engram tensors are BF16; `lookup_table` is I32 (checked against the header inventories by `Hy4FlashWeightMap.Check`).
 
 ## Shared pieces other models can use
 
