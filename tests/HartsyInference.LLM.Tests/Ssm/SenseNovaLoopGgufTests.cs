@@ -98,6 +98,7 @@ public sealed unsafe class SenseNovaLoopGgufTests
             // Each stored tensor appears once for the device whatever number of slots read it.
             List<Tensor> weights = fromGguf.EnumerateWeights().ToList();
             Assert.Equal(weights.Count, new HashSet<Tensor>(weights, ReferenceEqualityComparer.Instance).Count);
+            Assert.DoesNotContain(weights, t => t.Shape.Rank == 2 && t.Shape[0] == Hidden && t.Shape[1] == 2 * Hidden);   // the MTP block
             if (quantized)
             {
                 // The CPU backend cannot multiply by quantized weights (CUDA and Vulkan can), so the quantized file is checked by what it
@@ -233,6 +234,8 @@ public sealed unsafe class SenseNovaLoopGgufTests
                 Add($"{dst}.hc_ffn_fn.bias", hf[$"{src}.mhc_ffn.bias"], 0, 0, false);
             }
         }
+        // The MTP draft block sits past the plan (blk.6 here); the loader must not keep it.
+        Add("blk.6.nextn.eh_proj.weight", new float[Hidden * 2 * Hidden], Hidden, 2 * Hidden, false);
         writer.Flush();
         foreach (Tensor t in keep) t.Dispose();
     }
