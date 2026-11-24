@@ -459,7 +459,7 @@ public sealed record Hy4FlashConfig
             }
         }
         int[] section = indexedSection ?? slidingSection ?? [12, 10, 10];
-        if ((indexedSection ?? section).AsSpan().SequenceEqual(slidingSection ?? section) is false)
+        if (!(indexedSection ?? section).AsSpan().SequenceEqual(slidingSection ?? section))
             throw Bad("the indexed and sliding layers carry different mrope_section values; one shared section is supported.");
         return (indexed, sliding, section);
     }
