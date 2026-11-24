@@ -323,22 +323,30 @@ public sealed class VisionService : IVisionService, IDisposable
         return new DepthPro2Model(new DepthPro2Network(DepthPro2Variants.PresetFor(variant), loader.GetAllTensors()));
     }
 
-    /// <summary>The focal estimator: the caller's <see cref="DepthPro2FocalAuxKey"/> path, else the catalog location, else a <c>DepthPro2-focal</c> folder beside the depth checkpoint's.</summary>
+    /// <summary>The focal estimator: the caller's <see cref="DepthPro2FocalAuxKey"/> path, else the catalog location, else a
+    /// <c>DepthPro2-focal</c> folder beside the depth checkpoint's.</summary>
     private DepthPro2FocalEstimator DepthPro2Focal(ModelSpec spec, string depthPath)
     {
         ModelAsset asset = DepthPro2Catalog.Focal();
-        string? path = spec.Aux.TryGetValue(DepthPro2FocalAuxKey, out string? aux) && File.Exists(aux) ? aux
-            : ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true);
-        if (path is null)
+        string? path;
+        if (spec.Aux.TryGetValue(DepthPro2FocalAuxKey, out string? aux))
         {
-            string sibling = Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(depthPath))) ?? ".", "DepthPro2-focal", asset.FileName);
-            path = File.Exists(sibling) ? sibling : null;
+            path = File.Exists(aux) ? aux
+                : throw new FileNotFoundException($"The Depth Pro 2 focal estimator named by '{DepthPro2FocalAuxKey}' does not exist: {aux}");
+        }
+        else
+        {
+            string modelsFolder = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(depthPath))) ?? ".";
+            string sibling = Path.Combine(modelsFolder, "DepthPro2-focal", asset.FileName);
+            path = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true)
+                ?? (File.Exists(sibling) ? sibling : null);
         }
         if (path is null)
         {
             throw new FileNotFoundException(
                 $"Depth Pro 2 needs its focal estimator ({asset.Repo}/{asset.RepoPath}) when no focal length is given. Fetch it with "
-                + "`hartsy pull depthpro2-s`, place it in a 'DepthPro2-focal' folder beside the depth model's folder, or give a focal length in pixels.");
+                + "`hartsy pull depthpro2-s`, place it in a 'DepthPro2-focal' folder beside the depth model's folder, "
+                + "or give a focal length in pixels.");
         }
         return GetOrLoad(_depthPro2FocalCache, path, () =>
         {

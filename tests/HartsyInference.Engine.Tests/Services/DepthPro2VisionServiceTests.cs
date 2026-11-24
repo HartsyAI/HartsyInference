@@ -18,8 +18,8 @@ public sealed class DepthPro2VisionServiceTests
     public void AFocalLengthIsForMetricDepthOnlyAndMustBePositive()
     {
         VisionRequestValidator.Validate(new VisionRequest { Image = Image(), Mode = VisionMode.MetricDepth, FocalLengthPx = 500 });
-        Assert.Contains("only applies to MetricDepth",
-            Assert.Throws<ArgumentException>(() => VisionRequestValidator.Validate(new VisionRequest { Image = Image(), Mode = VisionMode.Depth, FocalLengthPx = 500 })).Message);
+        VisionRequest depth = new() { Image = Image(), Mode = VisionMode.Depth, FocalLengthPx = 500 };
+        Assert.Contains("only applies to MetricDepth", Assert.Throws<ArgumentException>(() => VisionRequestValidator.Validate(depth)).Message);
         foreach (double bad in new[] { 0, -1, double.NaN, double.PositiveInfinity })
         {
             Assert.Throws<ArgumentException>(() =>

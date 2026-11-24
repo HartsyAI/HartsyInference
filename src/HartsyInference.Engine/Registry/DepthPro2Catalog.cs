@@ -43,7 +43,8 @@ internal static class DepthPro2Catalog
         Status = ModelStatus.ValidationPending, CliDrivable = true, HuggingFaceRepo = "apple/DepthPro2-" + repoSize,
         Assets =
         [
-            new() { Repo = "apple/DepthPro2-" + repoSize, RepoPath = "model.safetensors", TargetSubdir = "Vision/DepthPro2-" + repoSize, Role = "transformer", Sha256 = sha256 },
+            new() { Repo = "apple/DepthPro2-" + repoSize, RepoPath = "model.safetensors", TargetSubdir = "Vision/DepthPro2-" + repoSize, Role = "transformer",
+                Sha256 = sha256 },
             Focal(),
         ],
     };
