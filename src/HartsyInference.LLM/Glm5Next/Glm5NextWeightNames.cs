@@ -139,7 +139,7 @@ public static class Glm5NextWeightNames
         return TryLayer(key, out int layer) && c.IsMtpLayer(layer);
     }
 
-    // The layer number of a key under model.language_model.layers.N., when it is one the config names (decoder or MTP).
+    // The number N of a key named model.language_model.layers.N.…; the callers check it against the config's layer count.
     private static bool TryLayer(string key, out int layer)
     {
         layer = -1;
