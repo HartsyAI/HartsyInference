@@ -80,6 +80,14 @@ public static class Glm5NextHfConfig
         };
     }
 
+    /// <summary>Parses only the <c>vision_config</c> object of a <c>config.json</c> (a vision-tower test or tool needs no text config).</summary>
+    /// <exception cref="InvalidDataException">The config has no vision tower or it is not a <c>glm5_next_vision</c> the engine can build.</exception>
+    public static Glm5NextVisionConfig ParseVision(string json)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("vision_config", out JsonElement v) ? ParseVision(v) : throw new InvalidDataException("config.json has no vision_config.");
+    }
+
     private static Glm5NextVisionConfig ParseVision(JsonElement v)
     {
         RequireString(v, "model_type", "glm5_next_vision");

@@ -1,0 +1,38 @@
+{
+ "vision_config": {
+  "output_hidden_states": false,
+  "return_dict": true,
+  "dtype": null,
+  "chunk_size_feed_forward": 0,
+  "is_encoder_decoder": false,
+  "id2label": {
+   "0": "LABEL_0",
+   "1": "LABEL_1"
+  },
+  "label2id": {
+   "LABEL_0": 0,
+   "LABEL_1": 1
+  },
+  "problem_type": null,
+  "depth": 2,
+  "hidden_size": 32,
+  "hidden_act": "silu",
+  "attention_bias": true,
+  "attention_dropout": 0.0,
+  "num_heads": 2,
+  "in_channels": 3,
+  "image_size": 336,
+  "patch_size": 14,
+  "rms_norm_eps": 1e-05,
+  "spatial_merge_size": 2,
+  "temporal_patch_size": 2,
+  "out_hidden_size": 24,
+  "intermediate_size": 64,
+  "initializer_range": 0.02,
+  "projection_intermediate_size": 48,
+  "swiglu_limit": 0.5,
+  "_name_or_path": "",
+  "model_type": "glm5_next_vision",
+  "output_attentions": false
+ }
+}
