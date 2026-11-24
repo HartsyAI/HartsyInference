@@ -249,6 +249,15 @@ public sealed class DuoRepackerTests : IDisposable
     }
 
     [Fact]
+    public void MergeBackbone_RefusesToWriteOverTheBackboneItself()
+    {
+        Fixture fx = Build();
+        using DuoLoraSource lora = DuoLoraSource.FromDcp(fx.Dcp);
+        Assert.Throws<ArgumentException>(() => DuoRepacker.MergeBackbone(fx.Backbone, lora, fx.Backbone + Path.DirectorySeparatorChar,
+            new DuoMergeOptions { Heads = Heads, HeadDim = HeadDim }));
+    }
+
+    [Fact]
     public void WriteAdalnTables_ComputesSiluOfTheTimeEmbeddingThroughEachBlocksAdalnProj()
     {
         Fixture fx = Build();

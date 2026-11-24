@@ -17,7 +17,7 @@ Stage defaults: causal `grid(51, shift 1.0)`, distill `grid(5, shift 5.0)`.
 ## Distributed checkpoint format
 
 `.metadata` is a pickle of dataclasses (`Metadata`, `TensorStorageMetadata`, `ChunkStorageMetadata`, `MetadataIndex`, `_StorageInfo`); upstream's README warns it is unpickled before any check. `DcpMetadataUnpickler` interprets it with an allow-list and never calls anything.
-`__0_0.distcp` is one standalone `torch.save` ZIP per tensor, found at `(offset, length)` in `storage_data`. The released file has 635 tensors and 695,937,536 elements (**[P]** from the plan's earlier parse; the reader pins it in a guarded test, `HARTSY_DUO_DCP_DIR`).
+`__0_0.distcp` is one standalone `torch.save` ZIP per tensor, found at `(offset, length)` in `storage_data`. The released file has 635 tensors and 695,937,536 elements (read with this reader from the real `.metadata` of the 1.0 causal and 1.0 distill repos on 2026-11-24, both 635 tensors and 317 LoRA modules, all mapped; the guarded tests `HARTSY_DUO_DCP_DIR` repeat it).
 Keys are `models.<family>.<module>.lora_{A,B}.default.weight` with the diffusers module names, plus an unused `role_embeddings.weight`. Upstream resolves the family from the manifest (`generator`); the first research pass read `student` for the base. `DuoLoraSource.FromDcp` takes the one prefix that carries LoRA tensors.
 
 ## Layout traps
@@ -30,7 +30,7 @@ Keys are `models.<family>.<module>.lora_{A,B}.default.weight` with the diffusers
 ## AdaLN tables
 
 Modulation depends on the scalar time and the row's modality only (`index = time_index * 3 + tag`, tags video 0, text 1, audio 2). Upstream feeds unscaled `t` in `[0, 1]`, a cos-first sinusoid, the time embedder in F32, then `silu` and the BF16 `adaln_proj`. For a fixed schedule the 13.0B-parameter per-block `adaln_proj` layers reduce to `blocks.N.adaln_proj.table [times * 3, 6 * hidden]`; 5 times (distill) are about 97 MB, 51 (causal) about 1 GB in F32. `DuoAdalnPrecision.Bf16Reference` follows upstream's rounding, `F32` the engine's.
-The schedule formula in `DuoSchedule` (`sigma' = shift * sigma / (1 + (shift - 1) * sigma)`, `sigma = 1 - t`) reproduces the distinct distill times the research derived; it is not yet compared with upstream's `grid()`.
+`DuoSchedule.Grid` is upstream's `grid` (`schedulers/flow.py` @068e357): `t = linspace(0, 1, points)` then `1 - shift * (1 - t) / (1 + (shift - 1) * (1 - t))`, in torch's default float32. Noisy blocks take `grid[step]` as their time and committed chunks 1.0 (`pipelines/inference.py`, `streaming.py`); the training layout uses a 0.999 placeholder for clean rows, which inference does not. AdaLN rows are `time_id * 3 + tag` into the distinct-times vector (clean slot first), so a consumer addresses a table row by step index, never by comparing floats.
 
 ## Licence
 
@@ -45,6 +45,5 @@ All four upstream repos ship the MiniMax H3 Community License (`license_name: mi
 
 ## Open
 
-- The real `.metadata` has not been read; the unpickler is tested on synthetic metadata that mirrors torch's dataclass pickling.
-- Upstream `grid()` and its dtype (schedule check above).
-- Whether the Comfy-Org H3 builds are `[Q; K; V]`-ordered is inferred from their verified runs, not from a file.
+- The qkv order of the Comfy-Org H3 builds the engine runs (the `minimax-h3` catalog entry) is inferred from those runs working, not read from a file.
+- A real-weight LoRA merge against upstream's merged tensors (plan level L2) needs the 2.78 GB LoRA and backbone shards; not run.

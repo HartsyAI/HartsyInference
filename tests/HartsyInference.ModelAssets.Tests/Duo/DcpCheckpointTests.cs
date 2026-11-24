@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Dcp;
+using HartsyInference.ModelAssets.Duo;
 using Xunit;
 
 namespace HartsyInference.ModelAssets.Tests.Duo;
@@ -158,5 +159,16 @@ public sealed class DcpCheckpointTests : IDisposable
         using DcpCheckpoint checkpoint = DcpCheckpoint.Open(Environment.GetEnvironmentVariable("HARTSY_DUO_DCP_DIR")!);
         Assert.Equal(635, checkpoint.Entries.Count);
         Assert.Equal(695_937_536L, checkpoint.Entries.Values.Sum(e => e.Shape.Aggregate(1L, (x, y) => x * y)));
+        Assert.All(checkpoint.Entries.Values, e => Assert.Equal("__0_0.distcp", e.RelativePath));
+    }
+
+    [DuoRealWeightsFact("HARTSY_DUO_DCP_DIR")]
+    [Trait("Category", "Integration")]
+    public void RealCheckpoint_EveryLoraModuleMapsOntoABackboneWeight()
+    {
+        using DuoLoraSource lora = DuoLoraSource.FromDcp(Environment.GetEnvironmentVariable("HARTSY_DUO_DCP_DIR")!);
+        Assert.Equal(317, lora.Modules.Count);
+        Assert.All(lora.Modules, module => Assert.True(DuoLoraKeyMap.TryMap(module, out _), $"'{module}' has no backbone target"));
+        Assert.All(lora.Describe(), t => Assert.Equal(DType.F32, t.DType));
     }
 }
