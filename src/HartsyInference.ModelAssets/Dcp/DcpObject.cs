@@ -10,6 +10,9 @@ internal sealed class DcpObject(string module, string name)
     /// <summary>Constructor arguments of a reduce call, when the object came from one.</summary>
     public object?[]? Args { get; set; }
 
+    /// <summary>The state a BUILD opcode set when it was a tuple (<c>TensorProperties</c> pickles its five fields as one) rather than an attribute dict.</summary>
+    public object?[]? State { get; set; }
+
     /// <summary>The attributes a BUILD opcode assigned.</summary>
     public Dictionary<string, object?> Fields { get; } = [];
 

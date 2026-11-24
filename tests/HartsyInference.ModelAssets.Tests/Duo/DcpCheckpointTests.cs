@@ -123,6 +123,27 @@ public sealed class DcpCheckpointTests : IDisposable
     }
 
     [Fact]
+    public void Parse_ReportsATruncatedOrCorruptedFileAsInvalidDataNotAnInternalError()
+    {
+        DcpFixture.Write(_folder, Sample());
+        byte[] metadata = File.ReadAllBytes(Path.Combine(_folder, ".metadata"));
+        foreach (int cut in new[] { 5, 40, metadata.Length / 2, metadata.Length - 1 })
+            Assert.Throws<InvalidDataException>(() => DcpMetadata.Parse(metadata[..cut]));
+
+        byte[] corrupted = [.. metadata];
+        for (int i = 60; i < corrupted.Length; i += 7) corrupted[i] ^= 0x5a;
+        Assert.ThrowsAny<Exception>(() => DcpMetadata.Parse(corrupted));
+    }
+
+    [Fact]
+    public void Parse_ReadsTensorPropertiesFromTheTupleStateTorchWrites()
+    {
+        DcpFixture.Write(_folder, Sample());
+        DcpMetadata parsed = DcpMetadata.Parse(File.ReadAllBytes(Path.Combine(_folder, ".metadata")));
+        Assert.Equal(DType.BF16, parsed.Tensors["models.generator.proj_in.lora_B.default.weight"].DType);
+    }
+
+    [Fact]
     public void Parse_RefusesAFileThatIsNotMetadata()
     {
         PickleBuilder p = new();

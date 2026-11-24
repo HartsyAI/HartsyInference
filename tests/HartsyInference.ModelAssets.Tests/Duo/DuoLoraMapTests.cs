@@ -78,13 +78,15 @@ public sealed class DuoLoraMapTests
     [Fact]
     public void Schedule_ReproducesTheDistinctTimesOfTheTwoStages()
     {
-        double[] distill = DuoSchedule.Grid(DuoSchedule.DistillSteps, DuoSchedule.DistillShift);
+        float[] distill = DuoSchedule.Grid(DuoSchedule.DistillSteps, DuoSchedule.DistillShift);
         Assert.Equal(5, distill.Length);
-        Assert.Equal(new[] { 0.0, 0.0625, 1.0 / 6.0, 0.375, 1.0 }, distill, new DoubleTolerance(1e-12));
-        double[] causal = DuoSchedule.Grid(DuoSchedule.CausalSteps, DuoSchedule.CausalShift);
+        Assert.Equal(new[] { 0.0, 0.0625, 1.0 / 6.0, 0.375, 1.0 }, distill.Select(v => (double)v), new DoubleTolerance(1e-6));
+        Assert.Equal(0f, distill[0]);
+        Assert.Equal(DuoSchedule.CleanTime, distill[^1]);
+        float[] causal = DuoSchedule.Grid(DuoSchedule.CausalSteps, DuoSchedule.CausalShift);
         Assert.Equal(51, causal.Length);
-        for (int i = 0; i <= 50; i++) Assert.Equal(i / 50.0, causal[i], 12);
-        Assert.Equal(51, DuoSchedule.AdalnTimes(50, 1.0).Length);
+        for (int i = 0; i <= 50; i++) Assert.Equal(i / 50.0, causal[i], 1e-6);
+        Assert.Equal(1f, causal[50]);
         Assert.Throws<ArgumentOutOfRangeException>(() => DuoSchedule.Grid(0, 1.0));
         Assert.Throws<ArgumentOutOfRangeException>(() => DuoSchedule.Grid(4, 0.0));
     }

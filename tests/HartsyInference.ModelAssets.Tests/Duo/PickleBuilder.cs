@@ -84,6 +84,16 @@ internal sealed class PickleBuilder
         return Op((byte)'R');
     }
 
+    /// <summary>An object whose state is a tuple: class, empty args, NEWOBJ, the tuple, BUILD (what a class with a custom <c>__getstate__</c> returning a tuple pickles to).</summary>
+    public PickleBuilder ObjectWithTupleState(string module, string name, params Action<PickleBuilder>[] state)
+    {
+        Global(module, name);
+        Op((byte)')');
+        Op(0x81);
+        Tuple(state);
+        return Op((byte)'b');
+    }
+
     /// <summary>An object with a state dict: class, empty args, NEWOBJ, then the fields through BUILD, as <c>object.__reduce_ex__</c> does for a dataclass.</summary>
     public PickleBuilder Object(string module, string name, params (string Field, Action<PickleBuilder> Value)[] fields)
     {

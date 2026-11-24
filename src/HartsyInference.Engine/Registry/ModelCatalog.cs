@@ -120,6 +120,16 @@ public static class ModelCatalog
         new() { Repo = "tencent/" + repo, RepoPath = folder + "/config.yaml", TargetSubdir = "3D/" + id, Role = "config", Sha256 = configSha },
     ];
 
+    /// <summary>The Realization LoRA of one Duo release: <c>.metadata</c> and <c>__0_0.distcp</c> of the repo's <c>realization/dcp</c> folder (2.78 GB), the only Duo-specific weights. The backbone is MiniMax-H3's Ref2VA transformer, which the
+    /// same repo repeats byte for byte, so it is not listed here. Hashes are the repo's own LFS sha256 at the revision named in <c>docs/Research/DUO_V1_WEIGHTS.md</c>.</summary>
+    private static ModelAsset[] DuoLoraAssets(string repo, string id, string metadataSha, string distcpSha) =>
+    [
+        new() { Repo = repo, RepoPath = "realization/dcp/__0_0.distcp", TargetSubdir = "Stable-Diffusion/Duo/" + id, TargetName = "realization/dcp/__0_0.distcp",
+            Role = "LoRA (distributed checkpoint)", Sha256 = distcpSha },
+        new() { Repo = repo, RepoPath = "realization/dcp/.metadata", TargetSubdir = "Stable-Diffusion/Duo/" + id, TargetName = "realization/dcp/.metadata",
+            Role = "LoRA index", Sha256 = metadataSha },
+    ];
+
     /// <summary>Hunyuan3D Paint 2.0 (<c>tencent/Hunyuan3D-2</c> at <c>9cd649ba</c>): the multiview UNet and the SD VAE, both safetensors, in the diffusers layout the loader reads.</summary>
     private static ModelAsset[] Hunyuan3DPaintAssets =>
     [
@@ -2984,6 +2994,39 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae/MiniMaxH3", Role = "vae",
                         Sha256 = "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48" },
                 },
+            },
+
+            // Duo v1 (inclusionAI): a LoRA on MiniMax-H3's Ref2VA DiT, driven chunk by chunk by a LoRA-tuned Qwen3-VL-32B. Only the weight preparation exists so far (DCP reader, LoRA merge, adaln tables in ModelAssets/Duo): no recipe,
+            // no Intent, no ASR, so nothing here runs yet, and the assets are the Duo-specific LoRA files only (the shared backbone, codecs and Intent base are MiniMax-H3's and Qwen's own files).
+            // Licence: the MiniMax H3 Community License (repo LICENSE, Exhibit A). Its default terms grant rights only outside the EU, UK, Republic of Korea and United States (use and distribution), require the licence and NOTICE
+            // beside any distributed file and a notice on modified files, bind recipients to the same restrictions (including no use of outputs to improve another model), and ask for "MiniMax H3" on a commercial UI and a
+            // machine-generated disclosure on public outputs. The owner holds a separate MiniMax licence that allows hosting a repack; its terms are not recorded yet, so hosting stays off until they are written here.
+            new CatalogEntry
+            {
+                Id = "duo-v1-distill", Modality = vid, DisplayName = "Duo 1.0 distill (full-duplex audio-video, 4 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (DMD generator, shift 5.0); needs the H3 Ref2VA backbone",
+                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.0-distill",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.0-distill", "duo-1.0-distill",
+                    "4ca08a328ea6ecc19490bd16605164d07dd9d8dcd7d3b0774c4d9358349be10a",
+                    "27b0188a15d7d52872db0005022c9737c3b128fdde9df360237aa0798a165bd4"),
+            },
+            new CatalogEntry
+            {
+                Id = "duo-v1-causal", Modality = vid, DisplayName = "Duo 1.0 causal base (full-duplex audio-video, 50 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the H3 Ref2VA backbone",
+                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.0-causal-base",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.0-causal-base", "duo-1.0-causal-base",
+                    "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
+                    "36a14c91142a15321d0d1e40257afb8ab4ddf1c5eddbb8723eca18d83d0620e1"),
+            },
+            new CatalogEntry
+            {
+                Id = "duo-v1-2-causal", Modality = vid, DisplayName = "Duo 1.2 causal base (full-duplex audio-video, 50 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the H3 Ref2VA backbone",
+                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.2-causal-base",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.2-causal-base", "duo-1.2-causal-base",
+                    "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
+                    "05332963e83056c3b3352329fdd55e84fb46881170f7889ddebf7ce7eede88a7"),
             },
 
             // 3D

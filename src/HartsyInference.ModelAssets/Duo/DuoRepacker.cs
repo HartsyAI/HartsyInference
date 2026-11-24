@@ -46,6 +46,8 @@ public static class DuoRepacker
         ArgumentException.ThrowIfNullOrEmpty(outputDir);
         ArgumentNullException.ThrowIfNull(options);
         string[] shards = ShardFiles(backboneDir);
+        if (string.Equals(Path.GetFullPath(backboneDir).TrimEnd('\\', '/'), Path.GetFullPath(outputDir).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("The output folder must differ from the backbone folder; sources are never overwritten.", nameof(outputDir));
 
         Dictionary<string, List<(string Module, DuoLoraTarget Target)>> byKey = new(StringComparer.Ordinal);
         List<string> unmapped = [];
@@ -57,6 +59,18 @@ public static class DuoRepacker
         }
         if (unmapped.Count > 0)
             throw new InvalidDataException($"{unmapped.Count} LoRA module(s) have no backbone weight to merge into, for example '{unmapped[0]}'.");
+
+        HashSet<string> present = new(StringComparer.Ordinal);
+        foreach (string shard in shards)
+        {
+            using SafeTensorsLoader header = new();
+            header.Load(shard);
+            present.UnionWith(header.Descriptors.Keys);
+        }
+        KeyValuePair<string, List<(string Module, DuoLoraTarget Target)>> absent = byKey.FirstOrDefault(entry => !present.Contains(entry.Key));
+        if (absent.Key is not null)
+            throw new InvalidDataException(
+                $"LoRA module '{absent.Value[0].Module}' targets '{absent.Key}', which no backbone shard holds; the shards are not the Duo backbone. Nothing was written.");
 
         Directory.CreateDirectory(outputDir);
         HashSet<string> merged = new(StringComparer.Ordinal);

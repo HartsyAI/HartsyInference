@@ -69,7 +69,8 @@ public sealed class DcpMetadata
     private static DType ReadDType(string key, DcpObject meta)
     {
         DcpObject? properties = meta.Field<DcpObject>("properties");
-        PickleGlobal? dtype = properties?.Fields.GetValueOrDefault("dtype") as PickleGlobal;
+        // TensorProperties pickles its state as the tuple (dtype, layout, requires_grad, memory_format_encoding, pin_memory).
+        PickleGlobal? dtype = (properties?.Fields.GetValueOrDefault("dtype") ?? properties?.State?.FirstOrDefault()) as PickleGlobal;
         return dtype?.Name switch
         {
             "float32" => DType.F32,

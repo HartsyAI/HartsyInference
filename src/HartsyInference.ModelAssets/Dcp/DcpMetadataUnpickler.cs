@@ -37,6 +37,7 @@ internal sealed class DcpMetadataUnpickler
     public static bool IsAllowedGlobal(string module, string name) => module switch
     {
         "torch" => TorchNames.Contains(name),
+        "torch.serialization" => name == "_get_layout",
         "collections" => name == "OrderedDict",
         "builtins" => BuiltinNames.Contains(name),
         "copyreg" => CopyregNames.Contains(name),
@@ -46,6 +47,19 @@ internal sealed class DcpMetadataUnpickler
     };
 
     public object? Run()
+    {
+        try
+        {
+            return RunCore();
+        }
+        catch (Exception error) when (error is InvalidCastException or IndexOutOfRangeException or ArgumentOutOfRangeException
+            or OverflowException or FormatException or DecoderFallbackException)
+        {
+            throw new InvalidDataException($"The metadata pickle is malformed near byte {_i}: {error.Message}", error);
+        }
+    }
+
+    private object? RunCore()
     {
         while (_i < _b.Length)
         {
@@ -111,8 +125,8 @@ internal sealed class DcpMetadataUnpickler
 
     private void Reduce()
     {
-        object?[] args = (object?[])Pop()!;
-        PickleGlobal callee = (PickleGlobal)Pop()!;
+        object?[] args = Pop() as object?[] ?? throw new InvalidDataException("A reduce call had no argument tuple.");
+        PickleGlobal callee = Pop() as PickleGlobal ?? throw new InvalidDataException("A reduce call did not name an allowed class.");
         if (callee is { Module: "torch", Name: "Size" })
         {
             object?[] dims = args.Length == 1 && args[0] is object?[] t ? t : [];
@@ -147,6 +161,7 @@ internal sealed class DcpMetadataUnpickler
         if (Peek() is not DcpObject target) return;
         if (state is DcpDict fields) Assign(target, fields);
         else if (state is object?[] { Length: 2 } pair && pair[0] is DcpDict first) Assign(target, first);
+        else if (state is object?[] tuple) target.State = tuple;
     }
 
     private static void Assign(DcpObject target, DcpDict fields)

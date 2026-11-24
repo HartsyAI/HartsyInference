@@ -103,10 +103,11 @@ internal static class DcpFixture
         long[] sizes = halfChunk ? tensor.Shape.Select(d => Math.Max(1, d / 2)).ToArray() : tensor.Shape;
         string dtype = tensor.DType == DType.F32 ? "float32" : "bfloat16";
         b.Object("torch.distributed.checkpoint.metadata", "TensorStorageMetadata",
-            ("properties", x => x.Object("torch.distributed.checkpoint.metadata", "TensorProperties",
-                ("dtype", y => y.Global("torch", dtype)), ("layout", y => y.Global("torch", "strided")),
-                ("requires_grad", y => y.Bool(false)), ("memory_format", y => y.Global("torch", "contiguous_format")),
-                ("pin_memory", y => y.Bool(false)))),
+            // TensorProperties.__getstate__ returns (dtype, layout, requires_grad, _MEM_FORMAT_ENCODING member, pin_memory); an Enum member pickles as cls(value).
+            ("properties", x => x.ObjectWithTupleState("torch.distributed.checkpoint.metadata", "TensorProperties",
+                y => y.Global("torch", dtype), y => y.Global("torch", "strided"), y => y.Bool(false),
+                y => y.Global("torch.distributed.checkpoint.metadata", "_MEM_FORMAT_ENCODING").Tuple(z => z.Int(0)).Op((byte)'R'),
+                y => y.Bool(false))),
             ("size", x => x.TorchSize(tensor.Shape)),
             ("chunks", x => x.List([y => y.Object("torch.distributed.checkpoint.metadata", "ChunkStorageMetadata",
                 ("offsets", z => z.TorchSize(zeros)), ("sizes", z => z.TorchSize(sizes)))])));

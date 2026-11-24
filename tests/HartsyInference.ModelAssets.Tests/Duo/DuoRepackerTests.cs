@@ -236,6 +236,8 @@ public sealed class DuoRepackerTests : IDisposable
             InvalidDataException error = Assert.Throws<InvalidDataException>(() =>
                 DuoRepacker.MergeBackbone(missing.Backbone, lora, Path.Combine(_root, "out1"), new DuoMergeOptions { Heads = Heads, HeadDim = HeadDim }));
             Assert.Contains("transformer_blocks.5.attn.to_q", error.Message);
+            Assert.Contains("blocks.5.attn.qkv_proj.weight", error.Message);
+            Assert.False(Directory.Exists(Path.Combine(_root, "out1")), "nothing is written before the check");
         }
 
         Directory.Delete(_root, recursive: true);
