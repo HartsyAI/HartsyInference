@@ -49,6 +49,15 @@ internal ref struct ProtoReader
         throw new InvalidDataException("Truncated protobuf varint.");
     }
 
+    /// <summary>Reads a little-endian fixed32 field as a float (protobuf <c>float</c>).</summary>
+    public float ReadFloat()
+    {
+        if (_pos + 4 > _end) throw new InvalidDataException("Truncated protobuf fixed32.");
+        float value = BitConverter.ToSingle(_buf.Slice(_pos, 4));
+        _pos += 4;
+        return value;
+    }
+
     /// <summary>Reads a length-delimited field, returning its absolute offset/length into the shared buffer and advancing past it.</summary>
     public (int Offset, int Length) ReadLengthDelimited()
     {

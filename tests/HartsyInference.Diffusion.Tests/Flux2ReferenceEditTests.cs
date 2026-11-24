@@ -79,6 +79,68 @@ public sealed class Flux2ReferenceEditTests
         Assert.True(MaxDifference(baseline, otherTime) > 1e-4f, "the reference's T coordinate reaches the target velocity");
     }
 
+    /// <summary>The reference rope tables are keyed exactly and survive other forwards in between: the same layout gives the same
+    /// answer before and after a plain forward and a differently-timed reference layout rewrote the shared tables.</summary>
+    [Fact]
+    [Trait("Category", "SyntheticSmoke")]
+    public void ReferenceRopeTablesAreRebuiltWhenAnotherLayoutHasUsedThem()
+    {
+        using IDisposable f32 = KnobProfile.Create("ovb-test").With(EngineKnobs.DitF16, false).Push();
+        using CpuBackend backend = new();
+        using Flux2Transformer transformer = new(Tiny);
+        transformer.LoadWeights(IrisZTestData.Converted(zeroModality: true));
+        int gridTokens = GridHeight * GridWidth;
+        using Tensor two = IrisZTestData.Random(new Random(3), 1, 2 * gridTokens, Channels);
+        using Tensor one = IrisZTestData.Random(new Random(4), 1, gridTokens, Channels);
+        using Tensor text = IrisZTestData.Random(new Random(5), 1, TextLength, Context);
+
+        float[] first = TargetVelocity(transformer, backend, two, text, [0f, 10f]);
+        using (transformer.Forward(backend, one, text, 0.5f, 0f, GridHeight, GridWidth)) { }
+        float[] afterPlain = TargetVelocity(transformer, backend, two, text, [0f, 10f]);
+        float[] otherTimes = TargetVelocity(transformer, backend, two, text, [0f, 11f]);
+        float[] afterOther = TargetVelocity(transformer, backend, two, text, [0f, 10f]);
+
+        Assert.Equal(first, afterPlain);
+        Assert.Equal(first, afterOther);
+        Assert.True(MaxDifference(first, otherTimes) > 1e-4f, "a different T coordinate is a different layout");
+    }
+
+    [Fact]
+    public void ALoneTargetSharesThePlainTablesAndMatchesAfterAReferenceLayoutRan()
+    {
+        using IDisposable f32 = KnobProfile.Create("ovb-test").With(EngineKnobs.DitF16, false).Push();
+        using CpuBackend backend = new();
+        using Flux2Transformer transformer = new(Tiny);
+        transformer.LoadWeights(IrisZTestData.Converted(zeroModality: true));
+        int gridTokens = GridHeight * GridWidth;
+        using Tensor two = IrisZTestData.Random(new Random(3), 1, 2 * gridTokens, Channels);
+        using Tensor one = IrisZTestData.Random(new Random(4), 1, gridTokens, Channels);
+        using Tensor text = IrisZTestData.Random(new Random(5), 1, TextLength, Context);
+
+        using Tensor plain = transformer.Forward(backend, one, text, 0.5f, 0f, GridHeight, GridWidth);
+        _ = TargetVelocity(transformer, backend, two, text, [0f, 10f]);
+        using Tensor lone = transformer.ForwardWithReferences(backend, one, text, 0.5f, GridHeight, GridWidth, [0f]);
+
+        Assert.True(MaxDifference(plain.AsReadOnlySpan<float>(), lone.AsReadOnlySpan<float>()) <= 1e-4f);
+    }
+
+    [Fact]
+    public void BadTextShapesAndNullReferencesAreRefusedByName()
+    {
+        using CpuBackend backend = new();
+        using Flux2Transformer transformer = new(Tiny);
+        transformer.LoadWeights(IrisZTestData.Converted(zeroModality: true));
+        using Tensor tokens = IrisZTestData.Random(new Random(1), 1, GridHeight * GridWidth, Channels);
+        using Tensor flatText = IrisZTestData.Random(new Random(2), TextLength, Context);
+        using Tensor batchedText = IrisZTestData.Random(new Random(2), 2, TextLength, Context);
+
+        Assert.Throws<ArgumentException>(() => transformer.ForwardWithReferences(backend, tokens, flatText, 0.5f, GridHeight, GridWidth, [0f]));
+        Assert.Throws<ArgumentException>(() => transformer.ForwardWithReferences(backend, tokens, batchedText, 0.5f, GridHeight, GridWidth, [0f]));
+
+        using Flux2EditFixture fixture = new();
+        Assert.Throws<ArgumentNullException>(() => fixture.Pipeline.EditEncoded(fixture.Cond, null, [null!], Request(cfg: 1f)));
+    }
+
     [Fact]
     public void AMismatchedTokenCountIsRefusedByName()
     {

@@ -62,6 +62,13 @@ public sealed unsafe class Flux2Transformer : IDisposable
     // positions only change with resolution / text length.
     private long _ropeSig = long.MinValue;
 
+    // The exact key of the reference-edit rope tables (see EnsureReferenceRope), valid only while _ropeSig is ReferenceRopeSignature.
+    private const long ReferenceRopeSignature = long.MinValue + 2;
+    private int _refTextLength;
+    private int _refHeight;
+    private int _refWidth;
+    private float[] _refTimes = [];
+
     private int _disposed;
 
     public Flux2Transformer(Flux2Config config)
@@ -200,6 +207,8 @@ public sealed unsafe class Flux2Transformer : IDisposable
         ArgumentNullException.ThrowIfNull(textEmbeddings);
         if (gridTimes.Length < 1)
             throw new ArgumentException("At least the target grid is required.", nameof(gridTimes));
+        if (textEmbeddings.Shape.Rank != 3 || textEmbeddings.Shape[0] != 1)
+            throw new ArgumentException($"Text embeddings must be [1, L, D], got {textEmbeddings.Shape}.", nameof(textEmbeddings));
         long expected = (long)gridTimes.Length * hPacked * wPacked;
         if (packedTokens.Shape.Rank != 3 || packedTokens.Shape[0] != 1 || packedTokens.Shape[1] != expected
             || packedTokens.Shape[2] != _config.InChannels)
@@ -219,22 +228,26 @@ public sealed unsafe class Flux2Transformer : IDisposable
         }
     }
 
-    /// <summary>Rope tables for <c>[text, grids...]</c> at the given T coordinates, rebuilt only when the key changes. A
-    /// plain or multi-grid forward in between leaves its own signature, so the tables are never mistaken for these.</summary>
+    /// <summary>Rope tables for <c>[text, grids...]</c> at the given T coordinates, rebuilt only when the key changes. The key is
+    /// compared exactly, never hashed (a collision would reuse another layout's positions and still produce an image), and the
+    /// tables carry the reserved <see cref="ReferenceRopeSignature"/>, so a plain or multi-grid forward in between leaves its own
+    /// signature and the tables are never mistaken for these.</summary>
     private void EnsureReferenceRope(int txtSeqLen, int hPacked, int wPacked, float[] gridTimes)
     {
-        HashCode hash = new HashCode();
-        hash.Add(txtSeqLen);
-        hash.Add(hPacked);
-        hash.Add(wPacked);
-        foreach (float time in gridTimes) hash.Add(time);
-        long sig = ((long)hash.ToHashCode() << 20) ^ 0x5EF0_0000_0000L ^ gridTimes.Length;
-        if (sig == _ropeSig)
+        if (_ropeSig == ReferenceRopeSignature && _refTextLength == txtSeqLen && _refHeight == hPacked && _refWidth == wPacked
+            && gridTimes.AsSpan().SequenceEqual(_refTimes))
+        {
             return;
+        }
+        // Disowned while the tables are rewritten, so a Precompute that throws part-way is redone on the next call.
         _ropeSig = long.MinValue;
         using Tensor posIds = Flux2PosEmbed.BuildGridPositionIds(txtSeqLen, hPacked, wPacked, gridTimes);
         _rope.Precompute(posIds);
-        _ropeSig = sig;
+        _refTextLength = txtSeqLen;
+        _refHeight = hPacked;
+        _refWidth = wPacked;
+        _refTimes = gridTimes.ToArray();
+        _ropeSig = ReferenceRopeSignature;
     }
 
     /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
@@ -286,7 +299,8 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
         // ── 4. Precompute 4-axis RoPE — sig-cached (Precompute rebuilds host tables + re-uploads the GPU
         //       cos/sin tables; it ran EVERY forward before) ──
-        if (gridTimes is null)
+        // A lone target at T = 0 is the plain layout: share its tables rather than rewrite them for the same positions.
+        if (gridTimes is null || (gridTimes.Length == 1 && gridTimes[0] == 0f))
             EnsureRope(txtSeqLen, hPacked, wPacked);
         else
             EnsureReferenceRope(txtSeqLen, hPacked, wPacked, gridTimes);
