@@ -5,7 +5,8 @@ namespace HartsyInference.LLM.Tests.Ssm;
 
 /// <summary>The chat template shipped with SenseNova-Loop-9B (<c>chat_template.jinja</c> @ 3cc220e, copied unchanged) must compile and render in the
 /// engine's Jinja interpreter. A construct the interpreter lacks degrades silently to ChatML (a <c>[WRN]</c> line), which would drop the thinking
-/// switch, so each shape the service sends is rendered here.</summary>
+/// switch, so the shapes below are rendered directly through the template. They use template-level dictionaries; the service's own message
+/// encoding (string content only, image parts not forwarded) is not covered here, and the image case is for the template only.</summary>
 public sealed class SenseNovaLoopChatTemplateTests
 {
     private static readonly string Source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "SenseNovaLoop", "chat_template.jinja"));
@@ -35,6 +36,33 @@ public sealed class SenseNovaLoopChatTemplateTests
     {
         string text = Render([Message("user", "Hi")], thinking: false);
         Assert.EndsWith("<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", text);
+    }
+
+    [Fact]
+    public void ToolHistory_RendersWithoutTheChatMlFallback()
+    {
+        // The second request of a tool-calling loop: user, assistant with tool_calls, tool, user. The template reads tool_call.arguments|items,
+        // which the interpreter must support, or the whole render falls back to ChatML.
+        Dictionary<string, object?> call = new()
+        {
+            ["id"] = "c1", ["type"] = "function",
+            ["function"] = new Dictionary<string, object?> { ["name"] = "get_weather", ["arguments"] = new Dictionary<string, object?> { ["city"] = "Oslo" } },
+        };
+        Dictionary<string, object?> assistant = new() { ["role"] = "assistant", ["content"] = "", ["tool_calls"] = new List<object?> { call } };
+        Dictionary<string, object?> tool = new() { ["role"] = "tool", ["content"] = "4C" };
+        string text = Render([Message("user", "Weather in Oslo?"), assistant, tool, Message("user", "Thanks")]);
+        Assert.Contains("<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>", text);
+        Assert.Contains("<tool_response>\n4C\n</tool_response>", text);
+        Assert.EndsWith("<|im_start|>assistant\n<think>\n", text);
+    }
+
+    [Fact]
+    public void AssistantHistoryWithAThinkBlock_KeepsItsAnswer()
+    {
+        // Content keeps reasoning markers literal, so an earlier turn with a think block must not render blank: split('</think>')[-1] is the answer.
+        string text = Render([Message("user", "Time?"), Message("assistant", "<think>\nhm\n</think>\n\nIt is 5C."), Message("user", "And now?")]);
+        Assert.Contains("It is 5C.", text);
+        Assert.DoesNotContain("<|im_start|>assistant\n<|im_end|>", text);
     }
 
     [Fact]
