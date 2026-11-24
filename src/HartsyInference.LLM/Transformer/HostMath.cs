@@ -44,9 +44,6 @@ internal static class HostMath
         }
     }
 
-    /// <summary>One dot product in a fixed order: four accumulators of <see cref="Vector{T}"/> lanes, then the scalar tail.</summary>
-    /// <remarks>The order depends only on <paramref name="n"/> and the machine's vector width, so one machine gives one value for the same
-    /// inputs however the caller splits its outputs.</remarks>
     /// <summary>The inner product of two equal-length spans, in the fixed summation order <see cref="Linear"/> uses.</summary>
     public static unsafe float Dot(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
@@ -56,6 +53,9 @@ internal static class HostMath
             return Dot(ap, bp, a.Length);
     }
 
+    /// <summary>One dot product in a fixed order: four accumulators of <see cref="Vector{T}"/> lanes, then the scalar tail.</summary>
+    /// <remarks>The order depends only on <paramref name="n"/> and the machine's vector width, so one machine gives one value for the same
+    /// inputs however the caller splits its outputs.</remarks>
     private static unsafe float Dot(float* a, float* b, int n)
     {
         int i = 0, width = Vector<float>.Count, step = width * 4;

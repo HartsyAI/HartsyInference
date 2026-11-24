@@ -14,6 +14,20 @@ public sealed class MaxwellTinyParityTests(ITestOutputHelper output)
 {
     private static readonly string Directory = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Maxwell");
 
+    [Fact]
+    public void StatesBeyondTheLoadedLimit_AreRefused()
+    {
+        using MaxwellModel model = Model();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => model.CreateState(65));
+    }
+
+    [Fact]
+    public void LoadOptions_KeepTheLayersResidentByDefault()
+    {
+        Assert.True(new MaxwellLoadOptions { MaxSequenceTokens = 8 }.ResidentWeights);
+    }
+
     private static float[] Load(string name) => NpyReader.ReadFloat32(Path.Combine(Directory, name + ".npy")).Data;
 
     private static int[] Tokens() => NpyReader.ReadInt32(Path.Combine(Directory, "input_ids.npy")).Data;
@@ -87,6 +101,7 @@ public sealed class MaxwellTinyParityTests(ITestOutputHelper output)
         JsonObject config = JsonNode.Parse(File.ReadAllText(Path.Combine(Directory, "config.json")))!.AsObject();
         config["block_sparse_gqa_num_remote_blocks"] = 100;
         config["block_sparse_gqa_total_support_blocks"] = 104;
+        config["block_sparse_gqa_topk_blocks"] = 100;
         MaxwellConfig wide = MaxwellConfig.Parse(config.ToJsonString());
         using BlockFp8CheckpointWeights weights = BlockFp8CheckpointWeights.Open(Directory, "Maxwell");
         using MaxwellModel model = new(new CpuBackend(), wide, weights, new MaxwellLoadOptions { MaxSequenceTokens = 64, ResidentWeights = true });

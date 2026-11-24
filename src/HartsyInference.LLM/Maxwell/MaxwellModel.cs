@@ -196,17 +196,28 @@ public sealed class MaxwellModel : IDisposable
         for (int t = 0; t < tokenIds.Length; t++)
         {
             using Tensor row = _embedding!.SliceRows(tokenIds[t], 1);
-            using Tensor f32 = row.DType == DType.F32 ? row.To(row.Device) : row.CastTo(DType.F32);
-            ReadOnlySpan<float> values = f32.AsReadOnlySpan<float>();
-            for (int c = 0; c < copies; c++) values.CopyTo(stream.AsSpan((t * copies + c) * d, d));
+            if (row.DType == DType.F32)
+            {
+                CopyRow(row.AsReadOnlySpan<float>(), stream, t * copies, copies, d);
+                continue;
+            }
+            using Tensor f32 = row.CastTo(DType.F32);
+            CopyRow(f32.AsReadOnlySpan<float>(), stream, t * copies, copies, d);
         }
         return stream;
+    }
+
+    private static void CopyRow(ReadOnlySpan<float> values, float[] stream, int firstRow, int copies, int d)
+    {
+        for (int c = 0; c < copies; c++) values.CopyTo(stream.AsSpan((firstRow + c) * d, d));
     }
 
     private void RequireAppendable(ReadOnlySpan<int> tokenIds, MaxwellSequenceState state, int startPos)
     {
         if (state.Faulted) throw new InvalidOperationException("An earlier forward on this state failed partway through; call Reset() before reusing it.");
         if (tokenIds.Length < 1) throw new ArgumentException("A forward needs at least one token.", nameof(tokenIds));
+        if (state.Capacity > _options.MaxSequenceTokens)
+            throw new InvalidOperationException($"The sequence state holds {state.Capacity} tokens; the model was loaded for {_options.MaxSequenceTokens}.");
         if (startPos + tokenIds.Length > state.Capacity)
             throw new InvalidOperationException($"The sequence state holds {state.Capacity} tokens; {startPos + tokenIds.Length} were asked for.");
         foreach (int id in tokenIds)

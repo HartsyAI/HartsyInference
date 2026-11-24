@@ -12,7 +12,7 @@ public sealed class MaxwellSequenceState
 
     /// <param name="config">The model's config.</param>
     /// <param name="capacity">Longest sequence this state will hold.</param>
-    public MaxwellSequenceState(MaxwellConfig config, int capacity)
+    internal MaxwellSequenceState(MaxwellConfig config, int capacity)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
@@ -56,17 +56,18 @@ public sealed class MaxwellSequenceState
     /// <summary>Makes room for <paramref name="tokens"/> entries in every cache of <paramref name="layer"/> and returns them.</summary>
     internal (float[] Keys, float[] Values, float[] IndexKeys) Reserve(int layer, int tokens)
     {
-        _keys[layer] = Grow(_keys[layer], tokens, _kvStride);
-        _values[layer] = Grow(_values[layer], tokens, _kvStride);
-        _indexKeys[layer] = Grow(_indexKeys[layer], tokens, _indexStride);
+        _keys[layer] = Grow(_keys[layer], tokens, _kvStride, Capacity);
+        _values[layer] = Grow(_values[layer], tokens, _kvStride, Capacity);
+        _indexKeys[layer] = Grow(_indexKeys[layer], tokens, _indexStride, Capacity);
         return (_keys[layer], _values[layer], _indexKeys[layer]);
     }
 
-    private static float[] Grow(float[] cache, int tokens, int stride)
+    // Doubles, but never past the capacity the state was made for: the caches are sized for the longest sequence at most once.
+    private static float[] Grow(float[] cache, int tokens, int stride, int capacity)
     {
         long needed = (long)tokens * stride;
         if (cache.Length >= needed) return cache;
-        long next = Math.Max(needed, Math.Min(cache.Length * 2L, (long)int.MaxValue / 2));
+        long next = Math.Max(needed, Math.Min(cache.Length * 2L, (long)capacity * stride));
         Array.Resize(ref cache, checked((int)next));
         return cache;
     }
