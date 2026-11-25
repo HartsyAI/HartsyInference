@@ -19,6 +19,9 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
 {
     private const double RelativeTolerance = 1e-4;
 
+    /// <summary>For CUDA's default F32 GEMMs, which run in TF32. Measured on a 4090: Duo 1.1e-3, LongCat and HunyuanVideo-1.5 about 4.5e-4.</summary>
+    private const double Tf32RelativeTolerance = 5e-3;
+
     [CudaDeviceFact]
     public void Cuda_LongCat_MatchesCpu() => Compare("longcat", GpuDevices.OpenCuda, LongCat);
 
@@ -37,14 +40,23 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
     [VulkanDeviceFact]
     public void Vulkan_Duo_MatchesCpu() => Compare("duo", GpuDevices.OpenVulkan, Duo);
 
-    private void Compare(string name, Func<IBackend> open, Func<IBackend, float[]> run)
+    /// <summary>The path a generation takes: nothing asks for exact GEMMs. Only the tolerance differs from the cases above.</summary>
+    [CudaDeviceFact]
+    public void Cuda_WithDefaultGemms_StaysWithinTheTf32Tolerance()
+    {
+        Compare("longcat tf32", GpuDevices.OpenCuda, LongCat, exact: false);
+        Compare("hunyuanvideo15 tf32", GpuDevices.OpenCuda, HunyuanVideo15, exact: false);
+        Compare("duo tf32", GpuDevices.OpenCuda, Duo, exact: false);
+    }
+
+    private void Compare(string name, Func<IBackend> open, Func<IBackend, float[]> run, bool exact = true)
     {
         float[] expected;
         using (CpuBackend cpu = new())
             expected = run(cpu);
         using IBackend device = open();
-        // CUDA runs F32 GEMMs in TF32 by default, up to about 1e-3 off; these compare the models, not that choice.
-        using ExactGemmScope exact = new(device);
+        // Off, CUDA runs F32 GEMMs in TF32; Vulkan ignores the switch.
+        device.HighPrecisionGemm = exact;
         device.ResetD2hSyncCount();
         float[] actual = run(device);
         output.WriteLine($"D2H_SYNCS {name}: {device.GetD2hSyncCount()} (the read of the result included)");
@@ -59,7 +71,8 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
         Assert.True(power > 0, $"{name}: the CPU output is all zero, so the comparison would be empty.");
         double relative = Math.Sqrt(error / power);
         output.WriteLine($"{name}: relative RMS error {relative:E3}");
-        Assert.True(relative <= RelativeTolerance, $"{name}: relative RMS error {relative:E3} exceeds {RelativeTolerance:E0}.");
+        double tolerance = exact ? RelativeTolerance : Tf32RelativeTolerance;
+        Assert.True(relative <= tolerance, $"{name}: relative RMS error {relative:E3} exceeds {tolerance:E0}.");
     }
 
     private static float[] LongCat(IBackend backend)
