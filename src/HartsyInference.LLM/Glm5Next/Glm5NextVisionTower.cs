@@ -286,7 +286,7 @@ public sealed class Glm5NextVisionTower : IDisposable
     private static float[] Host(IErnie5WeightSource source, string name, long elements)
     {
         Tensor raw = Read(source, name);
-        Tensor f32 = TensorCasts.EnsureF32(raw);
+        Tensor f32 = ProjectionOps.EnsureF32(raw);
         try
         {
             if (f32.ElementCount != elements) throw new InvalidDataException($"'{name}' holds {f32.ElementCount} values; the config implies {elements}.");
