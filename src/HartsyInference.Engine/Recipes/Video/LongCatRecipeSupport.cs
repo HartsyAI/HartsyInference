@@ -53,15 +53,22 @@ internal static class LongCatRecipeSupport
     /// too late.</summary>
     internal const long SafetyBytes = GiB;
 
+    /// <summary>Rows per projection and FFN tile. It must match the tile heights in <c>LongCatBlock</c> (the FFN and the self-attention QKV), which
+    /// bound those intermediates to one tile rather than the whole clip.</summary>
+    internal const int ActivationTileRows = 4096;
+
     /// <summary>The device headroom the streaming plan reserves before it sizes the resident prefix: the fixed context, pool and safety terms, plus
-    /// the step's activations. Per token, one block holds about 17 × hidden and 3 × FFN F32 elements (the attention and norm copies, the residual, and the
-    /// SwiGLU intermediates). The first 4090 runs showed the earlier estimates short: at 37,440 tokens a [37,440, 11,008] F32 FFN intermediate (1.6 GB)
-    /// was refused with 1.1 GB free.</summary>
+    /// the step's activations. Activations split by what the tiling bounds: the per-token block copies that stay whole (about 14 × hidden F32 elements
+    /// per token: the residual, norm, joined Q, K and V, attention output) scale with the tokens, and one tile's fused QKV and SwiGLU intermediates
+    /// (3 × hidden + 3 × FFN per row) scale with the tile. The first 4090 runs measured the untiled estimate; the split is derived from it, not
+    /// re-measured, and needs a GPU re-check against a tiled run.</summary>
     internal static long ActivationHeadroomBytes(long tokens, int hidden, int ffnHidden)
     {
         const long bytesPerElement = 4;
-        long perToken = (17L * hidden + 3L * ffnHidden) * bytesPerElement;
-        return ContextBytes + FixedPoolBytes + SafetyBytes + tokens * perToken;
+        long wholePerToken = 14L * hidden * bytesPerElement;
+        long tileRows = Math.Min(tokens, ActivationTileRows);
+        long tileBytes = tileRows * (3L * hidden + 3L * ffnHidden) * bytesPerElement;
+        return ContextBytes + FixedPoolBytes + SafetyBytes + tokens * wholePerToken + tileBytes;
     }
 
     /// <summary>The attention tokens one denoise step sees at a latent grid: latent frames × (latent height / 2) × (latent width / 2), the DiT's 2×2 patch.</summary>

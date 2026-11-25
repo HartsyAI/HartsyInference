@@ -121,19 +121,28 @@ public sealed class LongCatRecipeTests
         long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(tokens, hidden: 4096, ffnHidden: 11008);
 
         Assert.Equal(37_440, tokens);
+        // The whole-token term (14 × hidden per token) and one 4096-row tile of the QKV and FFN intermediates (3 × hidden + 3 × FFN per row).
         Assert.Equal(LongCatRecipeSupport.ContextBytes + LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes
-            + 37_440L * (17L * 4096 + 3L * 11008) * 4, headroom);
-        Assert.InRange(headroom, 22L << 30, 23L << 30);
+            + 37_440L * 14 * 4096 * 4 + 4096L * (3 * 4096 + 3 * 11008) * 4, headroom);
+        Assert.InRange(headroom, 16L << 30, 18L << 30);
+    }
+
+    [Fact]
+    public void TheTiledIntermediatesStopGrowingPastOneTile()
+    {
+        // Past one tile, adding tokens adds only the whole-token term: the FFN and QKV intermediates are bounded by the tile.
+        long at50k = LongCatRecipeSupport.ActivationHeadroomBytes(50_000, hidden: 4096, ffnHidden: 11008);
+        long at100k = LongCatRecipeSupport.ActivationHeadroomBytes(100_000, hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(50_000L * 14 * 4096 * 4, at100k - at50k);
     }
 
     [Theory]
     // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens.
     // The 22.8 GB card: 22,849 MiB free, the shared weights (1 GiB) preloaded before the free-memory read.
-    [InlineData(13, 46, 80, 22_849, 27)]
+    [InlineData(13, 46, 80, 22_849, 31)]
     // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens.
-    [InlineData(24, 60, 104, 22_849, 0)]
-    // The 4090 small-config Auto run: 11,960 tokens, headroom 13,182 MB, prefix 11 of 48: about 16.8 GB free once the shared weights are in.
-    [InlineData(13, 46, 80, 17_800, 11)]
+    [InlineData(24, 60, 104, 22_849, 14)]
     public void TheResidentPrefixMatchesTheCalibrationForTheFreeMemoryAtPlanTime(int latentFrames, int latentHeight, int latentWidth,
         int freeMib, int expectedPrefix)
     {
