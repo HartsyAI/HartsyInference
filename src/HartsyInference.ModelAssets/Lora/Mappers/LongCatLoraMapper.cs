@@ -161,7 +161,7 @@ public static class LongCatLoraMapper
     }
 
     /// <summary>Negates a mapper-owned F32 tensor in place.</summary>
-    private static unsafe void Negate(Tensor owned)
+    private static void Negate(Tensor owned)
     {
         Span<float> values = owned.AsSpan<float>();
         for (int i = 0; i < values.Length; i++)

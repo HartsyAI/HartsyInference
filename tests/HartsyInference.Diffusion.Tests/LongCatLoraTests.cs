@@ -230,7 +230,19 @@ public sealed class LongCatLoraTests : IDisposable
         using (mix.ForStep(2))
         {
             Assert.True(mix.Second.Enabled);
+            Assert.Throws<InvalidOperationException>(() => mix.ForStep(3));
         }
+    }
+
+    [Fact]
+    public void ASecondScopeOfTheSameLoraIsRefused()
+    {
+        LongCatLoraMix mix = new(2);
+        using (mix.ForStep(0))
+        {
+            Assert.Throws<InvalidOperationException>(() => mix.ForStep(1));
+        }
+        Assert.False(mix.First.Enabled);
     }
 
     [Fact]
@@ -262,7 +274,8 @@ public sealed class LongCatLoraTests : IDisposable
         };
         SafeTensorsWriter.Save(PathOf("zeropad.safetensors"), tensors);
 
-        Assert.ThrowsAny<Exception>(() => LoraFile.Load(PathOf("zeropad.safetensors")));
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => LoraFile.Load(PathOf("zeropad.safetensors")));
+        Assert.Contains("blocks.01", error.Message);
         foreach (Tensor t in tensors.Values)
             t.Dispose();
     }
