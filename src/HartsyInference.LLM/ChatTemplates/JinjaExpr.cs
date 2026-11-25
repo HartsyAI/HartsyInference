@@ -351,6 +351,12 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "safe": return v;
             case "lower": return Values.ToStr(v).ToLowerInvariant();
             case "upper": return Values.ToStr(v).ToUpperInvariant();
+            case "capitalize":
+            {
+                // Python str.capitalize: first character upper, the rest lower.
+                string cap = Values.ToStr(v);
+                return cap.Length == 0 ? cap : char.ToUpperInvariant(cap[0]) + cap[1..].ToLowerInvariant();
+            }
             // length/count: char count for strings, element count for sequences/dicts (Jinja semantics).
             case "length": case "count":
                 return v is string sLen ? (long)sLen.Length : (long)Values.AsList(v).Count;
@@ -633,8 +639,9 @@ internal static class ExprParser
         {
             if (t.TrySymbol("."))
             {
-                string name = t.ReadIdent();
-                e = new MemberExpr(e, name);
+                // Jinja also reads `list.0` as the item at that index.
+                if (t.TryNumber(out long item)) e = new IndexExpr(e, new LiteralExpr(item));
+                else e = new MemberExpr(e, t.ReadIdent());
             }
             else if (t.TrySymbol("["))
             {

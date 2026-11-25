@@ -30,7 +30,7 @@ public static class Glm5NextHfConfig
         if (!Bool(t, "index_kpool_compress")) throw new InvalidDataException("The indexer runs on compressed key pools: index_kpool_compress must be true.");
         if (Int(t, "n_group") != 1 || Int(t, "topk_group") != 1) throw new InvalidDataException("Grouped expert routing is not used by this model: n_group and topk_group must be 1.");
         int topK = Int(t, "index_topk"), pool = Int(t, "index_kpool");
-        if (pool < 1 || topK % pool != 0) throw new InvalidDataException($"index_topk ({topK}) must be a positive multiple of index_kpool ({pool}).");
+        if (topK < 1 || pool < 1 || topK % pool != 0) throw new InvalidDataException($"index_topk ({topK}) must be a positive multiple of index_kpool ({pool}).");
         int qkNope = Int(t, "qk_nope_head_dim");
         if (Int(t, "qk_head_dim") != qkNope) throw new InvalidDataException("qk_head_dim must equal qk_nope_head_dim for a NoPE layer.");
 

@@ -39,10 +39,12 @@ public static class HfChatAssets
 
     /// <summary>Loads the directory's tokenizer with <paramref name="bosToken"/> and <paramref name="eosToken"/> as its begin and end ids, and its chat template.</summary>
     /// <param name="stopIds">Ids that end generation, in addition to the end token.</param>
-    public static (ILlmTokenizer Tokenizer, IChatTemplate Template) Load(string directory, IReadOnlyList<int> stopIds, string? bosToken, string? eosToken)
+    /// <param name="hfWhitespace">Renders the template with transformers' <c>trim_blocks</c> and <c>lstrip_blocks</c> (see <see cref="JinjaChatTemplate"/>).</param>
+    public static (ILlmTokenizer Tokenizer, IChatTemplate Template) Load(string directory, IReadOnlyList<int> stopIds, string? bosToken, string? eosToken,
+        bool hfWhitespace = false)
     {
         ILlmTokenizer tokenizer = LoadTokenizer(directory, stopIds, bosToken, eosToken);
-        return (tokenizer, new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja"))));
+        return (tokenizer, new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja")), hfWhitespace: hfWhitespace));
     }
 
     /// <summary>Loads the directory's tokenizer with <paramref name="bosToken"/> and <paramref name="eosToken"/> as its begin and end ids.</summary>
