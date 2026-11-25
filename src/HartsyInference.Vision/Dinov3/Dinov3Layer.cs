@@ -7,7 +7,7 @@ namespace HartsyInference.Vision.Dinov3;
 /// <summary>One DINOv3 transformer block: pre-norm RoPE self-attention and an MLP (plain GELU, or SwiGLU when the checkpoint
 /// carries <c>mlp.gate_proj</c>, as the ViT-H+ does), each scaled by a learned per-channel LayerScale before its residual add.
 /// The key projection has no bias (the reference masks the k-bias).</summary>
-internal sealed unsafe class Dinov3Layer
+internal sealed class Dinov3Layer
 {
     private readonly int _hidden, _numHeads, _headDim, _inter;
     private readonly float _eps;
@@ -90,11 +90,11 @@ internal sealed unsafe class Dinov3Layer
         Tensor n1 = new(shape, DType.F32); backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
         Tensor attn = _attn!.Forward(backend, n1, n1, new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation });
         n1.Dispose();
-        Tensor attnScaled = LayerScale(backend, attn, _ls1!, batch, seq);
+        Tensor attnScaled = LayerScale(backend, attn, _ls1!);
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attnScaled); attnScaled.Dispose();
 
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
-        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2!, batch, seq); n2.Dispose();
+        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2!); n2.Dispose();
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
         return r2;
     }
@@ -122,10 +122,10 @@ internal sealed unsafe class Dinov3Layer
         int batch = (int)x.Shape[0], seq = (int)x.Shape[1];
         TensorShape shape = new(batch, seq, _hidden);
         Tensor attn = _attn!.ProjectOutput(backend, attended);
-        Tensor attnScaled = LayerScale(backend, attn, _ls1!, batch, seq);
+        Tensor attnScaled = LayerScale(backend, attn, _ls1!);
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attnScaled); attnScaled.Dispose();
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
-        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2!, batch, seq); n2.Dispose();
+        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2!); n2.Dispose();
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
         return r2;
     }
@@ -133,20 +133,14 @@ internal sealed unsafe class Dinov3Layer
     /// <summary>The attention layer of this block, for callers that attend over their own key/value rows.</summary>
     public AttentionLayer Attention => _attn ?? throw new InvalidOperationException("Load the block's weights first.");
 
-    // t[b,s,c] *= gamma[c]. The affine kernel broadcasts gamma over rows only for one batch item.
-    private Tensor LayerScale(IBackend backend, Tensor t, Tensor gamma, int batch, int seq)
+    // t[b,s,c] *= gamma[c], on the backend for any batch: AffineBroadcastLastDim takes a [D] scale and applies it to every row of [B, S, D],
+    // so a batch of frames needs no host loop (which would pull a resident tensor back to the host and push it up again).
+    private static Tensor LayerScale(IBackend backend, Tensor t, Tensor gamma)
     {
-        if (batch == 1)
-        {
-            Tensor o = new(t.Shape, DType.F32);
-            backend.AffineBroadcastLastDim(o, t, gamma, null);
-            t.Dispose();
-            return o;
-        }
-        float* tp = (float*)t.DataPointer; float* g = (float*)gamma.DataPointer;
-        for (long i = 0; i < (long)batch * seq; i++)
-            for (int c = 0; c < _hidden; c++) tp[i * _hidden + c] *= g[c];
-        return t;
+        Tensor o = new(t.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(o, t, gamma, null);
+        t.Dispose();
+        return o;
     }
 
     // Plain MLP with the exact-erf GELU that nn.GELU() uses in the reference, or SwiGLU (silu(gate) * up) for a gated checkpoint.
