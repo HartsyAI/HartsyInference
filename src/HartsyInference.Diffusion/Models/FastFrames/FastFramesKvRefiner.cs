@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Guidance;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.FastFrames;
@@ -232,7 +234,7 @@ public sealed class FastFramesKvRefiner : IDisposable
 
         using Tensor dK = FastFramesOps.Linear(backend, h, head.DK, head.DKB);
         using Tensor kSum = FastFramesOps.Add(backend, noisyK, dK);
-        Tensor refinedK = RenormPerHead(kSum, noisyK);
+        Tensor refinedK = RenormPerHead(backend, kSum, noisyK);
 
         using Tensor dV = FastFramesOps.Linear(backend, h, head.DV, head.DVB);
         using Tensor vSum = FastFramesOps.Add(backend, noisyV, dV);
@@ -242,31 +244,51 @@ public sealed class FastFramesKvRefiner : IDisposable
     }
 
     /// <summary>Scales each head's <c>HeadDim</c> slice of <paramref name="x"/> to the norm of the same slice of
-    /// <paramref name="reference"/>: <c>x · (‖ref‖ / (‖x‖ + 1e-6))</c>. No backend operation covers this exact form, so it runs on
-    /// the host.</summary>
-    private Tensor RenormPerHead(Tensor x, Tensor reference)
+    /// <paramref name="reference"/>: <c>x · (‖ref‖ / (‖x‖ + 1e-6))</c>, on the device. The guided Euler step's per-row norm does this
+    /// with guidance 0: the guided prediction is then the unguided one (<c>x</c>), rescaled per row against <c>cond</c> (the
+    /// reference). Each head is one row, so both inputs are first copied into <c>[tokens·heads, HeadDim]</c> with strided copies of
+    /// equal element count (no reshape view, which an op cannot read on a device), and the result is copied back.</summary>
+    private Tensor RenormPerHead(IBackend backend, Tensor x, Tensor reference)
     {
         int tokens = (int)x.Shape[0], heads = _config.Heads, headDim = _config.HeadDim;
-        Tensor output = new(x.Shape, DType.F32);
-        ReadOnlySpan<float> xs = x.AsReadOnlySpan<float>(), rs = reference.AsReadOnlySpan<float>();
-        Span<float> os = output.AsSpan<float>();
-        for (int t = 0; t < tokens; t++)
+        Tensor xRows = ToHeadRows(backend, x, tokens, heads, headDim);
+        Tensor referenceRows = ToHeadRows(backend, reference, tokens, heads, headDim);
+        Tensor zeros = new(xRows.Shape, DType.F32);
+        try
         {
-            for (int h = 0; h < heads; h++)
-            {
-                int offset = (t * heads + h) * headDim;
-                double xNorm = 0, rNorm = 0;
-                for (int d = 0; d < headDim; d++)
-                {
-                    xNorm += (double)xs[offset + d] * xs[offset + d];
-                    rNorm += (double)rs[offset + d] * rs[offset + d];
-                }
-                float scale = (float)(Math.Sqrt(rNorm) / (Math.Sqrt(xNorm) + RenormEps));
-                for (int d = 0; d < headDim; d++)
-                    os[offset + d] = xs[offset + d] * scale;
-            }
+            // z is the output (zero-filled, and not sharing storage with either prediction).
+            backend.Fill(zeros, 0f);
+            backend.GuidedEulerStep(zeros, referenceRows, xRows, GuidedEulerSpec.RowNorm(guidance: 0f, delta: 1f, eps: RenormEps));
         }
+        finally
+        {
+            xRows.Dispose();
+            referenceRows.Dispose();
+        }
+        Tensor output = new(x.Shape, DType.F32);
+        FromHeadRows(backend, output, zeros, tokens, heads, headDim);
+        zeros.Dispose();
         return output;
+    }
+
+    /// <summary>The <c>[tokens, heads·headDim]</c> columns as <c>[tokens·heads, headDim]</c> rows, same element order.</summary>
+    private static Tensor ToHeadRows(IBackend backend, Tensor columns, int tokens, int heads, int headDim)
+    {
+        Tensor rows = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        ReadOnlySpan<long> dims = [tokens, heads, headDim];
+        ReadOnlySpan<long> packedStrides = [(long)heads * headDim, headDim, 1];
+        ReadOnlySpan<long> columnStrides = [(long)heads * headDim, headDim, 1];
+        backend.CopyStrided(rows, columns, new StridedCopySpec(new StridedView(dims, packedStrides), new StridedView(dims, columnStrides)));
+        return rows;
+    }
+
+    /// <summary>The inverse of <see cref="ToHeadRows"/>: <c>[tokens·heads, headDim]</c> rows back to the <c>[tokens, heads·headDim]</c> columns.</summary>
+    private static void FromHeadRows(IBackend backend, Tensor columns, Tensor rows, int tokens, int heads, int headDim)
+    {
+        ReadOnlySpan<long> dims = [tokens, heads, headDim];
+        ReadOnlySpan<long> packedStrides = [(long)heads * headDim, headDim, 1];
+        ReadOnlySpan<long> columnStrides = [(long)heads * headDim, headDim, 1];
+        backend.CopyStrided(columns, rows, new StridedCopySpec(new StridedView(dims, columnStrides), new StridedView(dims, packedStrides)));
     }
 
     private Tensor RunStemBlock(IBackend backend, StemBlock block, Tensor x, Tensor embedding)
