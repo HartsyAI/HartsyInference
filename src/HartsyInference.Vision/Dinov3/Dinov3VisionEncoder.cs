@@ -228,11 +228,10 @@ public sealed unsafe class Dinov3VisionEncoder
         Dinov3Layer layer = _layers[block];
         // The frame, its prefix and patch rows, the ring and the result are only ever read and written by backend ops, so on a GPU backend
         // the block moves no tokens through the host.
-        long prefixWidth = (long)prefix * hidden, patchWidth = (long)patches * hidden;
         using Tensor prefixRows = new(new TensorShape(1, prefix, hidden), DType.F32);
         using Tensor patchRows = new(new TensorShape(1, patches, hidden), DType.F32);
-        backend.CopyStrided(prefixRows, frame, StridedCopySpec.Gather(Flat(0, prefixWidth)));
-        backend.CopyStrided(patchRows, frame, StridedCopySpec.Gather(Flat(prefixWidth, patchWidth)));
+        StridedCopies.SliceAxis(backend, prefixRows, frame, 1, 0, prefix);
+        StridedCopies.SliceAxis(backend, patchRows, frame, 1, prefix, patches);
 
         int live;
         Tensor? qMh = null, keys = null, values = null;
@@ -270,14 +269,11 @@ public sealed unsafe class Dinov3VisionEncoder
         Tensor flat = attention.MergeHeads(backend, attended, new TensorShape(1, patches, hidden));
         using Tensor patchOut = layer.FinishAttention(backend, patchRows, flat);
 
+        // One op writes the whole output, so a GPU backend allocates it on the device instead of uploading a host buffer first.
         Tensor next = new(frame.Shape, DType.F32);
-        backend.CopyStrided(next, prefixRows, StridedCopySpec.Scatter(Flat(0, prefixWidth)));
-        backend.CopyStrided(next, patchOut, StridedCopySpec.Scatter(Flat(prefixWidth, patchWidth)));
+        backend.Concat(next, [prefixRows, patchOut], 1);
         return next;
     }
-
-    // `count` contiguous elements of a tensor starting at element `offset`, as a view.
-    private static StridedView Flat(long offset, long count) => new([count], [1], offset);
 
     // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero
     // frames the patch rows alone, which a cached frame's patches take.

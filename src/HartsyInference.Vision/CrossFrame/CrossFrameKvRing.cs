@@ -51,7 +51,7 @@ public sealed class CrossFrameKvRing : IDisposable
             throw new ArgumentException($"The prefix must be F32 [1, P, C]; got {prefix.DType} {prefix.Shape}.", nameof(prefix));
         if (!_blocks.TryGetValue(block, out Entry? entry))
         {
-            entry = new Entry { Prefixes = new Tensor(new TensorShape(Window, prefix.Shape[1], prefix.Shape[2]), DType.F32) };
+            entry = new Entry { Prefixes = Zeroed(backend, new TensorShape(Window, prefix.Shape[1], prefix.Shape[2])) };
             _blocks[block] = entry;
         }
         else if (entry.Prefixes.Shape[1] != prefix.Shape[1] || entry.Prefixes.Shape[2] != prefix.Shape[2])
@@ -60,17 +60,16 @@ public sealed class CrossFrameKvRing : IDisposable
                 $"Block {block} caches prefixes of [{entry.Prefixes.Shape[1]}, {entry.Prefixes.Shape[2]}]; got {prefix.Shape}.", nameof(prefix));
         }
 
-        int width = (int)prefix.ElementCount;
-        backend.CopyStrided(entry.Prefixes, prefix, new StridedCopySpec(Flat(entry.Seen % Window * (long)width, width), Flat(0, width)));
+        StridedCopies.ScatterAxis(backend, entry.Prefixes, prefix, 0, entry.Seen % Window);
         int visible = Math.Min(entry.Seen + 1, Window);
 
         // The mean of the visible slots, summed in slot order: the first slot, then each later one added in place.
         Tensor sum = new(prefix.Shape, DType.F32);
         try
         {
-            backend.CopyStrided(sum, entry.Prefixes, StridedCopySpec.Gather(Flat(0, width)));
+            StridedCopies.SliceAxis(backend, sum, entry.Prefixes, 0, 0, 1);
             for (int s = 1; s < visible; s++)
-                backend.AccumulateStrided(sum, entry.Prefixes, new StridedCopySpec(Flat(0, width), Flat(s * (long)width, width)));
+                backend.AccumulateStrided(sum, entry.Prefixes, new StridedCopySpec(StridedView.Of(sum.Shape), StridedView.Of(entry.Prefixes.Shape).Slice(0, s, 1)));
             if (visible == 1) return sum;
             Tensor pooled = new(prefix.Shape, DType.F32);
             backend.Scale(pooled, sum, 1f / visible);
@@ -108,8 +107,8 @@ public sealed class CrossFrameKvRing : IDisposable
         if (entry.Keys is null)
         {
             TensorShape shape = new(1, heads, prefix + (long)Window * patches, dim);
-            entry.Keys = new Tensor(shape, DType.F32);
-            entry.Values = new Tensor(shape, DType.F32);
+            entry.Keys = Zeroed(backend, shape);
+            entry.Values = Zeroed(backend, shape);
             entry.Patches = patches;
             entry.Prefix = prefix;
         }
@@ -184,6 +183,8 @@ public sealed class CrossFrameKvRing : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(cache);
+        if (cache.DType != DType.F32 || cache.Shape.Rank != 4 || cache.Shape[0] != 1)
+            throw new ArgumentException($"The cache must be F32 head-major [1, heads, capacity, D]; got {cache.DType} {cache.Shape}.", nameof(cache));
         long heads = cache.Shape[1], capacity = cache.Shape[2], dim = cache.Shape[3];
         if (rows < 1 || rows > capacity) throw new ArgumentOutOfRangeException(nameof(rows), rows, $"A cache of {capacity} rows has no {rows} live rows.");
         Tensor live = new(new TensorShape(1, heads, rows, dim), DType.F32);
@@ -191,7 +192,24 @@ public sealed class CrossFrameKvRing : IDisposable
         return live;
     }
 
-    private static StridedView Flat(long offset, long count) => new([count], [1], offset);
+    // A cache allocated and zeroed on the device by one broadcast copy, so the first in-place scatter into it finds a device buffer instead of uploading a
+    // host buffer the size of the whole cache. Rows no frame has written are never read.
+    private static Tensor Zeroed(IBackend backend, TensorShape shape)
+    {
+        Tensor cache = new(shape, DType.F32);
+        try
+        {
+            using Tensor zero = new(new TensorShape(1), DType.F32);
+            zero.AsSpan<float>().Clear();
+            StridedCopies.FillFrom(backend, cache, zero);
+            return cache;
+        }
+        catch
+        {
+            cache.Dispose();
+            throw;
+        }
+    }
 
     private sealed class Entry
     {
