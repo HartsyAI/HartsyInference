@@ -71,7 +71,7 @@ public sealed class Fibo2AttentionHintTests
 
         Assert.Equal(new[] { "sage_fp8" }, names);
         Assert.Contains("sage_fp8", Fibo2AttentionHints.Describe("sage_fp8"));
-        Assert.Contains("does not implement", Fibo2AttentionHints.Describe("sage_fp8"));
+        Assert.Contains("float attention by default", Fibo2AttentionHints.Describe("sage_fp8"));
     }
 
     [Fact]
@@ -80,7 +80,9 @@ public sealed class Fibo2AttentionHintTests
         string text = Fibo2AttentionHints.Describe("comfy_kitchen_int8");
 
         Assert.Contains("comfy_kitchen_int8", text);
-        Assert.Contains("float attention", text);
+        Assert.Contains("float attention by default", text);
+        Assert.Contains("opt-in", text);
+        Assert.Contains("numerically unverified", text);
     }
 
     [Theory]

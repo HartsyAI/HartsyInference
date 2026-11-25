@@ -5,7 +5,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.453
 
-- Fixed the Fibo 2.0 int8 loader rejecting ComfyUI's `layers.N.attention.comfy_attention.config` hints (U8 `{"attention": "comfy_kitchen_int8"}`): they are now checked, logged as float attention, and dropped, and an unknown backend is refused.
+- Fixed the Fibo 2.0 int8 loader rejecting ComfyUI's `layers.N.attention.comfy_attention.config` hints (U8 `{"attention": "comfy_kitchen_int8"}`): they are checked, logged (the engine runs float attention by default; INT8 attention is an opt-in knob, numerically unverified against Comfy), and dropped. A malformed hint is refused; any backend name is accepted with a warning. A file at a pinned side-model path whose SHA-256 differs is refused by `ModelFileLocator.RequireOrEnsure`, which also serves Flux3, Krea2, MossImage and the reference adapter.
 
 ## alpha.452
 

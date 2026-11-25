@@ -3,9 +3,9 @@ using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>The ComfyUI attention hints in the Fibo 2.0 Comfy-Org int8 builds (see <see cref="ComfyAttentionHint"/>). The engine has
-/// no int8 attention and runs float attention for every backend, so a hint is never honoured: a malformed hint is refused, and a
-/// hint naming a backend is accepted with a warning that outputs differ from ComfyUI by that backend's own quantization.</summary>
+/// <summary>The ComfyUI attention hints in the Fibo 2.0 Comfy-Org int8 builds (see <see cref="ComfyAttentionHint"/>). The engine runs
+/// float attention by default; INT8 attention is an opt-in knob (<c>numerics.int8AttnV2</c>, CUDA), numerically unverified against
+/// ComfyUI. A malformed hint is refused; a hint naming a backend is accepted with a warning (see <see cref="Describe"/>).</summary>
 internal static class Fibo2AttentionHints
 {
     /// <summary>ComfyUI's int8 attention backend, the one the Fibo 2.0 and RMBG 3.0 int8 builds name.</summary>
@@ -29,15 +29,15 @@ internal static class Fibo2AttentionHints
         return names;
     }
 
-    /// <summary>The warning logged for a backend the checkpoint names. The engine runs float attention for all of them.</summary>
+    /// <summary>The warning logged for a backend the checkpoint names. The engine runs float attention by default for all of them.</summary>
     public static string Describe(string backend)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(backend);
         return backend == ComfyKitchenInt8
-            ? $"[Fibo2Recipe] The checkpoint names {ComfyKitchenInt8} attention (ComfyUI's int8 attention); the engine runs float "
-                + "attention, so outputs differ from ComfyUI by that quantization error."
-            : $"[Fibo2Recipe] The checkpoint names attention backend '{backend}', which the engine does not implement; it runs float "
-                + "attention, so outputs may differ from ComfyUI.";
+            ? $"[Fibo2Recipe] The checkpoint names {ComfyKitchenInt8} attention. The engine runs float attention by default; INT8 "
+                + "attention is an opt-in knob (numerics.int8AttnV2), numerically unverified against Comfy."
+            : $"[Fibo2Recipe] The checkpoint names attention backend '{backend}'. The engine runs float attention by default; outputs "
+                + "may differ from ComfyUI.";
     }
 
     /// <summary>Decodes one hint blob to its backend name.</summary>
