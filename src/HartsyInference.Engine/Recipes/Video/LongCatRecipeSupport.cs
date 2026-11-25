@@ -38,14 +38,14 @@ internal static class LongCatRecipeSupport
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
 
-    /// <summary>The device headroom the streaming plan reserves for one denoise step's activations, sized from the token count: each token of a
-    /// block holds the q, k and v projections and their head-major copies (4 × hidden) plus the SwiGLU intermediates (2 × FFN), in F32.
-    /// The result carries a 2× margin, because the first 4090 run used more than the estimate (a 585 MB QKV buffer was refused with 601 MB
-    /// free at 37,440 tokens while the planner had reserved only 3 GB).</summary>
+    /// <summary>The device headroom the streaming plan reserves for one denoise step's activations, sized from the token count. Per token, one
+    /// block holds in F32: q, k, v and their head-major copies, the attention output and the residual and norm copies (about 10 × hidden), and
+    /// the SwiGLU gate, up and product intermediates (3 × FFN). The result carries a 1.5× margin. The first 4090 runs showed the earlier 2 ×
+    /// (4 × hidden + 2 × FFN) estimate was short: at 37,440 tokens a [37,440, 11,008] F32 FFN intermediate (1.6 GB) was refused with 1.1 GB free.</summary>
     internal static long ActivationHeadroomBytes(long tokens, int hidden, int ffnHidden)
     {
-        const int marginFactor = 2, bytesPerElement = 4;
-        return marginFactor * tokens * (4L * hidden + 2L * ffnHidden) * bytesPerElement;
+        const long marginNumerator = 3, marginDenominator = 2, bytesPerElement = 4;
+        return tokens * (10L * hidden + 3L * ffnHidden) * bytesPerElement * marginNumerator / marginDenominator;
     }
 
     /// <summary>The attention tokens one denoise step sees at a latent grid: latent frames × (latent height / 2) × (latent width / 2), the DiT's 2×2 patch.</summary>

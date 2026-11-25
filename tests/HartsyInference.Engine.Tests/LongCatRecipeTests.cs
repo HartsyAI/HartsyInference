@@ -108,8 +108,8 @@ public sealed class LongCatRecipeTests
         long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(tokens, hidden: 4096, ffnHidden: 11008);
 
         Assert.Equal(37_440, tokens);
-        Assert.Equal(2L * 37_440 * (4L * 4096 + 2L * 11008) * 4, headroom);
-        Assert.InRange(headroom, 10L << 30, 11L << 30);
+        Assert.Equal(37_440L * (10L * 4096 + 3L * 11008) * 4 * 3 / 2, headroom);
+        Assert.InRange(headroom, 15L << 30, 16L << 30);
     }
 
     [Fact]
