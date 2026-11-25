@@ -590,7 +590,9 @@ Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_
 
 ### Open Vision Banana
 
-**Built, not yet run on real weights (2026-11-24).** `FunAILab/Open-Vision-Banana` @ `558ea8a` (paper arXiv 2611.15844, code `OpenVisionBanana/OpenVisionBanana` @ `d457d3f`): full fine-tunes of FLUX.2 [klein] Base 4B and 9B
+**Real-weight run on the RTX 3060 (2026-11-24): qualitative only.** Segmentation, depth and normals of a 1024x472 street photo (README prompts, seed 0, 28 steps, CFG 3.5, 4B zero-shot, fp32 shards narrowed to F16): segmentation 1024x464 in 1 min 48 s, 2.85 s/step, peak 11.4 GB of 12.3 GB on the card; depth 1 min 56 s; normals 1 min 53 s (unit length, mean 0.99999). Painted pixels: 98.8% within 40 of a legend colour or black. **Not done:** any metric (no labelled sample; mIoU needs an approved dataset), the 9B, the VAE posterior-mode check, the Klein 9B path.
+
+**Built (earlier).** `FunAILab/Open-Vision-Banana` @ `558ea8a` (paper arXiv 2611.15844, code `OpenVisionBanana/OpenVisionBanana` @ `d457d3f`): full fine-tunes of FLUX.2 [klein] Base 4B and 9B
 (`Flux2Transformer2DModel`, the base's config unchanged, fp32 diffusers shards) that answer a task prompt about a photo with a painted image. One model does semantic, referring and instance segmentation, relative
 inverse depth, surface normals, editing and generation; the prompt selects the task. The engine serves them as the `open-vision-banana-4b` / `-9b` variants of the `flux2` recipe (`FineTuneOf` klein-4b / klein-9b: no
 tensor tells them from their base, so the catalog id or a file/folder name carrying `ovb` selects them).
@@ -601,7 +603,7 @@ tensor tells them from their base, so the catalog id or a file/folder name carry
   Instance segmentation (GrabCut) is not ported.
 - **Catalog:** zero-shot averaged checkpoints `final_models/4B/zeroshot/checkpoint-87500-95000-w25` (15.5 GB) and `final_models/9B/zeroshot/checkpoint-coco86750-w25` (36.3 GB), shard sha256 pinned from the HF LFS oids.
 - **Licence:** weights FLUX Non-Commercial, outputs covered; code Apache-2.0 (the release's `LICENSE`).
-- **Evidence so far:** [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md#image-diffusion--see-model_status_imagemd-for-build-detail). Not done: any real-weight run, layer-diff against `Flux2KleinPipeline`, the mIoU / depth metric, GPU speed and VRAM, the VAE
+- **Evidence so far:** real-weight qualitative run above; [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md#image-diffusion--see-model_status_imagemd-for-build-detail). Not done: any real-weight run, layer-diff against `Flux2KleinPipeline`, the mIoU / depth metric, GPU speed and VRAM, the VAE
   posterior-mode check, Klein 9B (never run), the `VisionService` / CLI / API vision routes (waits on Depth Pro 2 and RMBG-3).
 
 ### Iris-Z
