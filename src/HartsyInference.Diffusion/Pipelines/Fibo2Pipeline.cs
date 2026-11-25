@@ -167,9 +167,9 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     /// VAE decoder.</summary>
     private Tensor DecodeLatent(Tensor latent)
     {
-        using Tensor patched = Flux2LatentOps.Patchify(latent, _config.InChannels * _config.PatchSize * _config.PatchSize, _config.PatchSize);
-        using Tensor unnormalized = Flux2LatentOps.BnUnNormalize(patched, _bnMean, _bnVar, _bnEps);
-        using Tensor vaeLatent = Flux2LatentOps.Unpatchify(unnormalized, _config.InChannels, _config.PatchSize);
+        using Tensor patched = Flux2LatentOps.Patchify(Backend, latent, _config.InChannels * _config.PatchSize * _config.PatchSize, _config.PatchSize);
+        using Tensor unnormalized = Flux2LatentOps.BnUnNormalize(Backend, patched, _bnMean, _bnVar, _bnEps);
+        using Tensor vaeLatent = Flux2LatentOps.Unpatchify(Backend, unnormalized, _config.InChannels, _config.PatchSize);
         return _vaeDecoder.DecodeTiled(Backend, vaeLatent);
     }
 

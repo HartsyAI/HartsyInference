@@ -205,7 +205,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
                 if (onProgress is not null)
                 {
                     using Tensor? snapshot = graph ? _transformer.SnapshotGraphLatent(Backend) : null;
-                    using Tensor preview = Flux2LatentOps.FromPackedTokens(snapshot ?? latent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    using Tensor preview = Flux2LatentOps.FromPackedTokens(Backend, snapshot ?? latent, patH, patW, _bnMean, _bnVar, _bnEps,
                         _config.VaeLatentChannels, _config.PatchSize);
                     onProgress(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
@@ -250,7 +250,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             Tensor vaeLatent;
             using (Tensor finalLatent = latent)
             {
-                vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
                     _config.VaeLatentChannels, _config.PatchSize);
             }
             Tensor image;
@@ -395,11 +395,11 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         int patH, int patW, int seed, int startStep, bool keepSource)
     {
         using Tensor noise = TakeOrCreateNoise(request, new TensorShape(1, _config.LatentChannels, patH, patW), seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(noise);
+        Tensor packedNoise = Flux2LatentOps.Pack(Backend, noise);
         if (request is not ImageToImageRequest img2img)
             return (packedNoise, null);
         using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
-        Tensor source = Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+        Tensor source = Flux2LatentOps.ToPackedTokens(Backend, vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
         Tensor noised = new(packedNoise.Shape, DType.F32);
         scheduler.AddNoise(noised, source, packedNoise, startStep);
         packedNoise.Dispose();
@@ -420,7 +420,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             return;
         }
         using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.LatentChannels, patH, patW), noiseSeed);
-        using Tensor freshPacked = Flux2LatentOps.Pack(freshNoise);
+        using Tensor freshPacked = Flux2LatentOps.Pack(Backend, freshNoise);
         using Tensor noisedSource = new(latent.Shape, DType.F32);
         FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(noisedSource, source, freshPacked, sigma);
         MaskBlendUtilities.BlendPackedInPlace(latent, noisedSource, packedMask);

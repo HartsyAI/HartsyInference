@@ -366,7 +366,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
                 if (onProgress is not null)
                 {
                     using Tensor? rgbSlice = fixedDepth is null ? SliceGrid(latent, 0, gridTokens) : null;
-                    using Tensor preview = Flux2LatentOps.FromPackedTokens(rgbSlice ?? latent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    using Tensor preview = Flux2LatentOps.FromPackedTokens(Backend, rgbSlice ?? latent, patH, patW, _bnMean, _bnVar, _bnEps,
                         _config.VaeLatentChannels, _config.PatchSize);
                     onProgress(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
@@ -461,7 +461,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         try
         {
             using Tensor vaeLatent = _vaeEncoder.Encode(Backend, image);
-            return Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+            return Flux2LatentOps.ToPackedTokens(Backend, vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
         }
         finally
         {
@@ -473,7 +473,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
 
     private Tensor DecodeTokens(Tensor tokens, int patH, int patW)
     {
-        using Tensor vaeLatent = Flux2LatentOps.FromPackedTokens(tokens, patH, patW, _bnMean, _bnVar, _bnEps,
+        using Tensor vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, tokens, patH, patW, _bnMean, _bnVar, _bnEps,
             _config.VaeLatentChannels, _config.PatchSize);
         return _vaeDecoder.DecodeTiled(Backend, vaeLatent);
     }
@@ -497,9 +497,9 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         return logDepth;
     }
 
-    private static Tensor PackedNoise(Tensor noise)
+    private Tensor PackedNoise(Tensor noise)
     {
-        using (noise) return Flux2LatentOps.Pack(noise);
+        using (noise) return Flux2LatentOps.Pack(Backend, noise);
     }
 
     private (int Width, int Height, int PatW, int PatH) Geometry(int width, int height)

@@ -105,8 +105,8 @@ public sealed unsafe partial class Fibo2Pipeline
     {
         using Tensor vaeLatent = edit.VaeEncoder.Encode(Backend, pixels);
         int patchVolume = _config.InChannels * _config.PatchSize * _config.PatchSize;
-        using Tensor patched = Flux2LatentOps.Patchify(vaeLatent, patchVolume, _config.PatchSize);
-        using Tensor normalized = Flux2LatentOps.BnNormalize(patched, _bnMean, _bnVar, _bnEps);
-        return Flux2LatentOps.Unpatchify(normalized, _config.InChannels, _config.PatchSize);
+        using Tensor patched = Flux2LatentOps.Patchify(Backend, vaeLatent, patchVolume, _config.PatchSize);
+        using Tensor normalized = Flux2LatentOps.BnNormalize(Backend, patched, _bnMean, _bnVar, _bnEps);
+        return Flux2LatentOps.Unpatchify(Backend, normalized, _config.InChannels, _config.PatchSize);
     }
 }

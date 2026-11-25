@@ -27,7 +27,7 @@ public static class Flux2ReferenceEncoder
                 if (h % downscaleFactor != 0 || w % downscaleFactor != 0)
                     throw new ArgumentException($"{family} reference images need sides that are multiples of {downscaleFactor}; got {w}x{h}.");
                 using Tensor vaeLatent = encoder.Encode(backend, image);
-                Tensor tokens = Flux2LatentOps.ToPackedTokens(vaeLatent, bnMean, bnVar, bnEps, patchSize);
+                Tensor tokens = Flux2LatentOps.ToPackedTokens(backend, vaeLatent, bnMean, bnVar, bnEps, patchSize);
                 // Host copy, so the VAE phase's activation sweep cannot take it.
                 _ = tokens.DataPointer;
                 encoded[done++] = new ReferenceLatentTokens(tokens, h / downscaleFactor, w / downscaleFactor);
