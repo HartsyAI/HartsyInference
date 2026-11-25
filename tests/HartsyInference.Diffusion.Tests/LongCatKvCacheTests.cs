@@ -80,7 +80,7 @@ public sealed class LongCatKvCacheTests : IDisposable
         }
 
         (int Queries, int Keys)[] self = [.. session.Snapshot()
-            .Where(static e => e.Kind == AttentionEvidenceKind.Execution && e.Component == nameof(LongCatKvCacheTests) && e.KeyCapacity > TextRows)
+            .Where(static e => e.Kind == AttentionEvidenceKind.Execution && e.Component == nameof(LongCatKvCacheTests) && e.KeyCapacity != TextRows)
             .Select(static e => (e.QueryTokens, e.KeyCapacity))];
         Assert.Equal(_config.Depth, self.Length);
         Assert.All(self, static a => Assert.Equal((Noisy * Hw, (Cond + Noisy) * Hw), a));
@@ -135,6 +135,30 @@ public sealed class LongCatKvCacheTests : IDisposable
         Assert.Equal(cache.Bytes, LongCatKvCache.EstimateBytes(_config, Cond, Height, Width));
         Assert.Equal(Cond * Hw, cache.Tokens);
         Assert.Equal(_config.Depth, cache.Layers);
+    }
+
+    [Fact]
+    public void EstimateBytes_RefusesWhatABuildRefuses()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => LongCatKvCache.EstimateBytes(_config, 0, Height, Width));
+        Assert.Throws<ArgumentOutOfRangeException>(() => LongCatKvCache.EstimateBytes(_config, -1, Height, Width));
+        Assert.Throws<ArgumentException>(() => LongCatKvCache.EstimateBytes(_config, Cond, Height + 1, Width));
+    }
+
+    [Fact]
+    public void ACacheOfAnotherGridOrBackend_IsRefused()
+    {
+        using Tensor cond = LongCatTestData.Latent(_config, Cond, Height, Width, 70);
+        using Tensor sameRows = LongCatTestData.Latent(_config, Noisy, Width, Height, 71);
+        using Tensor noisy = LongCatTestData.Latent(_config, Noisy, Height, Width, 72);
+        using Tensor text = LongCatTestData.Encoder(_config, TextRows, 73);
+        using LongCatKvCache cache = _transformer.BuildKvCache(_cpu, cond, _conditioning);
+        using CpuBackend other = new();
+
+        Assert.Contains("2×3 tokens", Assert.Throws<ArgumentException>(
+            () => _transformer.ForwardCached(_cpu, sameRows, text, [300f], _conditioning, cache)).Message);
+        Assert.Contains("another backend", Assert.Throws<ArgumentException>(
+            () => _transformer.ForwardCached(other, noisy, text, [300f], _conditioning, cache)).Message);
     }
 
     private static Tensor Frames(Tensor clip, int from, int count)
