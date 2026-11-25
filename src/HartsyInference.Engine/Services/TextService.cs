@@ -958,6 +958,12 @@ public sealed partial class TextService : ITextService, IDisposable
             LoadErnie5Directory(slot, deviceKey, checkpoint, path);
             return;
         }
+        if (HfTextDirectoryLoader.IsHy4Flash(checkpoint))
+        {
+            // A host reference on the CPU, as DeepSeek-V4.1 runs; the size guard in Hy4FlashTextModel.Load refuses checkpoints it cannot hold.
+            LoadHostReferenceInto(slot, checkpoint, path, ReplaceWithHostBackend(slot, deviceKey, "Hy4 Flash"), gateOrdinals: [], plan: null);
+            return;
+        }
         if (maxwell)
         {
             LoadMaxwellDirectory(slot, deviceKey, checkpoint, path);

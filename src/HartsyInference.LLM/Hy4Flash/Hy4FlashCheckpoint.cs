@@ -46,9 +46,11 @@ public sealed class Hy4FlashCheckpoint : IHy4FlashWeightSource, IDisposable
         if (!_set.Inventory.TryGetValue(name, out TensorLocation? location))
             throw new KeyNotFoundException($"The Hy4 Flash checkpoint has no tensor '{name}'.");
         if (location.DType == DType.F8E4M3) return Dequantize(name, location);
+        if (location.DType == DType.F16)
+            throw new InvalidDataException($"Tensor '{name}' is F16; the Hy4 Flash checkpoint stores BF16 and F8 only, so an F16 tensor is refused rather than converted.");
         if (IsLargeTable(name)) return _set.GetTensor(name);
         Tensor t = _set.ReadTensor(name);
-        if (t.DType != DType.BF16 && t.DType != DType.F16) return t;
+        if (t.DType != DType.BF16) return t;
         using (t) return ProjectionOps.EnsureF32(t);
     }
 
@@ -74,9 +76,16 @@ public sealed class Hy4FlashCheckpoint : IHy4FlashWeightSource, IDisposable
         for (int i = 0; i < dims.Length; i++) dims[i] = location.Shape[i];
         using Tensor raw = _set.ReadTensor(name);
         ReadOnlySpan<byte> codes = new(raw.DataPointer, checked((int)raw.ElementCount));
-        float[] values = Hy4FlashFp8.DequantizeBlocks(codes, dims, scale);
         Tensor output = new(new TensorShape(dims), DType.F32);
-        values.CopyTo(output.AsSpan<float>());
+        try
+        {
+            Hy4FlashFp8.DequantizeBlocks(codes, dims, scale, output.AsSpan<float>());
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
         return output;
     }
 }
