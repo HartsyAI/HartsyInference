@@ -37,8 +37,7 @@ public sealed class MovieRollKvCache : IDisposable
         public readonly List<(int Start, int End)> Frames = [];
     }
 
-    /// <summary>A cache whose stored tensors live on <paramref name="backend"/>; it is held for the pins and unpins.</summary>
-    /// <summary>A cache with no byte budget.</summary>
+    /// <summary>A cache whose stored tensors live on <paramref name="backend"/>; it is held for the pins and unpins. With this constructor it has no byte budget.</summary>
     public MovieRollKvCache(IBackend backend) : this(backend, long.MaxValue)
     {
     }
@@ -68,6 +67,14 @@ public sealed class MovieRollKvCache : IDisposable
     public static long BytesPerFrame(int blocks, int height, int width, int hidden) =>
         (long)blocks * height * width * hidden * 2 * sizeof(float);
 
+    /// <summary>Refuses, without changing anything, a write that would hold more than the budget on its own. Call it before a layer is cleared, so a
+    /// refusal leaves the cache as it was.</summary>
+    public void RequireFits(long bytes)
+    {
+        if (_byteBudget != long.MaxValue && bytes > _byteBudget)
+            throw new InvalidOperationException($"The write would hold {bytes} bytes of K and V; the budget is {_byteBudget}. Nothing was changed.");
+    }
+
     private static long BytesOf(Tensor? tensor) => tensor is null ? 0L : tensor.DType.ComputeByteCount(tensor.ElementCount);
 
     private void RequireBudget(long addBytes, long removeBytes)
@@ -86,20 +93,19 @@ public sealed class MovieRollKvCache : IDisposable
         ArgumentNullException.ThrowIfNull(frames);
         Entry entry = Layer(layer);
         RequireKeyValuePair(keys, values);
-        if (frames.Count == 0) throw new ArgumentException("An adopted layer needs at least one frame range.", nameof(frames));
-        long expectedTokens = 0;
-        foreach ((int start, int end) in frames)
-        {
-            if (start < 0 || end <= start)
-                throw new ArgumentOutOfRangeException(nameof(frames), $"The frame range [{start}, {end}) must be non-empty and start at 0 or later.");
-            expectedTokens += (long)(end - start) * _tokensPerFrame;
-        }
-        if (keys.Shape[1] != expectedTokens)
-            throw new ArgumentException($"The frames carry {expectedTokens} tokens; the arrays hold {keys.Shape[1]}.", nameof(keys));
+        ValidateFrameRanges(frames, keys, "adopted");
         RequireBudget(BytesOf(keys) + BytesOf(values), BytesOf(entry.Keys) + BytesOf(entry.Values));
 
         _backend.PinActivation(keys);
-        _backend.PinActivation(values);
+        try
+        {
+            _backend.PinActivation(values);
+        }
+        catch
+        {
+            _backend.UnpinActivation(keys);
+            throw;
+        }
         Release(entry.Keys);
         Release(entry.Values);
         entry.Keys = keys;
@@ -107,7 +113,6 @@ public sealed class MovieRollKvCache : IDisposable
         entry.Frames.Clear();
         entry.Frames.AddRange(frames);
     }
-
 
     /// <summary>Whether <see cref="Init"/> has run (and <see cref="Clear"/> has not).</summary>
     public bool IsInit { get; private set; }
@@ -225,16 +230,7 @@ public sealed class MovieRollKvCache : IDisposable
         ArgumentNullException.ThrowIfNull(frames);
         Entry entry = Layer(layer);
         RequireKeyValuePair(keys, values);
-        if (frames.Count == 0) throw new ArgumentException("A replaced layer needs at least one frame range.", nameof(frames));
-        long expectedTokens = 0;
-        foreach ((int start, int end) in frames)
-        {
-            if (start < 0 || end <= start)
-                throw new ArgumentOutOfRangeException(nameof(frames), $"The frame range [{start}, {end}) must be non-empty and start at 0 or later.");
-            expectedTokens += (long)(end - start) * _tokensPerFrame;
-        }
-        if (keys.Shape[1] != expectedTokens)
-            throw new ArgumentException($"The frames carry {expectedTokens} tokens; the arrays hold {keys.Shape[1]}.", nameof(keys));
+        ValidateFrameRanges(frames, keys, "replaced");
 
         RequireBudget(BytesOf(keys) + BytesOf(values), BytesOf(entry.Keys) + BytesOf(entry.Values));
         Tensor newKeys = Clone(keys);
@@ -254,6 +250,21 @@ public sealed class MovieRollKvCache : IDisposable
         entry.Values = newValues;
         entry.Frames.Clear();
         entry.Frames.AddRange(frames);
+    }
+
+    /// <summary>The frame ranges of a layer are non-empty and start at 0 or later, and together hold exactly the tokens of <paramref name="keys"/>.</summary>
+    private void ValidateFrameRanges(IReadOnlyList<(int Start, int End)> frames, Tensor keys, string role)
+    {
+        if (frames.Count == 0) throw new ArgumentException($"A {role} layer needs at least one frame range.", nameof(frames));
+        long expectedTokens = 0;
+        foreach ((int start, int end) in frames)
+        {
+            if (start < 0 || end <= start)
+                throw new ArgumentOutOfRangeException(nameof(frames), $"The frame range [{start}, {end}) must be non-empty and start at 0 or later.");
+            expectedTokens += (long)(end - start) * _tokensPerFrame;
+        }
+        if (keys.Shape[1] != expectedTokens)
+            throw new ArgumentException($"The frames carry {expectedTokens} tokens; the arrays hold {keys.Shape[1]}.", nameof(keys));
     }
 
     /// <summary>The stored K and V of a layer, or null when the layer holds no chunk. Not copied: valid until that layer changes.</summary>

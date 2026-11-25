@@ -261,6 +261,21 @@ public sealed class MovieRollWindowTests
         Assert.Equal(1_380_188_160L, MovieRollKvCache.BytesPerFrame(54, 30, 52, 2048));
     }
 
+    [Fact]
+    public void RecomputeRefusedByTheBudgetLeavesTheCacheAsItWas()
+    {
+        using Fixture fixture = new();
+        const long OneFrameKeyAndValue = 2L * PerFrame * Heads * HeadDim * sizeof(float);
+        using MovieRollKvCache cache = new(fixture.Backend, OneFrameKeyAndValue);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+        using Tensor first = new(new TensorShape(1, PerFrame, Heads, HeadDim), DType.F32);
+        cache.Update(HunyuanVideo15Dit.StreamLayerName(0), first, first, 0, 1);
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), new[] { 1, 2, 2 },
+            cache, FullHistoryBlocks));
+        Assert.Equal(new[] { (0, 1) }, cache.FrameRanges(HunyuanVideo15Dit.StreamLayerName(0)).ToArray());
+    }
+
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
     /// <paramref name="firstFrame"/>, in the token order the window uses.</summary>
     private static float[] Rows(int firstFrame, int frames)
