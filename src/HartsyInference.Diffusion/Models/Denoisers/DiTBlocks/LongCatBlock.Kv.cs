@@ -46,13 +46,24 @@ public sealed partial class LongCatBlock
         if (timeEmbed.Shape[0] != inputs.Frames)
             throw new ArgumentException($"The timestep embedding has {timeEmbed.Shape[0]} rows for {inputs.Frames} frames.", nameof(timeEmbed));
 
+        kv = null;
         using Tensor modulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _adaWeight!, _adaBias);
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         using Tensor attn = CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, null, keep: true, inputs.Segments, out kv);
-        using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
-        using Tensor normed3 = LongCatOps.NormModulate(backend, afterSelf, modulation, 4 * dim, 3 * dim, hw);
-        using Tensor ffn = FeedForward(backend, normed3);
-        return LongCatOps.GatedResidual(backend, afterSelf, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex);
+        try
+        {
+            using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
+            using Tensor normed3 = LongCatOps.NormModulate(backend, afterSelf, modulation, 4 * dim, 3 * dim, hw);
+            using Tensor ffn = FeedForward(backend, normed3);
+            return LongCatOps.GatedResidual(backend, afterSelf, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex);
+        }
+        catch
+        {
+            // The kept keys and values belong to the caller only on success; a failure after the attention releases them here.
+            kv?.Dispose();
+            kv = null;
+            throw;
+        }
     }
 
     /// <summary>Self-attention over token-major <paramref name="input"/> rows. Without a cache, the rows attend to their own keys. With one, they
@@ -110,6 +121,5 @@ public sealed partial class LongCatBlock
             v.Dispose();
         }
     }
-
 
 }
