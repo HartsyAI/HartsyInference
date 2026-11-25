@@ -9,7 +9,10 @@ public sealed class JinjaEngine
     private readonly List<Node> _program;
 
     /// <summary>Compiles <paramref name="template"/>; like Jinja2's default (<c>keep_trailing_newline=False</c>), one newline at the very end of the source is not part of the output.</summary>
-    public JinjaEngine(string template) => _program = Parser.Parse(Lexer.Lex(StripTrailingNewline(template)));
+    /// <param name="template">The Jinja source.</param>
+    /// <param name="hfWhitespace">Applies <c>trim_blocks</c> and <c>lstrip_blocks</c> as transformers' chat-template environment does: the newline after a block tag
+    /// is dropped, and indentation before a block tag that starts its line is dropped. Off keeps the engine's historical rendering.</param>
+    public JinjaEngine(string template, bool hfWhitespace = false) => _program = Parser.Parse(Lexer.Lex(StripTrailingNewline(template), hfWhitespace));
 
     private static string StripTrailingNewline(string template) =>
         template.EndsWith("\r\n", StringComparison.Ordinal) ? template[..^2] : template.EndsWith('\n') ? template[..^1] : template;
@@ -86,7 +89,7 @@ public sealed class JinjaEngine
 
     internal static class Lexer
     {
-        public static List<Seg> Lex(string t)
+        public static List<Seg> Lex(string t, bool hfWhitespace = false)
         {
             List<Seg> segs = [];
             int i = 0;
@@ -97,21 +100,25 @@ public sealed class JinjaEngine
                 char c = t[open + 1];
                 if (c == '#') // comment {# ... #} — strip entirely (honoring whitespace-control)
                 {
-                    if (open > i) segs.Add(new Seg(SegKind.Text, t[i..open], false, false));
+                    if (open > i) segs.Add(new Seg(SegKind.Text, hfWhitespace ? LstripBlock(t, i, open) : t[i..open], false, false));
                     int cc = FindClose(t, open + 2, "#}");
                     if (cc < 0) throw new FormatException($"Unclosed Jinja comment at {open}.");
                     string cInner = t[(open + 2)..cc];
                     // Emit a no-op stmt segment carrying only whitespace-control so adjacent text trims apply.
                     segs.Add(new Seg(SegKind.Stmt, "#comment", cInner.StartsWith('-'), cInner.EndsWith('-')));
-                    i = cc + 2; continue;
+                    i = cc + 2;
+                    if (hfWhitespace) i = SkipBlockNewline(t, i);
+                    continue;
                 }
                 if (c != '{' && c != '%') { // not a tag; emit text up to and including this brace, continue
                     int next = t.IndexOf('{', open + 1);
                     if (next < 0) { segs.Add(new Seg(SegKind.Text, t[i..], false, false)); break; }
-                    segs.Add(new Seg(SegKind.Text, t[i..next], false, false));
+                    // lstrip_blocks applies to the text in front of a block tag even when a literal brace sits between them.
+                    bool blockAhead = hfWhitespace && next + 1 < t.Length && (t[next + 1] == '%' || t[next + 1] == '#');
+                    segs.Add(new Seg(SegKind.Text, blockAhead ? LstripBlock(t, i, next) : t[i..next], false, false));
                     i = next; continue;
                 }
-                if (open > i) segs.Add(new Seg(SegKind.Text, t[i..open], false, false));
+                if (open > i) segs.Add(new Seg(SegKind.Text, hfWhitespace && c == '%' ? LstripBlock(t, i, open) : t[i..open], false, false));
                 string closeTok = c == '{' ? "}}" : "%}";
                 int close = FindClose(t, open + 2, closeTok);
                 if (close < 0) throw new FormatException($"Unclosed Jinja tag at {open}.");
@@ -121,6 +128,7 @@ public sealed class JinjaEngine
                 inner = inner.Trim('-').Trim();
                 segs.Add(new Seg(c == '{' ? SegKind.Expr : SegKind.Stmt, inner, trimL, trimR));
                 i = close + 2;
+                if (hfWhitespace && c == '%') i = SkipBlockNewline(t, i);
             }
             // Apply whitespace control: trim adjacent text.
             for (int k = 0; k < segs.Count; k++)
@@ -132,6 +140,26 @@ public sealed class JinjaEngine
                     segs[k + 1] = segs[k + 1] with { Value = segs[k + 1].Value.TrimStart() };
             }
             return segs;
+        }
+
+        // lstrip_blocks: the spaces and tabs between the start of a source line and a block tag are dropped when nothing else precedes the tag on that line.
+        private static string LstripBlock(string t, int start, int end)
+        {
+            string text = t[start..end];
+            int newline = text.LastIndexOf('\n');
+            int from = newline >= 0 ? newline + 1 : start == 0 || t[start - 1] == '\n' ? 0 : -1;
+            if (from < 0) return text;
+            for (int k = from; k < text.Length; k++)
+                if (text[k] != ' ' && text[k] != '\t') return text;
+            return text[..from];
+        }
+
+        // trim_blocks: the first newline after a block tag is dropped.
+        private static int SkipBlockNewline(string t, int at)
+        {
+            if (at < t.Length && t[at] == '\n') return at + 1;
+            if (at + 1 < t.Length && t[at] == '\r' && t[at + 1] == '\n') return at + 2;
+            return at;
         }
 
         /// <summary>Finds the block-closing token, skipping over quoted string literals (honoring backslash escapes) so a close token embedded inside a string — e.g. Qwen's tool-call template contains <c>}}</c> inside a quoted example — isn't mistaken for the real block end.</summary>

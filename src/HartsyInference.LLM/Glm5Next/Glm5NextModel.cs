@@ -78,7 +78,7 @@ public sealed class Glm5NextModel : IDisposable
     }
 
     /// <summary>Runs <paramref name="embeddings"/> <c>[tokens, hidden]</c> through the decoder at positions <c>state.Length ..</c>, advancing the state, and
-    /// returns the final normed hidden rows <c>[tokens, hidden]</c>.</summary>
+    /// returns the final normed hidden rows <c>[tokens, hidden]</c>. A call that throws partway leaves <paramref name="state"/> to be reset before reuse.</summary>
     public float[] ForwardHidden(ReadOnlySpan<float> embeddings, Glm5NextState state)
     {
         ArgumentNullException.ThrowIfNull(state);
