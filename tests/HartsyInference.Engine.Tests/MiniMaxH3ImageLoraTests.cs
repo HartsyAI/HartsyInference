@@ -104,6 +104,62 @@ public sealed class MiniMaxH3ImageLoraTests : IDisposable
         Assert.Contains(file.Layers, layer => layer.TargetKey == "token_refiner.blocks.0.mlp.fc2.weight");
     }
 
+    [Fact]
+    public void ModuleTheDitDoesNotHoldIsCountedAsMissingNotDropped()
+    {
+        // A module outside the four H3 names must reach the merge report, where lora.partialApplication decides it, not vanish in the parser.
+        string lora = WriteLora("extra-module.safetensors",
+            ("blocks.0.attn.qkv_proj", Hidden * 3),
+            ("blocks.0.attn.to_gate_compress", Hidden));
+        using LoraFile file = LoraFile.Load(lora);
+        Assert.Equal(LoraFormat.AiToolkitMiniMaxH3, file.Format);
+        Assert.Contains(file.Layers, layer => layer.TargetKey == "blocks.0.attn.to_gate_compress.weight");
+
+        using IBackend backend = new CpuBackend();
+        using Tensor qkv = Base(Hidden * 3, Hidden);
+        Dictionary<string, Tensor> weights = new(StringComparer.Ordinal)
+        {
+            ["blocks.0.attn.qkv_proj.weight"] = qkv,
+        };
+        using LoraStack? stack = RecipeLoraMerge.Apply([Spec(lora)], backend,
+            new LoraMergeTargets { Transformer = weights }, "MiniMaxH3ImageLoraTests");
+
+        Assert.NotNull(stack);
+        Assert.Equal(1, stack.Report.Applied);
+        Assert.Equal(1, stack.Report.SkippedMissing);
+    }
+
+    [Fact]
+    public void WanNamedFileStaysOnTheWanArm()
+    {
+        string lora = WriteLora("wan-shape.safetensors", ("blocks.0.self_attn.q", Hidden));
+        using LoraFile file = LoraFile.Load(lora);
+        Assert.Equal(LoraFormat.DiffusersWan, file.Format);
+    }
+
+    [Fact]
+    public void BareTurboRootStaysOnTheBareDitPath()
+    {
+        string path = Path.Combine(_folder, "bare-turbo.safetensors");
+        Tensor down = Factor(new TensorShape(Rank, Hidden));
+        Tensor up = Factor(new TensorShape(Hidden * 3, Rank));
+        try
+        {
+            SafeTensorsStreamWriter.Write(path,
+            [
+                new SafeTensorsStreamWriter.Entry("blocks.0.attn.qkv_proj.lora_A.weight", DType.F32, down.Shape, () => (down, false)),
+                new SafeTensorsStreamWriter.Entry("blocks.0.attn.qkv_proj.lora_B.weight", DType.F32, up.Shape, () => (up, false)),
+            ]);
+        }
+        finally
+        {
+            down.Dispose();
+            up.Dispose();
+        }
+        using LoraFile file = LoraFile.Load(path);
+        Assert.Equal(LoraFormat.DiffusersBareDit, file.Format);
+    }
+
     private static Tensor Base(int rows, int cols)
     {
         Tensor tensor = new(new TensorShape(rows, cols), DType.F32);

@@ -6,8 +6,9 @@ namespace HartsyInference.ModelAssets.Lora.Mappers;
 /// <summary>Parses MiniMax-H3 LoRA files trained with ai-toolkit (<c>diffusion_model.blocks.N.attn.qkv_proj.lora_A.weight</c>, and the
 /// <c>token_refiner.blocks.N.…</c> stream). The file names modules as the H3 DiT does, so after the wrapper is stripped each body is
 /// already the transformer's canonical weight name and passes through with no rename.
-/// <para>The Wan rename table would otherwise claim these roots (<c>diffusion_model.blocks.</c>) and label the file as Wan; the
-/// detector routes them here first, by the H3-only module names <c>attn.qkv_proj</c>, <c>attn.out_proj</c>, <c>mlp.fc1</c>, <c>mlp.fc2</c>.</para></summary>
+/// <para>Detection claims a file only by its attention names (<see cref="IsDistinctive"/>); the MLP names are common to other
+/// families. Once claimed, every block module passes through, so a module the DiT does not hold is counted as a missing key in the
+/// merge report and is decided by <c>lora.partialApplication</c>, not dropped here.</para></summary>
 public static class MiniMaxH3AiToolkitLoraMapper
 {
     /// <summary>The wrapper ai-toolkit puts in front of the checkpoint's own module path.</summary>
@@ -16,20 +17,21 @@ public static class MiniMaxH3AiToolkitLoraMapper
     /// <summary>The block roots an H3 DiT uses: the main stream, then the two token-refiner blocks.</summary>
     private static readonly string[] BlockRoots = ["blocks.", "token_refiner.blocks."];
 
-    /// <summary>Module paths inside a block that only MiniMax-H3 names this way: fused attention in, out, and the two MLP projections.</summary>
-    private static readonly HashSet<string> Modules = new(StringComparer.Ordinal)
+    /// <summary>The attention modules that identify the family. Only H3 among the families here fuses qkv under these names.</summary>
+    private static readonly HashSet<string> DistinctiveModules = new(StringComparer.Ordinal)
     {
-        "attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2",
+        "attn.qkv_proj", "attn.out_proj",
     };
 
-    /// <summary>Whether <paramref name="key"/> names an H3 block module under the ai-toolkit <c>diffusion_model.</c> wrapper. A bare
+    /// <summary>Whether <paramref name="key"/> names an H3 attention module under the ai-toolkit <c>diffusion_model.</c> wrapper. A bare
     /// root (the published Turbo LoRA's <c>blocks.0.attn.qkv_proj</c>) is deliberately not claimed here: it stays on the bare-DiT path.</summary>
     public static bool IsDistinctive(string key)
     {
         ArgumentNullException.ThrowIfNull(key);
         return key.StartsWith(Wrapper, StringComparison.Ordinal)
-            && LoraRoleSuffix.TryStrip(key, out string root, out LoraRole _) && TryCanonicalBody(root, out string body)
-            && Modules.Contains(ModuleOf(body));
+            && LoraRoleSuffix.TryStrip(key, out string root, out LoraRole _)
+            && TryCanonicalBody(root, out string body)
+            && DistinctiveModules.Contains(ModuleOf(body));
     }
 
     /// <summary>Parses every H3 block LoRA layer in the file onto <see cref="LoraTarget.Transformer"/>. A full-weight diff is refused by
@@ -60,7 +62,7 @@ public static class MiniMaxH3AiToolkitLoraMapper
 
         if (foreign > 0)
         {
-            Logs.Warning($"MiniMax-H3 LoRA: skipped {foreign} keys outside the DiT block modules.");
+            Logs.Warning($"MiniMax-H3 LoRA: skipped {foreign} keys outside the DiT block stacks.");
         }
         IReadOnlyList<LoraLayer> layers = LoraGroupBuffer.BuildLayers(groups,
             sourceKey => $"MiniMax-H3 LoRA group '{sourceKey}' is missing a matrix its decomposition needs; skipping.");
@@ -73,8 +75,8 @@ public static class MiniMaxH3AiToolkitLoraMapper
         return layers;
     }
 
-    /// <summary>Strips the optional ai-toolkit wrapper and checks the rest is a block module H3 owns, returning that module path
-    /// (<c>blocks.N.attn.qkv_proj</c>) as <paramref name="body"/>.</summary>
+    /// <summary>Strips the optional ai-toolkit wrapper and checks the rest is a numbered block of a block stack, returning that
+    /// module path (<c>blocks.N.attn.qkv_proj</c>) as <paramref name="body"/>. Any module name is accepted here.</summary>
     private static bool TryCanonicalBody(string root, out string body)
     {
         body = root.StartsWith(Wrapper, StringComparison.Ordinal) ? root[Wrapper.Length..] : root;
@@ -86,7 +88,7 @@ public static class MiniMaxH3AiToolkitLoraMapper
             }
             string rest = body[blockRoot.Length..];
             int separator = rest.IndexOf('.', StringComparison.Ordinal);
-            return separator > 0 && rest[..separator].All(char.IsAsciiDigit) && Modules.Contains(rest[(separator + 1)..]);
+            return separator > 0 && rest[..separator].All(char.IsAsciiDigit) && separator + 1 < rest.Length;
         }
         return false;
     }
