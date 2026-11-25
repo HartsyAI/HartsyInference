@@ -1275,8 +1275,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ? CublasApi.CUBLAS_COMPUTE_32F
             : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 
-    /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
-    private int SdpaF32Compute => _sdpaNoTf32 ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
+    /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c> or the call runs under <see cref="HighPrecisionGemm"/>
+    /// (a model's scoped full-precision request, e.g. <c>ExactGemmScope</c>). The attention row table is built once and still lists TF32 as the
+    /// rows' multiply format; only the GEMM's compute type follows the scope.</summary>
+    private int SdpaF32Compute => _sdpaNoTf32 || HighPrecisionGemm ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)

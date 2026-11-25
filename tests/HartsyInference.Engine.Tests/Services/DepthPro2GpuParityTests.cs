@@ -26,7 +26,6 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
     private const string FocalVariable = "HARTSY_DEPTHPRO2_FOCAL_WEIGHTS";
     private const string ReferenceVariable = "HARTSY_DEPTHPRO2_REF";
     private const double Tolerance = 1e-4;
-    private const double Tf32Tolerance = 5e-3;
 
     private static readonly Lazy<string?> CudaFailure = new(() => Probe(Gpu.Cuda));
     private static readonly Lazy<string?> VulkanFailure = new(() => Probe(Gpu.Vulkan));
@@ -46,15 +45,22 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
     [DepthPro2GpuFact(Gpu.CudaFp32)]
     public void CudaFp32_UnbufferedVideo_MatchesCpu() => Video(Gpu.CudaFp32, DepthPro2VideoMode.Unbuffered);
 
-    // The default CUDA lane multiplies F32 in TF32 (10-bit mantissa), so it is held to the TF32 bound, not the F32 one.
+    // The default CUDA lane keeps the engine's TF32 knobs on, but Depth Pro 2 runs its own GEMMs and attention in plain F32 (ExactGemmScope), so
+    // it is held to the same F32 bound as the lane that pins both knobs off.
     [DepthPro2GpuFact(Gpu.Cuda)]
-    public void Cuda_Tf32_Image_WithinTf32Bound_256x384() => Image(Gpu.Cuda, "a");
+    public void CudaDefault_Image_MatchesCpu_256x384() => Image(Gpu.Cuda, "a");
 
     [DepthPro2GpuFact(Gpu.Cuda)]
-    public void Cuda_Tf32_Image_WithinTf32Bound_Padded250x370() => Image(Gpu.Cuda, "b");
+    public void CudaDefault_Image_MatchesCpu_Padded250x370() => Image(Gpu.Cuda, "b");
 
     [DepthPro2GpuFact(Gpu.Cuda)]
-    public void Cuda_Tf32_BufferedVideo_WithinTf32Bound() => Video(Gpu.Cuda, DepthPro2VideoMode.Buffered);
+    public void CudaDefault_ThreeViews_MatchCpu() => Views(Gpu.Cuda);
+
+    [DepthPro2GpuFact(Gpu.Cuda)]
+    public void CudaDefault_BufferedVideo_MatchesCpu() => Video(Gpu.Cuda, DepthPro2VideoMode.Buffered);
+
+    [DepthPro2GpuFact(Gpu.Cuda)]
+    public void CudaDefault_UnbufferedVideo_MatchesCpu() => Video(Gpu.Cuda, DepthPro2VideoMode.Unbuffered);
 
     [DepthPro2GpuFact(Gpu.Vulkan)]
     public void Vulkan_Image_MatchesCpu_256x384() => Image(Gpu.Vulkan, "a");
@@ -88,7 +94,7 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         {
             double stageError = RelRms(actual[stage], values);
             output.WriteLine($"{gpu} {name} {stage} relRMS {stageError:E2}");
-            Assert.True(stageError <= Bound(gpu), $"{stage} relRMS {stageError:E2}");
+            Assert.True(stageError <= Tolerance, $"{stage} relRMS {stageError:E2}");
         }
 
         DepthPro2Prediction cpuResult = model.Predict(cpu, [rgb], width, height, focalLengthPx: null, estimator);
@@ -96,8 +102,8 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         Timed(device, model.Network, estimator, rgb, width, height, $"{gpu} {name}");
         double focalError = Math.Abs(gpuResult.FocalLengthPx - cpuResult.FocalLengthPx) / cpuResult.FocalLengthPx;
         output.WriteLine($"{gpu} {name} f_px {gpuResult.FocalLengthPx:F4} vs CPU {cpuResult.FocalLengthPx:F4} (rel {focalError:E2})");
-        Assert.True(focalError <= Bound(gpu), $"f_px rel {focalError:E2}");
-        CompareMaps($"{gpu} {name}", gpuResult.Maps, cpuResult.Maps, Bound(gpu));
+        Assert.True(focalError <= Tolerance, $"f_px rel {focalError:E2}");
+        CompareMaps($"{gpu} {name}", gpuResult.Maps, cpuResult.Maps, Tolerance);
     }
 
     // Three overlapping crops of the 256x384 input attend to each other as one set.
@@ -117,8 +123,8 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         DepthPro2Prediction gpuResult = model.Predict(device, views, viewW, viewH, focalLengthPx: null, estimator);
         double focalError = Math.Abs(gpuResult.FocalLengthPx - cpuResult.FocalLengthPx) / cpuResult.FocalLengthPx;
         output.WriteLine($"{gpu} views f_px {gpuResult.FocalLengthPx:F4} vs CPU {cpuResult.FocalLengthPx:F4} (rel {focalError:E2})");
-        Assert.True(focalError <= Bound(gpu), $"f_px rel {focalError:E2}");
-        CompareMaps($"{gpu} views", gpuResult.Maps, cpuResult.Maps, Bound(gpu));
+        Assert.True(focalError <= Tolerance, $"f_px rel {focalError:E2}");
+        CompareMaps($"{gpu} views", gpuResult.Maps, cpuResult.Maps, Tolerance);
     }
 
     // Eight sliding 128x160 crops: buffered clips of 4 overlapping by 2 (the last clip pulled back), or a 3-frame ring that wraps.
@@ -137,7 +143,7 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         List<DepthPro2Map> expected = RunVideo(network, cpu, frames, frameW, frameH, window, overlap, mode);
         List<DepthPro2Map> actual = RunVideo(network, device, frames, frameW, frameH, window, overlap, mode);
         Assert.Equal(count, actual.Count);
-        CompareMaps($"{gpu} {mode.ToString().ToLowerInvariant()} video", actual, expected, Bound(gpu));
+        CompareMaps($"{gpu} {mode.ToString().ToLowerInvariant()} video", actual, expected, Tolerance);
     }
 
     private static List<DepthPro2Map> RunVideo(DepthPro2Network network, IBackend backend, byte[][] frames, int width, int height, int window,
@@ -240,8 +246,6 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         }
     }
 
-    private static double Bound(Gpu gpu) => gpu == Gpu.Cuda ? Tf32Tolerance : Tolerance;
-
     private static double RelRms(float[] actual, float[] expected)
     {
         Assert.Equal(expected.Length, actual.Length);
@@ -337,7 +341,7 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>The device lane: CUDA with its default TF32 GEMMs, CUDA in plain FP32, or Vulkan.</summary>
+    /// <summary>The device lane: CUDA with the engine's default knobs (TF32 on; the model runs F32 itself), CUDA with both TF32 knobs pinned off, or Vulkan.</summary>
     public enum Gpu
     {
         Cuda,
