@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\python-reference\hy4_flash\tiny_config.json" Link="Fixtures\Hy4Flash\tiny_config.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
