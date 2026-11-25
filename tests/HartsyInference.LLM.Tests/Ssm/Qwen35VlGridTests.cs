@@ -1,4 +1,3 @@
-using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Multimodal;
@@ -73,23 +72,5 @@ public sealed class Qwen35VlGridTests
     public void BuildPositions_RefusesAGridThatDoesNotHoldTheEncoderTokens()
     {
         Assert.Throws<ArgumentException>(() => Qwen35VlGenerator.BuildPositions(21, 3, 4, new MRopeImageGrid(1, 2, 8), out _));
-    }
-
-    [Fact]
-    public void RequireQwen3Vl_RefusesAnyOtherTower()
-    {
-        Assert.Throws<NotSupportedException>(() => Qwen35VlGenerator.RequireQwen3Vl(new OtherTower()));
-    }
-
-    /// <summary>A stand-in for a non-Qwen3-VL vision tower; only its type matters to <see cref="Qwen35VlGenerator.RequireQwen3Vl"/>.</summary>
-    private sealed class OtherTower : IVlmImageEncoder
-    {
-        public Tensor Encode(IBackend backend, Tensor pixelValues) => throw new NotSupportedException();
-        public int TokensPerImage => 0;
-        public int ImageSize => 0;
-        public float[] ImageMean => [0f, 0f, 0f];
-        public float[] ImageStd => [1f, 1f, 1f];
-        public string Family => "other";
-        public void Dispose() { }
     }
 }

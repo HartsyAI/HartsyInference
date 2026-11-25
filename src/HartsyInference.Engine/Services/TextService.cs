@@ -905,7 +905,7 @@ public sealed partial class TextService : ITextService, IDisposable
             // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
             // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
             answer = slot.SsmModel is not null
-                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, question, maxTokens, sampling)
+                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector."), slot.Backend!).Generate(px, question, maxTokens, sampling)
                 : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
@@ -1755,8 +1755,8 @@ public sealed partial class TextService : ITextService, IDisposable
             + $"comm={comm.Transport} for '{Path.GetFileName(path)}' (column/row-split per layer, 2 all-reduces/layer).");
     }
 
-    /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.
-    /// On the SSM backbone (<paramref name="ssmBackbone"/>) only a Qwen3-VL tower is accepted: any other projector is refused here, with a warning, and the model stays text-only.</summary>
+    /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.</summary>
+    /// <param name="ssmBackbone">The SSM backbone (Qwen3.5-VL) accepts only a Qwen3-VL tower; any other projector is refused here with a warning and the model stays text-only.</param>
     private static void LoadVisionInto(TextDeviceSlot slot, string textPath, bool ssmBackbone = false)
     {
         string? mmproj = FindMmproj(textPath);
