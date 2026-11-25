@@ -10,6 +10,9 @@ internal readonly struct HfConfigFields(JsonElement element, string scope, strin
 
     public int Int(string name, int fallback) => Int(name, out int value) ? value : fallback;
 
+    /// <summary>The integer <paramref name="name"/>, or null when it is absent or not an integer.</summary>
+    public int? OptionalInt(string name) => Int(name, out int value) ? value : null;
+
     public double Double(string name, double fallback) =>
         Find(name) is { ValueKind: JsonValueKind.Number } n ? n.GetDouble() : fallback;
 
