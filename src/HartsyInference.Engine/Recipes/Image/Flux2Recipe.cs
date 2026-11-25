@@ -1,4 +1,3 @@
-using HartsyInference.Engine.Recipes;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
