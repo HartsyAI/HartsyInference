@@ -64,50 +64,40 @@ public sealed class LongCatRecipeTests
     }
 
     [Fact]
-    public void ANamed15BuildGetsTheDistilledDefaultsAndAnUnnamedRequestKeepsThe16()
+    public void AnUnnamedAvatarRequestGetsThe15SettingsNotThe16()
     {
         LongCatAvatarRecipe avatar = new();
-        ResolvedModelVariant named = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
         ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
 
-        VideoDefaults distilled = avatar.DefaultsFor(named);
-
-        Assert.Equal(8, distilled.Steps);
-        Assert.Equal(1f, distilled.CfgScale);
-        Assert.Equal(7f, distilled.FlowShift);
-        Assert.Equal(50, avatar.DefaultsFor(unnamed).Steps);
-        Assert.Equal(50, avatar.DefaultsFor(null).Steps);
-        Assert.Equal("1.6", unnamed.Id);
+        Assert.Equal("1.5", unnamed.Id);
+        foreach (ResolvedModelVariant variant in new[] { unnamed, named15 })
+        {
+            VideoDefaults settings = avatar.DefaultsFor(variant);
+            Assert.Equal(8, settings.Steps);
+            Assert.Equal(1f, settings.CfgScale);
+            Assert.Equal(7f, settings.FlowShift);
+        }
+        Assert.Equal(8, avatar.Defaults.Steps);
+        Assert.Equal(50, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
     }
 
     [Fact]
-    public void AnUnnamedAvatarRequestIsRefusedBeforeAnyWeightIsRead()
+    public void AUnnamedOr15RequestPassesTheRefusalAndA16RequestIsRefusedBeforeAnyWeightIsRead()
     {
-        LongCatAvatarRecipe avatar = new();
         using CpuBackend backend = new();
         ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
 
-        Assert.Throws<NotSupportedException>(() => avatar.Construct(new RecipeContext
+        Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        {
+            CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
+        }));
+        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
         {
             CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
         }));
-    }
-
-    [Fact]
-    public void ANamedBuildPassesTheRefusal()
-    {
-        using CpuBackend backend = new();
-        foreach (string hint in new[] { "1.5", "1.6" })
-        {
-            ResolvedModelVariant named = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), [hint]);
-
-            Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
-            {
-                CheckpointPath = "no-such-folder", Backend = backend, Variant = named,
-            }));
-
-            Assert.IsNotType<NotSupportedException>(error);
-        }
+        Assert.IsNotType<NotSupportedException>(error);
     }
 
     private static CheckpointProbe EmptyProbe() =>

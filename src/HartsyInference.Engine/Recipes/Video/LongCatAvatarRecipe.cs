@@ -3,9 +3,9 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Variants;
-using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -49,13 +49,27 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The 1.6 undistilled sampler: 50 steps, shift 7, text guidance 4 (research plan, avatar sampler). The output frame rate is 25 fps.
-    /// Whether the official default guidance differs is confirmed against the pinned reference at the real-weight run (B8).</summary>
+    /// <summary>The default build's settings (1.5, the catalog row's weights): the distilled path, 8 steps, guidance off (1.0), shift 7. Steps
+    /// and guidance are fixed by the distillation, so the planner locks them.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 8, CfgScale = 1.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
+        FlowShift = LongCatAvatarPipelineSettings.Shift,
+        LockedFields = VideoLockedFields.Steps | VideoLockedFields.CfgScale,
+    };
+
+    /// <summary>The 1.6 undistilled settings: 50 steps, shift 7, text guidance 4 (research plan). They apply only once a 1.6 INT8 catalog row
+    /// exists; the recipe refuses the 1.6 build until then.</summary>
+    public static VideoDefaults Undistilled16Defaults { get; } = new VideoDefaults
     {
         Steps = 50, CfgScale = 4.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
         FlowShift = LongCatAvatarPipelineSettings.Shift,
     };
+
+    /// <inheritdoc/>
+    /// <remarks>Only a named 1.6 build takes the 1.6 settings; the default and a named 1.5 build take the distilled ones.</remarks>
+    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(LongCatAvatarVariants.Avatar16) ? Undistilled16Defaults : Defaults;
 
     /// <inheritdoc/>
     /// <remarks>One segment: 1 + 4k frames up to <see cref="SegmentFrames"/>.</remarks>
@@ -64,33 +78,19 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         Frames = FrameGrid.StepPlusOne(LongCatRecipeSupport.TemporalCompressionFactor, FrameNormalization.SnapNearest, SegmentFrames),
     };
 
-    /// <summary>The 1.5 distilled build: 8 steps, guidance off (1.0), the 1.5 scheduler's shift 7. Steps and guidance are fixed by the
-    /// distillation, so the planner locks them.</summary>
-    public static VideoDefaults DistilledDefaults { get; } = new VideoDefaults
-    {
-        Steps = 8, CfgScale = 1.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
-        FlowShift = LongCatAvatarPipelineSettings.Shift,
-        LockedFields = VideoLockedFields.Steps | VideoLockedFields.CfgScale,
-    };
-
-    /// <inheritdoc/>
-    /// <remarks>Only a named build (a caller hint) imposes the 1.5 settings; a name-only or unnamed request keeps the 1.6 numbers.</remarks>
-    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is not null && variant.Is(LongCatAvatarVariants.Avatar15) && variant.IsDefinitive ? DistilledDefaults : Defaults;
-
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // The catalog row holds the 1.5 weights, and the two builds differ in schedule and defaults, so the build must be named: an
-        // unnamed request would run the 1.5 weights with the 1.6 settings. Named 1.5 takes the distilled path; named 1.6 the undistilled one.
+        // The 1.6 settings apply only with a 1.6 INT8 catalog row, which does not exist yet; a 1.6 request is refused before any weight is read.
+        // The default and a named 1.5 build run the distilled path with the 1.5 settings.
         ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
-        if (!variant.IsDefinitive)
+        if (variant.Is(LongCatAvatarVariants.Avatar16))
         {
-            throw new NotSupportedException("longcat-avatar needs its build named: longcat-avatar:1.5 (distilled) or longcat-avatar:1.6. "
-                + "The catalog row holds the 1.5 weights, so an unnamed request is refused rather than run with the wrong settings.");
+            throw new NotSupportedException("longcat-avatar's 1.6 build runs only once a 1.6 INT8 catalog row exists; none does yet. "
+                + "The 1.5 build (the default) runs instead.");
         }
         bool distilled = variant.Is(LongCatAvatarVariants.Avatar15);
 
