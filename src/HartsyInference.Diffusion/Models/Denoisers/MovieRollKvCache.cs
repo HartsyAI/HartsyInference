@@ -25,6 +25,7 @@ public sealed class MovieRollKvCache : IDisposable
     private readonly IBackend _backend;
     private readonly Dictionary<string, Entry> _layers = new(StringComparer.Ordinal);
     private int _tokensPerFrame;
+    private int _height, _width;
     private string? _firstLayer;
     private bool _disposed;
 
@@ -43,6 +44,12 @@ public sealed class MovieRollKvCache : IDisposable
 
     /// <summary>Whether <see cref="Init"/> has run (and <see cref="Clear"/> has not).</summary>
     public bool IsInit { get; private set; }
+
+    /// <summary>The latent grid the cache was initialised for: every chunk carries <c>Height × Width</c> tokens per frame.</summary>
+    public int Height { get { RequireInit(); return _height; } }
+
+    /// <summary>The latent grid width the cache was initialised for.</summary>
+    public int Width { get { RequireInit(); return _width; } }
 
     /// <summary>The first layer's name: the layer whose chunk count drives <see cref="ShouldRecompute"/>.</summary>
     public string? FirstLayer => _firstLayer;
@@ -65,6 +72,8 @@ public sealed class MovieRollKvCache : IDisposable
         foreach (string name in names) _layers.Add(name, new Entry());
         _firstLayer = names[0];
         _tokensPerFrame = height * width;
+        _height = height;
+        _width = width;
         IsInit = true;
     }
 
@@ -78,6 +87,8 @@ public sealed class MovieRollKvCache : IDisposable
         RequireKeyValuePair(keys, values);
         if (start < 0 || end <= start)
             throw new ArgumentOutOfRangeException(nameof(end), $"The frame range [{start}, {end}) must be non-empty and start at 0 or later.");
+        if (entry.Frames.Count > 0 && start < entry.Frames[entry.Frames.Count - 1].End)
+            throw new ArgumentOutOfRangeException(nameof(start), start, $"Chunk [{start}, {end}) starts before the last cached chunk ends at {entry.Frames[entry.Frames.Count - 1].End}; chunks append in frame order.");
         long expectedTokens = (long)(end - start) * _tokensPerFrame;
         if (keys.Shape[1] != expectedTokens)
             throw new ArgumentException($"Chunk [{start}, {end}) carries {keys.Shape[1]} tokens; {expectedTokens} are expected ({end - start} frames of {_tokensPerFrame}).", nameof(keys));
