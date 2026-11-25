@@ -27,6 +27,7 @@ public sealed class MovieRollWindowTests
     private const int Width = 3;
     private const int PerFrame = Height * Width;
     private const int WindowTokens = Frames * PerFrame;
+    private const int FullHistoryBlocks = 1;   // block 0 full history, block 1 sink-recent (the tiny model has two blocks)
 
     private static HunyuanVideo15Config TinyConfig() => new()
     {
@@ -132,6 +133,112 @@ public sealed class MovieRollWindowTests
             txtTemb, frameTemb, fixture.Layout(), fixture.Rope, Rows(3, Frames), cacheKeys, cacheValues, returnKv: false));
     }
 
+    [Fact]
+    public void FourWindowStreamingRolloutMatchesTheReference()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+        float[] timesteps = [700f, 537f, 300f];
+        Tensor qwen = fixture.Ref("in.qwen");
+        Tensor byt5 = fixture.Ref("in.byt5");
+        float windowTimestep = fixture.Ref("in.timestep").AsReadOnlySpan<float>()[0];
+
+        for (int window = 0; window < 4; window++)
+        {
+            Tensor latent = fixture.Ref($"win.stream.latent{window}");
+            using Tensor velocity = fixture.Dit.StreamDenoise(fixture.Backend, latent, timesteps, windowTimestep, qwen, byt5, cache, FullHistoryBlocks);
+            AssertValues(fixture.Ref($"win.stream.velocity{window}"), velocity, $"window {window} velocity");
+            fixture.Dit.StreamEncode(fixture.Backend, latent, timesteps, cache, FullHistoryBlocks, startFrame: Frames * window);
+        }
+    }
+
+    [Fact]
+    public void RecomputeRebuildsEveryLayerFromTheSelectedChunks()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [1, 2, 2], cache, FullHistoryBlocks);
+
+        Assert.Equal(5, cached);
+        string full = HunyuanVideo15Dit.StreamLayerName(0);
+        Assert.Equal(new[] { (0, 1), (1, 3), (3, 5) }, cache.FrameRanges(full).ToArray());
+        (Tensor Keys, Tensor Values)? fullCache = cache.Get(full);
+        AssertValues(fixture.Ref("rec.full0.k"), fullCache!.Value.Keys, "full-history keys after recompute");
+        AssertValues(fixture.Ref("rec.full0.v"), fullCache.Value.Values, "full-history values after recompute");
+
+        string sinkRecent = HunyuanVideo15Dit.StreamLayerName(1);
+        Assert.Equal(new[] { (0, 1), (3, 5) }, cache.FrameRanges(sinkRecent).ToArray());
+        (Tensor Keys, Tensor Values)? srCache = cache.Get(sinkRecent);
+        AssertValues(fixture.Ref("rec.sink1.k"), srCache!.Value.Keys, "sink-recent keys after recompute");
+        AssertValues(fixture.Ref("rec.sink1.v"), srCache.Value.Values, "sink-recent values after recompute");
+    }
+
+    [Fact]
+    public void StreamRefusesALatentThatDoesNotMatchTheCacheGrid()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height + 1, Width);
+
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamEncode(fixture.Backend, fixture.Ref("win.stream.latent0"), [700f, 537f, 300f],
+            cache, FullHistoryBlocks, startFrame: 0));
+    }
+
+    [Fact]
+    public void CacheRefusesAChunkThatStartsBeforeTheLastCachedChunkEnds()
+    {
+        using MovieRollKvCache cache = new(new CpuBackend());
+        cache.Init(["layer"], Height, Width);
+        using Tensor first = new(new TensorShape(1, 2 * PerFrame, Heads, HeadDim), DType.F32);
+        using Tensor overlap = new(new TensorShape(1, PerFrame, Heads, HeadDim), DType.F32);
+        cache.Update("layer", first, first, 0, 2);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.Update("layer", overlap, overlap, 1, 2));
+    }
+
+    [Fact]
+    public void RecomputeWithEveryBlockFullHistoryReturnsTheClipAndPacksEveryLayer()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [1, 2, 2], cache, fixture.Dit.BlockCount);
+
+        Assert.Equal(5, cached);
+        foreach (string layer in fixture.Dit.StreamLayerNames())
+            Assert.Equal(new[] { (0, 1), (1, 3), (3, 5) }, cache.FrameRanges(layer).ToArray());
+    }
+
+    [Fact]
+    public void RecomputeOfASingleChunkKeepsOneRangePerLayer()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [5], cache, FullHistoryBlocks);
+
+        Assert.Equal(5, cached);
+        foreach (string layer in fixture.Dit.StreamLayerNames())
+            Assert.Equal(new[] { (0, 5) }, cache.FrameRanges(layer).ToArray());
+    }
+
+    [Fact]
+    public void RecomputeRefusesChunksThatDoNotCoverTheLatent()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+        Tensor latent = fixture.Ref("rec.latent");
+
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [1, 2], cache, FullHistoryBlocks));
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [0, 5], cache, FullHistoryBlocks));
+    }
+
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
     /// <paramref name="firstFrame"/>, in the token order the window uses.</summary>
     private static float[] Rows(int firstFrame, int frames)
@@ -184,7 +291,7 @@ public sealed class MovieRollWindowTests
             Loader.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors"));
             Weights = Loader.GetAllTensors()
                 .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal)
-                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal))
+                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal) && !pair.Key.StartsWith("rec.", StringComparison.Ordinal))
                 .ToDictionary(pair => pair.Key, pair => pair.Value);
             Backend = new CpuBackend();
             Dit = new HunyuanVideo15Dit(TinyConfig());

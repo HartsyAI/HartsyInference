@@ -89,10 +89,12 @@ public sealed class LongCatRecipeTests
         ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
         ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
 
-        Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
         {
             CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
         }));
+        Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
+
         Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
         {
             CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,

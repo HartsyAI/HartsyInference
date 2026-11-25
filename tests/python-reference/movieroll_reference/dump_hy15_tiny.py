@@ -179,7 +179,8 @@ def main():
     cond = torch.randn(1, LATENT + 1, FRAMES, HEIGHT, WIDTH, generator=generator)
     t = torch.tensor([TIMESTEP])
     # Window latents come last in the draw order, so every tensor above keeps its value.
-    window_a, window_b, window_c = (torch.randn(1, LATENT, FRAMES, HEIGHT, WIDTH, generator=generator) for _ in range(3))
+    window_a, window_b, window_c, window_d = (torch.randn(1, LATENT, FRAMES, HEIGHT, WIDTH, generator=generator) for _ in range(4))
+    recompute_latent = torch.randn(1, LATENT, 5, HEIGHT, WIDTH, generator=generator)
 
     tensors = {}
     with torch.no_grad():
@@ -202,6 +203,8 @@ def main():
     tensors["in.frame_timesteps"] = frame_t
     with torch.no_grad():
         tensors.update(_window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5))
+        tensors.update(_stream_cases(model, [window_a, window_b, window_c, window_d], frame_t, t, qwen, byt5))
+        tensors.update(_recompute_cases(model, recompute_latent, RECOMPUTE_CHUNKS))
     tensors["in.latent"] = latent
     tensors["in.qwen"] = qwen
     tensors["in.byt5"] = byt5
@@ -232,7 +235,7 @@ def _forward_per_frame(model, x65, frame_t, t, qwen, byt5):
 WINDOW_MAX_FRAMES = 9
 
 
-def _window_block(block, img, txt, vec, vec_txt, thw, cos, sin, q_rows, k_rows, cache, return_kv):
+def _window_block(block, img, txt, vec, vec_txt, thw, cos, sin, q_rows, k_rows, cache, return_kv, bias=None):
     """MovieRoll's forward_inference for one double block. The cache holds the history's post-norm, pre-RoPE K and V; the window's
     K and V are appended to it, then RoPE runs on the concatenation at the packed rows ``k_rows`` (the window's Q at ``q_rows``).
     The text stream is skipped under ``return_kv``, which returns the window's own pre-RoPE K and V for the cache."""
@@ -254,7 +257,7 @@ def _window_block(block, img, txt, vec, vec_txt, thw, cos, sin, q_rows, k_rows, 
         v = torch.cat([v_full, txt_v], 1)
     else:
         q, k, v = img_q, k_full, v_full
-    attn = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2).flatten(2)
+    attn = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=bias).transpose(1, 2).flatten(2)
     img_len = img.shape[1]
     img = img + apply_gate(block.img_attn_proj(attn[:, :img_len]), gate=i1g, thw=thw)
     img = img + apply_gate(block.img_mlp(modulate(block.img_norm2(img), shift=i2s, scale=i2c, thw=thw)), gate=i2g, thw=thw)
@@ -308,6 +311,110 @@ def _window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5):
                                                  (cos[torch.arange(0, 6 * per_frame)], sin[torch.arange(0, 6 * per_frame)]))
                                     .reshape(1, 6 * per_frame, HIDDEN),
     }
+    return {name: value.float().contiguous() for name, value in tensors.items()}
+
+
+STREAM_MAX_FRAMES = 4 * FRAMES
+STREAM_FULL_HISTORY = 1   # block 0 reads its whole history; block 1 is sink-recent
+
+
+def _stream_cases(model, windows, frame_t, t, qwen, byt5):
+    """A rollout of four windows through both blocks, each denoised and then encoded. Block 0 (full history) keeps every window;
+    block 1 (sink-recent) keeps the sink, window 0, and, before each encode, drops the previous window, so a denoise reads the sink
+    and the previous window and an encode reads the sink alone. Text is the window timestep's, as in MovieRoll."""
+    thw = [FRAMES, HEIGHT, WIDTH]
+    cos, sin = get_nd_rotary_pos_embed(ROPE_DIMS, (STREAM_MAX_FRAMES, HEIGHT, WIDTH), theta=256, device="cpu")
+    per_frame = HEIGHT * WIDTH
+    zero_cond = torch.zeros(1, LATENT + 1, FRAMES, HEIGHT, WIDTH)
+    vec = model.time_in(frame_t.reshape(-1)).reshape(1, FRAMES, -1)
+    vec_txt = model.time_in(t)[:, None, :]
+    txt0 = torch.cat([model.byt5_in(byt5) + model.cond_type_embedding.weight[1],
+                      model.txt_in(qwen, t) + model.cond_type_embedding.weight[0]], 1)
+    cache = [[] for _ in model.double_blocks]   # per block: [(keys, values, frames), ...] in order
+
+    def history(entries):
+        cached = sum(frames for _, _, frames in entries)
+        if not entries:
+            return None, cached
+        return (torch.cat([k for k, _, _ in entries], 1), torch.cat([v for _, v, _ in entries], 1)), cached
+
+    tensors = {}
+    with torch.no_grad():
+        for w, window in enumerate(windows):
+            tensors[f"win.stream.latent{w}"] = window
+            x = model.img_in(torch.cat([window, zero_cond], 1))
+
+            img, txt = x, txt0
+            for b, block in enumerate(model.double_blocks):
+                kv, cached = history(cache[b])
+                n = cached + FRAMES
+                img, txt, _ = _window_block(block, img, txt, vec, vec_txt, thw, cos, sin,
+                                            torch.arange(cached * per_frame, n * per_frame),
+                                            torch.arange(0, n * per_frame), kv, False)
+            velocity = model.final_layer(img, vec, thw=thw).reshape(1, FRAMES, HEIGHT, WIDTH, LATENT).permute(0, 4, 1, 2, 3)
+            tensors[f"win.stream.velocity{w}"] = velocity.contiguous()
+
+            img = x
+            for b, block in enumerate(model.double_blocks):
+                if b >= STREAM_FULL_HISTORY:
+                    cache[b] = cache[b][:1]   # trim_to_sink before the encode
+                kv, cached = history(cache[b])
+                n = cached + FRAMES
+                img, _, kv_out = _window_block(block, img, None, vec, vec_txt, thw, cos, sin,
+                                               torch.arange(cached * per_frame, n * per_frame),
+                                               torch.arange(0, n * per_frame), kv, True)
+                cache[b].append((kv_out[0], kv_out[1], FRAMES))
+    return {name: value.float().contiguous() for name, value in tensors.items()}
+
+
+RECOMPUTE_CHUNKS = [1, 2, 2]
+
+
+def _chunk_bias(chunk_tokens):
+    """Block-causal additive mask: a query attends the keys of its own chunk and of the chunks before it."""
+    index = torch.cat([torch.full((n,), float(i)) for i, n in enumerate(chunk_tokens)])
+    allowed = index[None, :] <= index[:, None]
+    return torch.where(allowed, 0.0, -1e9)[None, None]
+
+
+def _recompute_cases(model, clean, chunk_frames):
+    """KV recompute of the clean clip at timestep 0 without text: the full-history blocks attend block-causally by chunk, then the
+    sink-recent blocks run over the sink (first chunk) and the recent chunk (last) taken from that pass. Each block's cache is the
+    window's post-norm, pre-RoPE K and V, as the encode pass stores them."""
+    total = sum(chunk_frames)
+    thw = [total, HEIGHT, WIDTH]
+    cos, sin = get_nd_rotary_pos_embed(ROPE_DIMS, (STREAM_MAX_FRAMES, HEIGHT, WIDTH), theta=256, device="cpu")
+    per_frame = HEIGHT * WIDTH
+    zero_cond = torch.zeros(1, LATENT + 1, total, HEIGHT, WIDTH)
+    tensors = {}
+    with torch.no_grad():
+        img = model.img_in(torch.cat([clean, zero_cond], 1))
+        vec = model.time_in(torch.zeros(total)).reshape(1, total, -1)
+        rows = torch.arange(0, total * per_frame)
+        bias = _chunk_bias([frames * per_frame for frames in chunk_frames])
+        for b, block in enumerate(model.double_blocks[:STREAM_FULL_HISTORY]):
+            img, _, kv = _window_block(block, img, None, vec, None, thw, cos, sin, rows, rows, None, True, bias)
+            tensors[f"rec.full{b}.k"] = kv[0]
+            tensors[f"rec.full{b}.v"] = kv[1]
+        sink_tokens = chunk_frames[0] * per_frame
+        if len(chunk_frames) > 1:
+            recent_tokens = chunk_frames[-1] * per_frame
+            sink_recent = torch.cat([img[:, :sink_tokens], img[:, img.shape[1] - recent_tokens:]], 1)
+            sr_tokens = [sink_tokens, recent_tokens]
+            sr_frames = chunk_frames[0] + chunk_frames[-1]
+        else:
+            sink_recent = img[:, :sink_tokens]
+            sr_tokens = [sink_tokens]
+            sr_frames = chunk_frames[0]
+        sr_vec = model.time_in(torch.zeros(sr_frames)).reshape(1, sr_frames, -1)
+        sr_rows = torch.arange(0, sr_frames * per_frame)
+        sr_bias = _chunk_bias(sr_tokens)
+        for b in range(STREAM_FULL_HISTORY, len(model.double_blocks)):
+            sink_recent, _, kv = _window_block(model.double_blocks[b], sink_recent, None, sr_vec, None, [sr_frames, HEIGHT, WIDTH],
+                                               cos, sin, sr_rows, sr_rows, None, True, sr_bias)
+            tensors[f"rec.sink{b}.k"] = kv[0]
+            tensors[f"rec.sink{b}.v"] = kv[1]
+    tensors["rec.latent"] = clean
     return {name: value.float().contiguous() for name, value in tensors.items()}
 
 
