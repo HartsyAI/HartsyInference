@@ -90,7 +90,21 @@ public sealed class PytorchPickleLoader : IDisposable
         using (FileStream fs = File.OpenRead(filePath))
             if (fs.Read(magic) < 2 || magic[0] != 0x50 || magic[1] != 0x4b)
                 throw new NotSupportedException($"'{filePath}' is not a ZIP torch checkpoint; only that format can be read tensor by tensor.");
-        ZipArchive zip = ZipFile.OpenRead(filePath);
+        OpenLazyZip(ZipFile.OpenRead(filePath), filePath, recursiveFlatten);
+    }
+
+    /// <summary>As <see cref="OpenLazy(string, bool)"/> for a <c>torch.save</c> ZIP held in a seekable <paramref name="zipStream"/> (one tensor of a distributed checkpoint, say). The caller keeps the stream open until the loader is disposed and then disposes it.</summary>
+    public void OpenLazy(Stream zipStream, string label, bool recursiveFlatten = false)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(zipStream);
+        if (_lazyZip is not null || _tensors.Count != 0)
+            throw new InvalidOperationException("This loader already holds a checkpoint.");
+        OpenLazyZip(new ZipArchive(zipStream, ZipArchiveMode.Read, leaveOpen: true), label, recursiveFlatten);
+    }
+
+    private void OpenLazyZip(ZipArchive zip, string filePath, bool recursiveFlatten)
+    {
         try
         {
             Dictionary<string, PickleTensor> metas = ParseZipMetas(zip, filePath, recursiveFlatten);
