@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Duo;
@@ -17,10 +18,22 @@ namespace HartsyInference.Diffusion.Tests;
 [Trait("Category", "GpuIntegration")]
 public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
 {
-    private const double RelativeTolerance = 1e-4;
+    /// <summary>The arithmetic a CUDA run uses. Vulkan has neither switch.</summary>
+    private enum Math32
+    {
+        /// <summary>F32 GEMMs and F32 attention. Measured on a 4090 with exact GEMMs: LongCat 2.9e-7, Duo 4.0e-7.</summary>
+        Exact,
 
-    /// <summary>For CUDA's default F32 GEMMs, which run in TF32. Measured on a 4090: Duo 1.1e-3, LongCat and HunyuanVideo-1.5 about 4.5e-4.</summary>
-    private const double Tf32RelativeTolerance = 5e-3;
+        /// <summary>F32 GEMMs; an attention call that allows F16 takes it. Only HunyuanVideo-1.5 has such calls: its joint attention narrows Q, K
+        /// and V to F16 because the QK norm bounds the scores. Measured on a 4090: 5.7e-5. Rounding the same operands and outputs on the CPU
+        /// gives 5.0e-5.</summary>
+        F16Attention,
+
+        /// <summary>What a generation runs: TF32 GEMMs and the F16 attention. Measured on a 4090: Duo 1.1e-3, the other two about 4.5e-4.</summary>
+        Default,
+    }
+
+    private static double Tolerance(Math32 math) => math switch { Math32.Exact => 1e-5, Math32.F16Attention => 1e-4, _ => 5e-3 };
 
     [CudaDeviceFact]
     public void Cuda_LongCat_MatchesCpu() => Compare("longcat", GpuDevices.OpenCuda, LongCat);
@@ -40,23 +53,29 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
     [VulkanDeviceFact]
     public void Vulkan_Duo_MatchesCpu() => Compare("duo", GpuDevices.OpenVulkan, Duo);
 
-    /// <summary>The path a generation takes: nothing asks for exact GEMMs. Only the tolerance differs from the cases above.</summary>
+    [CudaDeviceFact]
+    public void Cuda_HunyuanVideo15_WithF16Attention_StaysWithinItsTolerance() =>
+        Compare("hunyuanvideo15 f16 attention", GpuDevices.OpenCuda, HunyuanVideo15, Math32.F16Attention);
+
+    /// <summary>The path a generation takes. Only the tolerance differs from the cases above.</summary>
     [CudaDeviceFact]
     public void Cuda_WithDefaultGemms_StaysWithinTheTf32Tolerance()
     {
-        Compare("longcat tf32", GpuDevices.OpenCuda, LongCat, exact: false);
-        Compare("hunyuanvideo15 tf32", GpuDevices.OpenCuda, HunyuanVideo15, exact: false);
-        Compare("duo tf32", GpuDevices.OpenCuda, Duo, exact: false);
+        Compare("longcat tf32", GpuDevices.OpenCuda, LongCat, Math32.Default);
+        Compare("hunyuanvideo15 tf32", GpuDevices.OpenCuda, HunyuanVideo15, Math32.Default);
+        Compare("duo tf32", GpuDevices.OpenCuda, Duo, Math32.Default);
     }
 
-    private void Compare(string name, Func<IBackend> open, Func<IBackend, float[]> run, bool exact = true)
+    private void Compare(string name, Func<IBackend> open, Func<IBackend, float[]> run, Math32 math = Math32.Exact)
     {
         float[] expected;
         using (CpuBackend cpu = new())
             expected = run(cpu);
+        // The backend reads the F16 attention switch when it is built.
+        using IDisposable knobs = KnobProfileScope.Push(KnobProfile.Create("video-dit-parity").With(EngineKnobs.SdpaNoF16, math == Math32.Exact));
         using IBackend device = open();
-        // Off, CUDA runs F32 GEMMs in TF32; Vulkan ignores the switch.
-        device.HighPrecisionGemm = exact;
+        // Off, CUDA runs F32 GEMMs in TF32.
+        device.HighPrecisionGemm = math != Math32.Default;
         device.ResetD2hSyncCount();
         float[] actual = run(device);
         output.WriteLine($"D2H_SYNCS {name}: {device.GetD2hSyncCount()} (the read of the result included)");
@@ -71,7 +90,7 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
         Assert.True(power > 0, $"{name}: the CPU output is all zero, so the comparison would be empty.");
         double relative = Math.Sqrt(error / power);
         output.WriteLine($"{name}: relative RMS error {relative:E3}");
-        double tolerance = exact ? RelativeTolerance : Tf32RelativeTolerance;
+        double tolerance = Tolerance(math);
         Assert.True(relative <= tolerance, $"{name}: relative RMS error {relative:E3} exceeds {tolerance:E0}.");
     }
 

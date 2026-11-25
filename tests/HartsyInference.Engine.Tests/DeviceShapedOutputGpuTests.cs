@@ -87,7 +87,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
             projection.LoadWeights(weights);
             float[][] expected = Values([projection.Forward(new CpuBackend(), first, latter)]);
             using IBackend device = open();
-            // The projection's GEMMs run in TF32 on CUDA by default, which is about 4e-4 off the CPU here; this test is about the layout, so it
+            // The projection's GEMMs run in TF32 on CUDA by default, which measured 1.4e-4 off the CPU here; this test is about the layout, so it
             // compares exact ones. DepthPro2Head opens the same scope itself.
             using ExactGemmScope exact = new(device);
             using Tensor firstDevice = OnDevice(device, first);
