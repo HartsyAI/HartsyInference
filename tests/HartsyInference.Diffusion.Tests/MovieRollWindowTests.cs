@@ -154,6 +154,29 @@ public sealed class MovieRollWindowTests
     }
 
     [Fact]
+    public void RecomputeRebuildsEveryLayerFromTheSelectedChunks()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [1, 2, 2], cache, FullHistoryBlocks);
+
+        Assert.Equal(5, cached);
+        string full = HunyuanVideo15Dit.StreamLayerName(0);
+        Assert.Equal(new[] { (0, 1), (1, 3), (3, 5) }, cache.FrameRanges(full).ToArray());
+        (Tensor Keys, Tensor Values)? fullCache = cache.Get(full);
+        AssertValues(fixture.Ref("rec.full0.k"), fullCache!.Value.Keys, "full-history keys after recompute");
+        AssertValues(fixture.Ref("rec.full0.v"), fullCache.Value.Values, "full-history values after recompute");
+
+        string sinkRecent = HunyuanVideo15Dit.StreamLayerName(1);
+        Assert.Equal(new[] { (0, 1), (3, 5) }, cache.FrameRanges(sinkRecent).ToArray());
+        (Tensor Keys, Tensor Values)? srCache = cache.Get(sinkRecent);
+        AssertValues(fixture.Ref("rec.sink1.k"), srCache!.Value.Keys, "sink-recent keys after recompute");
+        AssertValues(fixture.Ref("rec.sink1.v"), srCache.Value.Values, "sink-recent values after recompute");
+    }
+
+    [Fact]
     public void StreamRefusesALatentThatDoesNotMatchTheCacheGrid()
     {
         using Fixture fixture = new();
@@ -174,6 +197,46 @@ public sealed class MovieRollWindowTests
         cache.Update("layer", first, first, 0, 2);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => cache.Update("layer", overlap, overlap, 1, 2));
+    }
+
+    [Fact]
+    public void RecomputeWithEveryBlockFullHistoryReturnsTheClipAndPacksEveryLayer()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [1, 2, 2], cache, fixture.Dit.BlockCount);
+
+        Assert.Equal(5, cached);
+        foreach (string layer in fixture.Dit.StreamLayerNames())
+            Assert.Equal(new[] { (0, 1), (1, 3), (3, 5) }, cache.FrameRanges(layer).ToArray());
+    }
+
+    [Fact]
+    public void RecomputeOfASingleChunkKeepsOneRangePerLayer()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [5], cache, FullHistoryBlocks);
+
+        Assert.Equal(5, cached);
+        foreach (string layer in fixture.Dit.StreamLayerNames())
+            Assert.Equal(new[] { (0, 5) }, cache.FrameRanges(layer).ToArray());
+    }
+
+    [Fact]
+    public void RecomputeRefusesChunksThatDoNotCoverTheLatent()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+        Tensor latent = fixture.Ref("rec.latent");
+
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [1, 2], cache, FullHistoryBlocks));
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [0, 5], cache, FullHistoryBlocks));
     }
 
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
@@ -228,7 +291,7 @@ public sealed class MovieRollWindowTests
             Loader.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors"));
             Weights = Loader.GetAllTensors()
                 .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal)
-                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal))
+                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal) && !pair.Key.StartsWith("rec.", StringComparison.Ordinal))
                 .ToDictionary(pair => pair.Key, pair => pair.Value);
             Backend = new CpuBackend();
             Dit = new HunyuanVideo15Dit(TinyConfig());
