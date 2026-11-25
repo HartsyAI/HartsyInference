@@ -30,7 +30,7 @@ public sealed class Flux2StreamingTests
         using SafeTensorsLoader reference = Reference();
         using CpuBackend backend = new();
         using Tensor noise = reference.GetTensor("noise");
-        using Tensor packed = Flux2LatentOps.Pack(noise);
+        using Tensor packed = Flux2LatentOps.Pack(backend, noise);
         using Tensor cond = reference.GetTensor("cond");
 
         float[] resident = Velocity(backend, dit, packed, cond);
