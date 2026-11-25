@@ -52,6 +52,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     };
 
     /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         List<IDisposable> loaders = new List<IDisposable>();
