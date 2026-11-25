@@ -68,7 +68,7 @@ public sealed class Hy4FlashHfDumpTests
 
         IBackend backend = new CpuBackend();
         using Hy4FlashGroupIndexer indexer = new(backend, settings, weights,
-            new Hy4FlashRopeRows(settings.RopeDim / 2, 256, config.IndexedRopeTheta), dim, config.QLoraRank);
+            Hy4FlashPlainRope.Create(settings.RopeDim / 2, 256, config.IndexedRopeTheta), dim, config.QLoraRank);
         using Tensor store = new(new TensorShape(64, settings.HeadDim), DType.F32);
         indexer.Append(x, tokens, 0, store);
 

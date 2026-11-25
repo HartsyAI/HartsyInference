@@ -29,7 +29,7 @@ public sealed class Hy4FlashLayer : IDisposable
     private int _disposed;
 
     /// <param name="rope">Rotary rows of this layer's attention (its own base, <c>QkRopeHeadDim / 2</c> wide).</param>
-    public Hy4FlashLayer(IBackend backend, Hy4FlashConfig cfg, int index, IHy4FlashWeightSource source, IRopeRowSource rope)
+    public Hy4FlashLayer(IBackend backend, Hy4FlashConfig cfg, int index, IModelWeightSource source, IRopeRowSource rope)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(cfg);
@@ -157,7 +157,7 @@ public sealed class Hy4FlashLayer : IDisposable
         return result;
     }
 
-    private DsaAttention BuildAttention(string p, IHy4FlashWeightSource source, IRopeRowSource rope)
+    private DsaAttention BuildAttention(string p, IModelWeightSource source, IRopeRowSource rope)
     {
         string a = p + ".self_attn.";
         DsaAttentionSettings settings = AttentionSettings(_cfg, Index);
@@ -202,7 +202,7 @@ public sealed class Hy4FlashLayer : IDisposable
         return new DsaAttention(_backend, settings, weights, rope, selector);
     }
 
-    private MoeFeedForward BuildMoe(string p, IHy4FlashWeightSource source)
+    private MoeFeedForward BuildMoe(string p, IModelWeightSource source)
     {
         string m = p + ".mlp.";
         Dictionary<string, Tensor> w = new(StringComparer.Ordinal)
@@ -224,7 +224,7 @@ public sealed class Hy4FlashLayer : IDisposable
         return moe;
     }
 
-    private Hy4FlashHyperConnection Hc(string prefix, IHy4FlashWeightSource source)
+    private Hy4FlashHyperConnection Hc(string prefix, IModelWeightSource source)
     {
         using Tensor scale = source.Read(prefix + ".hc_scale"), bias = source.Read(prefix + ".hc_base");
         Tensor fn = F32(source, prefix + ".hc_fn");
@@ -232,12 +232,7 @@ public sealed class Hy4FlashLayer : IDisposable
             fn, bias.AsReadOnlySpan<float>().ToArray(), scale.AsReadOnlySpan<float>().ToArray(), head: false);
     }
 
-    private Tensor F32(IHy4FlashWeightSource source, string name)
-    {
-        Tensor t = source.Read(name);
-        if (t.DType == DType.F32) return Own(t);
-        using (t) return Own(ProjectionOps.EnsureF32(t));
-    }
+    private Tensor F32(IModelWeightSource source, string name) => Own(WeightReads.ReadF32(source, name));
 
     private Tensor Own(Tensor t)
     {
