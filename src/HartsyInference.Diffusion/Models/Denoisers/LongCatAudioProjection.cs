@@ -104,10 +104,10 @@ public sealed class LongCatAudioProjection : IDisposable
             throw new ArgumentException($"The latter-frame audio must be [frames, {inLatter}], got {audioLatter.Shape}.", nameof(audioLatter));
 
         int f1 = (int)audioFirst.Shape[0], f2 = (int)audioLatter.Shape[0], frames = f1 + f2;
-        // The reference's first frame is always one row; a zero-row window (a one-latent-frame clip has no latter frames) gives empty
-        // projections that the reference's rearrange does not handle, so both are refused here rather than run on empty tensors.
-        if (f1 == 0)
-            throw new ArgumentException("The first-frame audio must have one row; it has none.", nameof(audioFirst));
+        // The runtime cannot allocate zero-row tensors, and the DiT handles a one-latent-frame clip before it calls this projection.
+        // The DiT passes exactly one first-frame row, so any other count is refused by name.
+        if (f1 != 1)
+            throw new ArgumentException($"The first-frame audio must have exactly one row; it has {f1}.", nameof(audioFirst));
         if (f2 == 0)
             throw new ArgumentException("The latter-frame audio has no rows: a clip of one latent frame has no latter frames to project.", nameof(audioLatter));
 
