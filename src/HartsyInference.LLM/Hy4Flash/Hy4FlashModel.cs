@@ -7,7 +7,8 @@ namespace HartsyInference.LLM.Hy4Flash;
 
 /// <summary>The Hy4 Flash text model as a host reference (transformers <c>HYV4FlashForConditionalGeneration</c>, text path): token embedding copied into <c>hc</c> residual streams, the 42
 /// decoder layers with the Engram memories added before their layers, the hyper-connection head, the final RMS norm and an F32 LM head. Every projection goes through <see cref="IBackend"/>.</summary>
-/// <remarks>Text-only: image spans need the vision tower and positions passed separately. Epsilon of the Engram norms is a constructor argument (see <see cref="Hy4FlashEngramLayer"/>).</remarks>
+/// <remarks>Image spans take their features from the vision tower through the <c>images</c> argument of <see cref="Forward"/>; without it the placeholder id is an ordinary token. The M-RoPE rows are shared by every state
+/// of the model, so <see cref="Forward"/> runs one call at a time and restamps them from the calling state. Epsilon of the Engram norms is a constructor argument (see <see cref="Hy4FlashEngramLayer"/>).</remarks>
 public sealed class Hy4FlashModel : IDisposable
 {
     private readonly IBackend _backend;
@@ -21,6 +22,8 @@ public sealed class Hy4FlashModel : IDisposable
     private readonly Tensor _lmHead;
     private readonly Hy4FlashMropeRows _indexedRope;
     private readonly Hy4FlashMropeRows _slidingRope;
+    private readonly object _gate = new();
+    private Hy4FlashSequenceState? _stamped;
     private int _disposed;
 
     /// <param name="maxPositions">Positions the rotary tables and caches cover.</param>
@@ -83,7 +86,7 @@ public sealed class Hy4FlashModel : IDisposable
     private Action<string, float[]>? _trace;
 
     /// <summary>A fresh sequence state.</summary>
-    public Hy4FlashSequenceState CreateState() => new([.. _layers.Select(l => l.CreateState(MaxPositions))]);
+    public Hy4FlashSequenceState CreateState() => new([.. _layers.Select(l => l.CreateState(MaxPositions))], MaxPositions);
 
     /// <summary>Runs <paramref name="tokenIds"/> at the positions after the state's cache and returns the logits of the last token, or of every token with <paramref name="allRows"/>.
     /// With <paramref name="images"/> given, each run of image placeholder ids takes its next entry (without it the placeholder id is an ordinary token, as in the reference): its feature rows replace the embeddings and its tokens get the frame positions (time constant,
@@ -97,6 +100,11 @@ public sealed class Hy4FlashModel : IDisposable
     /// <summary>Runs the tokens and returns the final normed hidden rows, <c>[rows, HiddenSize]</c> (the last row only unless <paramref name="allRows"/>).</summary>
     public float[] ForwardHidden(ReadOnlySpan<int> tokenIds, Hy4FlashSequenceState state, bool allRows = false, IReadOnlyList<Hy4FlashImage>? images = null)
     {
+        lock (_gate) return ForwardLocked(tokenIds, state, allRows, images);
+    }
+
+    private float[] ForwardLocked(ReadOnlySpan<int> tokenIds, Hy4FlashSequenceState state, bool allRows, IReadOnlyList<Hy4FlashImage>? images)
+    {
         ArgumentNullException.ThrowIfNull(state);
         int tokens = tokenIds.Length, h = _cfg.HiddenSize, hc = _cfg.HcMult, start = state.Length;
         if (tokens < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
@@ -107,6 +115,9 @@ public sealed class Hy4FlashModel : IDisposable
         state.Ids.CopyTo(ids, 0);
         tokenIds.CopyTo(ids.AsSpan(start));
 
+        // The rows are about to be written for this state: until the call succeeds no state owns them.
+        _stamped = null;
+        Restamp(state, start);
         float[] embedded = new float[tokens * h];
         for (int t = 0; t < tokens; t++) _embedding.Read(tokenIds[t], embedded.AsSpan(t * h, h));
         _trace?.Invoke("embed", embedded.ToArray());
@@ -129,6 +140,7 @@ public sealed class Hy4FlashModel : IDisposable
         }
         state.Ids.AddRange(tokenIds.ToArray());
         state.Length = start + tokens;
+        _stamped = state;
 
         _head.Gates(stream, tokens, out float[] pre, out _);
         float[] collapsed = _head.Collapse(stream, pre, tokens);
@@ -150,36 +162,59 @@ public sealed class Hy4FlashModel : IDisposable
     // Text tokens take consecutive positions; an image run takes its frame positions and its feature rows, and the next text token continues one past the largest.
     private void AssignPositions(ReadOnlySpan<int> ids, int start, Hy4FlashSequenceState state, IReadOnlyList<Hy4FlashImage>? images, float[] embedded)
     {
-        int h = _cfg.HiddenSize, m = _cfg.Vision.SpatialMergeSize, next = state.NextPosition;
+        int h = _cfg.HiddenSize, m = _cfg.Vision.SpatialMergeSize, next = state.NextPosition, used = state.ImagesUsed;
+        if (images is not null && ids.Length > 0 && ids[0] == _cfg.ImageTokenId && state.Ids.Count > 0 && state.Ids[^1] == _cfg.ImageTokenId)
+            throw new ArgumentException("An image placeholder run is split across two Forward calls; a run must lie inside one call.", nameof(ids));
         for (int t = 0; t < ids.Length;)
         {
             if (images is null || ids[t] != _cfg.ImageTokenId)
             {
-                _indexedRope.SetPosition(start + t, next, next, next);
-                _slidingRope.SetPosition(start + t, next, next, next);
+                SetSlot(state, start + t, next, next, next);
                 next++;
                 t++;
                 continue;
             }
             int end = t;
             while (end < ids.Length && ids[end] == _cfg.ImageTokenId) end++;
-            if (state.ImagesUsed >= images.Count) throw new ArgumentException("An image placeholder run has no image to take.", nameof(images));
-            Hy4FlashImage image = images[state.ImagesUsed++];
+            if (used >= images.Count) throw new ArgumentException("An image placeholder run has no image to take.", nameof(images));
+            Hy4FlashImage image = images[used];
+            if (image.GridHeight < 1 || image.GridWidth < 1 || image.GridHeight % m != 0 || image.GridWidth % m != 0)
+                throw new ArgumentException($"An image's patch grid must be a positive multiple of the merge size {m} on each side.", nameof(images));
             int rows = image.GridHeight / m, cols = image.GridWidth / m + 1;
             if (end - t != rows * cols || image.Features.Length != rows * cols * h)
                 throw new ArgumentException($"The image yields {rows * cols} tokens but its placeholder run holds {end - t}.", nameof(images));
             image.Features.CopyTo(embedded.AsSpan(t * h, rows * cols * h));
             for (int r = 0; r < rows; r++)
                 for (int c = 0; c < cols; c++)
-                {
-                    int slot = start + t + r * cols + c;
-                    _indexedRope.SetPosition(slot, next, next + r, next + c);
-                    _slidingRope.SetPosition(slot, next, next + r, next + c);
-                }
+                    SetSlot(state, start + t + r * cols + c, next, next + r, next + c);
             next += Math.Max(rows - 1, cols - 1) + 1;
+            used++;
             t = end;
         }
+        // Committed only once every run has validated, so a refused call leaves the state's counters as they were.
         state.NextPosition = next;
+        state.ImagesUsed = used;
+    }
+
+    // Writes one slot's position triple into the state (which keeps it for restamping) and into the shared rows.
+    private void SetSlot(Hy4FlashSequenceState state, int slot, int time, int height, int width)
+    {
+        state.Times[slot] = time;
+        state.Heights[slot] = height;
+        state.Widths[slot] = width;
+        _indexedRope.SetPosition(slot, time, height, width);
+        _slidingRope.SetPosition(slot, time, height, width);
+    }
+
+    // The rows are shared by every state of the model. A state whose slots were not the last ones written is restamped from its own triples before it runs.
+    private void Restamp(Hy4FlashSequenceState state, int start)
+    {
+        if (ReferenceEquals(_stamped, state)) return;
+        for (int slot = 0; slot < start; slot++)
+        {
+            _indexedRope.SetPosition(slot, state.Times[slot], state.Heights[slot], state.Widths[slot]);
+            _slidingRope.SetPosition(slot, state.Times[slot], state.Heights[slot], state.Widths[slot]);
+        }
     }
 
     private Hy4FlashEngramLayer BuildEngram(int layerIndex, IHy4FlashWeightSource source, float eps)
