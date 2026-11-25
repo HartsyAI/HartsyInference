@@ -275,7 +275,7 @@ same branch applies.
 | 6. Swarm classification | See [SwarmUI core](#swarmui-core) | Could not confirm |
 | Picture label | `MiniMaxH3TextEncoding.cs:188` | Confirmed mismatch with image node |
 | Layer 50 tap | `MiniMaxH3TextEncoder.cs:86` | Confirmed |
-| comfy_attention blob | No engine handling found | Confirmed gap |
+| comfy_attention blob | Dropped by `RouteKey` through the shared `ComfyAttentionHint` (`ModelAssets/Quant`); the blob's value is not read here | Dropped, not honoured: the engine runs float attention by default where ComfyUI may run the named backend; INT8 attention is opt-in (`numerics.int8AttnV2`, CUDA), unverified against Comfy |
 | Qwen3.8 runtime | Grep for `qwen3\.8`, `qwen38`, `qwen3_8`: only Qwen3-8B matches | **No** |
 
 ## Feature matrix (from the plan, unchanged)

@@ -1,10 +1,22 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Audio.Layers;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Audio.Models.VoiceIsolator;
+
+/// <summary>The tensors one band reads on every call: its encoder projection and its decoder head, resolved by name once at load.</summary>
+internal sealed record BandWeights(Tensor EncoderNormWeight, Tensor EncoderNormBias, Tensor EncoderWeight, Tensor EncoderBias,
+    Tensor HeadNormWeight, Tensor HeadNormBias, Tensor HeadWeight, Tensor HeadBias, Tensor OutWeight, Tensor OutBias)
+{
+    public static BandWeights Resolve(IReadOnlyDictionary<string, Tensor> w, int band) => new(
+        w[$"encoders.{band}.0.weight"], w[$"encoders.{band}.0.bias"], w[$"encoders.{band}.1.weight"], w[$"encoders.{band}.1.bias"],
+        w[$"denoise_decoder.heads.{band}.0.weight"], w[$"denoise_decoder.heads.{band}.0.bias"],
+        w[$"denoise_decoder.heads.{band}.1.weight"], w[$"denoise_decoder.heads.{band}.1.bias"],
+        w[$"denoise_decoder.heads.{band}.3.weight"], w[$"denoise_decoder.heads.{band}.3.bias"]);
+}
 
 /// <summary>The Inworld Voice Isolator network over one clip: STFT, band tokens, dual-path attention and Mamba blocks, per-band
 /// decoder heads, a bounded complex mask plus residual, and the inverse STFT added to the input. Weights stay F32 and borrow the
@@ -17,6 +29,7 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     private readonly object?[] _blocks;
     private readonly Tensor _bandEmbedding;
     private readonly Tensor? _lookaheadEmbedding;
+    private readonly BandWeights[] _bands;
     private readonly float[] _decoderScale;
     private readonly float[] _decoderShift;
     private readonly VoiceIsolatorSpectral _spectral;
@@ -49,6 +62,11 @@ public sealed class VoiceIsolatorNetwork : IDisposable
         if (_lookaheadEmbedding is not null)
         {
             VoiceIsolatorOps.RequireF32(_lookaheadEmbedding, "lookahead_embedding.weight", (long)config.LookaheadChoices.Count * config.Width);
+        }
+        _bands = new BandWeights[_edges.Length];
+        for (int band = 0; band < _bands.Length; band++)
+        {
+            _bands[band] = BandWeights.Resolve(_weights, band);
         }
         _blocks = new object?[config.BlockTypes.Count];
         for (int i = 0; i < _blocks.Length; i++)
@@ -214,11 +232,12 @@ public sealed class VoiceIsolatorNetwork : IDisposable
                     inP[(long)f * count + 2 * (j - start) + 1] = im[(long)f * bins + j];
                 }
             }
+            BandWeights weights = _bands[band];
             Tensor normed = new(input.Shape, DType.F32);
-            backend.LayerNorm(normed, input, _weights[$"encoders.{band}.0.weight"], _weights[$"encoders.{band}.0.bias"], 1e-5f);
+            backend.LayerNorm(normed, input, weights.EncoderNormWeight, weights.EncoderNormBias, 1e-5f);
             input.Dispose();
-            Tensor projected = WhisperOps.ProjectLinear(backend, normed, _weights[$"encoders.{band}.1.weight"],
-                _weights[$"encoders.{band}.1.bias"], 1, frames, count, width);
+            Tensor projected = WhisperOps.ProjectLinear(backend, normed, weights.EncoderWeight,
+                weights.EncoderBias, 1, frames, count, width);
             normed.Dispose();
             float* projP = (float*)projected.DataPointer;
             float* bandEmbedding = embeddingP + (long)band * width;
@@ -257,15 +276,16 @@ public sealed class VoiceIsolatorNetwork : IDisposable
                     rowP[(long)f * width + c] = source[(long)f * width + c] * (1f + _decoderScale[c]) + _decoderShift[c];
                 }
             }
+            BandWeights weights = _bands[band];
             Tensor normed = new(rows.Shape, DType.F32);
-            backend.LayerNorm(normed, rows, _weights[$"denoise_decoder.heads.{band}.0.weight"], _weights[$"denoise_decoder.heads.{band}.0.bias"], 1e-5f);
+            backend.LayerNorm(normed, rows, weights.HeadNormWeight, weights.HeadNormBias, 1e-5f);
             rows.Dispose();
-            Tensor hidden = WhisperOps.ProjectLinear(backend, normed, _weights[$"denoise_decoder.heads.{band}.1.weight"],
-                _weights[$"denoise_decoder.heads.{band}.1.bias"], 1, frames, width, width);
+            Tensor hidden = WhisperOps.ProjectLinear(backend, normed, weights.HeadWeight,
+                weights.HeadBias, 1, frames, width, width);
             normed.Dispose();
-            VoiceIsolatorOps.Gelu(hidden);
-            Tensor head = WhisperOps.ProjectLinear(backend, hidden, _weights[$"denoise_decoder.heads.{band}.3.weight"],
-                _weights[$"denoise_decoder.heads.{band}.3.bias"], 1, frames, width, 4 * bandBins);
+            Activations.ErfGelu(hidden);
+            Tensor head = WhisperOps.ProjectLinear(backend, hidden, weights.OutWeight,
+                weights.OutBias, 1, frames, width, 4 * bandBins);
             hidden.Dispose();
             float* headP = (float*)head.DataPointer;
             for (int f = 0; f < frames; f++)

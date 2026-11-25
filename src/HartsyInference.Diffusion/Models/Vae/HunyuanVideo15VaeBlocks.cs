@@ -331,42 +331,91 @@ internal static class HunyuanVideo15VaeShuffle
     public static Tensor RepeatToChannels(IBackend backend, Tensor z, int outC)
         => RepeatChannels(backend, z, Quotient(outC, (int)z.Shape[1], "decoder start shortcut repeat"));
 
-    /// <summary>Single-head attention over all <c>T·H·W</c> tokens with MovieRoll's frame-causal mask: a token attends to every token of its own
-    /// frame and of earlier frames. Scale is <c>1/√C</c>. Host arithmetic, quadratic in tokens: tiny-config only.</summary>
-    public static Tensor FrameCausalAttention(Tensor q, Tensor k, Tensor v)
+    /// <summary>Single-head attention over all <c>T·H·W</c> tokens with MovieRoll's frame-causal mask (<c>prepare_causal_attention_mask</c>): a
+    /// token attends to every token of its own frame and of every earlier frame. Scale is <c>1/√C</c>. This is not per-frame attention: earlier
+    /// frames stay visible. It runs on the backend, one head-major SDPA per query frame over the keys that frame may see, so no S×S mask exists.
+    /// <paramref name="q"/>, <paramref name="k"/> and <paramref name="v"/> are <c>[1, C, T, H, W]</c>; the caller disposes the result.</summary>
+    public static Tensor FrameCausalAttention(IBackend backend, Tensor q, Tensor k, Tensor v)
     {
         (int c, int t, int hh, int ww) = Dims(q);
-        int hw = hh * ww, n = t * hw;
-        ReadOnlySpan<float> qs = q.AsReadOnlySpan<float>(), ks = k.AsReadOnlySpan<float>(), vs = v.AsReadOnlySpan<float>();
-        Tensor o = Alloc(c, t, hh, ww);
-        Span<float> d = o.AsSpan<float>();
-        float scale = 1f / MathF.Sqrt(c);
-        float[] scores = new float[n];
-        for (int nq = 0; nq < n; nq++)
+        int hw = hh * ww;
+        long n = (long)t * hw;
+        RequireFrameAttention(c, t, hw);
+        Tensor? qt = null, kt = null, vt = null, tokens = null;
+        try
         {
-            int limit = (nq / hw + 1) * hw;
-            float max = float.NegativeInfinity;
-            for (int m = 0; m < limit; m++)
+            qt = TokenMajorTokens(backend, q, c, n);
+            kt = TokenMajorTokens(backend, k, c, n);
+            vt = TokenMajorTokens(backend, v, c, n);
+            tokens = new Tensor(new TensorShape([1L, 1L, n, c]), DType.F32);
+            float scale = 1f / MathF.Sqrt(c);
+            for (int f = 0; f < t; f++)
             {
-                double dot = 0;
-                for (int ci = 0; ci < c; ci++) dot += (double)qs[ci * n + nq] * ks[ci * n + m];
-                scores[m] = (float)dot * scale;
-                if (scores[m] > max) max = scores[m];
+                long visible = (long)(f + 1) * hw;
+                Tensor? qf = null, kf = null, vf = null, of = null;
+                try
+                {
+                    qf = new Tensor(new TensorShape([1L, 1L, hw, c]), DType.F32);
+                    kf = new Tensor(new TensorShape([1L, 1L, visible, c]), DType.F32);
+                    vf = new Tensor(new TensorShape([1L, 1L, visible, c]), DType.F32);
+                    of = new Tensor(new TensorShape([1L, 1L, hw, c]), DType.F32);
+                    StridedCopies.SliceAxis(backend, qf, qt, 2, (long)f * hw, hw);
+                    StridedCopies.SliceAxis(backend, kf, kt, 2, 0, visible);
+                    StridedCopies.SliceAxis(backend, vf, vt, 2, 0, visible);
+                    backend.ScaledDotProductAttention(of, qf, kf, vf, null, scale);
+                    StridedCopies.ScatterAxis(backend, tokens, of, 2, (long)f * hw);
+                }
+                finally
+                {
+                    qf?.Dispose();
+                    kf?.Dispose();
+                    vf?.Dispose();
+                    of?.Dispose();
+                }
             }
-            double denom = 0;
-            for (int m = 0; m < limit; m++)
-            {
-                scores[m] = MathF.Exp(scores[m] - max);
-                denom += scores[m];
-            }
-            for (int ci = 0; ci < c; ci++)
-            {
-                double acc = 0;
-                for (int m = 0; m < limit; m++) acc += scores[m] * vs[ci * n + m];
-                d[ci * n + nq] = (float)(acc / denom);
-            }
+            return ChannelFirst(backend, tokens, c, t, hh, ww);
         }
-        return o;
+        finally
+        {
+            qt?.Dispose();
+            kt?.Dispose();
+            vt?.Dispose();
+            tokens?.Dispose();
+        }
+    }
+
+    /// <summary>Size guard for the frame-causal attention. Two things must be indexable: the token count (its K and V are <c>[1, 1, N, C]</c>
+    /// tensors) and the per-frame score block, <c>hw × N</c> elements, which is the largest matrix a single frame's SDPA materialises on a backend
+    /// that does not tile it. Refusing here keeps the indexing failure in this layer's message instead of an out-of-range deep in a kernel.</summary>
+    internal static void RequireFrameAttention(int c, int t, int hw)
+    {
+        if (c <= 0 || t <= 0 || hw <= 0) throw new ArgumentException("Frame attention needs positive channels, frames and tokens per frame.");
+        long n = (long)t * hw;
+        if (n > int.MaxValue || (long)hw * n > int.MaxValue)
+            throw new ArgumentException($"Frame-causal attention over {n} tokens ({hw} per frame) needs a score block of {(long)hw * n} elements, beyond the indexable limit; the clip is too large for one attention.");
+    }
+
+    /// <summary>The channel-first <c>[1, C, N]</c> view of <paramref name="src"/> as token-major <c>[1, 1, N, C]</c>, copied on the backend.</summary>
+    private static Tensor TokenMajorTokens(IBackend backend, Tensor src, int c, long n)
+    {
+        Tensor dst = new(new TensorShape([1L, 1L, n, c]), DType.F32);
+        long[] dims = [1, 1, n, c];
+        // dst[0, 0, i, j] = src[j·N + i]: the destination walks rows, the source walks channels.
+        StridedCopySpec spec = new(new StridedView(dims, [0L, 0L, c, 1L]), new StridedView(dims, [0L, 0L, 1L, n]));
+        backend.CopyStrided(dst, src, in spec);
+        return dst;
+    }
+
+    /// <summary>The inverse of <see cref="TokenMajorTokens"/>: token-major <c>[1, 1, N, C]</c> back to <c>[1, C, T, H, W]</c>.</summary>
+    private static Tensor ChannelFirst(IBackend backend, Tensor tokens, int c, int t, int hh, int ww)
+    {
+        Tensor dst = Alloc(c, t, hh, ww);
+        long n = (long)t * hh * ww;
+        long[] dims = [1, 1, n, c];
+        // dst[j·N + i] = tokens[i, j]: the destination walks channels, the source walks rows.
+        StridedCopySpec spec = new(new StridedView(dims, [0L, 0L, 1L, n]), new StridedView(dims, [0L, 0L, c, 1L]));
+        backend.CopyStrided(dst, tokens, in spec);
+        return dst;
     }
 }
 
@@ -432,7 +481,7 @@ internal sealed class HunyuanVideo15VaeMidAttention
         Tensor hn = _norm.Forward(backend, x);
         Tensor q = _q.Forward(backend, hn), k = _k.Forward(backend, hn), v = _v.Forward(backend, hn);
         hn.Dispose();
-        Tensor attn = HunyuanVideo15VaeShuffle.FrameCausalAttention(q, k, v);
+        Tensor attn = HunyuanVideo15VaeShuffle.FrameCausalAttention(backend, q, k, v);
         q.Dispose(); k.Dispose(); v.Dispose();
         Tensor projected = _proj.Forward(backend, attn);
         attn.Dispose();

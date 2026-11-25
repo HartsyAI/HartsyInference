@@ -190,7 +190,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                 Logs.Debug($"{Family} step {i + 1}/{steps} done in {stepSw.ElapsedMilliseconds}ms");
                 if (onProgress is not null)
                 {
-                    using Tensor preview = Flux2LatentOps.FromPackedTokens(latent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    using Tensor preview = Flux2LatentOps.FromPackedTokens(Backend, latent, patH, patW, _bnMean, _bnVar, _bnEps,
                         _config.VaeLatentChannels, _config.PatchSize);
                     onProgress(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
@@ -228,7 +228,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             Tensor vaeLatent;
             using (Tensor finalLatent = latent)
             {
-                vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
                     _config.VaeLatentChannels, _config.PatchSize);
             }
             Tensor image;
@@ -320,7 +320,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                         $"FLUX.3 reference images need sides that are multiples of {_config.VaeDownscaleFactor}; got {w}x{h}.");
                 }
                 using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, image);
-                parts.Add(Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize));
+                parts.Add(Flux2LatentOps.ToPackedTokens(Backend, vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize));
                 shapes.Add((h / _config.VaeDownscaleFactor, w / _config.VaeDownscaleFactor));
             }
             if (parts.Count == 1)
@@ -348,11 +348,11 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         int patH, int patW, int seed, int startStep, bool keepSource)
     {
         using Tensor noise = TakeOrCreateNoise(request, new TensorShape(1, _config.InChannels, patH, patW), seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(noise);
+        Tensor packedNoise = Flux2LatentOps.PackHost(noise);
         if (request is not ImageToImageRequest img2img)
             return (packedNoise, null);
         using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
-        Tensor source = Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+        Tensor source = Flux2LatentOps.ToPackedTokensHost(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
         Tensor noised = new Tensor(packedNoise.Shape, DType.F32);
         scheduler.AddNoise(noised, source, packedNoise, startStep);
         packedNoise.Dispose();
@@ -375,7 +375,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             return;
         }
         using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, patH, patW), noiseSeed);
-        using Tensor freshPacked = Flux2LatentOps.Pack(freshNoise);
+        using Tensor freshPacked = Flux2LatentOps.PackHost(freshNoise);
         using Tensor noisedSource = new Tensor(latent.Shape, DType.F32);
         FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(noisedSource, source, freshPacked, sigma);
         MaskBlendUtilities.BlendPackedInPlace(latent, noisedSource, packedMask);

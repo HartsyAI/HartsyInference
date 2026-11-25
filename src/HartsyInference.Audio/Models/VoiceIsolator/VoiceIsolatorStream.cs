@@ -22,6 +22,9 @@ public sealed class VoiceIsolatorStream : IDisposable
     private readonly int _crossfadeFrames;
     private readonly int _lookahead;
     private readonly int _bins;
+    private readonly float[] _analysisRe;
+    private readonly float[] _analysisIm;
+    private readonly float[] _analysisWindow;
     private readonly List<float[]> _raw = [];
     private readonly List<(float[] Re, float[] Im)> _spectra = [];
     private readonly List<int> _boundaries = [];
@@ -40,7 +43,7 @@ public sealed class VoiceIsolatorStream : IDisposable
 
     /// <summary>Starts a session on a causal network, at the look-ahead given or the checkpoint default.</summary>
     /// <param name="blockFrames">Frames computed together: a throughput knob that adds no latency.</param>
-    /// <param name="cacheFrames">Frames of attention past each query keeps; null takes the checkpoint's attention window.</param>
+    /// <param name="cacheFrames">Keys each query sees, its own included (capped by the checkpoint's window); null takes the checkpoint's attention window.</param>
     /// <param name="windowFrames">Window of the two-lane mode; null turns the windows off.</param>
     /// <param name="crossfadeFrames">Crossfade of the two-lane mode; required with <paramref name="windowFrames"/>.</param>
     /// <param name="lookahead">Look-ahead in frames, one of the checkpoint trained positions; null takes its default.</param>
@@ -70,6 +73,9 @@ public sealed class VoiceIsolatorStream : IDisposable
         _config = network.Config;
         _spectral = network.Spectral;
         _bins = _spectral.Bins;
+        _analysisRe = new float[(long)blockFrames * _bins];
+        _analysisIm = new float[(long)blockFrames * _bins];
+        _analysisWindow = new float[_config.NFft];
         _blockFrames = blockFrames;
         _windowFrames = windowFrames;
         _crossfadeFrames = crossfadeFrames ?? 0;
@@ -135,8 +141,8 @@ public sealed class VoiceIsolatorStream : IDisposable
         while (_frames < limit)
         {
             int count = (int)Math.Min(Math.Min(_blockFrames, limit - _frames), NextCut() - _frames);
-            float[] re = new float[(long)count * _bins];
-            float[] im = new float[(long)count * _bins];
+            float[] re = _analysisRe;
+            float[] im = _analysisIm;
             for (int f = 0; f < count; f++)
             {
                 AnalyzeFrame(_frames + f, re, im, f);
@@ -167,7 +173,7 @@ public sealed class VoiceIsolatorStream : IDisposable
     {
         int n = _config.NFft;
         long start = frame * _config.HopLength - n / 2;
-        float[] window = new float[n];
+        float[] window = _analysisWindow;
         long total = _audioBase + _audio.Length;
         for (int i = 0; i < n; i++)
         {
