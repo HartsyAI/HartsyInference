@@ -15,6 +15,8 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly LongCatConfig _config;
     private readonly LongCatBlock[] _blocks;
+    private List<Tensor> _owned = [];
+    private bool _loaded;
     private readonly WanRope _rope;
     private readonly WanForwardCaches _caches = new();
     private readonly Dictionary<(int Frames, int TokensPerFrame), Tensor> _frameIndexes = [];
@@ -54,24 +56,49 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     public Action<int>? BeforeBlockForward { get; set; }
 
     /// <summary>Reads every tensor from the checkpoint dictionary (reference key names).</summary>
+    /// <remarks>All-or-nothing: the new widened copies are collected apart, and the previous ones are released only after every
+    /// tensor has loaded. A load that throws releases both sets and leaves the transformer unloaded, so <see cref="Forward"/> refuses
+    /// (it never reads a released tensor).</remarks>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _patchW2d = WanDitOps.Reshape2d(w["x_embedder.proj.weight"], _config.HiddenSize, _config.PatchVector);
-        _patchBias = TensorCasts.LoadF32(w, "x_embedder.proj.bias");
-        _time1W = w["t_embedder.mlp.0.weight"];
-        _time1B = w["t_embedder.mlp.0.bias"];
-        _time2W = w["t_embedder.mlp.2.weight"];
-        _time2B = w["t_embedder.mlp.2.bias"];
-        _text1W = w["y_embedder.y_proj.0.weight"];
-        _text1B = w["y_embedder.y_proj.0.bias"];
-        _text2W = w["y_embedder.y_proj.2.weight"];
-        _text2B = w["y_embedder.y_proj.2.bias"];
-        _finalAdaW = w["final_layer.adaLN_modulation.1.weight"];
-        _finalAdaB = w["final_layer.adaLN_modulation.1.bias"];
-        _finalW = w["final_layer.linear.weight"];
-        _finalB = w["final_layer.linear.bias"];
-        for (int i = 0; i < _blocks.Length; i++)
-            _blocks[i].LoadWeights(w, $"blocks.{i}");
+        List<Tensor> previous = _owned;
+        List<Tensor> owned = [];
+        _loaded = false;
+        try
+        {
+            if (w["x_embedder.proj.weight"].DType == DType.I8)
+                throw new InvalidDataException("The x_embedder projection must be dense; a quantized one has no patchify path.");
+            _patchW2d = WanDitOps.Reshape2d(w["x_embedder.proj.weight"], _config.HiddenSize, _config.PatchVector);
+            owned.Add(_patchW2d);
+            _patchBias = LongCatOps.WidenF32(w, "x_embedder.proj.bias", owned);
+            _time1W = w["t_embedder.mlp.0.weight"];
+            _time1B = LongCatOps.WidenF32(w, "t_embedder.mlp.0.bias", owned);
+            _time2W = w["t_embedder.mlp.2.weight"];
+            _time2B = LongCatOps.WidenF32(w, "t_embedder.mlp.2.bias", owned);
+            _text1W = w["y_embedder.y_proj.0.weight"];
+            _text1B = LongCatOps.WidenF32(w, "y_embedder.y_proj.0.bias", owned);
+            _text2W = w["y_embedder.y_proj.2.weight"];
+            _text2B = LongCatOps.WidenF32(w, "y_embedder.y_proj.2.bias", owned);
+            _finalAdaW = w["final_layer.adaLN_modulation.1.weight"];
+            _finalAdaB = LongCatOps.WidenF32(w, "final_layer.adaLN_modulation.1.bias", owned);
+            _finalW = w["final_layer.linear.weight"];
+            _finalB = LongCatOps.WidenF32(w, "final_layer.linear.bias", owned);
+            for (int i = 0; i < _blocks.Length; i++)
+                _blocks[i].LoadWeights(w, $"blocks.{i}", owned);
+        }
+        catch
+        {
+            foreach (Tensor copy in owned)
+                copy.Dispose();
+            foreach (Tensor stale in previous)
+                stale.Dispose();
+            _owned = [];
+            throw;
+        }
+        _owned = owned;
+        _loaded = true;
+        foreach (Tensor stale in previous)
+            stale.Dispose();
     }
 
     /// <summary>Every weight: the shared ones, then each block's.</summary>
@@ -105,6 +132,8 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, ReadOnlySpan<float> frameTimesteps, in LongCatConditioning conditioning,
         int validTextTokens = -1)
     {
+        if (!_loaded)
+            throw new InvalidOperationException("The transformer has no weights: LoadWeights was never called, or it failed.");
         if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.InChannels)
             throw new ArgumentException($"The latent is [1, {_config.InChannels}, T, H, W]; got {latent.Shape}.", nameof(latent));
         int frames = (int)latent.Shape[2], height = (int)latent.Shape[3], width = (int)latent.Shape[4];
@@ -117,13 +146,15 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
                 $"Give one timestep or one per latent frame ({frames}); got {frameTimesteps.Length}.", nameof(frameTimesteps));
         conditioning.Validate(frames);
 
-        Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
-        Probe?.Invoke("x_embedder", hidden);
-
+        // The caption and timestep embeddings run first: they can throw (a bad validTextTokens), and the patch embedding is the one tensor
+        // that would leak on that path.
         using Tensor timeEmbed = TimestepEmbedding(backend, frameTimesteps, frames);
         Probe?.Invoke("t_embedder", timeEmbed);
         using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
         Probe?.Invoke("y_embedder", text);
+
+        Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+        Probe?.Invoke("x_embedder", hidden);
 
         int roperef = conditioning.NumRefLatents > 0 ? conditioning.RefImgIndex + 1 : 0;
         LongCatConditioning ropeConditioning = conditioning;
@@ -191,9 +222,18 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         backend.SliceRows(kept, projected, 0);
         if (!_config.TextTokensZeroPad)
             return LongCatOps.Copy(backend, kept);
+        using Tensor zeros = new(new TensorShape(rows - valid, dim), DType.F32);
+        backend.Fill(zeros, 0f);
         Tensor padded = new(new TensorShape(rows, dim), DType.F32);
-        using Tensor zeros = LongCatOps.Zeros(new TensorShape(rows - valid, dim));
-        backend.Concat(padded, [kept, zeros], 0);
+        try
+        {
+            backend.Concat(padded, [kept, zeros], 0);
+        }
+        catch
+        {
+            padded.Dispose();
+            throw;
+        }
         return padded;
     }
 
@@ -230,7 +270,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         return index;
     }
 
-    /// <summary>Drops the references; the weight tensors belong to the checkpoint that supplied them.</summary>
+    /// <summary>Disposes the widened copies and cached indexes it owns; the checkpoint's own tensors are not touched.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -238,6 +278,9 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             foreach (Tensor index in _frameIndexes.Values)
                 index.Dispose();
             _frameIndexes.Clear();
+            foreach (Tensor owned in _owned)
+                owned.Dispose();
+            _owned.Clear();
             _patchW2d = _patchBias = _time1W = _time1B = _time2W = _time2B = _text1W = _text1B = _text2W = _text2B = null;
             _finalAdaW = _finalAdaB = _finalW = _finalB = null;
         }

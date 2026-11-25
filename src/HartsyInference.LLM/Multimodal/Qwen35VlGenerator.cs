@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Ssm;
@@ -61,7 +62,24 @@ public sealed class Qwen35VlGenerator
         System.Text.StringBuilder sb = new();
 
         _model.ResetState();
-        float[] logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen);
+        float[] logits;
+        {
+            // Multimodal RoPE: the image's placeholder run takes (start + t, start + row, start + col) over its merged grid and the text after it
+            // resumes at start + max(T, H, W), not at the sequence index. The decode steps below follow that offset.
+            int side = (int)Math.Round(Math.Sqrt(imgTokens));
+            if (side * side != imgTokens)
+                throw new NotSupportedException($"The image encoder returned {imgTokens} tokens, which is not a square merged grid.");
+            const int placeholder = -1;
+            int[] layout = new int[seqLen];
+            for (int i = 0; i < seqLen; i++) layout[i] = i >= pre.Length && i < pre.Length + imgTokens ? placeholder : 0;
+            int[] positions = MRopePositions.Build(layout, placeholder, [new MRopeImageGrid(1, side, side)], out int nextPosition);
+            (Tensor cos, Tensor sin) = _model.BuildMultimodalRope(positions, seqLen, 0, seqLen);
+            using (cos)
+            using (sin)
+            {
+                logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen, cos, sin, nextPosition);
+            }
+        }
         int token = sampler.Next(new Span<float>(logits), history);
 
         for (int step = 0; step < maxTokens && !stops.Contains(token); step++)
