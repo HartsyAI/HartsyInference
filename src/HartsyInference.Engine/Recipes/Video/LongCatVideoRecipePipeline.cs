@@ -59,25 +59,17 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
 
         // The DiT is placed by the streaming scope: resident when it fits, block-streamed when it does not. Each finished step
         // returns the stream's pool reservations (EndStep), which the scope requires.
-        float[] latents;
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
-        try
-        {
-            using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-video"))
+        float[] latents = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+            () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-video"),
+            onStep =>
             {
                 LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
                     settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale,
-                    Mode: mode, NumCondLatents: condLatents, CondLatents: firstFrame,
-                    OnProgress: step => { stream.EndStep(); bridge(step); }, Cancel: cancel);
-                latents = _pipeline.Denoise(run).Latents;
-            }
-            _backend.Sync();
-        }
-        finally
-        {
-            // Freed on the failure path too: a cancel or an exception mid-denoise must not leave the DiT's resident prefix on the device.
-            _backend.FreeWeights(_parts.Dit.EnumerateWeights());
-        }
+                    Mode: mode, NumCondLatents: condLatents, CondLatents: firstFrame, OnProgress: onStep, Cancel: cancel);
+                return _pipeline.Denoise(run).Latents;
+            },
+            bridge);
         cancel.ThrowIfCancellationRequested();
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
