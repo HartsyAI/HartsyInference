@@ -296,6 +296,62 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>The owner object (if any) kept alive for this tensor's lifetime. See <see cref="SetKeepAlive"/>.</summary>
     internal object? KeepAliveOwner => _keepAlive;
 
+    /// <summary>The device write of a view that this tensor's host bytes do not show yet, 0 when none. An id, not the view: a reference would keep
+    /// an abandoned view, and its device buffer, alive as long as its owner. See <see cref="MarkViewedOwnersStale"/>.</summary>
+    private long _staleBehindWrite;
+
+    /// <summary>The id of the last device write bound to this tensor while it was a view.</summary>
+    private long _viewWriteId;
+
+    private static long _lastViewWriteId;
+
+#if !DEBUG
+    /// <summary>1 once a read behind a view has been reported; the report names the pattern, so one is enough.</summary>
+    private static int _staleReadReported;
+#endif
+
+    /// <summary>Called by a residency cache as an op's output is bound to this tensor on a device. When this tensor is a view
+    /// (<see cref="Reshape"/>, <see cref="ReinterpretAs"/>, <see cref="SliceRows"/>), the tensors it views keep their old host bytes: residency is
+    /// per tensor, so a reader of the owner gets the bytes from before the op.</summary>
+    /// <remarks>Writing through a view is not wrong by itself; a method may write one in place and return it. Reading the owner afterwards is,
+    /// and only on a GPU, so it passes every CPU test. <see cref="EnsureCpuData"/> reports that read.</remarks>
+    internal void MarkViewedOwnersStale()
+    {
+        _staleBehindWrite = 0;
+        if (_keepAlive is not Tensor)
+            return;
+        _viewWriteId = Interlocked.Increment(ref _lastViewWriteId);
+        for (Tensor? owner = _keepAlive as Tensor; owner is not null; owner = owner._keepAlive as Tensor)
+        {
+            owner._staleBehindWrite = _viewWriteId;
+        }
+    }
+
+    /// <summary>Called as this tensor's device bytes reach the host: a view shares its owners' host memory, so they are current again.</summary>
+    internal void ClearViewedOwnersStale()
+    {
+        for (Tensor? owner = _keepAlive as Tensor; owner is not null; owner = owner._keepAlive as Tensor)
+        {
+            if (owner._staleBehindWrite == _viewWriteId)
+            {
+                owner._staleBehindWrite = 0;
+            }
+        }
+    }
+
+    private void ReportStaleRead()
+    {
+        _staleBehindWrite = 0;
+        string message = $"Tensor {Shape} {DType} was read on the host after a backend op wrote a view of it: the new bytes are only in the view's "
+            + "device buffer, so this read returns the old ones. Write the op's output into a tensor of its own and reshape that.";
+#if DEBUG
+        throw new InvalidOperationException(message);
+#else
+        if (Interlocked.Exchange(ref _staleReadReported, 1) == 0)
+            Logging.Logs.Error(message);
+#endif
+    }
+
     /// <summary>Returns whether this tensor and <paramref name="other"/> have overlapping materialized host-storage ranges, without allocating a host buffer or invoking either tensor's GPU sync callback. Object identity is always an alias; two distinct lazy GPU-only tensors are not, because backends cache their device storage by tensor identity. Reshapes and borrowed subranges already have host pointers, so their overlap is detected.</summary>
     /// <remarks>
     /// Callers must validate both byte counts before using this helper. Keeping the check here is important: no
@@ -802,6 +858,8 @@ public sealed unsafe class Tensor : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureCpuData()
     {
+        if (_staleBehindWrite != 0)
+            ReportStaleRead();
         Action? sync = ClaimPrimarySync();
         sync?.Invoke();
         GpuBinding[]? extras = TakeExtraBindings();
