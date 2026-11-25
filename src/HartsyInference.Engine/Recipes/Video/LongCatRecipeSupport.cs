@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
@@ -53,9 +54,9 @@ internal static class LongCatRecipeSupport
     /// too late.</summary>
     internal const long SafetyBytes = GiB;
 
-    /// <summary>Rows per projection and FFN tile. It must match the tile heights in <c>LongCatBlock</c> (the FFN and the self-attention QKV), which
-    /// bound those intermediates to one tile rather than the whole clip.</summary>
-    internal const int ActivationTileRows = 4096;
+    /// <summary>Rows per projection and FFN tile: the block's shared tile height, which bounds the FFN and the self-attention QKV intermediates to one
+    /// tile rather than the whole clip.</summary>
+    internal const int ActivationTileRows = LongCatBlock.DefaultTileRows;
 
     /// <summary>The device headroom the streaming plan reserves before it sizes the resident prefix: the fixed context, pool and safety terms, plus
     /// the step's activations. Activations split by what the tiling bounds: the per-token block copies that stay whole (about 14 × hidden F32 elements
