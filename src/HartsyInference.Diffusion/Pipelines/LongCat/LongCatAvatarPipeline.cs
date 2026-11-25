@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Requests;
 
 namespace HartsyInference.Diffusion.Pipelines.LongCat;
 
@@ -20,7 +21,7 @@ public sealed record LongCatAvatarRun(
     int Steps, LongCatAvatarSchedule.Kind Kind, float Shift,
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
-    int RefImgIndex = 10, bool UseKvCache = true);
+    int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default);
 
 /// <summary>The sigmas (shifted, with the terminal zero), the timesteps (sigma·1000), and the final latents.</summary>
 public sealed record LongCatAvatarResult(float[] Latents, float[] Sigmas, float[] Timesteps);
@@ -90,8 +91,10 @@ public sealed class LongCatAvatarPipeline
                 cache = _dit.BuildKvCache(_backend, condLatent, conditioning);
             }
 
+            long started = System.Diagnostics.Stopwatch.GetTimestamp();
             for (int i = 0; i < run.Steps; i++)
             {
+                run.Cancel.ThrowIfCancellationRequested();
                 float t = timesteps[i], dt = sigmasWithZero[i + 1] - sigmasWithZero[i];
                 float[] velocity = Velocity(run, cache, latents, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond);
 
@@ -104,6 +107,7 @@ public sealed class LongCatAvatarPipeline
                             int vIndex = (c * noisy + f) * hw + e;
                             latents[index] += dt * -velocity[vIndex];
                         }
+                run.OnProgress?.Invoke(new GenerationProgress(i + 1, run.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
             }
         }
         finally

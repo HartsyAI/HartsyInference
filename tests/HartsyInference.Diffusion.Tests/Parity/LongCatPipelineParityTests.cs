@@ -48,7 +48,7 @@ public sealed class LongCatPipelineParityTests
         {
             (int frames, int height, int width) = Shape(name);
             return new LongCatRun(channels, frames, height, width, Read(dir, document, $"{name}.init"), positive, negative, steps,
-                distill, shift, guidance, mode, numCond, cond, enhance);
+                distill, shift, guidance, mode, numCond, cond, enhance, RecordTrace: true);
         }
 
         void Compare(string name, LongCatRun run)
