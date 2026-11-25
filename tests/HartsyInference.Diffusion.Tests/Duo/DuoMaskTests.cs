@@ -71,13 +71,15 @@ public sealed class DuoMaskTests
     }
 
     [Fact]
-    public void Segments_RefuseRowsNoGroupCoversAndKeysPastTheEnd()
+    public void Segments_RefuseGapsOverlapsAndKeysPastTheEnd()
     {
         DuoMaskRect[] gap = [new(0, 2, 0, 4), new(3, 5, 0, 4)];
         Assert.Throws<ArgumentException>(() => DuoMask.Segments(gap, 5, 4));
         Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 2, 0, 4)], 3, 4));
         Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 2, 0, 5)], 2, 4));
         Assert.Throws<ArgumentException>(() => DuoMask.Segments([], 2, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 3, 0, 4), new DuoMaskRect(2, 5, 0, 4)], 5, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 2, 0, 4), new DuoMaskRect(0, 2, 0, 4)], 2, 4));
     }
 
     [Fact]

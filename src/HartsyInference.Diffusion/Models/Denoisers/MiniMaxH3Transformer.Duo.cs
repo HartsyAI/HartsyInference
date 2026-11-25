@@ -14,7 +14,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 public sealed unsafe partial class MiniMaxH3Transformer
 {
     /// <summary>The longest packed layout that takes one dense [S, S] bias (4·S² bytes). Longer layouts take the chunked route with a
-    /// per-tile bias instead; the dense bias is never built past this length.</summary>
+    /// per-tile bias instead; the dense bias is never built past this length. The cached forward has no bias and uses it as the bound of its
+    /// unchunked attention.</summary>
     internal const int MaxDuoDenseBiasRows = 32768;
 
     /// <summary>Byte budget for one query tile's bias ([rows, S] F32). Tile rows are this budget divided by 4·S, so a longer layout
