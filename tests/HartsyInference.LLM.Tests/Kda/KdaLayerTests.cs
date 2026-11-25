@@ -55,6 +55,69 @@ public sealed class KdaLayerTests
         }
     }
 
+    [Fact]
+    public void LowRankOutputGate_EqualsTheFactorProductAsOneMatrix()
+    {
+        const int tokens = 5, rank = 3;
+        Random rng = new(23);
+        KdaSettings s = Settings;
+        KdaWeights full = RandomWeights(rng);
+        float[] down = Floats(rng, rank * s.Hidden, -0.4f, 0.4f), up = Floats(rng, s.KeyDim * rank, -0.4f, 0.4f);
+        float[] product = new float[s.KeyDim * s.Hidden];
+        for (int o = 0; o < s.KeyDim; o++)
+            for (int i = 0; i < s.Hidden; i++)
+                for (int r = 0; r < rank; r++) product[o * s.Hidden + i] += up[o * rank + r] * down[r * s.Hidden + i];
+        KdaWeights viaProduct = full with { OutGateProj = Make(product, s.KeyDim, s.Hidden) };
+        KdaWeights lowRank = full with { OutGateProj = null, OutGateDown = Make(down, rank, s.Hidden), OutGateUp = Make(up, s.KeyDim, rank) };
+        IBackend backend = new CpuBackend();
+        float[] x = Floats(rng, tokens * s.Hidden, -1f, 1f);
+
+        float[] a = Run(backend, viaProduct, x, tokens, split: null), b = Run(backend, lowRank, x, tokens, split: null);
+        for (int i = 0; i < a.Length; i++) Assert.Equal(a[i], b[i], 5);
+    }
+
+    [Fact]
+    public void L2Epsilon_IsSeparateFromTheNormEpsilon()
+    {
+        const int tokens = 4;
+        Random rng = new(29);
+        KdaWeights w = RandomWeights(rng);
+        IBackend backend = new CpuBackend();
+        float[] x = Floats(rng, tokens * Settings.Hidden, -1f, 1f);
+        using Tensor input = Make(x, tokens, Settings.Hidden);
+
+        float[] Forward(float eps, float? l2Eps)
+        {
+            using KdaState state = new(Settings);
+            using Tensor output = new(new TensorShape(tokens, Settings.Hidden), DType.F32);
+            KdaLayer.Forward(backend, Settings, w, input, output, state, eps, l2Eps);
+            return output.AsReadOnlySpan<float>().ToArray();
+        }
+
+        float[] together = Forward(1e-5f, null), same = Forward(1e-5f, 1e-5f), split = Forward(1e-5f, 5f);
+        Assert.Equal(together, same);
+        Assert.NotEqual(together, split);
+    }
+
+    [Fact]
+    public void ExactlyOneOutputGateForm_IsRequired()
+    {
+        Random rng = new(31);
+        KdaWeights w = RandomWeights(rng);
+        using Tensor input = Make(Floats(rng, Settings.Hidden, -1f, 1f), 1, Settings.Hidden);
+        using Tensor output = new(new TensorShape(1, Settings.Hidden), DType.F32);
+        using KdaState state = new(Settings);
+        Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateProj = null }, input, output, state));
+        // a full gate with only one factor of a low-rank gate is refused, not run with the factor ignored
+        Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateDown = Make(new float[Settings.Hidden], 1, Settings.Hidden) }, input, output, state));
+        // a low-rank gate whose first factor is not Hidden wide is refused by name
+        Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateProj = null,
+            OutGateDown = Make(new float[2 * (Settings.Hidden + 1)], 2, Settings.Hidden + 1), OutGateUp = Make(new float[Settings.KeyDim * 2], Settings.KeyDim, 2) }, input, output, state));
+        // a low-rank gate whose factors disagree in rank is refused
+        Assert.Throws<ArgumentException>(() => KdaLayer.Forward(new CpuBackend(), Settings, w with { OutGateProj = null,
+            OutGateDown = Make(new float[2 * Settings.Hidden], 2, Settings.Hidden), OutGateUp = Make(new float[Settings.KeyDim * 3], Settings.KeyDim, 3) }, input, output, state));
+    }
+
     /// <summary>Runs the layer over <paramref name="tokens"/> tokens. With <paramref name="split"/> set, the first <c>split</c> tokens
     /// are one call and the rest a second call that carries the state.</summary>
     private static float[] Run(IBackend backend, KdaWeights w, float[] x, int tokens, int? split)

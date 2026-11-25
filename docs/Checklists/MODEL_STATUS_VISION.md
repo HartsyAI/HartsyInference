@@ -39,20 +39,25 @@ called with a `.Reshape` view as the write target orphans the CUDA activation-ca
 caller reads back, producing silent all-zero output. Fixed in `NormalBaeModel.cs` (`SqueezeExcite`,
 `RefineHead`) and `UperNetSegModel.cs` (`LayerNormChannelsFirst`, `MbConvBlock.Forward`) by allocating the
 output already in the written shape and reshaping only on the way out.
-**YOLO8, YOLO11, YOLOv8-Face, and
-ArcFace stay blocked** — not gated access, a distribution-format gap: HF hosts these only as raw Ultralytics
-`.pt` (a full pickled `nn.Module` object graph the engine's safe-subset pickle VM can't resolve) or, for
-ArcFace, raw ONNX (a graph format neither loader reads). No ungated pre-folded-safetensors mirror was found
-for any of the four (checked 2026-07-22). The architectures above are already real-weight parity-verified —
-the gap is purely that the one-time offline conversion (`convert_arcface_onnx.py`, and the analogous YOLO
-`-folded.safetensors` step) isn't something the Assets auto-download system can perform; it needs a local
-Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.cs` for the per-model detail.
+**YOLO8, YOLO11 and YOLOv8-Face stay blocked** — not gated access, a distribution-format gap: HF hosts these only
+as raw Ultralytics `.pt` (a full pickled `nn.Module` object graph the engine's safe-subset pickle VM can't resolve).
+No ungated pre-folded-safetensors mirror was found (checked 2026-07-22). The architectures above are already
+real-weight parity-verified — the gap is purely that the one-time offline `-folded.safetensors` conversion isn't
+something the Assets auto-download system can perform; it needs a local Python step outside the engine. See
+`src/HartsyInference.Cli/Infra/ModelCatalog.cs` for the per-model detail.
+
+**ArcFace is not blocked on a loader.** It is verified in the table above, and the engine reads raw ONNX itself:
+`OnnxWeightLoader` (`ModelAssets/Onnx`) parses initializers and the node list, with integer and float attributes,
+without ONNX Runtime. ArcFace still goes through its offline conversion (`convert_arcface_onnx.py`); the audio side already
+binds ONNX weights without it (CosyVoice2, g2pW, Silero, and Kim_Vocal_2 by walking the node list; see [MODEL_STATUS_AUDIO.md](MODEL_STATUS_AUDIO.md)).
 
 ## Runs end-to-end, parity pending (⚠️)
 
 | Model | Status | Notes |
 |---|---|---|
 | **Real-ESRGAN** (x4plus, x2plus, x4plus-anime-6B — RRDBNet super-resolution) | ✅ x4plus / ⚠️ x2plus, anime-6B | x4plus matches BasicSR on real weights (2026-11-03, CPU: network max \|Δ\| 1.7e-6, every output byte identical, untiled). Seeded x4 and x2 fixtures pin the network, the x2 reflect pad and unshuffle in the CPU lane. x2plus and anime-6B have only the 2026-09-09 real-weight CPU smoke (expected sizes, sharper than bilinear); tiled output is not compared. ([details](#real-esrgan)) |
+| **RMBG 3.0** (Bria; Fibo 2.0 edit that draws an alpha matte in 4 steps; `rmbg3`, `rmbg3-int8`) | ⚠️ wired, not run | Catalog, variant, matte step and vision modes are in; CPU unit tests pin the routing, defaults, shift and matte maths. Nothing has run on real weights or a GPU, and the Fibo 2.0 edit path underneath has not either. CC BY-NC 4.0. ([details](#rmbg-30)) |
+| **Depth Pro 2** (`depthpro2-s/-b/-l/-h`: metric depth in metres with a focal estimator; `hartsy vision -m depthpro2-s`, `--focal-px`) | 🔬 S on CPU / ❌ B, L, H+ not run | S and its focal estimator match the official ml-depth-pro-2 (`aa389cbb`) on CPU FP32, metric depth included (relRMS ≤ 1.1e-5, 2026-11-24). CLI and API run end to end on the real S weights: one image, views that share one focal length (the contract takes 2 to 64 and Depth Pro 2 at most 16; only two were run), and video frames (`--fps`, buffered `--window`/`--overlap` or `--unbuffered`). Views and frames attend to each other through the cross-frame blocks; the joint T=3 forward, buffered and unbuffered video match upstream `infer`/`infer_video` on CPU FP32 (relRMS at most 7.7e-6, 2026-11-24). Infinite depth (sky) is +inf with `ValidMask` 0. It runs at the image's own size, so images over 16384 patch tokens (2048x2048) are refused; at that cap S took 552 s and 6.4 GB on CPU. Weights are research-only (Apple Machine Learning Research Model License, non-commercial, revocable); catalog rows stay ValidationPending until GPU runs. See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). |
 | **DINOv3 ViT-H+/16** (1024 px encoder: RoPE with float32 periods, 4 storage tokens, LayerScale, SwiGLU MLP 5120 wide, 32 layers, 20 heads) | 🔬 encoder only | Real-weight encoder parity on the pinned Comfy-Org repack `dino_v3_vit_h_bf16.safetensors` against Hugging Face `DINOv3ViTModel` (2026-11-17, CPU FP32, knight input at 1024 px, 4101 tokens): after the final norm relRMS 1.2e-5, peak-relative 5.0e-5. The consumer is Idol (image to 3D Gaussians, in review). Weights are under the DINOv3 License (Meta, custom; not MIT or Apache). See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). |
 | **DINOv3 ViT-L/16** (448 px encoder: RoPE, 4 storage tokens, LayerScale, GELU MLP) | 🔬 encoder only | Real-weight encoder parity on the pinned `facebook/dinov3-vitl16-pretrain-lvd1689m` (2026-11-07, CPU FP32): peak-relative error ≤1.4e-6 at every stage (final norm: max abs 2.2e-5, rms 5.6e-7). No consumer in this change (HairDeck conditioning and GPU paths are not built). ViT-S/B are config-only. Weights are under the DINOv3 License (Meta, custom; not MIT or Apache). See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). |
 
@@ -118,6 +123,12 @@ Real-weight parity vs transformers `UperNetForSemanticSegmentation` (`openmmlab/
 ### RMBG-1.4
 
 Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). Full U²-Net-style nested-U (`conv_in` + 6 encoder + 5 decoder RSU blocks + `side1`) at 1024²; mask **maxAbs 2.9e-6, corr 1.00000000** vs the upstream model (test `RmbgParityTests`, oracle `dump_rmbg.py`). Clean chair segmentation confirmed visually. **BatchNorm folded into the conv at load; dilated convs realized as zero-inflated 3×3 kernels** (no dilation kernel needed); host bilinear-2× upsample (no backend op exists for it). `RmbgBackgroundRemover` (preprocess + alpha + gray-0.5 composite) is the pure-C# replacement for the Python `rembg` step the **image→3D pipelines** (TripoSR / Hunyuan3D) need — see PHASE_11 §6. Since alpha.56 `VisionMode.BackgroundRemoval` also returns the matte as `ImageData.Alpha` (8-bit, straight), so consumers that want a cutout rather than the gray composite get one from the same forward pass. Since alpha.65 `ImageRequest.RemoveBackground` drives the same net as an image-generation post step (`BackgroundRemovalStage`, after the refiner and segment passes) and returns the matte as `ImageResult.Alpha` over untouched RGB — that is what Swarm's Remove Background param maps to. Files: `src/HartsyInference.Vision/Rmbg/`.
+
+### RMBG 3.0
+
+Wired, not run. `rmbg3` (bf16) and `rmbg3-int8` are Vision catalog entries on Bria's ungated `briaai/RMBG-3.0-Comfy` repack; the Fibo 2.0 encoder and VAE are shared. `VisionMode.BackgroundRemoval` and `VisionMode.Matting` for these ids run the Fibo 2.0 edit path through the image service (the fixed instruction, 4 steps, no guidance, the trained size for the source aspect, the diffusers dynamic sigma shift), then turn the picture into 8-bit alpha at the source size with PIL's luma and Lanczos (`Rmbg3Matte`). Files: `src/HartsyInference.Engine/Features/Rmbg3Matte.cs`, `Recipes/Image/Fibo2Variants.cs` and `Fibo2Recipe.cs`. Pins, licence and the reference differences: [RMBG3_ARCHITECTURE.md](../Research/RMBG3_ARCHITECTURE.md).
+
+**Open:** real-weight parity against diffusers on saved noise; a GPU run (the Fibo 2.0 edit path and its int8 builds have none); whether 12 GB holds the int8 transformer after the encoder is released; the `ImageRequest.RemoveBackgroundModel` choice (`rmbg3` as the post-generation matter, RMBG-1.4 stays the default; CLI `--remove-background-model`) releases the generating pipeline first and is untested on a GPU. Not included: `briaai/VRMBG-3.0`, the video model, whose weights need a commercial agreement.
 
 ### Real-ESRGAN
 

@@ -211,6 +211,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IFxService Fx => _fx.Value;
 
+    /// <summary>The concrete audio-effects service, for engine-internal steps that need more than <see cref="IFxService"/>.</summary>
+    internal FxService FxInternal => _fx.Value;
+
     /// <inheritdoc/>
     public IModelPrefetchService ModelPrefetch => _modelPrefetch.Value;
 

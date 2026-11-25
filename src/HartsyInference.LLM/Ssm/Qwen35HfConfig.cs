@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Ssm;
@@ -35,6 +36,9 @@ public sealed record Qwen35HfConfig
     public float PartialRotaryFactor { get; init; } = 0.25f;
 
     public float RopeTheta { get; init; } = 10_000_000f;
+
+    /// <summary>RoPE frequency scaling from <c>rope_parameters.rope_type</c> (YaRN on SenseNova-Loop); none for plain Qwen3.5.</summary>
+    public RopeScaling RopeScaling { get; init; } = RopeScaling.None;
 
     /// <summary>Frequency pairs per multimodal RoPE axis (temporal, height, width); null when the config does not say, in
     /// which case the model takes the family's <c>[11, 11, 10]</c>.</summary>
@@ -82,6 +86,51 @@ public sealed record Qwen35HfConfig
         return FromTextConfig(root.TryGetProperty("text_config", out JsonElement nested) ? nested : root);
     }
 
+    /// <summary>The YaRN scaling a config's <c>rope_parameters</c> names (HF <c>_compute_yarn_parameters</c> inputs; <c>truncate</c> defaults to true there), else none.</summary>
+    /// <exception cref="InvalidDataException">A scaling type other than <c>default</c> and <c>yarn</c>.</exception>
+    private static RopeScaling ReadRopeScaling(JsonElement t)
+    {
+        // Both scopes, as the M-RoPE reader does: transformers reads rope_parameters, older configs carry rope_scaling.
+        JsonElement scope = default;
+        foreach (string key in (string[])["rope_parameters", "rope_scaling"])
+        {
+            if (t.TryGetProperty(key, out JsonElement candidate) && candidate.ValueKind == JsonValueKind.Object
+                && candidate.TryGetProperty("rope_type", out _))
+            {
+                scope = candidate;
+                break;
+            }
+        }
+        if (scope.ValueKind != JsonValueKind.Object) return RopeScaling.None;
+        string kind = scope.GetProperty("rope_type").GetString() ?? "default";
+        if (kind == "default") return RopeScaling.None;
+        if (kind != "yarn")
+        {
+            throw new InvalidDataException($"Qwen3.5 rope_type '{kind}' is not supported (default and yarn are).");
+        }
+        // HF's _compute_yarn_parameters reads both keys without a fallback; a missing one is an error, not a guess.
+        if (!scope.TryGetProperty("factor", out JsonElement factorEl) || !scope.TryGetProperty("original_max_position_embeddings", out JsonElement originalEl))
+        {
+            throw new InvalidDataException("A YaRN config needs factor and original_max_position_embeddings.");
+        }
+        double factor = factorEl.GetDouble();
+        double original = originalEl.GetDouble();
+        if (!(factor > 0) || !(original > 0))
+        {
+            throw new InvalidDataException("A YaRN config needs a positive factor and original_max_position_embeddings.");
+        }
+        return new RopeScaling
+        {
+            Type = RopeScalingType.Yarn,
+            Factor = factor,
+            OriginalContextLength = original,
+            BetaFast = scope.TryGetProperty("beta_fast", out JsonElement bf) ? bf.GetDouble() : 32.0,
+            BetaSlow = scope.TryGetProperty("beta_slow", out JsonElement bs) ? bs.GetDouble() : 1.0,
+            TruncateYarnCorrectionRange = !scope.TryGetProperty("truncate", out JsonElement tr) || tr.GetBoolean(),
+            AttentionFactor = scope.TryGetProperty("attention_factor", out JsonElement af) ? af.GetDouble() : double.NaN,
+        };
+    }
+
     /// <summary>Reads a parsed <c>text_config</c> object.</summary>
     public static Qwen35HfConfig FromTextConfig(JsonElement t)
     {
@@ -102,6 +151,7 @@ public sealed record Qwen35HfConfig
             if (t.TryGetProperty("rope_theta", out JsonElement th)) theta = (float)th.GetDouble();
             if (t.TryGetProperty("partial_rotary_factor", out JsonElement pf2)) partial = (float)pf2.GetDouble();
         }
+        RopeScaling ropeScaling = ReadRopeScaling(t);
         int[]? mropeSection = null;
         bool mropeInterleaved = true;
         foreach (JsonElement scope in mropeScopes)
@@ -155,7 +205,7 @@ public sealed record Qwen35HfConfig
             LinearValueHeadDim = t.GetProperty("linear_value_head_dim").GetInt32(),
             LinearNumKeyHeads = t.GetProperty("linear_num_key_heads").GetInt32(),
             LinearNumValueHeads = t.GetProperty("linear_num_value_heads").GetInt32(),
-            PartialRotaryFactor = partial, RopeTheta = theta, MropeSection = mropeSection, MropeInterleaved = mropeInterleaved,
+            PartialRotaryFactor = partial, RopeTheta = theta, RopeScaling = ropeScaling, MropeSection = mropeSection, MropeInterleaved = mropeInterleaved,
             RmsNormEps = t.TryGetProperty("rms_norm_eps", out JsonElement eps) ? (float)eps.GetDouble() : 1e-6f,
             NumExperts = Int(t, "num_experts", 0), NumExpertsPerTok = Int(t, "num_experts_per_tok", 0),
             MoeIntermediateSize = Int(t, "moe_intermediate_size", 0),

@@ -11,15 +11,17 @@ internal sealed unsafe class Dinov3Layer
 {
     private readonly int _hidden, _numHeads, _headDim, _inter;
     private readonly float _eps;
-    private readonly bool _gated;
+    private readonly bool _gated, _qvBias;
     private Tensor? _n1W, _n1B, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2;
     private Tensor? _gateW, _gateB;   // SwiGLU only: silu(gate_proj(x)) * up_proj(x)
     private AttentionLayer? _attn;
     private Tensor? _qW, _qB, _kW, _vW, _vB, _oW, _oB;
 
-    public Dinov3Layer(int hidden, int numHeads, int inter, float eps, bool gated)
+    /// <param name="qvBias">Whether the query and value projections carry a bias (every <c>facebook/dinov3</c> checkpoint). False reads none and
+    /// refuses a checkpoint that has one, as <paramref name="gated"/> does for the MLP.</param>
+    public Dinov3Layer(int hidden, int numHeads, int inter, float eps, bool gated, bool qvBias = true)
     {
-        _hidden = hidden; _numHeads = numHeads; _headDim = hidden / numHeads; _inter = inter; _eps = eps; _gated = gated;
+        _hidden = hidden; _numHeads = numHeads; _headDim = hidden / numHeads; _inter = inter; _eps = eps; _gated = gated; _qvBias = qvBias;
     }
 
     /// <summary>Loads one block from the HF DINOv3 layout under <paramref name="prefix"/> (e.g. <c>layer.3</c>).</summary>
@@ -31,10 +33,21 @@ internal sealed unsafe class Dinov3Layer
         _n1W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.weight", h));
         _n1B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.bias", h));
         _qW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.weight", h, h));
-        _qB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.bias", h));
         _kW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.k_proj.weight", h, h));
         _vW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.weight", h, h));
-        _vB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.bias", h));
+        if (_qvBias)
+        {
+            _qB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.bias", h));
+            _vB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.bias", h));
+        }
+        else if (w.ContainsKey($"{prefix}.attention.q_proj.bias") || w.ContainsKey($"{prefix}.attention.v_proj.bias"))
+        {
+            throw new NotSupportedException($"'{prefix}.attention' has a q or v bias but the preset's attention has none; use a preset with AttentionQkvBias.");
+        }
+        else
+        {
+            _qB = _vB = null;
+        }
         _oW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.weight", h, h));
         _oB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.bias", h));
         _ls1 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale1.lambda1", h));
@@ -85,6 +98,40 @@ internal sealed unsafe class Dinov3Layer
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
         return r2;
     }
+
+    /// <summary>The first half of <see cref="Forward"/> for attention the caller runs itself: Q, K and V of <c>norm1(x)</c>, token-major
+    /// <c>[B, S, heads, headDim]</c>, Q and K rotated by the <c>[B, S, headDim]</c> tables when they are given. The caller owns all three.</summary>
+    public (Tensor Q, Tensor K, Tensor V) ProjectAttention(IBackend backend, Tensor x, Tensor? cos, Tensor? sin)
+    {
+        if ((cos is null) != (sin is null)) throw new ArgumentException("Give both RoPE tables or neither.", nameof(cos));
+        Tensor n1 = new(x.Shape, DType.F32);
+        backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
+        (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, n1, releaseInput: true);
+        if (cos is not null)
+        {
+            QkRotation rotation = new(QkRotationKind.RotateHalf, cos, sin, (int)x.Shape[1]);
+            _attn.RotateQk(backend, q, k, new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation });
+        }
+        return (q, k, v);
+    }
+
+    /// <summary>The second half of <see cref="Forward"/>: <paramref name="x"/> plus the scaled output projection of <paramref name="attended"/>
+    /// (<c>[B, S, hidden]</c>, the attention of <see cref="ProjectAttention"/>'s queries, disposed here), then the MLP residual.</summary>
+    public Tensor FinishAttention(IBackend backend, Tensor x, Tensor attended)
+    {
+        int batch = (int)x.Shape[0], seq = (int)x.Shape[1];
+        TensorShape shape = new(batch, seq, _hidden);
+        Tensor attn = _attn!.ProjectOutput(backend, attended);
+        Tensor attnScaled = LayerScale(backend, attn, _ls1!, batch, seq);
+        Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attnScaled); attnScaled.Dispose();
+        Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
+        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2!, batch, seq); n2.Dispose();
+        Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
+        return r2;
+    }
+
+    /// <summary>The attention layer of this block, for callers that attend over their own key/value rows.</summary>
+    public AttentionLayer Attention => _attn ?? throw new InvalidOperationException("Load the block's weights first.");
 
     // t[b,s,c] *= gamma[c]. The affine kernel broadcasts gamma over rows only for one batch item.
     private Tensor LayerScale(IBackend backend, Tensor t, Tensor gamma, int batch, int seq)
