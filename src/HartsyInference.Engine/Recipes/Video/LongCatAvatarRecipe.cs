@@ -1,7 +1,11 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -18,6 +22,15 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
     /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
     internal const int OutputFps = 25;
+
+    /// <summary>The audio front end: Whisper-large-v3 from its upstream repo, at the revision the catalog row pins (the 1.5 repo bundles the same file).</summary>
+    internal const string WhisperRepo = "openai/whisper-large-v3";
+
+    /// <summary>The Whisper revision (<c>openai/whisper-large-v3</c> @ 06f233fe, its model.safetensors sha256 a8e94b85…).</summary>
+    internal const string WhisperRevision = "06f233fe06e710322aca913c1bc4249a0d71fce1";
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => LongCatAvatarVariants.Catalog;
 
     /// <inheritdoc/>
     public string Name => "longcat-avatar";
@@ -36,13 +49,27 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The 1.6 undistilled sampler: 50 steps, shift 7, text guidance 4 (research plan, avatar sampler). The output frame rate is 25 fps.
-    /// Whether the official default guidance differs is confirmed against the pinned reference at the real-weight run (B8).</summary>
+    /// <summary>The default build's settings (1.5, the catalog row's weights): the distilled path, 8 steps, guidance off (1.0), shift 7. Steps
+    /// and guidance are fixed by the distillation, so the planner locks them.</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
+    {
+        Steps = 8, CfgScale = 1.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
+        FlowShift = LongCatAvatarPipelineSettings.Shift,
+        LockedFields = VideoLockedFields.Steps | VideoLockedFields.CfgScale,
+    };
+
+    /// <summary>The 1.6 undistilled settings: 50 steps, shift 7, text guidance 4 (research plan). They apply only once a 1.6 INT8 catalog row
+    /// exists; the recipe refuses the 1.6 build until then.</summary>
+    public static VideoDefaults Undistilled16Defaults { get; } = new VideoDefaults
     {
         Steps = 50, CfgScale = 4.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
         FlowShift = LongCatAvatarPipelineSettings.Shift,
     };
+
+    /// <inheritdoc/>
+    /// <remarks>Only a named 1.6 build takes the 1.6 settings; the default and a named 1.5 build take the distilled ones.</remarks>
+    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(LongCatAvatarVariants.Avatar16) ? Undistilled16Defaults : Defaults;
 
     /// <inheritdoc/>
     /// <remarks>One segment: 1 + 4k frames up to <see cref="SegmentFrames"/>.</remarks>
@@ -54,6 +81,16 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
+        // The 1.6 settings apply only with a 1.6 INT8 catalog row, which does not exist yet; a 1.6 request is refused before any weight is read.
+        // The default and a named 1.5 build run the distilled path with the 1.5 settings.
+        ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
+        if (variant.Is(LongCatAvatarVariants.Avatar16))
+        {
+            throw new NotSupportedException("longcat-avatar's 1.6 build runs only once a 1.6 INT8 catalog row exists; none does yet. "
+                + "The 1.5 build (the default) runs instead.");
+        }
+        bool distilled = variant.Is(LongCatAvatarVariants.Avatar15);
+
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
@@ -64,19 +101,24 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
                     $"'{context.CheckpointPath}' has no audio_proj weights, so it is not a LongCat-Video-Avatar checkpoint. Point longcat-avatar at the avatar DiT.");
             }
 
-            string whisperPath = ModelDownloader.EnsureSideModelAsync(SideModels.WhisperLargeV3, onProgress: null, context.Cancel)
-                .GetAwaiter().GetResult();
+            // The Whisper-large-v3 copy the audio stack already caches (stt/openai--whisper-large-v3), at the pinned upstream revision.
+            IReadOnlyDictionary<string, string> fetched = AudioModelCache.FetchAllAsync(WhisperRepo, [new AudioModelFile("model.safetensors")],
+                category: "stt", revision: WhisperRevision, ct: context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader whisperLoader = new SafeTensorsLoader();
-            whisperLoader.Load(whisperPath);
+            whisperLoader.Load(fetched["model.safetensors"]);
             loaders.Add(whisperLoader);
+            // Only the encoder's tensors go to the encoder; the decoder's are never read.
+            Dictionary<string, Tensor> encoderWeights = whisperLoader.GetAllTensors()
+                .Where(pair => pair.Key.StartsWith("model.encoder.", StringComparison.Ordinal))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             WhisperEncoder whisper = new WhisperEncoder(WhisperConfig.LargeV3);
-            whisper.LoadWeights(whisperLoader.GetAllTensors());
+            whisper.LoadWeights(encoderWeights);
             loaders.Add(whisper);
             MelSpectrogramExtractor mel = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(WhisperConfig.LargeV3.NumMelBins));
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders);
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled);
         }
         catch (Exception ex)
         {

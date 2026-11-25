@@ -1,5 +1,9 @@
+using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
 
 namespace HartsyInference.Engine.Tests;
@@ -58,4 +62,47 @@ public sealed class LongCatRecipeTests
         Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio, avatar.Supports);
         Assert.False(avatar.Supports.HasFlag(VideoFeatures.LongFormChain));
     }
+
+    [Fact]
+    public void AnUnnamedAvatarRequestGetsThe15SettingsNotThe16()
+    {
+        LongCatAvatarRecipe avatar = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
+
+        Assert.Equal("1.5", unnamed.Id);
+        foreach (ResolvedModelVariant variant in new[] { unnamed, named15 })
+        {
+            VideoDefaults settings = avatar.DefaultsFor(variant);
+            Assert.Equal(8, settings.Steps);
+            Assert.Equal(1f, settings.CfgScale);
+            Assert.Equal(7f, settings.FlowShift);
+        }
+        Assert.Equal(8, avatar.Defaults.Steps);
+        Assert.Equal(50, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
+    }
+
+    [Fact]
+    public void AUnnamedOr15RequestPassesTheRefusalAndA16RequestIsRefusedBeforeAnyWeightIsRead()
+    {
+        using CpuBackend backend = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        {
+            CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
+        }));
+        Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
+
+        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        {
+            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
+        }));
+        Assert.IsNotType<NotSupportedException>(error);
+    }
+
+    private static CheckpointProbe EmptyProbe() =>
+        new(new HashSet<string>(StringComparer.Ordinal), new Dictionary<string, TensorShape>(StringComparer.Ordinal),
+            new Dictionary<string, string>(StringComparer.Ordinal), []);
 }

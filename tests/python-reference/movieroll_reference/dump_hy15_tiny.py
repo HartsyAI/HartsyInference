@@ -179,7 +179,7 @@ def main():
     cond = torch.randn(1, LATENT + 1, FRAMES, HEIGHT, WIDTH, generator=generator)
     t = torch.tensor([TIMESTEP])
     # Window latents come last in the draw order, so every tensor above keeps its value.
-    window_a, window_b, window_c = (torch.randn(1, LATENT, FRAMES, HEIGHT, WIDTH, generator=generator) for _ in range(3))
+    window_a, window_b, window_c, window_d = (torch.randn(1, LATENT, FRAMES, HEIGHT, WIDTH, generator=generator) for _ in range(4))
 
     tensors = {}
     with torch.no_grad():
@@ -202,6 +202,7 @@ def main():
     tensors["in.frame_timesteps"] = frame_t
     with torch.no_grad():
         tensors.update(_window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5))
+        tensors.update(_stream_cases(model, [window_a, window_b, window_c, window_d], frame_t, t, qwen, byt5))
     tensors["in.latent"] = latent
     tensors["in.qwen"] = qwen
     tensors["in.byt5"] = byt5
@@ -308,6 +309,59 @@ def _window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5):
                                                  (cos[torch.arange(0, 6 * per_frame)], sin[torch.arange(0, 6 * per_frame)]))
                                     .reshape(1, 6 * per_frame, HIDDEN),
     }
+    return {name: value.float().contiguous() for name, value in tensors.items()}
+
+
+STREAM_MAX_FRAMES = 4 * FRAMES
+STREAM_FULL_HISTORY = 1   # block 0 reads its whole history; block 1 is sink-recent
+
+
+def _stream_cases(model, windows, frame_t, t, qwen, byt5):
+    """A rollout of four windows through both blocks, each denoised and then encoded. Block 0 (full history) keeps every window;
+    block 1 (sink-recent) keeps the sink, window 0, and, before each encode, drops the previous window, so a denoise reads the sink
+    and the previous window and an encode reads the sink alone. Text is the window timestep's, as in MovieRoll."""
+    thw = [FRAMES, HEIGHT, WIDTH]
+    cos, sin = get_nd_rotary_pos_embed(ROPE_DIMS, (STREAM_MAX_FRAMES, HEIGHT, WIDTH), theta=256, device="cpu")
+    per_frame = HEIGHT * WIDTH
+    zero_cond = torch.zeros(1, LATENT + 1, FRAMES, HEIGHT, WIDTH)
+    vec = model.time_in(frame_t.reshape(-1)).reshape(1, FRAMES, -1)
+    vec_txt = model.time_in(t)[:, None, :]
+    txt0 = torch.cat([model.byt5_in(byt5) + model.cond_type_embedding.weight[1],
+                      model.txt_in(qwen, t) + model.cond_type_embedding.weight[0]], 1)
+    cache = [[] for _ in model.double_blocks]   # per block: [(keys, values, frames), ...] in order
+
+    def history(entries):
+        cached = sum(frames for _, _, frames in entries)
+        if not entries:
+            return None, cached
+        return (torch.cat([k for k, _, _ in entries], 1), torch.cat([v for _, v, _ in entries], 1)), cached
+
+    tensors = {}
+    with torch.no_grad():
+        for w, window in enumerate(windows):
+            tensors[f"win.stream.latent{w}"] = window
+            x = model.img_in(torch.cat([window, zero_cond], 1))
+
+            img, txt = x, txt0
+            for b, block in enumerate(model.double_blocks):
+                kv, cached = history(cache[b])
+                n = cached + FRAMES
+                img, txt, _ = _window_block(block, img, txt, vec, vec_txt, thw, cos, sin,
+                                            torch.arange(cached * per_frame, n * per_frame),
+                                            torch.arange(0, n * per_frame), kv, False)
+            velocity = model.final_layer(img, vec, thw=thw).reshape(1, FRAMES, HEIGHT, WIDTH, LATENT).permute(0, 4, 1, 2, 3)
+            tensors[f"win.stream.velocity{w}"] = velocity.contiguous()
+
+            img = x
+            for b, block in enumerate(model.double_blocks):
+                if b >= STREAM_FULL_HISTORY:
+                    cache[b] = cache[b][:1]   # trim_to_sink before the encode
+                kv, cached = history(cache[b])
+                n = cached + FRAMES
+                img, _, kv_out = _window_block(block, img, None, vec, vec_txt, thw, cos, sin,
+                                               torch.arange(cached * per_frame, n * per_frame),
+                                               torch.arange(0, n * per_frame), kv, True)
+                cache[b].append((kv_out[0], kv_out[1], FRAMES))
     return {name: value.float().contiguous() for name, value in tensors.items()}
 
 
