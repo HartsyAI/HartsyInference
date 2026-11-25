@@ -178,6 +178,30 @@ public sealed partial class OvbPerceptionTests
     }
 
     [Fact]
+    public void TheVisionResultsCarryOneMaskPerClassADepthPlaneAndUnitNormals()
+    {
+        ImageData painted = Photo();
+        OvbSegmentation segmentation = new(["road", "sky"], [0, 1, 255, 0], [1f, 1f, 0f, 1f], 2, 2, painted,
+            [new OvbLegendEntry("road", 1, 2, 3), new OvbLegendEntry("sky", 4, 5, 6)]);
+
+        VisionResult masks = OvbPerception.ToVisionResult(segmentation);
+
+        Assert.Equal(2, masks.Masks!.Count);
+        Assert.Equal(new byte[] { 255, 0, 0, 255 }, masks.Masks[0].Alpha ?? masks.Masks[0].Rgb.Where((_, i) => i % 3 == 0).ToArray());
+        Assert.Equal(new byte[] { 0, 255, 0, 0 }, masks.Masks[1].Alpha ?? masks.Masks[1].Rgb.Where((_, i) => i % 3 == 0).ToArray());
+        Assert.Same(painted, masks.Image);
+
+        OvbDepth depth = new(new float[] { 0.1f, 0.2f, 0.3f, 0.4f }, 2, 2, painted);
+        VisionResult depthResult = OvbPerception.ToVisionResult(depth);
+        Assert.Equal(VisionDepthKind.RelativeInverse, depthResult.DepthMap!.Kind);
+        Assert.Equal(new[] { 2, 2 }, depthResult.DepthMap.Values.Shape);
+
+        OvbNormals normals = new(new float[12], new bool[] { true, true, true, true }, 2, 2, painted);
+        VisionResult normalResult = OvbPerception.ToVisionResult(normals);
+        Assert.Equal(new[] { 2, 2, 3 }, normalResult.Normals!.Shape);
+    }
+
+    [Fact]
     public async Task ARequestForTooManyOrNoLegendsIsRefused()
     {
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>

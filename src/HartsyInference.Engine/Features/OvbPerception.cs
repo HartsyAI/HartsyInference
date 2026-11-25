@@ -1,6 +1,7 @@
 using HartsyInference.Core.Imaging;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Vision;
 using HartsyInference.Engine.Vision.OpenVisionBanana;
 
 namespace HartsyInference.Engine.Features;
@@ -142,6 +143,47 @@ public static class OvbPerception
         ImageData painted = BilinearTo(result, image.Width, image.Height);
         (float[] normals, bool[] valid) = OvbDecoder.NormalsFromRgb(painted.Rgb, painted.Width, painted.Height);
         return new OvbNormals(normals, valid, painted.Width, painted.Height, painted);
+    }
+
+    /// <summary>The segmentation as a <see cref="VisionResult"/>: one 0/255 mask per class in class order, and the painted picture.</summary>
+    public static VisionResult ToVisionResult(OvbSegmentation segmentation)
+    {
+        ArgumentNullException.ThrowIfNull(segmentation);
+        List<ImageData> masks = new(segmentation.Classes.Count);
+        for (int c = 0; c < segmentation.Classes.Count; c++)
+        {
+            byte[] mask = new byte[segmentation.Labels.Length];
+            for (int i = 0; i < mask.Length; i++)
+                mask[i] = segmentation.Labels[i] == c ? (byte)255 : (byte)0;
+            masks.Add(VisionMasks.ToImageData(mask, segmentation.Width, segmentation.Height));
+        }
+        return new VisionResult { Masks = masks, Image = segmentation.Painted };
+    }
+
+    /// <summary>The depth as a <see cref="VisionResult"/>: relative inverse depth, closer larger, one H×W plane.</summary>
+    public static VisionResult ToVisionResult(OvbDepth depth)
+    {
+        ArgumentNullException.ThrowIfNull(depth);
+        return new VisionResult
+        {
+            DepthMap = new VisionDepthMap
+            {
+                Values = new VisionArray(depth.InverseDepth, depth.Height, depth.Width),
+                Kind = VisionDepthKind.RelativeInverse,
+            },
+            Image = depth.Painted,
+        };
+    }
+
+    /// <summary>The normals as a <see cref="VisionResult"/>: camera-space unit normals H×W×3 and the painted picture.</summary>
+    public static VisionResult ToVisionResult(OvbNormals normals)
+    {
+        ArgumentNullException.ThrowIfNull(normals);
+        return new VisionResult
+        {
+            Normals = new VisionArray(normals.Normals, normals.Height, normals.Width, 3),
+            Image = normals.Painted,
+        };
     }
 
     /// <summary>The image request for one task: the task prompt verbatim, the photo as the reference, the model's own sampling.</summary>
