@@ -122,9 +122,9 @@ public sealed class LongCatRecipeTests
 
         Assert.Equal(37_440, tokens);
         // The whole-token term (14 × hidden per token) and one 4096-row tile of the QKV and FFN intermediates (3 × hidden + 3 × FFN per row).
-        Assert.Equal(LongCatRecipeSupport.ContextBytes + LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes
+        Assert.Equal(LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes
             + 37_440L * 14 * 4096 * 4 + 4096L * (3 * 4096 + 3 * 11008) * 4, headroom);
-        Assert.InRange(headroom, 16L << 30, 18L << 30);
+        Assert.InRange(headroom, 13L << 30, 14L << 30);
     }
 
     [Fact]
@@ -138,20 +138,21 @@ public sealed class LongCatRecipeTests
     }
 
     [Theory]
-    // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens.
-    // The 22.8 GB card: 22,849 MiB free, the shared weights (1 GiB) preloaded before the free-memory read.
-    [InlineData(13, 46, 80, 22_849, 31)]
-    // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens.
-    [InlineData(24, 60, 104, 22_849, 14)]
-    public void TheResidentPrefixMatchesTheCalibrationForTheFreeMemoryAtPlanTime(int latentFrames, int latentHeight, int latentWidth,
-        int freeMib, int expectedPrefix)
+    // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens. The 4090 small-config Auto run (planner: prefix 15,
+    // headroom 11,823 MB) had about 16.6 to 16.8 GB free once the shared weights were in; 16,700 MiB here.
+    [InlineData(13, 46, 80, 16_700, 26)]
+    // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens. Under this formula the prefix is 0 only when the free memory after the
+    // shared weights is below about 14.3 GiB; the full run's logged free value is still needed to confirm that point.
+    [InlineData(24, 60, 104, 14_000, 0)]
+    public void TheResidentPrefixMatchesTheCalibrationForTheFreeMemoryAfterTheSharedWeights(int latentFrames, int latentHeight, int latentWidth,
+        int freeAfterSharedMib, int expectedPrefix)
     {
-        // The shared weights are preloaded before the free-memory read, so the planner sees free minus shared; blocks are 313 MiB across 48.
-        const long sharedBytes = 1L << 30, blockBytes = 313L << 20;
+        // The planner reads free memory after the shared weights are preloaded; blocks are 313 MiB across 48.
+        const long blockBytes = 313L << 20;
         long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(
             LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth), hidden: 4096, ffnHidden: 11008);
 
-        int prefix = ResidentPrefixSizing.Size(((long)freeMib << 20) - sharedBytes, headroom, blockBytes, blockCount: 48);
+        int prefix = ResidentPrefixSizing.Size((long)freeAfterSharedMib << 20, headroom, blockBytes, blockCount: 48);
 
         Assert.Equal(expectedPrefix, prefix);
     }
