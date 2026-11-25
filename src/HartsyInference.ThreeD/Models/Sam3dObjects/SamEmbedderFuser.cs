@@ -153,25 +153,16 @@ public sealed class SamEmbedderFuser
 
     private void Validate()
     {
-        Require("idx_emb", _groupIndex.Count + 1, FusedDim);
+        SamWeights.Require(_weights, "idx_emb", _groupIndex.Count + 1, FusedDim);
         for (int i = 0; i < _embedders.Count; i++)
         {
             int dim = _embedders[i].EmbedDim;
             string prefix = $"projection_nets.{i}.";
-            Require(prefix + "0.weight", dim);
-            Require(prefix + "0.bias", dim);
-            Require(prefix + "1.w1.weight", Hidden, dim);
-            Require(prefix + "1.w3.weight", Hidden, dim);
-            Require(prefix + "1.w2.weight", FusedDim, Hidden);
+            SamWeights.Require(_weights, prefix + "0.weight", dim);
+            SamWeights.Require(_weights, prefix + "0.bias", dim);
+            SamWeights.Require(_weights, prefix + "1.w1.weight", Hidden, dim);
+            SamWeights.Require(_weights, prefix + "1.w3.weight", Hidden, dim);
+            SamWeights.Require(_weights, prefix + "1.w2.weight", FusedDim, Hidden);
         }
-    }
-
-    private void Require(string name, params int[] shape)
-    {
-        if (!_weights.TryGetValue(name, out Tensor? tensor))
-            throw new InvalidOperationException($"The fuser is missing '{name}'.");
-        TensorShape expected = new(Array.ConvertAll(shape, d => (long)d));
-        if (tensor.DType != DType.F32 || tensor.Shape != expected)
-            throw new InvalidOperationException($"'{name}' must be F32 {expected}; got {tensor.DType} {tensor.Shape}.");
     }
 }

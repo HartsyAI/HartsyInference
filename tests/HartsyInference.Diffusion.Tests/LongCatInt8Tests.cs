@@ -92,6 +92,57 @@ public sealed class LongCatInt8Tests : IDisposable
     }
 
     [Fact]
+    public void WidenedWeightsHoldExactlyTheBf16ValuesTheCodecDecodes()
+    {
+        // The recipe widens to F32 (not the policy's F16 default). A decoded int8 value is a BF16 number, and BF16 to F32 is exact, so the F32
+        // weights carry the same values a BF16 widening would store; the only cost of F32 is twice the bytes of a widened linear.
+        using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(_directory);
+        Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
+        using CpuBackend backend = new();
+        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackends(weights, [backend], DType.F32);
+
+        int checkedWeights = 0;
+        foreach ((string key, Tensor wide) in weights)
+        {
+            if (checkpoint.Weights[key].DType != DType.I8)
+                continue;
+            foreach (float value in wide.AsReadOnlySpan<float>())
+                Assert.Equal(0u, BitConverter.SingleToUInt32Bits(value) & 0xFFFFu);
+            checkedWeights++;
+        }
+        Assert.Equal(2 + 2 + 1 + _config.Depth * 9, checkedWeights);
+    }
+
+    [Fact]
+    public void PackedInt8WeightsStayPackedAndCountOneBytePerElement()
+    {
+        // A backend with a resident int8 path keeps the linears packed: nothing is widened, the dtype survives the load, and the block footprint
+        // is the packed size, not the F32 one. The CPU cannot run a packed GEMM, so this checks the placement and the footprint, not a forward.
+        using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(_directory);
+        Dictionary<string, Tensor> packedWeights = new(checkpoint.Weights, StringComparer.Ordinal);
+        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareFor(packedWeights, _ => true, "packed-test-backend", DType.F32);
+        using LongCatTransformer packed = new(_config);
+        packed.LoadWeights(packedWeights);
+
+        Assert.Equal(0, prepared.WidenedCount);
+        foreach ((string key, Tensor tensor) in checkpoint.Weights)
+            Assert.Equal(tensor.DType, packedWeights[key].DType);
+
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> widened = new(checkpoint.Weights, StringComparer.Ordinal);
+        using QuantizedWeightPolicy.PreparedWeights widenedHandle = QuantizedWeightPolicy.PrepareForBackends(widened, [backend], DType.F32);
+        using LongCatTransformer widenedDit = new(_config);
+        widenedDit.LoadWeights(widened);
+
+        long packedBlock = packed.GetBlock(0).EstimatedWeightBytes, widenedBlock = widenedDit.GetBlock(0).EstimatedWeightBytes;
+        Assert.True(packedBlock < widenedBlock, $"packed {packedBlock} against widened {widenedBlock}");
+        // Nine packed linears per block, each one byte per element.
+        List<Tensor> packedLinears = packed.GetBlock(0).EnumerateWeights().Where(static t => t.DType == DType.I8).ToList();
+        Assert.Equal(9, packedLinears.Count);
+        Assert.All(packedLinears, t => Assert.Equal(t.ElementCount, t.DType.ComputeByteCount(t.ElementCount)));
+    }
+
+    [Fact]
     public void Int8ForwardTracksTheDenseForward()
     {
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(_directory);
