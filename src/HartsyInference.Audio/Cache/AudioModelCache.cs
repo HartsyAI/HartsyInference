@@ -308,6 +308,7 @@ public static class AudioModelCache
         IProgress<long>? progress,
         CancellationToken ct)
     {
+        DownloadPermission.Demand($"{hfRepoId}/{filename}");
         string endpoint = Environment.GetEnvironmentVariable("HF_ENDPOINT") ?? DefaultEndpoint;
         string url = $"{endpoint}/{hfRepoId}/resolve/{revision}/{filename}";
 

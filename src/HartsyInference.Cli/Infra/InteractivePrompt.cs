@@ -13,6 +13,13 @@ public static class InteractivePrompt
         Console.IsInputRedirected || Console.IsOutputRedirected || !AnsiConsole.Profile.Capabilities.Ansi
         || !AnsiConsole.Profile.Capabilities.Interactive;
 
+    /// <summary>Whether someone can answer a prompt: standard input is a terminal, not a pipe, a file or closed.</summary>
+    public static bool CanAsk => !Console.IsInputRedirected;
+
+    /// <summary>Completes a refusal's "was not downloaded: " for a run nobody can answer.</summary>
+    public const string CannotAskReason =
+        "this run has no terminal to ask on; get the model's files with 'hartsy pull' first, or pass --set paths.allowDownloads=true";
+
     /// <summary>Shows <paramref name="choices"/> and returns the selected index, or -1 if the user cancels.</summary>
     public static int SelectIndex(string title, IReadOnlyList<string> choices)
     {
