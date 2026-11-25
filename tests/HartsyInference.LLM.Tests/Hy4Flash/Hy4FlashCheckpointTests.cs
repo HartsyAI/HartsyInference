@@ -63,7 +63,7 @@ public sealed class Hy4FlashCheckpointTests(ITestOutputHelper output)
         float[] actual = Hy4FlashFp8.DequantizeBlocks(codes, shape, scale);
         Assert.Equal(expected.Length, actual.Length);
         float worst = MaxRelative(expected, actual);
-        output.WriteLine($"block dequant max relative difference {worst:E2} over {actual.Length} values in 4 blocks (2 partial)");
+        output.WriteLine($"block dequant max relative difference {worst:E2} over {actual.Length} values in 4 blocks (3 partial)");
         Assert.True(worst < 1e-7f, $"{worst:E2}");
     }
 
@@ -88,6 +88,73 @@ public sealed class Hy4FlashCheckpointTests(ITestOutputHelper output)
         using Tensor a = checkpoint.Read(norm), b = fp8.Read(norm);
         Assert.Equal(DType.F32, b.DType);
         Assert.Equal(0f, MaxRelative(a.AsReadOnlySpan<float>(), b.AsReadOnlySpan<float>()));
+    }
+
+    // Round to nearest, ties to even, the way the fixture was written (data/bf16 is made from the F32 dump by the same rule).
+    private static float ToBf16(float value)
+    {
+        uint bits = BitConverter.SingleToUInt32Bits(value);
+        bits = (bits + 0x7FFFu + ((bits >> 16) & 1u)) & 0xFFFF0000u;
+        return BitConverter.UInt32BitsToSingle(bits);
+    }
+
+    [Fact]
+    public void Bf16LayerNorm_ReadsAsTheRoundedFloatsOfTheDump()
+    {
+        using Hy4FlashCheckpoint bf16 = Hy4FlashCheckpoint.Open(Path.Combine(DataDir, "bf16"));
+        using Hy4FlashCheckpoint dump = Hy4FlashCheckpoint.Open(DataDir);
+        const string norm = "model.layers.0.input_layernorm.weight";
+        using Tensor read = bf16.Read(norm);
+        using Tensor reference = dump.Read(norm);
+        Assert.Equal(DType.F32, read.DType);
+        float[] expected = [.. reference.AsReadOnlySpan<float>().ToArray().Select(ToBf16)];
+        Assert.Equal(expected, read.AsReadOnlySpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void Bf16EngramTable_StaysBf16AndItsRowsDecodeExactly()
+    {
+        using Hy4FlashCheckpoint bf16 = Hy4FlashCheckpoint.Open(Path.Combine(DataDir, "bf16"));
+        using Hy4FlashCheckpoint dump = Hy4FlashCheckpoint.Open(DataDir);
+        const string table = "model.layers.1.engram_layer.multi_head_embedding.embedding.weight";
+        using Tensor read = bf16.Read(table);
+        using Tensor reference = dump.Read(table);
+        Assert.Equal(DType.BF16, read.DType);
+        int dim = checked((int)reference.Shape[1]);
+        Hy4FlashEngramRows rows = new(read);
+        float[] got = new float[dim];
+        foreach (long row in new long[] { 0, 1, rows.Rows / 2, rows.Rows - 1 })
+        {
+            rows.Read(row, got);
+            float[] expected = [.. reference.AsReadOnlySpan<float>().Slice(checked((int)row * dim), dim).ToArray().Select(ToBf16)];
+            Assert.Equal(expected, got);
+        }
+    }
+
+    [Fact]
+    public void F16Tensor_IsRefusedAndTheErrorNamesIt()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "hy4-f16-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.Copy(Path.Combine(DataDir, "config.json"), Path.Combine(dir, "config.json"));
+            const string name = "model.layers.0.input_layernorm.weight";
+            byte[] header = System.Text.Encoding.UTF8.GetBytes($"{{\"{name}\":{{\"dtype\":\"F16\",\"shape\":[48],\"data_offsets\":[0,96]}}}}");
+            using (FileStream stream = File.Create(Path.Combine(dir, "weights.safetensors")))
+            {
+                stream.Write(BitConverter.GetBytes((long)header.Length));
+                stream.Write(header);
+                stream.Write(new byte[96]);
+            }
+            using Hy4FlashCheckpoint checkpoint = Hy4FlashCheckpoint.Open(dir);
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => checkpoint.Read(name));
+            Assert.Contains(name, error.Message);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     [Fact]

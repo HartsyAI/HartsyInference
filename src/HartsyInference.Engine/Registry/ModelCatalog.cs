@@ -1184,6 +1184,10 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
+            // Text / LLM — Hy4 Flash (instruct, FP8, base): host reference text path for checkpoints up to 1 GiB; the released sizes are refused by name.
+            Hy4FlashCatalog.Instruct(),
+            Hy4FlashCatalog.Fp8(),
+            Hy4FlashCatalog.Base(),
             // Text / LLM — Maxwell-V1.0-Flash: host reference model (MaxwellModel, block-sparse attention with its indexer) on the Text path; structural until a real-weight run.
             MaxwellCatalog.Build(),
 
@@ -1339,10 +1343,11 @@ public static class ModelCatalog
                 // Licence: weights FLUX Non-Commercial (the release's own statement: "The released model weights are derived from FLUX.2
                 // [klein] Base and are distributed under the FLUX Non-Commercial License ... Use of the weights, and of any output
                 // produced with them, is subject to the terms of that license."); code Apache-2.0. Built and parity-tested on a tiny
-                // diffusers fixture; no real-weight run yet.
+                // diffusers fixture. One real-weight run on the RTX 3060 (2026-11-24): qualitative depth and normals; segmentation mIoU 0.779
+                // over 40 COCO val2017 images (five object classes, our protocol; docs/Checklists/MODEL_STATUS_IMAGE.md).
                 Id = "open-vision-banana-4b", Modality = img, DisplayName = "Open Vision Banana 4B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
                 Status = vp,
-                CliDrivable = false,
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 1, 2, "e0eb9850ca1be16a9e48f5d00dd5309c4d024c7592f56d61c33efdeb6a74a0a0"),
