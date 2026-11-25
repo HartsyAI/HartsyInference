@@ -440,6 +440,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             spec = spec with { ProfileId = settings.ModelProfile };
         }
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
+        if (spec.Catalog?.Id == "longcat-avatar" && !settings.Quiet)
+        {
+            AnsiConsole.MarkupLine("[yellow]Consent:[/] LongCat-Video-Avatar makes a talking likeness of a real person. "
+                + "Use it only with the consent of the person depicted.");
+        }
 
         (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend,
             HartsyInference.Engine.Modality.Video, PlacementCli.TryModelBytes(settings.Model));

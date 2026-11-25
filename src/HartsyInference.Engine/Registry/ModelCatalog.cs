@@ -3133,7 +3133,7 @@ public static class ModelCatalog
                 // path, so 1.5 needs its own sampling settings before it is run. Revisions: model repo @ 92016c71, Whisper @ 06f233fe.
                 // The Hartsy-hosted repack is a later swap that needs the user's upload OK. Shard sha256 from the HF tree (LFS oids).
                 Id = "longcat-avatar", Modality = vid, DisplayName = "LongCat-Video-Avatar 1.5 (speech and image to video, consent required)",
-                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = false,
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
                 HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
                 Assets = new ModelAsset[]
                 {
