@@ -85,7 +85,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Open Vision Banana (generative perception)
 
-Built as an image-recipe variant (see [MODEL_STATUS_IMAGE.md](MODEL_STATUS_IMAGE.md#open-vision-banana)); `OvbDecoder` turns its painted answers into labels, depth and normals; the adapter, `OvbPerception`, is in the next PR of the series. **Not yet routed through `VisionService`**:
+Built as an image-recipe variant (see [MODEL_STATUS_IMAGE.md](MODEL_STATUS_IMAGE.md#open-vision-banana)); `OvbDecoder` turns its painted answers into labels, depth and normals; `OvbPerception` is the adapter that runs it through the image service. **Not yet routed through `VisionService`**:
 mapping onto `VisionResult` (masks, depth map, normals), `VisionMode` routing and the CLI/API vision commands wait for the Depth Pro 2 and RMBG-3 contract changes to merge. No real-weight run, so no row in the tables above.
 
 ### Deferred stretch models
