@@ -180,11 +180,50 @@ public sealed class HunyuanVideo15DitTests
         using Fixture fixture = new();
         float window = fixture.Reference("in.timestep").AsReadOnlySpan<float>()[0];
         Tensor latent = fixture.Reference("in.latent");
+        float[] same = Enumerable.Repeat(window, (int)latent.Shape[2]).ToArray();
         Tensor qwen = fixture.Reference("in.qwen");
         Tensor byt5 = fixture.Reference("in.byt5");
-        using Tensor perFrame = fixture.Dit.ForwardPerFrame(fixture.Backend, latent, [window, window, window], window, qwen, byt5);
+        using Tensor perFrame = fixture.Dit.ForwardPerFrame(fixture.Backend, latent, same, window, qwen, byt5);
         using Tensor clip = fixture.Dit.Forward(fixture.Backend, latent, window, qwen, byt5);
         AssertClose(clip, perFrame, "equal per-frame timesteps");
+    }
+
+    [Fact]
+    public void EqualPerFrameTimestepsWithoutByT5AreTheClipWideForward()
+    {
+        using Fixture fixture = new();
+        float window = fixture.Reference("in.timestep").AsReadOnlySpan<float>()[0];
+        Tensor latent = fixture.Reference("in.latent");
+        float[] same = Enumerable.Repeat(window, (int)latent.Shape[2]).ToArray();
+        Tensor qwen = fixture.Reference("in.qwen");
+        using Tensor perFrame = fixture.Dit.ForwardPerFrame(fixture.Backend, latent, same, window, qwen, null);
+        using Tensor clip = fixture.Dit.Forward(fixture.Backend, latent, window, qwen, null);
+        AssertClose(clip, perFrame, "equal per-frame timesteps without byT5");
+    }
+
+    [Fact]
+    public void EqualPerFrameTimestepsWithConditioningAreTheClipWideForward()
+    {
+        using Fixture fixture = new();
+        float window = fixture.Reference("in.timestep").AsReadOnlySpan<float>()[0];
+        Tensor latent = fixture.Reference("in.latent");
+        Tensor conditioning = fixture.Reference("in.conditioning");
+        float[] same = Enumerable.Repeat(window, (int)latent.Shape[2]).ToArray();
+        Tensor qwen = fixture.Reference("in.qwen");
+        Tensor byt5 = fixture.Reference("in.byt5");
+        using Tensor perFrame = fixture.Dit.ForwardPerFrame(fixture.Backend, latent, same, window, qwen, byt5, conditioning);
+        using Tensor clip = fixture.Dit.Forward(fixture.Backend, latent, window, qwen, byt5, conditioning);
+        AssertClose(clip, perFrame, "equal per-frame timesteps with conditioning");
+    }
+
+    [Fact]
+    public void PerFrameForwardRejectsAFrameTimestepCountThatDoesNotMatchTheLatent()
+    {
+        using Fixture fixture = new();
+        Tensor latent = fixture.Reference("in.latent");
+        Tensor qwen = fixture.Reference("in.qwen");
+        float[] tooFew = [500f, 500f];
+        Assert.Throws<ArgumentException>(() => fixture.Dit.ForwardPerFrame(fixture.Backend, latent, tooFew, 500f, qwen, null));
     }
 
     private static void AssertClose(Tensor expected, Tensor actual, string label)

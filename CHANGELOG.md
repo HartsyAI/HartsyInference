@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.451
+
+- Added Maxwell-V1.0-Flash (`maxwell-v1-flash`, 35B total / 3B active, Apache-2.0) to the Text path: the official FP8 checkpoint runs through the engine's Text service on CUDA, with a device expert cache, and gave a coherent answer on an RTX 4090; not CLI-drivable yet, and no Vulkan or split-device placement.
+
 ## alpha.450
 
 - Added Apple FastFrames S (1.3B, `fastframes-s`) to the video path: frame-wise causal text-to-video at 832x480, 81 frames at 16 fps, with a KV-cached rollout, a KV refiner and a pixel decoder; L (14B, `fastframes-l`) is wired but not CLI-drivable until block streaming lands.
