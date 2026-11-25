@@ -504,7 +504,7 @@ _transformer.InvalidateStepGraph(Backend);
                 if (nextStep < steps)
                 {
                     Tensor freshNoise = SeedGenerator.CreateNoise(noiseShape, seed + nextStep);
-                    Tensor freshPackedNoise = Flux2LatentOps.Pack(Backend, freshNoise);
+                    Tensor freshPackedNoise = Flux2LatentOps.PackHost(freshNoise);
                     freshNoise.Dispose();
                     noisedSource = new Tensor(packedShape, DType.F32);
                     scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
@@ -639,7 +639,7 @@ _transformer.InvalidateStepGraph(Backend);
         bool keepSourceLatent)
     {
         Tensor unpackedNoise = TakeOrCreateNoise(request, noiseShape, seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(Backend, unpackedNoise);
+        Tensor packedNoise = Flux2LatentOps.PackHost(unpackedNoise);
         unpackedNoise.Dispose();
 
         if (request is ImageToImageRequest img2img)

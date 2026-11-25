@@ -348,7 +348,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         int patH, int patW, int seed, int startStep, bool keepSource)
     {
         using Tensor noise = TakeOrCreateNoise(request, new TensorShape(1, _config.InChannels, patH, patW), seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(Backend, noise);
+        Tensor packedNoise = Flux2LatentOps.PackHost(noise);
         if (request is not ImageToImageRequest img2img)
             return (packedNoise, null);
         using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
@@ -375,7 +375,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             return;
         }
         using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, patH, patW), noiseSeed);
-        using Tensor freshPacked = Flux2LatentOps.Pack(Backend, freshNoise);
+        using Tensor freshPacked = Flux2LatentOps.PackHost(freshNoise);
         using Tensor noisedSource = new Tensor(latent.Shape, DType.F32);
         FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(noisedSource, source, freshPacked, sigma);
         MaskBlendUtilities.BlendPackedInPlace(latent, noisedSource, packedMask);

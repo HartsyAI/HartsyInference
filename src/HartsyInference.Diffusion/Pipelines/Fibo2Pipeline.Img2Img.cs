@@ -59,9 +59,7 @@ public sealed unsafe partial class Fibo2Pipeline
     /// <summary>VAE latent to denoiser latent: 2×2 patchify, BatchNorm normalisation on the 128 channels, unpatchify.</summary>
     internal static Tensor NormalizeVaeLatent(IBackend backend, Tensor vaeLatent, Fibo2Config config, Tensor bnMean, Tensor bnVar, float bnEps)
     {
-        using Tensor patched = Flux2LatentOps.Patchify(backend, vaeLatent, config.InChannels * config.PatchSize * config.PatchSize, config.PatchSize);
-        using Tensor normalized = Flux2LatentOps.BnNormalize(backend, patched, bnMean, bnVar, bnEps);
-        return Flux2LatentOps.Unpatchify(backend, normalized, config.InChannels, config.PatchSize);
+        return Flux2LatentOps.NormalizePatchified(backend, vaeLatent, bnMean, bnVar, bnEps, config.PatchSize);
     }
 
     /// <summary>The latent the loop starts from. Text-to-image scales the noise by the schedule's initial sigma; img2img mixes

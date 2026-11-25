@@ -28,7 +28,8 @@ public static class Flux2ReferenceEncoder
                     throw new ArgumentException($"{family} reference images need sides that are multiples of {downscaleFactor}; got {w}x{h}.");
                 using Tensor vaeLatent = encoder.Encode(backend, image);
                 Tensor tokens = Flux2LatentOps.ToPackedTokens(backend, vaeLatent, bnMean, bnVar, bnEps, patchSize);
-                // Host copy, so the VAE phase's activation sweep cannot take it.
+                // The tokens are device-resident after the backend copy. Reading DataPointer downloads them once here, so the VAE
+                // phase's activation sweep cannot free them before the denoise uses them: one D2H per reference, never per step.
                 _ = tokens.DataPointer;
                 encoded[done++] = new ReferenceLatentTokens(tokens, h / downscaleFactor, w / downscaleFactor);
             }

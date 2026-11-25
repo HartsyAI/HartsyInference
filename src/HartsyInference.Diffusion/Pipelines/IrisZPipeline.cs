@@ -499,7 +499,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
 
     private Tensor PackedNoise(Tensor noise)
     {
-        using (noise) return Flux2LatentOps.Pack(Backend, noise);
+        using (noise) return Flux2LatentOps.PackHost(noise);
     }
 
     private (int Width, int Height, int PatW, int PatH) Geometry(int width, int height)

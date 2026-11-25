@@ -213,7 +213,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
 
             TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
             using (Tensor noise = TakeOrCreateNoise(request, noiseShape, seed))
-                latent = Flux2LatentOps.Pack(Backend, noise);
+                latent = Flux2LatentOps.PackHost(noise);
 
             // An explicit shift is the schedule's mu, as for FLUX.2; otherwise diffusers' empirical mu on the TARGET tokens.
             float mu = request.SigmaShift ?? FlowMatchEulerDiscreteScheduler.EmpiricalMu(gridTokens, steps);

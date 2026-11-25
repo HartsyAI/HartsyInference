@@ -65,21 +65,59 @@ public sealed class Flux2LatentOpsTests
     }
 
     [Fact]
-    public void BnNormalize_and_BnUnNormalize_on_NCHW_match_the_per_channel_formula_and_invert()
+    public void NormalizePatchified_matches_patchify_normalize_unpatchify_and_inverts()
     {
-        float[] nchw = RandomValues(Batch * TokenChannels * GridH * GridW, 6);
+        float[] vae = RandomValues(Batch * Channels * GridH * Patch * GridW * Patch, 6);
         float[] mean = RandomValues(TokenChannels, 7);
         float[] var = RandomValues(TokenChannels, 8).Select(v => MathF.Abs(v) + 0.5f).ToArray();
         using CpuBackend backend = new();
-        using Tensor latent = Make(new TensorShape(Batch, TokenChannels, GridH, GridW), nchw);
+        using Tensor latent = Make(new TensorShape(Batch, Channels, GridH * Patch, GridW * Patch), vae);
         using Tensor meanT = Make(new TensorShape(TokenChannels), mean);
         using Tensor varT = Make(new TensorShape(TokenChannels), var);
 
-        using Tensor normalized = Flux2LatentOps.BnNormalize(backend, latent, meanT, varT, Eps);
-        AssertClose(NaiveNormalizeNchw(nchw, Batch, TokenChannels, GridH * GridW, mean, var), normalized.AsSpan<float>().ToArray());
+        using Tensor normalized = Flux2LatentOps.NormalizePatchified(backend, latent, meanT, varT, Eps, Patch);
+        float[] expected = NaiveUnpatchify(
+            NaiveNormalizeNchw(NaivePatchify(vae, Batch, Channels, GridH, GridW, Patch), Batch, TokenChannels, GridH * GridW, mean, var),
+            Batch, Channels, GridH, GridW, Patch);
+        AssertClose(expected, normalized.AsSpan<float>().ToArray());
 
-        using Tensor restored = Flux2LatentOps.BnUnNormalize(backend, normalized, meanT, varT, Eps);
-        AssertClose(nchw, restored.AsSpan<float>().ToArray());
+        using Tensor restored = Flux2LatentOps.UnnormalizePatchified(backend, normalized, meanT, varT, Eps, Patch);
+        AssertClose(vae, restored.AsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void PackHost_matches_the_backend_pack_and_never_needs_a_backend()
+    {
+        float[] nchw = RandomValues(Batch * Channels * GridH * GridW, 9);
+        using CpuBackend backend = new();
+        using Tensor latent = Make(new TensorShape(Batch, Channels, GridH, GridW), nchw);
+
+        using Tensor viaBackend = Flux2LatentOps.Pack(backend, latent);
+        using Tensor host = Flux2LatentOps.PackHost(latent);
+
+        Assert.Equal(NaivePack(nchw, Batch, Channels, GridH, GridW), host.AsSpan<float>().ToArray());
+        Assert.Equal(viaBackend.AsSpan<float>().ToArray(), host.AsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void NormalizedAffineStaysWithinAnUlpOfTheNaiveFormula()
+    {
+        // The affine is z*scale + shift, not (z - mean)*scale, so the two differ by rounding only. This pins that bound.
+        float[] vae = RandomValues(Batch * Channels * GridH * Patch * GridW * Patch, 14);
+        float[] mean = RandomValues(TokenChannels, 15).Select(v => 4f * v).ToArray();
+        float[] var = RandomValues(TokenChannels, 16).Select(v => MathF.Abs(v) + 0.25f).ToArray();
+        using CpuBackend backend = new();
+        using Tensor latent = Make(new TensorShape(Batch, Channels, GridH * Patch, GridW * Patch), vae);
+        using Tensor meanT = Make(new TensorShape(TokenChannels), mean);
+        using Tensor varT = Make(new TensorShape(TokenChannels), var);
+
+        using Tensor normalized = Flux2LatentOps.NormalizePatchified(backend, latent, meanT, varT, Eps, Patch);
+        float[] naive = NaiveUnpatchify(
+            NaiveNormalizeNchw(NaivePatchify(vae, Batch, Channels, GridH, GridW, Patch), Batch, TokenChannels, GridH * GridW, mean, var),
+            Batch, Channels, GridH, GridW, Patch);
+        float[] actual = normalized.AsSpan<float>().ToArray();
+        for (int i = 0; i < naive.Length; i++)
+            Assert.True(MathF.Abs(naive[i] - actual[i]) <= 4e-6f * MathF.Max(1f, MathF.Abs(naive[i])), $"element {i}: {naive[i]} vs {actual[i]}");
     }
 
     private static float[] NaivePack(float[] nchw, int batch, int channels, int h, int w)
@@ -106,6 +144,24 @@ public sealed class Flux2LatentOpsTests
                                 int outChannel = c * patch * patch + py * patch + px;
                                 output[((b * channels * patch * patch + outChannel) * h + y) * w + x] =
                                     vae[((b * channels + c) * inH + y * patch + py) * inW + x * patch + px];
+                            }
+        return output;
+    }
+
+    private static float[] NaiveUnpatchify(float[] patched, int batch, int channels, int h, int w, int patch)
+    {
+        int inW = w * patch, inH = h * patch;
+        float[] output = new float[batch * channels * inH * inW];
+        for (int b = 0; b < batch; b++)
+            for (int c = 0; c < channels; c++)
+                for (int py = 0; py < patch; py++)
+                    for (int px = 0; px < patch; px++)
+                        for (int y = 0; y < h; y++)
+                            for (int x = 0; x < w; x++)
+                            {
+                                int inChannel = c * patch * patch + py * patch + px;
+                                output[((b * channels + c) * inH + y * patch + py) * inW + x * patch + px] =
+                                    patched[((b * channels * patch * patch + inChannel) * h + y) * w + x];
                             }
         return output;
     }
