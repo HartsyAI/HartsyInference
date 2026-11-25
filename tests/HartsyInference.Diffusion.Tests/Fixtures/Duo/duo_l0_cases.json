@@ -1,0 +1,94 @@
+{
+  "cases": [
+    {
+      "name": "single noisy block, old policy",
+      "rope": "old",
+      "samples": [
+        {
+          "sampleId": 7,
+          "sharedDescription": 2,
+          "sharedCue": 1,
+          "reference": [1, 4, 4],
+          "blocks": [{ "startMs": 0, "bodyRows": 2, "video": [2, 4, 4], "audioSteps": 3, "frameStartsMs": [0, 100] }],
+          "clean": 0,
+          "noisy": [0]
+        }
+      ]
+    },
+    {
+      "name": "shared spans and body on the new policy",
+      "rope": "new",
+      "samples": [
+        {
+          "sampleId": 8,
+          "sharedDescription": 2,
+          "sharedCue": 3,
+          "reference": [1, 4, 4],
+          "blocks": [{ "startMs": 1000, "bodyRows": 2, "video": [2, 4, 4], "audioSteps": 3, "frameStartsMs": [0, 100] }],
+          "clean": 0,
+          "noisy": [0]
+        }
+      ]
+    },
+    {
+      "name": "clean history then the next block denoised",
+      "rope": "new",
+      "samples": [
+        {
+          "sampleId": 9,
+          "sharedDescription": 1,
+          "sharedCue": 1,
+          "reference": [1, 2, 2],
+          "blocks": [
+            { "startMs": 0, "bodyRows": 1, "video": [1, 2, 2], "audioSteps": 0, "frameStartsMs": [0] },
+            { "startMs": 500, "bodyRows": 1, "video": [1, 2, 2], "audioSteps": 0, "frameStartsMs": [0] }
+          ],
+          "clean": 1,
+          "noisy": [1]
+        }
+      ]
+    },
+    {
+      "name": "two conversations pack one after another",
+      "rope": "old",
+      "samples": [
+        {
+          "sampleId": 10,
+          "sharedDescription": 2,
+          "sharedCue": 1,
+          "reference": [1, 4, 4],
+          "blocks": [{ "startMs": 0, "bodyRows": 2, "video": [2, 4, 4], "audioSteps": 3, "frameStartsMs": [0, 100] }],
+          "clean": 0,
+          "noisy": [0]
+        },
+        {
+          "sampleId": 11,
+          "sharedDescription": 1,
+          "sharedCue": 2,
+          "reference": [1, 4, 4],
+          "blocks": [{ "startMs": 2000, "bodyRows": 1, "video": [2, 4, 4], "audioSteps": 2, "frameStartsMs": [0, 200] }],
+          "clean": 0,
+          "noisy": [0]
+        }
+      ]
+    },
+    {
+      "name": "non-square grid and a block without audio",
+      "rope": "new",
+      "samples": [
+        {
+          "sampleId": 12,
+          "sharedDescription": 1,
+          "sharedCue": 1,
+          "reference": [1, 2, 6],
+          "blocks": [
+            { "startMs": 0, "bodyRows": 2, "video": [1, 6, 4], "audioSteps": 0, "frameStartsMs": [0] },
+            { "startMs": 400, "bodyRows": 1, "video": [1, 6, 4], "audioSteps": 0, "frameStartsMs": [0] }
+          ],
+          "clean": 0,
+          "noisy": [0]
+        }
+      ]
+    }
+  ]
+}

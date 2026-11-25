@@ -22,7 +22,8 @@ public sealed unsafe class LongCatBlockTests
         try
         {
             LongCatBlock block = new(config);
-            block.LoadWeights(weights, "blocks.0");
+            List<Tensor> owned = [];
+            block.LoadWeights(weights, "blocks.0", owned);
             int hw = GridH * GridW, tokens = Frames * hw;
             using Tensor hidden = LongCatTestData.Random(new TensorShape(tokens, config.HiddenSize), 21);
             using Tensor text = LongCatTestData.Random(new TensorShape(TextRows, config.HiddenSize), 22);
