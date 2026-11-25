@@ -86,13 +86,16 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
 
         Hy4FlashCheckpoint checkpoint = Hy4FlashCheckpoint.Open(directory);
+        Hy4FlashModel? model = null;
         try
         {
-            Hy4FlashModel model = new(backend, config, checkpoint, maxSequenceTokens);
+            model = new Hy4FlashModel(backend, config, checkpoint, maxSequenceTokens);
             return new Hy4FlashTextModel(new Hy4FlashGenerationModel(model, backend, maxSequenceTokens), tokenizer, template, checkpoint);
         }
         catch
         {
+            // the generation model did not take ownership, so a model built before the failure is released here
+            model?.Dispose();
             checkpoint.Dispose();
             throw;
         }
@@ -105,7 +108,7 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
         _checkpoint.Dispose();
     }
 
-    // The safetensors bytes the directory holds, from its index when present, else every .safetensors file.
+    // The bytes of every .safetensors file the directory holds (the shard index is not read; the sizes are the files' own).
     private static long WeightBytes(string directory) =>
         Directory.GetFiles(directory, "*.safetensors").Sum(static f => new FileInfo(f).Length);
 
