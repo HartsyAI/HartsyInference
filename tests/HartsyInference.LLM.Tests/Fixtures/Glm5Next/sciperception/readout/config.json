@@ -1,0 +1,19 @@
+{
+ "format_version": "sage-projector-v1",
+ "component_type": "scientific_projector",
+ "task": "tiny/readout",
+ "weights": "projector.safetensors",
+ "projector": {
+  "kind": "atom",
+  "feature_dim": 12,
+  "index_dim": 6,
+  "max_atoms": 16,
+  "hidden_dim": 32,
+  "task_head_outputs": 1,
+  "readout_classes": 1,
+  "readout_uses_side": false,
+  "side_dim": 2,
+  "side_hidden_dim": 16
+ },
+ "output_dim": 24
+}

@@ -53,12 +53,15 @@ internal static class LongCatOps
         return index;
     }
 
-    /// <summary>A zero-filled F32 tensor.</summary>
-    public static unsafe Tensor Zeros(TensorShape shape)
+    /// <summary>An F32 view of a checkpoint vector. A widened copy is added to <paramref name="owned"/> so the owner disposes it.</summary>
+    public static Tensor WidenF32(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned)
     {
-        Tensor zeros = new(shape, DType.F32);
-        new Span<float>((float*)zeros.DataPointer, checked((int)shape.ElementCount)).Clear();
-        return zeros;
+        Tensor source = weights[key];
+        if (source.DType == DType.F32)
+            return source;
+        Tensor widened = source.CastTo(DType.F32);
+        owned.Add(widened);
+        return widened;
     }
 
     /// <summary>A device-friendly copy of <paramref name="source"/>.</summary>

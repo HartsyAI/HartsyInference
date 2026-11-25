@@ -50,13 +50,17 @@ SCENARIOS = [
 def install_stubs(repo):
     sys.path.insert(0, repo)
 
-    def flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, **_):  # [B, S, H, D]
+    # The stubs honour softmax_scale and refuse causal masks rather than ignore them, so a later reference pin that uses either fails loudly.
+    def flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, **_):  # [B, S, H, D]
+        assert not causal, "the SDPA stub has no causal mask; use the reference's own mask or extend the stub"
         out = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), scale=softmax_scale)
         return out.transpose(1, 2)
 
-    def flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **_):  # packed [S, H, D], one segment
+    def flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale=None, causal=False, **_):
+        # packed [S, H, D], one segment
         assert len(cu_seqlens_q) == 2 and len(cu_seqlens_k) == 2, "the dump runs batch 1"
-        out = F.scaled_dot_product_attention(q.transpose(0, 1)[None], k.transpose(0, 1)[None], v.transpose(0, 1)[None])
+        assert not causal, "the SDPA stub has no causal mask; use the reference's own mask or extend the stub"
+        out = F.scaled_dot_product_attention(q.transpose(0, 1)[None], k.transpose(0, 1)[None], v.transpose(0, 1)[None], scale=softmax_scale)
         return out[0].transpose(0, 1).contiguous()
 
     flash = types.ModuleType("flash_attn")
