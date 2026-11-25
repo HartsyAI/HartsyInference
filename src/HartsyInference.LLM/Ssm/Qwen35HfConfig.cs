@@ -90,27 +90,44 @@ public sealed record Qwen35HfConfig
     /// <exception cref="InvalidDataException">A scaling type other than <c>default</c> and <c>yarn</c>.</exception>
     private static RopeScaling ReadRopeScaling(JsonElement t)
     {
-        if (!t.TryGetProperty("rope_parameters", out JsonElement p) || p.ValueKind != JsonValueKind.Object
-            || !p.TryGetProperty("rope_type", out JsonElement kind) || kind.GetString() is null or "default")
+        // Both scopes, as the M-RoPE reader does: transformers reads rope_parameters, older configs carry rope_scaling.
+        JsonElement scope = default;
+        foreach (string key in (string[])["rope_parameters", "rope_scaling"])
         {
-            return RopeScaling.None;
+            if (t.TryGetProperty(key, out JsonElement candidate) && candidate.ValueKind == JsonValueKind.Object
+                && candidate.TryGetProperty("rope_type", out _))
+            {
+                scope = candidate;
+                break;
+            }
         }
-        if (kind.GetString() != "yarn")
+        if (scope.ValueKind != JsonValueKind.Object) return RopeScaling.None;
+        string kind = scope.GetProperty("rope_type").GetString() ?? "default";
+        if (kind == "default") return RopeScaling.None;
+        if (kind != "yarn")
         {
-            throw new InvalidDataException($"Qwen3.5 rope_type '{kind.GetString()}' is not supported (default and yarn are).");
+            throw new InvalidDataException($"Qwen3.5 rope_type '{kind}' is not supported (default and yarn are).");
         }
-        double factor = p.GetProperty("factor").GetDouble();
-        double original = p.TryGetProperty("original_max_position_embeddings", out JsonElement o) ? o.GetDouble()
-            : t.TryGetProperty("max_position_embeddings", out JsonElement m) ? m.GetDouble() / factor : 0;
+        // HF's _compute_yarn_parameters reads both keys without a fallback; a missing one is an error, not a guess.
+        if (!scope.TryGetProperty("factor", out JsonElement factorEl) || !scope.TryGetProperty("original_max_position_embeddings", out JsonElement originalEl))
+        {
+            throw new InvalidDataException("A YaRN config needs factor and original_max_position_embeddings.");
+        }
+        double factor = factorEl.GetDouble();
+        double original = originalEl.GetDouble();
+        if (!(factor > 0) || !(original > 0))
+        {
+            throw new InvalidDataException("A YaRN config needs a positive factor and original_max_position_embeddings.");
+        }
         return new RopeScaling
         {
             Type = RopeScalingType.Yarn,
             Factor = factor,
             OriginalContextLength = original,
-            BetaFast = p.TryGetProperty("beta_fast", out JsonElement bf) ? bf.GetDouble() : 32.0,
-            BetaSlow = p.TryGetProperty("beta_slow", out JsonElement bs) ? bs.GetDouble() : 1.0,
-            TruncateYarnCorrectionRange = !p.TryGetProperty("truncate", out JsonElement tr) || tr.GetBoolean(),
-            AttentionFactor = p.TryGetProperty("attention_factor", out JsonElement af) ? af.GetDouble() : double.NaN,
+            BetaFast = scope.TryGetProperty("beta_fast", out JsonElement bf) ? bf.GetDouble() : 32.0,
+            BetaSlow = scope.TryGetProperty("beta_slow", out JsonElement bs) ? bs.GetDouble() : 1.0,
+            TruncateYarnCorrectionRange = !scope.TryGetProperty("truncate", out JsonElement tr) || tr.GetBoolean(),
+            AttentionFactor = scope.TryGetProperty("attention_factor", out JsonElement af) ? af.GetDouble() : double.NaN,
         };
     }
 

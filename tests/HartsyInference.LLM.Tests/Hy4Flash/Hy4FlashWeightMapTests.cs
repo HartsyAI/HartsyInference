@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.Hy4Flash;
 
@@ -200,5 +201,49 @@ public sealed class Hy4FlashWeightMapTests
         Assert.Throws<HartsyInferenceException>(() => (c with { MropeSection = [12, 10, 9] }).Validate());
         Assert.Throws<HartsyInferenceException>(() => (c with { EngramPadId = 120818 }).Validate());
         Assert.Throws<HartsyInferenceException>(() => (c with { QuantMethod = "fp8", QuantFormat = "e4m3", QuantBlock = [64, 64] }).Validate());
+    }
+
+    [Fact]
+    public void WrongStorageDtype_IsReported_ForTheF32AndI32Tensors()
+    {
+        List<Hy4FlashTensorInfo> tensors = Tensors("instruct");
+        int hc = tensors.FindIndex(static t => t.Name == "model.layers.3.hc_mlp_layer.hc_pre.hc_fn");
+        tensors[hc] = tensors[hc] with { DType = "BF16" };
+        int table = tensors.FindIndex(static t => t.Name == "model.layers.1.engram_layer.lookup_table");
+        tensors[table] = tensors[table] with { DType = "F32" };
+        Hy4FlashWeightCoverage coverage = Hy4FlashWeightMap.Check(Config("instruct"), tensors);
+        Assert.Equal(2, coverage.DtypeMismatches.Count);
+        Assert.Throws<InvalidDataException>(coverage.RequireComplete);
+    }
+
+    [Fact]
+    public void ScaleGridOfAnotherDtype_IsReported()
+    {
+        List<Hy4FlashTensorInfo> tensors = Tensors("fp8");
+        int scale = tensors.FindIndex(static t => t.Name == "model.layers.3.mlp.experts.gate_up_proj_scale_inv");
+        tensors[scale] = tensors[scale] with { DType = "F16" };
+        Assert.Single(Hy4FlashWeightMap.Check(Config("fp8"), tensors).ScaleMismatches);
+    }
+
+    [Fact]
+    public void MalformedConfigValue_IsRefusedWithAHartsyInferenceException()
+    {
+        JsonNode root = JsonNode.Parse(File.ReadAllText(Fixture("instruct.config.json")))!;
+        root["text_config"]!["num_attention_heads"] = "thirty-two";
+        Assert.Throws<HartsyInferenceException>(() => Hy4FlashConfig.Parse(root.ToJsonString()));
+        JsonNode layers = JsonNode.Parse(File.ReadAllText(Fixture("instruct.config.json")))!;
+        layers["text_config"]!["layer_types"]![3] = 5;
+        Assert.Throws<HartsyInferenceException>(() => Hy4FlashConfig.Parse(layers.ToJsonString()));
+    }
+
+    [Fact]
+    public void ExtraValidationRules_AreEnforced()
+    {
+        Hy4FlashConfig c = Config("instruct");
+        Assert.Throws<HartsyInferenceException>(() => (c with { NumExpertsPerTok = c.NRoutedExperts + 1 }).Validate());
+        Assert.Throws<HartsyInferenceException>(() => (c with { TopkGroup = c.NGroup + 1, NGroup = c.NGroup }).Validate());
+        Assert.Throws<HartsyInferenceException>(() => (c with { NRoutedExperts = 510, NGroup = 4 }).Validate());
+        Assert.Throws<HartsyInferenceException>(() => (c with { TieWordEmbeddings = true }).Validate());
+        Assert.Throws<HartsyInferenceException>(() => (c with { Vision = c.Vision with { MaxImageSize = 2050 } }).Validate());
     }
 }

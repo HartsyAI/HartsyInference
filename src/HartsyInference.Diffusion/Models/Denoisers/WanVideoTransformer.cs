@@ -306,6 +306,12 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
     /// <param name="Temb">The time embedding the final layer modulates with, <c>[1, dim]</c> F32.</param>
     public readonly record struct FrameForward(Tensor Velocity, Tensor Hidden, Tensor Temb);
 
+    /// <summary>The patch embedding of one latent frame <c>[1, inChannels, 1, H, W]</c>: <c>[H·W/4, dim]</c> F32 tokens, the same
+    /// embedding the blocks start from. A refinement network that reads the clean latent through the generator's own embedding
+    /// uses this; the caller disposes the result.</summary>
+    public Tensor PatchEmbedFrame(IBackend backend, Tensor latentFrame) =>
+        WanDitOps.Patchify(backend, latentFrame, _config.InChannels, _config.InnerDim, _config.PatchSize, _patchW2d!, _patchB);
+
     /// <summary>One latent frame of an autoregressive (frame-wise causal) Wan model: denoise <paramref name="latentFrame"/>
     /// <c>[1, inChannels, 1, H, W]</c> at <paramref name="timestep"/> as frame <paramref name="frameIndex"/> of the clip, attending
     /// to the frames <paramref name="cache"/> holds for the earlier indices and to itself. Every block stores the frame's own keys
