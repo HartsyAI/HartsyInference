@@ -21,7 +21,7 @@ public sealed class DsaAttention : IDisposable
     private readonly IBackend _backend;
     private readonly DsaAttentionSettings _s;
     private readonly DsaAttentionWeights _w;
-    private readonly IRopeRowSource _rope;
+    private readonly IRopeRowSource? _rope;
     private readonly IDsaKeySelector _selector;
     private Tensor? _keyAbsorb;
     private Tensor? _valueExpand;
@@ -39,17 +39,24 @@ public sealed class DsaAttention : IDisposable
     /// <param name="backend">Runs every projection, norm, rotation and the attention itself.</param>
     /// <param name="settings">Shape of this layer; its <c>Indexer</c> is unused here.</param>
     /// <param name="weights">This layer's weights; its <c>Indexer</c> is unused here.</param>
-    /// <param name="rope">Rotary rows for the main query/key slice, <c>QkRopeDim / 2</c> wide, covering every position that will be seen.</param>
+    /// <param name="rope">Rotary rows for the main query/key slice, <c>QkRopeDim / 2</c> wide, covering every position that will be seen; null when <c>QkRopeDim</c> is 0 (NoPE).</param>
     /// <param name="selector">Picks the rows each query attends; owned and disposed with the layer.</param>
-    public DsaAttention(IBackend backend, DsaAttentionSettings settings, DsaAttentionWeights weights, IRopeRowSource rope, IDsaKeySelector selector)
+    public DsaAttention(IBackend backend, DsaAttentionSettings settings, DsaAttentionWeights weights, IRopeRowSource? rope, IDsaKeySelector selector)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(weights);
-        ArgumentNullException.ThrowIfNull(rope);
         ArgumentNullException.ThrowIfNull(selector);
         settings.Validate();
-        if (rope.HalfDim * 2 != settings.QkRopeDim) throw new ArgumentException("The rope table width must equal QkRopeDim.", nameof(rope));
+        if (settings.QkRopeDim > 0)
+        {
+            ArgumentNullException.ThrowIfNull(rope);
+            if (rope.HalfDim * 2 != settings.QkRopeDim) throw new ArgumentException("The rope table width must equal QkRopeDim.", nameof(rope));
+        }
+        else if (rope is not null)
+        {
+            throw new ArgumentException("A NoPE layer (QkRopeDim 0) takes no rope table.", nameof(rope));
+        }
         int h = settings.Heads, qkv = settings.QkNopeDim + settings.VDim;
         DsaIndexer.RequireShape(weights.QA, settings.QLoraRank, settings.Dim, "q_a_proj");
         DsaIndexer.RequireShape(weights.KvA, settings.LatentDim, settings.Dim, "kv_a_proj_with_mqa");
@@ -97,7 +104,7 @@ public sealed class DsaAttention : IDisposable
         if (x.Length != (long)tokens * s.Dim || y.Length != x.Length) throw new ArgumentException("x and y must each hold tokens x Dim values.");
         if (startPos != 0 && startPos != state.Length) throw new InvalidOperationException($"The state holds {state.Length} positions; this call starts at {startPos}.");
         if (startPos + tokens > state.Capacity) throw new InvalidOperationException("The DSA cache is full; allocate state for a longer sequence.");
-        if (startPos + tokens > _rope.Length) throw new ArgumentOutOfRangeException(nameof(startPos), "The rope table does not reach this position.");
+        if (_rope is not null && startPos + tokens > _rope.Length) throw new ArgumentOutOfRangeException(nameof(startPos), "The rope table does not reach this position.");
         Tensor keyAbsorb = _keyAbsorb ?? throw new ObjectDisposedException(nameof(DsaAttention));
         Tensor valueExpand = _valueExpand!;
         if (startPos == 0) state.Reset();
@@ -107,7 +114,7 @@ public sealed class DsaAttention : IDisposable
         float[] qLatent = HostOps.Project(_backend, x, tokens, s.Dim, _w.QA, s.QLoraRank);
         HostOps.RmsNorm(_backend, qLatent, s.QLoraRank, _w.QANorm, s.NormEps);
         float[] q = HostOps.Project(_backend, qLatent, tokens, s.QLoraRank, _w.QB, h * s.QkHeadDim);
-        PartialRotary.Rotate(_backend, _rope, rd, q, [1, tokens, h, s.QkHeadDim], positions, inverse: false, s.RopePairing);
+        if (_rope is not null) PartialRotary.Rotate(_backend, _rope, rd, q, [1, tokens, h, s.QkHeadDim], positions, inverse: false, s.RopePairing);
 
         // the latent row is [RMS-normed latent | rotated shared key], cached at its position
         float[] kv = HostOps.Project(_backend, x, tokens, s.Dim, _w.KvA, latent);
@@ -118,7 +125,7 @@ public sealed class DsaAttention : IDisposable
             kv.AsSpan(t * latent + kvr, rd).CopyTo(keyPe.AsSpan(t * rd, rd));
         }
         HostOps.RmsNorm(_backend, kvLatent, kvr, _w.KvANorm, s.NormEps);
-        PartialRotary.Rotate(_backend, _rope, rd, keyPe, [1, tokens, rd], positions, inverse: false, s.RopePairing);
+        if (_rope is not null) PartialRotary.Rotate(_backend, _rope, rd, keyPe, [1, tokens, rd], positions, inverse: false, s.RopePairing);
         Span<float> cache = state.Latent.AsSpan<float>();
         for (int t = 0; t < tokens; t++)
         {

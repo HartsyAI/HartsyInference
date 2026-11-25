@@ -51,7 +51,7 @@ public sealed class Hy4FlashEngramTests(ITestOutputHelper output)
     }
 
     private static Hy4FlashEngramLayer Layer(Hy4FlashConfig config, Hy4FlashEngramWeights weights, Tensor table, int[] lookup) =>
-        new(new CpuBackend(), config, 2, weights, new Hy4FlashRowTable(table), lookup, F32Eps);
+        new(new CpuBackend(), config, 2, weights, new Hy4FlashEngramRows(table), lookup, F32Eps);
 
     private static float MaxAbs(ReadOnlySpan<float> expected, ReadOnlySpan<float> actual)
     {
