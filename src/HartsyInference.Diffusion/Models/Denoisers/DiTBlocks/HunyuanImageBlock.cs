@@ -180,6 +180,77 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         foreach (Tensor w in _txtFfn.EnumerateWeights()) yield return w;
     }
 
+    /// <summary>One stream's adaLN in the mode the entry point runs: chunk tables (six <c>[1, hidden]</c> rows per batch item, as <see cref="Forward"/>
+    /// and the text stream use) or per-frame segment tables (the image stream of <see cref="ForwardPerFrame"/> and <see cref="ForwardWindow"/>).
+    /// The tables are not owned here; the caller releases them.</summary>
+    private readonly struct StreamAdaLN
+    {
+        private readonly Tensor[]? _chunks;
+        private readonly SegmentModulation? _attn;
+        private readonly SegmentModulation? _ffn;
+
+        private StreamAdaLN(Tensor[]? chunks, SegmentModulation? attn, SegmentModulation? ffn)
+        {
+            _chunks = chunks;
+            _attn = attn;
+            _ffn = ffn;
+        }
+
+        /// <summary>The six chunk tables: shift, scale, gate of attention, then shift, scale, gate of the FFN.</summary>
+        public static StreamAdaLN Chunks(Tensor[] six) => new(six, null, null);
+
+        /// <summary>The attention and FFN segment tables of a per-frame block.</summary>
+        public static StreamAdaLN Segments(SegmentModulation attn, SegmentModulation ffn) => new(null, attn, ffn);
+
+        /// <summary>The pre-sub-block norm: the FFN's when <paramref name="ffn"/> is set, else the attention's.</summary>
+        public Tensor Norm(IBackend backend, Tensor x, bool ffn, TensorShape shape)
+        {
+            if (_chunks is null) return (ffn ? _ffn! : _attn!).NormAffine(backend, x, 1e-6f);
+            int first = ffn ? 3 : 0;
+            return DiTUtils.NormModulate(backend, x, _chunks[first], _chunks[first + 1], shape);
+        }
+
+        /// <summary>The gated residual of a sub-block: <c>residual + gate · value</c>, gate from the attention's or FFN's table.</summary>
+        public Tensor Gate(IBackend backend, Tensor residual, Tensor value, bool ffn, TensorShape shape, DType act)
+        {
+            if (_chunks is null) return (ffn ? _ffn! : _attn!).GatedResidual(backend, residual, value);
+            Tensor output = new(shape, act);
+            backend.GatedResidualLastDim(output, residual, value, _chunks[ffn ? 5 : 2]);
+            return output;
+        }
+    }
+
+    /// <summary>The post-attention sub-blocks shared by every entry point: each stream's output projection and gated residual, then its FFN with
+    /// the FFN's own norm and gate. The image stream takes <paramref name="imgAdaLN"/>; the text stream takes <paramref name="txtAdaLN"/> and is
+    /// skipped when <paramref name="text"/> is null (an encode pass). The attended operands are consumed (their projections dispose them).</summary>
+    private (Tensor Image, Tensor? Text) FinishBlock(IBackend backend, StreamAdaLN imgAdaLN, Tensor image, Tensor imgAttended,
+        StreamAdaLN? txtAdaLN, Tensor? text, Tensor? txtAttended, TensorShape imgShape, TensorShape txtShape, DType act, int batch,
+        int imgSeqLen, int txtSeqLen)
+    {
+        Tensor imgProj = _imgAttn!.ProjectOutput(backend, imgAttended);
+        Tensor imgAfterAttn = imgAdaLN.Gate(backend, image, imgProj, ffn: false, imgShape, act);
+        imgProj.Dispose();
+        Tensor imgMlpIn = imgAdaLN.Norm(backend, imgAfterAttn, ffn: true, imgShape);
+        Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpIn, batch, imgSeqLen);
+        imgMlpIn.Dispose();
+        Tensor imgFinal = imgAdaLN.Gate(backend, imgAfterAttn, imgMlpOut, ffn: true, imgShape, act);
+        imgMlpOut.Dispose();
+        imgAfterAttn.Dispose();
+        if (text is null) return (imgFinal, null);
+
+        Tensor txtProj = _txtAttn!.ProjectOutput(backend, txtAttended!);
+        StreamAdaLN txt = txtAdaLN!.Value;
+        Tensor txtAfterAttn = txt.Gate(backend, text, txtProj, ffn: false, txtShape, act);
+        txtProj.Dispose();
+        Tensor txtMlpIn = txt.Norm(backend, txtAfterAttn, ffn: true, txtShape);
+        Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpIn, batch, txtSeqLen);
+        txtMlpIn.Dispose();
+        Tensor txtFinal = txt.Gate(backend, txtAfterAttn, txtMlpOut, ffn: true, txtShape, act);
+        txtMlpOut.Dispose();
+        txtAfterAttn.Dispose();
+        return (imgFinal, txtFinal);
+    }
+
     /// <summary>Forward pass. Each stream's modulation produces 6 params; image-only RoPE is applied via <see cref="HunyuanImageRope"/> before <c>[img, txt]</c> joint-attention concat. Returns <c>(image, text)</c>.</summary>
     // A batch above one rotates the image rows on the host after the head permute.
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor temb,
@@ -211,38 +282,13 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         Tensor[] attended = batch == 1
             ? JointAttend(backend, imgModulated, txtModulated, rope, imgPackedT, imgPackedH, imgPackedW)
             : JointAttendHeadMajor(backend, imgModulated, txtModulated, rope, imgSeqLen, imgPackedT, imgPackedH, imgPackedW);
-        Tensor imgAttnProj = _attention!.ProjectOutput(backend, 0, attended[0]);
-        Tensor imgAfterAttn = new Tensor(imgShape, act);
-        backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
-        imgAttnProj.Dispose();
-
-        Tensor txtAttnProj = _attention.ProjectOutput(backend, 1, attended[1]!);
-        Tensor txtAfterAttn = new Tensor(txtShape, act);
-        backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
-        txtAttnProj.Dispose();
-
-        // ── 10. Image MLP path ──
-        Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
-        Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
-        imgMlpModulated.Dispose();
-        Tensor imgFinal = new Tensor(imgShape, act);
-        backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
-        imgMlpOut.Dispose();
-        imgAfterAttn.Dispose();
-
-        // ── 11. Text MLP path ──
-        Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
-        Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
-        txtMlpModulated.Dispose();
-        Tensor txtFinal = new Tensor(txtShape, act);
-        backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
-        txtMlpOut.Dispose();
-        txtAfterAttn.Dispose();
+        (Tensor imgFinal, Tensor? txtFinal) = FinishBlock(backend, StreamAdaLN.Chunks(imgMod), image, attended[0], StreamAdaLN.Chunks(txtMod),
+            text, attended[1], imgShape, txtShape, act, batch, imgSeqLen, txtSeqLen);
 
         for (int i = 0; i < imgMod.Length; i++) imgMod[i].Dispose();
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
 
-        return (imgFinal, txtFinal);
+        return (imgFinal, txtFinal!);
     }
 
     /// <summary>Dual-stream forward with per-frame image modulation (MovieRoll's per-frame timestep). Image token i takes the adaLN row of its
@@ -285,31 +331,9 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
             Tensor[] attended = JointAttend(backend, imgModulated, txtModulated, rope, imgPackedT, imgPackedH, imgPackedW);
 
-            Tensor imgAttnProj = _attention!.ProjectOutput(backend, 0, attended[0]);
-            Tensor imgAfterAttn = attnMod.GatedResidual(backend, image, imgAttnProj);
-            imgAttnProj.Dispose();
-
-            Tensor txtAttnProj = _attention.ProjectOutput(backend, 1, attended[1]);
-            Tensor txtAfterAttn = new(txtShape, DType.F32);
-            backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
-            txtAttnProj.Dispose();
-
-            // Image FFN, per-group rows again.
-            Tensor imgMlpModulated = ffnMod.NormAffine(backend, imgAfterAttn, 1e-6f);
-            Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, 1, imgSeqLen);
-            imgMlpModulated.Dispose();
-            Tensor imgFinal = ffnMod.GatedResidual(backend, imgAfterAttn, imgMlpOut);
-            imgMlpOut.Dispose();
-            imgAfterAttn.Dispose();
-
-            Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
-            Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, 1, txtSeqLen);
-            txtMlpModulated.Dispose();
-            Tensor txtFinal = new(txtShape, DType.F32);
-            backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
-            txtMlpOut.Dispose();
-            txtAfterAttn.Dispose();
-            return (imgFinal, txtFinal);
+            (Tensor imgFinal, Tensor? txtFinal) = FinishBlock(backend, StreamAdaLN.Segments(attnMod, ffnMod), image, attended[0],
+                StreamAdaLN.Chunks(txtMod), text, attended[1], imgShape, txtShape, DType.F32, 1, imgSeqLen, txtSeqLen);
+            return (imgFinal, txtFinal!);
         }
         finally
         {
@@ -441,38 +465,15 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             attended.Dispose();
             attended = null;
 
-            // Image path: output projection, gated residual, then the per-frame FFN.
-            Tensor imgAttnProj = _imgAttn.ProjectOutput(backend, imgAttended!);
-            imgAttended = null;
-            Tensor imgAfterAttn = attnMod.GatedResidual(backend, image, imgAttnProj);
-            imgAttnProj.Dispose();
-            Tensor imgMlpModulated = ffnMod.NormAffine(backend, imgAfterAttn, 1e-6f);
-            Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, 1, sw);
-            imgMlpModulated.Dispose();
-            Tensor imgFinal = ffnMod.GatedResidual(backend, imgAfterAttn, imgMlpOut);
-            imgMlpOut.Dispose();
-            imgAfterAttn.Dispose();
-
+            // The post-attention sub-blocks are shared with the other entry points. An encode pass has no text stream and returns the window's K and V.
+            (Tensor imgFinal, Tensor? txtFinal) = FinishBlock(backend, StreamAdaLN.Segments(attnMod!, ffnMod!), image, imgAttended!,
+                txtMod is null ? (StreamAdaLN?)null : StreamAdaLN.Chunks(txtMod), text, txtAttended, imgShape, txtShape, DType.F32, 1, sw, st);
             if (returnKv)
             {
                 MovieRollWindowOutput encoded = new(imgFinal, null, keysOut, valuesOut);
                 keysOut = valuesOut = null;   // the result owns the cache tensors now
                 return encoded;
             }
-
-            // Text path: one shared modulation, as in ForwardPerFrame.
-            Tensor txtAttnProj = _txtAttn.ProjectOutput(backend, txtAttended!);
-            txtAttended = null;
-            Tensor txtAfterAttn = new(txtShape, DType.F32);
-            backend.GatedResidualLastDim(txtAfterAttn, text!, txtAttnProj, txtMod![2]);
-            txtAttnProj.Dispose();
-            Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
-            Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, 1, st);
-            txtMlpModulated.Dispose();
-            Tensor txtFinal = new(txtShape, DType.F32);
-            backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
-            txtMlpOut.Dispose();
-            txtAfterAttn.Dispose();
             return new MovieRollWindowOutput(imgFinal, txtFinal, null, null);
         }
         finally
