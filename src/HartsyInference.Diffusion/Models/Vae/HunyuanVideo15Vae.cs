@@ -129,7 +129,12 @@ public sealed class HunyuanVideo15Vae
     public Tensor EncodeMoments(IBackend backend, Tensor video)
     {
         RequireLoaded();
-        HunyuanVideo15VaeShuffle.Dims(video);
+        (int channels, int frames, int height, int width) = HunyuanVideo15VaeShuffle.Dims(video);
+        int spatial = _config.SpatialCompression, temporal = _config.TemporalCompression;
+        if (channels != _config.InChannels || frames < 1 || (frames - 1) % temporal != 0 || height % spatial != 0 || width % spatial != 0)
+            throw new ArgumentException(
+                $"HunyuanVideo-1.5 VAE encode needs a [1, {_config.InChannels}, {temporal}n + 1, H, W] clip with H and W multiples of {spatial}; got {video.Shape}.",
+                nameof(video));
         int z = _config.LatentChannels;
         Tensor h = _encConvIn!.Forward(backend, video);
         foreach (EncoderLevel level in _encLevels)
@@ -172,7 +177,7 @@ public sealed class HunyuanVideo15Vae
         HunyuanVideo15VaeShuffle.Dims(latent);
         int c0 = _config.BlockOutChannels[^1];
         Tensor conv = _decConvIn!.Forward(backend, latent);
-        Tensor repeat = HunyuanVideo15VaeShuffle.RepeatChannels(latent, c0);
+        Tensor repeat = HunyuanVideo15VaeShuffle.RepeatToChannels(backend, latent, c0);
         Tensor h = new(conv.Shape, DType.F32);
         backend.Add(h, conv, repeat);
         conv.Dispose();
