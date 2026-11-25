@@ -294,12 +294,6 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
     private unsafe Tensor EncodeEmbeds(IBackend backend, Tensor embeds, int[] positions, int length)
     {
         int hidden = _model.DModel;
-        int rotaryDim = _model.RotaryDim;
-        byte[] pairAxes = MRopePairAxes.Build([.. _model.MropeSection], rotaryDim / 2,
-            _model.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
-        int maxPosition = 0;
-        foreach (int p in positions) maxPosition = Math.Max(maxPosition, p);
-        (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(rotaryDim, _model.RopeTheta, RopeScaling.None, maxPosition + 1);
         Tensor output = new(new TensorShape(1, length, hidden), DType.F32);
         try
         {
@@ -312,8 +306,7 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
                 long bytes = (long)count * hidden * sizeof(float);
                 using Tensor chunk = new(new TensorShape(1, count, hidden), DType.F32);
                 Buffer.MemoryCopy(src + (long)start * hidden, (void*)chunk.DataPointer, bytes, bytes);
-                (Tensor cos, Tensor sin) = MRopeTable.BuildTensors(positions, length, start, count, invFreq, scaling, pairAxes,
-                    _model.AttnHeadDim, rotaryDim);
+                (Tensor cos, Tensor sin) = _model.BuildMultimodalRope(positions, length, start, count);
                 using (cos)
                 using (sin)
                 using (Tensor states = _model.ForwardEmbedsHidden(backend, chunk, count, cos, sin))

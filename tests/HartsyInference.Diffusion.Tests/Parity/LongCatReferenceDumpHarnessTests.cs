@@ -58,7 +58,7 @@ public sealed class LongCatReferenceDumpHarnessTests : IDisposable
         ];
         foreach (DumpCase c in cases)
         {
-            LongCatConditioning conditioning = new(c.Cond, c.Ref, c.RefIndex == 0 ? 10 : c.RefIndex, c.Range);
+            LongCatConditioning conditioning = new(c.Cond, c.Ref, c.RefIndex, c.Range);
             float[] timesteps = conditioning.FrameTimesteps(640f, c.Frames);
             using Tensor latent = LongCatTestData.Latent(_config, c.Frames, c.H, c.W, 2);
             using Tensor encoder = LongCatTestData.Encoder(_config, 7, 3);

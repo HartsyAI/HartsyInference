@@ -71,13 +71,39 @@ public static class Flux2Variants
         FineTuneOf = "dev",
     };
 
+    /// <summary>Open Vision Banana 4B (FunAILab/Open-Vision-Banana): the FLUX.2 [klein] Base 4B transformer fine-tuned to answer a
+    /// task prompt about an input photo with a painted image. The weights are Klein 4B's shape exactly, so no tensor tells it from
+    /// its base: a caller hint (the catalog id) selects it, and it then runs the reference-edit pipeline with true CFG.</summary>
+    public static ModelVariant OpenVisionBanana4B { get; } = new ModelVariant
+    {
+        Id = "open-vision-banana-4b",
+        DisplayName = "Open Vision Banana 4B",
+        HintAliases = ["ovb-4b"],
+        FilenameTokenSets = [["ovb", "4b"]],
+        FineTuneOf = "klein-4b",
+    };
+
+    /// <summary>Open Vision Banana 9B, the same fine-tune of FLUX.2 [klein] Base 9B. See <see cref="OpenVisionBanana4B"/>.</summary>
+    public static ModelVariant OpenVisionBanana9B { get; } = new ModelVariant
+    {
+        Id = "open-vision-banana-9b",
+        DisplayName = "Open Vision Banana 9B",
+        HintAliases = ["ovb-9b"],
+        FilenameTokenSets = [["ovb", "9b"]],
+        FineTuneOf = "klein-9b",
+    };
+
     /// <summary>The catalog <see cref="Flux2Recipe"/> declares. The Iris-Z builds come first: structure is tried in order,
     /// and their hidden sizes are also Klein 9B's and Dev's.</summary>
     public static ModelVariantCatalog Catalog { get; } =
-        new ModelVariantCatalog("flux2", Klein4B, [IrisZSmall, IrisZBig, Klein4B, Klein9B, Dev]);
+        new ModelVariantCatalog("flux2", Klein4B, [IrisZSmall, IrisZBig, OpenVisionBanana4B, OpenVisionBanana9B, Klein4B, Klein9B, Dev]);
 
     /// <summary>True for the Iris-Z builds, which run <c>IrisZPipeline</c> instead of the FLUX.2 pipeline.</summary>
     public static bool IsIrisZ(ResolvedModelVariant? variant) => variant is not null && (variant.Is(IrisZSmall) || variant.Is(IrisZBig));
+
+    /// <summary>True for the Open Vision Banana builds, which run <c>Flux2EditPipeline</c> (reference edit, true CFG).</summary>
+    public static bool IsOpenVisionBanana(ResolvedModelVariant? variant) =>
+        variant is not null && (variant.Is(OpenVisionBanana4B) || variant.Is(OpenVisionBanana9B));
 
     /// <summary>The transformer configuration a resolved variant builds with.</summary>
     public static Flux2Config ConfigFor(ResolvedModelVariant variant)
@@ -95,7 +121,7 @@ public static class Flux2Variants
         {
             return Flux2Config.Dev;
         }
-        return variant.Is(Klein9B) ? Flux2Config.Klein9B : Flux2Config.Klein4B;
+        return variant.Is(Klein9B) || variant.Is(OpenVisionBanana9B) ? Flux2Config.Klein9B : Flux2Config.Klein4B;
     }
 
     /// <summary>The leading dimension of the first projection tensor present, or null when none is or its rank is 0.</summary>
