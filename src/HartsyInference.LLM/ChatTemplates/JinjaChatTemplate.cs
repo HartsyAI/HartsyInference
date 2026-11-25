@@ -23,10 +23,11 @@ public sealed class JinjaChatTemplate : IChatTemplate
     /// <param name="chatTemplate">The Jinja source.</param>
     /// <param name="prependBos">Starts every encoded prompt with exactly one tokenizer BOS, adding it when the render does not begin with
     /// it: the GGUF <c>add_bos_token</c> contract as llama.cpp applies it, whether or not the template writes <c>bos_token</c>.</param>
-    public JinjaChatTemplate(string chatTemplate, bool prependBos = false)
+    /// <param name="hfWhitespace">Renders with transformers' <c>trim_blocks</c> and <c>lstrip_blocks</c>, which a template written for the Hugging Face environment relies on.</param>
+    public JinjaChatTemplate(string chatTemplate, bool prependBos = false, bool hfWhitespace = false)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
-        _engine = new JinjaEngine(chatTemplate);
+        _engine = new JinjaEngine(chatTemplate, hfWhitespace);
         Source = chatTemplate;
         _prependBos = prependBos;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
