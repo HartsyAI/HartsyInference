@@ -71,8 +71,8 @@ Families both upstreams already recognise and this engine has no recipe for. Ver
   variant of a family already ported here, and it is the only image-to-video Hunyuan class:
   `HunyuanVideoRecipe.Matches` takes `hunyuan-video`/`hunyuanvideo` only and drives the classic 13B T2V
   checkpoint. Cheapest worthwhile addition on this list. In progress as the base of MovieRoll (2026-11-24): the 54-block
-  8.3B DiT (`HunyuanVideo15Dit`, Tencent-name converter) matches a tiny-config reference on CPU; text encoders, 16x VAE,
-  pipeline and recipe are not built, and no checkpoint has run.
+  8.3B DiT (`HunyuanVideo15Dit`, Tencent-name converter) matches a tiny-config reference on CPU; text encoders and the
+  pipeline and recipe are not built (the 16x VAE is built, tiny-config parity), and no checkpoint has run.
   - MovieRoll H3 (causal VAE, 16× spatial / 4× temporal, 32 latent channels): tiny-config parity with MovieRoll's own Encoder/Decoder in `hartsy-ref:cpu` (end-to-end ≤3.4e-6, per stage ≤1.2e-7). Streaming T-cache decode, real weights and GPU shuffle ops are still open.
 - [ ] Wan conditioning variants ComfyUI ships that this tree does not: `WAN21_HuMo`, `WAN21_SCAIL` /
   `SCAIL2`, `WAN22_WanDancer` (music-driven dance, Wan2.1 backbone plus a `music_encoder` whose
