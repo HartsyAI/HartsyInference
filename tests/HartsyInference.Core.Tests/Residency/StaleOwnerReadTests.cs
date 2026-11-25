@@ -35,6 +35,18 @@ public sealed class StaleOwnerReadTests
     }
 
     [Fact]
+    public void SweepingTheActivations_LosesTheWrite_AndReadingTheOwnerStillThrows()
+    {
+        using ArrayResidency device = new();
+        using Tensor owner = new(new TensorShape(2, 2), DType.F32);
+        using Tensor view = owner.Reshape(new TensorShape(4));
+        device.Produce(view, [.. Values]);
+        device.FreeActivations();
+
+        Assert.Throws<InvalidOperationException>(() => owner.AsReadOnlySpan<float>().Length);
+    }
+
+    [Fact]
     public void AViewOfAView_AndARowSlice_MarkTheRoot()
     {
         using ArrayResidency device = new();
