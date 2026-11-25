@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
@@ -83,10 +84,9 @@ public sealed class LongCatRecipeTests
     }
 
     [Fact]
-    public void AUnnamedOr15RequestPassesTheRefusalAndA16RequestIsRefusedBeforeAnyWeightIsRead()
+    public void A16RequestIsRefusedBeforeAnyWeightIsRead()
     {
         using CpuBackend backend = new();
-        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
         ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
 
         NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
@@ -94,12 +94,67 @@ public sealed class LongCatRecipeTests
             CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
         }));
         Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
+    }
 
-        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+    [Fact]
+    public void ADistilledBuildWithoutItsLoraIsRefusedBeforeAnyWeightIsRead()
+    {
+        using CpuBackend backend = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
+
+        foreach (ResolvedModelVariant variant in new[] { unnamed, named15 })
         {
-            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
-        }));
-        Assert.IsNotType<NotSupportedException>(error);
+            NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+            {
+                CheckpointPath = "no-such-folder/base_model_int8", Backend = backend, Variant = variant,
+            }));
+            Assert.Contains("dmd_lora.safetensors", refused.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheStreamingHeadroomCoversTheFullAvatarRunsActivationsWithAMargin()
+    {
+        // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 24 x 30 x 52 = 37,440 tokens; hidden 4096, FFN 11,008.
+        long tokens = LongCatRecipeSupport.TokenCount(latentFrames: 24, latentHeight: 60, latentWidth: 104);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(tokens, hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(37_440, tokens);
+        // The whole-token term (14 × hidden per token) and one 4096-row tile of the QKV and FFN intermediates (3 × hidden + 3 × FFN per row).
+        Assert.Equal(LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes
+            + 37_440L * 14 * 4096 * 4 + 4096L * (3 * 4096 + 3 * 11008) * 4, headroom);
+        Assert.InRange(headroom, 15L << 30, 16L << 30);
+    }
+
+    [Fact]
+    public void TheTiledIntermediatesStopGrowingPastOneTile()
+    {
+        // Past one tile, adding tokens adds only the whole-token term: the FFN and QKV intermediates are bounded by the tile.
+        long at50k = LongCatRecipeSupport.ActivationHeadroomBytes(50_000, hidden: 4096, ffnHidden: 11008);
+        long at100k = LongCatRecipeSupport.ActivationHeadroomBytes(100_000, hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(50_000L * 14 * 4096 * 4, at100k - at50k);
+    }
+
+    [Theory]
+    // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens. The 4090 small-config Auto run logged 22,847 MB free before
+    // the shared preload; 16,700 MiB free after it is assumed here (the planner does not log that figure yet). Headroom 9,980 MiB gives 21 blocks.
+    [InlineData(13, 46, 80, 16_700, 21)]
+    // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens. Headroom 15,769 MiB: the prefix is 0 only below about 16.1 GiB free after
+    // the shared weights. The full run logged 22,852 MB free before the shared preload; the prefix-0 result pins the after-shared figure only by this bound.
+    [InlineData(24, 60, 104, 14_000, 0)]
+    public void TheResidentPrefixMatchesTheCalibrationForTheFreeMemoryAfterTheSharedWeights(int latentFrames, int latentHeight, int latentWidth,
+        int freeAfterSharedMib, int expectedPrefix)
+    {
+        // The planner reads free memory after the shared weights are preloaded; blocks are 313 MiB across 48.
+        const long blockBytes = 313L << 20;
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(
+            LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth), hidden: 4096, ffnHidden: 11008);
+
+        int prefix = ResidentPrefixSizing.Size((long)freeAfterSharedMib << 20, headroom, blockBytes, blockCount: 48);
+
+        Assert.Equal(expectedPrefix, prefix);
     }
 
     private static CheckpointProbe EmptyProbe() =>

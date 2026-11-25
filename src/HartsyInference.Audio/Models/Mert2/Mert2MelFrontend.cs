@@ -51,12 +51,12 @@ public sealed class Mert2MelFrontend
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "encoder.feature_extractor")
     {
         ArgumentNullException.ThrowIfNull(weights);
-        CopyF32(weights, $"{prefix}.spectrogram.window", _window, [_config.NFft]);
+        CopyF32(weights, $"{prefix}.spectrogram.window", _window, _config.NFft);
         // [bins, mels] and [mels, bins] hold the same number of floats, so only the full shape can tell a
         // transposed filterbank from the right one.
-        CopyF32(weights, $"{prefix}.mel_scale.fb", _filterbank, [_bins, _config.MelBins]);
-        CopyF32(weights, $"{prefix}.mel_mean", _mean, [_config.MelBins]);
-        CopyF32(weights, $"{prefix}.mel_std", _inverseStd, [_config.MelBins]);
+        CopyF32(weights, $"{prefix}.mel_scale.fb", _filterbank, _bins, _config.MelBins);
+        CopyF32(weights, $"{prefix}.mel_mean", _mean, _config.MelBins);
+        CopyF32(weights, $"{prefix}.mel_std", _inverseStd, _config.MelBins);
         for (int m = 0; m < _inverseStd.Length; m++)
         {
             _inverseStd[m] = 1f / MathF.Max(_inverseStd[m], StdFloor);
@@ -154,23 +154,16 @@ public sealed class Mert2MelFrontend
         return index < clip.Length ? clip[index] : 0f;
     }
 
-    private static void CopyF32(IReadOnlyDictionary<string, Tensor> weights, string key, float[] destination,
-        ReadOnlySpan<int> expected)
+    private static void CopyF32(IReadOnlyDictionary<string, Tensor> weights, string key, float[] destination, params long[] shape)
     {
-        if (!weights.TryGetValue(key, out Tensor? source))
-            throw new HartsyInferenceException($"MERT2 mel frontend is missing '{key}'.");
-        Mert2Ops.RequireShape(source, key, expected);
-        // EnsureF32 hands back the caller's own tensor when it is already F32, so only a conversion is ours to free.
-        Tensor f32 = TensorCasts.EnsureF32(source);
+        List<Tensor> owned = [];
         try
         {
-            if (f32.ElementCount != destination.Length)
-                throw new HartsyInferenceException($"MERT2 '{key}' has {f32.ElementCount} elements, expected {destination.Length}.");
-            f32.AsReadOnlySpan<float>().CopyTo(destination);
+            CheckpointTensors.RequireF32(weights, "MERT2 mel frontend", key, owned, shape).AsReadOnlySpan<float>().CopyTo(destination);
         }
         finally
         {
-            if (!ReferenceEquals(f32, source)) f32.Dispose();
+            foreach (Tensor copy in owned) copy.Dispose();
         }
     }
 }

@@ -2,19 +2,20 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 
-/// <summary>Weight lookups shared by the SAM 3D modules: every tensor must be present, F32 and of the expected shape.</summary>
+/// <summary>Weight lookups shared by the SAM 3D modules: every tensor must be present, of the expected dtype and of the expected shape. Name every dimension: an empty shape checks none.</summary>
 internal static class SamWeights
 {
+    private const string Family = "SAM 3D";
+
     /// <summary>The tensor under <paramref name="key"/>, borrowed.</summary>
-    /// <exception cref="InvalidOperationException">The key is missing, the tensor is not F32 (widen 16-bit weights first) or has another shape.</exception>
+    /// <exception cref="KeyNotFoundException">The checkpoint has no such tensor.</exception>
+    /// <exception cref="InvalidDataException">The tensor has another shape.</exception>
+    /// <exception cref="InvalidOperationException">The tensor is not F32: widen 16-bit weights first.</exception>
     public static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape)
     {
-        if (!weights.TryGetValue(key, out Tensor? tensor))
-            throw new InvalidOperationException($"SAM 3D weight '{key}' is missing.");
+        Tensor tensor = CheckpointTensors.Require(weights, Family, key, shape);
         if (tensor.DType != DType.F32)
             throw new InvalidOperationException($"SAM 3D weight '{key}' is {tensor.DType}; the module takes F32 weights, so widen 16-bit weights first.");
-        if (!tensor.Shape.Equals(new TensorShape(shape)))
-            throw new InvalidOperationException($"SAM 3D weight '{key}' has shape {tensor.Shape}, expected {new TensorShape(shape)}.");
         return tensor;
     }
 
@@ -23,12 +24,9 @@ internal static class SamWeights
     /// </summary>
     public static Tensor RequireLinear(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape)
     {
-        if (!weights.TryGetValue(key, out Tensor? tensor))
-            throw new InvalidOperationException($"SAM 3D weight '{key}' is missing.");
+        Tensor tensor = CheckpointTensors.Require(weights, Family, key, shape);
         if (tensor.DType != DType.F32 && tensor.DType != DType.F16 && tensor.DType != DType.BF16)
             throw new InvalidOperationException($"SAM 3D weight '{key}' is {tensor.DType}; the module takes F32, F16 or BF16 linear weights.");
-        if (!tensor.Shape.Equals(new TensorShape(shape)))
-            throw new InvalidOperationException($"SAM 3D weight '{key}' has shape {tensor.Shape}, expected {new TensorShape(shape)}.");
         return tensor;
     }
 }

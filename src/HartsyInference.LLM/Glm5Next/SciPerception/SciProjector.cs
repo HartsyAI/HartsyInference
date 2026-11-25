@@ -7,6 +7,9 @@ namespace HartsyInference.LLM.Glm5Next.SciPerception;
 /// <summary>Sage-SciPerception's <c>AtomProjector</c> (<c>modeling_projector.py</c>, SciPerception revision 7c228fc0): prepared per-row scientific features
 /// become rows of the language model's embedding width. <c>LayerNorm([feature | position | discrete embeddings]) → Linear → GELU → Linear</c>, plus an
 /// optional side-measurement MLP and a frozen per-row classifier whose probability a learned bridge maps into the same space. Host maths in F32.</summary>
+/// <remarks>Staged, with no caller in the Text path yet: splicing scientific rows into the placeholder span is the open item in
+/// <c>docs/Research/SAGE_S21_FLASH_ARCHITECTURE.md</c> ("Scientific inputs" and "Open"). The scientific encoders are not ported. Parity is checked
+/// against the tiny <c>sciperception</c> fixture (<c>SciProjectorTests</c>).</remarks>
 public sealed class SciProjector
 {
     private const float LayerNormEps = 1e-5f;
@@ -171,7 +174,7 @@ public sealed class SciProjector
         if (t.Shape.Rank != shape.Length) throw new InvalidDataException($"'{name}' has rank {t.Shape.Rank}; the projector config needs {shape.Length}.");
         for (int i = 0; i < shape.Length; i++)
             if (t.Shape[i] != shape[i]) throw new InvalidDataException($"'{name}' has shape {t.Shape}; the projector config needs dimension {i} = {shape[i]}.");
-        Tensor f32 = TensorCasts.EnsureF32(t);
+        Tensor f32 = ProjectionOps.EnsureF32(t);
         try
         {
             return f32.AsReadOnlySpan<float>().ToArray();

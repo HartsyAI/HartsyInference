@@ -1,13 +1,16 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.Video;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -15,7 +18,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <summary>What every LongCat recipe loads: the DiT from the checkpoint directory, the VAE, and umT5 with its tokenizer. The latent channel count
 /// is the DiT's own <see cref="LongCatConfig.InChannels"/>, so a tiny config and the release (16 channels) share one path.</summary>
 internal sealed record LongCatParts(LongCatTransformer Dit, int Channels, int CaptionChannels, bool HasAudio, IWanVaeDecoder Decoder,
-    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer);
+    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer, AdjunctGate? DmdGate = null);
 
 /// <summary>Where the umT5 and VAE come from. Null in production (the engine's side-model downloads); a test injects small stand-ins here, so the
 /// recipe path runs end to end without the multi-gigabyte files. Each factory returns objects the caller owns.</summary>
@@ -38,31 +41,93 @@ internal static class LongCatRecipeSupport
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
 
-    /// <summary>Device headroom the stream plans around for activations and workspace.</summary>
-    internal const long StreamHeadroomBytes = 3L * 1024 * 1024 * 1024;
+    /// <summary>One binary gibibyte, the unit of the streaming headroom terms.</summary>
+    private const long GiB = 1L << 30;
+
+    /// <summary>The allocator pool's transients for one denoise step, independent of the token count: 5.5 GiB. With the safety margin the fixed part
+    /// is 6.5 GiB. The 5 GiB fixed part was lowered from the 8.3 GiB estimate on the basis of spare VRAM at peak; the 4090 full-clip run gave
+    /// prefix 0 with 22,852 MB free before the shared preload, so the lower figure is not yet measured safe. 6.5 GiB stays until the
+    /// logged plan (free after shared, shared, headroom, block) settles it on a measured run.</summary>
+    internal const long FixedPoolBytes = GiB * 11 / 2;
+
+    /// <summary>The safety margin Auto leaves on top of the fixed terms (1 GiB): the conservative slack that keeps a near-full card from streaming
+    /// too late.</summary>
+    internal const long SafetyBytes = GiB;
+
+    /// <summary>Rows per projection and FFN tile: the block's shared tile height, which bounds the FFN and the self-attention QKV intermediates to one
+    /// tile rather than the whole clip.</summary>
+    internal const int ActivationTileRows = LongCatBlock.DefaultTileRows;
+
+    /// <summary>The device headroom the streaming plan reserves before it sizes the resident prefix: the fixed context, pool and safety terms, plus
+    /// the step's activations. Activations split by what the tiling bounds: the per-token block copies that stay whole (about 14 × hidden F32 elements
+    /// per token: the residual, norm, joined Q, K and V, attention output) scale with the tokens, and one tile's fused QKV and SwiGLU intermediates
+    /// (3 × hidden + 3 × FFN per row) scale with the tile. The first 4090 runs measured the untiled estimate; the split is derived from it, not
+    /// re-measured, and needs a GPU re-check against a tiled run.</summary>
+    internal static long ActivationHeadroomBytes(long tokens, int hidden, int ffnHidden)
+    {
+        const long bytesPerElement = 4;
+        long wholePerToken = 14L * hidden * bytesPerElement;
+        long tileRows = Math.Min(tokens, ActivationTileRows);
+        long tileBytes = tileRows * (3L * hidden + 3L * ffnHidden) * bytesPerElement;
+        return FixedPoolBytes + SafetyBytes + tokens * wholePerToken + tileBytes;
+    }
+
+    /// <summary>The attention tokens one denoise step sees at a latent grid: latent frames × (latent height / 2) × (latent width / 2), the DiT's 2×2 patch.</summary>
+    internal static long TokenCount(int latentFrames, int latentHeight, int latentWidth) =>
+        (long)latentFrames * (latentHeight / 2) * (latentWidth / 2);
 
     /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
-    /// memory when it does not. Disposing the scope evicts whatever it placed.</summary>
-    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName) =>
+    /// memory when it does not. Disposing the scope evicts the streamed window; the resident prefix stays on the device until the pipeline's pin
+    /// releases it (the denoise loop's finally frees the whole DiT).</summary>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens) =>
         BlockStreamingScope.Open(new BlockStreamingOptions
         {
-            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = StreamHeadroomBytes,
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName,
+            HeadroomBytes = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim),
         });
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
-    internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides)
+    /// <summary>The DMD distillation LoRA's static multiplier: the reference's <c>--lora_multiplier</c> default, applied when the LoRA is gated on.</summary>
+    internal const float DmdMultiplier = 0.8f;
+
+    /// <summary>Where the 1.5 distillation LoRA sits: <c>lora/dmd_lora.safetensors</c> beside the checkpoint's own folder (the reference layout).</summary>
+    internal static string DmdLoraPath(string checkpointPath) =>
+        Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
+
+    /// <summary>Loads the parts. With <paramref name="attachDmd"/>, the DMD LoRA is attached as a runtime gated term on the DiT's weights (the
+    /// INT8 base included), so it is live only while its <see cref="AdjunctGate"/> is enabled. A missing LoRA file is refused here, before any
+    /// weight is read, so a distilled request never runs on the bare base.</summary>
+    internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false)
     {
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
-        if (checkpoint.IsInt8)
+        // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
+        // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
+        Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
+        loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
+        AdjunctGate? dmdGate = null;
+        LoraStack? loras = null;
+        LoraFile? dmd = null;
+        if (attachDmd)
         {
-            throw new NotSupportedException(
-                $"'{context.CheckpointPath}' is an INT8 LongCat checkpoint. The INT8 weight route is not wired into the LongCat recipes yet.");
+            string dmdPath = DmdLoraPath(context.CheckpointPath);
+            if (!File.Exists(dmdPath))
+                throw new NotSupportedException($"The distilled build needs its distillation LoRA at '{dmdPath}', which is not there. Refusing to run the bare base as the distilled model.");
+            dmd = LoraFile.Load(dmdPath);
+            loras = new LoraStack();
+            dmdGate = new AdjunctGate();
+            loras.AddGated(dmd, dmdGate, DmdMultiplier);
+            loras.ApplyTo(weights, LoraTarget.Transformer, context.Backend);
         }
         LongCatTransformer dit = new(checkpoint.Config);
         loaders.Add(dit);
-        dit.LoadWeights(checkpoint.Weights);
+        dit.LoadWeights(weights);
+        if (dmd is not null)
+        {
+            loaders.Add(dmd);
+            loaders.Add(loras!);
+        }
 
         (IWanVaeDecoder decoder, IWanVaeEncoder encoder) = sides is null
             ? LoadProductionVae(loaders, context.Cancel)
@@ -79,7 +144,7 @@ internal static class LongCatRecipeSupport
         loaders.Add(tokenizer);
         // The avatar's audio modules are the audio_proj.* weights; a base checkpoint has none.
         bool hasAudio = checkpoint.Weights.Keys.Any(key => key.StartsWith("audio_proj.", StringComparison.Ordinal));
-        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer);
+        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer, dmdGate);
     }
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>

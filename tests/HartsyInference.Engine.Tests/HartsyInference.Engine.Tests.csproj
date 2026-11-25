@@ -37,4 +37,8 @@
     <None Include="..\HartsyInference.LLM.Tests\Fixtures\Glm5Next\sage-s21-flash-chat_template.jinja" Link="Fixtures\Glm5Next\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\GpuDeviceFacts.cs" Link="Shared\GpuDeviceFacts.cs" />
+  </ItemGroup>
+
 </Project>

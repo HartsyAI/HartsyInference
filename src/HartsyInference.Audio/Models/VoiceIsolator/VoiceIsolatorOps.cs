@@ -1,11 +1,13 @@
-using HartsyInference.Audio.Layers;
-using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VoiceIsolator;
 
-/// <summary>Layout and elementwise steps of the isolator that no backend op covers, as parallel host loops over F32 tensors.</summary>
+/// <summary>The isolator's layout and elementwise steps: backend ops wherever one exists, and host loops only for the steps no
+/// backend op covers (the exclusive attention, the frame reversal, the causal depthwise convolution's carry).</summary>
 internal static unsafe class VoiceIsolatorOps
 {
     /// <summary>Requires a tensor read through a raw pointer to be F32 with exactly <paramref name="count"/> elements.</summary>
@@ -18,86 +20,40 @@ internal static unsafe class VoiceIsolatorOps
     }
 
     /// <summary>Swaps the two leading axes of <c>[a, b, w]</c> into <c>[b, a, w]</c>.</summary>
-    public static void SwapLeading(Tensor output, Tensor input, int a, int b, int w)
-    {
-        float* src = (float*)input.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        CpuParallel.For(a * b, (long)a * b * w, row =>
-        {
-            int i = row / b;
-            int j = row - i * b;
-            Buffer.MemoryCopy(src + ((long)i * b + j) * w, dst + ((long)j * a + i) * w, w * 4L, w * 4L);
-        });
-    }
+    public static void SwapLeading(IBackend backend, Tensor output, Tensor input, int a, int b, int w)
+        => backend.Permute0213(output, input, a, b, w);
 
     /// <summary>Splits fused projections <c>[groups * seq, 3 * heads * hd]</c> (q, k, v concatenated per token) into head-major
     /// <c>[groups, heads, seq, hd]</c> tensors.</summary>
-    public static void SplitQkvToHeads(Tensor qkv, Tensor q, Tensor k, Tensor v, int groups, int seq, int heads, int hd)
+    public static void SplitQkvToHeads(IBackend backend, Tensor qkv, Tensor q, Tensor k, Tensor v, int groups, int seq, int heads, int hd)
     {
-        float* src = (float*)qkv.DataPointer;
-        float* outQ = (float*)q.DataPointer;
-        float* outK = (float*)k.DataPointer;
-        float* outV = (float*)v.DataPointer;
         int width = heads * hd;
-        CpuParallel.For(groups * seq, (long)groups * seq * width * 3, token =>
-        {
-            int g = token / seq;
-            int s = token - g * seq;
-            float* row = src + (long)token * 3 * width;
-            for (int h = 0; h < heads; h++)
-            {
-                long dst = (((long)g * heads + h) * seq + s) * hd;
-                Buffer.MemoryCopy(row + h * hd, outQ + dst, hd * 4L, hd * 4L);
-                Buffer.MemoryCopy(row + width + h * hd, outK + dst, hd * 4L, hd * 4L);
-                Buffer.MemoryCopy(row + 2 * width + h * hd, outV + dst, hd * 4L, hd * 4L);
-            }
-        });
+        TensorShape chunk = qkv.Shape.Rank == 3 ? new TensorShape(1, groups * seq, width) : new TensorShape(groups * seq, width);
+        Tensor qt = new(chunk, DType.F32);
+        Tensor kt = new(chunk, DType.F32);
+        Tensor vt = new(chunk, DType.F32);
+        backend.Split([qt, kt, vt], qkv, qkv.Shape.Rank - 1);
+        backend.Permute0213(q, qt, seq, heads, hd);
+        backend.Permute0213(k, kt, seq, heads, hd);
+        backend.Permute0213(v, vt, seq, heads, hd);
+        qt.Dispose();
+        kt.Dispose();
+        vt.Dispose();
     }
 
     /// <summary>Gathers head-major <c>[groups, heads, seq, hd]</c> into tokens <c>[groups * seq, heads * hd]</c>.</summary>
-    public static void HeadsToTokens(Tensor output, Tensor input, int groups, int seq, int heads, int hd)
-    {
-        float* src = (float*)input.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        CpuParallel.For(groups * seq, (long)groups * seq * heads * hd, token =>
-        {
-            int g = token / seq;
-            int s = token - g * seq;
-            for (int h = 0; h < heads; h++)
-            {
-                Buffer.MemoryCopy(src + (((long)g * heads + h) * seq + s) * hd, dst + (long)token * heads * hd + h * hd, hd * 4L, hd * 4L);
-            }
-        });
-    }
+    public static void HeadsToTokens(IBackend backend, Tensor output, Tensor input, int groups, int seq, int heads, int hd)
+        => backend.Permute0213(output, input, heads, seq, hd);
 
-    /// <summary>Rotates head-major <c>[groups, heads, seq, hd]</c> in place by the rotate-half RoPE of position <c>firstPosition + s</c>.</summary>
-    public static void Rope(Tensor x, int groups, int heads, int seq, int hd, int firstPosition, float[] cos, float[] sin)
+    /// <summary>Rotates head-major <c>[groups, heads, seq, hd]</c> in place by the rotate-half RoPE of position <c>firstPosition + s</c>.
+    /// The tables are the half-width rows of <see cref="RopeTables"/>, widened to the element layout the backend rotary takes.</summary>
+    public static void Rope(IBackend backend, Tensor x, int seq, int hd, int firstPosition, float[] cos, float[] sin)
     {
-        int half = hd / 2;
-        float* p = (float*)x.DataPointer;
-        fixed (float* cosP = cos)
-        fixed (float* sinP = sin)
-        {
-            float* c = cosP;
-            float* sn = sinP;
-            CpuParallel.For(groups * heads, (long)groups * heads * seq * hd, gh =>
-            {
-                float* head = p + (long)gh * seq * hd;
-                for (int s = 0; s < seq; s++)
-                {
-                    float* row = head + (long)s * hd;
-                    float* cr = c + (long)(firstPosition + s) * half;
-                    float* sr = sn + (long)(firstPosition + s) * half;
-                    for (int i = 0; i < half; i++)
-                    {
-                        float x1 = row[i];
-                        float x2 = row[half + i];
-                        row[i] = x1 * cr[i] - x2 * sr[i];
-                        row[half + i] = x1 * sr[i] + x2 * cr[i];
-                    }
-                }
-            });
-        }
+        Tensor cosRows = WidenedRows(cos, firstPosition, seq, hd);
+        Tensor sinRows = WidenedRows(sin, firstPosition, seq, hd);
+        backend.Rotary(RotaryCall.HeadMajor(x, cosRows, sinRows, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        cosRows.Dispose();
+        sinRows.Dispose();
     }
 
     /// <summary>The cos and sin tables <c>[positions, hd / 2]</c> of the reference's <c>rope_tables</c> (base 10000).</summary>
@@ -143,53 +99,13 @@ internal static unsafe class VoiceIsolatorOps
         });
     }
 
-    /// <summary>Erf-form GELU in place.</summary>
-    public static void Gelu(Tensor x) => Activations.ErfGelu(x);
+    /// <summary>Splits a <c>[.., 2 * inner]</c> tensor into its two halves along the last axis.</summary>
+    public static void SplitHalves(IBackend backend, Tensor input, Tensor first, Tensor second)
+        => backend.Split([first, second], input, input.Shape.Rank - 1);
 
-    /// <summary>Adds <paramref name="bias"/> (length <paramref name="width"/>) to every row, applies softplus, in place.</summary>
-    public static void BiasSoftplus(Tensor x, Tensor bias, long rows, int width)
-    {
-        float* p = (float*)x.DataPointer;
-        float* b = (float*)bias.DataPointer;
-        CpuParallel.For((int)rows, rows * width * 8, r =>
-        {
-            float* row = p + (long)r * width;
-            for (int i = 0; i < width; i++)
-            {
-                row[i] = SoftplusReference.Scalar(row[i] + b[i]);
-            }
-        });
-    }
-
-    /// <summary>Splits <c>[rows, 2 * inner]</c> into the two halves <c>[rows, inner]</c>.</summary>
-    public static void SplitHalves(Tensor input, Tensor first, Tensor second, long rows, int inner)
-    {
-        float* src = (float*)input.DataPointer;
-        float* a = (float*)first.DataPointer;
-        float* b = (float*)second.DataPointer;
-        CpuParallel.For((int)rows, rows * inner * 2, r =>
-        {
-            Buffer.MemoryCopy(src + (long)r * 2 * inner, a + (long)r * inner, inner * 4L, inner * 4L);
-            Buffer.MemoryCopy(src + (long)r * 2 * inner + inner, b + (long)r * inner, inner * 4L, inner * 4L);
-        });
-    }
-
-    /// <summary>Splits <c>[rows, dtRank + 2 * states]</c> into the step input <c>[rows, dtRank]</c>, B and C <c>[rows, states]</c>.</summary>
-    public static void SplitDtBc(Tensor input, Tensor dt, Tensor b, Tensor c, long rows, int dtRank, int states)
-    {
-        float* src = (float*)input.DataPointer;
-        float* d = (float*)dt.DataPointer;
-        float* bp = (float*)b.DataPointer;
-        float* cp = (float*)c.DataPointer;
-        int stride = dtRank + 2 * states;
-        CpuParallel.For((int)rows, rows * stride, r =>
-        {
-            float* row = src + (long)r * stride;
-            Buffer.MemoryCopy(row, d + (long)r * dtRank, dtRank * 4L, dtRank * 4L);
-            Buffer.MemoryCopy(row + dtRank, bp + (long)r * states, states * 4L, states * 4L);
-            Buffer.MemoryCopy(row + dtRank + states, cp + (long)r * states, states * 4L, states * 4L);
-        });
-    }
+    /// <summary>Splits <c>[.., dtRank + 2 * states]</c> into the step input <c>[.., dtRank]</c>, B and C <c>[.., states]</c>.</summary>
+    public static void SplitDtBc(IBackend backend, Tensor input, Tensor dt, Tensor b, Tensor c)
+        => backend.Split([dt, b, c], input, input.Shape.Rank - 1);
 
     /// <summary>Causal depthwise convolution plus SiLU in place over <c>[rows, frames, channels]</c>. <paramref name="history"/> holds
     /// the <c>taps - 1</c> frames before the first one per row (<c>[rows, taps - 1, channels]</c>) and is rewritten with the last
@@ -251,22 +167,35 @@ internal static unsafe class VoiceIsolatorOps
         });
     }
 
-    /// <summary>Concatenates two <c>[rows, width]</c> tensors, each plus <paramref name="residual"/>, into <c>[rows, 2 * width]</c>.</summary>
-    public static void ConcatPlusResidual(Tensor output, Tensor first, Tensor second, Tensor residual, long rows, int width)
+    /// <summary>Concatenates <c>first + residual</c> and <c>second + residual</c> along the last axis into <paramref name="output"/>
+    /// <c>[.., 2 * width]</c>.</summary>
+    public static void ConcatPlusResidual(IBackend backend, Tensor output, Tensor first, Tensor second, Tensor residual)
     {
-        float* a = (float*)first.DataPointer;
-        float* b = (float*)second.DataPointer;
-        float* res = (float*)residual.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        CpuParallel.For((int)rows, rows * width * 2, r =>
+        Tensor a = new(first.Shape, DType.F32);
+        Tensor b = new(second.Shape, DType.F32);
+        backend.Add(a, first, residual);
+        backend.Add(b, second, residual);
+        backend.Concat(output, [a, b], output.Shape.Rank - 1);
+        a.Dispose();
+        b.Dispose();
+    }
+
+    /// <summary>Copies rows <c>[firstPosition, firstPosition + count)</c> of a half-width table into a <c>[count, hd]</c> tensor whose
+    /// two halves both hold the row, the layout the rotate-half backend rotary reads.</summary>
+    private static Tensor WidenedRows(float[] half, int firstPosition, int count, int hd)
+    {
+        int h = hd / 2;
+        Tensor rows = new(new TensorShape(count, hd), DType.F32);
+        float* p = (float*)rows.DataPointer;
+        for (int s = 0; s < count; s++)
         {
-            float* d = dst + (long)r * 2 * width;
-            long at = (long)r * width;
-            for (int i = 0; i < width; i++)
+            for (int i = 0; i < h; i++)
             {
-                d[i] = a[at + i] + res[at + i];
-                d[width + i] = b[at + i] + res[at + i];
+                float v = half[(long)(firstPosition + s) * h + i];
+                p[(long)s * hd + i] = v;
+                p[(long)s * hd + h + i] = v;
             }
-        });
+        }
+        return rows;
     }
 }
