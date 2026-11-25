@@ -196,6 +196,30 @@ public sealed class KvSegmentStoreTests : IDisposable
     }
 
     [Fact]
+    public void ARefusedRewriteKeepsATensorTheSlotHolds()
+    {
+        IBackend backend = DispatchProxy.Create<IBackend, PinRecorder>();
+        PinRecorder pins = (PinRecorder)backend;
+        using KvSegmentStore store = new(backend, layers: 1, tokenAxis: 0);
+        Tensor keys = Filled(1, 2, 2), values = Filled(1, 2, 2);
+        store.Append(0, keys, values);
+
+        Tensor wrong = Filled(2, 3, 2);
+        Assert.Throws<ArgumentException>(() => store.Set(0, 0, keys, wrong));
+        Tensor unpinnable = Filled(3, 2, 2);
+        pins.Refuse = unpinnable;
+        Assert.Throws<InvalidOperationException>(() => store.Set(0, 0, keys, unpinnable));
+
+        Assert.True(IsDisposed(wrong));
+        Assert.True(IsDisposed(unpinnable));
+        Assert.Same(keys, store.Keys(0, 0));
+        Assert.Same(values, store.Values(0, 0));
+        Assert.False(IsDisposed(keys));
+        Assert.Contains(keys, pins.Pinned);
+        Assert.Equal(2, pins.Pinned.Count);
+    }
+
+    [Fact]
     public void OneTensorForBothIsRefused_AndDisposed()
     {
         using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 0);
@@ -245,10 +269,14 @@ public sealed class KvSegmentStoreTests : IDisposable
         Assert.Throws<ArgumentOutOfRangeException>(() => store.Append(3, keys, values));
         Assert.True(IsDisposed(keys));
         Assert.Throws<ArgumentOutOfRangeException>(() => store.Keys(-1, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.Count(1));
+        Assert.False(store.Has(0, -1));
+        Assert.False(store.Has(7, 0));
         store.Append(0, Filled(1, 2, 2), Filled(1, 2, 2));
         store.Dispose();
         Assert.Throws<ObjectDisposedException>(() => store.Keys(0, 0));
         Assert.Throws<ObjectDisposedException>(() => store.Join(0, 0, 1));
+        Assert.Throws<ObjectDisposedException>(() => store.Compact(0));
     }
 
     [Fact]

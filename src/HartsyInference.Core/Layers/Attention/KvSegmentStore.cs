@@ -54,19 +54,20 @@ public sealed class KvSegmentStore : IDisposable
     }
 
     /// <summary>Segment slots of <paramref name="layer"/>, empty ones included.</summary>
-    public int Count(int layer) => _layers[layer].Count;
+    public int Count(int layer) => Layer(layer).Count;
 
     /// <summary>Tokens stored in <paramref name="layer"/>.</summary>
     public long Tokens(int layer)
     {
         long tokens = 0;
-        foreach (Segment? segment in _layers[layer])
+        foreach (Segment? segment in Layer(layer))
             tokens += segment?.Keys.Shape[_tokenAxis] ?? 0;
         return tokens;
     }
 
     /// <summary>True when <paramref name="slot"/> of <paramref name="layer"/> holds keys and values.</summary>
-    public bool Has(int layer, int slot) => slot < _layers[layer].Count && _layers[layer][slot] is not null;
+    public bool Has(int layer, int slot) =>
+        (uint)layer < (uint)_layers.Length && (uint)slot < (uint)_layers[layer].Count && _layers[layer][slot] is not null;
 
     /// <summary>The keys of a slot, borrowed until the slot changes.</summary>
     /// <exception cref="InvalidOperationException">The slot is empty.</exception>
@@ -77,12 +78,14 @@ public sealed class KvSegmentStore : IDisposable
     public Tensor Values(int layer, int slot) => At(layer, slot).Values;
 
     /// <summary>Writes a slot, taking ownership of both tensors (also when it throws) and freeing what it replaces. Slots before it that were never
-    /// written stay empty.</summary>
+    /// written stay empty. A tensor belongs to one slot; writing a slot again with a tensor it already holds keeps that tensor, also when the write
+    /// is refused.</summary>
     /// <exception cref="ArgumentException">The two tensors differ from each other, or from the stored segments outside the token axis.</exception>
     public void Set(int layer, int slot, Tensor keys, Tensor values)
     {
         ArgumentNullException.ThrowIfNull(keys);
         ArgumentNullException.ThrowIfNull(values);
+        Segment? held = Has(layer, slot) ? _layers[layer][slot] : null;
         bool stored = false;
         try
         {
@@ -90,17 +93,16 @@ public sealed class KvSegmentStore : IDisposable
             List<Segment?> segments = Layer(layer);
             ArgumentOutOfRangeException.ThrowIfNegative(slot);
             Validate(keys, values);
-            Pin(keys, values);
+            Pin(keys, values, held);
             stored = true;
             while (segments.Count <= slot)
                 segments.Add(null);
-            Segment? replaced = segments[slot];
             segments[slot] = new Segment(keys, values);
-            // A slot may be written again with a tensor it already holds; that one stays.
-            if (replaced is not null && !ReferenceEquals(replaced.Keys, keys) && !ReferenceEquals(replaced.Keys, values))
-                Free(replaced.Keys);
-            if (replaced is not null && !ReferenceEquals(replaced.Values, keys) && !ReferenceEquals(replaced.Values, values))
-                Free(replaced.Values);
+            if (held is not null)
+            {
+                if (!ReferenceEquals(held.Keys, keys) && !ReferenceEquals(held.Keys, values)) Free(held.Keys);
+                if (!ReferenceEquals(held.Values, keys) && !ReferenceEquals(held.Values, values)) Free(held.Values);
+            }
             _shape = keys.Shape;
             _dtype = keys.DType;
             _shaped = true;
@@ -109,8 +111,8 @@ public sealed class KvSegmentStore : IDisposable
         {
             if (!stored)
             {
-                keys.Dispose();
-                if (!ReferenceEquals(keys, values)) values.Dispose();
+                if (!Holds(held, keys)) keys.Dispose();
+                if (!Holds(held, values)) values.Dispose();
             }
         }
     }
@@ -136,7 +138,7 @@ public sealed class KvSegmentStore : IDisposable
     }
 
     /// <summary>Drops every segment of <paramref name="layer"/>.</summary>
-    public void Clear(int layer) => RemoveRange(layer, 0, _layers[layer].Count);
+    public void Clear(int layer) => RemoveRange(layer, 0, Count(layer));
 
     /// <summary>Segments <c>[first, first + count)</c> joined along the token axis into fresh tensors the caller owns.</summary>
     /// <exception cref="InvalidOperationException">A slot in the range is empty.</exception>
@@ -163,9 +165,10 @@ public sealed class KvSegmentStore : IDisposable
     /// The old and the new copy exist together while it runs.</summary>
     public void Compact(int layer)
     {
-        if (_layers[layer].Count <= 1)
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        int count = Count(layer);
+        if (count <= 1)
             return;
-        int count = _layers[layer].Count;
         (Tensor keys, Tensor values) = Join(layer, 0, count);
         Set(layer, 0, keys, values);
         RemoveRange(layer, 1, count - 1);
@@ -212,16 +215,24 @@ public sealed class KvSegmentStore : IDisposable
             throw new ArgumentException($"The segments are {_dtype} {_shape} apart from axis {_tokenAxis}; this one is {keys.DType} {keys.Shape}.", nameof(keys));
     }
 
-    private void Pin(Tensor keys, Tensor values)
+    private static bool Holds(Segment? segment, Tensor tensor) =>
+        segment is not null && (ReferenceEquals(segment.Keys, tensor) || ReferenceEquals(segment.Values, tensor));
+
+    // Pins what the slot does not hold already; a failure leaves the pins as they were.
+    private void Pin(Tensor keys, Tensor values, Segment? held)
     {
-        _backend.PinActivation(keys);
+        bool pinKeys = !Holds(held, keys);
+        if (pinKeys)
+            _backend.PinActivation(keys);
         try
         {
-            _backend.PinActivation(values);
+            if (!Holds(held, values))
+                _backend.PinActivation(values);
         }
         catch
         {
-            _backend.UnpinActivation(keys);
+            if (pinKeys)
+                _backend.UnpinActivation(keys);
             throw;
         }
     }
