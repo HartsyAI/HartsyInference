@@ -1,0 +1,21 @@
+{
+ "transformers": "5.24.0.dev0",
+ "pinned_commit": "52bac5d0e0da56e26289c072f306877ff5870262",
+ "seed": 21,
+ "grids": [
+  [
+   1,
+   4,
+   6
+  ],
+  [
+   2,
+   4,
+   4
+  ]
+ ],
+ "rope_parameters": {
+  "rope_theta": 10000.0,
+  "rope_type": "axial"
+ }
+}

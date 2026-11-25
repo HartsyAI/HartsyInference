@@ -3,14 +3,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Hy4Flash;
 
-/// <summary>Row access to one large embedding table (an Engram layer table or the token embedding), <c>[rows, dim]</c> in F32 or BF16, read in place by 64-bit offset so a memory-mapped 31.7 GB table
+/// <summary>Row access to one Engram embedding table, <c>[rows, dim]</c> in F32 or BF16, read in place by 64-bit offset so a memory-mapped 31.7 GB table
 /// is never copied or spanned whole.</summary>
-public sealed unsafe class Hy4FlashRowTable
+public sealed unsafe class Hy4FlashEngramRows
 {
     private readonly Tensor _table;
 
     /// <param name="table">The flat per-layer table; borrowed, the caller keeps it alive.</param>
-    public Hy4FlashRowTable(Tensor table)
+    public Hy4FlashEngramRows(Tensor table)
     {
         ArgumentNullException.ThrowIfNull(table);
         if (table.Shape.Rank != 2 || (table.DType != DType.F32 && table.DType != DType.BF16))

@@ -91,6 +91,7 @@ per-model architecture notes and build plans.
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
 | **FLUX.3 Klein** (5.6B, full + step-distilled) | 🔧 Built 2026-10-15. Text-to-image, img2img, inpaint, up to 10 reference images, the native layout table, and LoRA (diffusers/PEFT, ComfyUI and kohya names). Tiny-config parity against ComfyUI passes; no real-weight or GPU run yet. ([details](#flux3-klein)) |
 | **Iris-Z** (small 9.1B, big 32.2B; image + depth) | 🔧 Built 2026-11-12 as two variants of the FLUX.2 recipe. Prompt to image, prompt to image + depth, image to depth and depth to image. CPU tests on tiny random weights pass; no real-weight or GPU run, and no parity against the reference yet. FLUX non-commercial licence. ([details](#iris-z)) |
+| **Open Vision Banana** (FunAILab; FLUX.2 Klein Base 4B and 9B fine-tunes; segmentation, depth, normals by editing) | 🔧 Built 2026-11-24 as the `open-vision-banana-4b` / `-9b` variants of the FLUX.2 recipe: the photo is a reference the DiT reads, true CFG, 28 steps, the task prompt verbatim. Tiny-config parity against diffusers 0.43.0 passes; **no real-weight or GPU run yet**. Weights FLUX non-commercial. ([details](#open-vision-banana)) |
 | **Fibo 2.0** (Bria, 44-layer DiT + Qwen3-VL-4B, `fibo2-dev`, `fibo2-edit-turbo`) | 🔧 2026-10-22: dev bf16 text-to-image ran on the real checkpoint (sha256 `2a09866f…`, header read: injection layers 6/14/22/30/38, FFN 9728, 512 queries) through SwarmUI on the RTX 4090 and produced a coherent 1024×1024 image that matches its caption (50 steps, CFG 5, seed 42). Speed: about 4.0 s/step before the F16 self-attention change, against ComfyUI 87ed5a066d9c at 1.09 s/step and 17.7 GB peak VRAM on the same card (bf16, CFG 5), so the engine was about 3.7× slower; re-measure after that change. Not yet compared with ComfyUI on the same noise and tokens (the baseline artifacts are saved); the other features (img2img, mask inpaint, LoRA, reference/masked editing, the int8 ConvRot builds) are covered only by CPU tests on tiny fixtures and have not run on real weights or a GPU. Glyph text images are refused (the rasteriser needs ComfyUI's Aileron font). CC-BY-NC-4.0. ([details](../Research/FIBO2_GPU_HANDOFF.md)) |
 | **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16; real weights on CUDA 2026-10-20 (text-to-image, reference edits, colorize LoRA, inpaint; no A/B or speed run yet). Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), reference-image edits in the Ostris / ai-toolkit layout (up to 3, cached or joint), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan, edits included; no speed run yet. ([details](#moss-image)) |
 
@@ -586,6 +587,22 @@ Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_
   synthetic smoke tests, converter, LoRA mapping and merge tests. **Not verified:** a real-weight generation, the
   text-encoder taps against ComfyUI, GPU backends, and an A/B of the hoisted Flux.2 latent and VAE code on Flux.2,
   Krea 2 and Lens.
+
+### Open Vision Banana
+
+**Built, not yet run on real weights (2026-11-24).** `FunAILab/Open-Vision-Banana` @ `558ea8a` (paper arXiv 2611.15844, code `OpenVisionBanana/OpenVisionBanana` @ `d457d3f`): full fine-tunes of FLUX.2 [klein] Base 4B and 9B
+(`Flux2Transformer2DModel`, the base's config unchanged, fp32 diffusers shards) that answer a task prompt about a photo with a painted image. One model does semantic, referring and instance segmentation, relative
+inverse depth, surface normals, editing and generation; the prompt selects the task. The engine serves them as the `open-vision-banana-4b` / `-9b` variants of the `flux2` recipe (`FineTuneOf` klein-4b / klein-9b: no
+tensor tells them from their base, so the catalog id or a file/folder name carrying `ovb` selects them).
+
+- **Run path:** the photo is VAE-encoded and appended to the token sequence as a reference (RoPE T = 10 + 10 i, one shared timestep), two-pass CFG against the empty prompt, 28 steps, guidance 3.5, the target is the photo's
+  size (at most 1 MP, floored to 16). `Flux2EditPipeline`; the recipe pipeline sends the prompt through Qwen3's chat template verbatim. FP32 shards narrow to F16 on load.
+- **Decoding:** `OvbDecoder` (legend snap with black as ignore, majority vote across legends, grouped merge with global class ids, depth = luma/255, normals with x negated) and `OvbPrompts` / `OvbLegend`. The adapter that runs them through the image service (`OvbPerception`) is in the next PR of the series.
+  Instance segmentation (GrabCut) is not ported.
+- **Catalog:** zero-shot averaged checkpoints `final_models/4B/zeroshot/checkpoint-87500-95000-w25` (15.5 GB) and `final_models/9B/zeroshot/checkpoint-coco86750-w25` (36.3 GB), shard sha256 pinned from the HF LFS oids.
+- **Licence:** weights FLUX Non-Commercial, outputs covered; code Apache-2.0 (the release's `LICENSE`).
+- **Evidence so far:** [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md#image-diffusion--see-model_status_imagemd-for-build-detail). Not done: any real-weight run, layer-diff against `Flux2KleinPipeline`, the mIoU / depth metric, GPU speed and VRAM, the VAE
+  posterior-mode check, Klein 9B (never run), the `VisionService` / CLI / API vision routes (waits on Depth Pro 2 and RMBG-3).
 
 ### Iris-Z
 
