@@ -85,8 +85,11 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         Dictionary<string, float[]> expected = Stages(cpu, model.Network, estimator, rgb, width, height);
         Dictionary<string, float[]> actual = Stages(device, model.Network, estimator, rgb, width, height);
         foreach ((string stage, float[] values) in expected)
-            output.WriteLine($"{gpu} {name} {stage} relRMS {RelRms(actual[stage], values):E2}");
-        Assert.True(RelRms(actual["inverse_depth"], expected["inverse_depth"]) <= Bound(gpu), "inverse depth");
+        {
+            double stageError = RelRms(actual[stage], values);
+            output.WriteLine($"{gpu} {name} {stage} relRMS {stageError:E2}");
+            Assert.True(stageError <= Bound(gpu), $"{stage} relRMS {stageError:E2}");
+        }
 
         DepthPro2Prediction cpuResult = model.Predict(cpu, [rgb], width, height, focalLengthPx: null, estimator);
         DepthPro2Prediction gpuResult = model.Predict(device, [rgb], width, height, focalLengthPx: null, estimator);
@@ -227,9 +230,13 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
             }
 
             double depth = Math.Sqrt(diff2 / Math.Max(ref2, 1e-30));
-            string inverse = actual[f].InverseDepth is { } gi && expected[f].InverseDepth is { } ci ? $", inverse depth relRMS {RelRms(gi, ci):E2}" : "";
-            output.WriteLine($"{label} frame {f}: depth relRMS {depth:E2}{inverse}, {infinite} infinite pixels");
+            Assert.Equal(expected[f].ValidMask, actual[f].ValidMask);
+            Assert.NotNull(actual[f].InverseDepth);
+            Assert.NotNull(expected[f].InverseDepth);
+            double inverse = RelRms(actual[f].InverseDepth!, expected[f].InverseDepth!);
+            output.WriteLine($"{label} frame {f}: depth relRMS {depth:E2}, inverse depth relRMS {inverse:E2}, {infinite} infinite pixels");
             Assert.True(depth <= bound, $"{label} frame {f}: depth relRMS {depth:E2}");
+            Assert.True(inverse <= bound, $"{label} frame {f}: inverse depth relRMS {inverse:E2}");
         }
     }
 
@@ -270,22 +277,31 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         return loader;
     }
 
-    // CudaFp32 turns TF32 off for the GEMMs and the attention GEMMs (numerics.noTf32, numerics.sdpaNoTf32), both read at construction.
+    // Both CUDA lanes pin numerics.noTf32 and numerics.sdpaNoTf32 (read at construction), so a settings file cannot swap them, and put back
+    // whatever override was there before.
     private static IBackend Open(Gpu gpu)
     {
         if (gpu == Gpu.Vulkan) return new VulkanBackend();
-        if (gpu == Gpu.Cuda) return new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory());
-        KnobStore.Set(EngineKnobs.NoTf32, true);
-        KnobStore.Set(EngineKnobs.SdpaNoTf32, true);
+        bool fp32 = gpu == Gpu.CudaFp32;
+        bool? noTf32 = KnobStore.HasOverride(EngineKnobs.NoTf32) ? EngineKnobs.NoTf32.Value : null;
+        bool? sdpaNoTf32 = KnobStore.HasOverride(EngineKnobs.SdpaNoTf32) ? EngineKnobs.SdpaNoTf32.Value : null;
+        KnobStore.Set(EngineKnobs.NoTf32, fp32);
+        KnobStore.Set(EngineKnobs.SdpaNoTf32, fp32);
         try
         {
             return new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory());
         }
         finally
         {
-            KnobStore.Clear(EngineKnobs.NoTf32);
-            KnobStore.Clear(EngineKnobs.SdpaNoTf32);
+            Restore(EngineKnobs.NoTf32, noTf32);
+            Restore(EngineKnobs.SdpaNoTf32, sdpaNoTf32);
         }
+    }
+
+    private static void Restore(Knob<bool> knob, bool? previous)
+    {
+        if (previous is { } value) KnobStore.Set(knob, value);
+        else KnobStore.Clear(knob);
     }
 
     private static string? Probe(Gpu gpu)
