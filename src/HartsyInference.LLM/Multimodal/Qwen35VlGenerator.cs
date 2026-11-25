@@ -12,18 +12,19 @@ public sealed class Qwen35VlGenerator
 {
     private readonly Qwen35Model _model;
     private readonly ILlmTokenizer _tok;
-    private readonly IVlmImageEncoder _vision;
+    private readonly Qwen3VlEncoder _vision;
     private readonly IBackend _backend;
 
-    public Qwen35VlGenerator(Qwen35Model model, ILlmTokenizer tok, IVlmImageEncoder vision, IBackend backend)
+    public Qwen35VlGenerator(Qwen35Model model, ILlmTokenizer tok, Qwen3VlEncoder vision, IBackend backend)
     {
         _model = model; _tok = tok; _vision = vision; _backend = backend;
     }
 
-    /// <param name="grid">The image's merged token grid, read from the pixels the tower encodes (<see cref="Qwen3VlEncoder.MergedGrid"/>).
-    /// Required: the M-RoPE positions of the image run cannot be inferred from its token count (a 2×8 grid has 16 tokens, as does 4×4).</param>
-    public unsafe string Generate(Tensor pixelValues, MRopeImageGrid grid, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    /// <summary>Generates an answer about <paramref name="pixelValues"/>. The image's merged grid is read from those pixels via the Qwen3-VL tower
+    /// (<see cref="Qwen3VlEncoder.MergedGrid"/>), never inferred from the token count: a 2×8 grid and a 4×4 grid both hold 16 tokens.</summary>
+    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
+        MRopeImageGrid grid = Qwen3VlEncoder.MergedGrid(pixelValues, _vision.PatchSize, _vision.Merge);
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler (matches MultimodalGenerator).
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
