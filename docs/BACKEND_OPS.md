@@ -493,7 +493,7 @@ Every implementation of these ops:
 | `GroupScale` | reference | `group_scale_f32`, `_f16_f32`, `_f16_f16`, `_bf16_f32`, `_bf16_bf16` | `group_scale_f32/f16/f16_f16`; BF16 takes the reference |
 | `LinearFused` | composed | int8 fused epilogues where eligible, else composed | composed |
 | `GuidedEulerStep` | reference | `guided_euler.ptx` (`guided_euler_f32`; `_reduce/_finalize/_scaled` for the global norm; `_rows` per row) | `guided_euler`; the normalized forms take the reference |
-| `SumProducts` | reference | reference | reference |
+| `SumProducts` | reference | `sum_products.ptx` (`sum_products_groups_f32`; `_partials/_finalize` for a group past 16384 elements) | reference |
 | `TopKGuidedLogits` | reference | `topk_guided_logits.ptx` (`topk_guided_logits_f32`, rows up to 16448 wide) | reference |
 | `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
 | `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Contracts;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Reduction;
@@ -141,6 +142,57 @@ public sealed class SumProductsTests
         Assert.Equal(exact, wide.AsReadOnlySpan<double>()[0]);
         Assert.Equal((float)exact, narrow.AsReadOnlySpan<float>()[0]);
         Assert.NotEqual(4096f * 4096f, narrow.AsReadOnlySpan<float>()[0]);
+    }
+
+    // The index arithmetic the CUDA kernel runs, on the CPU: row-major element i of the collapsed axes, in group i / ElementsPerGroup.
+    [Theory]
+    [InlineData("range")]
+    [InlineData("rows")]
+    [InlineData("columns")]
+    [InlineData("kept pair")]
+    [InlineData("broadcast")]
+    [InlineData("stepped")]
+    public void TheCollapsedAxes_AddressTheSameElementsInTheSameGroups(string name)
+    {
+        StridedView whole = StridedView.Of([4, 6, 10]);
+        StridedView columns = whole.Permute([2, 0, 1]);
+        SumProductsSpec spec = name switch
+        {
+            "range" => SumProductsSpec.Over(whole.Slice(1, 2, 3), All),
+            "rows" => SumProductsSpec.PerRow(240, 5, All),
+            "columns" => new SumProductsSpec(columns, columns, 1, All),
+            "kept pair" => new SumProductsSpec(whole.Split(2, 2, 5), whole.Split(2, 2, 5), 3, All),
+            "broadcast" => new SumProductsSpec(whole, StridedView.VectorAlong([4, 6, 10], 1), 2, All),
+            _ => new SumProductsSpec(whole.Slice(2, 1, 4, step: 2), whole.Slice(2, 0, 4), 1, All),
+        };
+        Random rng = new(6);
+        using Tensor a = Filled(rng, 240), b = Filled(rng, 240);
+        long groups = 1;
+        for (int axis = 0; axis < spec.KeptAxes; axis++) groups *= spec.A[axis];
+        using Tensor expected = new(new TensorShape(groups, 3), DType.F64);
+        Backend.SumProducts(expected, a, b, spec);
+
+        SumProductsGeometry g = SumProductsContract.Validate(expected, a, b, spec);
+        double[] actual = new double[groups * 3];
+        ReadOnlySpan<float> x = a.AsReadOnlySpan<float>(), y = b.AsReadOnlySpan<float>();
+        Assert.Equal(g.Groups * g.ElementsPerGroup, g.Axes.ElementCount);
+        for (long i = 0; i < g.Groups * g.ElementsPerGroup; i++)
+        {
+            long ia = g.Axes.SourceOffset, ib = g.Axes.DestinationOffset, rest = i;
+            for (int axis = g.Axes.Rank - 1; axis >= 0; axis--)
+            {
+                long at = axis == 0 ? rest : rest % g.Axes.Dim(axis);
+                rest /= g.Axes.Dim(axis);
+                ia += at * g.Axes.SourceStride(axis);
+                ib += at * g.Axes.DestinationStride(axis);
+            }
+            long group = i / g.ElementsPerGroup;
+            actual[group * 3] += (double)x[(int)ia] * y[(int)ib];
+            actual[group * 3 + 1] += (double)x[(int)ia] * x[(int)ia];
+            actual[group * 3 + 2] += (double)y[(int)ib] * y[(int)ib];
+        }
+
+        Assert.Equal(expected.AsReadOnlySpan<double>().ToArray(), actual);
     }
 
     [Fact]
