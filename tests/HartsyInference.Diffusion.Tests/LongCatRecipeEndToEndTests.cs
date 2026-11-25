@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Planning;
@@ -20,8 +21,10 @@ public sealed class LongCatRecipeEndToEndTests
 {
     private const int UmT5Vocab = 256384, UmT5Buckets = 32, Tokens = 8;
 
-    [Fact]
-    public void TheBaseRecipeGeneratesTheRequestedClipFromATinyCheckpoint()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheBaseRecipeGeneratesTheRequestedClipFromATinyCheckpoint(bool int8)
     {
         List<Dictionary<string, Tensor>> umt5Weights = [];
         string directory = Path.Combine(Path.GetTempPath(), "longcat-e2e-" + Guid.NewGuid().ToString("N"));
@@ -29,7 +32,21 @@ public sealed class LongCatRecipeEndToEndTests
         try
         {
             Dictionary<string, Tensor> weights = LongCatTestData.Weights(LongCatTestData.Tiny, seed: 71);
-            LongCatTestData.WriteCheckpoint(directory, weights);
+            if (int8)
+            {
+                // The release's per-row INT8 layout: the quantized linears carry .weight_int8 and .weight_scale, under the INT8 index name.
+                Dictionary<string, Tensor> quantized = LongCatTestData.QuantizePerRow(weights);
+                LongCatTestData.WriteCheckpoint(directory, quantized, indexFileName: LongCatCheckpoint.Int8IndexFileName);
+                foreach ((string key, Tensor tensor) in quantized)
+                {
+                    if (!weights.TryGetValue(key, out Tensor? dense) || !ReferenceEquals(dense, tensor))
+                        tensor.Dispose();
+                }
+            }
+            else
+            {
+                LongCatTestData.WriteCheckpoint(directory, weights);
+            }
             LongCatTestData.DisposeAll(weights);
 
             // The encoder reads its weight tensors for as long as it lives, so they are disposed only after the pipeline is.

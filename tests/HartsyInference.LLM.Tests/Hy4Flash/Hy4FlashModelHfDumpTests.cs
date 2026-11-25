@@ -2,6 +2,7 @@ using System.Text.Json;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Hy4Flash;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit.Abstractions;
 
@@ -20,11 +21,11 @@ public sealed class Hy4FlashModelHfDumpTests(ITestOutputHelper output)
         }
     }
 
-    private sealed class SetSource(ShardedSafeTensorSet set) : IHy4FlashWeightSource
+    private sealed class SetSource(ShardedSafeTensorSet set) : IModelWeightSource
     {
-        public Tensor Read(string name) => set.GetTensor(name);
+        public IEnumerable<string> Names => set.Inventory.Keys;
 
-        public bool Contains(string name) => set.Inventory.ContainsKey(name);
+        public Tensor Read(string name) => set.GetTensor(name);
     }
 
     private static int[] Ids()
