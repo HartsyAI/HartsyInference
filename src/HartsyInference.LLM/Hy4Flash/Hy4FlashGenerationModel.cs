@@ -107,7 +107,7 @@ public sealed class Hy4FlashGenerationModel : IGenerationModel
     /// <summary>Empty: the weights are host arrays and a checkpoint view, not engine tensors, so there is nothing for a residency planner to place.</summary>
     public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) => [];
 
-    /// <summary>The per-position state every layer keeps (latent row and indexer key) plus the Engram token history, for <paramref name="contextTokens"/> positions.</summary>
+    /// <summary>The per-position state every layer keeps (latent row and indexer key), for <paramref name="contextTokens"/> positions. The Engram token history (one int per position) is not counted.</summary>
     public long EstimateSequenceBytes(int contextTokens)
     {
         Hy4FlashConfig c = _model.Config;

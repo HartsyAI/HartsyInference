@@ -50,7 +50,9 @@ internal static class Hy4FlashCatalog
                 },
                 // Licence: Tencent Hy License 1.0 (Apache-2.0 derived). Section 10: a MaaS operator needs a separate written licence above US$50M worldwide gross
                 // revenue in any 12 months or a product above 100M monthly active users; no territory limit. Internal use is exempt.
-                Notes = notes + " Licence: Tencent Hy License 1.0, section 10 (separate licence for MaaS operators above US$50M revenue or 100M MAU).",
+                Notes = notes + " Thinking: enable_thinking false, or a reasoning effort of 50 (low) or less, selects the no_think template; higher efforts and no setting render"
+                    + " the checkpoint's own high default. The reasoning split (separating the thinking block from the answer) is not built."
+                    + " Licence: Tencent Hy License 1.0, section 10 (separate licence for MaaS operators above US$50M revenue or 100M MAU).",
             },
         ],
     };
