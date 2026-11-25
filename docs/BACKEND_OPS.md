@@ -435,6 +435,15 @@ out = max(x · rsqrt(mean(x²) + eps) · w, 0) · scale      per row of weight.E
 The default composes `RmsNorm`, `LeakyRelu(0)` and `Scale`; CUDA fuses them into one warp-per-row kernel for F32. The output
 may be shaped differently from the input (same element count), as the SANA-WM camera keys are.
 
+## SelectiveScan
+
+`SelectiveScan` is the Mamba-1 selective state-space recurrence. Per row and channel, with step `delta`, input `u`, decay `a`
+(negative), input and output projections `b` and `c`, and skip `d`: `h = exp(delta * a) h + delta * b * u` and `y = c . h + d * u`,
+multiplied by `silu(z)` when a gate is given. The state carries from one call to the next, which is how a stream runs it.
+The host reference (`SelectiveScanReference`) is the only implementation. It refuses more than `MaxStates` (256) states per
+channel, the size of the on-stack state it keeps per channel. A CUDA kernel is the next step: one thread per row and channel with
+the state in registers, as the Metal kernel in the upstream `scan.py` does.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -473,6 +482,7 @@ Every implementation of these ops:
 | `Exp`, `Reciprocal` | reference | `point_ops.ptx` (`elementwise_math_<in>_<out>`, F32 and BF16 each side) | reference |
 | `FrameDeltaScan` | reference | `frame_scan.ptx` (`frame_scan_scale_keys_f32`, `frame_scan_recurrence_f32`, `_col_f32`, `frame_scan_sum_f32`) around cuBLAS batched GEMMs | reference |
 | `DepthwiseConvGlu` | reference | `depthwise_glu.ptx` (`depthwise_glu_f32/bf16`, `depthwise_glu_bf16_vec`) | reference |
+| `SelectiveScan` | reference | none | none |
 | `UcpeTransform` | reference | `ucpe.ptx` (`ucpe_transform_f32`) | reference |
 | `DepthwiseConvFrames` | reference | `frame_conv.ptx` (`depthwise_conv_frames_f32`) | reference |
 | `RmsNormRelu` | composed | `rms_relu.ptx` (`rms_norm_relu_f32`); other dtypes composed | composed |
