@@ -246,8 +246,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// <paramref name="videoRows"/>/<paramref name="audioRows"/> are the patchified latent rows in segment order;
     /// <paramref name="textStates"/> is the Qwen3-VL hidden state <c>[textLen, textDim]</c>.
     /// <paramref name="attentionBias"/> is an optional additive score bias for the main trunk's dense attention: F32
-    /// <c>[S, S]</c> with <c>S = layout.SequenceLength</c>, on this backend's device, added before softmax, where a
-    /// <c>-inf</c> entry excludes that key. It is borrowed for the call and not disposed. Only the main trunk's dense attention
+    /// <c>[S, S]</c> with <c>S = layout.SequenceLength</c>, added before softmax, where a <c>-inf</c> entry excludes that key.
+    /// The caller must place it on this backend's device; the check covers only dtype and shape. It is borrowed for the call and not disposed. Only the main trunk's dense attention
     /// applies it; the token refiner stays unmasked. A biased forward refuses Fun ControlNet, sparse attention, and any forward
     /// that chunks attention, because the chunked and sparse paths take no bias. A biased call also skips the Sage and INT8 fast
     /// paths, which take no bias, so it runs the dense path. The score matrix costs 4·S² bytes, about 3.6 GB at S ≈ 30k.</summary>
@@ -299,7 +299,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>Refuses a biased forward that would not run dense, unchunked attention, and says why.</summary>
-    internal static void CheckBiasedRoute(int seq, int chunkRows, long freeBytes, bool sparse)
+    internal static void CheckBiasedRoute(int seq, int chunkRows, long freeBytes, bool sparse, bool chunkForced = false)
     {
         if (sparse)
         {
@@ -307,9 +307,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
         if (seq > chunkRows)
         {
+            // The forced setting wins over free VRAM, so freeing VRAM would not change the outcome. Name the setting instead.
+            string cause = chunkForced
+                ? "chunking is forced by the vram.h3ChunkRows setting; clear that setting to run dense"
+                : $"free VRAM is {freeBytes} bytes, too little for dense attention at this length; free more VRAM or shorten the sequence";
             throw new NotSupportedException(
                 $"A Duo attention bias needs dense, unchunked attention, but this forward chunks at {chunkRows} rows "
-                + $"(seq={seq}, free VRAM {freeBytes} bytes). Free more VRAM or shorten the sequence; a chunked bias path is not implemented.");
+                + $"(seq={seq}): {cause}. A chunked bias path is not implemented.");
         }
     }
 
@@ -352,7 +356,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
         if (attentionBias is not null)
         {
-            CheckBiasedRoute(seq, chunkRows, freeBytes, sparse: sparseAttention is not null);
+            CheckBiasedRoute(seq, chunkRows, freeBytes, sparse: sparseAttention is not null,
+                chunkForced: MiniMaxH3ChunkPolicy.ChunkRowsForced());
         }
 
         Tensor h = EmbedSegments(backend, layout, videoRows, audioRows, textStates);
@@ -864,9 +869,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     internal Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin, Tensor? bias = null)
     {
         int seq = (int)x.Shape[0];
-        if (bias is not null && (bias.DType != DType.F32 || bias.Shape.Rank != 2 || bias.Shape[0] != seq || bias.Shape[1] != seq))
+        if (bias is not null)
         {
-            throw new ArgumentException($"The attention bias must be F32 [{seq}, {seq}]; got {bias.DType} {bias.Shape}.", nameof(bias));
+            ValidateAttentionBias(bias, seq);
         }
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
         TensorShape headed = new TensorShape(1, heads, seq, hd);

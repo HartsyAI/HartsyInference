@@ -29,6 +29,9 @@ public static class MiniMaxH3ChunkPolicy
     /// comfortably fits <paramref name="freeBytes"/>, else a chunk scaled by the VRAM tier. The
     /// <c>vram.h3ChunkRows</c> setting overrides the decision outright (any positive integer) — the CPU backend's
     /// <c>GetVramInfo</c> always reports (0, 0), so that is also how a CPU-only test forces the chunked path.</summary>
+    /// <summary>Whether <c>vram.h3ChunkRows</c> forces the chunk size. When it does, free VRAM does not decide chunking at all.</summary>
+    public static bool ChunkRowsForced() => EngineKnobs.H3ChunkRows.Value is int forced && forced > 0;
+
     public static int ResolveChunkRows(
         int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes, IBackend? backend = null)
     {

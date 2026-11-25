@@ -45,6 +45,25 @@ public sealed class MiniMaxH3BiasRouteTests
             MiniMaxH3Transformer.CheckBiasedRoute(seq: 4096, chunkRows: 1024, freeBytes: 3_000_000_000L, sparse: false));
         Assert.Contains("chunks at 1024 rows", error.Message);
         Assert.Contains("seq=4096", error.Message);
-        Assert.Contains("free VRAM 3000000000 bytes", error.Message);
+        Assert.Contains("free VRAM is 3000000000 bytes", error.Message);
+        Assert.DoesNotContain("vram.h3ChunkRows", error.Message);
+    }
+
+    [Fact]
+    public void ForcedChunkingNamesTheSettingAndNotFreeVram()
+    {
+        // With vram.h3ChunkRows set, free VRAM does not decide chunking (the CPU backend reports 0), so the message must name the setting.
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() =>
+            MiniMaxH3Transformer.CheckBiasedRoute(seq: 4096, chunkRows: 1024, freeBytes: 0, sparse: false, chunkForced: true));
+        Assert.Contains("vram.h3ChunkRows", error.Message);
+        Assert.DoesNotContain("free more VRAM", error.Message);
+        Assert.DoesNotContain("free VRAM", error.Message);
+    }
+
+    [Fact]
+    public void ForcedChunkingIsNotRefusedWhenItDoesNotChunk()
+    {
+        // The forced setting only matters when the sequence actually exceeds the chunk rows.
+        MiniMaxH3Transformer.CheckBiasedRoute(seq: 512, chunkRows: int.MaxValue, freeBytes: 0, sparse: false, chunkForced: true);
     }
 }
