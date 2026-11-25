@@ -1,7 +1,9 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Demucs;
 using HartsyInference.Audio.Models.ResembleEnhance;
+using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -16,6 +18,18 @@ internal static class FxCatalog
 
     /// <summary>Sample rate Resemble-Enhance input is decoded to.</summary>
     internal const int EnhanceSampleRate = 44_100;
+
+    /// <summary>Catalog id of the Kim_Vocal_2 vocal separator (<c>-m kim-vocal-2</c>).</summary>
+    internal const string KimVocal2Id = "kim-vocal-2";
+
+    /// <summary>Where Kim_Vocal_2 ships: the vocal_separator folder of the LongCat-Video-Avatar-1.6 repo, 66,759,214 bytes.</summary>
+    internal const string KimVocal2Repo = "meituan-longcat/LongCat-Video-Avatar-1.6";
+
+    /// <summary>The file's path inside <see cref="KimVocal2Repo"/>.</summary>
+    internal const string KimVocal2File = "vocal_separator/Kim_Vocal_2.onnx";
+
+    /// <summary>sha256 of <see cref="KimVocal2File"/>, the repo's LFS oid.</summary>
+    internal const string KimVocal2Sha256 = "ce74ef3b6a6024ce44211a07be9cf8bc6d87728cc852a68ab34eb8e58cde9c8b";
 
     /// <summary>The Resemble-Enhance weights repo.</summary>
     internal const string EnhanceRepo = "ResembleAI/resemble-enhance";
@@ -81,6 +95,56 @@ internal static class FxCatalog
         pipeline.LoadWeights(weights);
         Logs.Info($"[Audio][Demucs] Loaded '{Path.GetFileName(path)}' ({config.NumSources} stems, 44.1 kHz).");
         return new DemucsRunner(pipeline, loader);
+    }
+
+    /// <summary>Resolves Kim_Vocal_2's <c>.onnx</c>: an explicit local path, else a file already in the fx weights folder, else the repo copy
+    /// (downloaded once into the audio cache and checked against <see cref="KimVocal2Sha256"/>).</summary>
+    internal static async Task<string> EnsureKimVocal2PathAsync(string? localPath, CancellationToken cancel)
+    {
+        if (!string.IsNullOrEmpty(localPath) && File.Exists(localPath))
+        {
+            return localPath;
+        }
+        string placed = Path.Combine(AudioModelRoot.WeightsDirectory("fx", KimVocal2Id), Path.GetFileName(KimVocal2File));
+        if (File.Exists(placed))
+        {
+            return placed;
+        }
+        string? cached = AudioModelCache.TryGetLocal(KimVocal2Repo, KimVocal2File, "fx");
+        if (cached is not null)
+        {
+            return cached;
+        }
+        Logs.Info($"[Audio][Kim-Vocal-2] Downloading {KimVocal2File} from {KimVocal2Repo} (66.8 MB, one-time)...");
+        string path = await AudioModelCache.GetAsync(KimVocal2Repo, KimVocal2File, "fx", ct: cancel).ConfigureAwait(false);
+        AudioModelCache.VerifySha256(path, KimVocal2Sha256);
+        return path;
+    }
+
+    /// <summary>Reads Kim_Vocal_2's graph and weights from <paramref name="path"/> (a repack to safetensors is a later step: the file is 66.8 MB and binds in
+    /// about a tenth of a second) and builds the runner on <paramref name="backend"/>.</summary>
+    internal static MdxVocalRunner LoadKimVocal2(string path, IBackend backend)
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Kim_Vocal_2 weights not found: '{path}'. Place Kim_Vocal_2.onnx there.", path);
+        }
+        Dictionary<string, Tensor> weights = KimVocal2OnnxConverter.Convert(path, out KimVocal2Geometry geometry);
+        try
+        {
+            KimVocal2Network network = new(weights);
+            Logs.Info($"[Audio][Kim-Vocal-2] Loaded '{Path.GetFileName(path)}' ({geometry.Levels} levels, widths {string.Join('/', geometry.Widths)}, "
+                + $"{geometry.DimF} bins, F32 on {backend.GetType().Name}).");
+            return new MdxVocalRunner(network, weights, backend);
+        }
+        catch
+        {
+            foreach (Tensor t in weights.Values)
+            {
+                t.Dispose();
+            }
+            throw;
+        }
     }
 
     /// <summary>Path of the DeepSpeed generator checkpoint inside the HF repo — the repo ships no model.safetensors / pytorch_model.bin, only the raw <c>enhancer_stage2</c> run directory.</summary>
