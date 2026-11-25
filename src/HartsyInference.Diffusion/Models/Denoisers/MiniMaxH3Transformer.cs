@@ -650,7 +650,7 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
     private void ForwardNamedBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
         Tensor cos, Tensor sin, string p, int chunkRows,
         IVideoSparseAttentionSession? sparseAttention = null, Tensor? attentionBias = null,
-        Func<int, int, Tensor>? biasTile = null)
+        Func<int, int, Tensor>? biasTile = null, Func<Tensor, Tensor>? attentionOverride = null)
     {
         int seq = (int)h.Shape[0];
         // A bias must run on the route it was built for. A dense bias on the chunked route, or a tile builder on the dense
@@ -671,7 +671,9 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
             Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex,
                 Optional($"{p}.attn.qkv_proj.weight"));
             normed.Dispose();
-            Tensor attn = sparseAttention is not null
+            // attentionOverride, when given, is the whole attention step (the cached Duo path); the route checks above do not apply to it.
+            Tensor attn = attentionOverride is not null ? attentionOverride(modulated)
+                : sparseAttention is not null
                 ? AttentionSparse(backend, modulated, $"{p}.attn", cos, sin, sparseAttention)
                 : seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows, biasTile)
                     : Attention(backend, modulated, $"{p}.attn", cos, sin, attentionBias);

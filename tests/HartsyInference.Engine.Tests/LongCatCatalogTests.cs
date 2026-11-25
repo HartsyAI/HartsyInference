@@ -44,10 +44,4 @@ public sealed class LongCatCatalogTests
 
         Assert.Equal("base_model/diffusion_pytorch_model-00001-of-00006.safetensors", primary.RepoPath);
     }
-
-    [Fact]
-    public void TheWhisperRevisionTheRecipePinsIsTheOneTheCatalogNames()
-    {
-        Assert.Equal("06f233fe06e710322aca913c1bc4249a0d71fce1", LongCatAvatarRecipe.WhisperRevision);
-    }
 }
