@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
@@ -10,9 +9,9 @@ using HartsyInference.Diffusion.Models.Duo;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>The cached Duo forward (PR 2h): a denoise that reads a committed history and, when asked, commits its own clean rows.
-/// Attention keys are <c>[cache | current]</c>, so the bias is <c>[S, past + S]</c>. Each block runs the shared H3 block body, with the
-/// attention step supplied as a delegate. Only the dense route is implemented; a layout past <see cref="MaxDuoDenseBiasRows"/> in either
-/// direction is refused.</summary>
+/// Attention keys are <c>[cache | current]</c> and each query group attends the key rows it may read, so there is no bias. Each block runs
+/// the shared H3 block body, with the attention step supplied as a delegate. The attention is not chunked; a layout past
+/// <see cref="MaxDuoDenseBiasRows"/> in either direction is refused.</summary>
 public sealed unsafe partial class MiniMaxH3Transformer
 {
     /// <summary>Runs one causal Duo denoise over <paramref name="layout"/>, reading <paramref name="cache"/>. When <paramref name="commit"/>
@@ -47,7 +46,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         if (seq > MaxDuoDenseBiasRows || past + seq > MaxDuoDenseBiasRows)
         {
             throw new NotSupportedException(
-                $"The cached Duo forward is dense: {past} cached rows and {seq} current rows exceed {MaxDuoDenseBiasRows}. "
+                $"The cached Duo forward is not chunked: {past} cached rows and {seq} current rows exceed {MaxDuoDenseBiasRows}. "
                 + "Tiled cached attention is not implemented.");
         }
         // Refuse an overflowing commit before anything is allocated, so a refused commit costs nothing.
@@ -64,9 +63,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         {
             keyGroups.Add(g with { Start = g.Start + past, End = g.End + past });
         }
-        IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(layout.Groups, keyGroups, DuoAttentionMode.Causal);
-        DuoAttentionBias.ValidateRows(rects, seq, past + seq);
-        using Tensor bias = HostTensor(new TensorShape(seq, past + seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, past + seq));
+        KeyRangeSegment[] segments = DuoMask.Segments(DuoMask.Build(layout.Groups, keyGroups, DuoAttentionMode.Causal), seq, past + seq);
 
         using Tensor tEmb = BuildTimeEmbedding(backend, times);
         using Tensor modIndex = BuildDuoModulationIndex(layout);
@@ -89,7 +86,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
                 ForwardNamedBlock(backend, ref stream, tEmb, modIndex, cos, sin, p, int.MaxValue,
                     BlockAttention.Override(x =>
                     {
-                        Tensor attn = CachedAttention(backend, x, $"{p}.attn", cos, sin, cache.Layer(block), bias, commit,
+                        Tensor attn = CachedAttention(backend, x, $"{p}.attn", cos, sin, cache.Layer(block), segments, commit,
                             out float[]? keys, out float[]? values);
                         keptKeys[block] = keys!;
                         keptValues[block] = values!;
@@ -119,19 +116,15 @@ public sealed unsafe partial class MiniMaxH3Transformer
         }
     }
 
-    /// <summary>Attention over <c>[cache | current]</c>, on the shared attention dispatcher. Returns the output projection for the current
+    /// <summary>Attention over <c>[cache | current]</c>, one shared-dispatcher call per segment. Returns the output projection for the current
     /// rows. When <paramref name="keepRows"/> is true, also returns the current rows' keys and values as head-major <c>[heads, rows, hd]</c>
     /// host arrays, keys already rotated, for a commit; otherwise both are null and nothing is copied.</summary>
     private Tensor CachedAttention(IBackend backend, Tensor x, string prefix, Tensor cos, Tensor sin, DuoKvCache past,
-        Tensor bias, bool keepRows, out float[]? keysNow, out float[]? valuesNow)
+        KeyRangeSegment[] segments, bool keepRows, out float[]? keysNow, out float[]? valuesNow)
     {
         int seq = (int)x.Shape[0];
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
         int rows = past.Rows;
-        if (bias.Shape.Rank != 2 || bias.Shape[0] != seq || bias.Shape[1] != rows + seq || bias.DType != DType.F32)
-        {
-            throw new ArgumentException($"The cached bias must be F32 [{seq}, {rows + seq}]; got {bias.DType} {bias.Shape}.", nameof(bias));
-        }
 
         using Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32);
         backend.Linear(qkv, x, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias"));
@@ -162,8 +155,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
                 HeadMajorWithPast(past.Keys, rows, k.AsSpan<float>(), seq, heads, hd));
             vAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
                 HeadMajorWithPast(past.Values, rows, v.AsSpan<float>(), seq, heads, hd));
-            Tensor scores = _attention.AttendHeadMajorOperands(backend, q, kAll, vAll, new AttentionCallContext { Bias = bias },
-                OperandOwnership.None);
+            Tensor scores = SegmentedAttention.RunHeadMajor(backend, _attention, q, kAll, vAll, segments);
             try
             {
                 using Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);

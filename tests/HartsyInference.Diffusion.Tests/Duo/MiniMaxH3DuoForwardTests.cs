@@ -326,6 +326,51 @@ public sealed class MiniMaxH3DuoForwardTests
     }
 
     [Fact]
+    public void CachedGroupsThatReadDifferentKeysMatchTheFullForward()
+    {
+        // Text reads the history and itself, the noisy rows read both and themselves, padding reads only padding: three calls in the cached
+        // forward, one biased call in the full one.
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        float[] times = Times();
+        IReadOnlyList<DuoGroup> refiner =
+            [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 2, 4)];
+        float[] videoAll = Values(5, 6 * VideoIn);
+        using Tensor text = MakeTensor(new TensorShape(4, TextDim), Values(2, 4 * TextDim));
+        using Tensor videoFull = MakeTensor(new TensorShape(6, VideoIn), videoAll);
+        DuoGroup shared = new(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), reference = new(0, -1, DuoGroupKind.Reference, DuoModality.Video, 2, 4);
+
+        DuoLayout full = CachedLayout(
+            [shared, reference, new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 4, 6),
+             new DuoGroup(0, 0, DuoGroupKind.Noisy, DuoModality.Video, 6, 10), new DuoGroup(-1, -1, DuoGroupKind.Padding, DuoModality.None, 10, 12)],
+            [1, 1, 0, 0, 1, 1, 0, 0, 0, 0, -1, -1], [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0], [2, 3, 6, 7, 8, 9], [0, 1, 4, 5], [0, 1, 2, 3], [3], 0);
+        (Tensor fullVideo, _) = transformer.ForwardDuo(backend, full, DuoAttentionMode.Causal, refiner, text, videoFull, null, times);
+        float[] expected = fullVideo.AsSpan<float>().ToArray();
+        fullVideo.Dispose();
+
+        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 4);
+        DuoLayout prefix = CachedLayout([shared, reference], [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
+        using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
+        (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
+        prefixOut.Dispose();
+
+        // The group order is not the row order: the plan is built from rows, so this must not matter.
+        DuoLayout current = CachedLayout(
+            [new DuoGroup(0, 0, DuoGroupKind.Noisy, DuoModality.Video, 2, 6), new DuoGroup(-1, -1, DuoGroupKind.Padding, DuoModality.None, 6, 8),
+             new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 0, 2)],
+            [1, 1, 0, 0, 0, 0, -1, -1], [0, 0, 1, 1, 1, 1, 0, 0], [2, 3, 4, 5], [0, 1], [2, 3], [0], 4);
+        using Tensor currentVideo = MakeTensor(new TensorShape(4, VideoIn), videoAll[(2 * VideoIn)..]);
+        (Tensor currentOut, _) = transformer.ForwardDuoCached(backend, current, DuoAttentionMode.Causal, refiner, text, currentVideo, null, times, cache, commit: false);
+        float[] got = currentOut.AsSpan<float>().ToArray();
+        currentOut.Dispose();
+
+        for (int i = 0; i < 4 * VideoIn; i++)
+        {
+            Assert.True(MathF.Abs(got[i] - expected[2 * VideoIn + i]) <= 1e-5f, $"element {i}: cached {got[i]} vs full {expected[2 * VideoIn + i]}.");
+        }
+    }
+
+    [Fact]
     public void CommitBeyondTheCacheCapacityLeavesTheCacheUnchanged()
     {
         using MiniMaxH3Transformer transformer = Transformer();

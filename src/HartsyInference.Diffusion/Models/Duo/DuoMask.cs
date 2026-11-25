@@ -1,3 +1,5 @@
+using HartsyInference.Core.Layers.Attention;
+
 namespace HartsyInference.Diffusion.Models.Duo;
 
 /// <summary>Whether a block of rows attends to another, in the frame-v5 protocol: the query-key rules of upstream <c>duo/models/realization/modules/masks.py</c> (@068e357), read from <c>visible()</c>.</summary>
@@ -103,6 +105,44 @@ public static class DuoMask
             }
         }
         return rects;
+    }
+
+    /// <summary>The rectangles as one attention segment per query group, in row order, each naming the key rows it reads. Attending per segment
+    /// replaces the <c>[queryLength, keyLength]</c> bias.</summary>
+    /// <exception cref="ArgumentException">The query groups do not tile <c>[0, queryLength)</c>, or a rectangle leaves the keys.</exception>
+    public static KeyRangeSegment[] Segments(IReadOnlyList<DuoMaskRect> rects, int queryLength, int keyLength)
+    {
+        ArgumentNullException.ThrowIfNull(rects);
+        List<DuoMaskRect> ordered = [.. rects];
+        ordered.Sort(static (a, b) =>
+        {
+            int byStart = a.QStart.CompareTo(b.QStart);
+            if (byStart != 0) return byStart;
+            int byEnd = a.QEnd.CompareTo(b.QEnd);
+            return byEnd != 0 ? byEnd : a.KStart.CompareTo(b.KStart);
+        });
+        List<KeyRangeSegment> segments = [];
+        for (int i = 0; i < ordered.Count;)
+        {
+            DuoMaskRect first = ordered[i];
+            List<AttentionKeyRange> keys = [];
+            for (; i < ordered.Count && ordered[i].QStart == first.QStart && ordered[i].QEnd == first.QEnd; i++)
+            {
+                AttentionKeyRange range = new(ordered[i].KStart, ordered[i].KEnd - ordered[i].KStart);
+                if (keys.Count > 0 && keys[^1].End == range.Start)
+                {
+                    keys[^1] = new AttentionKeyRange(keys[^1].Start, keys[^1].Count + range.Count);
+                }
+                else
+                {
+                    keys.Add(range);
+                }
+            }
+            segments.Add(new KeyRangeSegment(first.QStart, first.QEnd - first.QStart, keys));
+        }
+        KeyRangeSegment[] plan = [.. segments];
+        KeyRangeSegment.Validate(plan, queryLength, keyLength);
+        return plan;
     }
 
     /// <summary>Expands rectangles into a dense boolean matrix (true = attend). Test and CPU reference use only.</summary>
