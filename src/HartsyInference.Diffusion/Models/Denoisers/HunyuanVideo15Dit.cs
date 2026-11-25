@@ -606,9 +606,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
             modulated = modulation.NormAffine(backend, img, 1e-6f);
             int channels = _config.LatentChannels;
-            using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
-            using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
-            backend.Linear(projected, flat, _finalW!, _finalB!);
+            using Tensor projected = new(new TensorShape(1, tokens, channels), DType.F32);
+
+            backend.Linear(projected, modulated, _finalW!, _finalB!);
             Tensor velocity = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
             backend.Transpose2D(velocity, projected, tokens, channels);
             return velocity;
@@ -659,12 +659,12 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             new ReadOnlySpan<float>((void*)conditioning.DataPointer, (int)extraCount).CopyTo(extra);
         }
 
-        Tensor tokenMajor = new(new TensorShape(tokens, _config.ImgInChannels), DType.F32);
+        Tensor tokenMajor = new(new TensorShape(1, tokens, _config.ImgInChannels), DType.F32);
         backend.Transpose2D(tokenMajor, channelsFirst, _config.ImgInChannels, tokens);
         channelsFirst.Dispose();
-        using Tensor tokenMajor3 = tokenMajor.Reshape(new TensorShape(1, tokens, _config.ImgInChannels));
+
         Tensor img = new(new TensorShape(1, tokens, _config.HiddenSize), DType.F32);
-        backend.Linear(img, tokenMajor3, _imgInW!, _imgInB!);
+        backend.Linear(img, tokenMajor, _imgInW!, _imgInB!);
         tokenMajor.Dispose();
         return img;
     }
@@ -769,9 +769,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         normed.Dispose();
 
         int channels = _config.LatentChannels;
-        using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
-        using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
-        backend.Linear(projected, flat, _finalW!, _finalB!);
+        using Tensor projected = new(new TensorShape(1, tokens, channels), DType.F32);
+
+        backend.Linear(projected, modulated, _finalW!, _finalB!);
         // An owned [1, C, T, H, W] tensor (not a Reshape view, which would leave its parent to the finalizer once per step).
         Tensor velocity = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
         backend.Transpose2D(velocity, projected, tokens, channels);

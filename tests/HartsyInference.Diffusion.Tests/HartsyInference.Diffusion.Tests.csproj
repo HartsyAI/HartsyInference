@@ -36,4 +36,8 @@
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\GpuDeviceFacts.cs" Link="Shared\GpuDeviceFacts.cs" />
+  </ItemGroup>
+
 </Project>

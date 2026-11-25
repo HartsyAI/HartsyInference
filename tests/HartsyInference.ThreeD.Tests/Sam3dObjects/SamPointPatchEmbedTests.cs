@@ -272,10 +272,10 @@ public sealed class SamPointPatchEmbedTests
 
         Tensor kept = w["pos_embed"];
         w["pos_embed"] = Filled(rng, 1.0, 1, 8, 3, 3);
-        Assert.Throws<InvalidOperationException>(() => new SamPointPatchEmbed(Config, w));
+        Assert.Throws<InvalidDataException>(() => new SamPointPatchEmbed(Config, w));
         w["pos_embed"] = kept;
         w.Remove("blocks.0.mlp.fc2.bias");
-        Assert.Throws<InvalidOperationException>(() => new SamPointPatchEmbed(Config, w));
+        Assert.Throws<KeyNotFoundException>(() => new SamPointPatchEmbed(Config, w));
 
         Assert.Throws<ArgumentException>(() => new SamPointPatchEmbed(Config with { PatchSize = 3 }, w));
         Assert.Throws<ArgumentException>(() => new SamPointPatchEmbed(Config with { Heads = 3 }, w));

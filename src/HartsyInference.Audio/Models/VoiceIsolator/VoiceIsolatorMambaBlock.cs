@@ -27,7 +27,7 @@ internal sealed class VoiceIsolatorMambaBlock : IDisposable
         backend.Add(afterTime, x, timeOut);
         timeOut.Dispose();
         Tensor frameMajor = new(new TensorShape(frames, bands, width), DType.F32);
-        VoiceIsolatorOps.SwapLeading(frameMajor, afterTime, bands, frames, width);
+        VoiceIsolatorOps.SwapLeading(backend, frameMajor, afterTime, bands, frames, width);
         afterTime.Dispose();
         Tensor frequencyOut = _frequency.Forward(backend, frameMajor, frames, bands, null);
         Tensor afterFrequency = new(new TensorShape(1, n, width), DType.F32);
@@ -35,7 +35,7 @@ internal sealed class VoiceIsolatorMambaBlock : IDisposable
         frequencyOut.Dispose();
         frameMajor.Dispose();
         Tensor bandMajor = new(new TensorShape(1, n, width), DType.F32);
-        VoiceIsolatorOps.SwapLeading(bandMajor, afterFrequency, frames, bands, width);
+        VoiceIsolatorOps.SwapLeading(backend, bandMajor, afterFrequency, frames, bands, width);
         afterFrequency.Dispose();
         return bandMajor;
     }

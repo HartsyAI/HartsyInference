@@ -76,11 +76,11 @@ public sealed partial class LongCatBlock
         int s = (int)input.Shape[0];
         QkRotation rotation = new(QkRotationKind.InterleavedPairs, cos, sin, s);
         AttentionCallContext context = new() { QueryRotation = rotation, KeyRotation = rotation };
-        (Tensor q, Tensor k, Tensor v) = _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+        (Tensor q, Tensor k, Tensor v) = ProjectSelfTiled(backend, input);
         Tensor? queries = null, keys = null, values = null;
         try
         {
-            _selfAttention.RotateQk(backend, q, k, in context);
+            _selfAttention!.RotateQk(backend, q, k, in context);
             if (keep)
                 kept = new LongCatBlockKv(LongCatOps.Copy(backend, k), LongCatOps.Copy(backend, v));
             if (cache is null)

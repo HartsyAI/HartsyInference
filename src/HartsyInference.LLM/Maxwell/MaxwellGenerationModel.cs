@@ -50,7 +50,7 @@ public sealed class MaxwellGenerationModel : IGenerationModel
         MaxwellSequenceState caches = _model.CreateState(options.MaxSequenceTokens);
         return new HostReplaySequenceState(options.MaxSequenceTokens, _model.Config.HiddenSize,
             (ids, hidden) => _model.ForwardHidden(ids, caches, allRows: true).AsSpan().CopyTo(hidden),
-            caches.Reset, () => { });
+            caches.Reset, caches.Dispose);
     }
 
     /// <inheritdoc />

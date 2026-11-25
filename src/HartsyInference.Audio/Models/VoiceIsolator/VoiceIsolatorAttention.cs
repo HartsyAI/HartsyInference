@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Audio.Layers;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -52,12 +53,12 @@ internal sealed class VoiceIsolatorAttentionBlock
         Tensor afterTime = TimeTransformer(backend, x, bands, frames, causal, ropeCos, ropeSin, lane, stream);
         int width = _config.Width;
         Tensor frameMajor = new(new TensorShape(frames, bands, width), DType.F32);
-        VoiceIsolatorOps.SwapLeading(frameMajor, afterTime, bands, frames, width);
+        VoiceIsolatorOps.SwapLeading(backend, frameMajor, afterTime, bands, frames, width);
         afterTime.Dispose();
         Tensor afterBand = BandTransformer(backend, frameMajor, bands, frames);
         frameMajor.Dispose();
         Tensor bandMajor = new(new TensorShape(1, (long)bands * frames, width), DType.F32);
-        VoiceIsolatorOps.SwapLeading(bandMajor, afterBand, frames, bands, width);
+        VoiceIsolatorOps.SwapLeading(backend, bandMajor, afterBand, frames, bands, width);
         afterBand.Dispose();
         return bandMajor;
     }
@@ -76,7 +77,7 @@ internal sealed class VoiceIsolatorAttentionBlock
         Tensor q = new(headShape, DType.F32);
         Tensor k = new(headShape, DType.F32);
         Tensor v = new(headShape, DType.F32);
-        VoiceIsolatorOps.SplitQkvToHeads(qkv, q, k, v, bands, frames, heads, hd);
+        VoiceIsolatorOps.SplitQkvToHeads(backend, qkv, q, k, v, bands, frames, heads, hd);
         qkv.Dispose();
         Tensor attended;
         if (lane is not null && stream is not null)
@@ -85,8 +86,8 @@ internal sealed class VoiceIsolatorAttentionBlock
         }
         else
         {
-            VoiceIsolatorOps.Rope(q, bands, heads, frames, hd, 0, ropeCos, ropeSin);
-            VoiceIsolatorOps.Rope(k, bands, heads, frames, hd, 0, ropeCos, ropeSin);
+            VoiceIsolatorOps.Rope(backend, q, frames, hd, 0, ropeCos, ropeSin);
+            VoiceIsolatorOps.Rope(backend, k, frames, hd, 0, ropeCos, ropeSin);
             Tensor? mask = causal ? CausalMask(frames, _config.AttentionWindowFrames) : null;
             attended = new Tensor(headShape, DType.F32);
             backend.ScaledDotProductAttention(attended, q, k, v, mask, 1f / MathF.Sqrt(hd));
@@ -100,7 +101,7 @@ internal sealed class VoiceIsolatorAttentionBlock
         }
         v.Dispose();
         Tensor tokens = new(new TensorShape(1, n, width), DType.F32);
-        VoiceIsolatorOps.HeadsToTokens(tokens, attended, bands, frames, heads, hd);
+        VoiceIsolatorOps.HeadsToTokens(backend, tokens, attended, bands, frames, heads, hd);
         attended.Dispose();
         Tensor projected = WhisperOps.ProjectLinear(backend, tokens, _projW, _projB, 1, n, width, width);
         tokens.Dispose();
@@ -123,7 +124,7 @@ internal sealed class VoiceIsolatorAttentionBlock
         Tensor q = new(headShape, DType.F32);
         Tensor k = new(headShape, DType.F32);
         Tensor v = new(headShape, DType.F32);
-        VoiceIsolatorOps.SplitQkvToHeads(qkv, q, k, v, frames, bands, heads, hd);
+        VoiceIsolatorOps.SplitQkvToHeads(backend, qkv, q, k, v, frames, bands, heads, hd);
         qkv.Dispose();
         Tensor attended = new(headShape, DType.F32);
         backend.ScaledDotProductAttention(attended, q, k, v, null, 1f / MathF.Sqrt(hd));
@@ -131,7 +132,7 @@ internal sealed class VoiceIsolatorAttentionBlock
         k.Dispose();
         v.Dispose();
         Tensor tokens = new(new TensorShape(1, n, width), DType.F32);
-        VoiceIsolatorOps.HeadsToTokens(tokens, attended, frames, bands, heads, hd);
+        VoiceIsolatorOps.HeadsToTokens(backend, tokens, attended, frames, bands, heads, hd);
         attended.Dispose();
         Tensor projected = WhisperOps.ProjectLinear(backend, tokens, _outW, _outB, 1, n, width, width);
         tokens.Dispose();
@@ -147,7 +148,7 @@ internal sealed class VoiceIsolatorAttentionBlock
         Tensor normed = LayerNorm(backend, x, normW, normB, x.Shape);
         Tensor hidden = WhisperOps.ProjectLinear(backend, normed, w1, b1, 1, n, width, 4 * width);
         normed.Dispose();
-        VoiceIsolatorOps.Gelu(hidden);
+        Activations.ErfGelu(hidden);
         Tensor down = WhisperOps.ProjectLinear(backend, hidden, w2, b2, 1, n, 4 * width, width);
         hidden.Dispose();
         Tensor output = new(new TensorShape(1, n, width), DType.F32);

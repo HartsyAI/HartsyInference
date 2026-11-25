@@ -1,4 +1,5 @@
 using System.Globalization;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Hy4Flash;
 
@@ -87,7 +88,7 @@ public static class Hy4FlashWeightMap
                 scales.Add($"{t.Name} is FP8 with no scale grid");
         }
         List<string> missing = [.. expected.Keys.Where(k => !seen.Contains(k))];
-        return new Hy4FlashWeightCoverage(mapped, companions, drafter, unmapped, missing, shapes, scales, dtypes);
+        return new Hy4FlashWeightCoverage(new CheckpointKeyCoverage("Hy4 Flash", mapped, companions, drafter, unmapped, missing), shapes, scales, dtypes);
     }
 
     /// <summary>Which storage class a checkpoint key belongs to.</summary>
