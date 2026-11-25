@@ -105,6 +105,14 @@ public sealed class FastFramesKvRefiner : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_loaded)
             throw new InvalidOperationException("The refiner's weights are already loaded; a refiner loads once.");
+        foreach ((string name, long[] shape) in ExpectedShapes(_config))
+        {
+            // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
+            if (!weights.TryGetValue(name, out Tensor? tensor))
+                throw new ArgumentException($"The refiner checkpoint has no '{name}'.", nameof(weights));
+            if (tensor.Shape.Rank != shape.Length || !Enumerable.Range(0, shape.Length).All(i => tensor.Shape[i] == shape[i]))
+                throw new ArgumentException($"'{name}' is {tensor.Shape}; the refiner expects [{string.Join(", ", shape)}].", nameof(weights));
+        }
         int dA = _config.AdapterDim, dim = _config.Dim, layers = _config.Layers;
         _tEmbed0W = Own(F32(weights, "t_embed.mlp.0.weight")); _tEmbed0B = Own(F32(weights, "t_embed.mlp.0.bias"));
         _tEmbed2W = Own(F32(weights, "t_embed.mlp.2.weight")); _tEmbed2B = Own(F32(weights, "t_embed.mlp.2.bias"));
@@ -199,6 +207,12 @@ public sealed class FastFramesKvRefiner : IDisposable
         RequireLoaded();
         if (layer < 0 || layer >= _heads.Length)
             throw new ArgumentOutOfRangeException(nameof(layer), layer, $"The refiner has {_heads.Length} layers.");
+        if (noisyK.DType != DType.F32 || noisyV.DType != DType.F32 || phiV.DType != DType.F32)
+            throw new ArgumentException("The refiner runs in F32; cast the cache slot and the features first.");
+        if (noisyK.Shape.Rank != 2 || noisyK.Shape[1] != _config.Dim || noisyV.Shape != noisyK.Shape)
+            throw new ArgumentException($"K and V must be [S, {_config.Dim}] with one shape; got {noisyK.Shape} and {noisyV.Shape}.");
+        if (phiV.Shape.Rank != 2 || phiV.Shape[0] != noisyK.Shape[0] || phiV.Shape[1] != _config.AdapterDim)
+            throw new ArgumentException($"phi must be [{noisyK.Shape[0]}, {_config.AdapterDim}]; got {phiV.Shape}.");
         return RunHead(backend, _heads[layer], noisyK, noisyV, phiV, conditioning, layer);
     }
 

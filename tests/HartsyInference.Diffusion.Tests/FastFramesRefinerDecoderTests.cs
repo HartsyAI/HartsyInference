@@ -473,6 +473,55 @@ public sealed class FastFramesRefinerDecoderTests
         Assert.Throws<ObjectDisposedException>(() => decoder.CreateState());
     }
 
+    [Fact]
+    public void ARefinerAndDecoderRefuseHalfPrecisionInputs()
+    {
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = RefinerWeights(TinyRefiner, seed: 15);
+        using FastFramesKvRefiner refiner = new(TinyRefiner);
+        refiner.LoadWeights(weights);
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+        using Tensor half = new(new TensorShape(Tokens, TinyRefiner.Dim), DType.BF16);
+        using Tensor phi = new(new TensorShape(Tokens, TinyRefiner.AdapterDim), DType.F32);
+        using FastFramesKvRefiner.Conditioning conditioning = refiner.Prepare(backend, 833f);
+        Assert.Throws<ArgumentException>(() => refiner.RepairLayer(backend, 0, half, half, phi, conditioning));
+
+        FastFramesPixelDecoderConfig c = new(Dim: 8, InputDim: 8, LowBlocks: 1, HighBlocks: 1, FfnMultiplier: 4);
+        Dictionary<string, Tensor> decoderWeights = DecoderWeights(c, seed: 16, prefix: "");
+        using FastFramesPixelDecoder decoder = new(c);
+        decoder.LoadWeights(decoderWeights);
+        foreach (Tensor t in decoderWeights.Values)
+            t.Dispose();
+        using FastFramesPixelDecoder.State state = decoder.CreateState();
+        using Tensor hidden = new(new TensorShape(6, 8), DType.BF16);
+        using Tensor embedding = new(new TensorShape(1, 8), DType.F32);
+        Assert.Throws<ArgumentException>(() => decoder.DecodeFrame(backend, hidden, embedding, 3, 2, state));
+    }
+
+    [Fact]
+    public void AFailedLoadLeavesNothingBehindAndTheCheckpointCanBeLoadedAgain()
+    {
+        Dictionary<string, Tensor> refinerWeights = RefinerWeights(TinyRefiner, seed: 17);
+        Dictionary<string, Tensor> partialRefiner = new(refinerWeights);
+        partialRefiner.Remove("stem_norm.bias");
+        using FastFramesKvRefiner refiner = new(TinyRefiner);
+        Assert.Throws<ArgumentException>(() => refiner.LoadWeights(partialRefiner));
+        refiner.LoadWeights(refinerWeights);
+        foreach (Tensor t in refinerWeights.Values)
+            t.Dispose();
+
+        FastFramesPixelDecoderConfig c = new(Dim: 8, InputDim: 8, LowBlocks: 1, HighBlocks: 1, FfnMultiplier: 4);
+        Dictionary<string, Tensor> decoderWeights = DecoderWeights(c, seed: 18, prefix: "");
+        Dictionary<string, Tensor> partialDecoder = new(decoderWeights);
+        partialDecoder.Remove("fc_out.bias");
+        using FastFramesPixelDecoder decoder = new(c);
+        Assert.Throws<ArgumentException>(() => decoder.LoadWeights(partialDecoder));
+        decoder.LoadWeights(decoderWeights);
+        foreach (Tensor t in decoderWeights.Values)
+            t.Dispose();
+    }
+
     // ---------------------------------------------------------------- reference math (double precision)
 
     private static double[] LinearVec(double[] x, Tensor weight, Tensor? bias)
