@@ -1,0 +1,247 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Core.Rope;
+using HartsyInference.Core.Tensors;
+
+namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+
+/// <summary>LongCat-Video DiT block (<c>LongCatSingleStreamBlock</c>, meituan-longcat/LongCat-Video @ 58eb336). B=1 over <c>[S, dim]</c> with a
+/// per-frame modulation: (1) self-attention with fused QKV, per-head QK RMSNorm and 3D RoPE, run as the segments the caller plans, gated;
+/// (2) ungated text cross-attention on the noisy rows only, after an affine LayerNorm; (3) SwiGLU FFN, gated. Every weight is used through
+/// <see cref="IBackend.Linear"/> or <see cref="IBackend.LinearWeightRows"/>, which apply a runtime LoRA adjunct on any projection, and no
+/// path casts or fuses a weight past that.</summary>
+public sealed class LongCatBlock : IStreamingBlock
+{
+    private readonly LongCatConfig _config;
+    private Tensor? _adaWeight, _adaBias;
+    private Tensor? _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias;
+    private Tensor? _crossNormWeight, _crossNormBias;
+    private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
+    private Tensor? _w1, _w2, _w3;
+    private AttentionLayer? _selfAttention, _crossAttention;
+
+    /// <summary>Creates a block of the given geometry; <see cref="LoadWeights"/> fills it.</summary>
+    public LongCatBlock(LongCatConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        config.Validate();
+        _config = config;
+    }
+
+    /// <inheritdoc/>
+    public long EstimatedWeightBytes { get; private set; }
+
+    /// <summary>Reads the block's tensors under <paramref name="prefix"/> (<c>blocks.N</c>).</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    {
+        _adaWeight = w[$"{prefix}.adaLN_modulation.1.weight"];
+        _adaBias = w[$"{prefix}.adaLN_modulation.1.bias"];
+        _qkv = w[$"{prefix}.attn.qkv.weight"];
+        _qkvBias = w[$"{prefix}.attn.qkv.bias"];
+        _qNorm = TensorCasts.LoadF32(w, $"{prefix}.attn.q_norm.weight");
+        _kNorm = TensorCasts.LoadF32(w, $"{prefix}.attn.k_norm.weight");
+        _proj = w[$"{prefix}.attn.proj.weight"];
+        _projBias = w[$"{prefix}.attn.proj.bias"];
+        _crossNormWeight = TensorCasts.LoadF32(w, $"{prefix}.pre_crs_attn_norm.weight");
+        _crossNormBias = TensorCasts.LoadF32(w, $"{prefix}.pre_crs_attn_norm.bias");
+        _crossQ = w[$"{prefix}.cross_attn.q_linear.weight"];
+        _crossQBias = w[$"{prefix}.cross_attn.q_linear.bias"];
+        _crossKv = w[$"{prefix}.cross_attn.kv_linear.weight"];
+        _crossKvBias = w[$"{prefix}.cross_attn.kv_linear.bias"];
+        _crossQNorm = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.q_norm.weight");
+        _crossKNorm = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.k_norm.weight");
+        _crossProj = w[$"{prefix}.cross_attn.proj.weight"];
+        _crossProjBias = w[$"{prefix}.cross_attn.proj.bias"];
+        _w1 = w[$"{prefix}.ffn.w1.weight"];
+        _w2 = w[$"{prefix}.ffn.w2.weight"];
+        _w3 = w[$"{prefix}.ffn.w3.weight"];
+        long bytes = 0;
+        foreach (Tensor t in EnumerateWeights())
+            bytes += t.DType.ComputeByteCount(t.ElementCount);
+        EstimatedWeightBytes = bytes;
+        BuildAttention();
+    }
+
+    /// <inheritdoc/>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _adaWeight, _adaBias, _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias, _crossNormWeight, _crossNormBias,
+            _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias, _w1, _w2, _w3 })
+        {
+            if (t is not null)
+                yield return t;
+        }
+    }
+
+    private void BuildAttention()
+    {
+        AttentionLayerConfig self = new()
+        {
+            Heads = _config.NumHeads, KvHeads = _config.NumHeads, HeadDim = _config.HeadDim, Projection = AttentionProjection.FusedSplitNorm,
+            QkNorm = AttentionQkNorm.PerHead, ComputeDType = DType.F32,
+        };
+        _selfAttention = new AttentionLayer(self, new AttentionLayerWeights
+        {
+            Qkv = _qkv, QkvBias = _qkvBias, Output = _proj, OutputBias = _projBias, QueryNorm = _qNorm, KeyNorm = _kNorm,
+            QueryNormEps = LongCatConfig.NormEps, KeyNormEps = LongCatConfig.NormEps,
+        });
+        AttentionLayerConfig cross = self with { Projection = AttentionProjection.PerWeight };
+        _crossAttention = new AttentionLayer(cross, new AttentionNormWeights(_crossQNorm, _crossKNorm, LongCatConfig.NormEps, LongCatConfig.NormEps));
+    }
+
+    /// <summary>One forward over the F32 residual stream <paramref name="hidden"/> <c>[S, dim]</c>, which stays the caller's.
+    /// <paramref name="text"/> is the
+    /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
+    /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
+        Action<string, Tensor>? probe = null, string stage = "")
+    {
+        int dim = _config.HiddenSize;
+        int s = checked(inputs.Frames * inputs.TokensPerFrame);
+        if (hidden.DType != DType.F32 || hidden.Shape.Rank != 2 || hidden.Shape[0] != s || hidden.Shape[1] != dim)
+            throw new ArgumentException($"The LongCat stream is F32 [{s}, {dim}]; got {hidden.DType} {hidden.Shape}.", nameof(hidden));
+        if (timeEmbed.Shape[0] != inputs.Frames)
+            throw new ArgumentException($"The timestep embedding has {timeEmbed.Shape[0]} rows for {inputs.Frames} frames.", nameof(timeEmbed));
+        int hw = inputs.TokensPerFrame;
+
+        using Tensor modulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _adaWeight!, _adaBias);
+        probe?.Invoke($"{stage}.modulation", modulation);
+
+        // 1. self-attention: modulation columns are [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp].
+        using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
+        probe?.Invoke($"{stage}.attn_in", normed1);
+        using Tensor attn = SelfAttention(backend, normed1, in inputs, probe, stage);
+        probe?.Invoke($"{stage}.self_attn", attn);
+        using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
+        probe?.Invoke($"{stage}.after_self", afterSelf);
+
+        // 2. text cross-attention, noisy rows only (conditioning rows get a zero update).
+        using Tensor afterCross = CrossAttentionResidual(backend, afterSelf, text, in inputs, probe, stage);
+        probe?.Invoke($"{stage}.after_cross", afterCross);
+
+        // 3. SwiGLU FFN.
+        using Tensor normed3 = LongCatOps.NormModulate(backend, afterCross, modulation, 4 * dim, 3 * dim, hw);
+        using Tensor ffn = FeedForward(backend, normed3);
+        probe?.Invoke($"{stage}.ffn", ffn);
+        Tensor output = LongCatOps.GatedResidual(backend, afterCross, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex);
+        probe?.Invoke($"{stage}.out", output);
+        return output;
+    }
+
+    private Tensor SelfAttention(IBackend backend, Tensor input, in LongCatBlockInputs inputs, Action<string, Tensor>? probe, string stage)
+    {
+        int s = (int)input.Shape[0];
+        QkRotation rotation = new(QkRotationKind.InterleavedPairs, inputs.Cos, inputs.Sin, s);
+        AttentionCallContext context = new() { QueryRotation = rotation, KeyRotation = rotation };
+        if (inputs.Segments.Length == 1)
+        {
+            AttentionSegment.Validate(inputs.Segments, s);
+            if (inputs.Segments[0].KeyCount == s)
+                return _selfAttention!.Forward(backend, input, input, in context);
+        }
+
+        (Tensor q, Tensor k, Tensor v) = _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+        try
+        {
+            _selfAttention.RotateQk(backend, q, k, in context);
+            if (probe is not null)
+            {
+                probe($"{stage}.q", q);
+                probe($"{stage}.k", k);
+                probe($"{stage}.v", v);
+            }
+            Tensor flat = SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments);
+            return _selfAttention.ProjectOutput(backend, flat);
+        }
+        finally
+        {
+            q.Dispose();
+            k.Dispose();
+            v.Dispose();
+        }
+    }
+
+    /// <summary><c>x + cross_attn(norm(x))</c> for the rows past the conditioning frames; the conditioning rows pass through.</summary>
+    private Tensor CrossAttentionResidual(IBackend backend, Tensor x, Tensor text, in LongCatBlockInputs inputs, Action<string, Tensor>? probe,
+        string stage)
+    {
+        int dim = _config.HiddenSize;
+        int s = (int)x.Shape[0];
+        int condRows = checked(inputs.CondFrames * inputs.TokensPerFrame);
+        int noisyRows = s - condRows;
+        if (noisyRows <= 0)
+            return LongCatOps.Copy(backend, x);
+
+        using Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNorm(normed, x, _crossNormWeight!, _crossNormBias!, LongCatConfig.NormEps);
+        using Tensor? noisyRowsInput = condRows == 0 ? null : SliceRows(backend, normed, condRows, noisyRows, dim);
+        using Tensor update = CrossAttention(backend, noisyRowsInput ?? normed, text);
+        probe?.Invoke($"{stage}.cross_attn", update);
+        if (condRows == 0)
+            return LongCatOps.Add(backend, x, update);
+
+        // Conditioning rows pass through untouched: only the noisy rows take the update, joined back on device.
+        using Tensor conditioning = SliceRows(backend, x, 0, condRows, dim);
+        using Tensor noisy = SliceRows(backend, x, condRows, noisyRows, dim);
+        using Tensor updatedNoisy = LongCatOps.Add(backend, noisy, update);
+        Tensor joined = new(new TensorShape(s, dim), DType.F32);
+        backend.Concat(joined, [conditioning, updatedNoisy], 0);
+        return joined;
+    }
+
+    private Tensor CrossAttention(IBackend backend, Tensor queryInput, Tensor text)
+    {
+        int heads = _config.NumHeads, headDim = _config.HeadDim, dim = _config.HiddenSize;
+        int rows = (int)queryInput.Shape[0], textRows = (int)text.Shape[0];
+        Tensor q = new(new TensorShape(1, rows, heads, headDim), DType.F32);
+        Tensor k = new(new TensorShape(1, textRows, heads, headDim), DType.F32);
+        Tensor v = new(new TensorShape(1, textRows, heads, headDim), DType.F32);
+        Tensor flat;
+        try
+        {
+            backend.Linear(q, queryInput, _crossQ!, _crossQBias);
+            // kv_linear is one [2·dim, dim] weight: k is its first dim rows, v the next; windowed so a LoRA adjunct on it applies per part.
+            backend.LinearWeightRows(k, text, _crossKv!, _crossKvBias, 0, dim);
+            backend.LinearWeightRows(v, text, _crossKv!, _crossKvBias, dim, dim);
+            flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
+        }
+        catch
+        {
+            q.Dispose();
+            k.Dispose();
+            v.Dispose();
+            throw;
+        }
+        using (flat)
+        {
+            Tensor projected = new(new TensorShape(rows, dim), DType.F32);
+            backend.Linear(projected, flat, _crossProj!, _crossProjBias);
+            return projected;
+        }
+    }
+
+    private Tensor FeedForward(IBackend backend, Tensor x)
+    {
+        int s = (int)x.Shape[0];
+        int hidden = _config.FfnHiddenDim;
+        using Tensor gate = new(new TensorShape(s, hidden), DType.F32);
+        backend.Linear(gate, x, _w1!, null);
+        using Tensor activated = new(gate.Shape, DType.F32);
+        backend.Silu(activated, gate);
+        using Tensor up = new(gate.Shape, DType.F32);
+        backend.Linear(up, x, _w3!, null);
+        using Tensor product = new(gate.Shape, DType.F32);
+        backend.Mul(product, activated, up);
+        Tensor output = new(new TensorShape(s, _config.HiddenSize), DType.F32);
+        backend.Linear(output, product, _w2!, null);
+        return output;
+    }
+
+    private static Tensor SliceRows(IBackend backend, Tensor source, int start, int count, int dim)
+    {
+        Tensor rows = new(new TensorShape(count, dim), DType.F32);
+        backend.SliceRows(rows, source, start);
+        return rows;
+    }
+}
