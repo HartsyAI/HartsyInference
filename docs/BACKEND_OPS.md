@@ -271,7 +271,7 @@ gives every row inside a longer dimension its own sums; `Over(view)` gives one g
 - Each product of two F32 elements is formed in F64, where it is exact, and the sums accumulate in F64. An F64 output holds the sum, an
   F32 output the sum rounded once. A backend without F64 arithmetic takes the reference.
 - The order of the additions is free, so two implementations agree within `n · 2⁻⁵² · Σ|term|` over the `n` elements of a group, not bit for
-  bit. The reference adds in the order of the view.
+  bit, plus one rounding each when the output is F32. The reference adds in the order of the view.
 - An element the view addresses more than once (a broadcast axis) counts each time. NaN and infinity propagate.
 - F32 operands, which may be one tensor. The output holds exactly groups times terms elements and shares no storage with either.
 - The result is a tensor. `ProductSums.DotAndSquaredB` is the one helper that reads it on the host, which is a sync.
