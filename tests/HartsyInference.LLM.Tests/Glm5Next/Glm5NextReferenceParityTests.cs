@@ -55,9 +55,9 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void WrongEmbeddingShape_IsRefusedByName_AndNoTensorIsLeftOpen()
+    public void WrongEmbeddingShape_IsRefusedByName()
     {
-        // The constructor releases what it has read when a shape is refused; the refusal itself is the observable part here.
+        // The refusal is the observable behaviour; the constructor also releases what it had read, which this test does not measure.
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
         using Ernie5CheckpointWeights inner = Ernie5CheckpointWeights.Open(Dir);
         InvalidDataException ex = Assert.Throws<InvalidDataException>(() => new Glm5NextModel(new CpuBackend(), c, new WrongEmbedding(inner)));
@@ -78,7 +78,8 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     {
         using IDisposable owned = (IDisposable)source;
         using Glm5NextModel model = new(new CpuBackend(), c, source);
-        return model.Forward(ids, new Glm5NextState(c, ids.Length));
+        using Glm5NextState state = new(c, ids.Length);
+        return model.Forward(ids, state);
     }
 
     // Presents every F32 tensor of an inner source rounded to BF16: kept as BF16 storage, or read back as F32 holding the rounded values.
