@@ -94,19 +94,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <param name="conditioning">Optional <c>[1, 33, T, H, W]</c> (conditioning latent then mask); null feeds zeros (text-to-video).</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
     {
-        RequireF32(latent, nameof(latent));
-        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.LatentChannels)
-            throw new ArgumentException($"latent must be [1, {_config.LatentChannels}, T, H, W], got {latent.Shape}.", nameof(latent));
-        int frames = (int)latent.Shape[2], height = (int)latent.Shape[3], width = (int)latent.Shape[4];
-        ValidateText(qwen, byt5);
-        if (conditioning is not null)
-        {
-            RequireF32(conditioning, nameof(conditioning));
-            int extra = _config.ImgInChannels - _config.LatentChannels;
-            if (conditioning.Shape.Rank != 5 || conditioning.Shape[0] != 1 || conditioning.Shape[1] != extra
-                || conditioning.Shape[2] != frames || conditioning.Shape[3] != height || conditioning.Shape[4] != width)
-                throw new ArgumentException($"conditioning must be [1, {extra}, {frames}, {height}, {width}], got {conditioning.Shape}.", nameof(conditioning));
-        }
+        (int frames, int height, int width) = ValidateInputs(latent, qwen, byt5, conditioning);
         int tokens = frames * height * width;
         int hidden = _config.HiddenSize;
 
@@ -126,6 +114,106 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         Tensor velocity = ApplyFinal(backend, img, temb, tokens, hidden, frames, height, width);
         temb.Dispose();
         return velocity;
+    }
+
+    /// <summary>Velocity with per-frame timesteps (MovieRoll's streaming path): latent frame f is denoised at frameTimesteps[f], so its image
+    /// tokens take that frame's adaLN rows in every block and in the final layer. The text takes windowTimestep. Single window, no cache.
+    /// With every frame at the same timestep this equals Forward.</summary>
+    public Tensor ForwardPerFrame(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
+    {
+        ArgumentNullException.ThrowIfNull(frameTimesteps);
+        (int frames, int height, int width) = ValidateInputs(latent, qwen, byt5, conditioning);
+        if (frameTimesteps.Length != frames)
+            throw new ArgumentException($"{frameTimesteps.Length} frame timesteps for {frames} latent frames.", nameof(frameTimesteps));
+        int tokens = frames * height * width;
+        int hidden = _config.HiddenSize;
+
+        using TokenSegmentLayout layout = new(Enumerable.Repeat(height * width, frames).ToArray(), Enumerable.Range(0, frames).ToArray());
+        Tensor[] frameTemb = new Tensor[frames];
+        Tensor img = EmbedImage(backend, latent, conditioning, tokens);
+        Tensor txtTemb = TimestepMlp(backend, windowTimestep);
+        Tensor txt = BuildText(backend, qwen, byt5, windowTimestep);
+        try
+        {
+            for (int f = 0; f < frames; f++) frameTemb[f] = TimestepMlp(backend, frameTimesteps[f]);
+            for (int i = 0; i < _blocks.Length; i++)
+            {
+                BeforeBlockForward?.Invoke(i);
+                (Tensor nextImg, Tensor nextTxt) = _blocks[i].ForwardPerFrame(backend, img, txt, txtTemb, frameTemb, layout, _rope, height, width, frames);
+                img.Dispose(); txt.Dispose();
+                img = nextImg; txt = nextTxt;
+            }
+            txt.Dispose();
+            return ApplyFinalPerFrame(backend, img, frameTemb, layout, tokens, hidden, frames, height, width);
+        }
+        finally
+        {
+            foreach (Tensor t in frameTemb) t?.Dispose();
+            txtTemb.Dispose();
+        }
+    }
+
+    /// <summary>The final layer with each latent frame's adaLN shift and scale (1 + scale, applied by the segment op) from that frame's embedding.</summary>
+    private Tensor ApplyFinalPerFrame(IBackend backend, Tensor img, IReadOnlyList<Tensor> frameTemb, TokenSegmentLayout layout,
+        int tokens, int hidden, int frames, int height, int width)
+    {
+        List<(Tensor Shift, Tensor Scale, Tensor Gate)> rows = new(frames);
+        Tensor zeroGate = new(new TensorShape(1, hidden), DType.F32);
+        List<Tensor> owned = new(frames * 2);
+        SegmentModulation? modulation = null;
+        try
+        {
+            foreach (Tensor embedding in frameTemb)
+            {
+                using Tensor activated = new(embedding.Shape, DType.F32);
+                backend.Silu(activated, embedding);
+                using Tensor mod = new(new TensorShape(1, 2 * hidden), DType.F32);
+                backend.Linear(mod, activated, _finalModW!, _finalModB!);
+                Tensor shift = new(new TensorShape(1, hidden), DType.F32);
+                backend.SliceRows(shift, mod, 0);
+                Tensor scale = new(new TensorShape(1, hidden), DType.F32);
+                backend.SliceRows(scale, mod, 1);
+                owned.Add(shift);
+                owned.Add(scale);
+                rows.Add((shift, scale, zeroGate));
+            }
+            modulation = SegmentModulation.Build(backend, rows, layout);
+            Tensor modulated = modulation.NormAffine(backend, img, 1e-6f);
+            img.Dispose();
+
+            int channels = _config.LatentChannels;
+            using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
+            using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
+            backend.Linear(projected, flat, _finalW!, _finalB!);
+            Tensor velocity = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
+            backend.Transpose2D(velocity, projected, tokens, channels);
+            return velocity;
+        }
+        finally
+        {
+            modulation?.Dispose();
+            foreach (Tensor t in owned) t.Dispose();
+            zeroGate.Dispose();
+        }
+    }
+
+    /// <summary>Checks the latent, conditioning and text inputs and returns the latent's frame count and spatial size.</summary>
+    private (int Frames, int Height, int Width) ValidateInputs(Tensor latent, Tensor qwen, Tensor? byt5, Tensor? conditioning)
+    {
+        RequireF32(latent, nameof(latent));
+        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.LatentChannels)
+            throw new ArgumentException($"latent must be [1, {_config.LatentChannels}, T, H, W], got {latent.Shape}.", nameof(latent));
+        int frames = (int)latent.Shape[2], height = (int)latent.Shape[3], width = (int)latent.Shape[4];
+        ValidateText(qwen, byt5);
+        if (conditioning is not null)
+        {
+            RequireF32(conditioning, nameof(conditioning));
+            int extra = _config.ImgInChannels - _config.LatentChannels;
+            if (conditioning.Shape.Rank != 5 || conditioning.Shape[0] != 1 || conditioning.Shape[1] != extra
+                || conditioning.Shape[2] != frames || conditioning.Shape[3] != height || conditioning.Shape[4] != width)
+                throw new ArgumentException($"conditioning must be [1, {extra}, {frames}, {height}, {width}], got {conditioning.Shape}.", nameof(conditioning));
+        }
+        return (frames, height, width);
     }
 
     /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project.</summary>

@@ -192,6 +192,12 @@ def main():
         # Without byT5 tokens the text stream is the refined Qwen rows alone.
         velocity_no_byt5 = _forward_without_byt5(model, torch.cat([latent, zero_cond], 1), t, qwen)
         tensors["ref.velocity_no_byt5"] = velocity_no_byt5.contiguous()
+    # Per-frame timesteps: deterministic values, drawn without the generator so the clip-wide keys above are unchanged.
+    frame_t = torch.tensor([[700.0, 537.0, 300.0]])
+    with torch.no_grad():
+        velocity_per_frame = _forward_per_frame(model, torch.cat([latent, zero_cond], 1), frame_t, t, qwen, byt5)
+    tensors["ref.velocity_per_frame"] = velocity_per_frame.contiguous()
+    tensors["in.frame_timesteps"] = frame_t
     tensors["in.latent"] = latent
     tensors["in.qwen"] = qwen
     tensors["in.byt5"] = byt5
@@ -201,6 +207,22 @@ def main():
         tensors[name] = value.float().contiguous()
     save_file(tensors, args.out, metadata={"source": "MovieRoll 0b5f73e building blocks + SDPA attention", "hidden": str(HIDDEN)})
     print("wrote", args.out, len(tensors), "tensors")
+
+
+def _forward_per_frame(model, x65, frame_t, t, qwen, byt5):
+    """The clip with one timestep per latent frame (image modulation and final layer per frame), text at the window timestep."""
+    thw = [FRAMES, HEIGHT, WIDTH]
+    img = model.img_in(x65)
+    vec = model.time_in(frame_t.reshape(-1)).reshape(1, FRAMES, -1)
+    vec_txt = model.time_in(t)[:, None, :]
+    txt = model.txt_in(qwen, t) + model.cond_type_embedding.weight[0]
+    byt = model.byt5_in(byt5) + model.cond_type_embedding.weight[1]
+    txt = torch.cat([byt, txt], 1)
+    cos, sin = get_nd_rotary_pos_embed(ROPE_DIMS, (FRAMES, HEIGHT, WIDTH), theta=256, device="cpu")
+    for block in model.double_blocks:
+        img, txt = block(img, txt, vec, vec_txt, (cos, sin), thw)
+    out = model.final_layer(img, vec, thw=thw)
+    return out.reshape(1, FRAMES, HEIGHT, WIDTH, LATENT).permute(0, 4, 1, 2, 3)
 
 
 def _forward_without_byt5(model, x65, t, qwen):
