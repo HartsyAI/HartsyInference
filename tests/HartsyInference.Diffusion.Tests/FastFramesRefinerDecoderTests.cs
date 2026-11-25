@@ -303,7 +303,9 @@ public sealed class FastFramesRefinerDecoderTests
             using Tensor h = ToTensor(hidden[f]);
             using Tensor e = ToTensor([temb[f]]);
             using Tensor pixels = decoder.DecodeFrame(backend, h, e, grid, gridW, state);
-            Assert.Equal(new TensorShape([4L, 3, grid * 16, gridW * 16]), pixels.Shape);
+            // The device unpatchify returns [1, PatchT·C, H, W]; its memory is the frame-major [PatchT, C, H, W] the values below
+            // are laid out in.
+            Assert.Equal(new TensorShape([1L, 12, grid * 16, gridW * 16]), pixels.Shape);
             AssertClose(expected[f].SelectMany(p => p.SelectMany(ch => ch)).ToArray(), pixels.AsReadOnlySpan<float>(), $"frame {f} pixels");
         }
         foreach (Tensor t in weights.Values)

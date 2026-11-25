@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.FastFrames;
@@ -114,7 +115,12 @@ public sealed class FastFramesPixelDecoder : IDisposable
         _modulation = Own(F32(weights, prefix + "modulation"));
         _entryNormW = Own(F32(weights, prefix + "entry_norm.weight")); _entryNormB = Own(F32(weights, prefix + "entry_norm.bias"));
         _entryW = Own(Matrix(weights, prefix + "entry_pw.weight", dim, dim)); _entryB = Own(F32(weights, prefix + "entry_pw.bias"));
-        _outW = Own(F32(weights, prefix + "fc_out.weight")); _outB = Own(F32(weights, prefix + "fc_out.bias"));
+        // The head's rows are reordered once here, so the shared unpatchify reads each token's channel axis with the frame index
+        // inside the channel (see Unpatchify).
+        using (Tensor rawW = F32(weights, prefix + "fc_out.weight"))
+            _outW = Own(ReorderOutputRows(rawW, _config));
+        using (Tensor rawB = F32(weights, prefix + "fc_out.bias"))
+            _outB = Own(ReorderOutputRows(rawB, _config));
         List<Block> blocks = [];
         for (int i = 0; i < _config.LowBlocks; i++)
             blocks.Add(LoadBlock(weights, $"{prefix}conv_low.{i}."));
@@ -173,7 +179,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
             }
             using Tensor tokensOut = FastFramesOps.Linear(backend, current, _outW, _outB);
             current.Dispose();
-            return Unpatchify(tokensOut, gridH, gridW);
+            return Unpatchify(backend, tokensOut, gridH, gridW);
         }
         catch
         {
@@ -260,32 +266,40 @@ public sealed class FastFramesPixelDecoder : IDisposable
         return added;
     }
 
-    /// <summary>Linear unpatchify (the reference's <c>fhwpqrc -&gt; cfphqwr</c>; the result is frame-major <c>[PatchT, C, H, W]</c>): token <c>(h, w)</c> channel
-    /// <c>((p·PatchH + q)·PatchW + r)·C + c</c> is output channel <c>c</c> of frame <c>p</c> at row <c>h·PatchH + q</c>, column
-    /// <c>w·PatchW + r</c>.</summary>
-    private Tensor Unpatchify(Tensor tokensOut, int gridH, int gridW)
+    /// <summary>Linear unpatchify on the device, through the shared <see cref="PixelShuffles.UnpatchifyTokens"/>. Token <c>(h, w)</c>
+    /// holds, in the order the reordered head wrote it, <c>((q·PatchW + r)·PatchT + p)·C + c</c>: frame <c>p</c>, channel <c>c</c> at
+    /// patch row <c>q</c>, column <c>r</c>. The shared op reads the channel axis as <c>(p, c)</c> fastest, so the result is
+    /// <c>[1, PatchT·C, H, W]</c>, which is the frame-major <c>[PatchT, C, H, W]</c> in memory.</summary>
+    private Tensor Unpatchify(IBackend backend, Tensor tokensOut, int gridH, int gridW)
     {
         int pt = _config.PatchT, ph = _config.PatchH, pw = _config.PatchW, c = _config.OutChannels;
-        int height = gridH * ph, width = gridW * pw;
-        Tensor output = new(new TensorShape(pt, c, height, width), DType.F32);
-        ReadOnlySpan<float> source = tokensOut.AsReadOnlySpan<float>();
-        Span<float> target = output.AsSpan<float>();
-        int perToken = pt * ph * pw * c;
-        for (int h = 0; h < gridH; h++)
+        if (ph != pw)
+            throw new NotSupportedException($"The shared unpatchify needs square patches; this decoder has {ph}x{pw}.");
+        Tensor output = new(new TensorShape(1, pt * c, gridH * ph, gridW * pw), DType.F32);
+        PixelShuffles.UnpatchifyTokens(backend, output, tokensOut, pt * c, gridH, gridW, ph, innerChannelFastest: true);
+        return output;
+    }
+
+    /// <summary>Reorders the head's rows (or bias entries) from the released <c>((p·PatchH + q)·PatchW + r)·C + c</c> to
+    /// <c>((q·PatchW + r)·PatchT + p)·C + c</c>, so the frame index sits inside the channel axis.</summary>
+    private static Tensor ReorderOutputRows(Tensor source, FastFramesPixelDecoderConfig config)
+    {
+        int pt = config.PatchT, ph = config.PatchH, pw = config.PatchW, c = config.OutChannels;
+        long rowLength = source.Shape.ElementCount / (pt * ph * pw * c);
+        Tensor output = new(source.Shape, DType.F32);
+        ReadOnlySpan<float> from = source.AsReadOnlySpan<float>();
+        Span<float> to = output.AsSpan<float>();
+        for (int q = 0; q < ph; q++)
         {
-            for (int w = 0; w < gridW; w++)
+            for (int r = 0; r < pw; r++)
             {
-                ReadOnlySpan<float> token = source.Slice((h * gridW + w) * perToken, perToken);
                 for (int p = 0; p < pt; p++)
                 {
-                    for (int q = 0; q < ph; q++)
+                    for (int ch = 0; ch < c; ch++)
                     {
-                        for (int r = 0; r < pw; r++)
-                        {
-                            int baseIndex = ((p * ph + q) * pw + r) * c;
-                            for (int ch = 0; ch < c; ch++)
-                                target[(((p * c) + ch) * height + h * ph + q) * width + w * pw + r] = token[baseIndex + ch];
-                        }
+                        int released = ((p * ph + q) * pw + r) * c + ch;
+                        int reordered = ((q * pw + r) * pt + p) * c + ch;
+                        from.Slice((int)(released * rowLength), (int)rowLength).CopyTo(to.Slice((int)(reordered * rowLength), (int)rowLength));
                     }
                 }
             }
