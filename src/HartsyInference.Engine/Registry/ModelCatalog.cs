@@ -140,6 +140,16 @@ public static class ModelCatalog
         new() { Repo = "tencent/" + repo, RepoPath = folder + "/config.yaml", TargetSubdir = "3D/" + id, Role = "config", Sha256 = configSha },
     ];
 
+    /// <summary>The Realization LoRA of one Duo release: <c>.metadata</c> and <c>__0_0.distcp</c> of the repo's <c>realization/dcp</c> folder (2.78 GB), the only Duo-specific weights. The backbone is MiniMax-H3's Ref2VA transformer, which the
+    /// same repo repeats byte for byte, so it is not listed here. Hashes are the repo's own LFS sha256 at the revision named in <c>docs/Research/DUO_V1_WEIGHTS.md</c>.</summary>
+    private static ModelAsset[] DuoLoraAssets(string repo, string id, string metadataSha, string distcpSha) =>
+    [
+        new() { Repo = repo, RepoPath = "realization/dcp/__0_0.distcp", TargetSubdir = "Stable-Diffusion/Duo/" + id, TargetName = "realization/dcp/__0_0.distcp",
+            Role = "LoRA (distributed checkpoint)", Sha256 = distcpSha },
+        new() { Repo = repo, RepoPath = "realization/dcp/.metadata", TargetSubdir = "Stable-Diffusion/Duo/" + id, TargetName = "realization/dcp/.metadata",
+            Role = "LoRA index", Sha256 = metadataSha },
+    ];
+
     /// <summary>Hunyuan3D Paint 2.0 (<c>tencent/Hunyuan3D-2</c> at <c>9cd649ba</c>): the multiview UNet and the SD VAE, both safetensors, in the diffusers layout the loader reads.</summary>
     private static ModelAsset[] Hunyuan3DPaintAssets =>
     [
@@ -2741,6 +2751,44 @@ public static class ModelCatalog
                 },
             },
 
+            // Bria RMBG 3.0 (background removal, image). Not a segmentation net: Fibo 2.0 (8B flow-matching DiT, Qwen3-VL-4B, FLUX.2 VAE)
+            // tuned to draw an alpha matte as an edit of the source image in 4 steps, so it runs through Fibo2Recipe's edit path and
+            // shares the Fibo 2.0 encoder and VAE assets. The transformer is Bria's own ungated ComfyUI repack briaai/RMBG-3.0-Comfy
+            // @ 63880aa074782b09e7ae17184960dfd6de70ab85 (the original briaai/RMBG-3.0 is auto-gated); its safetensors header has
+            // the same keys and shapes as the Comfy-Org Fibo 2.0 files. Hashes are the Hugging Face LFS object ids. Not real-weight
+            // verified. Licence: CC BY-NC 4.0 (the repo LICENSE file; the Hub metadata says bria-fibo), non-commercial; the card says
+            // "Commercial use requires a separate agreement with Bria AI." Bria's separate video model VRMBG-3.0 is manually gated
+            // and not included.
+            new CatalogEntry
+            {
+                Id = "rmbg3", Modality = vis, DisplayName = "Bria RMBG 3.0 (background removal)",
+                Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "a5df048f799025510f29a743c0dca0d4f1362478ec00f6f7c86ee66d57b4e5d9" },
+                    SideModels.Fibo2Qwen3VL4B,
+                    SideModels.Fibo2Vae,
+                },
+            },
+            // RMBG 3.0 as Bria's int8_tensorwise + ConvRot build (8.41 GB) with the matching int8 Qwen3-VL-4B encoder; same recipe and licence.
+            new CatalogEntry
+            {
+                Id = "rmbg3-int8", Modality = vis, DisplayName = "Bria RMBG 3.0 (int8 ConvRot)",
+                Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_int8_convrot.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "bc29b9a87ed378596c5ca5bc0c5bdfaa8aabc8415d33f3c767f9a3cbd9fd566d" },
+                    SideModels.Fibo2Qwen3VL4BInt8,
+                    SideModels.Fibo2Vae,
+                },
+            },
+
             // Real-ESRGAN pixel-space super-resolution. The official release files live on GitHub, not HuggingFace;
             // these repos mirror them byte-for-byte — x4plus is the copy the ControlNet annotator bundle carries
             // (five independent HF uploads share its hash), anime6b's hash agrees across four uploads, x2plus is a
@@ -3057,6 +3105,39 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae/MiniMaxH3", Role = "vae",
                         Sha256 = "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48" },
                 },
+            },
+
+            // Duo v1 (inclusionAI): a LoRA on MiniMax-H3's Ref2VA DiT, driven chunk by chunk by a LoRA-tuned Qwen3-VL-32B. Only the weight preparation exists so far (DCP reader, LoRA merge, adaln tables in ModelAssets/Duo): no recipe,
+            // no Intent, no ASR, so nothing here runs yet, and the assets are the Duo-specific LoRA files only (the shared backbone, codecs and Intent base are MiniMax-H3's and Qwen's own files).
+            // Licence: the MiniMax H3 Community License (repo LICENSE, Exhibit A). Its default terms grant rights only outside the EU, UK, Republic of Korea and United States (use and distribution), require the licence and NOTICE
+            // beside any distributed file and a notice on modified files, bind recipients to the same restrictions (including no use of outputs to improve another model), and ask for "MiniMax H3" on a commercial UI and a
+            // machine-generated disclosure on public outputs. The owner holds a separate MiniMax licence that allows hosting a repack; its terms are not recorded yet, so hosting stays off until they are written here.
+            new CatalogEntry
+            {
+                Id = "duo-v1-distill", Modality = vid, DisplayName = "Duo 1.0 distill (full-duplex audio-video, 4 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (DMD generator, shift 5.0); needs the H3 Ref2VA backbone",
+                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.0-distill",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.0-distill", "duo-1.0-distill",
+                    "4ca08a328ea6ecc19490bd16605164d07dd9d8dcd7d3b0774c4d9358349be10a",
+                    "27b0188a15d7d52872db0005022c9737c3b128fdde9df360237aa0798a165bd4"),
+            },
+            new CatalogEntry
+            {
+                Id = "duo-v1-causal", Modality = vid, DisplayName = "Duo 1.0 causal base (full-duplex audio-video, 50 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the H3 Ref2VA backbone",
+                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.0-causal-base",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.0-causal-base", "duo-1.0-causal-base",
+                    "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
+                    "36a14c91142a15321d0d1e40257afb8ab4ddf1c5eddbb8723eca18d83d0620e1"),
+            },
+            new CatalogEntry
+            {
+                Id = "duo-v1-2-causal", Modality = vid, DisplayName = "Duo 1.2 causal base (full-duplex audio-video, 50 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the H3 Ref2VA backbone",
+                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.2-causal-base",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.2-causal-base", "duo-1.2-causal-base",
+                    "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
+                    "05332963e83056c3b3352329fdd55e84fb46881170f7889ddebf7ce7eede88a7"),
             },
 
             // 3D

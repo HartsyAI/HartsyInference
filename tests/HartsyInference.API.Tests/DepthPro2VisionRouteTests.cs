@@ -111,6 +111,56 @@ public sealed class DepthPro2VisionRouteTests : IAsyncLifetime
         foreach (JsonElement view in views) AssertDepth(view.GetProperty("depthMap"));
     }
 
+    [Fact]
+    public async Task VideoOptionsOutsideMetricDepthFramesOrAnOverlapAtTheWindowAreA400()
+    {
+        HttpResponseMessage onViews = await _http.PostAsJsonAsync("/v1/native/vision/sequence", new
+        {
+            model = "depthpro2-s",
+            request = new { images = new[] { Image(), Image() }, mode = "MetricDepth", kind = "Views", frameWindow = 2 },
+        });
+        HttpResponseMessage overlap = await _http.PostAsJsonAsync("/v1/native/vision/sequence", new
+        {
+            model = "depthpro2-s",
+            request = new { images = new[] { Image(), Image() }, mode = "MetricDepth", kind = "Frames", fps = 10.0, frameWindow = 2, frameOverlap = 2 },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, onViews.StatusCode);
+        Assert.Contains("only applies to MetricDepth frames", await onViews.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.BadRequest, overlap.StatusCode);
+    }
+
+    [RealWeightsFact(WeightsVariable)]
+    public async Task FramesStreamOneMetricDepthPerFrameBufferedAndUnbuffered()
+    {
+        foreach (string buffering in new[] { "Buffered", "Unbuffered" })
+        {
+            object request = new
+            {
+                images = new[] { Image(), Image(shift: 10), Image(shift: 20), Image(shift: 30) }, mode = "MetricDepth", kind = "Frames", fps = 8.0,
+                focalLengthPx = 120.0, frameWindow = 3, frameBuffering = buffering,
+            };
+            HttpResponseMessage response = await _http.PostAsJsonAsync("/v1/native/vision/sequence", new { model = "depthpro2-s", modelPath = ModelPath, request });
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            string body = await response.Content.ReadAsStringAsync();
+            List<JsonElement> frames = [.. body.Split('\n').Where(line => line.StartsWith("data:", StringComparison.Ordinal))
+                .Select(line => JsonDocument.Parse(line["data:".Length..]).RootElement)
+                .Where(e => e.TryGetProperty("result", out _))];
+            Assert.Equal(4, frames.Count);
+            for (int i = 0; i < frames.Count; i++)
+            {
+                Assert.Equal(i, frames[i].GetProperty("index").GetInt32());
+                Assert.Equal(i / 8.0, frames[i].GetProperty("timestampSeconds").GetDouble(), 1e-9);
+                JsonElement result = frames[i].GetProperty("result");
+                Assert.Equal(120, result.GetProperty("camera").GetProperty("fx").GetDouble());
+                AssertDepth(result.GetProperty("depthMap"));
+            }
+
+            Assert.Contains("event: complete", body);
+        }
+    }
+
     private static void AssertDepth(JsonElement depthMap)
     {
         Assert.Equal("MetricMeters", depthMap.GetProperty("kind").GetString());
