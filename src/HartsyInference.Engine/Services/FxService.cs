@@ -30,6 +30,10 @@ public sealed class FxService : IFxService
         {
             return SeparateVocalsAsync(selector, request, cancel);
         }
+        if (IsVoiceIsolator(selector, request, out bool realtime))
+        {
+            return IsolateVoiceAsync(selector, request, realtime, cancel);
+        }
         string modelName = string.IsNullOrWhiteSpace(request.Model) ? selector.Variant : request.Model;
         // The runner is cached by what identifies its weights: an explicit local checkpoint, else the model name
         // (EnsureDemucsPathAsync resolves the same path for the same pair). The job carries the same key so the
@@ -64,6 +68,61 @@ public sealed class FxService : IFxService
             return new StemsResult
             {
                 Stems = encoded,
+                Format = "wav",
+                SampleRate = runner.SampleRate,
+            };
+        }, cancel);
+    }
+
+    private static bool IsVoiceIsolator(AudioModelSelector selector, FxSeparateRequest request, out bool realtime)
+    {
+        string id = string.IsNullOrWhiteSpace(request.Model) ? selector.Id : request.Model;
+        realtime = string.Equals(id, FxCatalog.VoiceIsolatorRealtimeId, StringComparison.OrdinalIgnoreCase);
+        return realtime || string.Equals(id, FxCatalog.VoiceIsolatorId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Voice-isolator route of <see cref="SeparateAsync"/>: a <c>voice</c> and a <c>background</c> stem (mono, 48 kHz; the
+    /// background is the input minus the voice). Runs on the engine's backend with the STFT on the host.</summary>
+    private Task<StemsResult> IsolateVoiceAsync(AudioModelSelector selector, FxSeparateRequest request, bool realtime, CancellationToken cancel)
+    {
+        if (request.Shifts != 0 || request.Segment is not null || request.Overlap is not null)
+        {
+            throw new ArgumentException("Shifts, Segment and Overlap are Demucs options; the voice isolator takes only LookaheadFrames (realtime).", nameof(request));
+        }
+        if (request.LookaheadFrames is not null && !realtime)
+        {
+            throw new ArgumentException("LookaheadFrames applies to voice-isolator-realtime only.", nameof(request));
+        }
+        if (request.LookaheadFrames is { } trained && Array.IndexOf(FxCatalog.VoiceIsolatorRealtimeLookaheads, trained) < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), trained,
+                $"LookaheadFrames must be one of {string.Join(", ", FxCatalog.VoiceIsolatorRealtimeLookaheads)}.");
+        }
+        string cacheKey = selector.LocalPath ?? (realtime ? FxCatalog.VoiceIsolatorRealtimeId : FxCatalog.VoiceIsolatorId);
+        // CPU for now: the STFT, the per-band layers and the scan reference run on the host, and the GPU route has not been run.
+        IBackend backend = _cpuBackend.Value;
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Isolator, cacheKey), async ct =>
+        {
+            float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.VoiceIsolatorSampleRate);
+            if (mono.Length == 0)
+            {
+                throw new ArgumentException("The audio to isolate decoded to no samples.", nameof(request));
+            }
+            ct.ThrowIfCancellationRequested();
+            string path = await FxCatalog.EnsureVoiceIsolatorPathAsync(realtime, selector.LocalPath, ct).ConfigureAwait(false);
+            VoiceIsolatorRunner runner = await _engine.AudioRuntime.Isolator
+                .GetOrLoadAsync(cacheKey, _ => Task.FromResult(FxCatalog.LoadVoiceIsolator(path, realtime)), ct).ConfigureAwait(false);
+            long started = Environment.TickCount64;
+            (float[] voice, float[] background) = runner.Isolate(backend, mono, request.LookaheadFrames, LogIsolatorProgress, ct);
+            Logs.Verbose($"[Audio][Voice-Isolator] Isolated {AudioClipCodec.Seconds(mono.Length, FxCatalog.VoiceIsolatorSampleRate):0.0}s "
+                + $"({(realtime ? "realtime stream" : "offline")}) in {Environment.TickCount64 - started}ms.");
+            return new StemsResult
+            {
+                Stems = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+                {
+                    ["voice"] = AudioClipCodec.EncodeWav(voice, null, runner.SampleRate),
+                    ["background"] = AudioClipCodec.EncodeWav(background, null, runner.SampleRate),
+                },
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
@@ -131,6 +190,8 @@ public sealed class FxService : IFxService
             string path = await FxCatalog.EnsureKimVocal2PathAsync(selector.LocalPath, ct).ConfigureAwait(false);
             return FxCatalog.LoadKimVocal2(path, backend);
         }, cancel);
+
+    private static void LogIsolatorProgress(int done, int total) => Logs.Verbose($"[Audio][Voice-Isolator] window {done}/{total}");
 
     private static void LogProgress(int done, int total) => Logs.Verbose($"[Audio][Kim-Vocal-2] chunk {done}/{total}");
 
