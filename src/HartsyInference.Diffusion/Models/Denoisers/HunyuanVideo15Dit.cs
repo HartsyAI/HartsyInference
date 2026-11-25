@@ -160,26 +160,27 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     }
 
     /// <summary>The final layer with each latent frame's adaLN shift and scale (1 + scale, applied by the segment op). The projection is one batched
-    /// Linear over all frames, and the shift and scale columns are split on the device. Consumes <paramref name="img"/>.</summary>
+    /// Linear over all frames, and the shift and scale columns are split on the device. Consumes <paramref name="img"/>: it is disposed on every path.</summary>
     private Tensor ApplyFinalPerFrame(IBackend backend, Tensor img, Tensor frameTemb, TokenSegmentLayout layout,
         int tokens, int hidden, int frames, int height, int width)
     {
-        using Tensor activated = new(frameTemb.Shape, DType.F32);
-        backend.Silu(activated, frameTemb);
-        using Tensor mod = new(new TensorShape(frames, 2 * hidden), DType.F32);
-        backend.Linear(mod, activated, _finalModW!, _finalModB!);
-        Tensor shift = new(new TensorShape(frames, hidden), DType.F32);
-        StridedCopies.SliceAxis(backend, shift, mod, 1, 0, hidden);
-        Tensor scale = new(new TensorShape(frames, hidden), DType.F32);
-        StridedCopies.SliceAxis(backend, scale, mod, 1, hidden, hidden);
-        // The gate is never read by NormAffine; a zeroed table keeps the segment type uniform.
-        Tensor gate = new(new TensorShape(frames, hidden), DType.F32);
-        SegmentModulation modulation = SegmentModulation.FromTables(shift, scale, gate, layout);
+        SegmentModulation? modulation = null;
+        Tensor? modulated = null;
         try
         {
-            Tensor modulated = modulation.NormAffine(backend, img, 1e-6f);
-            img.Dispose();
+            using Tensor activated = new(frameTemb.Shape, DType.F32);
+            backend.Silu(activated, frameTemb);
+            using Tensor mod = new(new TensorShape(frames, 2 * hidden), DType.F32);
+            backend.Linear(mod, activated, _finalModW!, _finalModB!);
+            Tensor shift = new(new TensorShape(frames, hidden), DType.F32);
+            StridedCopies.SliceAxis(backend, shift, mod, 1, 0, hidden);
+            Tensor scale = new(new TensorShape(frames, hidden), DType.F32);
+            StridedCopies.SliceAxis(backend, scale, mod, 1, hidden, hidden);
+            // NormAffine never reads the gate. The table is never touched, so Tensor never allocates its memory.
+            Tensor gate = new(new TensorShape(frames, hidden), DType.F32);
+            modulation = SegmentModulation.FromTables(shift, scale, gate, layout);
 
+            modulated = modulation.NormAffine(backend, img, 1e-6f);
             int channels = _config.LatentChannels;
             using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
             using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
@@ -190,7 +191,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         }
         finally
         {
-            modulation.Dispose();
+            modulation?.Dispose();
+            modulated?.Dispose();
+            img.Dispose();
         }
     }
 
