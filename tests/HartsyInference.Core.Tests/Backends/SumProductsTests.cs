@@ -4,6 +4,7 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Reduction;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
 using Xunit;
 
 namespace HartsyInference.Core.Tests.Backends;
@@ -13,6 +14,19 @@ public sealed class SumProductsTests
 {
     private const ProductTerms All = ProductTerms.Dot | ProductTerms.SquaredA | ProductTerms.SquaredB;
     private static readonly IBackend Backend = new CpuBackend();
+
+    [Theory]
+    [InlineData("sum_products.ptx")]
+    [InlineData("sum_products.sm75.ptx")]
+    public void TheShippedKernels_TakeTheParameterTheLauncherPasses(string ptx)
+    {
+        string text = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Ptx", ptx));
+
+        int[] sizes = [.. System.Text.RegularExpressions.Regex.Matches(text, @"\.param \.align 8 \.b8 sum_products_\w+_param_\d+\[(\d+)\]")
+            .Select(static m => int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture))];
+
+        Assert.Equal([CudaKernels.SumProductsArgsBytes, CudaKernels.SumProductsArgsBytes, CudaKernels.SumProductsArgsBytes], sizes);
+    }
 
     [Theory]
     [InlineData(0)]

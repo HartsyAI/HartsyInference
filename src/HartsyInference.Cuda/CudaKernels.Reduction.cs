@@ -5,8 +5,8 @@ using HartsyInference.Core.Backends.Reduction;
 
 namespace HartsyInference.Cuda;
 
-// Sums of products over strided views (Kernels/reduction/sum_products.cu). The geometry is one by-value kernel parameter, so a launch captures into
-// a graph without a device-side spec buffer.
+// Sums of products over strided views (Kernels/reduction/sum_products.cu). The geometry is one by-value kernel parameter, so the launches need no
+// device-side spec buffer to be captured into a graph. The backend op around them allocates its scratch per call; its capture is not tested.
 public sealed partial class CudaKernels
 {
     /// <summary>Most blocks one sum-of-products launch spans; the kernels grid-stride past it.</summary>
@@ -37,6 +37,9 @@ public sealed partial class CudaKernels
         public int Wide;
         public uint PartialsPerGroup;
     }
+
+    /// <summary>Bytes of the sum-of-products kernel parameter, which the shipped PTX declares too.</summary>
+    internal static unsafe int SumProductsArgsBytes => sizeof(SumProductsArgs);
 
     private void LoadReductionKernels()
     {
