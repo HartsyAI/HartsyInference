@@ -19,6 +19,9 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     private bool _loaded;
     private readonly WanRope _rope;
     private readonly WanForwardCaches _caches = new();
+
+    /// <summary>Text projections computed so far: one per distinct encoder tensor, not one per pass, when the caller keeps its tensors alive.</summary>
+    internal int TextProjectionBuilds => _caches.TextProjBuilds;
     private readonly Dictionary<(int Frames, int TokensPerFrame), Tensor> _frameIndexes = [];
     private int _disposed;
     private LongCatAudioProjection? _audioProjection;

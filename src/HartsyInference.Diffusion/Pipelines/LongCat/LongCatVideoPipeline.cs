@@ -82,6 +82,7 @@ public sealed class LongCatVideoPipeline
         bool guided = run.Guidance > 1f;
         List<LongCatStepTrace> trace = new(run.RecordTrace ? schedule.Steps : 0);
         long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
 
         for (int i = 0; i < schedule.Steps; i++)
         {
@@ -91,10 +92,10 @@ public sealed class LongCatVideoPipeline
             float[] frameTimesteps = conditioning.FrameTimesteps(timestep, frames);
 
             float[] velocity = guided
-                ? Guide(Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning),
-                    Predict(latents, run, channels, frames, run.Negative, frameTimesteps, conditioning),
+                ? Guide(Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors),
+                    Predict(latents, run, channels, frames, run.Negative, frameTimesteps, conditioning, tensors),
                     guidedFrom, channels, frames, hw, run.Guidance)
-                : Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning);
+                : Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors);
 
             // the reference negates the model output for its scheduler, then steps the frames after the conditioning ones.
             float[] stepped = new float[channels * (frames - cond) * hw];
@@ -162,12 +163,11 @@ public sealed class LongCatVideoPipeline
     }
 
     private float[] Predict(float[] latents, LongCatRun run, int channels, int frames, LongCatPrompt prompt, float[] frameTimesteps,
-        LongCatConditioning conditioning)
+        LongCatConditioning conditioning, LongCatRunTensors tensors)
     {
         using Tensor input = new(new TensorShape([1, channels, frames, run.Height, run.Width]), DType.F32);
         latents.AsSpan().CopyTo(input.AsSpan<float>());
-        using Tensor text = new(new TensorShape(prompt.Length, _dit.Config.CaptionChannels), DType.F32);
-        prompt.Embeds.AsSpan().CopyTo(text.AsSpan<float>());
+        Tensor text = tensors.Text(prompt);
         using Tensor output = _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens);
         return output.AsReadOnlySpan<float>().ToArray();
     }

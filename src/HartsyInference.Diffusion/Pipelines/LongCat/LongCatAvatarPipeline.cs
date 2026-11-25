@@ -58,6 +58,7 @@ public sealed class LongCatAvatarPipeline
         Validate(run);
         // The gate stays on for every step of this run; the stacked LoRA's strength (0.8) is its own, so the gate scale is 1.
         using IDisposable? loraScope = run.LoraGate?.Enable(1f);
+        using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
         int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
         int cond = run.Mode == LongCatAvatarMode.At2v ? 0 : run.NumCondLatents;
         int noisy = frames - cond;
@@ -102,7 +103,7 @@ public sealed class LongCatAvatarPipeline
             {
                 run.Cancel.ThrowIfCancellationRequested();
                 float t = timesteps[i], dt = sigmasWithZero[i + 1] - sigmasWithZero[i];
-                float[] velocity = Velocity(run, cache, latents, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond);
+                float[] velocity = Velocity(run, cache, latents, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond, tensors);
 
                 // The reference negates the model output for its scheduler and steps the noisy frames only.
                 for (int c = 0; c < channels; c++)
@@ -128,7 +129,7 @@ public sealed class LongCatAvatarPipeline
     /// <summary>The velocity of the noisy frames, <c>[channels, noisy, hw]</c>, with the cache (the noisy frames only) or without it (all frames, the
     /// noisy rows taken from the result).</summary>
     private float[] Velocity(LongCatAvatarRun run, LongCatKvCache? cache, float[] latents, int channels, int frames, int hw, int cond,
-        LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond)
+        LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond, LongCatRunTensors tensors)
     {
         int noisy = frames - cond;
         bool cached = cache is not null;
@@ -137,7 +138,7 @@ public sealed class LongCatAvatarPipeline
         float[] timesteps = cached ? [t] : conditioning.FrameTimesteps(t, frames);
         float[] full = Guided(run, guided, (promptIsPositive, audioOn) =>
             Predict(input, channels, inputFrames, run.Height, run.Width, promptIsPositive ? run.Positive : run.Negative,
-                audioOn ? audioCond : audioUncond!, timesteps, conditioning, cache));
+                audioOn ? audioCond : audioUncond!, timesteps, conditioning, cache, tensors));
         if (cached)
             return full;
 
@@ -165,15 +166,12 @@ public sealed class LongCatAvatarPipeline
     }
 
     private float[] Predict(float[] latents, int channels, int frames, int height, int width, LongCatPrompt prompt, float[] audio,
-        float[] frameTimesteps, LongCatConditioning conditioning, LongCatKvCache? cache)
+        float[] frameTimesteps, LongCatConditioning conditioning, LongCatKvCache? cache, LongCatRunTensors tensors)
     {
         using Tensor input = new(new TensorShape([1, channels, frames, height, width]), DType.F32);
         latents.AsSpan().CopyTo(input.AsSpan<float>());
-        using Tensor text = new(new TensorShape(prompt.Length, _dit.Config.CaptionChannels), DType.F32);
-        prompt.Embeds.AsSpan().CopyTo(text.AsSpan<float>());
-        int ctx = _dit.Config.AudioContextTokens, audioWidth = _dit.Config.AudioOutputDim;
-        using Tensor audioTokens = new(new TensorShape(frames * ctx, audioWidth), DType.F32);
-        audio.AsSpan().CopyTo(audioTokens.AsSpan<float>());
+        Tensor text = tensors.Text(prompt);
+        Tensor audioTokens = tensors.Audio(audio, frames * _dit.Config.AudioContextTokens);
         using Tensor output = cache is null
             ? _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens, audioTokens)
             : _dit.ForwardCached(_backend, input, text, frameTimesteps, in conditioning, cache, prompt.ValidTokens, audioTokens);
