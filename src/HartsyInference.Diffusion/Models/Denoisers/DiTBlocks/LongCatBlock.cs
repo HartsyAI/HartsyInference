@@ -167,6 +167,91 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
+    /// <summary>Rows per self-attention projection tile. The fused QKV output is [rows, 3·dim] F32; untiled at 37,440 tokens it is 1.84 GB.</summary>
+    internal const int DefaultQkvTileRows = 4096;
+
+    private int _qkvTileRows = DefaultQkvTileRows;
+
+    /// <summary>Sets the QKV projection tile height. A value at or above the token count projects untiled; tests use small tiles to exercise the seams.</summary>
+    internal void SetQkvTileRows(int rows)
+    {
+        if (rows < 1) throw new ArgumentOutOfRangeException(nameof(rows));
+        _qkvTileRows = rows;
+    }
+
+    /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
+    /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
+    private (Tensor Q, Tensor K, Tensor V) ProjectSelfTiled(IBackend backend, Tensor input)
+    {
+        int s = (int)input.Shape[0];
+        int dim = (int)input.Shape[1];
+        int tile = Math.Min(_qkvTileRows, s);
+        if (tile >= s)
+            return _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+
+        List<Tensor> qs = new((s + tile - 1) / tile), ks = new(qs.Capacity), vs = new(qs.Capacity);
+        try
+        {
+            for (int start = 0; start < s; start += tile)
+            {
+                int rows = Math.Min(tile, s - start);
+                using Tensor chunk = SliceRows(backend, input, start, rows, dim);
+                (Tensor q, Tensor k, Tensor v) = _selfAttention!.ProjectSelf(backend, chunk, releaseInput: false);
+                qs.Add(q);
+                ks.Add(k);
+                vs.Add(v);
+            }
+            Tensor joinedQ = JoinRows(backend, qs, s);
+            try
+            {
+                Tensor joinedK = JoinRows(backend, ks, s);
+                try
+                {
+                    return (joinedQ, joinedK, JoinRows(backend, vs, s));
+                }
+                catch
+                {
+                    joinedK.Dispose();
+                    throw;
+                }
+            }
+            catch
+            {
+                joinedQ.Dispose();
+                throw;
+            }
+        }
+        finally
+        {
+            foreach (Tensor t in qs) t.Dispose();
+            foreach (Tensor t in ks) t.Dispose();
+            foreach (Tensor t in vs) t.Dispose();
+        }
+    }
+
+    /// <summary>Concatenates row tiles of one projection into a single [rows, ...] tensor of the tiles' dtype.</summary>
+    private static Tensor JoinRows(IBackend backend, List<Tensor> parts, int rows)
+    {
+        Tensor first = parts[0];
+        TensorShape shape = first.Shape.Rank switch
+        {
+            2 => new TensorShape(rows, first.Shape[1]),
+            3 => new TensorShape(rows, first.Shape[1], first.Shape[2]),
+            _ => throw new NotSupportedException($"A tiled LongCat projection joins rank-2 or rank-3 tiles; got rank {first.Shape.Rank}."),
+        };
+        Tensor joined = new(shape, first.DType);
+        try
+        {
+            backend.Concat(joined, parts.ToArray(), 0);
+            return joined;
+        }
+        catch
+        {
+            joined.Dispose();
+            throw;
+        }
+    }
+
     private Tensor SelfAttention(IBackend backend, Tensor input, in LongCatBlockInputs inputs, Action<string, Tensor>? probe, string stage)
     {
         int s = (int)input.Shape[0];
@@ -175,14 +260,15 @@ public sealed partial class LongCatBlock : IStreamingBlock
         if (inputs.Segments.Length == 1)
         {
             AttentionSegment.Validate(inputs.Segments, s);
-            if (inputs.Segments[0].KeyCount == s)
+            // The fused path projects every row at once, so it runs only when the rows fit one projection tile.
+            if (inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
                 return _selfAttention!.Forward(backend, input, input, in context);
         }
 
-        (Tensor q, Tensor k, Tensor v) = _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+        (Tensor q, Tensor k, Tensor v) = ProjectSelfTiled(backend, input);
         try
         {
-            _selfAttention.RotateQk(backend, q, k, in context);
+            _selfAttention!.RotateQk(backend, q, k, in context);
             if (probe is not null)
             {
                 probe($"{stage}.q", q);
