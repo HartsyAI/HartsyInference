@@ -93,6 +93,39 @@ public sealed class LongCatAudioProjectionTests
         }
     }
 
+    [Fact]
+    public void LoadAndForwardRefuseAfterDispose()
+    {
+        LongCatAudioProjection projection = NewProjection();
+        Dictionary<string, Tensor> weights = Weights(seed: 17);
+        try
+        {
+            projection.LoadWeights(weights);
+            using Tensor first = Filled(1, SeqLen * Blocks * Channels, seed: 18);
+            using Tensor latter = Filled(3, SeqLenVf * Blocks * Channels, seed: 19);
+            using CpuBackend backend = new();
+            projection.Dispose();
+
+            Assert.Throws<ObjectDisposedException>(() => projection.Forward(backend, first, latter));
+            Assert.Throws<ObjectDisposedException>(() => projection.LoadWeights(weights));
+        }
+        finally
+        {
+            DisposeAll(weights);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, 8, 3, "seqLen")]
+    [InlineData(5, 0, 3, "seqLenVf")]
+    [InlineData(5, 8, 0, "blocks")]
+    public void ConstructorNamesTheArgumentThatIsNotPositive(int seqLen, int seqLenVf, int blocks, string expectedName)
+    {
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new LongCatAudioProjection(seqLen, seqLenVf, blocks, Channels, Intermediate, OutputDim, Context));
+        Assert.Equal(expectedName, error.ParamName);
+    }
+
     private static LongCatAudioProjection NewProjection() =>
         new(SeqLen, SeqLenVf, Blocks, Channels, Intermediate, OutputDim, Context);
 
