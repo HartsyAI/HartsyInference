@@ -62,6 +62,10 @@ public enum LoraFormat
     /// <summary>Idol's denoiser (<c>blocks.N.attn.qkv.lora_down.weight</c>, <c>noise_refiner.N.mlp.mlp.0…</c>, bare or under <c>diffusion_model.</c>): the Comfy-format idol-turbo slow and fast phase experts. Recognized by the <c>mlp.mlp.N</c> MLP spelling no other family uses.</summary>
     Idol,
 
+    /// <summary>LongCat-Video: the reference's own LoRA state dict (<c>lora___lorahyphen___blocks___lorahyphen___N___lorahyphen___attn___lorahyphen___qkv.lora_down.weight</c>)
+    /// with an <c>alpha_scale</c> scalar and fused projections stored split (<c>lora_up.blocks.i</c>). Recognized by the <c>lora___lorahyphen___</c> prefix.</summary>
+    LongCat,
+
     /// <summary>Kohya/musubi-tuner <c>lora_unet_&lt;module path with '.' written as '_'&gt;</c> keys no specific kohya layout claims (Krea 2: <c>lora_unet_blocks_0_attn_wq</c>). The module names are resolved against the target model's own weight names when the LoRA is applied, as ComfyUI does, so any DiT works without a per-family table. Detected after every other format.</summary>
     KohyaGeneric,
 }
