@@ -8,7 +8,9 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// converter renames <c>.weight_int8</c> to <c>.weight</c>, folds the scale onto <see cref="Tensor.QuantInfo"/> as an unrotated
 /// <c>int8_tensorwise</c> weight, and drops the
 /// companion, so the quantized-weight policy and a backend's resident int8 path take it as any other int8_tensorwise weight.</summary>
-/// <remarks>The scale tensors are borrowed from the checkpoint that produced them and live as long as it does.</remarks>
+/// <remarks>The scale tensors are borrowed from the checkpoint that produced them and live as long as it does. The quantized tensors of the
+/// input are annotated in place (their <see cref="Tensor.QuantInfo"/> is set on the tensors passed in), so a caller that shares that dictionary
+/// sees the annotation too. In an INT8 layout a scale without its quantized weight is refused.</remarks>
 public static class LongCatInt8Converter
 {
     /// <summary>Suffix of a quantized weight's key.</summary>
@@ -26,10 +28,15 @@ public static class LongCatInt8Converter
     {
         ArgumentNullException.ThrowIfNull(source);
         Dictionary<string, Tensor> result = new(source.Count, StringComparer.Ordinal);
+        bool int8 = IsInt8Layout(source.Keys);
         foreach ((string key, Tensor tensor) in source)
         {
-            if (key.EndsWith(ScaleSuffix, StringComparison.Ordinal) && source.ContainsKey(key[..^ScaleSuffix.Length] + QuantizedSuffix))
+            if (int8 && key.EndsWith(ScaleSuffix, StringComparison.Ordinal))
+            {
+                if (!source.ContainsKey(key[..^ScaleSuffix.Length] + QuantizedSuffix))
+                    throw new InvalidDataException($"'{key}' has no '{key[..^ScaleSuffix.Length]}{QuantizedSuffix}'; an orphan dequant scale is refused.");
                 continue;
+            }
             if (!key.EndsWith(QuantizedSuffix, StringComparison.Ordinal))
             {
                 result[key] = tensor;
