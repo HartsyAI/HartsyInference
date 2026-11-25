@@ -151,16 +151,26 @@ public sealed class FastFramesPipeline
         ArgumentNullException.ThrowIfNull(promptEmbeds);
         ArgumentNullException.ThrowIfNull(noise);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
-        CheckKvFitsNow(latentFrames);
+        // A pinned prefix from an earlier clip is still on the device, so the free VRAM read here does not show what the placement
+        // will have free. The placement releases or keeps that prefix; the check after it decides, so skip this one.
+        if (!_generatorPin.Resident)
+            CheckKvFitsNow(latentFrames);
     }
+
+    /// <summary>The frame-cache need of a clip of <paramref name="latentFrames"/> on this pipeline: the cache in the slot dtype, plus one
+    /// block's joined prefix. Used by both checks and by the block placement's headroom, so they agree.</summary>
+    private long ClipKvNeedBytes(int latentFrames) =>
+        KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
+            _transformer.BranchActivation(_backend, singleGroup: true));
 
     /// <summary>Checks the clip's frame cache against the free VRAM the backend reports now. Called at admission and again once the
     /// block placement has run, so the weights it uploaded are counted as used.</summary>
     private void CheckKvFitsNow(int latentFrames)
     {
         (long freeBytes, long totalBytes) = _backend.GetVramInfo();
-        CheckKvFits(_config.Name, _transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
-            _transformer.BranchActivation(_backend, singleGroup: true), freeBytes, totalBytes);
+        DType slot = _transformer.BranchActivation(_backend, singleGroup: true);
+        long need = KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim, slot);
+        CheckFits(_config.Name, need, latentFrames, slot, freeBytes, totalBytes);
     }
 
     /// <summary>Refuses a clip whose frame-wise cache cannot fit in the free VRAM, before any frame is denoised. The cache keeps every
@@ -170,13 +180,19 @@ public sealed class FastFramesPipeline
     /// attention scratch, the decoder and the refiner come on top.</summary>
     /// <exception cref="InvalidOperationException">The cache for <paramref name="latentFrames"/> does not fit in <paramref name="freeBytes"/>.</exception>
     public static void CheckKvFits(string name, int blocks, int latentFrames, int tokensPerFrame, int hidden, DType slot,
-        long freeBytes, long totalBytes)
+        long freeBytes, long totalBytes) =>
+        CheckFits(name, KvNeedBytes(blocks, latentFrames, tokensPerFrame, hidden, slot), latentFrames, slot, freeBytes, totalBytes);
+
+    /// <summary>The frame cache of a clip in <paramref name="slot"/> plus one block's joined prefix (the copy the rewrite makes per
+    /// block): the bytes the clip needs before attention scratch, the decoder and the refiner.</summary>
+    public static long KvNeedBytes(int blocks, int latentFrames, int tokensPerFrame, int hidden, DType slot) =>
+        FrameKvCache.EstimateBytes(blocks, latentFrames, tokensPerFrame, hidden, slot)
+        + FrameKvCache.EstimateBytes(1, latentFrames, tokensPerFrame, hidden, slot);
+
+    private static void CheckFits(string name, long need, int latentFrames, DType slot, long freeBytes, long totalBytes)
     {
         if (totalBytes <= 0)
             return;
-        long cache = FrameKvCache.EstimateBytes(blocks, latentFrames, tokensPerFrame, hidden, slot);
-        long joinedPrefix = FrameKvCache.EstimateBytes(1, latentFrames, tokensPerFrame, hidden, slot);
-        long need = cache + joinedPrefix;
         if (need > freeBytes)
         {
             throw new InvalidOperationException(
@@ -191,10 +207,9 @@ public sealed class FastFramesPipeline
         using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
-        // The block placement reserves the frame cache for this clip: the cache is device-resident until the clip ends, so the planner
-        // must keep its size free before it decides how many blocks stay resident. On a CPU backend the scope is resident-only.
-        long cacheBytes = FrameKvCache.EstimateBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth,
-            _transformer.Config.InnerDim, DType.F16);
+        // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
+        // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
+        long kvNeed = ClipKvNeedBytes(latentFrames);
         // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
         // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
         using BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
@@ -202,12 +217,14 @@ public sealed class FastFramesPipeline
             Backend = _backend,
             Denoiser = _transformer,
             ModelName = _config.Name,
-            HeadroomBytes = StreamingHeadroomOverride ?? cacheBytes + DefaultStreamingHeadroomBytes,
+            HeadroomBytes = StreamingHeadroomOverride ?? kvNeed + DefaultStreamingHeadroomBytes,
             Mode = StreamingMode,
             Pin = _generatorPin,
             TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
         });
         LastStreamedBlocks = streaming.StreamedBlocks;
+        // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
+        CheckKvFitsNow(latentFrames);
         for (int frame = 0; frame < latentFrames; frame++)
         {
             cancel.ThrowIfCancellationRequested();
