@@ -56,7 +56,7 @@ public sealed record DsaAttentionSettings
     {
         if (Dim < 1 || Heads < 1 || QLoraRank < 1 || KvLoraRank < 1 || QkNopeDim < 1 || VDim < 1 || Window < 0)
             throw new ArgumentException("DSA widths and heads must be positive; the window may be zero (none).");
-        if (QkRopeDim < 2 || (QkRopeDim & 1) != 0) throw new ArgumentException("QkRopeDim must be even and positive.");
+        if (QkRopeDim < 0 || (QkRopeDim & 1) != 0) throw new ArgumentException("QkRopeDim must be even and not negative; zero means no rotated slice (NoPE).");
         Indexer?.Validate();
     }
 }
