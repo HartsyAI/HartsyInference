@@ -511,14 +511,14 @@ public sealed class SamMotFlowTests
 
         Tensor removed = w["blocks.1.mlp.shape.mlp.2.bias"];
         w.Remove("blocks.1.mlp.shape.mlp.2.bias");
-        InvalidOperationException missing = Assert.Throws<InvalidOperationException>(() => new SamMotFlow(Config, w));
+        KeyNotFoundException missing = Assert.Throws<KeyNotFoundException>(() => new SamMotFlow(Config, w));
         Assert.Contains("blocks.1.mlp.shape.mlp.2.bias", missing.Message);
         w["blocks.1.mlp.shape.mlp.2.bias"] = removed;
 
         Tensor kept = w["latent_mapping.rot.out_layer.weight"];
         using Tensor wrongShape = Filled(rng, 1.0, 3, Config.ModelChannels);
         w["latent_mapping.rot.out_layer.weight"] = wrongShape;
-        Assert.Throws<InvalidOperationException>(() => new SamMotFlow(Config, w));
+        Assert.Throws<InvalidDataException>(() => new SamMotFlow(Config, w));
         w["latent_mapping.rot.out_layer.weight"] = kept;
 
         Tensor f16Source = w["t_embedder.mlp.2.bias"];

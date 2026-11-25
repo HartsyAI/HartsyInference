@@ -226,12 +226,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             // Exact inverse of the decode chain below (unpack → BN un-normalize → unpatchify → decode), so the
             // source enters the loop in the same representation the loop integrates in.
             Tensor sourceLatent32 = VaeEncoder!.Encode(Backend, img2imgReq.SourceImage);
-            Tensor sourcePatched = Flux2LatentOps.Patchify(sourceLatent32, _config.InChannels, _config.PatchSize);
+            Tensor sourcePacked = Flux2LatentOps.ToPackedTokensHost(sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
             sourceLatent32.Dispose();
-            Tensor sourceBn = Flux2LatentOps.BnNormalize(sourcePatched, _bnMean, _bnVar, _bnEps);
-            sourcePatched.Dispose();
-            Tensor sourcePacked = Flux2LatentOps.Pack(sourceBn);
-            sourceBn.Dispose();
 
             Tensor noised = new Tensor(packedShape, DType.F32);
             scheduler.AddNoise(noised, sourcePacked, packedLatent, startStep);
@@ -342,12 +338,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             if (onProgress is not null)
             {
-                Tensor previewPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
-                Tensor previewUnnormalized = Flux2LatentOps.BnUnNormalize(previewPatched, _bnMean, _bnVar, _bnEps);
-                previewPatched.Dispose();
-                Tensor previewLatent = Flux2LatentOps.Unpatchify(
-                    previewUnnormalized, _config.OutChannels, _config.PatchSize);
-                previewUnnormalized.Dispose();
+                Tensor previewLatent = Flux2LatentOps.FromPackedTokens(Backend, packedLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    _config.OutChannels, _config.PatchSize);
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                 {
                     Latent = previewLatent,
@@ -361,17 +353,10 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
-        // ── 5. Unpack [B, S, 128] → [B, 128, patH, patW] ──────────
-        Tensor unpackedPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
+        // ── 5–7. BN un-normalize (per-channel mean/var), unpack and 2×2 unpatchify: [B, S, 128] → [B, 32, latH, latW] ──
+        Tensor latent32 = Flux2LatentOps.FromPackedTokens(Backend, packedLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+            _config.OutChannels, _config.PatchSize);
         packedLatent.Dispose();
-
-        // ── 6. BN un-normalize on the 128-channel patchified latent (per-channel mean/var)──
-        Tensor unBn = Flux2LatentOps.BnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
-        unpackedPatched.Dispose();
-
-        // ── 7. 2×2 unpatchify: [B, 128, patH, patW] → [B, 32, latH, latW] ──
-        Tensor latent32 = Flux2LatentOps.Unpatchify(unBn, _config.OutChannels, _config.PatchSize);
-        unBn.Dispose();
 
         // ── 8. VAE decode ─────────────────────────────────────────
         Logs.Verbose("Decoding latents (tiled F32 path)...");

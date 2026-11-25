@@ -189,6 +189,22 @@ public sealed class HunyuanVideo15VaeTests
         Assert.Throws<InvalidDataException>(() => vae.LoadWeights(weights));
     }
 
+    [Theory]
+    [InlineData(4, 2, 3)]
+    [InlineData(512, 21, 1560)]
+    public void FrameAttentionGuardAcceptsAClipInsideTheIndexableLimit(int c, int t, int hw)
+    {
+        HunyuanVideo15VaeShuffle.RequireFrameAttention(c, t, hw);
+    }
+
+    [Theory]
+    [InlineData(4, 2, 50000)]
+    [InlineData(4, 1100000000, 2)]
+    public void FrameAttentionGuardRefusesAScoreBlockBeyondTheIndexableLimit(int c, int t, int hw)
+    {
+        Assert.Throws<ArgumentException>(() => HunyuanVideo15VaeShuffle.RequireFrameAttention(c, t, hw));
+    }
+
     private static void AssertClose(Tensor expected, Tensor actual, string label, float tolerance)
     {
         Assert.Equal(expected.Shape, actual.Shape);

@@ -164,7 +164,20 @@ public sealed class SamEmbedderFuserTests
         using Owned ownedValid = new(new Dictionary<string, Tensor> { ["rgb_image"] = valid["rgb_image"] });
         ArgumentException typo = Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, valid, new HashSet<string> { "typo" }));
         Assert.Equal("forceDrop", typo.ParamName);
+        Tensor kept = w["projection_nets.1.1.w2.weight"];
+        using (Tensor half = kept.CastTo(DType.F16))
+        {
+            w["projection_nets.1.1.w2.weight"] = half;
+            Assert.Throws<InvalidOperationException>(() => new SamEmbedderFuser(Embedders, Fused, w));
+        }
+        w["projection_nets.1.1.w2.weight"] = kept;
+        using (Tensor flat = new(new TensorShape(kept.ElementCount), DType.F32))
+        {
+            w["projection_nets.1.1.w2.weight"] = flat;
+            Assert.Throws<InvalidDataException>(() => new SamEmbedderFuser(Embedders, Fused, w));
+        }
+        w["projection_nets.1.1.w2.weight"] = kept;
         w.Remove("idx_emb");
-        Assert.Throws<InvalidOperationException>(() => new SamEmbedderFuser(Embedders, Fused, w));
+        Assert.Throws<KeyNotFoundException>(() => new SamEmbedderFuser(Embedders, Fused, w));
     }
 }

@@ -28,6 +28,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private Tensor? _timeW0, _timeB0, _timeW1, _timeB1;
     private Tensor? _byt5NormW, _byt5NormB, _byt5W1, _byt5B1, _byt5W2, _byt5B2, _byt5W3, _byt5B3;
     private Tensor? _condType;
+    private Tensor? _onesRow;
     private Tensor? _finalModW, _finalModB, _finalW, _finalB;
 
     /// <summary>Creates the DiT; call <see cref="LoadWeights"/> before <see cref="Forward"/>.</summary>
@@ -67,6 +68,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         _byt5W2 = F32(w, "byt5_in.fc2.weight"); _byt5B2 = F32(w, "byt5_in.fc2.bias");
         _byt5W3 = F32(w, "byt5_in.fc3.weight"); _byt5B3 = F32(w, "byt5_in.fc3.bias");
         _condType = F32(w, "cond_type_embedding.weight");
+        _onesRow = new Tensor(new TensorShape(_config.HiddenSize), DType.F32);
+        _onesRow.AsSpan<float>().Fill(1f);
         _finalModW = F32(w, "final_layer.adaLN_modulation.1.weight"); _finalModB = F32(w, "final_layer.adaLN_modulation.1.bias");
         _finalW = F32(w, "final_layer.linear.weight"); _finalB = F32(w, "final_layer.linear.bias");
         _refiner.LoadWeights(w, "txt_in");
@@ -289,7 +292,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// cache is the pre-RoPE K and V of the earlier chunks, so no attention matrix bigger than one chunk is ever built. The full-history blocks
     /// replace their cache layers with the whole clip. Each sink-recent block then replaces its layer with the sink (the first chunk) and the
     /// recent one (the last), computed from the same pass after the full-history blocks, so every block describes the same input. The cache is
-    /// soft-cleared first, as in MovieRoll. If a block throws, the layers already replaced hold the new clip and the rest hold the old state, so
+    /// soft-cleared first, as in MovieRoll, but only after the budget has admitted the clip: a refusal leaves the cache as it was. If a block throws, the layers already replaced hold the new clip and the rest hold the old state, so
     /// call <see cref="MovieRollKvCache.Clear"/> before reusing the cache. Frame coordinates: after a recompute the cached ranges are packed from
     /// frame 0 over the returned <c>T</c> frames, not the absolute frames the chunks came from, so the next window starts at frame <c>T</c>.
     /// The reference for this path is a transcription of MovieRoll's function, not the upstream code. Returns <c>T</c>.</summary>
@@ -315,23 +318,19 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             throw new ArgumentException($"The cache holds {cache.Height}×{cache.Width} latent tokens per frame; this latent is {height}×{width}.", nameof(latent));
         int perFrame = height * width;
 
+        cache.RequireFits(MovieRollKvCache.BytesPerFrame(_blocks.Length, height, width, _config.HiddenSize) * frames);
         cache.SoftClear();
         using Tensor image = EmbedImage(backend, latent, null, frames * perFrame);
-        Tensor[] chunks = SplitChunks(backend, image, chunkFrames, perFrame);
+        Tensor[]? chunks = null;
+        ChunkInputs? inputs = null;
         try
         {
+            chunks = SplitChunks(backend, image, chunkFrames, perFrame);
+            inputs = new ChunkInputs(this, backend, chunkFrames, perFrame);
             for (int i = 0; i < fullHistoryBlocks; i++)
             {
-                (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, chunks, chunkFrames, height, width);
-                try
-                {
-                    cache.ReplaceLayer(StreamLayerName(i), keys, values, PackedRanges(chunkFrames));
-                }
-                finally
-                {
-                    keys.Dispose();
-                    values.Dispose();
-                }
+                (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, chunks!, chunkFrames, height, width, inputs!.Temb, inputs!.Layouts);
+                AdoptOrDispose(cache, StreamLayerName(i), keys, values, PackedRanges(chunkFrames));
             }
             if (fullHistoryBlocks == _blocks.Length)
                 return frames;
@@ -339,8 +338,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             // The sink-recent blocks see the sink and the recent chunk of the full-history output, as two chunks of their own.
             int sinkFrames = chunkFrames[0];
             int recentFrames = chunkFrames.Length > 1 ? chunkFrames[chunkFrames.Length - 1] : 0;
-            Tensor[] sinkRecent = recentFrames > 0 ? new[] { CopyOf(backend, chunks[0]), CopyOf(backend, chunks[chunks.Length - 1]) } : new[] { CopyOf(backend, chunks[0]) };
+            Tensor[] sinkRecent = recentFrames > 0
+                ? new[] { CopyOf(backend, chunks![0]), CopyOf(backend, chunks![chunks!.Length - 1]) }
+                : new[] { CopyOf(backend, chunks![0]) };
             int[] srChunkFrames = recentFrames > 0 ? new[] { sinkFrames, recentFrames } : new[] { sinkFrames };
+            Tensor[] srTemb = recentFrames > 0 ? new[] { inputs!.Temb[0], inputs!.Temb[chunks!.Length - 1] } : new[] { inputs!.Temb[0] };
+            TokenSegmentLayout[] srLayouts = recentFrames > 0
+                ? new[] { inputs!.Layouts[0], inputs!.Layouts[chunks!.Length - 1] }
+                : new[] { inputs!.Layouts[0] };
             List<(int Start, int End)> srRanges = recentFrames > 0
                 ? new List<(int Start, int End)> { (0, sinkFrames), (frames - recentFrames, frames) }
                 : new List<(int Start, int End)> { (0, sinkFrames) };
@@ -348,16 +353,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             {
                 for (int i = fullHistoryBlocks; i < _blocks.Length; i++)
                 {
-                    (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, sinkRecent, srChunkFrames, height, width);
-                    try
-                    {
-                        cache.ReplaceLayer(StreamLayerName(i), keys, values, srRanges);
-                    }
-                    finally
-                    {
-                        keys.Dispose();
-                        values.Dispose();
-                    }
+                    (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, sinkRecent, srChunkFrames, height, width, srTemb, srLayouts);
+                    AdoptOrDispose(cache, StreamLayerName(i), keys, values, srRanges);
                 }
             }
             finally
@@ -368,20 +365,105 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         }
         finally
         {
-            foreach (Tensor chunk in chunks) chunk.Dispose();
+            if (chunks is not null)
+                foreach (Tensor chunk in chunks) chunk.Dispose();
+            inputs?.Dispose();
+        }
+    }
+
+    /// <summary>Hands a layer's K and V to the cache. On success the cache owns them; if the cache refuses (its checks or byte budget), the arrays
+    /// are disposed here and the refusal propagates.</summary>
+    private static void AdoptOrDispose(MovieRollKvCache cache, string layer, Tensor keys, Tensor values, IReadOnlyList<(int Start, int End)> ranges)
+    {
+        try
+        {
+            cache.AdoptLayer(layer, keys, values, ranges);
+        }
+        catch
+        {
+            keys.Dispose();
+            values.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The per-chunk inputs of a clip, built once per distinct chunk length and shared by every block: a zero-timestep row per frame and a
+    /// segment layout. Owns its tensors and layouts; <see cref="Dispose"/> releases them.</summary>
+    private sealed class ChunkInputs : IDisposable
+    {
+        private readonly List<IDisposable> _owned = new();
+
+        public ChunkInputs(HunyuanVideo15Dit dit, IBackend backend, int[] frames, int perFrame)
+        {
+            Temb = new Tensor[frames.Length];
+            Layouts = new TokenSegmentLayout[frames.Length];
+            Dictionary<int, Tensor> tembByLength = new();
+            Dictionary<int, TokenSegmentLayout> layoutByLength = new();
+            try
+            {
+                for (int c = 0; c < frames.Length; c++)
+                {
+                    int len = frames[c];
+                    if (!tembByLength.TryGetValue(len, out Tensor? temb))
+                    {
+                        temb = dit.TimestepMlpRows(backend, new float[len]);
+                        tembByLength[len] = temb;
+                        _owned.Add(temb);
+                    }
+                    if (!layoutByLength.TryGetValue(len, out TokenSegmentLayout? layout))
+                    {
+                        layout = FrameLayout(len, perFrame);
+                        layoutByLength[len] = layout;
+                        _owned.Add(layout);
+                    }
+                    Temb[c] = temb;
+                    Layouts[c] = layout;
+                }
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        public Tensor[] Temb { get; }
+
+        public TokenSegmentLayout[] Layouts { get; }
+
+        public void Dispose()
+        {
+            foreach (IDisposable owned in _owned) owned.Dispose();
+            _owned.Clear();
         }
     }
 
     /// <summary>One block over the chunks of a clip, with block-causal attention done chunk by chunk. Chunk <c>c</c> runs as a window whose cache is
     /// the pre-RoPE K and V of chunks <c>0..c-1</c>, and its RoPE positions are the packed frames before it plus its own. Each chunk's output
-    /// replaces <paramref name="chunks"/>[c] in place, so the next block reads it. The last block stores only its K and V, which depend on the
-    /// chunk's input alone. Returns the clip's K and V, token-major <c>[1, S, heads, D]</c>, owned by the caller.</summary>
-    private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width)
+    /// replaces <paramref name="chunks"/>[c] in place, so the next block reads it. The running prefix is the clip's K and V so far, so the final
+    /// prefix is the answer and is not concatenated again. The last block stores only its K and V, which depend on the chunk's input alone.
+    /// Returns the clip's K and V, token-major <c>[1, S, heads, D]</c>, owned by the caller.</summary>
+    private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width,
+        Tensor[] temb, TokenSegmentLayout[] layouts)
     {
-        int perFrame = height * width;
         bool lastBlock = block == _blocks.Length - 1;
-        Tensor[] keyParts = new Tensor[chunks.Length];
-        Tensor[] valueParts = new Tensor[chunks.Length];
+        if (lastBlock)
+        {
+            Tensor[] keyParts = new Tensor[chunks.Length];
+            Tensor[] valueParts = new Tensor[chunks.Length];
+            try
+            {
+                for (int c = 0; c < chunks.Length; c++)
+                    (keyParts[c], valueParts[c]) = _blocks[block].EncodeWindowKeysAndValues(backend, chunks[c], temb[c], layouts[c]);
+                return (ConcatTokenMajor(backend, keyParts), ConcatTokenMajor(backend, valueParts));
+            }
+            finally
+            {
+                foreach (Tensor t in keyParts) t?.Dispose();
+                foreach (Tensor t in valueParts) t?.Dispose();
+            }
+        }
+
         Tensor? prefixKeys = null, prefixValues = null;
         try
         {
@@ -389,38 +471,58 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             for (int c = 0; c < chunks.Length; c++)
             {
                 int len = frames[c];
-                using Tensor temb = TimestepMlpRows(backend, new float[len]);
-                using TokenSegmentLayout layout = FrameLayout(len, perFrame);
-                if (lastBlock)
+                float[] positions = HunyuanImagePosEmbed.GridRows([before + len, height, width]);
+                MovieRollWindowOutput output = _blocks[block].ForwardWindow(backend, chunks[c], null, null, temb[c], layouts[c], _rope,
+                    positions, prefixKeys, prefixValues, returnKv: true);
+                chunks[c].Dispose();
+                chunks[c] = output.Image;
+                Tensor? keys = output.Keys, values = output.Values;
+                Tensor? nextKeys = null, nextValues = null;
+                try
                 {
-                    (keyParts[c], valueParts[c]) = _blocks[block].EncodeWindowKeysAndValues(backend, chunks[c], temb, layout);
-                }
-                else
-                {
-                    float[] positions = HunyuanImagePosEmbed.GridRows([before + len, height, width]);
-                    MovieRollWindowOutput output = _blocks[block].ForwardWindow(backend, chunks[c], null, null, temb, layout, _rope, positions,
-                        prefixKeys, prefixValues, returnKv: true);
-                    chunks[c].Dispose();
-                    chunks[c] = output.Image;
-                    keyParts[c] = output.Keys!;
-                    valueParts[c] = output.Values!;
-                    Tensor nextKeys = prefixKeys is null ? ConcatTokenMajor(backend, keyParts[c]) : ConcatTokenMajor(backend, prefixKeys, keyParts[c]);
-                    Tensor nextValues = prefixValues is null ? ConcatTokenMajor(backend, valueParts[c]) : ConcatTokenMajor(backend, prefixValues, valueParts[c]);
+                    // The first chunk's K and V become the prefix as they are; later ones are appended to the running prefix.
+                    if (prefixKeys is null)
+                    {
+                        nextKeys = keys;
+                        keys = null;
+                    }
+                    else
+                    {
+                        nextKeys = ConcatTokenMajor(backend, prefixKeys, keys!);
+                    }
+                    if (prefixValues is null)
+                    {
+                        nextValues = values;
+                        values = null;
+                    }
+                    else
+                    {
+                        nextValues = ConcatTokenMajor(backend, prefixValues, values!);
+                    }
                     prefixKeys?.Dispose();
                     prefixValues?.Dispose();
                     prefixKeys = nextKeys;
                     prefixValues = nextValues;
+                    nextKeys = null;
+                    nextValues = null;
+                }
+                finally
+                {
+                    keys?.Dispose();
+                    values?.Dispose();
+                    nextKeys?.Dispose();
+                    nextValues?.Dispose();
                 }
                 before += len;
             }
-            return (ConcatTokenMajor(backend, keyParts), ConcatTokenMajor(backend, valueParts));
+            Tensor resultKeys = prefixKeys!, resultValues = prefixValues!;
+            prefixKeys = prefixValues = null;
+            return (resultKeys, resultValues);
         }
         finally
         {
             prefixKeys?.Dispose();
             prefixValues?.Dispose();
-            foreach (Tensor t in keyParts) t?.Dispose();
-            foreach (Tensor t in valueParts) t?.Dispose();
         }
     }
 
@@ -507,9 +609,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
             modulated = modulation.NormAffine(backend, img, 1e-6f);
             int channels = _config.LatentChannels;
-            using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
-            using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
-            backend.Linear(projected, flat, _finalW!, _finalB!);
+            using Tensor projected = new(new TensorShape(1, tokens, channels), DType.F32);
+
+            backend.Linear(projected, modulated, _finalW!, _finalB!);
             Tensor velocity = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
             backend.Transpose2D(velocity, projected, tokens, channels);
             return velocity;
@@ -541,33 +643,48 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         return (frames, height, width);
     }
 
-    /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project.</summary>
+    /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project. Everything runs on the
+    /// backend: the latent and conditioning are read as <c>[1, channels, tokens]</c> views and concatenated on channels, the conditioning is not
+    /// copied first, and only a null conditioning allocates the zero block.</summary>
     private Tensor EmbedImage(IBackend backend, Tensor latent, Tensor? conditioning, int tokens)
     {
         int latentChannels = _config.LatentChannels;
         int extraChannels = _config.ImgInChannels - latentChannels;
-        Tensor channelsFirst = new(new TensorShape(_config.ImgInChannels, tokens), DType.F32);
-        float* destination = (float*)channelsFirst.DataPointer;
-        long latentCount = (long)latentChannels * tokens;
-        new ReadOnlySpan<float>((void*)latent.DataPointer, (int)latentCount).CopyTo(new Span<float>(destination, (int)latentCount));
         long extraCount = (long)extraChannels * tokens;
-        Span<float> extra = new(destination + latentCount, (int)extraCount);
-        if (conditioning is null) extra.Clear();
-        else
+        using Tensor latentRows = latent.Reshape(new TensorShape(1, latentChannels, tokens));
+        Tensor? zeros = null, conditioningRows = null;
+        try
         {
-            if (conditioning.Shape.ElementCount != extraCount)
-                throw new ArgumentException($"conditioning must hold {extraChannels} channels over {tokens} tokens, got {conditioning.Shape}.", nameof(conditioning));
-            new ReadOnlySpan<float>((void*)conditioning.DataPointer, (int)extraCount).CopyTo(extra);
-        }
+            if (conditioning is null)
+            {
+                zeros = new Tensor(new TensorShape(1, extraChannels, tokens), DType.F32);
+                using Tensor zero = new(new TensorShape(1), DType.F32);
+                zero.AsSpan<float>()[0] = 0f;
+                StridedCopies.FillFrom(backend, zeros, zero);
+            }
+            else
+            {
+                if (conditioning.Shape.ElementCount != extraCount)
+                    throw new ArgumentException($"conditioning must hold {extraChannels} channels over {tokens} tokens, got {conditioning.Shape}.", nameof(conditioning));
+                conditioningRows = conditioning.Reshape(new TensorShape(1, extraChannels, tokens));
+            }
+            Tensor extraRows = conditioningRows ?? zeros!;
 
-        Tensor tokenMajor = new(new TensorShape(tokens, _config.ImgInChannels), DType.F32);
-        backend.Transpose2D(tokenMajor, channelsFirst, _config.ImgInChannels, tokens);
-        channelsFirst.Dispose();
-        using Tensor tokenMajor3 = tokenMajor.Reshape(new TensorShape(1, tokens, _config.ImgInChannels));
-        Tensor img = new(new TensorShape(1, tokens, _config.HiddenSize), DType.F32);
-        backend.Linear(img, tokenMajor3, _imgInW!, _imgInB!);
-        tokenMajor.Dispose();
-        return img;
+            Tensor channelsFirst = new(new TensorShape(1, _config.ImgInChannels, tokens), DType.F32);
+            backend.Concat(channelsFirst, [latentRows, extraRows], 1);
+            Tensor tokenMajor = new(new TensorShape(1, tokens, _config.ImgInChannels), DType.F32);
+            backend.Transpose2D(tokenMajor, channelsFirst, _config.ImgInChannels, tokens);
+            channelsFirst.Dispose();
+            Tensor img = new(new TensorShape(1, tokens, _config.HiddenSize), DType.F32);
+            backend.Linear(img, tokenMajor, _imgInW!, _imgInB!);
+            tokenMajor.Dispose();
+            return img;
+        }
+        finally
+        {
+            zeros?.Dispose();
+            conditioningRows?.Dispose();
+        }
     }
 
     /// <summary>Sinusoid(256) then Linear, SiLU, Linear: <c>time_in.mlp</c>, for one clip-wide timestep. Returns <c>[1, hidden]</c>.</summary>
@@ -601,12 +718,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private Tensor BuildText(IBackend backend, Tensor qwen, Tensor? byt5, float timestep)
     {
         int hidden = _config.HiddenSize;
-        Tensor refined = _refiner.Forward(backend, qwen, timestep);
-        AddTypeRow(refined, 0);
+        Tensor refinedRaw = _refiner.Forward(backend, qwen, timestep);
+        Tensor refined = AddTypeRow(backend, refinedRaw, 0);
+        refinedRaw.Dispose();
         if (byt5 is null) return refined;
 
-        Tensor mapped = MapByT5(backend, byt5);
-        AddTypeRow(mapped, 1);
+        Tensor mappedRaw = MapByT5(backend, byt5);
+        Tensor mapped = AddTypeRow(backend, mappedRaw, 1);
+        mappedRaw.Dispose();
         Tensor joined = new(new TensorShape(1, mapped.Shape[1] + refined.Shape[1], hidden), DType.F32);
         backend.Concat(joined, [mapped, refined], 1);
         mapped.Dispose(); refined.Dispose();
@@ -633,18 +752,16 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         return mapped;
     }
 
-    /// <summary>Adds <c>cond_type_embedding[row]</c> to every token in place.</summary>
-    private void AddTypeRow(Tensor tokens, int row)
+    /// <summary>Adds the type embedding row <paramref name="row"/> to every token of <paramref name="tokens"/> on the backend and returns the sum,
+    /// a new tensor; the input is left alone.</summary>
+    private Tensor AddTypeRow(IBackend backend, Tensor tokens, int row)
     {
         int hidden = _config.HiddenSize;
-        long count = tokens.ElementCount / hidden;
-        float* data = (float*)tokens.DataPointer;
-        float* type = (float*)_condType!.DataPointer + (long)row * hidden;
-        for (long i = 0; i < count; i++)
-        {
-            float* tokenRow = data + i * hidden;
-            for (int c = 0; c < hidden; c++) tokenRow[c] += type[c];
-        }
+        using Tensor typeRow = new(new TensorShape(hidden), DType.F32);
+        backend.SliceRows(typeRow, _condType!, row);
+        Tensor output = new(tokens.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(output, tokens, _onesRow!, typeRow);
+        return output;
     }
 
     /// <summary><c>FinalLayer</c>: LayerNorm (no affine) modulated by <c>chunk(adaLN(SiLU(temb)))</c> = <c>[shift, scale]</c>, then Linear, and the
@@ -670,9 +787,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         normed.Dispose();
 
         int channels = _config.LatentChannels;
-        using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
-        using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
-        backend.Linear(projected, flat, _finalW!, _finalB!);
+        using Tensor projected = new(new TensorShape(1, tokens, channels), DType.F32);
+
+        backend.Linear(projected, modulated, _finalW!, _finalB!);
         // An owned [1, C, T, H, W] tensor (not a Reshape view, which would leave its parent to the finalizer once per step).
         Tensor velocity = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
         backend.Transpose2D(velocity, projected, tokens, channels);
@@ -701,5 +818,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         w.TryGetValue(key, out Tensor? tensor) ? TensorCasts.EnsureF32(tensor) : throw new KeyNotFoundException($"HunyuanVideo-1.5 DiT is missing '{key}'.");
 
     /// <inheritdoc/>
-    public void Dispose() => _rope.Dispose();
+    public void Dispose()
+    {
+        _rope.Dispose();
+        _onesRow?.Dispose();
+    }
 }

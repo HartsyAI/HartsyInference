@@ -110,6 +110,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         {
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
             owned.Add(source);
+            // Hints are validated and their backends named here, before HalfPrecisionWeights drops them.
+            foreach (string backend in Fibo2AttentionHints.Requested(source.Weights))
+                Logs.Warning(Fibo2AttentionHints.Describe(backend));
             Dictionary<string, Tensor> dit = Fibo2WeightPreparation.HalfPrecisionWeights(source.Weights, owned);
             bool quantized = Fibo2WeightPreparation.HasPackedWeights(dit);
             // A packed int8 weight no executing device can read widens here, not inside the first GEMM.
@@ -147,7 +150,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Fibo2Recipe");
             owned.Add(vae);
 
-            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae);
+            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae, context.TextEncoderBackendOrDefault);
             owned.Add(editSupport);
             Fibo2Pipeline pipeline = new(context.Backend, encoder, transformer, vae.Decoder, vae.BnMean, vae.BnVar, config,
                 vaeEncoder: vae.Encoder);

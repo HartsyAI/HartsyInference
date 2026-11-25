@@ -63,7 +63,7 @@ public sealed class Flux2EditParityTests
         using Tensor noise = reference.GetTensor("noise");
         using Tensor refTokens = reference.GetTensor("ref_tokens");
         using Tensor cond = reference.GetTensor("cond");
-        using Tensor packed = Flux2LatentOps.Pack(noise);
+        using Tensor packed = Flux2LatentOps.Pack(backend, noise);
         Assert.Equal(6, packed.Shape[1]);
 
         using Tensor both = Concat(backend, packed, refTokens);
@@ -124,7 +124,7 @@ public sealed class Flux2EditParityTests
             for (int i = 0; i < steps; i++)
             {
                 using Tensor diffusersPacked = reference.GetTensor($"latents_step_{i}");
-                using Tensor diffusers = Flux2LatentOps.FromPackedTokens(diffusersPacked, 2, 3, bnMean, bnVar, 1e-4f, IrisZTestData.LatentChannels, 2);
+                using Tensor diffusers = Flux2LatentOps.FromPackedTokens(backend, diffusersPacked, 2, 3, bnMean, bnVar, 1e-4f, IrisZTestData.LatentChannels, 2);
                 AssertRelRms($"latents after step {i}", latents[i], diffusers, LoopTolerance);
             }
         }

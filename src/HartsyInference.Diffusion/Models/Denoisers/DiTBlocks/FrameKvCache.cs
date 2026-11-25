@@ -13,110 +13,62 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// activations so they survive the per-step activation sweep; disposing unpins and frees them.</summary>
 public sealed class FrameKvCache : IDisposable
 {
-    private readonly IBackend _backend;
-    private readonly Tensor?[][] _keys;
-    private readonly Tensor?[][] _values;
-    private int _disposed;
-    private int _channels = -1;
+    private readonly KvSegmentStore _store;
 
     /// <summary>A cache of <paramref name="layers"/> layers with room for <paramref name="maxFrames"/> frame slots each.</summary>
     public FrameKvCache(IBackend backend, int layers, int maxFrames)
     {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentOutOfRangeException.ThrowIfLessThan(layers, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxFrames, 1);
-        _backend = backend;
-        _keys = new Tensor?[layers][];
-        _values = new Tensor?[layers][];
-        for (int i = 0; i < layers; i++)
-        {
-            _keys[i] = new Tensor?[maxFrames];
-            _values[i] = new Tensor?[maxFrames];
-        }
+        _store = new KvSegmentStore(backend, layers, tokenAxis: 0);
+        MaxFrames = maxFrames;
     }
 
     /// <summary>Layers the cache spans.</summary>
-    public int Layers => _keys.Length;
+    public int Layers => _store.Layers;
 
     /// <summary>Frame slots per layer.</summary>
-    public int MaxFrames => _keys[0].Length;
+    public int MaxFrames { get; }
 
     /// <summary>Bytes a full cache takes: keys and values of <paramref name="tokensPerFrame"/> × <paramref name="hidden"/> for every
     /// frame of every layer.</summary>
     public static long EstimateBytes(int layers, int frames, int tokensPerFrame, int hidden, DType dtype) =>
-        2L * layers * frames * tokensPerFrame * hidden * dtype.SizeInBytes;
+        KvSegmentStore.EstimateBytes(layers, (long)frames * tokensPerFrame, hidden, dtype);
 
     /// <summary>True when slot <paramref name="frame"/> of <paramref name="layer"/> holds a key and a value.</summary>
-    public bool Has(int layer, int frame) => _keys[layer][frame] is not null;
+    public bool Has(int layer, int frame)
+    {
+        RequireFrame(frame);
+        return _store.Has(layer, frame);
+    }
 
     /// <summary>The key stored for <paramref name="layer"/> and <paramref name="frame"/>; borrowed, never disposed by the caller.</summary>
-    public Tensor Keys(int layer, int frame) => _keys[layer][frame] ?? throw Empty(layer, frame);
+    public Tensor Keys(int layer, int frame) => _store.Keys(layer, frame);
 
     /// <summary>The value stored for <paramref name="layer"/> and <paramref name="frame"/>; borrowed.</summary>
-    public Tensor Values(int layer, int frame) => _values[layer][frame] ?? throw Empty(layer, frame);
+    public Tensor Values(int layer, int frame) => _store.Values(layer, frame);
 
     /// <summary>Writes slot <paramref name="frame"/> of <paramref name="layer"/>, taking ownership of both tensors (also when it
     /// throws) and freeing the entries it replaces.</summary>
-    /// <exception cref="ArgumentException">The two tensors differ in shape or dtype.</exception>
+    /// <exception cref="ArgumentException">The two tensors differ in shape or dtype, or are not token-major <c>[S, C]</c>.</exception>
     public void Set(int layer, int frame, Tensor keys, Tensor values)
     {
         ArgumentNullException.ThrowIfNull(keys);
         ArgumentNullException.ThrowIfNull(values);
-        if (keys.Shape != values.Shape || keys.DType != values.DType)
+        if (frame < 0 || frame >= MaxFrames || keys.Shape.Rank != 2)
         {
+            TensorShape shape = keys.Shape;
             keys.Dispose();
             values.Dispose();
-            throw new ArgumentException($"Keys {keys.Shape} {keys.DType} and values {values.Shape} {values.DType} must match.");
+            RequireFrame(frame);
+            throw new ArgumentException($"A slot is token-major [S, C]; got {shape}.");
         }
-        if (keys.Shape.Rank != 2)
-        {
-            keys.Dispose();
-            values.Dispose();
-            throw new ArgumentException($"A slot is token-major [S, C]; got {keys.Shape}.");
-        }
-        if (_channels >= 0 && keys.Shape[1] != _channels)
-        {
-            keys.Dispose();
-            values.Dispose();
-            throw new ArgumentException($"The slots hold {_channels} channels; this one holds {keys.Shape[1]}.");
-        }
-        if (Volatile.Read(ref _disposed) != 0)
-        {
-            keys.Dispose();
-            values.Dispose();
-            throw new ObjectDisposedException(nameof(FrameKvCache));
-        }
-        _channels = (int)keys.Shape[1];
-        Release(layer, frame);
-        _backend.PinActivation(keys);
-        _backend.PinActivation(values);
-        _keys[layer][frame] = keys;
-        _values[layer][frame] = values;
+        _store.Set(layer, frame, keys, values);
     }
 
     /// <summary>Joins slots 0 through <paramref name="lastFrame"/> of <paramref name="layer"/> along the token axis into fresh
     /// tensors the caller owns. The slots are not disposed.</summary>
     /// <exception cref="InvalidOperationException">A slot in the range is empty.</exception>
-    public (Tensor Keys, Tensor Values) JoinPrefix(int layer, int lastFrame)
-    {
-        Tensor[] keys = new Tensor[lastFrame + 1];
-        Tensor[] values = new Tensor[lastFrame + 1];
-        for (int f = 0; f <= lastFrame; f++)
-        {
-            keys[f] = Keys(layer, f);
-            values[f] = Values(layer, f);
-        }
-        Tensor joinedKeys = Join(keys);
-        try
-        {
-            return (joinedKeys, Join(values));
-        }
-        catch
-        {
-            joinedKeys.Dispose();
-            throw;
-        }
-    }
+    public (Tensor Keys, Tensor Values) JoinPrefix(int layer, int lastFrame) => _store.Join(layer, 0, lastFrame + 1);
 
     /// <summary>The attention rewrite of one block's pass over frame <paramref name="frame"/>: it stores the live keys and values
     /// as the frame's slot and returns the joined slots 0 through the frame for the attention to read.</summary>
@@ -129,49 +81,14 @@ public sealed class FrameKvCache : IDisposable
         return new FrameRewrite(this, layer, frame);
     }
 
-    private Tensor Join(Tensor[] parts)
+    private void RequireFrame(int frame)
     {
-        // Set enforces token-major [S, C] slots with one channel count, so the prefix joins on the token axis, axis 0.
-        long tokens = 0;
-        foreach (Tensor part in parts)
-            tokens += part.Shape[0];
-        Tensor joined = new(new TensorShape([tokens, parts[0].Shape[1]]), parts[0].DType);
-        try
-        {
-            _backend.Concat(joined, parts, 0);
-        }
-        catch
-        {
-            joined.Dispose();
-            throw;
-        }
-        return joined;
+        ArgumentOutOfRangeException.ThrowIfNegative(frame);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(frame, MaxFrames);
     }
-
-    private void Release(int layer, int frame)
-    {
-        foreach (Tensor?[] slots in new[] { _keys[layer], _values[layer] })
-        {
-            if (slots[frame] is not Tensor old)
-                continue;
-            _backend.UnpinActivation(old);
-            old.Dispose();
-            slots[frame] = null;
-        }
-    }
-
-    private static InvalidOperationException Empty(int layer, int frame) =>
-        new($"Layer {layer} has no keys and values stored for frame {frame}.");
 
     /// <inheritdoc/>
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-            return;
-        for (int layer = 0; layer < Layers; layer++)
-            for (int frame = 0; frame < MaxFrames; frame++)
-                Release(layer, frame);
-    }
+    public void Dispose() => _store.Dispose();
 
     private sealed class FrameRewrite(FrameKvCache cache, int layer, int frame) : IKvRewrite
     {
