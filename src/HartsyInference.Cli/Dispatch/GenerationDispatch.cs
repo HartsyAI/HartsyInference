@@ -82,6 +82,7 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
             RemoveBackground = parameters.GetBool("remove-background", false) ? true : null,
+            RemoveBackgroundModel = parameters.GetStringOrNull("remove-background-model"),
             // SwarmUI's own default is on (UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)), so the
             // flag turns the extras OFF rather than on.
             ModelSpecificEnhancements = !parameters.GetBool("no-model-enhancements", false),
@@ -514,6 +515,8 @@ public static class GenerationDispatch
         {
             return await VisionBatchAsync(engine, spec, inputPath, visionMode, parameters, outputDir, cancel).ConfigureAwait(false);
         }
+        if (parameters.Get("window") is not null || parameters.Get("overlap") is not null || parameters.Get("unbuffered") is not null)
+            throw new ArgumentException("--window, --overlap and --unbuffered apply to a folder of video frames (with --fps), not a single image.");
         ImageData image = LoadImage(prompt);
         VisionRequest request = new VisionRequest
         {
@@ -615,14 +618,14 @@ public static class GenerationDispatch
             + "metric-depth, geometry, pose, matting, face, intrinsic, track, or interpolate."),
     };
 
-    /// <summary>A folder input: its images (sorted by name) become the frames of a track or interpolate run, or the views
-    /// of a multi-view depth/geometry run. Frame runs need <c>--fps</c>; interpolation needs <c>--factor</c> or
-    /// <c>--target-fps</c>; tracking takes its text prompt from <c>--prompt</c> on the first frame.</summary>
+    /// <summary>A folder input: its images (sorted by name) become the frames of a track, interpolate or video metric-depth run, or the
+    /// views of a multi-view depth/geometry run. Frame runs need <c>--fps</c> (which is also what makes a metric-depth folder a video);
+    /// interpolation needs <c>--factor</c> or <c>--target-fps</c>; tracking takes its text prompt from <c>--prompt</c> on the first frame.</summary>
     private static async Task<GeneratedArtifact> VisionBatchAsync(IInferenceEngine engine, ModelSpec spec, string folder,
         VisionMode mode, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
         List<ImageData> images = VisionBatchInputs(folder).Select(LoadImage).ToList();
-        bool frames = VisionRequestValidator.IsSequenceOnly(mode);
+        bool frames = VisionRequestValidator.IsSequenceOnly(mode) || mode == VisionMode.MetricDepth && parameters.GetDoubleOrNull("fps") is not null;
         string? query = parameters.Get("query");
         VisionBatchRequest request = new VisionBatchRequest
         {
@@ -637,6 +640,9 @@ public static class GenerationDispatch
                 : null,
             Threshold = parameters.GetFloat("confidence", 0.25f),
             FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
+            FrameWindow = parameters.GetIntOrNull("window"),
+            FrameOverlap = parameters.GetIntOrNull("overlap"),
+            FrameBuffering = parameters.Get("unbuffered") == "true" ? VisionFrameBuffering.Unbuffered : null,
         };
         VisionRequestValidator.Validate(request);
         string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), folder);

@@ -42,6 +42,15 @@ internal static class NpyReader
         return (shape, data);
     }
 
+    /// <summary>Reads a little-endian int32 <c>.npy</c> (<c>&lt;i4</c>, C order).</summary>
+    public static (long[] Shape, int[] Data) ReadInt32(string path)
+    {
+        (long[] shape, byte[] raw) = ReadRaw(path, "'<i4'");
+        int[] data = new int[raw.Length / sizeof(int)];
+        Buffer.BlockCopy(raw, 0, data, 0, raw.Length);
+        return (shape, data);
+    }
+
     private static (long[] Shape, byte[] Data) ReadRaw(string path, string descr)
     {
         byte[] bytes = File.ReadAllBytes(path);
