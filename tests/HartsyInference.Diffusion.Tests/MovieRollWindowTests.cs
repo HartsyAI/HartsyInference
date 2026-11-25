@@ -239,6 +239,21 @@ public sealed class MovieRollWindowTests
         Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [0, 5], cache, FullHistoryBlocks));
     }
 
+    [Fact]
+    public void EncodeIgnoresATextStreamPassedWithReturnKv()
+    {
+        using Fixture fixture = new();
+        using Tensor frameTemb = fixture.FrameTemb();
+        using Tensor txtTemb = fixture.TxtTemb();
+        using TokenSegmentLayout layout = fixture.Layout();
+        using MovieRollWindowOutput encoded = fixture.Block.ForwardWindow(fixture.Backend, fixture.Ref("win.in.img_a"), fixture.Ref("win.in.txt"),
+            txtTemb, frameTemb, layout, fixture.Rope, Rows(0, Frames), null, null, returnKv: true);
+
+        Assert.Null(encoded.Text);
+        AssertValues(fixture.Ref("win.encode.img"), encoded.Image, "encoded image with a text stream passed");
+        AssertValues(fixture.Ref("win.encode.k"), encoded.Keys!, "encoded keys with a text stream passed");
+    }
+
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
     /// <paramref name="firstFrame"/>, in the token order the window uses.</summary>
     private static float[] Rows(int firstFrame, int frames)

@@ -227,6 +227,8 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         StreamAdaLN? txtAdaLN, Tensor? text, Tensor? txtAttended, TensorShape imgShape, TensorShape txtShape, DType act, int batch,
         int imgSeqLen, int txtSeqLen)
     {
+        if (text is not null && (txtAdaLN is null || txtAttended is null))
+            throw new ArgumentException("A text stream needs its adaLN and its attended rows.", nameof(text));
         Tensor imgProj = _imgAttn!.ProjectOutput(backend, imgAttended);
         Tensor imgAfterAttn = imgAdaLN.Gate(backend, image, imgProj, ffn: false, imgShape, act);
         imgProj.Dispose();
@@ -237,18 +239,25 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();
         if (text is null) return (imgFinal, null);
-
-        Tensor txtProj = _txtAttn!.ProjectOutput(backend, txtAttended!);
-        StreamAdaLN txt = txtAdaLN!.Value;
-        Tensor txtAfterAttn = txt.Gate(backend, text, txtProj, ffn: false, txtShape, act);
-        txtProj.Dispose();
-        Tensor txtMlpIn = txt.Norm(backend, txtAfterAttn, ffn: true, txtShape);
-        Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpIn, batch, txtSeqLen);
-        txtMlpIn.Dispose();
-        Tensor txtFinal = txt.Gate(backend, txtAfterAttn, txtMlpOut, ffn: true, txtShape, act);
-        txtMlpOut.Dispose();
-        txtAfterAttn.Dispose();
-        return (imgFinal, txtFinal);
+        try
+        {
+            Tensor txtProj = _txtAttn!.ProjectOutput(backend, txtAttended!);
+            StreamAdaLN txt = txtAdaLN!.Value;
+            Tensor txtAfterAttn = txt.Gate(backend, text, txtProj, ffn: false, txtShape, act);
+            txtProj.Dispose();
+            Tensor txtMlpIn = txt.Norm(backend, txtAfterAttn, ffn: true, txtShape);
+            Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpIn, batch, txtSeqLen);
+            txtMlpIn.Dispose();
+            Tensor txtFinal = txt.Gate(backend, txtAfterAttn, txtMlpOut, ffn: true, txtShape, act);
+            txtMlpOut.Dispose();
+            txtAfterAttn.Dispose();
+            return (imgFinal, txtFinal);
+        }
+        catch
+        {
+            imgFinal.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Forward pass. Each stream's modulation produces 6 params; image-only RoPE is applied via <see cref="HunyuanImageRope"/> before <c>[img, txt]</c> joint-attention concat. Returns <c>(image, text)</c>.</summary>
@@ -467,7 +476,9 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
 
             // The post-attention sub-blocks are shared with the other entry points. An encode pass has no text stream and returns the window's K and V.
             (Tensor imgFinal, Tensor? txtFinal) = FinishBlock(backend, StreamAdaLN.Segments(attnMod!, ffnMod!), image, imgAttended!,
-                txtMod is null ? (StreamAdaLN?)null : StreamAdaLN.Chunks(txtMod), text, txtAttended, imgShape, txtShape, DType.F32, 1, sw, st);
+                txtMod is null ? (StreamAdaLN?)null : StreamAdaLN.Chunks(txtMod), returnKv ? null : text, txtAttended, imgShape, txtShape, DType.F32, 1, sw, st);
+            imgAttended = null;
+            txtAttended = null;   // FinishBlock took the attended rows
             if (returnKv)
             {
                 MovieRollWindowOutput encoded = new(imgFinal, null, keysOut, valuesOut);
