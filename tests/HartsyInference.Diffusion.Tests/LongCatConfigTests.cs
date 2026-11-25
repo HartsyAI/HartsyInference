@@ -49,6 +49,17 @@ public sealed class LongCatConfigTests
     }
 
     [Fact]
+    public void WholeFloatsParseAndFractionsAreRefused()
+    {
+        // diffusers configs sometimes write integers as floats (4.0); a fraction names its field instead of parsing to a wrong size.
+        LongCatConfig config = LongCatConfig.FromJson("""{"mlp_ratio":4.0,"patch_size":[1.0,2.0,2.0]}""");
+        Assert.Equal(4, config.MlpRatio);
+        Assert.Equal((1, 2, 2), config.PatchSize);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => LongCatConfig.FromJson("""{"depth":47.5}"""));
+        Assert.Contains("depth", error.Message);
+    }
+
+    [Fact]
     public void ShapesGiveTheSameGeometryAsTheConfig()
     {
         LongCatConfig tiny = LongCatTestData.Tiny;
