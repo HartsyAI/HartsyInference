@@ -18,7 +18,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>MiniMax-H3 DiT: a single-stream packed-token transformer that denoises video and stereo audio latents
 /// jointly. Rows are laid out by <see cref="MiniMaxH3PackedLayout"/> as [text | conditioning | audio | video]; each
 /// segment carries its own modulation row, selected by (timestep class, modality tag).</summary>
-public sealed unsafe class MiniMaxH3Transformer : IDisposable
+public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
 {
     private const string FunControlWeightPrefix = "__fun_control.";
 
