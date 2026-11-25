@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.ModelAssets.Registry;
 using Spectre.Console;
@@ -32,6 +33,7 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
 
         using CancellationTokenSource cts = new CancellationTokenSource();
         using IDisposable cancelBinding = CommandRunner.BindCancelKey(cts);
+        using IDisposable granted = DownloadPermission.Grant();
 
         // Catalog ids first ("chroma", "qwen-image", ...): pull the pinned asset set into the Models tree —
         // the same flow `hartsy image -m <id>` uses, minus the confirmation prompt (pull IS the confirmation).
@@ -158,7 +160,7 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
             // Models tree would double-download. Same branch EnsurePresent takes, minus the confirm.
             if (ModelAcquisition.UsesAudioCache(cat, cat.Modality))
             {
-                if (!ModelAcquisition.EnsureAudioAssetsPresent(cat, cat.Modality, confirm: false, ct))
+                if (!ModelAcquisition.EnsureAudioAssetsPresent(cat, cat.Modality, out _, confirm: false, ct))
                     return 1;
                 AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/]");
                 return 0;
