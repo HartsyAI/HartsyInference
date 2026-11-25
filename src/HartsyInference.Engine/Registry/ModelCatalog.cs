@@ -3131,12 +3131,12 @@ public static class ModelCatalog
                 // (bf16 base_model; shard sha256 are the HF tree's LFS oids; index and config are git blobs and carry no hash here).
                 // Licence conflict, recorded not resolved: MIT on the model card, "academic use only and commercial use is not permitted" on the
                 // project page, upstream issue #165 unanswered. Likeness generation: the depicted person's consent is required.
-                // The 1.5 layout is distilled (8 steps, guidance off); the recipe refuses this row unless a 1.6 build is named, until the
-                // distilled path is wired. The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
+                // The 1.5 layout is distilled (8 steps, guidance off); the recipe runs this row on that path by default, and refuses a 1.6
+                // request until a 1.6 INT8 row exists (a row's settings must match its weights). The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
                 // (stt/openai--whisper-large-v3 @ 06f233fe). TargetSubdir is LongCat/<row>, the family-folder convention (FastFrames/, Vision/,
                 // LLM/), not the Comfy-style diffusion_models/ layout. The Hartsy-hosted repack is a later swap that needs the user's upload OK.
                 Id = "longcat-avatar", Modality = vid, DisplayName = "LongCat-Video-Avatar 1.5 (speech and image to video, consent required)",
-                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = false,
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
                 HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
                 Assets = new ModelAsset[]
                 {

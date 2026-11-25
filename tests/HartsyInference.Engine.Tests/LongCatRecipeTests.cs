@@ -64,34 +64,41 @@ public sealed class LongCatRecipeTests
     }
 
     [Fact]
-    public void AnUnnamedOrA15AvatarRequestIsRefusedBeforeAnyWeightIsRead()
+    public void AnUnnamedAvatarRequestGetsThe15SettingsNotThe16()
     {
         LongCatAvatarRecipe avatar = new();
-        using CpuBackend backend = new();
         ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
         ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
 
-        Assert.Throws<NotSupportedException>(() => avatar.Construct(new RecipeContext
+        Assert.Equal("1.5", unnamed.Id);
+        foreach (ResolvedModelVariant variant in new[] { unnamed, named15 })
         {
-            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
-        }));
-        Assert.Throws<NotSupportedException>(() => avatar.Construct(new RecipeContext
-        {
-            CheckpointPath = "no-such-folder", Backend = backend, Variant = named15,
-        }));
+            VideoDefaults settings = avatar.DefaultsFor(variant);
+            Assert.Equal(8, settings.Steps);
+            Assert.Equal(1f, settings.CfgScale);
+            Assert.Equal(7f, settings.FlowShift);
+        }
+        Assert.Equal(8, avatar.Defaults.Steps);
+        Assert.Equal(50, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
     }
 
     [Fact]
-    public void ANamed16AvatarRequestPassesTheRefusal()
+    public void AUnnamedOr15RequestPassesTheRefusalAndA16RequestIsRefusedBeforeAnyWeightIsRead()
     {
         using CpuBackend backend = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
         ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
 
-        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
         {
             CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
         }));
+        Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
 
+        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        {
+            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
+        }));
         Assert.IsNotType<NotSupportedException>(error);
     }
 
