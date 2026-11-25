@@ -119,6 +119,56 @@ public sealed unsafe partial class MiniMaxH3Transformer
         {
             throw new NotSupportedException("Duo role embeddings are disabled upstream and are not ported; refusing rather than ignoring them.");
         }
+        ValidateDuoInputs(layout, refinerGroups, (int)textStates.Shape[0], videoRows, audioRows, times.Length);
+        if (chunkRowsOverride is int forcedRows)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(forcedRows);
+        }
+
+        int hidden = _config.HiddenSize;
+        int seq = layout.Length;
+        int headDim = _config.AttentionHeadDim;
+        int textCount = layout.TextRows.Length, videoCount = layout.VideoRows.Length, audioCount = layout.AudioRows.Length;
+
+        // Route first: one dense bias for a sequence that fits, a reused per-tile bias for anything longer. No S x S matrix is built
+        // on the tiled route. Every allocation below is a `using`, so a throw disposes whatever was already built.
+        (long freeBytes, _) = backend.GetVramInfo();
+        int chunkRows = chunkRowsOverride ?? MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
+        DuoRoute route = ResolveDuoRoute(seq, chunkRows);
+        IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(layout.Groups, layout.Groups, mode);
+        DuoAttentionBias.ValidateRows(rects, seq, seq);
+        using Tensor? bias = route.Tiled ? null : HostTensor(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
+        using DuoTileMasks? tiles = route.Tiled ? new DuoTileMasks(rects, seq) : null;
+        BlockAttention attention = route.Tiled ? BlockAttention.Tiled(tiles!.Tile) : BlockAttention.Dense(bias!);
+        using Tensor tEmb = BuildTimeEmbedding(backend, times);
+        using Tensor modIndex = BuildDuoModulationIndex(layout);
+        (float[] cosValues, float[] sinValues) = DuoRope.Tables(layout.Positions, headDim);
+        using Tensor cos = HostTensor(new TensorShape(seq, headDim), cosValues);
+        using Tensor sin = HostTensor(new TensorShape(seq, headDim), sinValues);
+
+        Tensor stream = BuildDuoStream(backend, layout, refinerGroups, mode, textStates, videoRows, audioRows, hidden,
+            textCount, videoCount, audioCount);
+        try
+        {
+            for (int i = 0; i < _config.NumLayers; i++)
+            {
+                ForwardNamedBlock(backend, ref stream, tEmb, modIndex, cos, sin, $"blocks.{i}", route.ChunkRows, attention);
+            }
+
+            // norm_out and the output heads: shared with the cached forward.
+            return DuoHead(backend, stream, tEmb, layout, times.Length, audioCount > 0);
+        }
+        finally
+        {
+            stream.Dispose();
+        }
+    }
+
+    /// <summary>The input checks both Duo forwards share, run before any allocation. The caller has already refused null arguments and
+    /// the roles flag; <paramref name="textRows"/> is 0 when there is no text stream.</summary>
+    private void ValidateDuoInputs(DuoLayout layout, IReadOnlyList<DuoGroup> refinerGroups, int textRows, Tensor videoRows,
+        Tensor? audioRows, int timestepCount)
+    {
         if (BodyDType != DType.F32)
         {
             throw new NotSupportedException("The Duo forward runs an F32 body; its zero-row gather is F32-only.");
@@ -143,58 +193,16 @@ public sealed unsafe partial class MiniMaxH3Transformer
         {
             throw new ArgumentException($"Audio rows {audioRows.Shape[0]} do not match the layout's {layout.AudioRows.Length}.", nameof(audioRows));
         }
-        if (times.Length == 0)
+        if (timestepCount == 0)
         {
-            throw new ArgumentException("At least one timestep is needed.", nameof(times));
+            throw new ArgumentException("At least one timestep is needed.", "times");
         }
-        ValidateDuoRefinerGroups(refinerGroups, (int)textStates.Shape[0]);
-        ValidateDuoTimeIds(layout, times.Length);
-        if (chunkRowsOverride is int forcedRows)
+        if (textRows == 0 && layout.TextRows.Length > 0)
         {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(forcedRows);
+            throw new ArgumentException("The layout has text rows, so textStates must be given with at least one row.", "textStates");
         }
-
-        int hidden = _config.HiddenSize;
-        int seq = layout.Length;
-        int headDim = _config.AttentionHeadDim;
-        int textCount = layout.TextRows.Length, videoCount = layout.VideoRows.Length, audioCount = layout.AudioRows.Length;
-
-        // Route first: one dense bias for a sequence that fits, a reused per-tile bias for anything longer. No S x S matrix is built
-        // on the tiled route. Every allocation below is a `using`, so a throw disposes whatever was already built.
-        (long freeBytes, _) = backend.GetVramInfo();
-        int chunkRows = chunkRowsOverride ?? MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
-        DuoRoute route = ResolveDuoRoute(seq, chunkRows);
-        IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(layout.Groups, layout.Groups, mode);
-        DuoAttentionBias.ValidateRows(rects, seq, seq);
-        using Tensor? bias = route.Tiled ? null : HostTensor(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
-        using DuoTileMasks? tiles = route.Tiled ? new DuoTileMasks(rects, seq) : null;
-        Func<int, int, Tensor>? biasTile = null;
-        if (tiles is not null)
-        {
-            biasTile = (r0, rows) => tiles.Tile(r0, rows);
-        }
-        using Tensor tEmb = BuildTimeEmbedding(backend, times);
-        using Tensor modIndex = BuildDuoModulationIndex(layout);
-        (float[] cosValues, float[] sinValues) = DuoRope.Tables(layout.Positions, headDim);
-        using Tensor cos = HostTensor(new TensorShape(seq, headDim), cosValues);
-        using Tensor sin = HostTensor(new TensorShape(seq, headDim), sinValues);
-
-        Tensor stream = BuildDuoStream(backend, layout, refinerGroups, mode, textStates, videoRows, audioRows, hidden,
-            textCount, videoCount, audioCount);
-        try
-        {
-            for (int i = 0; i < _config.NumLayers; i++)
-            {
-                ForwardBlock(backend, ref stream, tEmb, modIndex, cos, sin, i, route.ChunkRows, null, bias, biasTile);
-            }
-
-            // norm_out and the output heads: shared with the cached forward.
-            return DuoHead(backend, stream, tEmb, layout, times.Length, audioCount > 0);
-        }
-        finally
-        {
-            stream.Dispose();
-        }
+        ValidateDuoRefinerGroups(refinerGroups, textRows);
+        ValidateDuoTimeIds(layout, timestepCount);
     }
 
     /// <summary>Bounds-checks each refiner group against the text rows it names, before any allocation.</summary>
@@ -230,7 +238,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
     {
         // Text is optional: a layout with no text rows, or an empty text stream, skips the refiner.
         using Tensor? refined = textStates is not null && textStates.Shape[0] > 0
-            ? RefineDuoText(backend, textStates, refinerGroups, mode)
+            ? DuoRefinedText(backend, textStates, refinerGroups, mode)
             : null;
         using Tensor? selected = textCount > 0 ? Gather(backend, refined!, layout.TextSourceRows) : null;
         using Tensor videoEmbed = ProjectIntoStream(backend, videoRows, "video_patch_proj", hidden);
@@ -257,45 +265,21 @@ public sealed unsafe partial class MiniMaxH3Transformer
         return Gather(backend, source, packed);
     }
 
-    /// <summary>The Duo token refiner: context_embedder (H3's condition_proj), then the masked refiner blocks, then final_norm.
-    /// The refiner graph is its own: upstream builds it from <paramref name="refinerGroups"/>, not from the packed layout.
-    /// Empty text returns no rows, as upstream skips the refiner for it.</summary>
-    private Tensor RefineDuoText(IBackend backend, Tensor textStates, IReadOnlyList<DuoGroup> refinerGroups,
-        DuoAttentionMode mode)
+    /// <summary>The Duo token refiner: the shared <see cref="RefineText"/> body, masked by the refiner's own graph built from
+    /// <paramref name="refinerGroups"/>, not from the packed layout. Projects always, so H3's hidden-width shortcut is off.
+    /// Only called with at least one text row.</summary>
+    private Tensor DuoRefinedText(IBackend backend, Tensor textStates, IReadOnlyList<DuoGroup> refinerGroups, DuoAttentionMode mode)
     {
-        int hidden = _config.HiddenSize;
-        int rows = (int)textStates.Shape[0];
-        Tensor x = ProjectIntoStream(backend, textStates, "condition_proj", hidden);
-        if (rows == 0)
-        {
-            return x;
-        }
-
-        try
-        {
-            using Tensor? bias = _config.TokenRefinerNumLayers > 0
-                ? HostTensor(new TensorShape(rows, rows),
-                    DuoAttentionBias.Build(DuoMask.Build(refinerGroups, refinerGroups, mode, refiner: true), rows, rows))
-                : null;
-            for (int i = 0; i < _config.TokenRefinerNumLayers; i++)
-            {
-                string p = $"token_refiner.blocks.{i}";
-                using Tensor normed = Norm(backend, x, $"{p}.norm1.weight", _config.NormEps, BodyDType);
-                Tensor attn = Attention(backend, normed, $"{p}.attn", cos: null, sin: null, bias);
-                x = Residual(backend, x, attn);
-
-                using Tensor normed2 = Norm(backend, x, $"{p}.norm2.weight", _config.NormEps, BodyDType);
-                Tensor mlp = Mlp(backend, normed2, $"{p}.mlp");
-                x = Residual(backend, x, mlp);
-            }
-
-            return Norm(backend, x, "token_refiner.final_norm.weight", _config.FinalNormEps, BodyDType);
-        }
-        finally
-        {
-            x.Dispose();
-        }
+        using Tensor? bias = DuoRefinerBias(refinerGroups, (int)textStates.Shape[0], mode);
+        return RefineText(backend, textStates, bias, passthroughWhenHidden: false);
     }
+
+    /// <summary>The refiner's visibility bias over its own rows, or null when the refiner has no blocks, as upstream builds the graph only for blocks.</summary>
+    private Tensor? DuoRefinerBias(IReadOnlyList<DuoGroup> refinerGroups, int rows, DuoAttentionMode mode) =>
+        _config.TokenRefinerNumLayers > 0
+            ? HostTensor(new TensorShape(rows, rows),
+                DuoAttentionBias.Build(DuoMask.Build(refinerGroups, refinerGroups, mode, refiner: true), rows, rows))
+            : null;
 
     /// <summary>Per-row AdaLN index <c>timeIds * 3 + max(tag, 0)</c>, the row layout the block tables are built for.
     /// Same definition as <see cref="DuoLayout.AdalnRow"/>; the layout's time ids must already be validated.</summary>

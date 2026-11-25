@@ -35,41 +35,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         {
             throw new NotSupportedException("A cached Duo forward is causal only; a bidirectional score never reads the committed history.");
         }
-        if (BodyDType != DType.F32)
-        {
-            throw new NotSupportedException("The Duo forward runs an F32 body; its zero-row gather is F32-only.");
-        }
-        if (layout.VideoRows.Length == 0)
-        {
-            throw new NotSupportedException("A Duo layout with no video rows is not supported; every target carries video.");
-        }
-        if (audioRows is null && layout.AudioRows.Length > 0)
-        {
-            throw new ArgumentException("The layout has audio rows, so audioRows must be given.", nameof(audioRows));
-        }
-        if (audioRows is not null && !_config.HasAudio)
-        {
-            throw new ArgumentException("This checkpoint has no audio stream, so audioRows must be null.", nameof(audioRows));
-        }
-        if (videoRows.Shape[0] != layout.VideoRows.Length)
-        {
-            throw new ArgumentException($"Video rows {videoRows.Shape[0]} do not match the layout's {layout.VideoRows.Length}.", nameof(videoRows));
-        }
-        if (audioRows is not null && audioRows.Shape[0] != layout.AudioRows.Length)
-        {
-            throw new ArgumentException($"Audio rows {audioRows.Shape[0]} do not match the layout's {layout.AudioRows.Length}.", nameof(audioRows));
-        }
-        if (times.Length == 0)
-        {
-            throw new ArgumentException("At least one timestep is needed.", nameof(times));
-        }
-        int textRows = textStates is null ? 0 : (int)textStates.Shape[0];
-        if (textRows == 0 && layout.TextRows.Length > 0)
-        {
-            throw new ArgumentException("The layout has text rows, so textStates must be given.", nameof(textStates));
-        }
-        ValidateDuoRefinerGroups(refinerGroups, textRows);
-        ValidateDuoTimeIds(layout, times.Length);
+        ValidateDuoInputs(layout, refinerGroups, textStates is null ? 0 : (int)textStates.Shape[0], videoRows, audioRows, times.Length);
 
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd, hidden = _config.HiddenSize;
         if (cache.Blocks != _config.NumLayers || cache.Width != inner)
@@ -120,15 +86,15 @@ public sealed unsafe partial class MiniMaxH3Transformer
                 string p = $"blocks.{i}";
                 // The block body is the shared H3 one. Only the attention step differs: it reads the cache and keeps this block's rows
                 // for a commit. No chunking applies here, so the block runs unchunked and the delegate is the whole attention.
-                ForwardNamedBlock(backend, ref stream, tEmb, modIndex, cos, sin, p, int.MaxValue, null, null, null,
-                    attentionOverride: x =>
+                ForwardNamedBlock(backend, ref stream, tEmb, modIndex, cos, sin, p, int.MaxValue,
+                    BlockAttention.Override(x =>
                     {
                         Tensor attn = CachedAttention(backend, x, $"{p}.attn", cos, sin, cache.Layer(block), bias, commit,
                             out float[]? keys, out float[]? values);
                         keptKeys[block] = keys!;
                         keptValues[block] = values!;
                         return attn;
-                    });
+                    }));
             }
 
             (Tensor video, Tensor? audio) = DuoHead(backend, stream, tEmb, layout, times.Length, audioRows is not null);
