@@ -93,11 +93,18 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
                 + "The 1.5 build (the default) runs instead.");
         }
         bool distilled = variant.Is(LongCatAvatarVariants.Avatar15);
+        // The distilled build is the base plus the DMD LoRA gated on. Without that file the request would run the bare base at 8 steps, so it
+        // is refused here, before the checkpoint is opened.
+        if (distilled && !File.Exists(LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)))
+        {
+            throw new NotSupportedException($"longcat-avatar's distilled build needs its distillation LoRA at "
+                + $"'{LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)}'. Refusing to run the bare base at 8 steps.");
+        }
 
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null);
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null, attachDmd: distilled);
             if (!parts.HasAudio)
             {
                 throw new InvalidOperationException(
@@ -121,7 +128,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled);
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled, parts.DmdGate);
         }
         catch (Exception ex)
         {

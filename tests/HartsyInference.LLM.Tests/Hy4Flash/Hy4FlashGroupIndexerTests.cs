@@ -58,7 +58,7 @@ public sealed class Hy4FlashGroupIndexerTests
                 TopK = Json.GetProperty("topk").GetInt32(), NormEps = (float)Json.GetProperty("norm_eps").GetDouble(),
             };
             Indexer = new Hy4FlashGroupIndexer(backend, settings, _weights,
-                new Hy4FlashRopeRows(settings.RopeDim / 2, 256, Json.GetProperty("theta").GetDouble()), Dim, QRank);
+                Hy4FlashPlainRope.Create(settings.RopeDim / 2, 256, Json.GetProperty("theta").GetDouble()), Dim, QRank);
             X = Floats(Json.GetProperty("x"));
             QLatent = Floats(Json.GetProperty("q_latent"));
         }
