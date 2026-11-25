@@ -620,22 +620,27 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
             return DtypeCastHelper.EnsureDtype(backend, passthrough, BodyDType);
         }
         Tensor x = ProjectIntoStream(backend, textStates, "condition_proj", hidden);
-        for (int i = 0; i < _config.TokenRefinerNumLayers; i++)
+        try
         {
-            string p = $"token_refiner.blocks.{i}";
-            Tensor normed = Norm(backend, x, $"{p}.norm1.weight", _config.NormEps, BodyDType);
-            Tensor attn = Attention(backend, normed, $"{p}.attn", cos: null, sin: null, refinerBias);
-            normed.Dispose();
-            x = Residual(backend, x, attn);
+            for (int i = 0; i < _config.TokenRefinerNumLayers; i++)
+            {
+                string p = $"token_refiner.blocks.{i}";
+                Tensor attn;
+                using (Tensor normed = Norm(backend, x, $"{p}.norm1.weight", _config.NormEps, BodyDType))
+                    attn = Attention(backend, normed, $"{p}.attn", cos: null, sin: null, refinerBias);
+                x = Residual(backend, x, attn);
 
-            Tensor normed2 = Norm(backend, x, $"{p}.norm2.weight", _config.NormEps, BodyDType);
-            Tensor mlp = Mlp(backend, normed2, $"{p}.mlp");
-            normed2.Dispose();
-            x = Residual(backend, x, mlp);
+                Tensor mlp;
+                using (Tensor normed = Norm(backend, x, $"{p}.norm2.weight", _config.NormEps, BodyDType))
+                    mlp = Mlp(backend, normed, $"{p}.mlp");
+                x = Residual(backend, x, mlp);
+            }
+            return Norm(backend, x, "token_refiner.final_norm.weight", _config.FinalNormEps, BodyDType);
         }
-        Tensor final = Norm(backend, x, "token_refiner.final_norm.weight", _config.FinalNormEps, BodyDType);
-        x.Dispose();
-        return final;
+        finally
+        {
+            x.Dispose();
+        }
     }
 
     private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,

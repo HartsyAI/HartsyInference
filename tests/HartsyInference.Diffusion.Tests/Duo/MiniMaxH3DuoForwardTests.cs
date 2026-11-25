@@ -153,6 +153,41 @@ public sealed class MiniMaxH3DuoForwardTests
     }
 
     [Fact]
+    public void ALayoutWithTextRowsNeedsTextStates_InBothForwards()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        using Tensor empty = new(new TensorShape(0, TextDim), DType.F32);
+        using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
+        using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
+        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 4);
+
+        ArgumentException full = Assert.Throws<ArgumentException>(() => transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal,
+            [], empty, video, audio, Times()));
+        ArgumentException cached = Assert.Throws<ArgumentException>(() => transformer.ForwardDuoCached(backend, layout, DuoAttentionMode.Causal,
+            [], null, video, audio, Times(), cache, commit: false));
+
+        Assert.Equal("textStates", full.ParamName);
+        Assert.Equal("textStates", cached.ParamName);
+    }
+
+    [Fact]
+    public void NoTimestepIsRefusedByTheNameOfTheCallersParameter()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
+        using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
+        using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal,
+            RefinerGroups(), text, video, audio, times: []));
+        Assert.Equal("times", error.ParamName);
+    }
+
+    [Fact]
     public void RefinerGroupBeyondTheTextRowsIsRefused()
     {
         using MiniMaxH3Transformer transformer = Transformer();
