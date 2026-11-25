@@ -22,11 +22,16 @@ internal sealed class LongCatRunTensors(int captionChannels, int audioWidth) : I
         return text;
     }
 
-    /// <summary>The audio tokens of <paramref name="rows"/> rows, the same object for every pass that reads <paramref name="audio"/>.</summary>
+    /// <summary>The audio tokens of <paramref name="rows"/> rows, the same object for every pass that reads <paramref name="audio"/>. No cache reads
+    /// these: keeping them saves one host copy per pass, nothing else.</summary>
     public Tensor Audio(float[] audio, int rows)
     {
         if (_audio.TryGetValue(audio, out Tensor? tokens))
+        {
+            if (tokens.Shape[0] != rows)
+                throw new ArgumentException($"The audio tokens were built with {tokens.Shape[0]} rows; this pass needs {rows}.", nameof(rows));
             return tokens;
+        }
         tokens = new Tensor(new TensorShape(rows, audioWidth), DType.F32);
         audio.AsSpan().CopyTo(tokens.AsSpan<float>());
         _audio[audio] = tokens;
