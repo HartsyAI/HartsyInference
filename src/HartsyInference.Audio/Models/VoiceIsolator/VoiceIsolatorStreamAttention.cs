@@ -24,7 +24,7 @@ internal sealed class VoiceIsolatorAttentionLane : IDisposable
 }
 
 /// <summary>The settings every attention block of a stream shares and the attention step itself: the past each query may see, the
-/// buffer capacity, the rotary tables of every slot, and the checkpoint's own window bound.</summary>
+/// buffer capacity, the rotary tables of every slot, and the sliding window the attention kernel applies.</summary>
 internal sealed unsafe class VoiceIsolatorStreamAttention
 {
     private const int FirstSlots = 64;
@@ -36,7 +36,7 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
     {
         CacheFrames = cacheFrames;
         Capacity = capacity;
-        // Each query keeps at most CacheFrames past keys, and the checkpoint's own window when that is shorter.
+        // Each query sees at most CacheFrames keys, its own included, and the checkpoint's window when that is shorter.
         SlidingWindow = window > 0 ? Math.Min(window, cacheFrames) : cacheFrames;
         (_cos, _sin) = VoiceIsolatorOps.RopeTables(capacity, headDim);
     }
