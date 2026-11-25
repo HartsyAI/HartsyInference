@@ -135,6 +135,29 @@ public sealed class MovieRollWindowTests
         }
     }
 
+    [Fact]
+    public void RecomputeRebuildsEveryLayerFromTheSelectedChunks()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [1, 2, 2], cache, FullHistoryBlocks);
+
+        Assert.Equal(5, cached);
+        string full = HunyuanVideo15Dit.StreamLayerName(0);
+        Assert.Equal(new[] { (0, 1), (1, 3), (3, 5) }, cache.FrameRanges(full).ToArray());
+        (Tensor Keys, Tensor Values)? fullCache = cache.Get(full);
+        AssertValues(fixture.Ref("rec.full0.k"), fullCache!.Value.Keys, "full-history keys after recompute");
+        AssertValues(fixture.Ref("rec.full0.v"), fullCache.Value.Values, "full-history values after recompute");
+
+        string sinkRecent = HunyuanVideo15Dit.StreamLayerName(1);
+        Assert.Equal(new[] { (0, 1), (3, 5) }, cache.FrameRanges(sinkRecent).ToArray());
+        (Tensor Keys, Tensor Values)? srCache = cache.Get(sinkRecent);
+        AssertValues(fixture.Ref("rec.sink1.k"), srCache!.Value.Keys, "sink-recent keys after recompute");
+        AssertValues(fixture.Ref("rec.sink1.v"), srCache.Value.Values, "sink-recent values after recompute");
+    }
+
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
     /// <paramref name="firstFrame"/>, in the token order the window uses.</summary>
     private static float[] Rows(int firstFrame, int frames)
@@ -187,7 +210,7 @@ public sealed class MovieRollWindowTests
             Loader.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors"));
             Weights = Loader.GetAllTensors()
                 .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal)
-                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal))
+                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal) && !pair.Key.StartsWith("rec.", StringComparison.Ordinal))
                 .ToDictionary(pair => pair.Key, pair => pair.Value);
             Backend = new CpuBackend();
             Dit = new HunyuanVideo15Dit(TinyConfig());

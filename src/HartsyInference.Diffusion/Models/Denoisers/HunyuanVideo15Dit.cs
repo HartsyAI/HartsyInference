@@ -1,3 +1,4 @@
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -263,6 +264,156 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             txt?.Dispose();
             txtTemb?.Dispose();
             frameTemb?.Dispose();
+        }
+    }
+
+    /// <summary>MovieRoll's KV recompute (<c>_forward_kv_recompute</c>): re-encodes the clean chunks <paramref name="chunkFrames"/> of
+    /// <paramref name="latent"/> at timestep 0 without text, each chunk attending to itself and the chunks before it. The full-history
+    /// blocks replace their cache layers with the whole clip; each sink-recent block then replaces its layer with the sink (the first
+    /// chunk) and the recent one (the last chunk), computed from the same pass after the full-history blocks, so every block describes the
+    /// same input. Clears nothing itself: the layers are replaced in place. Returns the number of frames now cached.</summary>
+    public int StreamRecompute(IBackend backend, Tensor latent, int[] chunkFrames, MovieRollKvCache cache, int fullHistoryBlocks)
+    {
+        ArgumentNullException.ThrowIfNull(chunkFrames);
+        ArgumentNullException.ThrowIfNull(cache);
+        if (!cache.IsInit) throw new InvalidOperationException("Init the cache with StreamLayerNames before recomputing.");
+        if (fullHistoryBlocks < 0 || fullHistoryBlocks > _blocks.Length)
+            throw new ArgumentOutOfRangeException(nameof(fullHistoryBlocks), fullHistoryBlocks, $"Full-history blocks must be in [0, {_blocks.Length}].");
+        if (chunkFrames.Length == 0 || chunkFrames.Any(frames => frames <= 0))
+            throw new ArgumentException("Every recompute chunk needs at least one frame.", nameof(chunkFrames));
+        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.LatentChannels || latent.DType != DType.F32)
+            throw new ArgumentException($"latent must be F32 [1, {_config.LatentChannels}, T, H, W], got {latent.Shape} {latent.DType}.", nameof(latent));
+        int frames = (int)latent.Shape[2];
+        int height = (int)latent.Shape[3];
+        int width = (int)latent.Shape[4];
+        if (chunkFrames.Sum() != frames)
+            throw new ArgumentException($"The chunks cover {chunkFrames.Sum()} frames; the latent has {frames}.", nameof(chunkFrames));
+        int perFrame = height * width;
+
+        Tensor img = EmbedImage(backend, latent, null, frames * perFrame);
+        Tensor? sinkRecent = null;
+        try
+        {
+            // The full-history chain over every chunk, causal by chunk, at timestep 0.
+            int[] chunkTokens = chunkFrames.Select(f => f * perFrame).ToArray();
+            using (Tensor fullBias = ChunkCausalBias(chunkTokens))
+            using (Tensor timeless = TimestepMlpRows(backend, new float[frames]))
+            using (TokenSegmentLayout layout = FrameLayout(frames, perFrame))
+            {
+                float[] positions = HunyuanImagePosEmbed.GridRows([frames, height, width]);
+                for (int i = 0; i < fullHistoryBlocks; i++)
+                {
+                    MovieRollWindowOutput output = _blocks[i].ForwardWindow(backend, img, null, null, timeless, layout, _rope, positions,
+                        null, null, returnKv: true, attentionBias: fullBias);
+                    img.Dispose();
+                    img = output.Image;
+                    try
+                    {
+                        cache.ReplaceLayer(StreamLayerName(i), output.Keys!, output.Values!, PackedRanges(chunkFrames));
+                    }
+                    finally
+                    {
+                        output.Keys?.Dispose();
+                        output.Values?.Dispose();
+                    }
+                }
+            }
+
+            // The sink-recent chain: the sink and the recent chunk of the full-history output, recomputed from this pass.
+            int sinkFrames = chunkFrames[0];
+            int recentFrames = chunkFrames.Length > 1 ? chunkFrames[chunkFrames.Length - 1] : 0;
+            int srFrames = sinkFrames + recentFrames;
+            int[] srTokens = recentFrames > 0 ? new[] { sinkFrames * perFrame, recentFrames * perFrame } : new[] { sinkFrames * perFrame };
+            List<(int Start, int End)> srRanges = recentFrames > 0
+                ? new List<(int Start, int End)> { (0, sinkFrames), (frames - recentFrames, frames) }
+                : new List<(int Start, int End)> { (0, sinkFrames) };
+            sinkRecent = SinkRecentRows(backend, img, frames, perFrame, sinkFrames, recentFrames);
+            img.Dispose();
+            img = null!;
+            using (Tensor srBias = ChunkCausalBias(srTokens))
+            using (Tensor srTemb = TimestepMlpRows(backend, new float[srFrames]))
+            using (TokenSegmentLayout srLayout = FrameLayout(srFrames, perFrame))
+            {
+                float[] srPositions = HunyuanImagePosEmbed.GridRows([srFrames, height, width]);
+                for (int i = fullHistoryBlocks; i < _blocks.Length; i++)
+                {
+                    MovieRollWindowOutput output = _blocks[i].ForwardWindow(backend, sinkRecent!, null, null, srTemb, srLayout, _rope,
+                        srPositions, null, null, returnKv: true, attentionBias: srBias);
+                    sinkRecent!.Dispose();
+                    sinkRecent = output.Image;
+                    try
+                    {
+                        cache.ReplaceLayer(StreamLayerName(i), output.Keys!, output.Values!, srRanges);
+                    }
+                    finally
+                    {
+                        output.Keys?.Dispose();
+                        output.Values?.Dispose();
+                    }
+                }
+            }
+            return frames;
+        }
+        finally
+        {
+            img?.Dispose();
+            sinkRecent?.Dispose();
+        }
+    }
+
+    private static IReadOnlyList<(int Start, int End)> PackedRanges(int[] chunkFrames)
+    {
+        List<(int Start, int End)> ranges = new(chunkFrames.Length);
+        int offset = 0;
+        foreach (int frames in chunkFrames)
+        {
+            ranges.Add((offset, offset + frames));
+            offset += frames;
+        }
+        return ranges;
+    }
+
+    private static TokenSegmentLayout FrameLayout(int frames, int perFrame) =>
+        new(Enumerable.Repeat(perFrame, frames).ToArray(), Enumerable.Range(0, frames).ToArray());
+
+    /// <summary>Additive <c>[1, 1, S, S]</c> attention bias for block-causal attention over chunks of the given token counts: a query may attend
+    /// the keys of its own chunk and earlier ones. Built on the host.</summary>
+    private static Tensor ChunkCausalBias(int[] chunkTokens)
+    {
+        int total = chunkTokens.Sum();
+        int[] chunkOf = new int[total];
+        int at = 0;
+        for (int c = 0; c < chunkTokens.Length; c++)
+            for (int t = 0; t < chunkTokens[c]; t++) chunkOf[at++] = c;
+        Tensor bias = new(new TensorShape(1, 1, total, total), DType.F32);
+        Span<float> values = bias.AsSpan<float>();
+        for (int q = 0; q < total; q++)
+            for (int k = 0; k < total; k++)
+                values[q * total + k] = chunkOf[k] <= chunkOf[q] ? 0f : -1e9f;
+        return bias;
+    }
+
+
+    /// <summary>The sink tokens and the recent tokens of a flat <c>[1, S, hidden]</c> image, concatenated; with no recent frame, the sink alone.</summary>
+    private Tensor SinkRecentRows(IBackend backend, Tensor image, int frames, int perFrame, int sinkFrames, int recentFrames)
+    {
+        int sinkTokens = sinkFrames * perFrame;
+        int recentTokens = recentFrames * perFrame;
+        Tensor sink = new(new TensorShape(1, sinkTokens, _config.HiddenSize), DType.F32);
+        JointAttention.SplitRows(backend, sink, image, 1, frames * perFrame, 0);
+        if (recentFrames == 0) return sink;
+        Tensor recent = new(new TensorShape(1, recentTokens, _config.HiddenSize), DType.F32);
+        try
+        {
+            JointAttention.SplitRows(backend, recent, image, 1, frames * perFrame, (frames - recentFrames) * perFrame);
+            Tensor joined = new(new TensorShape(1, sinkTokens + recentTokens, _config.HiddenSize), DType.F32);
+            backend.Concat(joined, [sink, recent], 1);
+            return joined;
+        }
+        finally
+        {
+            sink.Dispose();
+            recent.Dispose();
         }
     }
 
