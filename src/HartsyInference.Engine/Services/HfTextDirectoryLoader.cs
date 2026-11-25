@@ -6,6 +6,7 @@ using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Glm5Next;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Models.Spark;
@@ -48,7 +49,11 @@ internal static class HfTextDirectoryLoader
         string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
         || string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal)
         || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal)
-        || IsKimiK31(info);
+        || IsKimiK31(info)
+        || IsGlm5Next(info);
+
+    /// <summary>Whether <paramref name="info"/> is a glm5_next checkpoint (Sage S2.1 Flash, GLM-5.3-Flash). It runs on the backend of the requested device.</summary>
+    internal static bool IsGlm5Next(HfCheckpointInfo info) => string.Equals(info.ModelType, Glm5NextTextModel.ModelType, StringComparison.Ordinal);
 
     /// <summary>Whether <paramref name="info"/> is a Kimi K3.1 checkpoint. Its backend follows the requested device rather than the CPU.</summary>
     internal static bool IsKimiK31(HfCheckpointInfo info) => string.Equals(info.ModelType, KimiK31ModelType, StringComparison.Ordinal);
@@ -66,6 +71,8 @@ internal static class HfTextDirectoryLoader
             return MaxwellTextModel.Load(backend, info.Root, MaxwellOptionsFor(backend.Device));
         if (IsKimiK31(info))
             return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
+        if (IsGlm5Next(info))
+            return Glm5NextTextModel.Load(backend, info.Root, MaxSequenceTokens);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
     }
 
@@ -126,6 +133,12 @@ internal static class HfTextDirectoryLoader
         }
         if (IsKimiK31(info))
             RequireKimiK31Runnable(info);
+        if (IsGlm5Next(info))
+        {
+            Glm5NextTextModel.ReadConfig(info.ConfigPath);
+            if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+                throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Sage S2.1 Flash Text path needs.");
+        }
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
         if (!stateful && !miniMax && !IsHostReferenceFamily(info))

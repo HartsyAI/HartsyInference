@@ -11,12 +11,21 @@ public sealed class DsaAttentionState : IDisposable
     /// <param name="capacity">Positions the cache holds.</param>
     /// <param name="settings">The layer the state is for.</param>
     public DsaAttentionState(int capacity, DsaAttentionSettings settings)
+        : this(capacity, settings, settings?.Indexer?.HeadDim ?? throw new ArgumentException("Settings without an Indexer need an explicit key width.", nameof(settings)))
+    {
+    }
+
+    /// <param name="capacity">Positions the cache holds.</param>
+    /// <param name="settings">The layer the state is for.</param>
+    /// <param name="keyWidth">Width of the per-position selector key row (<see cref="IDsaKeySelector.KeyWidth"/>); 0 keeps none.</param>
+    public DsaAttentionState(int capacity, DsaAttentionSettings settings, int keyWidth)
     {
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(keyWidth);
         Capacity = capacity;
         _latent = new Tensor(new TensorShape(capacity, settings.LatentDim), DType.F32);
-        _indexKeys = new Tensor(new TensorShape(capacity, settings.Indexer.HeadDim), DType.F32);
+        _indexKeys = new Tensor(new TensorShape(capacity, Math.Max(keyWidth, 1)), DType.F32);
     }
 
     /// <summary>Positions the cache holds.</summary>

@@ -66,6 +66,7 @@ Desktop.ini
 
 ## Model files (large binary files — don't commit)
 *.safetensors
+!/tests/python-reference/hy4_flash/data/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioS2/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioDrama3/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
@@ -76,6 +77,7 @@ Desktop.ini
 !/tests/HartsyInference.LLM.Tests/Fixtures/Flint/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/tiny/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/sciperception/*/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/tiny_vision/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MiniMaxM3/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Maxwell/*.safetensors
 !/tests/HartsyInference.ModelAssets.Tests/Fixtures/GgmlCodecs/*.safetensors
