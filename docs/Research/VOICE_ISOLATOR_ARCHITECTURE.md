@@ -34,7 +34,7 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Reuse map
 
-`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1), which the LLM `MambaModel` now uses as well.
+`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1). The LLM `MambaModel` keeps its own host scan until the item C change (#1191) moves it onto this op.
 
 ## Reference runs
 
