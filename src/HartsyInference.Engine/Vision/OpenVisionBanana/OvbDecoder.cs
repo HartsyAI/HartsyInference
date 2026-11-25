@@ -63,8 +63,8 @@ public static class OvbDecoder
     /// <see cref="Ignore"/>; ties go to the lowest class. Also returns the winner's share among the non-abstaining votes
     /// (0 where all abstained), a stability diagnostic and not a probability.
     /// <para>Reached from src through <c>OvbPerception.SegmentAsync</c> when <c>legends</c> is above 1. The vision route passes 1,
-    /// so only the API's <c>legends</c> parameter and the tests reach it today. Pinned by the parity fixture's
-    /// <c>passes</c> and <c>legends</c> entries.</para></summary>
+    /// so only direct callers of <c>OvbPerception.SegmentAsync</c> and the tests reach it today. Pinned by the parity fixture's
+    /// <c>voted</c> and <c>agreement</c> tensors; <c>passes</c> and <c>legends</c> in <c>meta.json</c> give the setup.</para></summary>
     public static (byte[] Labels, float[] Agreement) MajorityVote(IReadOnlyList<byte[]> maps, int classCount)
     {
         ArgumentNullException.ThrowIfNull(maps);
@@ -115,7 +115,8 @@ public static class OvbDecoder
     /// <see cref="SnapToLegend"/>'s <c>classIds</c>, or two groups' local label 0 would be merged as one class.
     /// <para>Not reached from src: the segmentation path merges legends by majority vote (<see cref="MajorityVote"/>). Planned
     /// use: a grouped-taxonomy run with more classes than one legend holds, once the segmentation route accepts a grouped
-    /// taxonomy. Pinned by the parity fixture's <c>merged</c> map.</para></summary>
+    /// taxonomy. Pinned by the parity fixture's <c>merged</c> and <c>grp_merged</c> maps; <c>grp_merged</c> is the
+    /// disjoint-groups case.</para></summary>
     public static byte[] MergeGrouped(IReadOnlyList<byte[]> labelMaps, IReadOnlyList<float[]> distanceMaps)
     {
         ArgumentNullException.ThrowIfNull(labelMaps);
