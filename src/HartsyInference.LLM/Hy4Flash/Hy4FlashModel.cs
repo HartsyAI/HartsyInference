@@ -13,7 +13,7 @@ public sealed class Hy4FlashModel : IDisposable
     private readonly IBackend _backend;
     private readonly Hy4FlashConfig _cfg;
     private readonly List<Tensor> _owned = [];
-    private readonly Hy4FlashRowTable _embedding;
+    private readonly Hy4FlashEngramRows _embedding;
     private readonly Hy4FlashLayer[] _layers;
     private readonly Hy4FlashEngramLayer?[] _engram;
     private readonly Hy4FlashHyperConnection _head;
@@ -36,7 +36,7 @@ public sealed class Hy4FlashModel : IDisposable
         _engram = new Hy4FlashEngramLayer?[config.NumHiddenLayers];
         try
         {
-            _embedding = new Hy4FlashRowTable(Own(source.Read("model.embed_tokens.weight")));
+            _embedding = new Hy4FlashEngramRows(Own(source.Read("model.embed_tokens.weight")));
             _finalNorm = F32(source, "model.norm.weight");
             _lmHead = Own(source.Read("lm_head.weight"));
             using Tensor scale = source.Read("model.hc_head.hc_head_scale"), bias = source.Read("model.hc_head.hc_head_base");
@@ -90,7 +90,11 @@ public sealed class Hy4FlashModel : IDisposable
         int tokens = tokenIds.Length, h = _cfg.HiddenSize, hc = _cfg.HcMult, start = state.Length;
         if (tokens < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
         if (start + tokens > MaxPositions) throw new InvalidOperationException($"The state holds {MaxPositions} positions; {start + tokens} were asked for.");
-        state.Ids.AddRange(tokenIds.ToArray());
+
+        // The state's token history is only extended once every layer has run, so a refused or failed call leaves Ids and Length as they were.
+        int[] ids = new int[start + tokens];
+        state.Ids.CopyTo(ids, 0);
+        tokenIds.CopyTo(ids.AsSpan(start));
 
         float[] embedded = new float[tokens * h];
         for (int t = 0; t < tokens; t++) _embedding.Read(tokenIds[t], embedded.AsSpan(t * h, h));
@@ -99,7 +103,6 @@ public sealed class Hy4FlashModel : IDisposable
         for (int t = 0; t < tokens; t++)
             for (int i = 0; i < hc; i++) embedded.AsSpan(t * h, h).CopyTo(stream.AsSpan((t * hc + i) * h, h));
 
-        int[] ids = [.. state.Ids];
         for (int l = 0; l < _layers.Length; l++)
         {
             if (_engram[l] is { } engram)
@@ -112,6 +115,7 @@ public sealed class Hy4FlashModel : IDisposable
             _layers[l].Forward(stream, tokens, start, state.Layers[l]);
             _trace?.Invoke($"layer_{l}_out", stream.ToArray());
         }
+        state.Ids.AddRange(tokenIds.ToArray());
         state.Length = start + tokens;
 
         _head.Gates(stream, tokens, out float[] pre, out _);
@@ -144,7 +148,7 @@ public sealed class Hy4FlashModel : IDisposable
         };
         int[] lookup;
         using (Tensor table = source.Read(e + "lookup_table")) lookup = table.AsReadOnlySpan<int>().ToArray();
-        return new Hy4FlashEngramLayer(_backend, _cfg, layerIndex + 1, weights, new Hy4FlashRowTable(Own(source.Read(e + "multi_head_embedding.embedding.weight"))), lookup, eps);
+        return new Hy4FlashEngramLayer(_backend, _cfg, layerIndex + 1, weights, new Hy4FlashEngramRows(Own(source.Read(e + "multi_head_embedding.embedding.weight"))), lookup, eps);
     }
 
     private Tensor F32(IHy4FlashWeightSource source, string name)
