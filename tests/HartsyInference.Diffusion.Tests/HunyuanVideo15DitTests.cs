@@ -243,7 +243,8 @@ public sealed class HunyuanVideo15DitTests
             Loader = new SafeTensorsLoader();
             Loader.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors"));
             Weights = Loader.GetAllTensors()
-                .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal))
+                .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal)
+                    && !pair.Key.StartsWith("win.", StringComparison.Ordinal))
                 .ToDictionary(pair => pair.Key, pair => pair.Value);
             Backend = new CpuBackend();
             Dit = new HunyuanVideo15Dit(TinyConfig());
