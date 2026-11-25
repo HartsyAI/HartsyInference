@@ -80,7 +80,10 @@ public static class OvbPerception
     }
 
     /// <summary>The region of <paramref name="image"/> that matches <paramref name="description"/>, as a 0/255 mask the size of the
-    /// photo, run on <paramref name="spec"/>'s model.</summary>
+    /// photo, run on <paramref name="spec"/>'s model.
+    /// <para>Not reached from src: <c>VisionMode</c> has no referring mode, so the vision route does not call this. Planned
+    /// use: a referring mode on the vision route, which would take the description from <c>VisionRequest.Prompt</c>. The
+    /// decode it relies on (<c>ForegroundAgainst</c>) is pinned by the parity fixture's <c>refer_rgb</c> entry.</para></summary>
     public static async Task<(byte[] Mask, ImageData Painted)> ReferAsync(InferenceEngine engine, ModelSpec spec, ImageData image,
         string description, CancellationToken cancel)
     {
