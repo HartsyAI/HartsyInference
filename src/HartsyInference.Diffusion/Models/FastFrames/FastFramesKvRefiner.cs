@@ -251,44 +251,26 @@ public sealed class FastFramesKvRefiner : IDisposable
     private Tensor RenormPerHead(IBackend backend, Tensor x, Tensor reference)
     {
         int tokens = (int)x.Shape[0], heads = _config.Heads, headDim = _config.HeadDim;
-        Tensor xRows = ToHeadRows(backend, x, tokens, heads, headDim);
-        Tensor referenceRows = ToHeadRows(backend, reference, tokens, heads, headDim);
-        Tensor zeros = new(xRows.Shape, DType.F32);
-        try
-        {
-            // z is the output (zero-filled, and not sharing storage with either prediction).
-            backend.Fill(zeros, 0f);
-            backend.GuidedEulerStep(zeros, referenceRows, xRows, GuidedEulerSpec.RowNorm(guidance: 0f, delta: 1f, eps: RenormEps));
-        }
-        finally
-        {
-            xRows.Dispose();
-            referenceRows.Dispose();
-        }
+        using Tensor xRows = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        using Tensor referenceRows = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        // z is the output: zero-filled, and not sharing storage with either prediction.
+        using Tensor zeros = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        Retype(backend, xRows, x, tokens, heads, headDim);
+        Retype(backend, referenceRows, reference, tokens, heads, headDim);
+        backend.Fill(zeros, 0f);
+        backend.GuidedEulerStep(zeros, referenceRows, xRows, GuidedEulerSpec.RowNorm(guidance: 0f, delta: 1f, eps: RenormEps));
         Tensor output = new(x.Shape, DType.F32);
-        FromHeadRows(backend, output, zeros, tokens, heads, headDim);
-        zeros.Dispose();
+        Retype(backend, output, zeros, tokens, heads, headDim);
         return output;
     }
 
-    /// <summary>The <c>[tokens, heads·headDim]</c> columns as <c>[tokens·heads, headDim]</c> rows, same element order.</summary>
-    private static Tensor ToHeadRows(IBackend backend, Tensor columns, int tokens, int heads, int headDim)
-    {
-        Tensor rows = new(new TensorShape(tokens * heads, headDim), DType.F32);
-        ReadOnlySpan<long> dims = [tokens, heads, headDim];
-        ReadOnlySpan<long> packedStrides = [(long)heads * headDim, headDim, 1];
-        ReadOnlySpan<long> columnStrides = [(long)heads * headDim, headDim, 1];
-        backend.CopyStrided(rows, columns, new StridedCopySpec(new StridedView(dims, packedStrides), new StridedView(dims, columnStrides)));
-        return rows;
-    }
-
-    /// <summary>The inverse of <see cref="ToHeadRows"/>: <c>[tokens·heads, headDim]</c> rows back to the <c>[tokens, heads·headDim]</c> columns.</summary>
-    private static void FromHeadRows(IBackend backend, Tensor columns, Tensor rows, int tokens, int heads, int headDim)
+    /// <summary>Copies between <c>[tokens, heads·headDim]</c> and <c>[tokens·heads, headDim]</c>. Both shapes hold the elements in the
+    /// same order, so this is one strided copy with the same strides on both sides: a retype, not a permute.</summary>
+    private static void Retype(IBackend backend, Tensor destination, Tensor source, int tokens, int heads, int headDim)
     {
         ReadOnlySpan<long> dims = [tokens, heads, headDim];
-        ReadOnlySpan<long> packedStrides = [(long)heads * headDim, headDim, 1];
-        ReadOnlySpan<long> columnStrides = [(long)heads * headDim, headDim, 1];
-        backend.CopyStrided(columns, rows, new StridedCopySpec(new StridedView(dims, columnStrides), new StridedView(dims, packedStrides)));
+        ReadOnlySpan<long> strides = [(long)heads * headDim, headDim, 1];
+        backend.CopyStrided(destination, source, new StridedCopySpec(new StridedView(dims, strides), new StridedView(dims, strides)));
     }
 
     private Tensor RunStemBlock(IBackend backend, StemBlock block, Tensor x, Tensor embedding)
