@@ -82,8 +82,8 @@ public static class CrossFrameTokens
         try
         {
             backend.CopyStrided(frames, input, StridedCopySpec.Gather(Flat(0, input.ElementCount)));
-            backend.CopyStrided(frames, joint, new StridedCopySpec(
-                new StridedView([count, patchWidth], [frameWidth, 1], prefixWidth), new StridedView([count, patchWidth], [patchWidth, 1], prefixWidth)));
+            StridedView inFrames = new([count, patchWidth], [frameWidth, 1], prefixWidth);
+            backend.CopyStrided(frames, joint, new StridedCopySpec(inFrames, new StridedView([count, patchWidth], [patchWidth, 1], prefixWidth)));
             return frames;
         }
         catch
@@ -104,7 +104,8 @@ public static class CrossFrameTokens
         ArgumentNullException.ThrowIfNull(source);
         if (target.DType != DType.F32 || source.DType != DType.F32 || target.Shape.Rank != 3 || !target.Shape.Equals(source.Shape) || prefixRows < 0
             || prefixRows > target.Shape[1])
-            throw new ArgumentException($"Target and source must be F32 [B, S, C] of one shape with at most S prefix rows; got {target.Shape}, {source.Shape}, {prefixRows}.",
+            throw new ArgumentException(
+                $"Target and source must be F32 [B, S, C] of one shape with at most S prefix rows; got {target.Shape}, {source.Shape}, {prefixRows}.",
                 nameof(target));
         if (prefixRows == 0) return;
         long batch = target.Shape[0], frameWidth = target.Shape[1] * target.Shape[2], prefixWidth = prefixRows * target.Shape[2];

@@ -213,8 +213,8 @@ public sealed unsafe class Dinov3VisionEncoder
     }
 
     // One block over every frame as one sequence; each frame keeps the prefix it went in with.
-    // A lone frame is its own joint sequence (the mean of one prefix is that prefix, and the rope table of one frame is the ordinary one), so it skips
-    // Join and Split and only puts its prefix back.
+    // A lone frame is its own joint sequence (the mean of one prefix is that prefix, and the rope table of one frame is the ordinary one), so it
+    // skips Join and Split and only puts its prefix back.
     private static Tensor JointBlock(IBackend backend, Dinov3Layer layer, Tensor frames, int prefix, CrossFrameRope rope)
     {
         if (frames.Shape[0] == 1)
