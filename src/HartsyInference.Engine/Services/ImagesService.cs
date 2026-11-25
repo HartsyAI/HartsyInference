@@ -26,6 +26,7 @@ public sealed class ImagesService : IImagesService
     {
         ArgumentNullException.ThrowIfNull(request);
         RejectUnsupported(spec, request);
+        BackgroundRemovalStage.ModelIdFor(request);
         long diagnosticId = _engine.StartDiagnostics();
         return Task.Run(
             () =>
@@ -43,7 +44,7 @@ public sealed class ImagesService : IImagesService
                 string? keepRefiner = request.Refiner?.Model;
                 LeasedRecipe leased = _engine.GetOrConstructRecipeLeased(spec, request, alsoKeepPath: keepRefiner, cancel: cancel);
                 // Held to the end of this block, so the refiner and segment passes below run on a pipeline nothing evicts.
-                using IDisposable recipeLease = leased.Lease;
+                using ReleasableLease recipeLease = new(leased.Lease);
                 IRecipePipeline pipeline = leased.Pipeline;
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageDefaults defaults = _engine.DefaultsFor(spec);
@@ -115,7 +116,11 @@ public sealed class ImagesService : IImagesService
                     result = SegmentRefinement.Apply(result, resolved, pipeline, _engine.Backend, _clipSeg, progress, cancel);
                 }
                 // Last, over the final pixels, so the matte matches what the caller actually receives.
-                result = BackgroundRemovalStage.Apply(_engine, resolved, result);
+                if (BackgroundRemovalStage.NeedsGeneratorReleased(resolved))
+                {
+                    recipeLease.Release();
+                }
+                result = BackgroundRemovalStage.Apply(_engine, resolved, result, cancel);
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted);
                 RecipeIdentity recipe = RecipeIdentity.For(InferenceEngine.FamilyIdFor(spec), defaults.Revision,
                     RecipeResolution.ResolveVariant(spec));
@@ -209,5 +214,19 @@ public sealed class ImagesService : IImagesService
         {
             throw new NotSupportedException(violation);
         }
+    }
+
+    /// <summary>A pipeline lease that can be given back before the generation block ends, once and safely twice.</summary>
+    private sealed class ReleasableLease(IDisposable inner) : IDisposable
+    {
+        private int _released;
+
+        public void Release()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+                inner.Dispose();
+        }
+
+        public void Dispose() => Release();
     }
 }
