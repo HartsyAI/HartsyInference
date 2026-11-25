@@ -23,16 +23,16 @@ public sealed record MovieRollSamplerOptions
     /// <summary>Blocks below this index keep their whole history; the rest are sink-recent.</summary>
     public int FullHistoryBlocks { get; init; }
 
-    /// <summary>The sigma of the context noise on each clean chunk before it enters the cache (0 leaves the chunk clean).</summary>
+    /// <summary>The sigma of the context noise on each clean chunk before it enters the cache, in [0, 1] (0 leaves the chunk clean).</summary>
     public float ContextNoise { get; init; }
 
     /// <summary>Whether a KV recompute may fire when the cache reaches <see cref="KvRecomputeThreshold"/> chunks.</summary>
     public bool KvRecomputeEnabled { get; init; }
 
-    /// <summary>The cached chunk count that triggers a recompute.</summary>
+    /// <summary>The cached chunk count that triggers a recompute; positive when recompute is enabled.</summary>
     public int KvRecomputeThreshold { get; init; } = 18;
 
-    /// <summary>The most recent chunks a recompute keeps, besides the first and the middle chunk.</summary>
+    /// <summary>The most recent chunks a recompute keeps, besides the first and the middle chunk; not negative.</summary>
     public int KvRecomputeRecentK { get; init; } = 3;
 
     /// <summary>Classifier-free guidance; null runs the distilled chain (no guidance, one forward per step).</summary>
@@ -65,16 +65,20 @@ public sealed class MovieRollSampler
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(noise);
         if (!cache.IsInit) throw new InvalidOperationException("Init the cache with the DiT's stream layer names before sampling.");
-        if (options.Cfg is not null && (negativeQwen is null))
+        if (options.Cfg is not null && negativeQwen is null)
             throw new ArgumentException("Classifier-free guidance needs the negative prompt's text.", nameof(negativeQwen));
         if (options.ChunkFrames <= 0 || options.NumChunks <= 0 || options.TailChunkFrames < 0)
             throw new ArgumentException("Chunk and chunk count must be positive.", nameof(options));
+        if (options.ContextNoise < 0f || options.ContextNoise > 1f)
+            throw new ArgumentOutOfRangeException(nameof(options), options.ContextNoise, "The context-noise sigma lies in [0, 1].");
+        if (options.KvRecomputeRecentK < 0)
+            throw new ArgumentOutOfRangeException(nameof(options), options.KvRecomputeRecentK, "The recent-chunk count is not negative.");
+        if (options.KvRecomputeEnabled && options.KvRecomputeThreshold <= 0)
+            throw new ArgumentOutOfRangeException(nameof(options), options.KvRecomputeThreshold, "The recompute threshold is positive when recompute is enabled.");
 
         int window = _schedule.WindowSize;
         int tail = options.TailChunkFrames == 0 ? options.ChunkFrames : options.TailChunkFrames;
         int stepsPerWindow = _schedule.StepsPerWindow;
-        int channels = _dit.Config.LatentChannels;
-        int height = cache.Height, width = cache.Width;
         List<Tensor> queue = new();
         List<Tensor> outputs = new();
         int currentFrame = 0;
@@ -87,11 +91,17 @@ public sealed class MovieRollSampler
                 {
                     Tensor clean = queue[0];
                     queue.RemoveAt(0);
-                    outputs.Add(CopyOf(clean));
-                    bool globalLast = decoded == options.NumChunks - 1;
-                    if (!globalLast)
-                        currentFrame = Emit(cache, options, outputs, clean, currentFrame, channels, height, width, noise);
-                    clean.Dispose();
+                    try
+                    {
+                        outputs.Add(CopyOf(clean));
+                        bool globalLast = decoded == options.NumChunks - 1;
+                        if (!globalLast)
+                            currentFrame = Emit(cache, options, outputs, clean, currentFrame, noise);
+                    }
+                    finally
+                    {
+                        clean.Dispose();
+                    }
                     decoded++;
                     if (decoded >= options.NumChunks) break;
                 }
@@ -111,8 +121,8 @@ public sealed class MovieRollSampler
     }
 
     /// <summary>Encodes the clean head into the cache, or recomputes the cache from the selected outputs, and returns the new current frame.</summary>
-    private int Emit(MovieRollKvCache cache, MovieRollSamplerOptions options, List<Tensor> outputs, Tensor clean, int currentFrame, int channels,
-        int height, int width, Func<int, Tensor> noise)
+    private int Emit(MovieRollKvCache cache, MovieRollSamplerOptions options, List<Tensor> outputs, Tensor clean, int currentFrame,
+        Func<int, Tensor> noise)
     {
         bool recompute = options.KvRecomputeEnabled && cache.ShouldRecompute(options.KvRecomputeThreshold);
         List<int> selected = recompute ? SelectRecomputeChunks(outputs.Count, options.KvRecomputeRecentK) : new List<int>();
@@ -132,10 +142,10 @@ public sealed class MovieRollSampler
     }
 
     /// <summary>One global step over the queue: every chunk takes its own Euler step from its own ladder entry, with CFG when configured.</summary>
-    private void StepQueue(MovieRollKvCache cache, MovieRollSamplerOptions options, List<Tensor> queue, int localStep, Tensor qwen, Tensor? byt5,
+    private void StepQueue(MovieRollKvCache cache, MovieRollSamplerOptions options, List<Tensor> queue, int globalStep, Tensor qwen, Tensor? byt5,
         Tensor? negativeQwen, Tensor? negativeByt5)
     {
-        int[] indices = _schedule.StepIndices(localStep).Take(queue.Count).ToArray();
+        int[] indices = _schedule.StepIndices(globalStep).Take(queue.Count).ToArray();
         int chunks = queue.Count;
         int[] frames = queue.Select(chunk => (int)chunk.Shape[2]).ToArray();
         float[] frameTimesteps = new float[frames.Sum()];
@@ -143,69 +153,75 @@ public sealed class MovieRollSampler
         for (int c = 0; c < chunks; c++)
             for (int f = 0; f < frames[c]; f++) frameTimesteps[at++] = _schedule.Timesteps[indices[c]];
 
+        // The text stream takes the first frame's timestep, which is the queue's head (slot 0), as MovieRoll's rolling forward does.
         using Tensor window = Concat(queue);
         using Tensor velocity = _dit.StreamDenoise(_backend, window, frameTimesteps, frameTimesteps[0], qwen, byt5, cache, options.FullHistoryBlocks);
-        using Tensor unconditional = options.Cfg is null
-            ? null!
+        Tensor? unconditional = options.Cfg is null
+            ? null
             : _dit.StreamDenoise(_backend, window, frameTimesteps, frameTimesteps[0], negativeQwen!, negativeByt5, cache, options.FullHistoryBlocks);
-
-        for (int c = 0; c < chunks; c++)
+        try
         {
-            int start = FramesBefore(frames, c);
-            Tensor conditional = Slice(velocity, start, frames[c]);
-            Tensor guided = conditional;
-            if (options.Cfg is not null)
+            for (int c = 0; c < chunks; c++)
             {
-                Tensor uncond = Slice(unconditional, start, frames[c]);
-                guided = Guide(uncond, conditional, CfgScale(options.Cfg, _schedule.Timesteps[indices[c]]));
-                uncond.Dispose();
-                conditional.Dispose();
+                int start = FramesBefore(frames, c);
+                Tensor conditional = Slice(velocity, start, frames[c]);
+                Tensor? guided = null;
+                Tensor? updated = null;
+                try
+                {
+                    if (options.Cfg is null)
+                    {
+                        guided = conditional;
+                    }
+                    else
+                    {
+                        using Tensor uncond = Slice(unconditional!, start, frames[c]);
+                        guided = Guide(uncond, conditional, CfgScale(options.Cfg, _schedule.Timesteps[indices[c]]));
+                    }
+                    float sigma = _schedule.Sigmas[indices[c]];
+                    float next = _schedule.Sigmas[indices[c] + 1];
+                    updated = new Tensor(queue[c].Shape, DType.F32);
+                    _backend.AffineMix(updated, queue[c], guided, 1f, next - sigma);
+                }
+                catch
+                {
+                    updated?.Dispose();
+                    throw;
+                }
+                finally
+                {
+                    conditional.Dispose();
+                    guided?.Dispose();
+                }
+                queue[c].Dispose();
+                queue[c] = updated!;
             }
-            float sigma = _schedule.Sigmas[indices[c]];
-            float next = _schedule.Sigmas[indices[c] + 1];
-            Tensor step = new(queue[c].Shape, DType.F32);
-            _backend.Scale(step, guided, next - sigma);
-            guided.Dispose();
-            Tensor updated = new(queue[c].Shape, DType.F32);
-            _backend.Add(updated, queue[c], step);
-            step.Dispose();
-            queue[c].Dispose();
-            queue[c] = updated;
+        }
+        finally
+        {
+            unconditional?.Dispose();
         }
     }
 
     /// <summary>AnnealCFG: the scale at a timestep, <c>Min + (Max − Min) · t / N_train</c>, with N_train 1000.</summary>
     private static float CfgScale(MovieRollCfg cfg, float timestep) => cfg.Min + (cfg.Max - cfg.Min) * timestep / 1000f;
 
+    /// <summary>The guided velocity <c>uncond + s · (cond − uncond)</c>, as one affine mix.</summary>
     private Tensor Guide(Tensor uncond, Tensor cond, float scale)
     {
-        Tensor difference = new(cond.Shape, DType.F32);
-        Tensor negated = new(uncond.Shape, DType.F32);
-        _backend.Scale(negated, uncond, -1f);
-        _backend.Add(difference, cond, negated);
-        negated.Dispose();
-        Tensor scaled = new(cond.Shape, DType.F32);
-        _backend.Scale(scaled, difference, scale);
-        difference.Dispose();
         Tensor output = new(cond.Shape, DType.F32);
-        _backend.Add(output, uncond, scaled);
-        scaled.Dispose();
+        _backend.AffineMix(output, cond, uncond, scale, 1f - scale);
         return output;
     }
 
+    /// <summary>The context-noised chunk <c>(1 − σ) · clean + σ · eps</c>. A sigma of 0 is a copy of the clean chunk, and draws no noise.</summary>
     private Tensor ContextNoise(Tensor clean, float sigma, Func<int, Tensor> noise)
     {
         if (sigma <= 0f) return CopyOf(clean);
         int frames = (int)clean.Shape[2];
         using Tensor eps = noise(frames);
-        Tensor keep = new(clean.Shape, DType.F32);
-        _backend.Scale(keep, clean, 1f - sigma);
-        Tensor drawn = new(clean.Shape, DType.F32);
-        _backend.Scale(drawn, eps, sigma);
         Tensor output = new(clean.Shape, DType.F32);
-        _backend.Add(output, keep, drawn);
-        keep.Dispose();
-        drawn.Dispose();
+        _backend.AffineMix(output, clean, eps, 1f - sigma, sigma);
         return output;
     }
 

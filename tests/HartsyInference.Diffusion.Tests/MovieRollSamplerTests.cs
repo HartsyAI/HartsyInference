@@ -59,7 +59,9 @@ public sealed class MovieRollSamplerTests
         using Tensor output = fixture.Sample(cache, Options(numChunks: 5, recompute: true, threshold: 3), fixture.Schedule(), cfg: null, seed: 13);
 
         Assert.Equal(5, output.Shape[2]);
-        Assert.NotEmpty(cache.FrameRanges(HunyuanVideo15Dit.StreamLayerName(0)));
+        IReadOnlyList<(int Start, int End)> ranges = cache.FrameRanges(HunyuanVideo15Dit.StreamLayerName(0));
+        Assert.Equal(3, ranges.Count);
+        Assert.Equal(3, ranges[ranges.Count - 1].End);
     }
 
     [Fact]
@@ -68,12 +70,12 @@ public sealed class MovieRollSamplerTests
         using Fixture fixture = new();
         using MovieRollKvCache cache = fixture.NewCache();
         MovieRollSchedule distilled = MovieRollSchedule.Distilled(new[] { 1000, 800, 600, 400, 200 }, 5, 5.0);
-        using Tensor output = fixture.Sample(cache, Options(numChunks: 2, window: 5), distilled, cfg: null, seed: 17);
+        using Tensor output = fixture.Sample(cache, Options(numChunks: 2), distilled, cfg: null, seed: 17);
 
         Assert.Equal(2, output.Shape[2]);
     }
 
-    private static MovieRollSamplerOptions Options(int numChunks, bool recompute = false, int threshold = 18, int window = 2) => new()
+    private static MovieRollSamplerOptions Options(int numChunks, bool recompute = false, int threshold = 18) => new()
     {
         ChunkFrames = 1,
         NumChunks = numChunks,
