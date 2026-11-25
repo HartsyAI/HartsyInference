@@ -47,6 +47,7 @@ public sealed class DepthPro2Network
         if (pixels.DType != DType.F32 || pixels.Shape.Rank != 4 || pixels.Shape[0] != 1 || pixels.Shape[1] != 3 || pixels.Shape[2] < 1 || pixels.Shape[3] < 1)
             throw new ArgumentException($"pixels must be F32 [1, 3, H, W]; got {pixels.DType} {pixels.Shape}.", nameof(pixels));
         int height = (int)pixels.Shape[2], width = (int)pixels.Shape[3];
+        using ExactGemmScope exact = new(backend);
         using Tensor? padded = PadToMultiple(backend, pixels);
         Tensor full = InverseDepthOfPadded(backend, padded ?? pixels, observe);
         if (padded is null) return full;
@@ -67,6 +68,7 @@ public sealed class DepthPro2Network
             || frames.Shape[2] < 1 || frames.Shape[3] < 1)
             throw new ArgumentException($"frames must be F32 [T, 3, H, W]; got {frames.DType} {frames.Shape}.", nameof(frames));
         int height = (int)frames.Shape[2], width = (int)frames.Shape[3];
+        using ExactGemmScope exact = new(backend);
         using Tensor? padded = PadToMultiple(backend, frames);
         Tensor full = InverseDepthOfPadded(backend, padded ?? frames, null, ring);
         if (padded is null) return full;
