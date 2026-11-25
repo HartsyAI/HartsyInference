@@ -116,7 +116,17 @@ public sealed record LongCatConfig
             FrequencyEmbeddingSize = Int(root, "frequency_embedding_size", defaults.FrequencyEmbeddingSize),
             PatchSize = patch,
             TextTokensZeroPad = zeroPad,
+            AudioOutputDim = Int(root, "output_dim", defaults.AudioOutputDim),
+            AudioWindow = Int(root, "audio_window", defaults.AudioWindow),
+            AudioBlock = Int(root, "audio_block", defaults.AudioBlock),
+            AudioChannel = Int(root, "audio_channel", defaults.AudioChannel),
+            AudioIntermediateDim = Int(root, "intermediate_dim", defaults.AudioIntermediateDim),
+            AudioContextTokens = Int(root, "context_tokens", defaults.AudioContextTokens),
+            AudioVaeScale = Int(root, "vae_scale", defaults.AudioVaeScale),
         };
+        // The avatar configs ship audio_prenorm false; the pre-audio norm is not implemented, so true is refused rather than ignored.
+        if (root.TryGetProperty("audio_prenorm", out JsonElement prenorm) && prenorm.ValueKind == JsonValueKind.True)
+            throw new InvalidDataException("audio_prenorm true is not supported: the audio pre-norm is not implemented.");
         config.Validate();
         return config;
     }

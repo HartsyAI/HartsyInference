@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// the caption MLP, <see cref="LongCatConfig.Depth"/> <see cref="LongCatBlock"/>s and a per-frame adaLN final layer. B=1. The
 /// audio cross-attention of the avatar
 /// models belongs to <see cref="LongCatBlock"/> in the phase that adds it; the forward here is the shape it extends.</summary>
-public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
+public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamableDenoiser
 {
     private readonly LongCatConfig _config;
     private readonly LongCatBlock[] _blocks;
