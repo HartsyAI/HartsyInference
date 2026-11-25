@@ -4,10 +4,11 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Core.Memory.Vram.Streaming;
-using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Video;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -55,7 +56,7 @@ internal static class LongCatRecipeSupport
     {
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
-        // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The policy
+        // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
         // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
         loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
@@ -136,6 +137,32 @@ internal static class LongCatRecipeSupport
         using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
         using Tensor host = VideoRecipeUtils.HostCopy(latent);
         return host.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>Runs one denoise loop with the DiT placed by a streaming scope, and frees the DiT on every path. The scope is disposed inside
+    /// the try (evicting the streamed window), then the DiT's weights are freed in the finally, so a cancel or an exception mid-denoise does not
+    /// leave the resident prefix on the device. Each finished step calls the scope's EndStep before the caller's progress callback.</summary>
+    internal static float[] RunDenoiseStreamed(IBackend backend, LongCatTransformer dit, Func<BlockStreamingScope> openScope,
+        Func<Action<GenerationProgress>, float[]> denoise, Action<GenerationProgress>? progress)
+    {
+        float[] latents;
+        try
+        {
+            using (BlockStreamingScope stream = openScope())
+            {
+                latents = denoise(step =>
+                {
+                    stream.EndStep();
+                    progress?.Invoke(step);
+                });
+            }
+            backend.Sync();
+        }
+        finally
+        {
+            backend.FreeWeights(dit.EnumerateWeights());
+        }
+        return latents;
     }
 
     /// <summary>Decodes a denoised latent of <c>[channels, frames, height, width]</c> to RGB24 frames.</summary>

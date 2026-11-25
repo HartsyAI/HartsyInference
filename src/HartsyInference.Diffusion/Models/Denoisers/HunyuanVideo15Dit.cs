@@ -1,3 +1,4 @@
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -157,6 +158,330 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             txtTemb?.Dispose();
             frameTemb?.Dispose();
         }
+    }
+
+    /// <summary>MovieRoll's streaming config fixes the sink at one chunk (<c>sink_chunks == 1</c>, enforced by its <c>validate</c>).</summary>
+    private const int MovieRollSinkChunks = 1;
+
+    /// <summary>The cache layer name of block <paramref name="block"/> in a <see cref="MovieRollKvCache"/> of this DiT, the MovieRoll
+    /// <c>double_block_{i+1}</c> naming. Initialise the cache with <see cref="StreamLayerNames"/>.</summary>
+    public static string StreamLayerName(int block) => $"double_block_{block + 1}";
+
+    /// <summary>The cache layer names of every block, in block order.</summary>
+    public IReadOnlyList<string> StreamLayerNames() => Enumerable.Range(0, _blocks.Length).Select(StreamLayerName).ToArray();
+
+    /// <summary>MovieRoll's streaming denoise of one window (<c>forward_inference</c> with text): each block attends over its cached history
+    /// and the window's own tokens, text included, and the window's velocity is returned. Blocks below <paramref name="fullHistoryBlocks"/>
+    /// read their whole history; the rest (sink-recent) read what the last <see cref="StreamEncode"/> left them: the sink and the previous
+    /// window. The cache is not changed here, so the caller encodes the window once it is clean.</summary>
+    public Tensor StreamDenoise(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor qwen, Tensor? byt5,
+        MovieRollKvCache cache, int fullHistoryBlocks)
+    {
+        return StreamWindow(backend, latent, frameTimesteps, windowTimestep, qwen, byt5, cache, fullHistoryBlocks, encode: false, startFrame: 0)!;
+    }
+
+    /// <summary>MovieRoll's encode pass of one clean window: no text, and the window's own K and V are appended to each block's cache at frames
+    /// <c>[startFrame, startFrame + frames)</c>. The sink-recent blocks first drop their previous window, keeping only the sink, so the window
+    /// is encoded over the sink alone, as MovieRoll's <c>trim_to_sink</c> does before every encode. The last block stores its K and V without
+    /// running its attention, FFN or output, since nothing reads that output. Layers are written in block order: if a block throws, the blocks
+    /// before it already hold this window and the rest do not, so call <see cref="MovieRollKvCache.Clear"/> before reusing the cache.
+    /// <paramref name="startFrame"/> must not precede the end of the last cached chunk, which the cache enforces.</summary>
+    public void StreamEncode(IBackend backend, Tensor latent, float[] frameTimesteps, MovieRollKvCache cache, int fullHistoryBlocks, int startFrame)
+    {
+        if (startFrame < 0) throw new ArgumentOutOfRangeException(nameof(startFrame), startFrame, "The window must start at frame 0 or later.");
+        Tensor? discarded = StreamWindow(backend, latent, frameTimesteps, 0f, null, null, cache, fullHistoryBlocks, encode: true, startFrame);
+        discarded?.Dispose();
+    }
+
+    private Tensor? StreamWindow(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor? qwen, Tensor? byt5,
+        MovieRollKvCache cache, int fullHistoryBlocks, bool encode, int startFrame)
+    {
+        ArgumentNullException.ThrowIfNull(frameTimesteps);
+        ArgumentNullException.ThrowIfNull(cache);
+        if (!cache.IsInit) throw new InvalidOperationException("Init the cache with StreamLayerNames before streaming.");
+        if (fullHistoryBlocks < 0 || fullHistoryBlocks > _blocks.Length)
+            throw new ArgumentOutOfRangeException(nameof(fullHistoryBlocks), fullHistoryBlocks, $"Full-history blocks must be in [0, {_blocks.Length}].");
+        (int frames, int height, int width) = encode ? ValidateLatent(latent) : ValidateInputs(latent, qwen!, byt5, null);
+        if (cache.Height != height || cache.Width != width)
+            throw new ArgumentException($"The cache holds {cache.Height}×{cache.Width} latent tokens per frame; this latent is {height}×{width}.", nameof(latent));
+        if (frameTimesteps.Length != frames)
+            throw new ArgumentException($"{frameTimesteps.Length} frame timesteps for {frames} latent frames.", nameof(frameTimesteps));
+        int tokens = frames * height * width;
+        int hidden = _config.HiddenSize;
+
+        using TokenSegmentLayout layout = new(Enumerable.Repeat(height * width, frames).ToArray(), Enumerable.Range(0, frames).ToArray());
+        Tensor? img = null, txt = null, txtTemb = null, frameTemb = null;
+        try
+        {
+            img = EmbedImage(backend, latent, null, tokens);
+            frameTemb = TimestepMlpRows(backend, frameTimesteps);
+            if (!encode)
+            {
+                txtTemb = TimestepMlp(backend, windowTimestep);
+                txt = BuildText(backend, qwen!, byt5, windowTimestep);
+            }
+
+            for (int i = 0; i < _blocks.Length; i++)
+            {
+                string layer = StreamLayerName(i);
+                if (encode && i >= fullHistoryBlocks) cache.TrimToSink(layer, MovieRollSinkChunks);
+                if (encode && i == _blocks.Length - 1)
+                {
+                    (Tensor keys, Tensor values) = _blocks[i].EncodeWindowKeysAndValues(backend, img!, frameTemb!, layout);
+                    try
+                    {
+                        cache.Update(layer, keys, values, startFrame, startFrame + frames);
+                    }
+                    finally
+                    {
+                        keys.Dispose();
+                        values.Dispose();
+                    }
+                    break;
+                }
+
+                (Tensor Keys, Tensor Values)? history = cache.Get(layer);
+                int cachedFrames = cache.FrameRanges(layer).Sum(range => range.End - range.Start);
+                float[] positions = HunyuanImagePosEmbed.GridRows([cachedFrames + frames, height, width]);
+
+                MovieRollWindowOutput output = _blocks[i].ForwardWindow(backend, img!, txt, txtTemb, frameTemb!, layout, _rope, positions,
+                    history?.Keys, history?.Values, returnKv: encode);
+                // The output takes over the image and text streams before any cache write can throw, so nothing leaks on that path.
+                Tensor nextImg = output.Image;
+                Tensor? nextTxt = output.Text;
+                img!.Dispose();
+                img = nextImg;
+                if (!encode)
+                {
+                    txt!.Dispose();
+                    txt = nextTxt;
+                }
+                try
+                {
+                    if (encode) cache.Update(layer, output.Keys!, output.Values!, startFrame, startFrame + frames);
+                }
+                finally
+                {
+                    output.Keys?.Dispose();
+                    output.Values?.Dispose();
+                }
+            }
+
+            if (encode)
+                return null;
+            txt!.Dispose();
+            txt = null;
+            Tensor finalInput = img!;
+            img = null;
+            return ApplyFinalPerFrame(backend, finalInput, frameTemb!, layout, tokens, hidden, frames, height, width);
+        }
+        finally
+        {
+            img?.Dispose();
+            txt?.Dispose();
+            txtTemb?.Dispose();
+            frameTemb?.Dispose();
+        }
+    }
+
+    /// <summary>MovieRoll's KV recompute (<c>_forward_kv_recompute</c>). The clean chunks are re-encoded at timestep 0 without text, and each chunk
+    /// attends to itself and the chunks before it. That block-causal attention runs per chunk, not through a mask: each chunk is a window whose
+    /// cache is the pre-RoPE K and V of the earlier chunks, so no attention matrix bigger than one chunk is ever built. The full-history blocks
+    /// replace their cache layers with the whole clip. Each sink-recent block then replaces its layer with the sink (the first chunk) and the
+    /// recent one (the last), computed from the same pass after the full-history blocks, so every block describes the same input. The cache is
+    /// soft-cleared first, as in MovieRoll. If a block throws, the layers already replaced hold the new clip and the rest hold the old state, so
+    /// call <see cref="MovieRollKvCache.Clear"/> before reusing the cache. Frame coordinates: after a recompute the cached ranges are packed from
+    /// frame 0 over the returned <c>T</c> frames, not the absolute frames the chunks came from, so the next window starts at frame <c>T</c>.
+    /// The reference for this path is a transcription of MovieRoll's function, not the upstream code. Returns <c>T</c>.</summary>
+    public int StreamRecompute(IBackend backend, Tensor latent, int[] chunkFrames, MovieRollKvCache cache, int fullHistoryBlocks)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(latent);
+        ArgumentNullException.ThrowIfNull(chunkFrames);
+        ArgumentNullException.ThrowIfNull(cache);
+        if (!cache.IsInit) throw new InvalidOperationException("Init the cache with StreamLayerNames before recomputing.");
+        if (fullHistoryBlocks < 0 || fullHistoryBlocks > _blocks.Length)
+            throw new ArgumentOutOfRangeException(nameof(fullHistoryBlocks), fullHistoryBlocks, $"Full-history blocks must be in [0, {_blocks.Length}].");
+        if (chunkFrames.Length == 0 || chunkFrames.Any(frames => frames <= 0))
+            throw new ArgumentException("Every recompute chunk needs at least one frame.", nameof(chunkFrames));
+        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.LatentChannels || latent.DType != DType.F32)
+            throw new ArgumentException($"latent must be F32 [1, {_config.LatentChannels}, T, H, W], got {latent.Shape} {latent.DType}.", nameof(latent));
+        int frames = (int)latent.Shape[2];
+        int height = (int)latent.Shape[3];
+        int width = (int)latent.Shape[4];
+        if (chunkFrames.Sum() != frames)
+            throw new ArgumentException($"The chunks cover {chunkFrames.Sum()} frames; the latent has {frames}.", nameof(chunkFrames));
+        if (cache.Height != height || cache.Width != width)
+            throw new ArgumentException($"The cache holds {cache.Height}×{cache.Width} latent tokens per frame; this latent is {height}×{width}.", nameof(latent));
+        int perFrame = height * width;
+
+        cache.SoftClear();
+        using Tensor image = EmbedImage(backend, latent, null, frames * perFrame);
+        Tensor[] chunks = SplitChunks(backend, image, chunkFrames, perFrame);
+        try
+        {
+            for (int i = 0; i < fullHistoryBlocks; i++)
+            {
+                (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, chunks, chunkFrames, height, width);
+                try
+                {
+                    cache.ReplaceLayer(StreamLayerName(i), keys, values, PackedRanges(chunkFrames));
+                }
+                finally
+                {
+                    keys.Dispose();
+                    values.Dispose();
+                }
+            }
+            if (fullHistoryBlocks == _blocks.Length)
+                return frames;
+
+            // The sink-recent blocks see the sink and the recent chunk of the full-history output, as two chunks of their own.
+            int sinkFrames = chunkFrames[0];
+            int recentFrames = chunkFrames.Length > 1 ? chunkFrames[chunkFrames.Length - 1] : 0;
+            Tensor[] sinkRecent = recentFrames > 0 ? new[] { CopyOf(backend, chunks[0]), CopyOf(backend, chunks[chunks.Length - 1]) } : new[] { CopyOf(backend, chunks[0]) };
+            int[] srChunkFrames = recentFrames > 0 ? new[] { sinkFrames, recentFrames } : new[] { sinkFrames };
+            List<(int Start, int End)> srRanges = recentFrames > 0
+                ? new List<(int Start, int End)> { (0, sinkFrames), (frames - recentFrames, frames) }
+                : new List<(int Start, int End)> { (0, sinkFrames) };
+            try
+            {
+                for (int i = fullHistoryBlocks; i < _blocks.Length; i++)
+                {
+                    (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, sinkRecent, srChunkFrames, height, width);
+                    try
+                    {
+                        cache.ReplaceLayer(StreamLayerName(i), keys, values, srRanges);
+                    }
+                    finally
+                    {
+                        keys.Dispose();
+                        values.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                foreach (Tensor t in sinkRecent) t.Dispose();
+            }
+            return frames;
+        }
+        finally
+        {
+            foreach (Tensor chunk in chunks) chunk.Dispose();
+        }
+    }
+
+    /// <summary>One block over the chunks of a clip, with block-causal attention done chunk by chunk. Chunk <c>c</c> runs as a window whose cache is
+    /// the pre-RoPE K and V of chunks <c>0..c-1</c>, and its RoPE positions are the packed frames before it plus its own. Each chunk's output
+    /// replaces <paramref name="chunks"/>[c] in place, so the next block reads it. The last block stores only its K and V, which depend on the
+    /// chunk's input alone. Returns the clip's K and V, token-major <c>[1, S, heads, D]</c>, owned by the caller.</summary>
+    private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width)
+    {
+        int perFrame = height * width;
+        bool lastBlock = block == _blocks.Length - 1;
+        Tensor[] keyParts = new Tensor[chunks.Length];
+        Tensor[] valueParts = new Tensor[chunks.Length];
+        Tensor? prefixKeys = null, prefixValues = null;
+        try
+        {
+            int before = 0;
+            for (int c = 0; c < chunks.Length; c++)
+            {
+                int len = frames[c];
+                using Tensor temb = TimestepMlpRows(backend, new float[len]);
+                using TokenSegmentLayout layout = FrameLayout(len, perFrame);
+                if (lastBlock)
+                {
+                    (keyParts[c], valueParts[c]) = _blocks[block].EncodeWindowKeysAndValues(backend, chunks[c], temb, layout);
+                }
+                else
+                {
+                    float[] positions = HunyuanImagePosEmbed.GridRows([before + len, height, width]);
+                    MovieRollWindowOutput output = _blocks[block].ForwardWindow(backend, chunks[c], null, null, temb, layout, _rope, positions,
+                        prefixKeys, prefixValues, returnKv: true);
+                    chunks[c].Dispose();
+                    chunks[c] = output.Image;
+                    keyParts[c] = output.Keys!;
+                    valueParts[c] = output.Values!;
+                    Tensor nextKeys = prefixKeys is null ? ConcatTokenMajor(backend, keyParts[c]) : ConcatTokenMajor(backend, prefixKeys, keyParts[c]);
+                    Tensor nextValues = prefixValues is null ? ConcatTokenMajor(backend, valueParts[c]) : ConcatTokenMajor(backend, prefixValues, valueParts[c]);
+                    prefixKeys?.Dispose();
+                    prefixValues?.Dispose();
+                    prefixKeys = nextKeys;
+                    prefixValues = nextValues;
+                }
+                before += len;
+            }
+            return (ConcatTokenMajor(backend, keyParts), ConcatTokenMajor(backend, valueParts));
+        }
+        finally
+        {
+            prefixKeys?.Dispose();
+            prefixValues?.Dispose();
+            foreach (Tensor t in keyParts) t?.Dispose();
+            foreach (Tensor t in valueParts) t?.Dispose();
+        }
+    }
+
+    /// <summary>Splits a flat <c>[1, T·H·W, hidden]</c> clip into one <c>[1, len·H·W, hidden]</c> tensor per chunk. The clip is left alone.</summary>
+    private Tensor[] SplitChunks(IBackend backend, Tensor image, int[] chunkFrames, int perFrame)
+    {
+        int total = chunkFrames.Sum() * perFrame;
+        Tensor[] chunks = new Tensor[chunkFrames.Length];
+        int offset = 0;
+        for (int c = 0; c < chunkFrames.Length; c++)
+        {
+            int rows = chunkFrames[c] * perFrame;
+            chunks[c] = new Tensor(new TensorShape(1, rows, _config.HiddenSize), DType.F32);
+            JointAttention.SplitRows(backend, chunks[c], image, 1, total, offset);
+            offset += rows;
+        }
+        return chunks;
+    }
+
+    /// <summary>A copy of a flat <c>[1, S, hidden]</c> tensor.</summary>
+    private static Tensor CopyOf(IBackend backend, Tensor source)
+    {
+        Tensor copy = new(source.Shape, DType.F32);
+        backend.CopyTo(copy, source);
+        return copy;
+    }
+
+    /// <summary>Concatenates token-major <c>[1, S, heads, D]</c> tensors along the token axis into a new tensor. The parts are not disposed.</summary>
+    private Tensor ConcatTokenMajor(IBackend backend, params Tensor[] parts)
+    {
+        int total = 0;
+        foreach (Tensor part in parts) total += (int)part.Shape[1];
+        Tensor joined = new(new TensorShape(1, total, _config.NumHeads, _config.HeadDim), DType.F32);
+        if (parts.Length == 1) backend.CopyTo(joined, parts[0]);
+        else backend.Concat(joined, parts, 1);
+        return joined;
+    }
+
+    private static IReadOnlyList<(int Start, int End)> PackedRanges(int[] chunkFrames)
+    {
+        List<(int Start, int End)> ranges = new(chunkFrames.Length);
+        int offset = 0;
+        foreach (int frames in chunkFrames)
+        {
+            ranges.Add((offset, offset + frames));
+            offset += frames;
+        }
+        return ranges;
+    }
+
+    private static TokenSegmentLayout FrameLayout(int frames, int perFrame) =>
+        new(Enumerable.Repeat(perFrame, frames).ToArray(), Enumerable.Range(0, frames).ToArray());
+
+    /// <summary>Checks a clean latent for the encode pass: F32 <c>[1, LatentChannels, T, H, W]</c>.</summary>
+    private (int Frames, int Height, int Width) ValidateLatent(Tensor latent)
+    {
+        ArgumentNullException.ThrowIfNull(latent);
+        RequireF32(latent, nameof(latent));
+        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.LatentChannels)
+            throw new ArgumentException($"latent must be [1, {_config.LatentChannels}, T, H, W], got {latent.Shape}.", nameof(latent));
+        return ((int)latent.Shape[2], (int)latent.Shape[3], (int)latent.Shape[4]);
     }
 
     /// <summary>The final layer with each latent frame's adaLN shift and scale (1 + scale, applied by the segment op). The projection is one batched
