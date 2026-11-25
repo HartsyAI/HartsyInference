@@ -50,10 +50,14 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
         if (frames > LongCatAvatarRecipe.SegmentFrames)
             throw new ArgumentOutOfRangeException(nameof(settings), frames, $"One LongCat-Video-Avatar segment is at most {LongCatAvatarRecipe.SegmentFrames} frames.");
+        if (settings.Fps != LongCatAvatarRecipe.OutputFps)
+            throw new ArgumentOutOfRangeException(nameof(settings), settings.Fps, $"LongCat-Video-Avatar's audio windows are built for {LongCatAvatarRecipe.OutputFps} fps.");
+        if (width % LongCatRecipeSupport.PatchGrid != 0 || height % LongCatRecipeSupport.PatchGrid != 0)
+            throw new ArgumentException($"LongCat-Video-Avatar needs width and height in multiples of {LongCatRecipeSupport.PatchGrid}, got {width}×{height}.");
         int latentFrames = (frames - 1) / LongCatRecipeSupport.TemporalCompressionFactor + 1;
         int latentHeight = height / LongCatRecipeSupport.SpatialCompressionFactor;
         int latentWidth = width / LongCatRecipeSupport.SpatialCompressionFactor;
-        int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
+        int seed = RecipeRequestMapper.MapSeed(settings.Seed) ?? SeedGenerator.RandomSeed();
 
         float[] rawAudio = DrivingWindows(waveform, settings.Fps, frames);
         (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(rawAudio, frames, latentFrames);
@@ -74,7 +78,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         }
 
         LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-            audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear, LongCatAvatarPipelineSettings.Shift,
+            audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear, settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift,
             settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame);
 
         float[] latents;
@@ -92,7 +96,9 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
         Logs.Info($"[LongCatAvatarRecipePipeline] Decoded {decoded.Length} frames {width}x{height}.");
-        return VideoRecipeUtils.ToResult(decoded, width, height, request, drivingSpeech.IsEmpty ? null : drivingSpeech, settings.Fps);
+        // One segment is the output, so the soundtrack is cut to the same length: the clip is frames / fps seconds long.
+        AudioBuffer? soundtrack = drivingSpeech.IsEmpty ? null : drivingSpeech.TrimTo((double)frames / settings.Fps);
+        return VideoRecipeUtils.ToResult(decoded, width, height, request, soundtrack, settings.Fps);
     }
 
     /// <summary>Whisper features of the driving speech, cut into one 5-frame window per video frame: <c>[frames, 5 · 5 · 1280]</c>.</summary>
