@@ -17,7 +17,7 @@ namespace HartsyInference.Diffusion.Tests;
 [Trait("Category", "GpuIntegration")]
 public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
 {
-    private const double RelativeTolerance = 1e-3;
+    private const double RelativeTolerance = 1e-4;
 
     [CudaDeviceFact]
     public void Cuda_LongCat_MatchesCpu() => Compare("longcat", GpuDevices.OpenCuda, LongCat);
@@ -43,6 +43,8 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
         using (CpuBackend cpu = new())
             expected = run(cpu);
         using IBackend device = open();
+        // CUDA runs F32 GEMMs in TF32 by default, up to about 1e-3 off; these compare the models, not that choice.
+        using ExactGemmScope exact = new(device);
         device.ResetD2hSyncCount();
         float[] actual = run(device);
         output.WriteLine($"D2H_SYNCS {name}: {device.GetD2hSyncCount()} (the read of the result included)");
