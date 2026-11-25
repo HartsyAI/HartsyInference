@@ -6,9 +6,6 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Audio.Models.VoiceIsolator;
 
-/// <summary>The Inworld Voice Isolator network over one clip: STFT, band tokens, dual-path attention and Mamba blocks, per-band
-/// decoder heads, a bounded complex mask plus residual, and the inverse STFT added to the input. Weights stay F32 and borrow the
-/// memory map of their file.</summary>
 /// <summary>The tensors one band reads on every call: its encoder projection and its decoder head, resolved by name once at load.</summary>
 internal sealed record BandWeights(Tensor EncoderNormWeight, Tensor EncoderNormBias, Tensor EncoderWeight, Tensor EncoderBias,
     Tensor HeadNormWeight, Tensor HeadNormBias, Tensor HeadWeight, Tensor HeadBias, Tensor OutWeight, Tensor OutBias)
@@ -20,6 +17,9 @@ internal sealed record BandWeights(Tensor EncoderNormWeight, Tensor EncoderNormB
         w[$"denoise_decoder.heads.{band}.3.weight"], w[$"denoise_decoder.heads.{band}.3.bias"]);
 }
 
+/// <summary>The Inworld Voice Isolator network over one clip: STFT, band tokens, dual-path attention and Mamba blocks, per-band
+/// decoder heads, a bounded complex mask plus residual, and the inverse STFT added to the input. Weights stay F32 and borrow the
+/// memory map of their file.</summary>
 public sealed class VoiceIsolatorNetwork : IDisposable
 {
     private readonly SafeTensorsLoader _loader;
