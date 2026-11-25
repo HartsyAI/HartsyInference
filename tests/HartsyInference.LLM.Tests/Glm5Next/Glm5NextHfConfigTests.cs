@@ -46,12 +46,33 @@ public sealed class Glm5NextHfConfigTests
     [InlineData("\"index_kpool_compress\": true", "\"index_kpool_compress\": false", "index_kpool_compress")]
     [InlineData("\"model_type\": \"glm5_next_text\"", "\"model_type\": \"glm4\"", "glm5_next_text")]
     [InlineData("\"hidden_act\": \"silu\",\n    \"hidden_size\": 4096", "\"hidden_act\": \"gelu\",\n    \"hidden_size\": 4096", "silu")]
+    [InlineData("\"num_hidden_layers\": 45,", "\"num_hidden_layers\": 44,", "layer_types must name every decoder layer")]
+    [InlineData("\"linear_attention\"", "\"sliding_attention\"", "unknown layer type 'sliding_attention'")]
+    [InlineData("\"sparse\"", "\"moe\"", "unknown kind 'moe'")]
+    [InlineData("\"vocab_size\": 154880", "\"vocab_size_renamed\": 154880", "vocab_size")]
+    [InlineData("\"num_nextn_predict_layers\": 1", "\"num_nextn_predict_layers\": -1", "must not be negative")]
+    [InlineData("\"image_token_id\": 154854,", "", "image_token_id")]
     public void ConfigThatTheEngineDoesNotRun_IsRefusedByName(string find, string replace, string expected)
     {
         string json = Glm5NextIndexFixture.ConfigJson();
         Assert.Contains(find, json);
         InvalidDataException e = Assert.Throws<InvalidDataException>(() => Glm5NextHfConfig.Parse(json.Replace(find, replace)));
         Assert.Contains(expected, e.Message);
+    }
+
+    [Fact]
+    public void FullAttentionLayerType_IsTheDsaSpelling_AsTransformersMapsIt()
+    {
+        // configuration_glm5_next.py (52bac5d0, L166-168): a 'full_attention' layer becomes 'indexed_attention', so it reads as DSA here too.
+        string json = Glm5NextIndexFixture.ConfigJson().Replace("deepseek_sparse_attention", "full_attention");
+        Assert.Equal(Glm5NextHfConfig.Parse(Glm5NextIndexFixture.ConfigJson()).LayerKinds, Glm5NextHfConfig.Parse(json).LayerKinds);
+    }
+
+    [Fact]
+    public void VisionHeadWidthThatDoesNotDivide_IsRefused()
+    {
+        string json = Glm5NextIndexFixture.ConfigJson().Replace("\"num_heads\": 16", "\"num_heads\": 15");
+        Assert.Contains("multiple of num_heads 15", Assert.Throws<InvalidDataException>(() => Glm5NextHfConfig.Parse(json)).Message);
     }
 
     [Fact]

@@ -99,6 +99,40 @@ internal sealed unsafe class Dinov3Layer
         return r2;
     }
 
+    /// <summary>The first half of <see cref="Forward"/> for attention the caller runs itself: Q, K and V of <c>norm1(x)</c>, token-major
+    /// <c>[B, S, heads, headDim]</c>, Q and K rotated by the <c>[B, S, headDim]</c> tables when they are given. The caller owns all three.</summary>
+    public (Tensor Q, Tensor K, Tensor V) ProjectAttention(IBackend backend, Tensor x, Tensor? cos, Tensor? sin)
+    {
+        if ((cos is null) != (sin is null)) throw new ArgumentException("Give both RoPE tables or neither.", nameof(cos));
+        Tensor n1 = new(x.Shape, DType.F32);
+        backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
+        (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, n1, releaseInput: true);
+        if (cos is not null)
+        {
+            QkRotation rotation = new(QkRotationKind.RotateHalf, cos, sin, (int)x.Shape[1]);
+            _attn.RotateQk(backend, q, k, new AttentionCallContext { QueryRotation = rotation, KeyRotation = rotation });
+        }
+        return (q, k, v);
+    }
+
+    /// <summary>The second half of <see cref="Forward"/>: <paramref name="x"/> plus the scaled output projection of <paramref name="attended"/>
+    /// (<c>[B, S, hidden]</c>, the attention of <see cref="ProjectAttention"/>'s queries, disposed here), then the MLP residual.</summary>
+    public Tensor FinishAttention(IBackend backend, Tensor x, Tensor attended)
+    {
+        int batch = (int)x.Shape[0], seq = (int)x.Shape[1];
+        TensorShape shape = new(batch, seq, _hidden);
+        Tensor attn = _attn!.ProjectOutput(backend, attended);
+        Tensor attnScaled = LayerScale(backend, attn, _ls1!, batch, seq);
+        Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attnScaled); attnScaled.Dispose();
+        Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
+        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2!, batch, seq); n2.Dispose();
+        Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
+        return r2;
+    }
+
+    /// <summary>The attention layer of this block, for callers that attend over their own key/value rows.</summary>
+    public AttentionLayer Attention => _attn ?? throw new InvalidOperationException("Load the block's weights first.");
+
     // t[b,s,c] *= gamma[c]. The affine kernel broadcasts gamma over rows only for one batch item.
     private Tensor LayerScale(IBackend backend, Tensor t, Tensor gamma, int batch, int seq)
     {
