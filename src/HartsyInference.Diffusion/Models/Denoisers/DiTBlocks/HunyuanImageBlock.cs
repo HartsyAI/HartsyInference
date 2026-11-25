@@ -37,6 +37,11 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
     private readonly SwiGluFfn _txtFfn;
 
     private JointAttention? _attention;
+    private AttentionLayer? _imgAttn, _txtAttn;
+
+    // The token-major, QK-norm-free attention the window path runs over the cache-extended keys (the joint layer's config, without the
+    // stream norms, which the window path applies to its own rows before the RoPE).
+    private AttentionLayer? _windowAttend;
 
     /// <summary>Creates a Hunyuan Image dual-stream block.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for V2.1).</param>
@@ -112,15 +117,22 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             weights[$"{prefix}.ff_context.net.2.bias"]);
 
         // QK RMS-norm bounds the scores, so the joint call may narrow to F16.
+        _imgAttn = Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias, _normQ, _normK);
+        _txtAttn = Stream(_addQWeight!, _addQBias, _addKWeight!, _addKBias, _addVWeight!, _addVBias, _toAddOutWeight!, _toAddOutBias,
+            _normAddedQ, _normAddedK);
         _attention = new JointAttention(
             new JointAttentionConfig
             {
                 Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true,
                 TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
             },
-            [Stream(_toQWeight!, _toQBias, _toKWeight!, _toKBias, _toVWeight!, _toVBias, _toOutWeight!, _toOutBias, _normQ, _normK),
-             Stream(_addQWeight!, _addQBias, _addKWeight!, _addKBias, _addVWeight!, _addVBias, _toAddOutWeight!, _toAddOutBias,
-                 _normAddedQ, _normAddedK)]);
+            [_imgAttn, _txtAttn]);
+        // AllowF16 as the joint layer: the QK RMS norm bounds the scores, so the window attention may narrow to F16 too.
+        _windowAttend = new AttentionLayer(new AttentionLayerConfig
+        {
+            Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, AllowF16 = true,
+            TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
+        });
     }
 
     private AttentionLayer Stream(Tensor q, Tensor? qBias, Tensor k, Tensor? kBias, Tensor v, Tensor? vBias, Tensor output,
@@ -306,6 +318,221 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             if (imgMod is not null)
                 foreach (Tensor m in imgMod) m.Dispose();
             foreach (Tensor m in txtMod) m.Dispose();
+        }
+    }
+
+    /// <summary>The MovieRoll inference-regime window of this block (<c>forward_inference</c>): per-frame image modulation as in
+    /// <see cref="ForwardPerFrame"/>, batch 1, F32. The window's Q and K are projected and QK-normed, then the cached history is
+    /// concatenated in front of the window's K and V, and RoPE runs over the concatenation: <paramref name="positions"/> holds one row
+    /// of rope-axis coordinates per token of the cache then the window, <c>(Sc + Sw) × axes</c>, and the window takes the trailing rows.
+    /// The cache is post-norm and pre-RoPE, so each cached row rotates at the position it occupies in this window, which a history
+    /// re-packed after a trim need not share with the position it was captured at. <paramref name="returnKv"/> encodes the window
+    /// for the cache: the text stream is skipped and the window's own pre-RoPE K and V are returned. Otherwise the window attends
+    /// over its text rows too. Inputs are not disposed; the result is owned by the caller.</summary>
+    public MovieRollWindowOutput ForwardWindow(IBackend backend, Tensor image, Tensor? text, Tensor txtTemb, Tensor frameTemb,
+        TokenSegmentLayout layout, HunyuanImageRope rope, float[] positions, Tensor? cacheKeys, Tensor? cacheValues, bool returnKv)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(txtTemb);
+        ArgumentNullException.ThrowIfNull(frameTemb);
+        ArgumentNullException.ThrowIfNull(layout);
+        ArgumentNullException.ThrowIfNull(rope);
+        ArgumentNullException.ThrowIfNull(positions);
+        if (_imgAttn is null || _txtAttn is null || _windowAttend is null)
+            throw new InvalidOperationException("LoadWeights before ForwardWindow.");
+        if (image.Shape.Rank != 3 || image.Shape[0] != 1 || image.DType != DType.F32)
+            throw new ArgumentException($"ForwardWindow takes a batch-1 F32 image; got {image.Shape} {image.DType}.", nameof(image));
+        int sw = (int)image.Shape[1];
+        if (layout.TotalLength != sw)
+            throw new ArgumentException($"The layout covers {layout.TotalLength} image tokens; the image has {sw}.", nameof(layout));
+        if (frameTemb.Shape.Rank != 2 || frameTemb.Shape[1] != _hiddenSize || frameTemb.Shape[0] != layout.GroupCount)
+            throw new ArgumentException($"frameTemb must be [{layout.GroupCount}, {_hiddenSize}], got {frameTemb.Shape}.", nameof(frameTemb));
+        if (!returnKv && text is null)
+            throw new ArgumentException("A denoising window takes its text stream; pass returnKv to encode a window without text.", nameof(text));
+        if (text is not null && (text.Shape.Rank != 3 || text.Shape[0] != 1 || text.Shape[2] != _hiddenSize || text.DType != DType.F32))
+            throw new ArgumentException($"The text stream is [1, St, {_hiddenSize}] F32; got {text.Shape} {text.DType}.", nameof(text));
+        if ((cacheKeys is null) != (cacheValues is null))
+            throw new ArgumentException("The cache's keys and values come together.", nameof(cacheKeys));
+        int sc = 0;
+        if (cacheKeys is not null && cacheValues is not null)
+        {
+            if (cacheKeys.Shape.Rank != 4 || cacheKeys.Shape[0] != 1 || cacheKeys.Shape[2] != _numHeads || cacheKeys.Shape[3] != _headDim
+                || cacheKeys.DType != DType.F32 || !cacheValues.Shape.Equals(cacheKeys.Shape) || cacheValues.DType != DType.F32)
+                throw new ArgumentException($"The cache is [1, Sc, {_numHeads}, {_headDim}] F32 keys and values; got {cacheKeys.Shape} and {cacheValues.Shape}.",
+                    nameof(cacheKeys));
+            sc = (int)cacheKeys.Shape[1];
+        }
+        int axes = rope.AxesDim.Length;
+        if (positions.Length != checked((sc + sw) * axes))
+            throw new ArgumentException($"{sc + sw} cached and window tokens over {axes} axes take {(sc + sw) * axes} positions; got {positions.Length}.",
+                nameof(positions));
+
+        if (rope.HeadDim != _headDim)
+            throw new ArgumentException($"The rope is {rope.HeadDim} wide per head; the block has {_headDim}.", nameof(rope));
+        int st = returnKv ? 0 : (int)text!.Shape[1];
+        int total = sw + st;
+        TensorShape imgShape = new(1, sw, _hiddenSize);
+        TensorShape txtShape = new(1, st, _hiddenSize);
+        Tensor[]? imgMod = null, txtMod = null;
+        SegmentModulation? attnMod = null, ffnMod = null;
+        Tensor? imgQ = null, imgK = null, imgV = null, txtQ = null, txtK = null, txtV = null;
+        Tensor? keysOut = null, valuesOut = null;
+        Tensor? attendQ = null, attendK = null, attendV = null, attended = null, imgAttended = null, txtAttended = null;
+        try
+        {
+            imgMod = _imgModulation.Forward(backend, frameTemb);
+            attnMod = SegmentModulation.FromTables(imgMod[0], imgMod[1], imgMod[2], layout);
+            ffnMod = SegmentModulation.FromTables(imgMod[3], imgMod[4], imgMod[5], layout);
+            imgMod = null;   // the segment tables now own the six projections
+            if (!returnKv) txtMod = _txtModulation.Forward(backend, txtTemb);
+
+            // Projection and QK norm of the window, before any rotation: the cache stores exactly these K and V.
+            Tensor imgModulated = attnMod.NormAffine(backend, image, 1e-6f);
+            (imgQ, imgK, imgV) = ProjectWindowStream(backend, _imgAttn, imgModulated);
+            if (returnKv)
+            {
+                keysOut = new Tensor(imgK.Shape, DType.F32);
+                valuesOut = new Tensor(imgV.Shape, DType.F32);
+                backend.CopyTo(keysOut, imgK);
+                backend.CopyTo(valuesOut, imgV);
+            }
+            if (!returnKv)
+            {
+                Tensor txtModulated = DiTUtils.NormModulate(backend, text!, txtMod![0], txtMod[1], txtShape);
+                (txtQ, txtK, txtV) = ProjectWindowStream(backend, _txtAttn, txtModulated);
+            }
+
+            // The cache is concatenated before the RoPE; the window's rows take the trailing positions.
+            if (cacheKeys is not null && cacheValues is not null)
+            {
+                // headOwned false: the cache belongs to the caller, so only the window's own K and V are consumed here.
+                imgK = ConcatTokens(backend, cacheKeys, imgK!, sc + sw, headOwned: false);
+                imgV = ConcatTokens(backend, cacheValues, imgV!, sc + sw, headOwned: false);
+            }
+            // Separate slots: the query and key tables keep their own signatures, so every block of this window reuses them.
+            rope.RotateRows(backend, imgQ!, positions.AsSpan(sc * axes), sw, _numHeads, slot: 0);
+            rope.RotateRows(backend, imgK!, positions, sc + sw, _numHeads, slot: 1);
+
+            // Joint attention over [cache, window] keys and [window, text] queries; the text rows attend over everything. Each operand stays
+            // tracked by the finally until the attention call takes it, so a throw before that disposes it exactly once.
+            attendQ = imgQ; attendK = imgK; attendV = imgV;
+            imgQ = imgK = imgV = null;
+            if (!returnKv)
+            {
+                attendQ = ConcatTokens(backend, attendQ!, txtQ!, total);
+                txtQ = null;
+                attendK = ConcatTokens(backend, attendK!, txtK!, total + sc);
+                txtK = null;
+                attendV = ConcatTokens(backend, attendV!, txtV!, total + sc);
+                txtV = null;
+            }
+            TensorShape flatShape = new(1, total, _hiddenSize);
+            attended = _windowAttend.Attend(backend, attendQ!, attendK!, attendV!, flatShape, default(AttentionCallContext));
+            attendQ = attendK = attendV = null;   // Attend took the operands
+
+            imgAttended = new Tensor(new TensorShape(1, sw, _hiddenSize), DType.F32);
+            JointAttention.SplitRows(backend, imgAttended, attended, 1, total, 0);
+            if (!returnKv)
+            {
+                txtAttended = new Tensor(txtShape, DType.F32);
+                JointAttention.SplitRows(backend, txtAttended, attended, 1, total, sw);
+            }
+            attended.Dispose();
+            attended = null;
+
+            // Image path: output projection, gated residual, then the per-frame FFN.
+            Tensor imgAttnProj = _imgAttn.ProjectOutput(backend, imgAttended!);
+            imgAttended = null;
+            Tensor imgAfterAttn = attnMod.GatedResidual(backend, image, imgAttnProj);
+            imgAttnProj.Dispose();
+            Tensor imgMlpModulated = ffnMod.NormAffine(backend, imgAfterAttn, 1e-6f);
+            Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, 1, sw);
+            imgMlpModulated.Dispose();
+            Tensor imgFinal = ffnMod.GatedResidual(backend, imgAfterAttn, imgMlpOut);
+            imgMlpOut.Dispose();
+            imgAfterAttn.Dispose();
+
+            if (returnKv)
+            {
+                MovieRollWindowOutput encoded = new(imgFinal, null, keysOut, valuesOut);
+                keysOut = valuesOut = null;   // the result owns the cache tensors now
+                return encoded;
+            }
+
+            // Text path: one shared modulation, as in ForwardPerFrame.
+            Tensor txtAttnProj = _txtAttn.ProjectOutput(backend, txtAttended!);
+            txtAttended = null;
+            Tensor txtAfterAttn = new(txtShape, DType.F32);
+            backend.GatedResidualLastDim(txtAfterAttn, text!, txtAttnProj, txtMod![2]);
+            txtAttnProj.Dispose();
+            Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
+            Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, 1, st);
+            txtMlpModulated.Dispose();
+            Tensor txtFinal = new(txtShape, DType.F32);
+            backend.GatedResidualLastDim(txtFinal, txtAfterAttn, txtMlpOut, txtMod[5]);
+            txtMlpOut.Dispose();
+            txtAfterAttn.Dispose();
+            return new MovieRollWindowOutput(imgFinal, txtFinal, null, null);
+        }
+        finally
+        {
+            attnMod?.Dispose();
+            ffnMod?.Dispose();
+            if (imgMod is not null)
+                foreach (Tensor m in imgMod) m.Dispose();
+            if (txtMod is not null)
+                foreach (Tensor m in txtMod) m.Dispose();
+            imgQ?.Dispose();
+            imgK?.Dispose();
+            imgV?.Dispose();
+            txtQ?.Dispose();
+            txtK?.Dispose();
+            txtV?.Dispose();
+            keysOut?.Dispose();
+            valuesOut?.Dispose();
+            attendQ?.Dispose();
+            attendK?.Dispose();
+            attendV?.Dispose();
+            attended?.Dispose();
+            imgAttended?.Dispose();
+            txtAttended?.Dispose();
+        }
+    }
+
+    /// <summary>Projects one stream's modulated rows to Q, K and V and QK-norms Q and K, before any rotation. Releases the input.</summary>
+    private static (Tensor Q, Tensor K, Tensor V) ProjectWindowStream(IBackend backend, AttentionLayer stream, Tensor modulated)
+    {
+        (Tensor q, Tensor k, Tensor v) = stream.ProjectSelf(backend, modulated, releaseInput: true);
+        try
+        {
+            stream.NormalizeQk(backend, ref q, ref k);
+            return (q, k, v);
+        }
+        catch
+        {
+            q.Dispose();
+            k.Dispose();
+            v.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Concatenates two token-major <c>[1, S, heads, D]</c> operands along the token axis into a new <c>[1, totalTokens, heads, D]</c>.
+    /// <paramref name="tail"/> is always disposed (also when the concatenation throws); <paramref name="head"/> is disposed only when
+    /// <paramref name="headOwned"/> is set, since the cache's tensors belong to the caller.</summary>
+    private Tensor ConcatTokens(IBackend backend, Tensor head, Tensor tail, int totalTokens, bool headOwned = true)
+    {
+        try
+        {
+            Tensor joined = new(new TensorShape(1, totalTokens, _numHeads, _headDim), DType.F32);
+            backend.Concat(joined, [head, tail], 1);
+            return joined;
+        }
+        finally
+        {
+            if (headOwned) head.Dispose();
+            tail.Dispose();
         }
     }
 

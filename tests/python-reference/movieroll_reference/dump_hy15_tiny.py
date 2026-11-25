@@ -178,6 +178,8 @@ def main():
     byt5 = torch.randn(1, BYT5_LEN, BYT5_DIM, generator=generator)
     cond = torch.randn(1, LATENT + 1, FRAMES, HEIGHT, WIDTH, generator=generator)
     t = torch.tensor([TIMESTEP])
+    # Window latents come last in the draw order, so every tensor above keeps its value.
+    window_a, window_b, window_c = (torch.randn(1, LATENT, FRAMES, HEIGHT, WIDTH, generator=generator) for _ in range(3))
 
     tensors = {}
     with torch.no_grad():
@@ -198,6 +200,8 @@ def main():
         velocity_per_frame = _forward_per_frame(model, torch.cat([latent, zero_cond], 1), frame_t, t, qwen, byt5)
     tensors["ref.velocity_per_frame"] = velocity_per_frame.contiguous()
     tensors["in.frame_timesteps"] = frame_t
+    with torch.no_grad():
+        tensors.update(_window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5))
     tensors["in.latent"] = latent
     tensors["in.qwen"] = qwen
     tensors["in.byt5"] = byt5
@@ -223,6 +227,88 @@ def _forward_per_frame(model, x65, frame_t, t, qwen, byt5):
         img, txt = block(img, txt, vec, vec_txt, (cos, sin), thw)
     out = model.final_layer(img, vec, thw=thw)
     return out.reshape(1, FRAMES, HEIGHT, WIDTH, LATENT).permute(0, 4, 1, 2, 3)
+
+
+WINDOW_MAX_FRAMES = 9
+
+
+def _window_block(block, img, txt, vec, vec_txt, thw, cos, sin, q_rows, k_rows, cache, return_kv):
+    """MovieRoll's forward_inference for one double block. The cache holds the history's post-norm, pre-RoPE K and V; the window's
+    K and V are appended to it, then RoPE runs on the concatenation at the packed rows ``k_rows`` (the window's Q at ``q_rows``).
+    The text stream is skipped under ``return_kv``, which returns the window's own pre-RoPE K and V for the cache."""
+    need_txt = not return_kv
+    i1s, i1c, i1g, i2s, i2c, i2g = block.img_mod(vec).chunk(6, dim=-1)
+    img_q, img_k, img_v = block.qkv("img", modulate(block.img_norm1(img), shift=i1s, scale=i1c, thw=thw))
+    kv_out = (img_k.clone(), img_v.clone()) if return_kv else None
+    k_full, v_full = img_k, img_v
+    if cache is not None:
+        k_full = torch.cat([cache[0], img_k], 1)
+        v_full = torch.cat([cache[1], img_v], 1)
+    img_q = apply_rotary_emb(img_q, (cos[q_rows], sin[q_rows]))
+    k_full = apply_rotary_emb(k_full, (cos[k_rows], sin[k_rows]))
+    if need_txt:
+        t1s, t1c, t1g, t2s, t2c, t2g = block.txt_mod(vec_txt).chunk(6, dim=-1)
+        txt_q, txt_k, txt_v = block.qkv("txt", modulate(block.txt_norm1(txt), shift=t1s, scale=t1c, num_chunks=1))
+        q = torch.cat([img_q, txt_q], 1)
+        k = torch.cat([k_full, txt_k], 1)
+        v = torch.cat([v_full, txt_v], 1)
+    else:
+        q, k, v = img_q, k_full, v_full
+    attn = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2).flatten(2)
+    img_len = img.shape[1]
+    img = img + apply_gate(block.img_attn_proj(attn[:, :img_len]), gate=i1g, thw=thw)
+    img = img + apply_gate(block.img_mlp(modulate(block.img_norm2(img), shift=i2s, scale=i2c, thw=thw)), gate=i2g, thw=thw)
+    if need_txt:
+        txt = txt + apply_gate(block.txt_attn_proj(attn[:, img_len:]), gate=t1g, num_chunks=1)
+        txt = txt + apply_gate(block.txt_mlp(modulate(block.txt_norm2(txt), shift=t2s, scale=t2c, num_chunks=1)), gate=t2g, num_chunks=1)
+        return img, txt, None
+    return img, None, kv_out
+
+
+def _window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5):
+    """Block 0 of the inference-regime window, against the MovieRoll cache semantics. Window A is encoded at packed frames 0..2 and
+    kept as history. Window B is encoded at frames 6..8 and kept too. Window C is denoised at frames 3..5 over A's cache (packed
+    where it was captured), and again over B's cache, whose absolute position (6..8) differs from its packed position (0..2)."""
+    thw = [FRAMES, HEIGHT, WIDTH]
+    cos, sin = get_nd_rotary_pos_embed(ROPE_DIMS, (WINDOW_MAX_FRAMES, HEIGHT, WIDTH), theta=256, device="cpu")
+    block = model.double_blocks[0]
+    per_frame = HEIGHT * WIDTH
+
+    def rows(first_frame):
+        return torch.arange(first_frame * per_frame, (first_frame + FRAMES) * per_frame)
+
+    zero_cond = torch.zeros(1, LATENT + 1, FRAMES, HEIGHT, WIDTH)
+    img_a = model.img_in(torch.cat([window_a, zero_cond], 1))
+    img_b = model.img_in(torch.cat([window_b, zero_cond], 1))
+    img_c = model.img_in(torch.cat([window_c, zero_cond], 1))
+    vec = model.time_in(frame_t.reshape(-1)).reshape(1, FRAMES, -1)
+    vec_txt = model.time_in(t)[:, None, :]
+    txt = torch.cat([model.byt5_in(byt5) + model.cond_type_embedding.weight[1],
+                     model.txt_in(qwen, t) + model.cond_type_embedding.weight[0]], 1)
+
+    img_enc, _, kv_a = _window_block(block, img_a, None, vec, vec_txt, thw, cos, sin, rows(0), rows(0), None, True)
+    _, _, kv_b = _window_block(block, img_b, None, vec, vec_txt, thw, cos, sin, rows(6), rows(6), None, True)
+    img_d, txt_d, _ = _window_block(block, img_c, txt, vec, vec_txt, thw, cos, sin, rows(3), torch.arange(0, 6 * per_frame),
+                                    kv_a, False)
+    img_r, txt_r, _ = _window_block(block, img_c, txt, vec, vec_txt, thw, cos, sin, rows(3), torch.arange(0, 6 * per_frame),
+                                    kv_b, False)
+    img_ec, _, kv_ec = _window_block(block, img_c, None, vec, vec_txt, thw, cos, sin, rows(3), torch.arange(0, 6 * per_frame), kv_a, True)
+    tensors = {
+        "win.in.img_a": img_a, "win.in.img_b": img_b, "win.in.img_c": img_c, "win.in.txt": txt,
+        "win.in.vec": vec, "win.in.vec_txt": vec_txt,
+        "win.encode.img": img_enc, "win.encode.k": kv_a[0], "win.encode.v": kv_a[1],
+        "win.encode_cached.img": img_ec, "win.encode_cached.k": kv_ec[0], "win.encode_cached.v": kv_ec[1],
+        "win.encode_b.k": kv_b[0], "win.encode_b.v": kv_b[1],
+        "win.denoise.img": img_d, "win.denoise.txt": txt_d,
+        "win.repos.img": img_r, "win.repos.txt": txt_r,
+        # The RoPE tables alone: MovieRoll's rotation of all-ones Q and K at the window rows and at the cache-then-window rows.
+        "win.table.rot_ones_q": apply_rotary_emb(torch.ones(1, FRAMES * per_frame, HEADS, HEAD_DIM),
+                                                 (cos[rows(3)], sin[rows(3)])).reshape(1, FRAMES * per_frame, HIDDEN),
+        "win.table.rot_ones_k": apply_rotary_emb(torch.ones(1, 6 * per_frame, HEADS, HEAD_DIM),
+                                                 (cos[torch.arange(0, 6 * per_frame)], sin[torch.arange(0, 6 * per_frame)]))
+                                    .reshape(1, 6 * per_frame, HIDDEN),
+    }
+    return {name: value.float().contiguous() for name, value in tensors.items()}
 
 
 def _forward_without_byt5(model, x65, t, qwen):
