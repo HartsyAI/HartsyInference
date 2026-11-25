@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using HartsyInference.Core.Configuration;
 
 namespace HartsyInference.Engine;
 
@@ -31,6 +32,7 @@ internal static class AssetUrlDownload
             throw new ArgumentException($"'{label}' must be fetched from an https URL.", nameof(url));
         if (string.IsNullOrWhiteSpace(sha256))
             throw new ArgumentException($"'{label}' is fetched from a URL and needs a pinned sha256.", nameof(sha256));
+        DownloadPermission.Demand(label);
         string? directory = Path.GetDirectoryName(destination);
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);

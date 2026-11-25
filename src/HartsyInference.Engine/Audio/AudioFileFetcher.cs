@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
@@ -39,6 +40,7 @@ internal static class AudioFileFetcher
         {
             return;
         }
+        DownloadPermission.Demand(url);
         string? directory = Path.GetDirectoryName(targetPath);
         if (!string.IsNullOrEmpty(directory))
         {
