@@ -7,7 +7,9 @@ namespace HartsyInference.Diffusion.Models.Duo;
 /// and shape the attention path fixes. Duo needs row-granular sliding eviction over the packed sequence, which a frame slot cannot express.
 /// A backend-backed row cache is a later step; whether <c>FrameKvCache</c> can host it is open.
 /// Rows are stored verbatim. The intended contract is that keys are post-QK-norm and post-RoPE, as the attention layer reads them, and values
-/// as produced by the V projection. This class does not enforce that, and the order has not been checked against upstream.</summary>
+/// as produced by the V projection. This class does not enforce that, and the order has not been checked against upstream.
+/// Because keys are post-RoPE, each row's rotary position is fixed when it is committed. Eviction never re-rotates the remaining rows, so their
+/// positions do not restart at 0. A caller that stored pre-RoPE keys would have to re-rotate after eviction, which this contract rules out.</summary>
 public sealed class DuoKvCache
 {
     private readonly float[] _keys;

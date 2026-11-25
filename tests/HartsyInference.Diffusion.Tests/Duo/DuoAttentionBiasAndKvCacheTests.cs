@@ -129,13 +129,39 @@ public sealed class DuoAttentionBiasAndKvCacheTests
         cache.Append(keys.AsSpan(4 * Width, chunk * Width), values.AsSpan(4 * Width, chunk * Width));
         Assert.Equal(window, cache.Rows);
 
-        float[] q = Sequence(1, 6);
         float[] windowKeys = keys.AsSpan(2 * Width, window * Width).ToArray();
         float[] windowValues = values.AsSpan(2 * Width, window * Width).ToArray();
-        AssertClose(Attend(q, 1, windowKeys, windowValues, window, new float[window]),
-            Attend(q, 1, cache.Keys.ToArray(), cache.Values.ToArray(), cache.Rows, new float[window]));
         Assert.True(cache.Keys.SequenceEqual(windowKeys));
         Assert.True(cache.Values.SequenceEqual(windowValues));
+    }
+
+    [Fact]
+    public void AppendRefusesMismatchedAndPartialRows()
+    {
+        DuoKvCache cache = new DuoKvCache(2, Width);
+        Assert.Throws<ArgumentException>(() => cache.Append(new float[Width], new float[Width + 1]));
+        Assert.Throws<ArgumentException>(() => cache.Append(new float[Width + 1], new float[Width + 1]));
+        Assert.Equal(0, cache.Rows);
+    }
+
+    [Fact]
+    public void EvictOldestChecksBoundsAndZeroIsANoOp()
+    {
+        DuoKvCache cache = new DuoKvCache(3, Width);
+        float[] keys = Sequence(2, 7), values = Sequence(2, 8);
+        cache.Append(keys, values);
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.EvictOldest(3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.EvictOldest(-1));
+        cache.EvictOldest(0);
+        Assert.Equal(2, cache.Rows);
+        Assert.True(cache.Keys.SequenceEqual(keys));
+        Assert.True(cache.Values.SequenceEqual(values));
+    }
+
+    [Fact]
+    public void DegenerateRectangleIsRefused()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => DuoAttentionBias.Build([new DuoMaskRect(1, 1, 0, 1)], 2, 2));
     }
 
     [Fact]
