@@ -87,6 +87,95 @@ public sealed class MiniMaxH3DuoForwardTests
             RefinerGroups(), text, video, audioRows: null, Times()));
     }
 
+    [Fact]
+    public void LargeClockPositionsStayFiniteAndCausal()
+    {
+        // A clock near 1e6 (about 11 hours of 25 ms ticks) must not lose the RoPE angle to double-to-F32 rounding
+        // or overflow the path: the output stays finite, and the reference rows still do not see the noisy row.
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        double[] positions = layout.Positions;
+        for (int r = 0; r < layout.Length; r++)
+        {
+            positions[r * 3] += 1_000_000.0;
+        }
+        float[] video = Values(1, VideoRowCount * VideoIn);
+        float[] perturbed = (float[])video.Clone();
+        for (int c = 0; c < VideoIn; c++)
+        {
+            perturbed[4 * VideoIn + c] += 0.5f;
+        }
+
+        float[] baseline = Run(transformer, backend, layout, DuoAttentionMode.Causal, video);
+        float[] changed = Run(transformer, backend, layout, DuoAttentionMode.Causal, perturbed);
+
+        Assert.All(baseline, value => Assert.True(float.IsFinite(value)));
+        AssertRowsEqual(baseline, changed, 0, 4);
+    }
+
+    [Fact]
+    public void AudioHeadReturnsOneRowPerAudioRowAtItsPatchWidth()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
+        using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
+        using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
+
+        (Tensor v, Tensor? a) = transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal, RefinerGroups(), text, video, audio, Times());
+        using (v)
+        using (a)
+        {
+            Assert.NotNull(a);
+            Assert.Equal(VideoRowCount, (int)v.Shape[0]);
+            Assert.Equal(VideoIn, (int)v.Shape[1]);
+            Assert.Equal(AudioRowCount, (int)a!.Shape[0]);
+            Assert.Equal(AudioIn, (int)a.Shape[1]);
+            Assert.All(a.AsSpan<float>().ToArray(), value => Assert.True(float.IsFinite(value)));
+        }
+    }
+
+    [Fact]
+    public void TimeIdBeyondTheGivenTimestepsIsRefused()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
+        using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
+        using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
+
+        // The layout's noisy rows name timestep 1, so a single timestep is one too few.
+        Assert.Throws<ArgumentOutOfRangeException>(() => transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal,
+            RefinerGroups(), text, video, audio, times: [0f]));
+    }
+
+    [Fact]
+    public void RefinerGroupBeyondTheTextRowsIsRefused()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
+        using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
+        using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
+        IReadOnlyList<DuoGroup> tooLong = [new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 0, TextRowCount + 4)];
+
+        Assert.Throws<ArgumentException>(() => transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal,
+            tooLong, text, video, audio, Times()));
+    }
+
+    [Fact]
+    public void DenseBiasLengthCapRefusesRowsBeyondTheLimit()
+    {
+        MiniMaxH3Transformer.ValidateDuoDenseBiasLength(MiniMaxH3Transformer.MaxDuoDenseBiasRows);
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() =>
+            MiniMaxH3Transformer.ValidateDuoDenseBiasLength(MiniMaxH3Transformer.MaxDuoDenseBiasRows + 1));
+        Assert.Contains("dense", error.Message);
+    }
+
     private static float[] Run(MiniMaxH3Transformer transformer, IBackend backend, DuoLayout layout, DuoAttentionMode mode,
         float[] videoValues)
     {
