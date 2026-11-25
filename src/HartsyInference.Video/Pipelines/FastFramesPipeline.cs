@@ -143,11 +143,31 @@ public sealed class FastFramesPipeline
         return GenerateCore(promptEmbeds, noise, latentFrames, progress, cancel);
     }
 
-    private static void ValidateRequest(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames)
+    private void ValidateRequest(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames)
     {
         ArgumentNullException.ThrowIfNull(promptEmbeds);
         ArgumentNullException.ThrowIfNull(noise);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
+        (long freeBytes, long totalBytes) = _backend.GetVramInfo();
+        CheckKvFits(_config.Name, _transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
+            freeBytes, totalBytes);
+    }
+
+    /// <summary>Refuses a clip whose frame-wise cache cannot fit in the free VRAM, before any frame is denoised. The cache keeps every
+    /// frame's keys and values for every block until the clip ends, in F16 on a GPU; <see cref="FrameKvCache.EstimateBytes"/> gives
+    /// its size. A backend that reports no VRAM (CPU) is not checked.</summary>
+    /// <exception cref="InvalidOperationException">The cache for <paramref name="latentFrames"/> does not fit in <paramref name="freeBytes"/>.</exception>
+    public static void CheckKvFits(string name, int blocks, int latentFrames, int tokensPerFrame, int hidden, long freeBytes, long totalBytes)
+    {
+        if (totalBytes <= 0)
+            return;
+        long need = FrameKvCache.EstimateBytes(blocks, latentFrames, tokensPerFrame, hidden, DType.F16);
+        if (need > freeBytes)
+        {
+            throw new InvalidOperationException(
+                $"{name} needs {need >> 20} MiB of frame KV cache for {latentFrames} latent frames; the device has {freeBytes >> 20} MiB free "
+                + $"of {totalBytes >> 20} MiB. Generate fewer frames, or free VRAM first.");
+        }
     }
 
     private IEnumerable<FastFramesFrame> RolloutCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
