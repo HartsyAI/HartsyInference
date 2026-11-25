@@ -14,7 +14,7 @@ namespace HartsyInference.LLM.Hy4Flash;
 /// then RMS norm, then the trailing <c>RopeDim</c> channels rotated (interleaved pairs) at the group's first token. Query: <c>Wq q_latent</c> per head, trailing channels rotated at the
 /// query position. Score: <c>sum_h w_h * relu(q_h . k_g)</c> with <c>w = Whw x * Heads^-0.5 * HeadDim^-0.5</c>. A query ignores groups at or after its own, recalls the top
 /// <c>TopK / Kpool - 1</c> others (all of them when fewer) and always its own.</para>
-/// <para>Up to <c>TopK</c> cached keys the layer is dense and the indexer does nothing, as in the reference. Slots equal rotary positions (text-only); image spans need positions passed separately.
+/// <para>Up to <c>TopK</c> cached keys the layer is dense and the indexer does nothing, as in the reference. Each slot's rotary position is the one its sequence state assigned (text tokens consecutive, an image run its frame positions; see <c>Hy4FlashModel.Forward</c>).
 /// Ties between equal scores resolve to the lower group index; the reference <c>topk</c> leaves them undefined.</para>
 /// </remarks>
 public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
