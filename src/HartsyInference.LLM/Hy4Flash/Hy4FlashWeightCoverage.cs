@@ -11,7 +11,7 @@ namespace HartsyInference.LLM.Hy4Flash;
 public sealed record Hy4FlashWeightCoverage(CheckpointKeyCoverage Keys, IReadOnlyList<string> ShapeMismatches, IReadOnlyList<string> ScaleMismatches,
     IReadOnlyList<string> DtypeMismatches)
 {
-    /// <summary>Fails when any key feeds nothing, any parameter has no key, or any shape, scale grid or dtype disagrees, naming the first few of each.</summary>
+    /// <summary>Fails when any key feeds nothing, any parameter has no key, or any shape, scale grid or dtype disagrees, naming the first few of each. Call this rather than <c>Keys.RequireComplete</c>, which checks only the keys.</summary>
     /// <exception cref="InvalidDataException">The checkpoint and the config do not match.</exception>
     public void RequireComplete()
     {
