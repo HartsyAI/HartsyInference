@@ -59,6 +59,11 @@ public enum LoraFormat
     /// projections (<c>attn.wq</c>, <c>attn.gate</c>), which the Wan rename table would otherwise leave unmatched.</summary>
     Krea2,
 
+    /// <summary>MiniMax-H3 trained with ai-toolkit (<c>diffusion_model.blocks.N.attn.qkv_proj.lora_A.weight</c>, <c>attn.out_proj</c>, <c>mlp.fc1</c>,
+    /// <c>mlp.fc2</c>, and the <c>token_refiner.blocks.N</c> stream). Recognized by those H3-only module names; the names already match the DiT's
+    /// canonical keys, so they pass through with no rename. The Wan arm would otherwise claim the <c>diffusion_model.blocks.</c> roots.</summary>
+    AiToolkitMiniMaxH3,
+
     /// <summary>Idol's denoiser (<c>blocks.N.attn.qkv.lora_down.weight</c>, <c>noise_refiner.N.mlp.mlp.0…</c>, bare or under <c>diffusion_model.</c>): the Comfy-format idol-turbo slow and fast phase experts. Recognized by the <c>mlp.mlp.N</c> MLP spelling no other family uses.</summary>
     Idol,
 

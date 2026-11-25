@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// (2) ungated text cross-attention on the noisy rows only, after an affine LayerNorm; (3) SwiGLU FFN, gated. Every weight is used through
 /// <see cref="IBackend.Linear"/> or <see cref="IBackend.LinearWeightRows"/>, which apply a runtime LoRA adjunct on any projection, and no
 /// path casts or fuses a weight past that.</summary>
-public sealed class LongCatBlock : IStreamingBlock
+public sealed partial class LongCatBlock : IStreamingBlock
 {
     private readonly LongCatConfig _config;
     private Tensor? _adaWeight, _adaBias;
@@ -20,6 +20,7 @@ public sealed class LongCatBlock : IStreamingBlock
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
     private Tensor? _w1, _w2, _w3;
     private AttentionLayer? _selfAttention, _crossAttention;
+    private LongCatAvatarAudioStep? _audio;
 
     /// <summary>Creates a block of the given geometry; <see cref="LoadWeights"/> fills it.</summary>
     public LongCatBlock(LongCatConfig config)
@@ -56,11 +57,25 @@ public sealed class LongCatBlock : IStreamingBlock
         _w1 = w[$"{prefix}.ffn.w1.weight"];
         _w2 = w[$"{prefix}.ffn.w2.weight"];
         _w3 = w[$"{prefix}.ffn.w3.weight"];
+        BuildAttention();
+        // Avatar blocks carry the audio step. It loads first, so the estimate below counts it. A base checkpoint has none of these keys: any step
+        // from an earlier avatar load is released, so the block is a base block again.
+        LongCatAvatarAudioStep? audio = w.ContainsKey($"{prefix}.audio_adaLN_modulation.1.weight")
+            ? LongCatAvatarAudioStep.Load(w, prefix, _config.HiddenSize, _config.AdalnTembedDim, _config.AudioOutputDim, _config.NumHeads)
+            : null;
+        _audio?.Dispose();
+        _audio = audio;
         long bytes = 0;
         foreach (Tensor t in EnumerateWeights())
             bytes += t.DType.ComputeByteCount(t.ElementCount);
         EstimatedWeightBytes = bytes;
-        BuildAttention();
+    }
+
+    /// <summary>Releases the avatar audio step's own tensors (the base block owns none). The block is unusable for a forward afterwards.</summary>
+    public void Dispose()
+    {
+        _audio?.Dispose();
+        _audio = null;
     }
 
     /// <inheritdoc/>
@@ -72,6 +87,9 @@ public sealed class LongCatBlock : IStreamingBlock
             if (t is not null)
                 yield return t;
         }
+        if (_audio is not null)
+            foreach (Tensor t in _audio.EnumerateWeights())
+                yield return t;
     }
 
     private void BuildAttention()
@@ -95,7 +113,7 @@ public sealed class LongCatBlock : IStreamingBlock
     /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
     /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
-        Action<string, Tensor>? probe = null, string stage = "")
+        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null, LongCatBlockKv? cache = null)
     {
         int dim = _config.HiddenSize;
         int s = checked(inputs.Frames * inputs.TokensPerFrame);
@@ -111,7 +129,10 @@ public sealed class LongCatBlock : IStreamingBlock
         // 1. self-attention: modulation columns are [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp].
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         probe?.Invoke($"{stage}.attn_in", normed1);
-        using Tensor attn = SelfAttention(backend, normed1, in inputs, probe, stage);
+        // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
+        using Tensor attn = cache is null
+            ? SelfAttention(backend, normed1, in inputs, probe, stage)
+            : CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, cache, keep: false, inputs.Segments, out _);
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
         probe?.Invoke($"{stage}.after_self", afterSelf);
@@ -120,13 +141,30 @@ public sealed class LongCatBlock : IStreamingBlock
         using Tensor afterCross = CrossAttentionResidual(backend, afterSelf, text, in inputs, probe, stage);
         probe?.Invoke($"{stage}.after_cross", afterCross);
 
-        // 3. SwiGLU FFN.
-        using Tensor normed3 = LongCatOps.NormModulate(backend, afterCross, modulation, 4 * dim, 3 * dim, hw);
-        using Tensor ffn = FeedForward(backend, normed3);
-        probe?.Invoke($"{stage}.ffn", ffn);
-        Tensor output = LongCatOps.GatedResidual(backend, afterCross, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex);
-        probe?.Invoke($"{stage}.out", output);
-        return output;
+        // 2b. avatar audio step (audio tokens given): the noisy rows take the gated audio cross-attention, the conditioning rows are unchanged.
+        Tensor? afterAudio = null;
+        if (audio is not null)
+        {
+            if (_audio is null)
+                throw new InvalidOperationException("The block has no avatar audio weights, but audio tokens were given.");
+            afterAudio = _audio.Apply(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw);
+            probe?.Invoke($"{stage}.after_audio", afterAudio);
+        }
+        Tensor stream = afterAudio ?? afterCross;
+        try
+        {
+            // 3. SwiGLU FFN.
+            using Tensor normed3 = LongCatOps.NormModulate(backend, stream, modulation, 4 * dim, 3 * dim, hw);
+            using Tensor ffn = FeedForward(backend, normed3);
+            probe?.Invoke($"{stage}.ffn", ffn);
+            Tensor output = LongCatOps.GatedResidual(backend, stream, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex);
+            probe?.Invoke($"{stage}.out", output);
+            return output;
+        }
+        finally
+        {
+            afterAudio?.Dispose();
+        }
     }
 
     private Tensor SelfAttention(IBackend backend, Tensor input, in LongCatBlockInputs inputs, Action<string, Tensor>? probe, string stage)
@@ -197,14 +235,12 @@ public sealed class LongCatBlock : IStreamingBlock
         Tensor q = new(new TensorShape(1, rows, heads, headDim), DType.F32);
         Tensor k = new(new TensorShape(1, textRows, heads, headDim), DType.F32);
         Tensor v = new(new TensorShape(1, textRows, heads, headDim), DType.F32);
-        Tensor flat;
         try
         {
             backend.Linear(q, queryInput, _crossQ!, _crossQBias);
             // kv_linear is one [2·dim, dim] weight: k is its first dim rows, v the next; windowed so a LoRA adjunct on it applies per part.
             backend.LinearWeightRows(k, text, _crossKv!, _crossKvBias, 0, dim);
             backend.LinearWeightRows(v, text, _crossKv!, _crossKvBias, dim, dim);
-            flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
         }
         catch
         {
@@ -213,6 +249,8 @@ public sealed class LongCatBlock : IStreamingBlock
             v.Dispose();
             throw;
         }
+        // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
+        Tensor flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
         using (flat)
         {
             Tensor projected = new(new TensorShape(rows, dim), DType.F32);

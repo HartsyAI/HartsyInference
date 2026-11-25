@@ -10,10 +10,11 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// q is a projection of the video tokens with a per-head RMSNorm, k and v are the two halves of one <c>kv_linear</c> over the audio tokens with
 /// a per-head RMSNorm on k, and the output is projected back to <c>dim</c>.</summary>
 /// <remarks>
-/// Layout: <c>x</c> is <c>[frames·S, dim]</c> (frame-major), <c>audio</c> is <c>[frames·ctx, encoderDim]</c>. With <c>numCond</c> conditioning
-/// frames the reference returns zeros for their tokens and computes only the noisy frames, which is what this returns too. The output is
-/// <c>[frames·S, dim]</c>. Weights under <c>attn.</c>: <c>q_linear</c>, <c>q_norm</c>, <c>kv_linear</c>, <c>k_norm</c>, <c>proj</c>. The
-/// reference's RoPE1D on q and k runs only when a multi-speaker reference map is given; that path is not in this class.
+/// Layout: <c>x</c> is <c>[frames·S, dim]</c> (frame-major) and <c>audio</c> is <c>[frames·ctx, encoderDim]</c>, both F32. The noisy frames
+/// are batched as the attention's batch axis, so each frame still attends only to its own audio. With <c>numCond</c> conditioning frames the
+/// reference returns zeros for their tokens and computes only the noisy frames; this returns the same, so the output is <c>[frames·S, dim]</c>.
+/// Weights under <c>attn.</c>: <c>q_linear</c>, <c>q_norm</c>, <c>kv_linear</c>, <c>k_norm</c>, <c>proj</c>. The reference's RoPE1D on q and k runs
+/// only when a multi-speaker reference map is given; that path is not in this class.
 /// </remarks>
 public sealed class LongCatAudioCrossAttention : IDisposable
 {
@@ -23,7 +24,7 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private readonly int _dim, _encoderDim, _heads, _headDim;
     private readonly AttentionLayerConfig _config;
     private AttentionLayer? _attention;
-    private Tensor? _qW, _qB, _kvW, _kvB, _projW, _projB, _qNorm, _kNorm;
+    private Tensor? _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB;
     private List<Tensor> _owned = [];
     private bool _loaded;
     private int _disposed;
@@ -46,27 +47,31 @@ public sealed class LongCatAudioCrossAttention : IDisposable
         };
     }
 
-    /// <summary>Reads the eight tensors under <paramref name="prefix"/>; all-or-nothing, and the previous set (if any) is kept on failure.</summary>
+    /// <summary>Reads the eight tensors under <paramref name="prefix"/>. All-or-nothing: every tensor is checked before the previous set
+    /// (if any) is released, so a failed load keeps the layer as it was.</summary>
+    /// <exception cref="ObjectDisposedException">The layer was disposed.</exception>
+    /// <exception cref="InvalidDataException">A tensor is missing or has the wrong shape.</exception>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "attn.")
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(weights);
         List<Tensor> owned = [];
         try
         {
-            Tensor qW = Expect(LongCatOps.WidenF32(weights, prefix + "q_linear.weight", owned), [_dim, _dim], prefix + "q_linear.weight");
+            // Matrices stay as stored (a quantized or F16 checkpoint keeps its adjunct path); vectors are widened, and the copies are owned here.
+            Tensor qW = Expect(weights[prefix + "q_linear.weight"], [_dim, _dim], prefix + "q_linear.weight");
             Tensor qB = Expect(LongCatOps.WidenF32(weights, prefix + "q_linear.bias", owned), [_dim], prefix + "q_linear.bias");
             Tensor qN = Expect(LongCatOps.WidenF32(weights, prefix + "q_norm.weight", owned), [_headDim], prefix + "q_norm.weight");
-            Tensor kvW = Expect(LongCatOps.WidenF32(weights, prefix + "kv_linear.weight", owned), [2 * _dim, _encoderDim], prefix + "kv_linear.weight");
+            Tensor kvW = Expect(weights[prefix + "kv_linear.weight"], [2 * _dim, _encoderDim], prefix + "kv_linear.weight");
             Tensor kvB = Expect(LongCatOps.WidenF32(weights, prefix + "kv_linear.bias", owned), [2 * _dim], prefix + "kv_linear.bias");
             Tensor kN = Expect(LongCatOps.WidenF32(weights, prefix + "k_norm.weight", owned), [_headDim], prefix + "k_norm.weight");
-            Tensor pW = Expect(LongCatOps.WidenF32(weights, prefix + "proj.weight", owned), [_dim, _dim], prefix + "proj.weight");
+            Tensor pW = Expect(weights[prefix + "proj.weight"], [_dim, _dim], prefix + "proj.weight");
             Tensor pB = Expect(LongCatOps.WidenF32(weights, prefix + "proj.bias", owned), [_dim], prefix + "proj.bias");
 
-            ObjectDisposedException.ThrowIf(_disposed != 0, this);
-            foreach (Tensor old in _owned)
-                old.Dispose();
+            AttentionLayer attention = new(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
+            ReleaseOwned();
             _owned = owned;
-            _attention = new AttentionLayer(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
+            _attention = attention;
             _qW = qW; _qB = qB; _qNorm = qN; _kvW = kvW; _kvB = kvB; _kNorm = kN; _projW = pW; _projB = pB;
             _loaded = true;
         }
@@ -80,8 +85,13 @@ public sealed class LongCatAudioCrossAttention : IDisposable
 
     /// <summary>Audio cross-attention over <paramref name="frames"/> latent frames. See the type remarks for the layout.</summary>
     /// <returns>A new <c>[frames·S, dim]</c> tensor the caller owns.</returns>
+    /// <exception cref="ObjectDisposedException">The layer was disposed.</exception>
+    /// <exception cref="InvalidOperationException">No weights are loaded.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="frames"/> or <paramref name="numCond"/> is out of range.</exception>
+    /// <exception cref="ArgumentException"><paramref name="x"/> or <paramref name="audio"/> is not F32, has the wrong width, or has rows that do not split per frame.</exception>
     public Tensor Forward(IBackend backend, Tensor x, Tensor audio, int frames, int numCond)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(x);
         ArgumentNullException.ThrowIfNull(audio);
@@ -91,57 +101,66 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             throw new ArgumentOutOfRangeException(nameof(frames), frames, "frames must be at least 1.");
         if (numCond < 0 || numCond >= frames)
             throw new ArgumentOutOfRangeException(nameof(numCond), numCond, $"numCond must lie in [0, {frames - 1}] (at least one noisy frame).");
+        if (x.DType != DType.F32)
+            throw new ArgumentException($"x must be F32, got {x.DType}.", nameof(x));
+        if (audio.DType != DType.F32)
+            throw new ArgumentException($"audio must be F32, got {audio.DType}.", nameof(audio));
         if (x.Shape.Rank != 2 || x.Shape[1] != _dim || x.Shape[0] % frames != 0)
             throw new ArgumentException($"x must be [frames·S, {_dim}] with frames={frames}, got {x.Shape}.", nameof(x));
         if (audio.Shape.Rank != 2 || audio.Shape[1] != _encoderDim || audio.Shape[0] % frames != 0)
-            throw new ArgumentException($"audio must be [frames·ctx, {_encoderDim}] with frames={frames}, got {audio.Shape}.", nameof(audio));
+            throw new ArgumentException($"audio must be [frames·ctx, {_encoderDim}] with frames={frames} (a row count that is not a multiple "
+                + $"of frames cannot be split per frame), got {audio.Shape}.", nameof(audio));
 
         int tokens = (int)x.Shape[0] / frames, ctx = (int)audio.Shape[0] / frames;
         int noisy = frames - numCond;
-        List<Tensor> pieces = [];
+        int noisyTokens = noisy * tokens, noisyCtx = noisy * ctx;
+
+        // The noisy frames, batched on the attention's batch axis: [noisy, tokens, heads, D] for q and [noisy, ctx, heads, D] for k and v.
+        // With no conditioning frames the noisy rows are all of x and audio, so they are used in place rather than copied.
+        Tensor? noisyX = null, noisyAudio = null;
+        Tensor projected;
         try
         {
             if (numCond > 0)
             {
-                // The reference returns zeros for the conditioning frames' tokens (output_cond).
-                Tensor zeros = new(new TensorShape(numCond * tokens, _dim), DType.F32);
-                backend.Fill(zeros, 0f);
-                pieces.Add(zeros);
+                noisyX = new(new TensorShape(noisyTokens, _dim), DType.F32);
+                backend.SliceRows(noisyX, x, numCond * tokens);
+                noisyAudio = new(new TensorShape(noisyCtx, _encoderDim), DType.F32);
+                backend.SliceRows(noisyAudio, audio, numCond * ctx);
             }
-
-            for (int f = numCond; f < frames; f++)
-            {
-                using Tensor frameX = new(new TensorShape(tokens, _dim), DType.F32);
-                backend.SliceRows(frameX, x, f * tokens);
-                using Tensor frameAudio = new(new TensorShape(ctx, _encoderDim), DType.F32);
-                backend.SliceRows(frameAudio, audio, f * ctx);
-                pieces.Add(AttendFrame(backend, frameX, frameAudio, tokens, ctx));
-            }
-
-            Tensor output = new(new TensorShape(frames * tokens, _dim), DType.F32);
-            backend.Concat(output, pieces.ToArray(), 0);
-            return output;
+            projected = AttendBatched(backend, noisyX ?? x, noisyAudio ?? audio, noisy, tokens, ctx);
         }
         finally
         {
-            foreach (Tensor piece in pieces)
-                piece.Dispose();
+            noisyX?.Dispose();
+            noisyAudio?.Dispose();
+        }
+        if (numCond == 0)
+            return projected;
+
+        using (projected)
+        {
+            // The reference returns zeros for the conditioning frames' tokens (output_cond), then the noisy frames' output.
+            using Tensor zeros = new(new TensorShape(numCond * tokens, _dim), DType.F32);
+            backend.Fill(zeros, 0f);
+            Tensor output = new(new TensorShape(frames * tokens, _dim), DType.F32);
+            backend.Concat(output, [zeros, projected], 0);
+            return output;
         }
     }
 
-    /// <summary>One frame: q from its video tokens, k and v from its audio tokens, attention, then the output projection.</summary>
-    private Tensor AttendFrame(IBackend backend, Tensor frameX, Tensor frameAudio, int tokens, int ctx)
+    /// <summary>All noisy frames at once: q, k and v, one attention over the batch of frames, then the output projection.</summary>
+    private Tensor AttendBatched(IBackend backend, Tensor noisyX, Tensor noisyAudio, int batch, int tokens, int ctx)
     {
-        // The Linear and LinearWeightRows writes use the 4-D layout that the attention layer reads; the element counts match.
-        Tensor q = new(new TensorShape(1, tokens, _heads, _headDim), DType.F32);
-        Tensor k = new(new TensorShape(1, ctx, _heads, _headDim), DType.F32);
-        Tensor v = new(new TensorShape(1, ctx, _heads, _headDim), DType.F32);
-        Tensor attended;
+        // The Linear and LinearWeightRows writes use the 4-D layout the attention layer reads; the element counts match.
+        Tensor q = new(new TensorShape(batch, tokens, _heads, _headDim), DType.F32);
+        Tensor k = new(new TensorShape(batch, ctx, _heads, _headDim), DType.F32);
+        Tensor v = new(new TensorShape(batch, ctx, _heads, _headDim), DType.F32);
         try
         {
-            backend.Linear(q, frameX, _qW!, _qB);
-            backend.LinearWeightRows(k, frameAudio, _kvW!, _kvB, 0, _dim);
-            backend.LinearWeightRows(v, frameAudio, _kvW!, _kvB, _dim, _dim);
+            backend.Linear(q, noisyX, _qW!, _qB);
+            backend.LinearWeightRows(k, noisyAudio, _kvW!, _kvB, 0, _dim);
+            backend.LinearWeightRows(v, noisyAudio, _kvW!, _kvB, _dim, _dim);
         }
         catch
         {
@@ -150,14 +169,22 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             v.Dispose();
             throw;
         }
-        // Attend takes ownership of q, k and v and disposes them.
-        attended = _attention!.Attend(backend, q, k, v, new TensorShape(tokens, _dim), default);
+        // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
+        Tensor attended = _attention!.Attend(backend, q, k, v, new TensorShape(batch * tokens, _dim), default);
         using (attended)
         {
-            Tensor projected = new(new TensorShape(tokens, _dim), DType.F32);
+            Tensor projected = new(new TensorShape(batch * tokens, _dim), DType.F32);
             backend.Linear(projected, attended, _projW!, _projB);
             return projected;
         }
+    }
+
+    /// <summary>The loaded weights (matrices as stored, vectors widened); empty before a load.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB })
+            if (t is not null)
+                yield return t;
     }
 
     /// <inheritdoc/>
@@ -165,10 +192,17 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        ReleaseOwned();
+        _qW = _qB = _kvW = _kvB = _projW = _projB = null;
+        _attention = null;
+        _loaded = false;
+    }
+
+    private void ReleaseOwned()
+    {
         foreach (Tensor t in _owned)
             t.Dispose();
         _owned = [];
-        _loaded = false;
     }
 
     private static Tensor Expect(Tensor tensor, long[] shape, string key)

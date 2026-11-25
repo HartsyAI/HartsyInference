@@ -291,33 +291,67 @@ internal static class VideoRecipeUtils
         return host;
     }
 
-    /// <summary>Batched umT5 encode for the Wan family: every context in one encode, sliced back apart, pad rows zeroed, then the encoder's weights freed. The slice/zero passes are host loops, so the returned embeddings are host-materialized — that IS the cross-device boundary when <paramref name="backend"/> is a separate text-encoder backend, and must not be optimized away.</summary>
-    internal static Tensor[] EncodeWanPromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, params int[][] tokenSets)
+    /// <summary>Batched umT5 encode for the Wan family: every context in one encode, sliced back apart, pad rows zeroed, then the encoder's weights freed.
+    /// The slice and zero passes are host loops, so the returned embeddings are host-materialized: that is the cross-device boundary when
+    /// <paramref name="backend"/> is a separate text-encoder backend, and it must not be optimized away.</summary>
+    internal static Tensor[] EncodeWanPromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, params int[][] tokenSets) =>
+        EncodeUmT5PromptBatch(backend, umt5, textDim, WanVideoRecipe.TokenLength, zeroPaddedRows: true, tokenSets);
+
+    /// <summary>The umT5 batch encode with the padded positions kept as the encoder produced them, for LongCat: its DiT zeroes and attends the
+    /// padded rows itself. Each token set must be exactly <paramref name="tokenLength"/> long, as the tokenizer produces.</summary>
+    internal static Tensor[] EncodeUmT5PromptBatchKeepingPadding(IBackend backend, T5TextEncoder umt5, int textDim, int tokenLength,
+        params int[][] tokenSets) =>
+        EncodeUmT5PromptBatch(backend, umt5, textDim, tokenLength, zeroPaddedRows: false, tokenSets);
+
+    /// <summary>The shared batched umT5 encode. Throws if a token set is not <paramref name="tokenLength"/> long: the slice that
+    /// follows is an unchecked copy, so a shorter or longer set would read the wrong rows.</summary>
+    internal static Tensor[] EncodeUmT5PromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, int tokenLength, bool zeroPaddedRows,
+        int[][] tokenSets)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(umt5);
         ArgumentNullException.ThrowIfNull(tokenSets);
+        for (int i = 0; i < tokenSets.Length; i++)
+        {
+            ArgumentNullException.ThrowIfNull(tokenSets[i]);
+            if (tokenSets[i].Length != tokenLength)
+                throw new ArgumentException($"Token set {i} has {tokenSets[i].Length} tokens; the batch slices {tokenLength} per context.", nameof(tokenSets));
+        }
         int[][] masks = new int[tokenSets.Length][];
         for (int i = 0; i < tokenSets.Length; i++)
         {
             masks[i] = T5Tokenizer.CreateAttentionMask(tokenSets[i]);
         }
         Tensor[] embeds = new Tensor[tokenSets.Length];
-        Tensor batch = umt5.Encode(backend, tokenSets, masks);
         try
         {
-            for (int i = 0; i < tokenSets.Length; i++)
+            Tensor batch = umt5.Encode(backend, tokenSets, masks);
+            try
             {
-                embeds[i] = CfgHelper.SliceBatchElement(batch, i, WanVideoRecipe.TokenLength, textDim);
+                for (int i = 0; i < tokenSets.Length; i++)
+                {
+                    embeds[i] = CfgHelper.SliceBatchElement(batch, i, tokenLength, textDim);
+                }
+            }
+            finally
+            {
+                batch.Dispose();
+            }
+            if (zeroPaddedRows)
+            {
+                for (int i = 0; i < tokenSets.Length; i++)
+                {
+                    ZeroPaddedRows(embeds[i], tokenSets[i], textDim);
+                }
             }
         }
-        finally
+        catch
         {
-            batch.Dispose();
-        }
-        for (int i = 0; i < tokenSets.Length; i++)
-        {
-            ZeroPaddedRows(embeds[i], tokenSets[i], textDim);
+            foreach (Tensor embed in embeds)
+            {
+                embed?.Dispose();
+            }
+            throw;
         }
         backend.Sync();
         backend.FreeWeights(umt5.EnumerateWeights());
