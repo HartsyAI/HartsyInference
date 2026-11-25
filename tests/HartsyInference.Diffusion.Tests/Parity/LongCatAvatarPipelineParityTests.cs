@@ -87,6 +87,11 @@ public sealed class LongCatAvatarPipelineParityTests
                 LongCatAvatarSchedule.Kind.Linear, 7f, 4f, 4f, LongCatAvatarMode.Ai2v, NumCondLatents: 1, CondLatents: firstFrame);
             double ai2vError = RelRms(pipelineRunner.Denoise(ai2v).Latents, LongCatReferenceDump.Read(dir, document, "pipeline.ai2v.latents"));
             Assert.True(ai2vError <= Tolerance, $"ai2v loop relRMS {ai2vError:E3} exceeds {Tolerance:E0}.");
+            // The distilled 8-step path (avatar 1.5): the 8-sample sigmas, guidance off, one pass per step.
+            LongCatAvatarRun distill8 = new(channels, frames, height, width, latent, positive, negative, audioTokens, unconditional, 8,
+                LongCatAvatarSchedule.Kind.Distill8, 7f, 1f, 1f, LongCatAvatarMode.At2v);
+            double distillError = RelRms(pipelineRunner.Denoise(distill8).Latents, LongCatReferenceDump.Read(dir, document, "pipeline.at2v_distill8.latents"));
+            Assert.True(distillError <= Tolerance, $"distilled 8-step loop relRMS {distillError:E3} exceeds {Tolerance:E0}.");
         }
         finally
         {

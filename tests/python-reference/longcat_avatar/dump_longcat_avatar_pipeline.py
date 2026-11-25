@@ -161,9 +161,20 @@ def main():
     # ai2v: one conditioning frame (the image), no reference, no cache.
     ai2v = uncached_loop(latent, 1, 0)
 
+    # The distilled 8-step path (avatar 1.5): the 8-sample sigma list, guidance off (both scales 1), one pass per step.
+    sigmas8, timesteps8 = sigmas_with_shift(method, 8, True, "avatar-v1.5", shift)
+    with torch.no_grad():
+        latents8 = latent.clone()
+        for i in range(8):
+            t = float(timesteps8[i])
+            dt = float(sigmas8[i + 1] - sigmas8[i])
+            noise = -model(latents8, torch.tensor([t]), encoder, audio_embs=audio)
+            latents8 = latents8 + dt * noise
+    at2v_distill8 = latents8
+
     os.makedirs(args.dit, exist_ok=True)
     outputs = (("pipeline.at2v.latents", at2v), ("pipeline.avc.latents", avc), ("pipeline.avc_nocache.latents", avc_nocache),
-               ("pipeline.ai2v.latents", ai2v), ("pipeline.negative", negative))
+               ("pipeline.ai2v.latents", ai2v), ("pipeline.at2v_distill8.latents", at2v_distill8), ("pipeline.negative", negative))
     for name, value in outputs:
         array = np.ascontiguousarray(value.detach().cpu().numpy().astype(np.float32))
         array.tofile(os.path.join(args.dit, name + ".f32"))
