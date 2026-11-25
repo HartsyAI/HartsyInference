@@ -9,10 +9,10 @@ namespace HartsyInference.Engine.Tests.Services;
 
 /// <summary>
 /// How often Depth Pro 2 moves tensors between the host and the CUDA device while it runs one warm image, three joint views and an unbuffered video,
-/// on the S weights with synthetic frames: device-to-host syncs (<c>GetD2hSyncCount</c>) and residency-cache misses (<c>GetGpuCacheStats</c>; each miss
-/// is a host-to-device upload). It asserts only that the regions run, and prints one <c>D2H_SYNCS</c> line per region
-/// so a change can be compared with a baseline run of the same test. Needs <c>HARTSY_DEPTHPRO2_WEIGHTS</c>, <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> and a
-/// CUDA device; otherwise it is reported as skipped (a skip is not a measurement).
+/// on the S weights with synthetic frames: device-to-host syncs (<c>GetD2hSyncCount</c>) and residency-cache misses
+/// (<c>GetGpuCacheStats</c>; each miss is a host-to-device upload). It asserts only that the regions run, and prints one <c>D2H_SYNCS</c> line
+/// per region so a change can be compared with a baseline run of the same test. Needs <c>HARTSY_DEPTHPRO2_WEIGHTS</c>,
+/// <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> and a CUDA device; otherwise it is reported as skipped (a skip is not a measurement).
 /// </summary>
 [Trait("Category", "GpuIntegration")]
 [Collection(DepthPro2GpuKnobsCollection.Name)]
@@ -35,7 +35,8 @@ public sealed class DepthPro2DeviceTrafficTests(ITestOutputHelper output)
         const int imageW = 1024, imageH = 576;
         byte[] image = Frame(imageW, imageH, 0);
         model.Predict(device, [image], imageW, imageH, null, estimator);
-        (long imageSyncs, long imageUploads, double imageMs) = CountedValue(device, () => model.Predict(device, [image], imageW, imageH, null, estimator));
+        (long imageSyncs, long imageUploads, double imageMs) =
+            CountedValue(device, () => model.Predict(device, [image], imageW, imageH, null, estimator));
 
         // Three joint 384x216 views.
         const int viewW = 384, viewH = 216;
@@ -72,7 +73,8 @@ public sealed class DepthPro2DeviceTrafficTests(ITestOutputHelper output)
         return (device.GetD2hSyncCount(), device.GetGpuCacheStats().misses - missesBefore, clock.Elapsed.TotalMilliseconds);
     }
 
-    private static (long Syncs, long Uploads, double Milliseconds) CountedValue<T>(CudaBackend device, Func<T> work) => Counted(device, () => { _ = work(); });
+    private static (long Syncs, long Uploads, double Milliseconds) CountedValue<T>(CudaBackend device, Func<T> work) =>
+        Counted(device, () => { _ = work(); });
 
     // A smooth gradient with a few sinusoids and mild noise, the same for a given seed.
     private static byte[] Frame(int width, int height, int seed)
@@ -83,7 +85,8 @@ public sealed class DepthPro2DeviceTrafficTests(ITestOutputHelper output)
             for (int x = 0; x < width; x++)
             {
                 double u = x / (double)width, v = y / (double)height;
-                double r = 0.4 + 0.4 * Math.Sin(6 * u + seed) * Math.Cos(4 * v), g = 0.5 - 0.3 * u + 0.2 * v, b = 0.3 + 0.5 * Math.Sin(5 * v + 0.5 * seed);
+                double r = 0.4 + 0.4 * Math.Sin(6 * u + seed) * Math.Cos(4 * v), g = 0.5 - 0.3 * u + 0.2 * v;
+                double b = 0.3 + 0.5 * Math.Sin(5 * v + 0.5 * seed);
                 int o = (y * width + x) * 3;
                 rgb[o] = Clamp(r + rng.NextDouble() * 0.04);
                 rgb[o + 1] = Clamp(g + rng.NextDouble() * 0.04);
