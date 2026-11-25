@@ -1,6 +1,7 @@
 using System.Text;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes.Image;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.Engine.Tests;
 
@@ -61,13 +62,25 @@ public sealed class Fibo2AttentionHintTests
     }
 
     [Fact]
-    public void Requested_RefusesABackendTheEngineCannotRun()
+    public void Requested_AcceptsAnUnknownBackend_AndTheWarningNamesIt()
     {
         using Tensor blob = Blob("{\"attention\": \"sage_fp8\"}");
         Dictionary<string, Tensor> weights = new(StringComparer.Ordinal) { [Hint] = blob };
 
-        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => Fibo2AttentionHints.Requested(weights));
-        Assert.Contains("sage_fp8", ex.Message);
+        IReadOnlyList<string> names = Fibo2AttentionHints.Requested(weights);
+
+        Assert.Equal(new[] { "sage_fp8" }, names);
+        Assert.Contains("sage_fp8", Fibo2AttentionHints.Describe("sage_fp8"));
+        Assert.Contains("does not implement", Fibo2AttentionHints.Describe("sage_fp8"));
+    }
+
+    [Fact]
+    public void Describe_NamesComfyKitchenInt8AsTheInt8AttentionDifference()
+    {
+        string text = Fibo2AttentionHints.Describe("comfy_kitchen_int8");
+
+        Assert.Contains("comfy_kitchen_int8", text);
+        Assert.Contains("float attention", text);
     }
 
     [Theory]
@@ -94,9 +107,9 @@ public sealed class Fibo2AttentionHintTests
     [Fact]
     public void IsHint_MatchesOnlyTheAttentionConfigKey()
     {
-        Assert.True(Fibo2AttentionHints.IsHint(Hint));
-        Assert.False(Fibo2AttentionHints.IsHint("layers.0.attention.qkv.comfy_quant"));
-        Assert.False(Fibo2AttentionHints.IsHint("layers.0.attention.qkv.weight"));
+        Assert.True(ComfyAttentionHint.IsHint(Hint));
+        Assert.False(ComfyAttentionHint.IsHint("layers.0.attention.qkv.comfy_quant"));
+        Assert.False(ComfyAttentionHint.IsHint("layers.0.attention.qkv.weight"));
     }
 
     [Fact]

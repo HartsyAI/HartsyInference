@@ -110,11 +110,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         {
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
             owned.Add(source);
+            // Hints are validated and their backends named here, before HalfPrecisionWeights drops them.
             foreach (string backend in Fibo2AttentionHints.Requested(source.Weights))
-            {
-                Logs.Warning($"[Fibo2Recipe] The checkpoint names {backend} attention (ComfyUI's int8 attention); the engine runs float "
-                    + "attention, so outputs differ from ComfyUI by that quantization error.");
-            }
+                Logs.Warning(Fibo2AttentionHints.Describe(backend));
             Dictionary<string, Tensor> dit = Fibo2WeightPreparation.HalfPrecisionWeights(source.Weights, owned);
             bool quantized = Fibo2WeightPreparation.HasPackedWeights(dit);
             // A packed int8 weight no executing device can read widens here, not inside the first GEMM.

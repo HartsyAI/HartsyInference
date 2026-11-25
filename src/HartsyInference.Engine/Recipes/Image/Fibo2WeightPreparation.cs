@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -25,8 +26,9 @@ internal static class Fibo2WeightPreparation
         foreach (KeyValuePair<string, Tensor> pair in source)
         {
             Tensor tensor = pair.Value;
-            if (Fibo2AttentionHints.IsHint(pair.Key))
-                continue; // A ComfyUI attention hint, validated by Fibo2AttentionHints.Requested; not a weight.
+            // A ComfyUI attention hint is not a weight. Construct validates every hint with Fibo2AttentionHints.Requested before this runs.
+            if (ComfyAttentionHint.IsHint(pair.Key))
+                continue;
             if (IsPackedInt8(tensor))
             {
                 weights[pair.Key] = tensor;
