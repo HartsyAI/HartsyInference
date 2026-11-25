@@ -33,6 +33,7 @@ public static class LoraFormatDetector
         bool hasAnima = false;
         bool hasKrea2 = false;
         bool hasIdol = false;
+        bool hasLongCat = false;
         bool hasKohyaGeneric = false;
 
         foreach (string key in descriptors.Keys)
@@ -61,6 +62,11 @@ public static class LoraFormatDetector
             if (HasLoraSuffix(key) && AnimaLoraMapper.IsDistinctive(key))
             {
                 hasAnima = true;
+            }
+            // LongCat's own state dict. Its prefix is unique, and its lora_up.blocks.N keys carry no suffix the generic arms know.
+            if (LongCatLoraMapper.IsDistinctive(key))
+            {
+                hasLongCat = true;
             }
             // Idol's block modules. Bare `blocks.N.attn.qkv.lora_down.weight` roots would otherwise reach the bare-checkpoint arm below,
             // whose PEFT-only suffix list does not even carry the kohya matrices these files use.
@@ -188,6 +194,7 @@ public static class LoraFormatDetector
             }
         }
 
+        if (hasLongCat) return LoraFormat.LongCat;
         if (hasFlux3) return LoraFormat.Flux3;
         if (hasMossImage) return LoraFormat.MossImage;
         if (hasFibo2) return LoraFormat.Fibo2;

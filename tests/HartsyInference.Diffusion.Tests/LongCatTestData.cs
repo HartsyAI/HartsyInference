@@ -34,7 +34,7 @@ internal static class LongCatTestData
     /// <summary>Writes <paramref name="weights"/> as the two-shard diffusers-named index the real checkpoints use, optionally
     /// leaving keys out or storing another dtype.</summary>
     public static void WriteCheckpoint(string directory, Dictionary<string, Tensor> weights, bool writeConfig = true, Func<string, bool>? skip = null,
-        DType? storage = null)
+        DType? storage = null, string indexFileName = LongCatCheckpoint.IndexFileName)
     {
         string[] keys = weights.Keys.Order(StringComparer.Ordinal).Where(key => skip?.Invoke(key) != true).ToArray();
         string[] shardNames = ["diffusion_pytorch_model-00001-of-00002.safetensors", "diffusion_pytorch_model-00002-of-00002.safetensors"];
@@ -45,13 +45,13 @@ internal static class LongCatTestData
             Dictionary<string, Tensor> part = [];
             foreach (string key in keys.Where((_, i) => i % 2 == shard))
             {
-                part[key] = storage is null ? weights[key] : weights[key].CastTo(storage.Value);
+                part[key] = storage is null || weights[key].DType == DType.I8 ? weights[key] : weights[key].CastTo(storage.Value);
                 map[key] = shardNames[shard];
                 total += part[key].DType.ComputeByteCount(part[key].ElementCount);
             }
             SafeTensorsWriter.Save(Path.Combine(directory, shardNames[shard]), part);
         }
-        File.WriteAllText(Path.Combine(directory, LongCatCheckpoint.IndexFileName),
+        File.WriteAllText(Path.Combine(directory, indexFileName),
             JsonSerializer.Serialize(new Dictionary<string, object>
             {
                 ["metadata"] = new Dictionary<string, long> { ["total_size"] = total }, ["weight_map"] = map,
@@ -63,6 +63,42 @@ internal static class LongCatTestData
                  "adaln_tembed_dim":64,"frequency_embedding_size":64,"patch_size":[1,2,2],"text_tokens_zero_pad":true}
                 """);
         }
+    }
+
+    /// <summary>The release's per-row INT8 layout of <paramref name="weights"/>: every rank-2 weight except <c>final_layer.linear</c> becomes
+    /// <c>.weight_int8</c> (round(w / scale)) plus <c>.weight_scale</c> (max|row| / 127); everything else is shared as is.</summary>
+    public static Dictionary<string, Tensor> QuantizePerRow(Dictionary<string, Tensor> weights)
+    {
+        Dictionary<string, Tensor> result = new(StringComparer.Ordinal);
+        foreach ((string key, Tensor weight) in weights)
+        {
+            if (weight.Shape.Rank != 2 || !key.EndsWith(".weight", StringComparison.Ordinal)
+                || key.StartsWith("final_layer.linear", StringComparison.Ordinal)
+                || key.EndsWith("norm.weight", StringComparison.Ordinal) || key.EndsWith("pre_crs_attn_norm.weight", StringComparison.Ordinal))
+            {
+                result[key] = weight;
+                continue;
+            }
+            long rows = weight.Shape[0], cols = weight.Shape[1];
+            Tensor quantized = new(weight.Shape, DType.I8);
+            Tensor scales = new(new TensorShape(rows), DType.F32);
+            ReadOnlySpan<float> w = weight.AsReadOnlySpan<float>();
+            Span<sbyte> q = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, sbyte>(quantized.AsSpan<byte>());
+            Span<float> s = scales.AsSpan<float>();
+            for (long r = 0; r < rows; r++)
+            {
+                float max = 0f;
+                for (long c = 0; c < cols; c++)
+                    max = MathF.Max(max, MathF.Abs(w[(int)(r * cols + c)]));
+                s[(int)r] = max / 127f;
+                for (long c = 0; c < cols; c++)
+                    q[(int)(r * cols + c)] = (sbyte)MathF.Round(w[(int)(r * cols + c)] / s[(int)r]);
+            }
+            string baseKey = key[..^".weight".Length];
+            result[baseKey + ".weight_int8"] = quantized;
+            result[baseKey + ".weight_scale"] = scales;
+        }
+        return result;
     }
 
     public static Tensor Random(TensorShape shape, int seed, float scale = 1f)
