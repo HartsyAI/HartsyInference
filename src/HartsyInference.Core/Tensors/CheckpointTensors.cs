@@ -12,8 +12,15 @@ public static class CheckpointTensors
     public static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string family, string key, params long[] shape)
     {
         ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(shape);
         if (!weights.TryGetValue(key, out Tensor? tensor))
             throw new KeyNotFoundException($"{family} checkpoint has no tensor '{key}'.");
+        return Check(tensor, family, key, shape);
+    }
+
+    private static Tensor Check(Tensor tensor, string family, string key, long[] shape)
+    {
         if (shape.Length > 0 && !HasShape(tensor, shape))
             throw new InvalidDataException($"{family} tensor '{key}' has shape {tensor.Shape}, expected [{string.Join(", ", shape)}].");
         return tensor;
@@ -28,7 +35,9 @@ public static class CheckpointTensors
     public static Tensor? OptionalF32(IReadOnlyDictionary<string, Tensor> weights, string family, string key, ICollection<Tensor> owned, params long[] shape)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        return weights.ContainsKey(key) ? RequireF32(weights, family, key, owned, shape) : null;
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(shape);
+        return weights.TryGetValue(key, out Tensor? tensor) ? Widen(Check(tensor, family, key, shape), family, key, owned) : null;
     }
 
     private static Tensor Widen(Tensor tensor, string family, string key, ICollection<Tensor> owned)
