@@ -11,13 +11,13 @@ public sealed class AukSingleBlock(AukConfig config)
     private readonly AukSwiGluFfn _ff = new();
     private Tensor? _modW, _modB;
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, ICollection<Tensor> owned)
     {
         int dim = config.Dim;
-        _modW = AukOps.Take(weights, $"{prefix}.attn_norm.linear.weight", 6 * dim, dim);
-        _modB = AukOps.Take(weights, $"{prefix}.attn_norm.linear.bias", 6 * dim);
-        _attn.Load(weights, $"{prefix}.attn", "to_qkv", "q_norm", "k_norm", "to_out.0", dim, config.Heads);
-        _ff.Load(weights, $"{prefix}.ff", dim, config.FfInner);
+        _modW = AukOps.Take(weights, $"{prefix}.attn_norm.linear.weight", owned, 6 * dim, dim);
+        _modB = AukOps.Take(weights, $"{prefix}.attn_norm.linear.bias", owned, 6 * dim);
+        _attn.Load(weights, $"{prefix}.attn", "to_qkv", "q_norm", "k_norm", "to_out.0", dim, config.Heads, owned);
+        _ff.Load(weights, $"{prefix}.ff", dim, config.FfInner, owned);
     }
 
     /// <summary>Returns a new <c>[1, n, dim]</c> tensor; <paramref name="x"/> stays with the caller and RoPE positions run 0..n-1 of the tables.</summary>
