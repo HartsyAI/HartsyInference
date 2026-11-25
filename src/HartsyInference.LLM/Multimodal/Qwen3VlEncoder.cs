@@ -136,6 +136,18 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
     private Tensor W(string key) => _w[key];
     private bool Has(string key) => _w.ContainsKey(key);
 
+    /// <summary>The merged token grid of a preprocessed image <c>[1, 3, H, W]</c>, read from its real height and width (the same
+    /// <c>H / (patch · merge)</c> by <c>W / (patch · merge)</c> that <see cref="Encode"/> emits), for the M-RoPE positions of its placeholder run.
+    /// Refuses a size that is not a whole number of merged patches rather than rounding it.</summary>
+    public static MRopeImageGrid MergedGrid(Tensor pixelValues, int patchSize, int merge)
+    {
+        int H = (int)pixelValues.Shape[2], Wd = (int)pixelValues.Shape[3];
+        int block = patchSize * merge;
+        if (block <= 0 || H <= 0 || Wd <= 0 || H % block != 0 || Wd % block != 0)
+            throw new ArgumentException($"Image {H}x{Wd} is not a whole number of {block}-pixel merged patches.", nameof(pixelValues));
+        return new MRopeImageGrid(1, H / block, Wd / block);
+    }
+
     /// <summary>Encodes a preprocessed image <c>[1, 3, H, W]</c> into <c>[1, tokens, textHidden]</c>.</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {

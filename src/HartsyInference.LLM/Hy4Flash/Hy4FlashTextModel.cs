@@ -67,7 +67,7 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
         Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(directory, "config.json"));
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), chatPath = Path.Combine(directory, "chat_template.jinja");
         (string? bosLiteral, string? eosLiteral) = HfChatAssets.SpecialTokenLiterals(directory);
-        List<int> stopIds = StopIds(directory, config);
+        List<int> stopIds = HfStopIds.Read(directory, config.EosTokenId);
         ILlmTokenizer tokenizer;
         IChatTemplate template;
         try
@@ -111,33 +111,4 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
     // The bytes of every .safetensors file the directory holds (the shard index is not read; the sizes are the files' own).
     private static long WeightBytes(string directory) =>
         Directory.GetFiles(directory, "*.safetensors").Sum(static f => new FileInfo(f).Length);
-
-    /// <summary>The end-of-sequence ids from <c>config.json</c> and <c>generation_config.json</c> (an int or a list), which end generation alongside the end token.</summary>
-    private static List<int> StopIds(string directory, Hy4FlashConfig config)
-    {
-        List<int> ids = [];
-        if (config.EosTokenId is { } eos) ids.Add(eos);
-        string path = Path.Combine(directory, "generation_config.json");
-        if (!File.Exists(path)) return ids;
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
-            if (!document.RootElement.TryGetProperty("eos_token_id", out JsonElement value)) return ids;
-            if (value.ValueKind == JsonValueKind.Number) ids.Add(StopId(value, path));
-            else if (value.ValueKind == JsonValueKind.Array)
-                foreach (JsonElement item in value.EnumerateArray())
-                    if (item.ValueKind == JsonValueKind.Number) ids.Add(StopId(item, path));
-        }
-        catch (JsonException ex)
-        {
-            throw new HartsyInferenceException($"'{path}' is not valid JSON: {ex.Message}", ex);
-        }
-        return [.. ids.Distinct()];
-    }
-
-    private static int StopId(JsonElement value, string path)
-    {
-        if (value.TryGetInt32(out int id)) return id;
-        throw new HartsyInferenceException($"'{path}' names eos_token_id {value.GetRawText()}, which is not a 32-bit token id.");
-    }
 }
