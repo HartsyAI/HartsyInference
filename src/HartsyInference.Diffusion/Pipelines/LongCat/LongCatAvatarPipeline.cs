@@ -110,6 +110,86 @@ public sealed class LongCatAvatarPipeline
         return new LongCatAvatarResult(latents, sigmasWithZero, timesteps);
     }
 
+    /// <summary>The long-video chain in latent space (the reference's segment loop in <c>run_demo_avatar_*</c>). Segment 0 is
+    /// <paramref name="firstLatents"/> (its frames, no reference). Each later segment conditions on the reference latent (the first frame of
+    /// segment 0, fixed) and the last <paramref name="contextFrames"/> frames of the previous segment, runs <c>generate_avc</c> with the reference
+    /// index, drops the reference, and contributes its frames after the context. The reference re-encodes decoded pixel frames for the context;
+    /// that round trip is the VAE seam and is not in this chain.</summary>
+    /// <param name="template">The per-segment run: frames (including the reference frame's slot is NOT counted: see below), sizes, prompts, schedule
+    /// and guidance. Mode, conditioning, audio and noise are set per segment.</param>
+    /// <param name="contextFrames">Latent frames of context carried between segments (the reference's 13 pixel frames are 4 latents).</param>
+    /// <param name="firstLatents">Segment 0's latents, <c>[channels, segmentFrames, hw]</c> with <c>segmentFrames = template.Frames − 1</c>.</param>
+    /// <param name="audioTokens">Each later segment's audio tokens, <c>[template.Frames·contextTokens, audioOutputDim]</c>.</param>
+    /// <param name="noises">Each later segment's noise, <c>[channels, template.Frames, hw]</c>.</param>
+    /// <returns>Segment 0 whole, then each later segment's new frames (context dropped), each <c>[channels, frames, hw]</c>.</returns>
+    public IReadOnlyList<float[]> Chain(LongCatAvatarRun template, int contextFrames, float[] firstLatents, IReadOnlyList<float[]> audioTokens,
+        IReadOnlyList<float[]> noises)
+    {
+        ArgumentNullException.ThrowIfNull(template);
+        ArgumentNullException.ThrowIfNull(audioTokens);
+        ArgumentNullException.ThrowIfNull(noises);
+        if (audioTokens.Count != noises.Count)
+            throw new ArgumentException("Each later segment needs its audio tokens and its noise.", nameof(noises));
+        int channels = template.Channels, hw = template.Height * template.Width, frames = template.Frames;
+        int segmentFrames = frames - 1, noisy = segmentFrames - contextFrames;
+        if (contextFrames < 1 || noisy < 1)
+            throw new ArgumentOutOfRangeException(nameof(contextFrames), contextFrames, "The context must be shorter than a segment.");
+        if (firstLatents.Length != channels * segmentFrames * hw)
+            throw new ArgumentException($"The first segment holds {firstLatents.Length} values; expected {channels * segmentFrames * hw}.", nameof(firstLatents));
+
+        // The reference latent is the first frame of segment 0 and stays fixed; the context is the last frames of the previous segment.
+        float[] reference = FrameOf(firstLatents, channels, segmentFrames, hw, 0);
+        float[] context = LastFrames(firstLatents, channels, segmentFrames, hw, contextFrames);
+        List<float[]> outputs = [firstLatents];
+        for (int s = 0; s < noises.Count; s++)
+        {
+            LongCatAvatarRun run = template with
+            {
+                Mode = LongCatAvatarMode.Avc,
+                NumCondLatents = contextFrames + 1,
+                CondLatents = Concat(reference, context, channels, hw, contextFrames),
+                AudioTokens = audioTokens[s],
+                Noise = noises[s],
+            };
+            float[] full = Denoise(run).Latents;
+            // Drop the reference (frame 0 of the run): what remains is the context followed by this segment's frames.
+            float[] withoutReference = RemoveFirstFrame(full, channels, frames, hw);
+            outputs.Add(LastFrames(withoutReference, channels, segmentFrames, hw, noisy));
+            context = LastFrames(withoutReference, channels, segmentFrames, hw, contextFrames);
+        }
+        return outputs;
+    }
+
+    private static float[] FrameOf(float[] latent, int channels, int frames, int hw, int index)
+    {
+        float[] result = new float[channels * hw];
+        for (int c = 0; c < channels; c++)
+            latent.AsSpan((c * frames + index) * hw, hw).CopyTo(result.AsSpan(c * hw, hw));
+        return result;
+    }
+
+    /// <summary>[reference, context] per channel, as one run's conditioning: <c>[channels, 1 + contextFrames, hw]</c>.</summary>
+    private static float[] Concat(float[] reference, float[] context, int channels, int hw, int contextFrames)
+    {
+        float[] result = new float[channels * (1 + contextFrames) * hw];
+        for (int c = 0; c < channels; c++)
+        {
+            int at = c * (1 + contextFrames) * hw;
+            reference.AsSpan(c * hw, hw).CopyTo(result.AsSpan(at, hw));
+            context.AsSpan(c * contextFrames * hw, contextFrames * hw).CopyTo(result.AsSpan(at + hw, contextFrames * hw));
+        }
+        return result;
+    }
+
+    /// <summary>A <c>[channels, frames, hw]</c> latent without its first frame: <c>[channels, frames − 1, hw]</c>.</summary>
+    private static float[] RemoveFirstFrame(float[] latent, int channels, int frames, int hw)
+    {
+        float[] result = new float[channels * (frames - 1) * hw];
+        for (int c = 0; c < channels; c++)
+            latent.AsSpan((c * frames + 1) * hw, (frames - 1) * hw).CopyTo(result.AsSpan(c * (frames - 1) * hw, (frames - 1) * hw));
+        return result;
+    }
+
     /// <summary>The velocity over the noisy frames with the cache: <c>[channels, noisy, hw]</c>.</summary>
     private float[] Velocity(LongCatAvatarRun run, LongCatKvCache cache, float[] latents, int channels, int frames, int hw, int cond,
         LongCatConditioning conditioning, float t, bool guided)

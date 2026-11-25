@@ -84,6 +84,57 @@ public sealed class LongCatAvatarPipelineParityTests
         }
     }
 
+    /// <summary>A two-segment chain on the tiny DiT: segment 0 is the first latents, segment 1 adds the noisy frames after the context, and every
+    /// value is finite. The reference comparison of the chain is not in this test (the chain's reference loop is not dumped yet).</summary>
+    [LongCatAvatarPipelineFact]
+    public void TheChainRunsTwoSegmentsAndKeepsEveryFrameFinite()
+    {
+        string dir = Environment.GetEnvironmentVariable(EnvName)!;
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "meta.json")));
+        JsonElement root = document.RootElement;
+        LongCatConfig config = new()
+        {
+            InChannels = 4, OutChannels = 4, HiddenSize = 64, Depth = 2, NumHeads = 4, CaptionChannels = 32, MlpRatio = 4,
+            AdalnTembedDim = 32, FrequencyEmbeddingSize = 32, PatchSize = (1, 2, 2), TextTokensZeroPad = true,
+            AudioOutputDim = 16, AudioWindow = 5, AudioBlock = 3, AudioChannel = 6, AudioIntermediateDim = 16, AudioContextTokens = 4,
+            AudioVaeScale = 4,
+        };
+        Dictionary<string, Tensor> weights = [];
+        try
+        {
+            foreach (JsonProperty tensor in root.GetProperty("tensors").EnumerateObject())
+                if (tensor.Name.StartsWith("dit.", StringComparison.Ordinal))
+                    weights[tensor.Name["dit.".Length..]] = LongCatReferenceDump.Load(dir, document, tensor.Name);
+            using LongCatTransformer transformer = new(config);
+            transformer.LoadWeights(weights);
+            using CpuBackend backend = new();
+            LongCatAvatarPipeline runner = new(backend, transformer);
+
+            int channels = config.InChannels, height = 4, width = 4, hw = height * width, segmentFrames = 4, ctx = config.AudioContextTokens;
+            int templateFrames = segmentFrames + 1, textLen = 6;
+            float[] encoder = LongCatReferenceDump.Read(dir, document, "inputs.encoder");
+            LongCatPrompt prompt = new(encoder, textLen, textLen);
+            float[] noise = Enumerable.Range(0, channels * templateFrames * hw).Select(i => 0.01f * (i % 17) - 0.05f).ToArray();
+            float[] firstLatents = Enumerable.Range(0, channels * segmentFrames * hw).Select(i => 0.02f * (i % 13) - 0.1f).ToArray();
+            float[] audioTokens = Enumerable.Range(0, templateFrames * ctx * config.AudioOutputDim).Select(i => 0.005f * (i % 11) - 0.02f).ToArray();
+            float[] unconditional = new float[audioTokens.Length];
+
+            LongCatAvatarRun template = new(channels, templateFrames, height, width, noise, prompt, prompt, audioTokens, unconditional, 2,
+                LongCatAvatarSchedule.Kind.Linear, 7f, 1f, 1f, LongCatAvatarMode.Avc, NumCondLatents: 0, CondLatents: null, RefImgIndex: 10);
+            IReadOnlyList<float[]> segments = runner.Chain(template, 2, firstLatents, [audioTokens], [noise]);
+
+            Assert.Equal(2, segments.Count);
+            Assert.Equal(firstLatents, segments[0]);
+            Assert.Equal(channels * (segmentFrames - 2) * hw, segments[1].Length);
+            Assert.All(segments[1], static v => Assert.True(float.IsFinite(v)));
+        }
+        finally
+        {
+            foreach (Tensor tensor in weights.Values)
+                tensor.Dispose();
+        }
+    }
+
     /// <summary>The first <paramref name="count"/> frames of a flat <c>[1, C, F, H, W]</c> latent, as a flat <c>[C, count, hw]</c> array.</summary>
     private static float[] Frames(float[] flat, int channels, int frames, int hw, int from, int count)
     {
