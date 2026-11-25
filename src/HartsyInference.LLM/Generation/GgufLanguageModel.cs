@@ -51,7 +51,7 @@ public sealed class GgufLanguageModel : IDisposable
         => new(null, owner, config, transformer, tokenizer, template);
 
     /// <summary>Architectures that are NOT <see cref="GenericTransformer"/> decoders — dense/MoE-transformer config inference (head_count etc.) is meaningless and throws for these (e.g. mamba2's <c>attention.head_count</c> is 0, so head_dim = hidden/heads divides by zero); route them through <see cref="Ssm.SsmLanguageModel"/> instead.</summary>
-    internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7", "qwen35", "qwen35moe"];
+    internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7", "qwen35", "qwen35moe", "sensenova_loop"];
 
     internal static ILlmTokenizer BuildTokenizer(GgufMetadata meta)
     {

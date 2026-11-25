@@ -5,6 +5,10 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.446
 
+- Added Bria RMBG 3.0 background removal (`rmbg3`, `rmbg3-int8`; CC BY-NC 4.0): `hartsy vision removebg` and matting draw the alpha matte with the Fibo 2.0 editor. `--remove-background-model rmbg3` also uses it as the cutout step of an image generation (RMBG-1.4 stays the default). Not yet run on real weights.
+
+## alpha.447
+
 - Added Sage S2.1 Flash (320B scientific multimodal MoE, `internlm/Sage-S2.1-Flash`) to the Text path as a host reference model: text chat with its own chat template on one device, a catalog row for the BF16 and FP8 checkpoints, and the vision tower and scientific-data projectors as engine pieces; checked against transformers on a tiny random model only, no real weights have run.
 
 ## alpha.445

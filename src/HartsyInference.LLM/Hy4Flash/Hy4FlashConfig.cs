@@ -222,6 +222,18 @@ public sealed record Hy4FlashConfig
     /// <exception cref="HartsyInferenceException">The document is not a <c>hy_v4_flash</c> config, a required field is missing, or the shape is inconsistent.</exception>
     public static Hy4FlashConfig Parse(string json)
     {
+        try
+        {
+            return ParseCore(json);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException or KeyNotFoundException or JsonException or ArgumentException)
+        {
+            throw new HartsyInferenceException($"Hy4 Flash config: {ex.Message}", ex);
+        }
+    }
+
+    private static Hy4FlashConfig ParseCore(string json)
+    {
         using JsonDocument document = JsonDocument.Parse(json);
         JsonElement root = document.RootElement;
         HfConfigFields top = new(root, "config", "Hy4 Flash");
@@ -299,7 +311,7 @@ public sealed record Hy4FlashConfig
             EngramFp8Embedding = t.Bool("engram_fp8_embedding", true),
             EngramLookupTableSize = t.Int("engram_lookup_table_size", 120818),
             EngramHeadVocabSizes = ReadEngramVocab(text),
-            RmsNormEps = t.Double("rms_norm_eps", 1e-6),
+            RmsNormEps = t.Double("rms_norm_eps", 1e-5),
             MaxPositionEmbeddings = t.Int("max_position_embeddings"),
             TieWordEmbeddings = t.Bool("tie_word_embeddings", false),
             BosTokenId = OptionalInt(text, "bos_token_id"),
@@ -344,6 +356,14 @@ public sealed record Hy4FlashConfig
         if (LayerKinds.Count != NumHiddenLayers || SparseFfn.Count != NumHiddenLayers)
             throw Bad("layer_types and mlp_layer_types must each list num_hidden_layers entries.");
         if (HcMult < 1) throw Bad($"hc_mult must be positive, got {HcMult}.");
+        if (NRoutedExperts < 1 || NumExpertsPerTok < 1 || NumExpertsPerTok > NRoutedExperts)
+            throw Bad($"num_experts_per_tok ({NumExpertsPerTok}) must be between 1 and n_routed_experts ({NRoutedExperts}).");
+        if (NGroup < 1 || TopkGroup < 1 || TopkGroup > NGroup || NRoutedExperts % NGroup != 0)
+            throw Bad($"n_group {NGroup} and topk_group {TopkGroup} must divide the {NRoutedExperts} experts with topk_group at most n_group.");
+        if (QkRopeHeadDim % 2 != 0) throw Bad($"qk_rope_head_dim ({QkRopeHeadDim}) must be even.");
+        if (Vision.MaxImageSize % Vision.PatchSize != 0)
+            throw Bad($"vision max_image_size ({Vision.MaxImageSize}) must be a multiple of the patch size ({Vision.PatchSize}).");
+        if (TieWordEmbeddings) throw Bad("tied word embeddings are not read by this reference (the LM head is a separate tensor).");
         if (SlidingQkNopeHeadDim != QkNopeHeadDim || SlidingQkRopeHeadDim != QkRopeHeadDim || SlidingVHeadDim != VHeadDim)
             throw Bad("sliding layers with head widths different from the indexed layers' are not supported (only the head count differs in every shipped file).");
         if (EngramLayerIds.Count > 0)
@@ -355,7 +375,7 @@ public sealed record Hy4FlashConfig
             {
                 if (id < 1 || id > NumHiddenLayers) throw Bad($"engram_layer_ids entry {id} is outside 1..{NumHiddenLayers}.");
                 if (!EngramHeadVocabSizes.TryGetValue(id, out long[][]? sizes) || sizes.Length != orders
-                    || sizes.Any(o => o.Length != EngramHeadsPerNgram))
+                    || sizes.Any(o => o.Length != EngramHeadsPerNgram || o.Any(m => m <= 0)))
                     throw Bad($"engram_layer_head_vocab_sizes['{id}'] must hold {orders} lists of {EngramHeadsPerNgram} sizes.");
             }
             if (EngramEmbedPerNgram % EngramHeadsPerNgram != 0) throw Bad("engram_n_embed_per_ngram must divide by the head count.");
@@ -439,7 +459,7 @@ public sealed record Hy4FlashConfig
             }
         }
         int[] section = indexedSection ?? slidingSection ?? [12, 10, 10];
-        if ((indexedSection ?? section).AsSpan().SequenceEqual(slidingSection ?? section) is false)
+        if (!(indexedSection ?? section).AsSpan().SequenceEqual(slidingSection ?? section))
             throw Bad("the indexed and sliding layers carry different mrope_section values; one shared section is supported.");
         return (indexed, sliding, section);
     }

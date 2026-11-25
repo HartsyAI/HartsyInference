@@ -15,7 +15,7 @@ public sealed class PassthroughKeyMapper : IGgufKeyMapper
     // v.blk.N.*/v.patch_embd/mm.* names that every IVlmImageEncoder (Siglip/Qwen2.5-VL/Qwen3-VL/…) reads directly.
     // Without this, the heuristic misfires — e.g. Qwen3-VL's fused v.blk.N.attn_qkv makes PhiKeyMapper claim the file
     // and drop the vision tensors (mmproj then fails to load, model silently degrades to text-only).
-    public IReadOnlyCollection<string> Architectures => ["passthrough", "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "neo-bert", "mamba", "mamba2", "rwkv6", "rwkv7", "t5", "t5encoder", "qwen35", "qwen35moe", "clip"];
+    public IReadOnlyCollection<string> Architectures => ["passthrough", "bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "neo-bert", "mamba", "mamba2", "rwkv6", "rwkv7", "t5", "t5encoder", "qwen35", "qwen35moe", "sensenova_loop", "clip"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames) => true;
     public string? MapKey(string ggufKey) => ggufKey;
