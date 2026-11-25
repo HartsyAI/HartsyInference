@@ -1,47 +1,46 @@
-using System.Text.Json;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>ComfyUI's per-layer attention hints in the Fibo 2.0 Comfy-Org builds (<c>layers.N.attention.comfy_attention.config</c>):
-/// a 35-byte U8 JSON blob, <c>{"attention": "comfy_kitchen_int8"}</c>, on every block. It names the attention backend ComfyUI runs
-/// those layers with and is not a weight. The engine has no int8 attention, so it runs float attention; the hint is accepted, logged
-/// as a deviation, and dropped from the weights. A hint naming any other backend is refused, since the engine cannot run it.</summary>
+/// <summary>The ComfyUI attention hints in the Fibo 2.0 Comfy-Org int8 builds (see <see cref="ComfyAttentionHint"/>). The engine has
+/// no int8 attention and runs float attention for every backend, so a hint is never honoured: a malformed hint is refused, and a
+/// hint naming a backend is accepted with a warning that outputs differ from ComfyUI by that backend's own quantization.</summary>
 internal static class Fibo2AttentionHints
 {
-    /// <summary>The key suffix every hint carries.</summary>
-    public const string Suffix = ".comfy_attention.config";
-
-    /// <summary>ComfyUI's int8 attention backend, the only one the Fibo 2.0 builds name.</summary>
+    /// <summary>ComfyUI's int8 attention backend, the one the Fibo 2.0 and RMBG 3.0 int8 builds name.</summary>
     public const string ComfyKitchenInt8 = "comfy_kitchen_int8";
 
-    /// <summary>Whether a checkpoint key is an attention hint rather than a tensor.</summary>
-    public static bool IsHint(string key) => key.EndsWith(Suffix, StringComparison.Ordinal);
-
-    /// <summary>Reads every hint in <paramref name="weights"/> and returns the distinct backends they name, after checking each one.</summary>
-    /// <exception cref="InvalidDataException">A hint is not a U8 blob holding <c>{"attention": "&lt;name&gt;"}</c>.</exception>
-    /// <exception cref="NotSupportedException">A hint names a backend the engine cannot run.</exception>
+    /// <summary>Validates every hint in <paramref name="weights"/> and returns the distinct backend names they name, in file order.
+    /// Hints are not weights; the caller drops them.</summary>
+    /// <exception cref="InvalidDataException">A hint is not a U8 blob holding <c>{"attention": "&lt;backend&gt;"}</c>.</exception>
     public static IReadOnlyList<string> Requested(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
         List<string> names = [];
         foreach (KeyValuePair<string, Tensor> pair in weights)
         {
-            if (!IsHint(pair.Key))
+            if (!ComfyAttentionHint.IsHint(pair.Key))
                 continue;
-            string name = Read(pair.Value, pair.Key);
-            if (name != ComfyKitchenInt8)
-            {
-                throw new NotSupportedException($"Fibo 2.0 tensor '{pair.Key}' names attention backend '{name}'. The engine runs only "
-                    + $"'{ComfyKitchenInt8}' hints (as float attention); it cannot run '{name}'.");
-            }
-            if (!names.Contains(name))
-                names.Add(name);
+            string backend = Read(pair.Value, pair.Key);
+            if (!names.Contains(backend))
+                names.Add(backend);
         }
         return names;
     }
 
-    /// <summary>Decodes one hint blob to its backend name. Trailing NUL padding is tolerated, as in the other ComfyUI JSON blobs.</summary>
+    /// <summary>The warning logged for a backend the checkpoint names. The engine runs float attention for all of them.</summary>
+    public static string Describe(string backend)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(backend);
+        return backend == ComfyKitchenInt8
+            ? $"[Fibo2Recipe] The checkpoint names {ComfyKitchenInt8} attention (ComfyUI's int8 attention); the engine runs float "
+                + "attention, so outputs differ from ComfyUI by that quantization error."
+            : $"[Fibo2Recipe] The checkpoint names attention backend '{backend}', which the engine does not implement; it runs float "
+                + "attention, so outputs may differ from ComfyUI.";
+    }
+
+    /// <summary>Decodes one hint blob to its backend name.</summary>
     internal static string Read(Tensor blob, string key)
     {
         ArgumentNullException.ThrowIfNull(blob);
@@ -49,25 +48,8 @@ internal static class Fibo2AttentionHints
         {
             throw new InvalidDataException($"Fibo 2.0 tensor '{key}' must be a one-dimensional U8 blob of 1 to 4096 bytes; got {blob.DType} {blob.Shape}.");
         }
-        ReadOnlySpan<byte> bytes = blob.AsReadOnlySpan<byte>();
-        int end = bytes.Length;
-        while (end > 0 && bytes[end - 1] == 0)
-            end--;
-        try
-        {
-            using JsonDocument json = JsonDocument.Parse(bytes[..end].ToArray());
-            if (json.RootElement.ValueKind == JsonValueKind.Object
-                && json.RootElement.TryGetProperty("attention", out JsonElement value)
-                && value.ValueKind == JsonValueKind.String
-                && value.GetString() is { Length: > 0 } name)
-            {
-                return name;
-            }
-        }
-        catch (JsonException)
-        {
-            // Reported below with the key.
-        }
-        throw new InvalidDataException($"Fibo 2.0 tensor '{key}' is not an attention hint of the form {{\"attention\": \"<backend>\"}}.");
+        string? backend = ComfyAttentionHint.TryParseBackend(blob.AsReadOnlySpan<byte>());
+        return backend ?? throw new InvalidDataException(
+            $"Fibo 2.0 tensor '{key}' is not an attention hint of the form {{\"attention\": \"<backend>\"}}.");
     }
 }

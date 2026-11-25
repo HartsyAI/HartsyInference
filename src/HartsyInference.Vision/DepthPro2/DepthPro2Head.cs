@@ -56,6 +56,8 @@ public sealed class DepthPro2Head
     /// </summary>
     public Tensor Forward(IBackend backend, IReadOnlyList<Tensor> taps, int prefixTokens, int gridH, int gridW, Action<string, Tensor>? observe = null)
     {
+        ArgumentNullException.ThrowIfNull(backend);
+        using ExactGemmScope exact = new(backend);
         Tensor[] levels = Reassemble(backend, taps, prefixTokens, gridH, gridW);
         try
         {
@@ -73,6 +75,7 @@ public sealed class DepthPro2Head
     public Tensor[] Reassemble(IBackend backend, IReadOnlyList<Tensor> taps, int prefixTokens, int gridH, int gridW)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        using ExactGemmScope exact = new(backend);
         ArgumentNullException.ThrowIfNull(taps);
         if (taps.Count != 4) throw new ArgumentException($"The head takes four taps; got {taps.Count}.", nameof(taps));
         int patches = gridH * gridW;
@@ -125,6 +128,7 @@ public sealed class DepthPro2Head
     public Tensor Decode(IBackend backend, IReadOnlyList<Tensor> levels, Action<string, Tensor>? observe = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        using ExactGemmScope exact = new(backend);
         ArgumentNullException.ThrowIfNull(levels);
         if (levels.Count != 4) throw new ArgumentException($"The decoder takes four levels; got {levels.Count}.", nameof(levels));
         Tensor? features = null;
@@ -153,6 +157,7 @@ public sealed class DepthPro2Head
     public Tensor InverseDepth(IBackend backend, Tensor decoded)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        using ExactGemmScope exact = new(backend);
         ArgumentNullException.ThrowIfNull(decoded);
         int half = _decoder / 2;
         using Tensor first = Conv(backend, decoded, W("head.0.weight", half, _decoder, 3, 3), W("head.0.bias", half), 1, 1);

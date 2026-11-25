@@ -53,6 +53,7 @@ public sealed class DepthPro2FocalEstimator
         (int fullH, int fullW) = InputSize(height, width);
         (int cropH, int cropW, int offH, int offW) = CenterCrop(fullH, fullW);
 
+        using ExactGemmScope exact = new(backend);
         using Tensor input = ResizeAndCrop(pixels, fullH, fullW, cropH, cropW, offH, offW);
         observe?.Invoke("fov_input", input);
         int patch = _trunkPreset.PatchSize, gridH = cropH / patch, gridW = cropW / patch;
@@ -129,6 +130,7 @@ public sealed class DepthPro2FocalEstimator
     /// <summary>The four tapped trunk outputs concatenated on channels: <c>[1, 5 + patches, 4·384]</c>.</summary>
     public Tensor EncodeTaps(IBackend backend, Tensor input)
     {
+        using ExactGemmScope exact = new(backend);
         Tensor[] taps = _trunk.EncodeIntermediates(backend, input, TappedBlocks, PrefixResetBlocks);
         try
         {

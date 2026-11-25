@@ -80,6 +80,7 @@ public sealed class DepthPro2FovHead
     public Tensor Forward(IBackend backend, Tensor taps, int gridH, int gridW, Action<string, Tensor>? observe = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        using ExactGemmScope exact = new(backend);
         ArgumentNullException.ThrowIfNull(taps);
         int tokens = _numPrefix + gridH * gridW, width = _taps * _embed;
         if (taps.DType != DType.F32 || taps.Shape.Rank != 3 || taps.Shape[0] != 1 || taps.Shape[1] != tokens || taps.Shape[2] != width)
