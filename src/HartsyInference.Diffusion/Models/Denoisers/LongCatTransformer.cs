@@ -126,7 +126,9 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     }
 
     /// <inheritdoc/>
-    public IEnumerable<Tensor> EnumerateSharedWeights()
+    public IEnumerable<Tensor> EnumerateSharedWeights() => LowRankAdjunct.ExpandWeights(OwnSharedWeights());
+
+    private IEnumerable<Tensor> OwnSharedWeights()
     {
         foreach (Tensor? t in new[] { _patchW2d, _patchBias, _time1W, _time1B, _time2W, _time2B, _text1W, _text1B, _text2W, _text2B,
             _finalAdaW, _finalAdaB, _finalW, _finalB })

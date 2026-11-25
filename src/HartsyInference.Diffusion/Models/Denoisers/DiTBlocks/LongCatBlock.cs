@@ -79,7 +79,10 @@ public sealed partial class LongCatBlock : IStreamingBlock
     }
 
     /// <inheritdoc/>
-    public IEnumerable<Tensor> EnumerateWeights()
+    public IEnumerable<Tensor> EnumerateWeights() => LowRankAdjunct.ExpandWeights(OwnWeights());
+
+    /// <summary>The block's own weights, without the adapter operands their LoRA terms carry.</summary>
+    private IEnumerable<Tensor> OwnWeights()
     {
         foreach (Tensor? t in new[] { _adaWeight, _adaBias, _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias, _crossNormWeight, _crossNormBias,
             _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias, _w1, _w2, _w3 })
