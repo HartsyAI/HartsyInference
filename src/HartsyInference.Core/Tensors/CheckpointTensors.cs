@@ -1,7 +1,8 @@
 namespace HartsyInference.Core.Tensors;
 
 /// <summary>Reads a model's tensors out of a checkpoint dictionary by name and shape. A wrong or truncated checkpoint fails here, naming the
-/// family and the key, instead of in the first op that reads it.</summary>
+/// family and the key, instead of in the first op that reads it. A missing tensor is a <see cref="KeyNotFoundException"/> and a mis-shaped one an
+/// <see cref="InvalidDataException"/>: a fault of the installed checkpoint, not of the request, so the API answers 500.</summary>
 /// <remarks>Every method borrows from the dictionary except where a widened copy is needed; that copy joins the caller's owned list, so exactly
 /// the tensors a module allocated are the ones it disposes.</remarks>
 public static class CheckpointTensors
