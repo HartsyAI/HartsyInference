@@ -57,6 +57,28 @@ public sealed class LongCatVideoDeviceLoopTests : IDisposable
         Assert.True(worst <= 1e-5, $"device loop drifted from the host loop by {worst}");
     }
 
+    [Fact]
+    public void AContinuationWhereEveryFrameIsConditioningReturnsTheConditioningFrames()
+    {
+        // Nothing is stepped, so the output is the conditioning latent and every step is still reported.
+        Random rng = new(17);
+        float[] noise = RandomArray(rng, _config.InChannels * Frames * Hw);
+        float[] condLatents = RandomArray(rng, _config.InChannels * Frames * Hw);
+        LongCatPrompt positive = new(RandomArray(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt negative = new(RandomArray(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+
+        using LongCatTransformer transformer = new(_config);
+        transformer.LoadWeights(_weights);
+        LongCatRun run = new(_config.InChannels, Frames, Height, Width, noise, positive, negative, Steps, Distill: false, Shift: 3f,
+            Guidance: 4f, Mode: LongCatConditioningMode.Continuation, NumCondLatents: Frames, CondLatents: condLatents, RecordTrace: true);
+
+        LongCatResult result = new LongCatVideoPipeline(_backend, transformer).Denoise(run);
+
+        Assert.Equal(condLatents, result.Latents);
+        Assert.Equal(Steps, result.Steps.Count);
+        Assert.All(result.Steps, step => Assert.Empty(step.SampleOut));
+    }
+
     /// <summary>The host loop the device version replaces: the same forwards, the CFG-zero combine and the Euler step on host arrays.</summary>
     private float[] HostReference(LongCatTransformer transformer, LongCatRun run, int cond)
     {
