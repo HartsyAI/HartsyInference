@@ -57,6 +57,11 @@ internal static class GatedFfn
     public static Tensor SwiGlu(IBackend backend, ActivationKind activation, Tensor gate, Tensor up, float clampLimit, float alpha,
         float situBeta, float situLinearBeta)
     {
+        if (activation == ActivationKind.SwigluClamped)
+        {
+            if (clampLimit <= 0f) throw new InvalidOperationException("The clamped SwiGLU needs a positive limit.");
+            activation = ActivationKind.Silu;
+        }
         if (activation == ActivationKind.SwigluOai) return SwigluOai(backend, gate, up, alpha, clampLimit);
         if (activation == ActivationKind.Situ) return SituGlu(backend, gate, up, situBeta, situLinearBeta);
         Tensor gateAct = new(gate.Shape, DType.F32);

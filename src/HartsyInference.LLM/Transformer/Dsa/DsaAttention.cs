@@ -22,7 +22,7 @@ public sealed class DsaAttention : IDisposable
     private readonly DsaAttentionSettings _s;
     private readonly DsaAttentionWeights _w;
     private readonly IRopeRowSource _rope;
-    private readonly DsaIndexer _indexer;
+    private readonly IDsaKeySelector _selector;
     private Tensor? _keyAbsorb;
     private Tensor? _valueExpand;
 
@@ -32,12 +32,22 @@ public sealed class DsaAttention : IDisposable
     /// <param name="rope">Rotary rows for the main query/key slice, <c>QkRopeDim / 2</c> wide, covering every position that will be seen.</param>
     /// <param name="indexerRope">Rotary rows for the indexer slice, <c>Indexer.RopeDim / 2</c> wide; ERNIE 5.5 uses the same plain table.</param>
     public DsaAttention(IBackend backend, DsaAttentionSettings settings, DsaAttentionWeights weights, IRopeRowSource rope, IRopeRowSource indexerRope)
+        : this(backend, settings, weights, rope, TokenTopKSelector(backend, settings, weights, indexerRope))
+    {
+    }
+
+    /// <param name="backend">Runs every projection, norm, rotation and the attention itself.</param>
+    /// <param name="settings">Shape of this layer; its <c>Indexer</c> is unused here.</param>
+    /// <param name="weights">This layer's weights; its <c>Indexer</c> is unused here.</param>
+    /// <param name="rope">Rotary rows for the main query/key slice, <c>QkRopeDim / 2</c> wide, covering every position that will be seen.</param>
+    /// <param name="selector">Picks the rows each query attends; owned and disposed with the layer.</param>
+    public DsaAttention(IBackend backend, DsaAttentionSettings settings, DsaAttentionWeights weights, IRopeRowSource rope, IDsaKeySelector selector)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(rope);
-        ArgumentNullException.ThrowIfNull(indexerRope);
+        ArgumentNullException.ThrowIfNull(selector);
         settings.Validate();
         if (rope.HalfDim * 2 != settings.QkRopeDim) throw new ArgumentException("The rope table width must equal QkRopeDim.", nameof(rope));
         int h = settings.Heads, qkv = settings.QkNopeDim + settings.VDim;
@@ -57,8 +67,18 @@ public sealed class DsaAttention : IDisposable
         _s = settings;
         _w = weights;
         _rope = rope;
-        _indexer = new DsaIndexer(backend, settings.Indexer, weights.Indexer, indexerRope, settings.Dim, settings.QLoraRank);
+        _selector = selector;
         (_keyAbsorb, _valueExpand) = FoldKvB(weights.KvB, settings);
+    }
+
+    private static DsaIndexerSelector TokenTopKSelector(IBackend backend, DsaAttentionSettings settings, DsaAttentionWeights weights, IRopeRowSource indexerRope)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(indexerRope);
+        DsaIndexerSettings indexer = settings.Indexer ?? throw new ArgumentException("A token top-k layer needs settings.Indexer.", nameof(settings));
+        DsaIndexerWeights indexerWeights = weights.Indexer ?? throw new ArgumentException("A token top-k layer needs weights.Indexer.", nameof(weights));
+        return new DsaIndexerSelector(backend, new DsaIndexer(backend, indexer, indexerWeights, indexerRope, settings.Dim, settings.QLoraRank), settings.Window);
     }
 
     /// <summary>The shape this layer was built with, used to size its per-sequence state.</summary>
@@ -106,15 +126,12 @@ public sealed class DsaAttention : IDisposable
             keyPe.AsSpan(t * rd, rd).CopyTo(cache.Slice((startPos + t) * latent + kvr, rd));
         }
 
-        _indexer.AppendKeys(x, tokens, startPos, state.IndexKeys);
+        _selector.Append(x, tokens, startPos, state.IndexKeys);
         state.Length = endPos;
-        int[] limits = new int[tokens];
-        for (int t = 0; t < tokens; t++) limits[t] = SparseWindowMerge.IndexerLimit(positions[t], s.Window);
-        int[] topk = _indexer.Select(x, qLatent, positions, limits, state.IndexKeys, out int topkCols);
-        int[] rows = MergeWindow(topk, topkCols, positions, out int rowCols, out int rowWidth);
+        DsaKeySelection selection = _selector.Select(x, qLatent, positions, endPos, state.IndexKeys);
 
         float[] query = AbsorbQueries(q, tokens, keyAbsorb);
-        float[] latentOut = Attend(query, tokens, positions, rows, rowCols, rowWidth, state);
+        float[] latentOut = Attend(query, tokens, selection, state);
         float[] o = ExpandValues(latentOut, tokens, valueExpand);
 
         if (_w.OGate is { } gateWeight)
@@ -150,44 +167,16 @@ public sealed class DsaAttention : IDisposable
         return query;
     }
 
-    // Every query's [topk | window | -1 ...] row through IBackend.MergeWindowTopK. With no indexer columns yet (no query is past its
-    // window) a one-column placeholder stands in; no query takes from it, since each takes min(max(seq - window, 0), cols) = 0.
-    private int[] MergeWindow(int[] topk, int topkCols, int[] positions, out int cols, out int width)
+    // Each query attends the rows its selection names; K is the whole latent row, V its latent prefix (MQA, one KV head).
+    private float[] Attend(float[] query, int tokens, DsaKeySelection selection, DsaAttentionState state)
     {
-        int tokens = positions.Length;
-        cols = Math.Max(topkCols, 1);
-        width = cols + _s.Window;
-        int[] source = topk;
-        if (topkCols == 0)
-        {
-            source = new int[tokens];
-            Array.Fill(source, -1);
-        }
-        using Tensor topkT = HostMath.Tensor(source, tokens, cols);
-        using Tensor positionT = HostMath.Tensor(positions, tokens);
-        using Tensor rows = new(new TensorShape(tokens, width), DType.I32);
-        _backend.MergeWindowTopK(rows, topkT, positionT, _s.Window);
-        return rows.AsReadOnlySpan<int>().ToArray();
-    }
-
-    // Each query attends its own [topk | window] rows; K is the whole latent row, V its latent prefix (MQA, one KV head).
-    private float[] Attend(float[] query, int tokens, int[] positions, int[] rows, int rowCols, int rowWidth, DsaAttentionState state)
-    {
-        int h = _s.Heads, kvr = _s.KvLoraRank, latent = _s.LatentDim, win = _s.Window;
+        int h = _s.Heads, kvr = _s.KvLoraRank, latent = _s.LatentDim;
         float[] latentOut = new float[tokens * h * kvr];
         for (int t = 0; t < tokens; t++)
         {
-            int seq = positions[t] + 1, picked = Math.Min(Math.Max(seq - win, 0), rowCols);
-            int count = picked + Math.Min(seq, win);
-            // A NaN indexer score ranks below the masked tail and can leave a -1 among the picks; name it here, not in GatherRows.
-            for (int i = 0; i < picked; i++)
-            {
-                if ((uint)rows[t * rowWidth + i] >= (uint)(seq - win))
-                    throw new InvalidOperationException($"DSA top-k entry {rows[t * rowWidth + i]} for position {positions[t]} is "
-                        + $"outside [0, {seq - win}); the indexer scores held a NaN.");
-            }
+            int count = selection.Counts[t];
             using Tensor keys = new(new TensorShape(count, latent), DType.F32);
-            _backend.GatherRows(keys, state.Latent, rows.AsSpan(t * rowWidth, count));
+            _backend.GatherRows(keys, state.Latent, selection.Rows.AsSpan(t * selection.Width, count));
             using Tensor qT = HostMath.Tensor(query.AsSpan(t * h * latent, h * latent), 1, h * latent);
             using Tensor oT = new(new TensorShape(1, h * kvr), DType.F32);
             AttentionCall call = new()
@@ -267,6 +256,6 @@ public sealed class DsaAttention : IDisposable
     {
         Interlocked.Exchange(ref _keyAbsorb, null)?.Dispose();
         Interlocked.Exchange(ref _valueExpand, null)?.Dispose();
-        _indexer.Dispose();
+        _selector.Dispose();
     }
 }

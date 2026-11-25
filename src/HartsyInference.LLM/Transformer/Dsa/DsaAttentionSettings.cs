@@ -33,8 +33,8 @@ public sealed record DsaAttentionSettings
     /// <summary>Epsilon of the two latent RMS norms.</summary>
     public required float NormEps { get; init; }
 
-    /// <summary>The indexer that picks older keys.</summary>
-    public required DsaIndexerSettings Indexer { get; init; }
+    /// <summary>The token top-k indexer of ERNIE-5.5 and Kimi; null when the layer is built with its own <see cref="IDsaKeySelector"/>.</summary>
+    public DsaIndexerSettings? Indexer { get; init; }
 
     /// <summary>Pairing of the main query/key rotation; ERNIE 5.5's is interleaved (not NeoX) on the trailing <see cref="QkRopeDim"/> values.</summary>
     public RotaryPairing RopePairing { get; init; } = RotaryPairing.Interleaved;
@@ -57,7 +57,6 @@ public sealed record DsaAttentionSettings
         if (Dim < 1 || Heads < 1 || QLoraRank < 1 || KvLoraRank < 1 || QkNopeDim < 1 || VDim < 1 || Window < 0)
             throw new ArgumentException("DSA widths and heads must be positive; the window may be zero (none).");
         if (QkRopeDim < 2 || (QkRopeDim & 1) != 0) throw new ArgumentException("QkRopeDim must be even and positive.");
-        ArgumentNullException.ThrowIfNull(Indexer);
-        Indexer.Validate();
+        Indexer?.Validate();
     }
 }
