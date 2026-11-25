@@ -164,7 +164,9 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         int curH = hp, curW = wp;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            (x, curH, curW) = _blocks[i].Forward(backend, x, curH, curW);
+            Tensor previous = x;
+            (x, curH, curW) = _blocks[i].Forward(backend, previous, curH, curW);
+            previous.Dispose();
             if (i == _stageEnds[stageIdx])
             {
                 stageFeats[stageIdx] = NhwcToNchw(backend, x, 1, curH, curW, _blocks[i].DimOut);
@@ -304,24 +306,22 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         return outT;
     }
 
-    // ── Layout helpers (route the transpose through the backend; reshapes are zero-copy views) ──
+    // ── Layout helpers (one backend transpose over counts; the output takes the new shape, so nothing is reshaped on the host) ──
 
     /// <summary>NCHW → NHWC via a batched transpose of the flattened spatial axis.</summary>
     internal static Tensor NchwToNhwc(IBackend backend, Tensor x, int b, int c, int h, int w)
     {
-        Tensor v = x.Reshape(new TensorShape(b, c, h * w));
-        Tensor t = new Tensor(new TensorShape(b, h * w, c), DType.F32);
-        backend.Transpose2D(t, v, c, h * w);
-        return t.Reshape(new TensorShape(b, h, w, c));
+        Tensor t = new Tensor(new TensorShape(b, h, w, c), DType.F32);
+        backend.Transpose2D(t, x, c, h * w);
+        return t;
     }
 
     /// <summary>NHWC → NCHW via a batched transpose of the flattened spatial axis.</summary>
     internal static Tensor NhwcToNchw(IBackend backend, Tensor x, int b, int h, int w, int c)
     {
-        Tensor v = x.Reshape(new TensorShape(b, h * w, c));
-        Tensor t = new Tensor(new TensorShape(b, c, h * w), DType.F32);
-        backend.Transpose2D(t, v, h * w, c);
-        return t.Reshape(new TensorShape(b, c, h, w));
+        Tensor t = new Tensor(new TensorShape(b, c, h, w), DType.F32);
+        backend.Transpose2D(t, x, h * w, c);
+        return t;
     }
 
     private static Tensor Get(IReadOnlyDictionary<string, Tensor> weights, string key)
