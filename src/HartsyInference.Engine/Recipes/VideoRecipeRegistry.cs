@@ -66,5 +66,7 @@ public static class VideoRecipeRegistry
         new Video.HunyuanVideoRecipe(),
         new Video.FastFramesRecipe(),
         new Video.MiniMaxH3Recipe(),
+        new Video.LongCatVideoRecipe(),
+        new Video.LongCatAvatarRecipe(),
     };
 }
