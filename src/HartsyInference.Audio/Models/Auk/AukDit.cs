@@ -60,7 +60,7 @@ public sealed unsafe class AukDit : IDisposable
             [$"{time}.2.weight"] = AukOps.Take(weights, $"{time}.2.weight", _owned, dim, dim),
             [$"{time}.2.bias"] = AukOps.Take(weights, $"{time}.2.bias", _owned, dim),
         };
-        _timeEmbed.LoadWeights(timeWeights, $"{prefix}.time_embed");
+        _timeEmbed.LoadWeights(timeWeights, $"{prefix}.time_embed", _owned);
         _audioEmbed.LoadWeights(weights, $"{prefix}.audio_embed", _owned);
         _txtProjW = AukOps.Take(weights, $"{prefix}.txt_proj.weight", _owned, dim, _config.TextDim);
         _txtProjB = AukOps.Take(weights, $"{prefix}.txt_proj.bias", _owned, dim);

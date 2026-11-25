@@ -45,6 +45,10 @@ internal static unsafe class F5Ops
         }
     }
 
+    /// <summary>The checkpoint tensor under <paramref name="key"/> in F32: borrowed when stored that way, else a copy that joins <paramref name="owned"/>.</summary>
+    public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, ICollection<Tensor> owned, params long[] shape) =>
+        CheckpointTensors.RequireF32(weights, "F5-TTS", key, owned, shape);
+
     /// <summary>Global Response Normalization (ConvNeXt-V2 Eq. 4) on the channel-last layout <c>[B, T, D]</c>: <c>out = gamma * (x * Gx/(mean(Gx)+eps)) + beta + x</c> where <c>Gx = ||x||_2</c> along the time axis.</summary>
     public static void Grn(Tensor x, Tensor gamma, Tensor beta, int batch, int t, int dim)
     {

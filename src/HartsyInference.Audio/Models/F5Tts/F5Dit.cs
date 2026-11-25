@@ -26,6 +26,7 @@ public sealed unsafe class F5Dit : IDisposable
 
     private Tensor? _ropeCos, _ropeSin;   // [maxPos, headDim] backend-ready (first half of each row used)
     private bool _loaded;
+    private readonly List<Tensor> _owned = [];
 
     // Per-loop text-embedding cache: two step-invariant tensors (cond/uncond) keyed by sequence length.
     private Tensor? _txtCond, _txtUncond;
@@ -65,16 +66,20 @@ public sealed unsafe class F5Dit : IDisposable
     /// <summary>Loads from a HuggingFace safetensors dictionary; the upstream prefix is <c>ema_model.transformer</c> for the released F5-TTS v1 base checkpoint (<c>F5TTS_v1_Base/model_1250000.safetensors</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "ema_model.transformer")
     {
-        _timeEmb.LoadWeights(w, $"{prefix}.time_embed");
-        _textEmb.LoadWeights(w, $"{prefix}.text_embed");
-        _inputEmb.LoadWeights(w, $"{prefix}.input_embed");
+        ThrowIfDisposed();
+        _loaded = false;
+        ReleaseOwned();
+        int dim = _cfg.Dim;
+        _timeEmb.LoadWeights(w, $"{prefix}.time_embed", _owned);
+        _textEmb.LoadWeights(w, $"{prefix}.text_embed", _owned);
+        _inputEmb.LoadWeights(w, $"{prefix}.input_embed", _owned);
         for (int i = 0; i < _blocks.Length; i++)
-            _blocks[i].LoadWeights(w, $"{prefix}.transformer_blocks.{i}");
+            _blocks[i].LoadWeights(w, $"{prefix}.transformer_blocks.{i}", _owned);
 
-        _normOutLinW = WhisperOps.EnsureF32(w[$"{prefix}.norm_out.linear.weight"]);
-        _normOutLinB = WhisperOps.EnsureF32(w[$"{prefix}.norm_out.linear.bias"]);
-        _projOutW = WhisperOps.EnsureF32(w[$"{prefix}.proj_out.weight"]);
-        _projOutB = WhisperOps.EnsureF32(w[$"{prefix}.proj_out.bias"]);
+        _normOutLinW = F5Ops.Take(w, $"{prefix}.norm_out.linear.weight", _owned, 2 * dim, dim);
+        _normOutLinB = F5Ops.Take(w, $"{prefix}.norm_out.linear.bias", _owned, 2 * dim);
+        _projOutW = F5Ops.Take(w, $"{prefix}.proj_out.weight", _owned, _cfg.MelDim, dim);
+        _projOutB = F5Ops.Take(w, $"{prefix}.proj_out.bias", _owned, _cfg.MelDim);
 
         // Precompute RoPE tables. F5-TTS uses full RoPE (rotary_dim = head_dim = 64) with theta=10000.
         // Repacked into the backend's the interleaved rotary (RotaryCall.Rows) "duplicated-pair" layout: freq_i sits at position 2i
@@ -317,11 +322,23 @@ public sealed unsafe class F5Dit : IDisposable
 
     public void Dispose()
     {
-        Interlocked.Exchange(ref _disposed, 1);
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        ReleaseOwned();
+        _textEmb.Dispose();
         _xFixed?.Dispose(); _siluFixed?.Dispose(); _graphVelocity?.Dispose();
         _xFixed = _siluFixed = _graphVelocity = null;
         _txtCond?.Dispose(); _txtUncond?.Dispose();
         _txtCond = _txtUncond = null;
+    }
+
+    /// <summary>Frees what this instance made itself at load: the widened weights and the RoPE tables. Free the weights from a device first.</summary>
+    private void ReleaseOwned()
+    {
+        foreach (Tensor copy in _owned) copy.Dispose();
+        _owned.Clear();
+        _ropeCos?.Dispose();
+        _ropeSin?.Dispose();
+        _ropeCos = _ropeSin = null;
     }
 }
 
@@ -334,12 +351,13 @@ internal sealed unsafe class F5TimestepEmbedding
 
     public F5TimestepEmbedding(F5TtsConfig cfg) { _cfg = cfg; }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
-        _mlp0W = WhisperOps.EnsureF32(w[$"{prefix}.time_mlp.0.weight"]);
-        _mlp0B = WhisperOps.EnsureF32(w[$"{prefix}.time_mlp.0.bias"]);
-        _mlp2W = WhisperOps.EnsureF32(w[$"{prefix}.time_mlp.2.weight"]);
-        _mlp2B = WhisperOps.EnsureF32(w[$"{prefix}.time_mlp.2.bias"]);
+        int dim = _cfg.Dim;
+        _mlp0W = F5Ops.Take(w, $"{prefix}.time_mlp.0.weight", owned, dim, _cfg.TimeFreqEmbedDim);
+        _mlp0B = F5Ops.Take(w, $"{prefix}.time_mlp.0.bias", owned, dim);
+        _mlp2W = F5Ops.Take(w, $"{prefix}.time_mlp.2.weight", owned, dim, dim);
+        _mlp2B = F5Ops.Take(w, $"{prefix}.time_mlp.2.bias", owned, dim);
     }
 
     public Tensor Forward(IBackend backend, float timestep)
