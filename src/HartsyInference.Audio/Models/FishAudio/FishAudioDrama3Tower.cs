@@ -231,15 +231,8 @@ public sealed unsafe class FishAudioDrama3Tower : IDisposable
         }
     }
 
-    private static Tensor Require(IReadOnlyDictionary<string, Tensor> w, string key, long rows, long cols)
-    {
-        if (!w.TryGetValue(key, out Tensor? t)) throw new KeyNotFoundException($"The Drama 3 checkpoint has no tower weight '{key}'.");
-        if (t.Shape.Rank != 2 || t.Shape[0] != rows || t.Shape[1] != cols)
-        {
-            throw new InvalidDataException($"Drama 3 tower weight '{key}' is {t.Shape}; expected [{rows}, {cols}].");
-        }
-        return t;
-    }
+    private static Tensor Require(IReadOnlyDictionary<string, Tensor> w, string key, long rows, long cols) =>
+        CheckpointTensors.Require(w, "Drama 3 tower", key, rows, cols);
 
     public void Dispose()
     {
