@@ -1116,7 +1116,19 @@ public sealed partial class TextService : ITextService, IDisposable
         Logs.Warning(backend.Device.IsGpu
             ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
             : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
-        if (slot.HostReference is Ernie5TextModel ernie) slot.ExpertOffload = AttachErnie5ExpertCache(backend, ernie);
+        if (slot.HostReference is Ernie5TextModel ernie)
+        {
+            try
+            {
+                slot.ExpertOffload = AttachErnie5ExpertCache(backend, ernie);
+            }
+            catch
+            {
+                // Without the cache the experts would be uploaded on every forward, so a half-attached model is unloaded rather than kept.
+                UnloadSlot(slot);
+                throw;
+            }
+        }
         Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
     }
 
