@@ -1,30 +1,24 @@
 using System.Globalization;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Hy4Flash;
 
-/// <summary>What a checkpoint's tensors map to: model parameters, their FP8 scale companions, skipped drafter tensors, and what disagrees.</summary>
-/// <param name="Mapped">Keys that feed a parameter.</param>
-/// <param name="ScaleCompanions">FP8 block-scale keys whose weight is mapped.</param>
-/// <param name="SkippedDrafter">Speculative-drafter tensors, skipped because the first series does not run the drafter.</param>
-/// <param name="Unmapped">Keys that feed nothing; any one fails the load.</param>
-/// <param name="Missing">Parameters with no key; any one fails the load.</param>
+/// <summary>What a checkpoint's tensors map to: the key-level coverage shared with the other families, and the shape, scale and dtype checks Hy4 adds on top.</summary>
+/// <param name="Keys">Mapped, scale-companion, skipped and unmapped keys and missing parameters. The speculative drafter's tensors are counted as skipped MTP keys.</param>
 /// <param name="ShapeMismatches">Tensors whose shape differs from the config's.</param>
 /// <param name="ScaleMismatches">FP8 weights without a correctly shaped scale grid, or a grid beside a weight that is not FP8.</param>
 /// <param name="DtypeMismatches">Tensors whose storage dtype is not one the layout allows (F32 for the hyper-connections, sinks, indexer pooling and router bias; I32 for the Engram token map).</param>
-public sealed record Hy4FlashWeightCoverage(int Mapped, int ScaleCompanions, int SkippedDrafter, IReadOnlyList<string> Unmapped,
-    IReadOnlyList<string> Missing, IReadOnlyList<string> ShapeMismatches, IReadOnlyList<string> ScaleMismatches, IReadOnlyList<string> DtypeMismatches)
+public sealed record Hy4FlashWeightCoverage(CheckpointKeyCoverage Keys, IReadOnlyList<string> ShapeMismatches, IReadOnlyList<string> ScaleMismatches,
+    IReadOnlyList<string> DtypeMismatches)
 {
-    /// <summary>Every key the coverage saw.</summary>
-    public int Total => Mapped + ScaleCompanions + SkippedDrafter + Unmapped.Count;
-
-    /// <summary>Fails when any key feeds nothing, any parameter has no key, or any shape or scale grid disagrees, naming the first few of each.</summary>
+    /// <summary>Fails when any key feeds nothing, any parameter has no key, or any shape, scale grid or dtype disagrees, naming the first few of each.</summary>
     /// <exception cref="InvalidDataException">The checkpoint and the config do not match.</exception>
     public void RequireComplete()
     {
-        if (Unmapped.Count == 0 && Missing.Count == 0 && ShapeMismatches.Count == 0 && ScaleMismatches.Count == 0 && DtypeMismatches.Count == 0) return;
+        if (Keys.Unmapped.Count == 0 && Keys.Missing.Count == 0 && ShapeMismatches.Count == 0 && ScaleMismatches.Count == 0 && DtypeMismatches.Count == 0) return;
         throw new InvalidDataException(string.Create(CultureInfo.InvariantCulture,
-            $"The Hy4 Flash checkpoint does not match the config: {Unmapped.Count} unmapped key(s) [{string.Join(", ", Unmapped.Take(6))}], "
-            + $"{Missing.Count} missing [{string.Join(", ", Missing.Take(6))}], {ShapeMismatches.Count} shape mismatch(es) "
+            $"The Hy4 Flash checkpoint does not match the config: {Keys.Unmapped.Count} unmapped key(s) [{string.Join(", ", Keys.Unmapped.Take(6))}], "
+            + $"{Keys.Missing.Count} missing [{string.Join(", ", Keys.Missing.Take(6))}], {ShapeMismatches.Count} shape mismatch(es) "
             + $"[{string.Join("; ", ShapeMismatches.Take(4))}], {ScaleMismatches.Count} scale mismatch(es) [{string.Join("; ", ScaleMismatches.Take(4))}], "
             + $"{DtypeMismatches.Count} dtype mismatch(es) [{string.Join("; ", DtypeMismatches.Take(4))}]."));
     }
