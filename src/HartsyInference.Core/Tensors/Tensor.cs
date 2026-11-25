@@ -306,8 +306,8 @@ public sealed unsafe class Tensor : IDisposable
     private static long _lastViewWriteId;
 
 #if !DEBUG
-    /// <summary>1 once a read behind a view has been reported; the report names the pattern, so one is enough.</summary>
-    private static int _staleReadReported;
+    /// <summary>The reads behind a view reported so far, by message (shape and dtype): each is logged once, so a second site still shows.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _staleReadsReported = new(StringComparer.Ordinal);
 #endif
 
     /// <summary>Called by a residency cache as an op's output is bound to this tensor on a device. When this tensor is a view
@@ -347,7 +347,7 @@ public sealed unsafe class Tensor : IDisposable
 #if DEBUG
         throw new InvalidOperationException(message);
 #else
-        if (Interlocked.Exchange(ref _staleReadReported, 1) == 0)
+        if (_staleReadsReported.TryAdd(message, 0))
             Logging.Logs.Error(message);
 #endif
     }
