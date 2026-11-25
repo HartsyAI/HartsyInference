@@ -599,7 +599,7 @@ tensor tells them from their base, so the catalog id or a file/folder name carry
 
 - **Run path:** the photo is VAE-encoded and appended to the token sequence as a reference (RoPE T = 10 + 10 i, one shared timestep), two-pass CFG against the empty prompt, 28 steps, guidance 3.5, the target is the photo's
   size (at most 1 MP, floored to 16). `Flux2EditPipeline`; the recipe pipeline sends the prompt through Qwen3's chat template verbatim. FP32 shards narrow to F16 on load.
-- **Decoding:** `OvbDecoder` (legend snap with black as ignore, majority vote across legends, grouped merge with global class ids, depth = luma/255, normals with x negated) and `OvbPerception` (the adapter).
+- **Decoding:** `OvbDecoder` (legend snap with black as ignore, majority vote across legends, grouped merge with global class ids, depth = luma/255, normals with x negated) and `OvbPrompts` / `OvbLegend`. The adapter that runs them through the image service (`OvbPerception`) is in the next PR of the series.
   Instance segmentation (GrabCut) is not ported.
 - **Catalog:** zero-shot averaged checkpoints `final_models/4B/zeroshot/checkpoint-87500-95000-w25` (15.5 GB) and `final_models/9B/zeroshot/checkpoint-coco86750-w25` (36.3 GB), shard sha256 pinned from the HF LFS oids.
 - **Licence:** weights FLUX Non-Commercial, outputs covered; code Apache-2.0 (the release's `LICENSE`).
