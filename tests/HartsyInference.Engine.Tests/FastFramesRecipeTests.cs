@@ -52,7 +52,7 @@ public sealed class FastFramesRecipeTests
     {
         FastFramesRecipe recipe = new();
         Assert.Equal(VideoFeatures.None, ((IVideoRecipe)recipe).Supports);
-        Assert.Equal(MemoryCapabilities.None, ((IVideoRecipe)recipe).MemorySupports);
+        Assert.Equal(MemoryCapabilities.BlockStreaming, ((IVideoRecipe)recipe).MemorySupports);
         Assert.Equal("none", recipe.Prompt!.Negative);
         Assert.Equal(["t5"], recipe.Prompt.Encoders);
     }
