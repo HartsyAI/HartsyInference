@@ -31,7 +31,7 @@ public sealed class Sam2HieraBlockGpuTests(ITestOutputHelper output)
         {
             using ExactGemmScope exact = new(device);
             Compare(device, dimIn: 8, dimOut: 8, heads: 2, window: 0, pool: false, expectedSyncs: globalSyncs);
-            // The windowed and pooled forms still partition windows on the host; their counts are only printed.
+            // The windowed forms still partition windows on the host, so their counts and the pooled one's are only printed.
             Compare(device, dimIn: 8, dimOut: 16, heads: 2, window: 0, pool: true);
             Compare(device, dimIn: 8, dimOut: 8, heads: 2, window: 4, pool: false);
             Compare(device, dimIn: 8, dimOut: 16, heads: 4, window: 4, pool: true);
