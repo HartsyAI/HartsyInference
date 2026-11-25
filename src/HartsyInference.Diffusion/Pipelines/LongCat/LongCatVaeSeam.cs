@@ -8,9 +8,10 @@ namespace HartsyInference.Diffusion.Pipelines.LongCat;
 /// Wan 2.1 VAE (the base repo's <c>autoencoder_kl_wan</c>, 4× temporal and 8× spatial compression, 16 latent channels); the encoder and decoder
 /// here are the existing Wan classes, and the normalization is inside them (the latent is already normalized on both sides).</summary>
 /// <remarks>
-/// The seam checks what the pipeline relies on: the clip has 3 channels in [-1, 1] and 1 + 4·k frames, the latent has the DiT's channel count and
-/// the compressed frame and spatial grid, and the encoder and decoder return shapes that agree with those. It does not check the values: that
-/// needs the VAE weights (the real-weight run, B6). Decode is one call over the whole latent; the reference decodes in chunks, which is a memory
+/// The seam checks the shapes the pipeline relies on. A clip must be <c>[1, 3, T, H, W]</c> with <c>T = 1 + 4·k</c> and <c>H</c> and <c>W</c>
+/// multiples of 8; a latent must be <c>[1, channels, F, h, w]</c> with the DiT's channel count. The encoder's and decoder's returned shapes are
+/// checked against those, and a wrong shape disposes the returned tensor before it throws. Pixel and latent values are not checked: that needs
+/// the VAE weights (the real-weight run, B6). Decode is one call over the whole latent; the reference decodes in chunks, which is a memory
 /// choice, not a numerical one, and is not implemented here.
 /// </remarks>
 public static class LongCatVaeSeam
@@ -27,17 +28,26 @@ public static class LongCatVaeSeam
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(encoder);
         ArgumentNullException.ThrowIfNull(rgbClip);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(latentChannels);
         if (rgbClip.Shape.Rank != 5 || rgbClip.Shape[0] != 1 || rgbClip.Shape[1] != 3)
             throw new ArgumentException($"The clip must be [1, 3, T, H, W], got {rgbClip.Shape}.", nameof(rgbClip));
         long frames = rgbClip.Shape[2], height = rgbClip.Shape[3], width = rgbClip.Shape[4];
-        if ((frames - 1) % TemporalScale != 0 || frames < 1)
+        if (frames < 1 || (frames - 1) % TemporalScale != 0)
             throw new ArgumentException($"The clip must have 1 + {TemporalScale}·k frames, got {frames}.", nameof(rgbClip));
         if (height % SpatialScale != 0 || width % SpatialScale != 0)
             throw new ArgumentException($"The clip's height and width must be multiples of {SpatialScale}, got {height}×{width}.", nameof(rgbClip));
 
         Tensor latent = encoder.Encode(backend, rgbClip);
         long expectedFrames = (frames - 1) / TemporalScale + 1;
-        RequireShape(latent, latentChannels, expectedFrames, height / SpatialScale, width / SpatialScale, "encoded latent");
+        try
+        {
+            RequireShape(latent, latentChannels, expectedFrames, height / SpatialScale, width / SpatialScale, "encoded latent");
+        }
+        catch
+        {
+            latent.Dispose();
+            throw;
+        }
         return latent;
     }
 
@@ -47,11 +57,22 @@ public static class LongCatVaeSeam
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(decoder);
         ArgumentNullException.ThrowIfNull(latent);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(latentChannels);
         if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != latentChannels)
             throw new ArgumentException($"The latent must be [1, {latentChannels}, F, h, w], got {latent.Shape}.", nameof(latent));
         long frames = latent.Shape[2], h = latent.Shape[3], w = latent.Shape[4];
+        if (frames < 1)
+            throw new ArgumentException($"The latent must have at least one frame, got {frames}.", nameof(latent));
         Tensor clip = decoder.Decode(backend, latent);
-        RequireShape(clip, 3, 1 + TemporalScale * (frames - 1), h * SpatialScale, w * SpatialScale, "decoded clip");
+        try
+        {
+            RequireShape(clip, 3, 1 + TemporalScale * (frames - 1), h * SpatialScale, w * SpatialScale, "decoded clip");
+        }
+        catch
+        {
+            clip.Dispose();
+            throw;
+        }
         return clip;
     }
 

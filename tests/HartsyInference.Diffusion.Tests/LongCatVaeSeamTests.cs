@@ -57,6 +57,62 @@ public sealed class LongCatVaeSeamTests
         Assert.Throws<InvalidOperationException>(() => LongCatVaeSeam.EncodeClip(backend, wrong, clip, Channels));
     }
 
+    [Fact]
+    public void ADecoderThatReturnsTheWrongShapeIsRefused()
+    {
+        using CpuBackend backend = new();
+        using Tensor latent = new(new TensorShape([1, Channels, 4, 2, 2]), DType.F32);
+        StandIn wrong = new() { DecodedFrames = 12 };
+
+        Assert.Throws<InvalidOperationException>(() => LongCatVaeSeam.DecodeLatents(backend, wrong, latent, Channels));
+    }
+
+    [Theory]
+    [InlineData(12, 16)]
+    [InlineData(13, 12)]
+    public void AClipWhoseHeightOrWidthIsNotAMultipleOfEightIsRefused(int height, int width)
+    {
+        using CpuBackend backend = new();
+        using Tensor clip = new(new TensorShape([1, 3, 13, height, width]), DType.F32);
+
+        Assert.Throws<ArgumentException>(() => LongCatVaeSeam.EncodeClip(backend, new StandIn(), clip, Channels));
+    }
+
+    [Fact]
+    public void AClipOfTheWrongRankBatchOrChannelCountIsRefused()
+    {
+        using CpuBackend backend = new();
+        using Tensor rank4 = new(new TensorShape([1, 3, 13, 16]), DType.F32);
+        using Tensor batch2 = new(new TensorShape([2, 3, 13, 16, 16]), DType.F32);
+        using Tensor channels4 = new(new TensorShape([1, 4, 13, 16, 16]), DType.F32);
+
+        Assert.Throws<ArgumentException>(() => LongCatVaeSeam.EncodeClip(backend, new StandIn(), rank4, Channels));
+        Assert.Throws<ArgumentException>(() => LongCatVaeSeam.EncodeClip(backend, new StandIn(), batch2, Channels));
+        Assert.Throws<ArgumentException>(() => LongCatVaeSeam.EncodeClip(backend, new StandIn(), channels4, Channels));
+    }
+
+    [Fact]
+    public void ALatentOfTheWrongRankOrBatchIsRefused()
+    {
+        using CpuBackend backend = new();
+        using Tensor rank4 = new(new TensorShape([1, Channels, 4, 2]), DType.F32);
+        using Tensor batch2 = new(new TensorShape([2, Channels, 4, 2, 2]), DType.F32);
+
+        Assert.Throws<ArgumentException>(() => LongCatVaeSeam.DecodeLatents(backend, new StandIn(), rank4, Channels));
+        Assert.Throws<ArgumentException>(() => LongCatVaeSeam.DecodeLatents(backend, new StandIn(), batch2, Channels));
+    }
+
+    [Fact]
+    public void ANonPositiveLatentChannelCountIsRefusedUpFront()
+    {
+        using CpuBackend backend = new();
+        using Tensor clip = new(new TensorShape([1, 3, 13, 16, 16]), DType.F32);
+        using Tensor latent = new(new TensorShape([1, Channels, 4, 2, 2]), DType.F32);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => LongCatVaeSeam.EncodeClip(backend, new StandIn(), clip, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => LongCatVaeSeam.DecodeLatents(backend, new StandIn(), latent, -1));
+    }
+
     private static long[] Shape(Tensor tensor)
     {
         long[] shape = new long[tensor.Shape.Rank];
@@ -77,8 +133,14 @@ public sealed class LongCatVaeSeamTests
             return new Tensor(new TensorShape([1, Channels, frames, rgbClip.Shape[3] / 8, rgbClip.Shape[4] / 8]), DType.F32);
         }
 
-        public Tensor Decode(IBackend backend, Tensor latent) =>
-            new(new TensorShape([1, 3, 1 + 4 * (latent.Shape[2] - 1), latent.Shape[3] * 8, latent.Shape[4] * 8]), DType.F32);
+        /// <summary>The frame count the decoder returns; the right value is 1 + 4·(F−1).</summary>
+        public long DecodedFrames { get; init; } = -1;
+
+        public Tensor Decode(IBackend backend, Tensor latent)
+        {
+            long frames = DecodedFrames >= 0 ? DecodedFrames : 1 + 4 * (latent.Shape[2] - 1);
+            return new Tensor(new TensorShape([1, 3, frames, latent.Shape[3] * 8, latent.Shape[4] * 8]), DType.F32);
+        }
 
         public Tensor EncodeRgbFrame(IBackend backend, ReadOnlySpan<byte> rgb24, int width, int height) =>
             throw new NotSupportedException("The seam test uses the clip path only.");
