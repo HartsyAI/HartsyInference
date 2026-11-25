@@ -58,18 +58,24 @@ public static class ModelAcquisition
     private static IDisposable RefuseForThisRun(ModelSpec spec)
     {
         AnsiConsole.MarkupLine($"[yellow]Nothing was downloaded. This run uses only what is on disk; 'hartsy pull {Markup.Escape(spec.Catalog!.Id)}' fetches the files above.[/]");
-        return DownloadPermission.Refuse(InteractivePrompt.CanAsk ? DeclinedReason : InteractivePrompt.CannotAskReason);
+        return DownloadPermission.Refuse(DownloadPermission.IsDecided ? DownloadPermission.SettingOffReason
+            : InteractivePrompt.CanAsk ? DeclinedReason : InteractivePrompt.CannotAskReason);
     }
 
-    /// <summary>The answer to "may these be downloaded": no when the setting is off, the user's at a terminal, and without a terminal only a setting
-    /// that says yes. Standard input that is not a terminal is never read for the answer.</summary>
-    internal static bool MayDownload(bool canAsk, Func<bool> ask)
+    /// <summary>The refusal the process starts with: a run whose input is a pipe, a file or closed cannot say yes, so nothing is downloaded for it, not at
+    /// the prompt and not by a model load. A set <c>paths.allowDownloads</c> is the answer instead; it is applied here because a <c>--set</c> value does
+    /// not reach a thread that runs outside this one's context.</summary>
+    internal static IDisposable? RefuseAtStart(bool canAsk)
     {
-        bool decided = DownloadPermission.IsDecided;
-        if (decided && !EngineKnobs.AllowDownloads.Value)
-            return false;
-        return canAsk ? ask() : decided;
+        if (DownloadPermission.IsDecided)
+            return EngineKnobs.AllowDownloads.Value ? null : DownloadPermission.Refuse(DownloadPermission.SettingOffReason);
+        return canAsk ? null : DownloadPermission.Refuse(InteractivePrompt.CannotAskReason);
     }
+
+    /// <summary>The answer to "may these be downloaded": the setting's when it has a value, so that nobody is asked a question whose answer would not
+    /// count, else the user's at a terminal, else no. Standard input that is not a terminal is never read for the answer.</summary>
+    internal static bool MayDownload(bool canAsk, Func<bool> ask) =>
+        DownloadPermission.IsDecided ? EngineKnobs.AllowDownloads.Value : canAsk && ask();
 
     private static bool MayDownload() =>
         MayDownload(InteractivePrompt.CanAsk, static () => InteractivePrompt.Confirm("Download these now?", defaultYes: false));

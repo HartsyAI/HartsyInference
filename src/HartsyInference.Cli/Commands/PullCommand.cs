@@ -157,7 +157,7 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
         try
         {
             // Audio-cache-backed entries load via AudioModelCache at runtime — pulling them into the
-            // Models tree would double-download. Same branch EnsurePresent takes, minus the confirm.
+            // Models tree would double-download. Same branch EnsurePresent takes, minus the confirm, so it cannot be declined.
             if (ModelAcquisition.UsesAudioCache(cat, cat.Modality))
             {
                 if (!ModelAcquisition.EnsureAudioAssetsPresent(cat, cat.Modality, out _, confirm: false, ct))

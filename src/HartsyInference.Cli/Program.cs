@@ -58,8 +58,7 @@ public static class Program
         }
         using IDisposable? scopedSettings = knobScope;
 
-        // A run whose input is a pipe, a file or closed cannot say yes, so nothing is downloaded for it: not at the prompt, and not by a model load.
-        using IDisposable? cannotAsk = InteractivePrompt.CanAsk ? null : DownloadPermission.Refuse(InteractivePrompt.CannotAskReason);
+        using IDisposable? refused = ModelAcquisition.RefuseAtStart(InteractivePrompt.CanAsk);
 
         if (args.Length == 0)
         {

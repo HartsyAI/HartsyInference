@@ -7,7 +7,12 @@ using Xunit;
 
 namespace HartsyInference.Cli.Tests;
 
+/// <summary>Keeps the process-wide refusal of these tests away from the rest of the assembly.</summary>
+[CollectionDefinition("DownloadPermission", DisableParallelization = true)]
+public sealed class DownloadPermissionCollection;
+
 /// <summary>Who may say yes to a download: a person at a terminal, or the setting. A closed or redirected input is a no, and a no holds for the whole run.</summary>
+[Collection("DownloadPermission")]
 public sealed class DownloadConsentTests
 {
     [Fact]
@@ -25,12 +30,46 @@ public sealed class DownloadConsentTests
     }
 
     [Fact]
-    public void TheSetting_AllowsARunWithoutATerminal_AndRefusesAtOne()
+    public void TheSetting_IsTheAnswer_AndNobodyIsAsked()
     {
-        using (KnobProfileScope.Push(KnobProfile.Create("yes").With(EngineKnobs.AllowDownloads, true)))
-            Assert.True(ModelAcquisition.MayDownload(canAsk: false, static () => throw new InvalidOperationException("asked")));
-        using (KnobProfileScope.Push(KnobProfile.Create("no").With(EngineKnobs.AllowDownloads, false)))
-            Assert.False(ModelAcquisition.MayDownload(canAsk: true, static () => throw new InvalidOperationException("asked")));
+        // A "no" typed against a setting that says yes would not hold for the load, so the question is not put.
+        foreach (bool canAsk in new[] { true, false })
+        {
+            foreach (bool setting in new[] { true, false })
+            {
+                using (KnobProfileScope.Push(KnobProfile.Create("set").With(EngineKnobs.AllowDownloads, setting)))
+                    Assert.Equal(setting, ModelAcquisition.MayDownload(canAsk, static () => throw new InvalidOperationException("asked")));
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false, null, "no terminal")]
+    [InlineData(true, null, null)]
+    [InlineData(false, true, null)]
+    [InlineData(true, false, "paths.allowDownloads is off")]
+    [InlineData(false, false, "paths.allowDownloads is off")]
+    public async Task TheRefusalAtStart_HoldsOnAThreadTheSettingDoesNotReach(bool canAsk, bool? setting, string? refusal)
+    {
+        KnobProfile profile = KnobProfile.Create("set");
+        if (setting is bool value)
+            profile = profile.With(EngineKnobs.AllowDownloads, value);
+        using (KnobProfileScope.Push(profile))
+        using (ModelAcquisition.RefuseAtStart(canAsk))
+        {
+            Exception? here = Record.Exception(static () => DownloadPermission.Demand("x")), there = await OnAnotherThread("x");
+            if (refusal is null)
+            {
+                Assert.Null(here);
+                Assert.Null(there);
+            }
+            else
+            {
+                Assert.Contains(refusal, Assert.IsType<DownloadRefusedException>(here).Message);
+                Assert.Contains(refusal, Assert.IsType<DownloadRefusedException>(there).Message);
+            }
+        }
+        DownloadPermission.Demand("after the run");
     }
 
     [Fact]
@@ -51,11 +90,15 @@ public sealed class DownloadConsentTests
         using (AcquiredModel acquired = ModelAcquisition.EnsurePresent(spec))
         {
             Assert.Null(acquired.Spec.LocalPath);
-            Task<Exception?> load;
-            using (ExecutionContext.SuppressFlow())
-                load = Task.Run(static Exception? () => Record.Exception(static () => DownloadPermission.Demand("a file the load wants")));
-            Assert.Contains("paths.allowDownloads=true", Assert.IsType<DownloadRefusedException>(await load).Message);
+            // The profile does not reach this thread; what stops the load there is the refusal EnsurePresent left in force.
+            Assert.IsType<DownloadRefusedException>(await OnAnotherThread("a file the load wants"));
         }
         DownloadPermission.Demand("after the run");
+    }
+
+    private static Task<Exception?> OnAnotherThread(string what)
+    {
+        using (ExecutionContext.SuppressFlow())
+            return Task.Run(Exception? () => Record.Exception(() => DownloadPermission.Demand(what)));
     }
 }
