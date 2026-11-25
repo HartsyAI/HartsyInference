@@ -1,6 +1,6 @@
 namespace HartsyInference.Engine.Requests;
 
-/// <summary>Stem-separation request (Demucs): split a mix into its component stems.</summary>
+/// <summary>Stem-separation request: split a mix into stems (Demucs), the vocals of a mix (Kim_Vocal_2), or the voice and background of a recording (Inworld Voice Isolator).</summary>
 public sealed record FxSeparateRequest
 {
     /// <summary>The mixed audio to separate.</summary>
@@ -17,6 +17,9 @@ public sealed record FxSeparateRequest
 
     /// <summary>Segment length in seconds. Lower it to cut peak memory. Upstream recommends a minimum of 10 s for the older models, and documents that <b>Hybrid Transformer models support at most 7.8 s</b> — the pipeline clamps to the checkpoint's trained segment. Null keeps the configured value.</summary>
     public double? Segment { get; init; }
+
+    /// <summary>Look-ahead of <c>voice-isolator-realtime</c> in frames of 10 ms; the checkpoint was trained at 0, 2 and 4. Null keeps its default (2, 20 ms).</summary>
+    public int? LookaheadFrames { get; init; }
 
     /// <summary>Deterministic seed for the <see cref="Shifts"/> offsets, so a shifted run is reproducible.</summary>
     public int Seed { get; init; }

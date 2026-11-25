@@ -33,26 +33,26 @@ public sealed class LongCatBlock : IStreamingBlock
     public long EstimatedWeightBytes { get; private set; }
 
     /// <summary>Reads the block's tensors under <paramref name="prefix"/> (<c>blocks.N</c>).</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, List<Tensor> owned)
     {
         _adaWeight = w[$"{prefix}.adaLN_modulation.1.weight"];
-        _adaBias = w[$"{prefix}.adaLN_modulation.1.bias"];
+        _adaBias = LongCatOps.WidenF32(w, $"{prefix}.adaLN_modulation.1.bias", owned);
         _qkv = w[$"{prefix}.attn.qkv.weight"];
-        _qkvBias = w[$"{prefix}.attn.qkv.bias"];
-        _qNorm = TensorCasts.LoadF32(w, $"{prefix}.attn.q_norm.weight");
-        _kNorm = TensorCasts.LoadF32(w, $"{prefix}.attn.k_norm.weight");
+        _qkvBias = LongCatOps.WidenF32(w, $"{prefix}.attn.qkv.bias", owned);
+        _qNorm = LongCatOps.WidenF32(w, $"{prefix}.attn.q_norm.weight", owned);
+        _kNorm = LongCatOps.WidenF32(w, $"{prefix}.attn.k_norm.weight", owned);
         _proj = w[$"{prefix}.attn.proj.weight"];
-        _projBias = w[$"{prefix}.attn.proj.bias"];
-        _crossNormWeight = TensorCasts.LoadF32(w, $"{prefix}.pre_crs_attn_norm.weight");
-        _crossNormBias = TensorCasts.LoadF32(w, $"{prefix}.pre_crs_attn_norm.bias");
+        _projBias = LongCatOps.WidenF32(w, $"{prefix}.attn.proj.bias", owned);
+        _crossNormWeight = LongCatOps.WidenF32(w, $"{prefix}.pre_crs_attn_norm.weight", owned);
+        _crossNormBias = LongCatOps.WidenF32(w, $"{prefix}.pre_crs_attn_norm.bias", owned);
         _crossQ = w[$"{prefix}.cross_attn.q_linear.weight"];
-        _crossQBias = w[$"{prefix}.cross_attn.q_linear.bias"];
+        _crossQBias = LongCatOps.WidenF32(w, $"{prefix}.cross_attn.q_linear.bias", owned);
         _crossKv = w[$"{prefix}.cross_attn.kv_linear.weight"];
-        _crossKvBias = w[$"{prefix}.cross_attn.kv_linear.bias"];
-        _crossQNorm = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.q_norm.weight");
-        _crossKNorm = TensorCasts.LoadF32(w, $"{prefix}.cross_attn.k_norm.weight");
+        _crossKvBias = LongCatOps.WidenF32(w, $"{prefix}.cross_attn.kv_linear.bias", owned);
+        _crossQNorm = LongCatOps.WidenF32(w, $"{prefix}.cross_attn.q_norm.weight", owned);
+        _crossKNorm = LongCatOps.WidenF32(w, $"{prefix}.cross_attn.k_norm.weight", owned);
         _crossProj = w[$"{prefix}.cross_attn.proj.weight"];
-        _crossProjBias = w[$"{prefix}.cross_attn.proj.bias"];
+        _crossProjBias = LongCatOps.WidenF32(w, $"{prefix}.cross_attn.proj.bias", owned);
         _w1 = w[$"{prefix}.ffn.w1.weight"];
         _w2 = w[$"{prefix}.ffn.w2.weight"];
         _w3 = w[$"{prefix}.ffn.w3.weight"];
