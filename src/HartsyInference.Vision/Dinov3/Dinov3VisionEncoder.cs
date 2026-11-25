@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.CrossFrame;
@@ -225,11 +226,12 @@ public sealed unsafe class Dinov3VisionEncoder
     {
         int hidden = _preset.HiddenSize, seqLen = (int)frame.Shape[1], patches = seqLen - prefix;
         Dinov3Layer layer = _layers[block];
+        // The frame, its prefix and patch rows, the ring and the result are only ever read and written by backend ops, so on a GPU backend
+        // the block moves no tokens through the host.
         using Tensor prefixRows = new(new TensorShape(1, prefix, hidden), DType.F32);
         using Tensor patchRows = new(new TensorShape(1, patches, hidden), DType.F32);
-        ReadOnlySpan<float> src = frame.AsReadOnlySpan<float>();
-        src[..(prefix * hidden)].CopyTo(prefixRows.AsSpan<float>());
-        src[(prefix * hidden)..].CopyTo(patchRows.AsSpan<float>());
+        StridedCopies.SliceAxis(backend, prefixRows, frame, 1, 0, prefix);
+        StridedCopies.SliceAxis(backend, patchRows, frame, 1, prefix, patches);
 
         int live;
         Tensor? qMh = null, keys = null, values = null;
@@ -240,19 +242,19 @@ public sealed unsafe class Dinov3VisionEncoder
             using (k)
             using (v)
             {
-                using Tensor pooled = ring.UpdatePrefix(block, prefixRows);
+                using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
                 (Tensor pq, Tensor pk, Tensor pv) = layer.ProjectAttention(backend, pooled, null, null);
                 pq.Dispose();
                 using (pk)
                 using (pv)
-                    live = ring.Update(block, k, v, pk, pv);
+                    live = ring.Update(backend, block, k, v, pk, pv);
                 qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
                 backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
             }
 
             // Exact-length copies of the live rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
-            keys = LiveRows(ring.Keys(block), live);
-            values = LiveRows(ring.Values(block), live);
+            keys = CrossFrameKvRing.LiveCopy(backend, ring.Keys(block), live);
+            values = CrossFrameKvRing.LiveCopy(backend, ring.Values(block), live);
         }
         catch
         {
@@ -267,22 +269,10 @@ public sealed unsafe class Dinov3VisionEncoder
         Tensor flat = attention.MergeHeads(backend, attended, new TensorShape(1, patches, hidden));
         using Tensor patchOut = layer.FinishAttention(backend, patchRows, flat);
 
+        // One op writes the whole output, so a GPU backend allocates it on the device instead of uploading a host buffer first.
         Tensor next = new(frame.Shape, DType.F32);
-        Span<float> dst = next.AsSpan<float>();
-        prefixRows.AsReadOnlySpan<float>().CopyTo(dst);
-        patchOut.AsReadOnlySpan<float>().CopyTo(dst[(prefix * hidden)..]);
+        backend.Concat(next, [prefixRows, patchOut], 1);
         return next;
-    }
-
-    // The first `rows` rows of every head of a head-major cache [1, heads, capacity, D], as a new [1, heads, rows, D].
-    private static Tensor LiveRows(Tensor cache, int rows)
-    {
-        int heads = (int)cache.Shape[1], capacity = (int)cache.Shape[2], dim = (int)cache.Shape[3];
-        Tensor live = new(new TensorShape(1, heads, rows, dim), DType.F32);
-        ReadOnlySpan<float> src = cache.AsReadOnlySpan<float>();
-        Span<float> dst = live.AsSpan<float>();
-        for (int h = 0; h < heads; h++) src.Slice(h * capacity * dim, rows * dim).CopyTo(dst.Slice(h * rows * dim, rows * dim));
-        return live;
     }
 
     // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero
