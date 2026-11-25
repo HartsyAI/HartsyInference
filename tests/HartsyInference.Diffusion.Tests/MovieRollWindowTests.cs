@@ -45,8 +45,26 @@ public sealed class MovieRollWindowTests
             txtTemb, frameTemb, layout, fixture.Rope, Rows(0, Frames), null, null, returnKv: true);
 
         Assert.Null(encoded.Text);
+        AssertValues(fixture.Ref("win.encode.img"), encoded.Image, "encoded image");
         AssertValues(fixture.Ref("win.encode.k"), encoded.Keys!, "encoded keys");
         AssertValues(fixture.Ref("win.encode.v"), encoded.Values!, "encoded values");
+    }
+
+    [Fact]
+    public void EncodeOverANonEmptyCacheMatchesTheReference()
+    {
+        using Fixture fixture = new();
+        using Tensor frameTemb = fixture.FrameTemb();
+        using Tensor txtTemb = fixture.TxtTemb();
+        using TokenSegmentLayout layout = fixture.Layout();
+        using Tensor keys = Copy(fixture.Ref("win.encode.k"), new TensorShape(1, WindowTokens, Heads, HeadDim));
+        using Tensor values = Copy(fixture.Ref("win.encode.v"), new TensorShape(1, WindowTokens, Heads, HeadDim));
+        using MovieRollWindowOutput encoded = fixture.Block.ForwardWindow(fixture.Backend, fixture.Ref("win.in.img_c"), null,
+            txtTemb, frameTemb, layout, fixture.Rope, Concat(Rows(0, Frames), Rows(Frames, Frames)), keys, values, returnKv: true);
+
+        AssertValues(fixture.Ref("win.encode_cached.img"), encoded.Image, "encoded image over cache");
+        AssertValues(fixture.Ref("win.encode_cached.k"), encoded.Keys!, "encoded keys over cache");
+        AssertValues(fixture.Ref("win.encode_cached.v"), encoded.Values!, "encoded values over cache");
     }
 
     [Fact]

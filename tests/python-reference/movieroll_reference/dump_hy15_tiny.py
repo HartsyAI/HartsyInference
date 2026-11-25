@@ -287,16 +287,18 @@ def _window_cases(model, window_a, window_b, window_c, frame_t, t, qwen, byt5):
     txt = torch.cat([model.byt5_in(byt5) + model.cond_type_embedding.weight[1],
                      model.txt_in(qwen, t) + model.cond_type_embedding.weight[0]], 1)
 
-    _, _, kv_a = _window_block(block, img_a, None, vec, vec_txt, thw, cos, sin, rows(0), rows(0), None, True)
+    img_enc, _, kv_a = _window_block(block, img_a, None, vec, vec_txt, thw, cos, sin, rows(0), rows(0), None, True)
     _, _, kv_b = _window_block(block, img_b, None, vec, vec_txt, thw, cos, sin, rows(6), rows(6), None, True)
     img_d, txt_d, _ = _window_block(block, img_c, txt, vec, vec_txt, thw, cos, sin, rows(3), torch.arange(0, 6 * per_frame),
                                     kv_a, False)
     img_r, txt_r, _ = _window_block(block, img_c, txt, vec, vec_txt, thw, cos, sin, rows(3), torch.arange(0, 6 * per_frame),
                                     kv_b, False)
+    img_ec, _, kv_ec = _window_block(block, img_c, None, vec, vec_txt, thw, cos, sin, rows(3), torch.arange(0, 6 * per_frame), kv_a, True)
     tensors = {
         "win.in.img_a": img_a, "win.in.img_b": img_b, "win.in.img_c": img_c, "win.in.txt": txt,
         "win.in.vec": vec, "win.in.vec_txt": vec_txt,
-        "win.encode.k": kv_a[0], "win.encode.v": kv_a[1],
+        "win.encode.img": img_enc, "win.encode.k": kv_a[0], "win.encode.v": kv_a[1],
+        "win.encode_cached.img": img_ec, "win.encode_cached.k": kv_ec[0], "win.encode_cached.v": kv_ec[1],
         "win.encode_b.k": kv_b[0], "win.encode_b.v": kv_b[1],
         "win.denoise.img": img_d, "win.denoise.txt": txt_d,
         "win.repos.img": img_r, "win.repos.txt": txt_r,

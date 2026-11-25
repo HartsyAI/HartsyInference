@@ -92,7 +92,7 @@ public sealed unsafe class HunyuanImageRope : IDisposable
     /// <paramref name="x"/> at explicit positions: <paramref name="positions"/> holds one row of <see cref="AxesDim"/> coordinates per token,
     /// the layout <see cref="HunyuanImagePosEmbed.GridRows"/> produces for a packed grid. Any row may repeat or be any integer, so a
     /// streaming window can rotate its cached history at the packed positions it occupies. Batch 1 only; the tables are leased for the call.</summary>
-    public void RotateRows(IBackend backend, Tensor x, ReadOnlySpan<float> positions, int tokens, int heads)
+    public void RotateRows(IBackend backend, Tensor x, ReadOnlySpan<float> positions, int tokens, int heads, int slot = 0)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (tokens <= 0)
@@ -100,7 +100,7 @@ public sealed unsafe class HunyuanImageRope : IDisposable
         if (positions.Length != checked(tokens * _axesDim.Length))
             throw new ArgumentException($"{tokens} tokens over {_axesDim.Length} axes take {tokens * _axesDim.Length} positions; got {positions.Length}.",
                 nameof(positions));
-        using RopeTableLease lease = _deviceTables.Acquire(backend, 0, tokens, positions);
+        using RopeTableLease lease = _deviceTables.Acquire(backend, slot, tokens, positions);
         Tensor cos = lease.DeviceCos ?? throw new InvalidOperationException("RoPE device tables require a preloading cache.");
         Tensor sin = lease.DeviceSin ?? throw new InvalidOperationException("RoPE device tables require a preloading cache.");
         backend.Rotary(RotaryCall.Rows(x, cos, sin, tokens, heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
