@@ -60,20 +60,60 @@ public sealed class DuoAttentionBiasAndKvCacheTests
     }
 
     [Fact]
-    public void CachedAttentionEqualsFullAttentionOverTheSameKeys()
+    public void EvictingThenMaskingEqualsFullSequenceWindowedBias()
     {
-        const int total = 6, queries = 2, past = total - queries;
-        float[] keys = Sequence(total, 1), values = Sequence(total, 2), q = Sequence(queries, 3);
-        float[] bias = CausalBias(past, queries);
+        // Blocks of 2 rows over 8 rows. A block sees the last 4 committed rows and causal rows of its own block.
+        // The cached path physically evicts old rows and builds its bias over [cache | block] indices. The full-sequence path keeps every
+        // row and builds a window bias over absolute indices. Both must agree at every block.
+        const int blockRows = 2, blocks = 4, window = 4, total = blockRows * blocks;
+        float[] keys = Sequence(total, 1), values = Sequence(total, 2), q = Sequence(total, 3);
+        DuoKvCache cache = new DuoKvCache(window, Width);
 
-        float[] full = Attend(q, queries, keys, values, total, bias);
+        for (int b = 0; b < blocks; b++)
+        {
+            int start = b * blockRows;
+            int cacheRows = cache.Rows;
+            Assert.Equal(Math.Min(start, window), cacheRows);
 
-        DuoKvCache cache = new DuoKvCache(total, Width);
-        cache.Append(keys.AsSpan(0, past * Width), values.AsSpan(0, past * Width));
-        cache.Append(keys.AsSpan(past * Width), values.AsSpan(past * Width));
-        float[] cached = Attend(q, queries, cache.Keys.ToArray(), cache.Values.ToArray(), cache.Rows, bias);
+            // Cached path: history rows from the cache, then the block's own rows.
+            List<DuoMaskRect> cachedRects = [];
+            for (int i = 0; i < blockRows; i++)
+            {
+                if (cacheRows > 0)
+                {
+                    cachedRects.Add(new DuoMaskRect(i, i + 1, 0, cacheRows));
+                }
+                cachedRects.Add(new DuoMaskRect(i, i + 1, cacheRows, cacheRows + i + 1));
+            }
+            float[] cachedKeys = new float[(cacheRows + blockRows) * Width];
+            float[] cachedValues = new float[(cacheRows + blockRows) * Width];
+            cache.Keys.CopyTo(cachedKeys);
+            cache.Values.CopyTo(cachedValues);
+            keys.AsSpan(start * Width, blockRows * Width).CopyTo(cachedKeys.AsSpan(cacheRows * Width));
+            values.AsSpan(start * Width, blockRows * Width).CopyTo(cachedValues.AsSpan(cacheRows * Width));
+            float[] cachedOut = Attend(q.AsSpan(start * Width, blockRows * Width).ToArray(), blockRows, cachedKeys, cachedValues,
+                cacheRows + blockRows, DuoAttentionBias.Build(cachedRects, blockRows, cacheRows + blockRows));
 
-        AssertClose(full, cached);
+            // Full-sequence path: every row kept; the window is a mask over absolute positions.
+            List<DuoMaskRect> fullRects = [];
+            for (int i = 0; i < blockRows; i++)
+            {
+                int position = start + i;
+                fullRects.Add(new DuoMaskRect(i, i + 1, Math.Max(0, start - window), position + 1));
+            }
+            float[] fullOut = Attend(q.AsSpan(start * Width, blockRows * Width).ToArray(), blockRows,
+                keys.AsSpan(0, (start + blockRows) * Width).ToArray(), values.AsSpan(0, (start + blockRows) * Width).ToArray(),
+                start + blockRows, DuoAttentionBias.Build(fullRects, blockRows, start + blockRows));
+            AssertClose(fullOut, cachedOut);
+
+            // Commit the block: evict to make room, then append.
+            int excess = cache.Rows + blockRows - window;
+            if (excess > 0)
+            {
+                cache.EvictOldest(excess);
+            }
+            cache.Append(keys.AsSpan(start * Width, blockRows * Width), values.AsSpan(start * Width, blockRows * Width));
+        }
     }
 
     [Fact]

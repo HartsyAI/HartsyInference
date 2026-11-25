@@ -1,7 +1,13 @@
 namespace HartsyInference.Diffusion.Models.Duo;
 
 /// <summary>One layer's key and value rows of the committed history, oldest first, in a flat row-major <c>[rows, width]</c> buffer.
-/// The caller appends each committed chunk and evicts the oldest rows when a sliding history window is full; a row is never rewritten in place.</summary>
+/// The caller appends each committed chunk and evicts the oldest rows when a sliding history window is full; a row is never rewritten in place.
+/// <b>CPU reference only.</b> It is managed <c>float[]</c> storage, not backend tensors, and nothing in the production path uses it yet.
+/// <see cref="Denoisers.DiTBlocks.FrameKvCache"/> is not reused because it stores one slot per latent frame as pinned backend tensors whose dtype
+/// and shape the attention path fixes. Duo needs row-granular sliding eviction over the packed sequence, which a frame slot cannot express.
+/// A backend-backed row cache is a later step; whether <c>FrameKvCache</c> can host it is open.
+/// Rows are stored verbatim. The intended contract is that keys are post-QK-norm and post-RoPE, as the attention layer reads them, and values
+/// as produced by the V projection. This class does not enforce that, and the order has not been checked against upstream.</summary>
 public sealed class DuoKvCache
 {
     private readonly float[] _keys;
