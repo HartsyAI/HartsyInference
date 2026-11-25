@@ -37,6 +37,21 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
 
     IGenerationModel IHostReferenceTextModel.Generation => Generation;
 
+    /// <summary>Refuses a directory that could not load, before a caller unloads what it replaces: the config must parse, the weights must fit <paramref name="maxWeightBytes"/>, and the
+    /// <c>tokenizer.json</c> must exist.</summary>
+    /// <exception cref="HartsyInferenceException">The config is not runnable, the weights are larger than <paramref name="maxWeightBytes"/>, or <c>tokenizer.json</c> is missing.</exception>
+    public static void RequireLoadable(string directory, long maxWeightBytes = MaxHostWeightBytes)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(directory);
+        Hy4FlashConfig.Load(Path.Combine(directory, "config.json"));
+        long bytes = WeightBytes(directory);
+        if (bytes > maxWeightBytes)
+            throw new HartsyInferenceException($"'{directory}' holds {bytes / (1 << 20)} MiB of weights. The Hy4 Flash host reference loads every weight as F32 in host "
+                + $"memory and runs only checkpoints up to {maxWeightBytes / (1 << 20)} MiB; the released checkpoints need the device path, which is not built.");
+        if (!File.Exists(Path.Combine(directory, "tokenizer.json")))
+            throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the Hy4 Flash Text path needs to build its prompt.");
+    }
+
     /// <summary>Loads <paramref name="directory"/>; the result owns everything it opened.</summary>
     /// <exception cref="HartsyInferenceException">The checkpoint is larger than <see cref="MaxHostWeightBytes"/>, the config is not runnable, the tokenizer is missing or
     /// unusable, or its special ids disagree with <c>config.json</c>.</exception>
@@ -48,15 +63,9 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentException.ThrowIfNullOrEmpty(directory);
+        RequireLoadable(directory, maxWeightBytes);
         Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(directory, "config.json"));
-        long bytes = WeightBytes(directory);
-        if (bytes > maxWeightBytes)
-            throw new HartsyInferenceException($"'{directory}' holds {bytes / (1 << 20)} MiB of weights. The Hy4 Flash host reference loads every weight as F32 in host "
-                + $"memory and runs only checkpoints up to {maxWeightBytes / (1 << 20)} MiB; the released checkpoints need the device path, which is not built.");
-
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), chatPath = Path.Combine(directory, "chat_template.jinja");
-        if (!File.Exists(tokenizerPath))
-            throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the Hy4 Flash Text path needs to build its prompt.");
         (string? bosLiteral, string? eosLiteral) = HfChatAssets.SpecialTokenLiterals(directory);
         List<int> stopIds = StopIds(directory, config);
         ILlmTokenizer tokenizer;

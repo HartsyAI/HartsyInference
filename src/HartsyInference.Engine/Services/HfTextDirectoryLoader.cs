@@ -141,7 +141,8 @@ internal static class HfTextDirectoryLoader
         if (IsKimiK31(info))
             RequireKimiK31Runnable(info);
         if (IsHy4Flash(info))
-            Hy4FlashConfig.Load(info.ConfigPath);
+            // Refused here, before TextService unloads the model it replaces: the size and tokenizer checks live in RequireLoadable.
+            Hy4FlashTextModel.RequireLoadable(info.Root);
         if (IsGlm5Next(info))
         {
             Glm5NextTextModel.ReadConfig(info.ConfigPath);

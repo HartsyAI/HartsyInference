@@ -155,7 +155,7 @@ public sealed class Hy4FlashTextModelTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void NoThinkEffort_SelectsTheNoThinkVariant_AndTheDefaultMatchesHigh()
+    public void NoThinkVariant_IsSelectedByThinkingOffOrALowEffort_AndTheDefaultIsHigh()
     {
         string dir = SyntheticCheckpoint();
         try
@@ -163,15 +163,34 @@ public sealed class Hy4FlashTextModelTests(ITestOutputHelper output)
             using Hy4FlashTextModel model = Hy4FlashTextModel.Load(new CpuBackend(), dir, 64);
             List<ChatMessage> messages = [new("user", "hello")];
             int[] defaults = model.Template.Encode(model.Tokenizer, messages, true, null, null, null);
-            int[] noThink = model.Template.Encode(model.Tokenizer, messages, true, null, null, 1);
-            int[] high = model.Template.Encode(model.Tokenizer, messages, true, null, null, 50);
-            Assert.NotEqual(defaults, noThink);
+            int[] high = model.Template.Encode(model.Tokenizer, messages, true, null, null, 75);
+            int[] thinkingOn = model.Template.Encode(model.Tokenizer, messages, true, true, null, 75);
+            int[] noThinkLow = model.Template.Encode(model.Tokenizer, messages, true, null, null, 50);
+            int[] noThinkMin = model.Template.Encode(model.Tokenizer, messages, true, null, null, 1);
+            int[] thinkingOff = model.Template.Encode(model.Tokenizer, messages, true, false, null, null);
+            int[] thinkingOffHighEffort = model.Template.Encode(model.Tokenizer, messages, true, false, null, 100);
+
+            Assert.NotEqual(defaults, noThinkLow);
             Assert.Equal(defaults, high);
+            Assert.Equal(defaults, thinkingOn);
+            Assert.Equal(noThinkLow, noThinkMin);
+            Assert.Equal(noThinkLow, thinkingOff);
+            Assert.Equal(noThinkLow, thinkingOffHighEffort);
         }
         finally
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public void Reset_ClearsTheImageRunFlagAndTheCounters()
+    {
+        using Hy4FlashSequenceState state = new([], 8) { EndsInImageRun = true, NextPosition = 5, ImagesUsed = 1 };
+        state.Reset();
+        Assert.False(state.EndsInImageRun);
+        Assert.Equal(0, state.NextPosition);
+        Assert.Equal(0, state.ImagesUsed);
     }
 
     [Fact]

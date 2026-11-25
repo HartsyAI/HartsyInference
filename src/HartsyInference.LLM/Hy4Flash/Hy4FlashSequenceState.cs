@@ -52,6 +52,7 @@ public sealed class Hy4FlashSequenceState : IDisposable
         Length = 0;
         NextPosition = 0;
         ImagesUsed = 0;
+        EndsInImageRun = false;
         Ids.Clear();
         foreach (DsaAttentionState layer in Layers) layer.Reset();
     }

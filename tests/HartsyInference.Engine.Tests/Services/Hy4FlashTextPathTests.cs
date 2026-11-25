@@ -3,6 +3,9 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Hy4Flash;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Engine.Services;
 
@@ -92,5 +95,60 @@ public sealed class Hy4FlashTextPathTests : IDisposable
         HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(dir) ?? throw new InvalidOperationException("not probed");
         HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(info));
         Assert.Contains("num_hidden_layers", ex.Message, StringComparison.Ordinal);
+    }
+
+    // A sparse-looking weights file just over the host limit: the size is what is refused, so its contents need not be a model.
+    private string Oversize()
+    {
+        string dir = Path.Combine(_root, "oversize");
+        Directory.CreateDirectory(dir);
+        File.Copy(Hy4Dir("data/config.json"), Path.Combine(dir, "config.json"));
+        File.WriteAllText(Path.Combine(dir, "tokenizer.json"), "{}");
+        byte[] header = [2, 0, 0, 0, 0, 0, 0, 0, (byte)'{', (byte)'}'];
+        using (FileStream stream = File.Create(Path.Combine(dir, "weights.safetensors")))
+        {
+            stream.Write(header);
+            stream.SetLength(Hy4FlashTextModel.MaxHostWeightBytes + (1L << 20));
+        }
+        return dir;
+    }
+
+    // The loaded model must survive a refused load: the slot keeps its backend and the path it was loaded from.
+    private async Task RefusalKeepsTheLoadedModel(string dir, string expected)
+    {
+        ModelSpec spec = new() { Requested = dir, Modality = Modality.Text, LocalPath = dir };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "Hello" }],
+            Device = "vulkan:0",
+            Temperature = 0,
+            MaxTokens = 1,
+        };
+        using InferenceEngine engine = new("cpu");
+        TextService text = (TextService)engine.Text;
+        TextDeviceSlot slot = text.EnsureSlot("vulkan:0");
+        CpuBackend previous = new();
+        slot.Backend = previous;
+        slot.LoadedPath = "previous-model-directory";
+
+        HartsyInferenceException error = await Assert.ThrowsAsync<HartsyInferenceException>(() => engine.Text.GenerateAsync(spec, request));
+
+        Assert.Contains(expected, error.Message, StringComparison.Ordinal);
+        Assert.Same(previous, slot.Backend);
+        Assert.Equal("previous-model-directory", slot.LoadedPath);
+    }
+
+    [Fact]
+    public async Task OversizeHy4_IsRefusedBeforeTheLoadedModelIsUnloaded()
+    {
+        await RefusalKeepsTheLoadedModel(Oversize(), "MiB of weights");
+    }
+
+    [Fact]
+    public async Task Hy4WithoutTokenizer_IsRefusedBeforeTheLoadedModelIsUnloaded()
+    {
+        string dir = Synthetic();
+        File.Delete(Path.Combine(dir, "tokenizer.json"));
+        await RefusalKeepsTheLoadedModel(dir, "tokenizer.json");
     }
 }
