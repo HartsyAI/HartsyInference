@@ -149,6 +149,21 @@ def main():
                 write_tensor(args.out, meta, "audio_proj", captured["audio_proj"].reshape(-1, config["output_dim"]))
     hook.remove()
 
+    # KV-cache path (the pipeline's use_kv_cache): the first two latent frames are conditioning. The cache comes from a pass over them with
+    # skip_crs_attn (no text, no audio) and return_kv; the denoising call then takes only the last two frames with that cache.
+    cond_frames = 2
+    with torch.no_grad():
+        _, kv_cache = model(latent[:, :, :cond_frames], torch.tensor([0.0]), encoder, audio_embs=audio, num_cond_latents=cond_frames,
+                            num_ref_latents=1, ref_img_index=10, return_kv=True, skip_crs_attn=True)
+        cached = model(latent[:, :, cond_frames:], torch.tensor([500.0]), encoder, audio_embs=audio, num_cond_latents=cond_frames,
+                       num_ref_latents=1, ref_img_index=10, kv_cache_dict=kv_cache)
+    k0 = kv_cache[0][0]  # [B, heads, S, D], after norm and RoPE
+    write_tensor(args.out, meta, "kv.block0.k", k0.permute(0, 2, 1, 3)[0])
+    write_tensor(args.out, meta, "kv.block0.v", kv_cache[0][1].permute(0, 2, 1, 3)[0])
+    write_tensor(args.out, meta, "kv.block1.k", kv_cache[1][0].permute(0, 2, 1, 3)[0])
+    write_tensor(args.out, meta, "kv.block1.v", kv_cache[1][1].permute(0, 2, 1, 3)[0])
+    write_tensor(args.out, meta, "velocity.avc_cache", cached.reshape(-1))
+
     with open(os.path.join(args.out, "meta.json"), "w", encoding="utf-8") as handle:
         json.dump(meta, handle, indent=2)
     print(json.dumps({"tensors": len(meta["tensors"]), "velocity_shape": list(velocity.shape)}))

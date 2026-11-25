@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// (2) ungated text cross-attention on the noisy rows only, after an affine LayerNorm; (3) SwiGLU FFN, gated. Every weight is used through
 /// <see cref="IBackend.Linear"/> or <see cref="IBackend.LinearWeightRows"/>, which apply a runtime LoRA adjunct on any projection, and no
 /// path casts or fuses a weight past that.</summary>
-public sealed class LongCatBlock : IStreamingBlock
+public sealed partial class LongCatBlock : IStreamingBlock
 {
     private readonly LongCatConfig _config;
     private Tensor? _adaWeight, _adaBias;
@@ -113,7 +113,7 @@ public sealed class LongCatBlock : IStreamingBlock
     /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
     /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
-        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null)
+        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null, LongCatBlockKv? cache = null)
     {
         int dim = _config.HiddenSize;
         int s = checked(inputs.Frames * inputs.TokensPerFrame);
@@ -129,7 +129,10 @@ public sealed class LongCatBlock : IStreamingBlock
         // 1. self-attention: modulation columns are [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp].
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         probe?.Invoke($"{stage}.attn_in", normed1);
-        using Tensor attn = SelfAttention(backend, normed1, in inputs, probe, stage);
+        // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
+        using Tensor attn = cache is null
+            ? SelfAttention(backend, normed1, in inputs, probe, stage)
+            : CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, cache, keep: false, inputs.Segments, out _);
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
         probe?.Invoke($"{stage}.after_self", afterSelf);
