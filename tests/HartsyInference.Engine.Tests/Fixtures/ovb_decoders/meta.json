@@ -1,0 +1,100 @@
+{
+ "height": 20,
+ "width": 24,
+ "classes": [
+  "road",
+  "sidewalk",
+  "car",
+  "person",
+  "sky"
+ ],
+ "passes": 3,
+ "classCount": 5,
+ "ovbCommit": "d457d3f7fe3a871d757956167ed552a1b4762ad8",
+ "legends": [
+  [
+   [
+    216,
+    88,
+    40
+   ],
+   [
+    120,
+    104,
+    152
+   ],
+   [
+    232,
+    72,
+    200
+   ],
+   [
+    40,
+    88,
+    184
+   ],
+   [
+    56,
+    168,
+    104
+   ]
+  ],
+  [
+   [
+    56,
+    120,
+    120
+   ],
+   [
+    56,
+    136,
+    152
+   ],
+   [
+    8,
+    184,
+    232
+   ],
+   [
+    168,
+    136,
+    200
+   ],
+   [
+    40,
+    88,
+    232
+   ]
+  ],
+  [
+   [
+    168,
+    200,
+    232
+   ],
+   [
+    168,
+    40,
+    24
+   ],
+   [
+    24,
+    72,
+    72
+   ],
+   [
+    72,
+    184,
+    24
+   ],
+   [
+    56,
+    200,
+    184
+   ]
+  ]
+ ],
+ "selectivePrompt": "[TASK: SEMANTIC_SEGMENTATION] Generate a semantic segmentation visualization of the input image, using this color mapping for the listed classes: { 'road': [216, 88, 40], 'sidewalk': [120, 104, 152], 'car': [232, 72, 200], 'person': [40, 88, 184], 'sky': [56, 168, 104] }. Paint pixels belonging to a listed class with exactly its RGB color. Pixels that do not belong to one of these listed classes must be black [0, 0, 0] and must not be forced into a listed class. Output only the segmentation visualization image.",
+ "quickstartPrompt": "[TASK: SEMANTIC_SEGMENTATION] Generate a semantic segmentation visualization of the input image, using this color mapping: {\"road\": [216,88,40], \"sidewalk\": [120,104,152], \"car\": [232,72,200], \"person\": [40,88,184], \"sky\": [56,168,104]} Color each pixel of a listed class with its color and leave everything else black. Output only the segmentation visualization image.",
+ "note": "label 255 = ignore; quickstartPrompt follows the README quickstart literal with the same legend"
+}
