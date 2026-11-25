@@ -182,6 +182,10 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         {
             return "metric-depth";
         }
+        if (id.Contains("open-vision-banana"))
+        {
+            return "segment";
+        }
         if (id.Contains("clipseg") || id.Contains("sam"))
         {
             return "segment";

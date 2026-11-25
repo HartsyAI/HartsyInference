@@ -1184,6 +1184,10 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
+            // Text / LLM — Hy4 Flash (instruct, FP8, base): host reference text path for checkpoints up to 1 GiB; the released sizes are refused by name.
+            Hy4FlashCatalog.Instruct(),
+            Hy4FlashCatalog.Fp8(),
+            Hy4FlashCatalog.Base(),
             // Text / LLM — Maxwell-V1.0-Flash: host reference model (MaxwellModel, block-sparse attention with its indexer) on the Text path; structural until a real-weight run.
             MaxwellCatalog.Build(),
 
@@ -1339,10 +1343,11 @@ public static class ModelCatalog
                 // Licence: weights FLUX Non-Commercial (the release's own statement: "The released model weights are derived from FLUX.2
                 // [klein] Base and are distributed under the FLUX Non-Commercial License ... Use of the weights, and of any output
                 // produced with them, is subject to the terms of that license."); code Apache-2.0. Built and parity-tested on a tiny
-                // diffusers fixture; no real-weight run yet.
+                // diffusers fixture. One real-weight run on the RTX 3060 (2026-11-24): qualitative depth and normals; segmentation mIoU 0.779
+                // over 40 COCO val2017 images (five object classes, our protocol; docs/Checklists/MODEL_STATUS_IMAGE.md).
                 Id = "open-vision-banana-4b", Modality = img, DisplayName = "Open Vision Banana 4B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
                 Status = vp,
-                CliDrivable = false,
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 1, 2, "e0eb9850ca1be16a9e48f5d00dd5309c4d024c7592f56d61c33efdeb6a74a0a0"),
@@ -3079,6 +3084,45 @@ public static class ModelCatalog
                     // Comfy-Org repacked bf16 DiT; LLaVA-Llama-3-8B + CLIP-L + the 3D VAE resolve as side models.
                     new() { Repo = "Comfy-Org/HunyuanVideo_repackaged", RepoPath = "split_files/diffusion_models/hunyuan_video_t2v_720p_bf16.safetensors",
                         TargetSubdir = "Stable-Diffusion/HunyuanVideo", Role = "transformer", Sha256 = "c6ff2d107f0fec571fe276ad847468404ed01855c28c0be8859c3b311daec52a" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "fastframes-s", Modality = vid, DisplayName = "FastFrames S (1.3B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Apple's FastFrames-S companions plus the Causal Forcing++ generator they were trained with (Apache-2.0).
+                    // The generator is a PyTorch pickle read through the safe subset reader; nothing in it is executed.
+                    new() { Repo = "zhuhz22/Causal-Forcing", RepoPath = "causal-forcing++/framewise-2step.pt",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "framewise-2step.pt", Role = "transformer",
+                        Sha256 = "8f899a016dffb9539788fac82c6200e43ef6e23b6e61ec6b885bb507a760ce42" },
+                    new() { Repo = "apple/FastFrames-S", RepoPath = "fastframes-s/kv_refiner.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "kv_refiner.safetensors", Role = "kv refiner",
+                        Sha256 = "b4f36d00effd78a60435526dcc2b1a0e6bbed0f09621ee8ab4019460769a7bbb" },
+                    new() { Repo = "apple/FastFrames-S", RepoPath = "fastframes-s/pixel_decoder.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "pixel_decoder.safetensors", Role = "pixel decoder",
+                        Sha256 = "815682581f6376d2cdacc60568facf1bd979112091e4157fb6c00ae946b89b32" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "fastframes-l", Modality = vid, DisplayName = "FastFrames L (14B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
+                // Not CLI-drivable until block streaming lands: the 28.6 GB BF16 generator does not fit a 24 GB card, and the CLI would
+                // download about 30 GB before failing. The recipe still constructs for engine-level runs.
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    // Apple's FastFrames-L, all three files.
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/dit.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "dit.safetensors", Role = "transformer",
+                        Sha256 = "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de" },
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/kv_refiner.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "kv_refiner.safetensors", Role = "kv refiner",
+                        Sha256 = "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74" },
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/pixel_decoder.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "pixel_decoder.safetensors", Role = "pixel decoder",
+                        Sha256 = "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55" },
                 },
             },
             new CatalogEntry

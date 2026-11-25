@@ -85,6 +85,8 @@ public sealed class VisionService : IVisionService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         VisionRequestValidator.Validate(request);
+        if (OvbPerception.Handles(spec))
+            return OpenVisionBanana(spec, request, cancel);
         if (Rmbg3Matte.Handles(spec))
         {
             if (request.Mode is not (VisionMode.BackgroundRemoval or VisionMode.Matting))
@@ -535,6 +537,27 @@ public sealed class VisionService : IVisionService, IDisposable
         finally
         {
             pixels.Dispose();
+        }
+    }
+
+    /// <summary>Open Vision Banana: segmentation (the prompt names the classes, comma-separated), depth or normals, each one
+    /// task prompt through the image service with the photo as the reference (<see cref="OvbPerception"/>). Other modes are refused
+    /// by name: the model answers only these tasks.</summary>
+    private async Task<VisionResult> OpenVisionBanana(ModelSpec spec, VisionRequest request, CancellationToken cancel)
+    {
+        switch (request.Mode)
+        {
+            case VisionMode.Segment:
+                string[] classes = (request.Prompt ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+                if (classes.Length == 0)
+                    throw new ArgumentException("Open Vision Banana segments the classes its prompt names: pass them comma-separated, e.g. -p \"car,person,road\".", nameof(request));
+                return OvbPerception.ToVisionResult(await OvbPerception.SegmentAsync(_engine, spec, request.Image, classes, legends: 1, cancel).ConfigureAwait(false));
+            case VisionMode.Depth:
+                return OvbPerception.ToVisionResult(await OvbPerception.DepthAsync(_engine, spec, request.Image, cancel).ConfigureAwait(false));
+            case VisionMode.Normal:
+                return OvbPerception.ToVisionResult(await OvbPerception.NormalsAsync(_engine, spec, request.Image, cancel).ConfigureAwait(false));
+            default:
+                throw new NotSupportedException($"Open Vision Banana ('{spec.Requested}') answers segment, depth and normal tasks, not {request.Mode}.");
         }
     }
 

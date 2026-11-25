@@ -22,6 +22,12 @@ public sealed class Hy4FlashSequenceState : IDisposable
     /// <summary>The (time, height, width) rotary position of every cache slot this state wrote. The model's shared M-RoPE rows are restamped from these when another state used them last.</summary>
     internal int[] Times { get; }
 
+    /// <summary>The model that created this state; the model refuses a state of another model, whose rotary rows and slots would not match.</summary>
+    internal object? Owner { get; set; }
+
+    /// <summary>Whether the last call ended inside an image placeholder run, so the next call must not open with another one.</summary>
+    internal bool EndsInImageRun { get; set; }
+
     /// <summary>Height plane of each slot, see <see cref="Times"/>.</summary>
     internal int[] Heights { get; }
 
@@ -39,6 +45,17 @@ public sealed class Hy4FlashSequenceState : IDisposable
 
     /// <summary>Images consumed so far, so a later chunk takes the next one.</summary>
     public int ImagesUsed { get; internal set; }
+
+    /// <summary>Empties every layer's cache and the token history; the next prefill starts at position 0.</summary>
+    public void Reset()
+    {
+        Length = 0;
+        NextPosition = 0;
+        ImagesUsed = 0;
+        EndsInImageRun = false;
+        Ids.Clear();
+        foreach (DsaAttentionState layer in Layers) layer.Reset();
+    }
 
     /// <inheritdoc />
     public void Dispose()

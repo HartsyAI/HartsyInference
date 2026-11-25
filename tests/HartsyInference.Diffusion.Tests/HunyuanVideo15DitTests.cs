@@ -163,6 +163,30 @@ public sealed class HunyuanVideo15DitTests
         Assert.Contains("txt_in.individual_token_refiner.blocks.1.self_attn.qkv.weight", converted.Keys);
     }
 
+    [Fact]
+    public void PerFrameTimestepsMatchTheReference()
+    {
+        using Fixture fixture = new();
+        float[] frameTimesteps = fixture.Reference("in.frame_timesteps").AsReadOnlySpan<float>().ToArray();
+        float window = fixture.Reference("in.timestep").AsReadOnlySpan<float>()[0];
+        using Tensor velocity = fixture.Dit.ForwardPerFrame(fixture.Backend, fixture.Reference("in.latent"), frameTimesteps, window,
+            fixture.Reference("in.qwen"), fixture.Reference("in.byt5"));
+        AssertClose(fixture.Reference("ref.velocity_per_frame"), velocity, "per-frame velocity");
+    }
+
+    [Fact]
+    public void EqualPerFrameTimestepsAreTheClipWideForward()
+    {
+        using Fixture fixture = new();
+        float window = fixture.Reference("in.timestep").AsReadOnlySpan<float>()[0];
+        Tensor latent = fixture.Reference("in.latent");
+        Tensor qwen = fixture.Reference("in.qwen");
+        Tensor byt5 = fixture.Reference("in.byt5");
+        using Tensor perFrame = fixture.Dit.ForwardPerFrame(fixture.Backend, latent, [window, window, window], window, qwen, byt5);
+        using Tensor clip = fixture.Dit.Forward(fixture.Backend, latent, window, qwen, byt5);
+        AssertClose(clip, perFrame, "equal per-frame timesteps");
+    }
+
     private static void AssertClose(Tensor expected, Tensor actual, string label)
     {
         Assert.Equal(expected.Shape, actual.Shape);

@@ -6,6 +6,7 @@ using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.LLM.Glm5Next;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Models.Lfm3;
@@ -49,11 +50,15 @@ internal static class HfTextDirectoryLoader
         string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
         || string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal)
         || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal)
+        || IsHy4Flash(info)
         || IsKimiK31(info)
         || IsGlm5Next(info);
 
     /// <summary>Whether <paramref name="info"/> is a glm5_next checkpoint (Sage S2.1 Flash, GLM-5.3-Flash). It runs on the backend of the requested device.</summary>
     internal static bool IsGlm5Next(HfCheckpointInfo info) => string.Equals(info.ModelType, Glm5NextTextModel.ModelType, StringComparison.Ordinal);
+
+    /// <summary>Whether <paramref name="info"/> is a Hy4 Flash checkpoint (<c>hy_v4_flash</c>, the base and instruct builds alike).</summary>
+    internal static bool IsHy4Flash(HfCheckpointInfo info) => string.Equals(info.ModelType, Hy4FlashConfig.ModelType, StringComparison.Ordinal);
 
     /// <summary>Whether <paramref name="info"/> is a Kimi K3.1 checkpoint. Its backend follows the requested device rather than the CPU.</summary>
     internal static bool IsKimiK31(HfCheckpointInfo info) => string.Equals(info.ModelType, KimiK31ModelType, StringComparison.Ordinal);
@@ -71,6 +76,8 @@ internal static class HfTextDirectoryLoader
             return MaxwellTextModel.Load(backend, info.Root, MaxwellOptionsFor(backend.Device));
         if (IsKimiK31(info))
             return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
+        if (IsHy4Flash(info))
+            return Hy4FlashTextModel.Load(backend, info.Root, MaxSequenceTokens);
         if (IsGlm5Next(info))
             return Glm5NextTextModel.Load(backend, info.Root, MaxSequenceTokens);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
@@ -133,6 +140,9 @@ internal static class HfTextDirectoryLoader
         }
         if (IsKimiK31(info))
             RequireKimiK31Runnable(info);
+        if (IsHy4Flash(info))
+            // Refused here, before TextService unloads the model it replaces: the size and tokenizer checks live in RequireLoadable.
+            Hy4FlashTextModel.RequireLoadable(info.Root);
         if (IsGlm5Next(info))
         {
             Glm5NextTextModel.ReadConfig(info.ConfigPath);
