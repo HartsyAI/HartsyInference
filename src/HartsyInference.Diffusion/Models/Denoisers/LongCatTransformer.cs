@@ -124,13 +124,15 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
                 $"Give one timestep or one per latent frame ({frames}); got {frameTimesteps.Length}.", nameof(frameTimesteps));
         conditioning.Validate(frames);
 
-        Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
-        Probe?.Invoke("x_embedder", hidden);
-
+        // The caption and timestep embeddings run first: they can throw (a bad validTextTokens), and the patch embedding is the one tensor
+        // that would leak on that path.
         using Tensor timeEmbed = TimestepEmbedding(backend, frameTimesteps, frames);
         Probe?.Invoke("t_embedder", timeEmbed);
         using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
         Probe?.Invoke("y_embedder", text);
+
+        Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+        Probe?.Invoke("x_embedder", hidden);
 
         int roperef = conditioning.NumRefLatents > 0 ? conditioning.RefImgIndex + 1 : 0;
         LongCatConditioning ropeConditioning = conditioning;
@@ -199,7 +201,8 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         if (!_config.TextTokensZeroPad)
             return LongCatOps.Copy(backend, kept);
         Tensor padded = new(new TensorShape(rows, dim), DType.F32);
-        using Tensor zeros = LongCatOps.Zeros(new TensorShape(rows - valid, dim));
+        using Tensor zeros = new(new TensorShape(rows - valid, dim), DType.F32);
+        backend.Fill(zeros, 0f);
         backend.Concat(padded, [kept, zeros], 0);
         return padded;
     }

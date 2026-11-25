@@ -64,14 +64,6 @@ internal static class LongCatOps
         return widened;
     }
 
-    /// <summary>A zero-filled F32 tensor.</summary>
-    public static unsafe Tensor Zeros(TensorShape shape)
-    {
-        Tensor zeros = new(shape, DType.F32);
-        new Span<float>((float*)zeros.DataPointer, checked((int)shape.ElementCount)).Clear();
-        return zeros;
-    }
-
     /// <summary>A device-friendly copy of <paramref name="source"/>.</summary>
     public static Tensor Copy(IBackend backend, Tensor source)
     {
