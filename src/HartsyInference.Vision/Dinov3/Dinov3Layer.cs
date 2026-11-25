@@ -133,8 +133,8 @@ internal sealed unsafe class Dinov3Layer
     /// <summary>The attention layer of this block, for callers that attend over their own key/value rows.</summary>
     public AttentionLayer Attention => _attn ?? throw new InvalidOperationException("Load the block's weights first.");
 
-    // t[b,s,c] *= gamma[c], on the backend for any batch: AffineBroadcastLastDim takes a [D] scale and applies it to every row of [B, S, D], so a batch of frames
-    // needs no host loop (which would pull a resident tensor back to the host and push it up again).
+    // t[b,s,c] *= gamma[c], on the backend for any batch: AffineBroadcastLastDim takes a [D] scale and applies it to every row of [B, S, D],
+    // so a batch of frames needs no host loop (which would pull a resident tensor back to the host and push it up again).
     private static Tensor LayerScale(IBackend backend, Tensor t, Tensor gamma)
     {
         Tensor o = new(t.Shape, DType.F32);
