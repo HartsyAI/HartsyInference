@@ -28,8 +28,13 @@ public sealed class LongCatAudioProjection : IDisposable
     /// <summary>Creates the projection geometry; <see cref="LoadWeights"/> fills it.</summary>
     public LongCatAudioProjection(int seqLen, int seqLenVf, int blocks, int channels, int intermediate, int outputDim, int contextTokens)
     {
-        if (seqLen < 1 || seqLenVf < 1 || blocks < 1 || channels < 1 || intermediate < 1 || outputDim < 1 || contextTokens < 1)
-            throw new ArgumentOutOfRangeException(nameof(seqLen), "Every audio projection dimension must be positive.");
+        RequirePositive(seqLen, nameof(seqLen));
+        RequirePositive(seqLenVf, nameof(seqLenVf));
+        RequirePositive(blocks, nameof(blocks));
+        RequirePositive(channels, nameof(channels));
+        RequirePositive(intermediate, nameof(intermediate));
+        RequirePositive(outputDim, nameof(outputDim));
+        RequirePositive(contextTokens, nameof(contextTokens));
         _seqLen = seqLen;
         _seqLenVf = seqLenVf;
         _blocks = blocks;
@@ -45,9 +50,13 @@ public sealed class LongCatAudioProjection : IDisposable
     /// <summary>Width of each output token (the reference's <c>output_dim</c>).</summary>
     public int OutputDim => _outputDim;
 
-    /// <summary>Reads the seven tensors (four projections with biases and the output LayerNorm) under <paramref name="prefix"/>.</summary>
+    /// <summary>Reads the ten tensors (four projections, each with a weight and a bias, and the output LayerNorm's weight and bias) under
+    /// <paramref name="prefix"/>. The reference's <c>norm_output_audio</c> is not a config key: the avatar DiT builds the projection without
+    /// it, so the output LayerNorm is always present and always loaded.</summary>
+    /// <exception cref="ObjectDisposedException">The projection was disposed.</exception>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "audio_proj.")
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(weights);
         List<Tensor> owned = [];
         try
@@ -82,6 +91,7 @@ public sealed class LongCatAudioProjection : IDisposable
     /// <summary>Projects one clip's audio windows to the per-frame context tokens. See the type remarks for the layout.</summary>
     public Tensor Forward(IBackend backend, Tensor audioFirst, Tensor audioLatter)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(audioFirst);
         ArgumentNullException.ThrowIfNull(audioLatter);
@@ -94,6 +104,12 @@ public sealed class LongCatAudioProjection : IDisposable
             throw new ArgumentException($"The latter-frame audio must be [frames, {inLatter}], got {audioLatter.Shape}.", nameof(audioLatter));
 
         int f1 = (int)audioFirst.Shape[0], f2 = (int)audioLatter.Shape[0], frames = f1 + f2;
+        // The reference's first frame is always one row; a zero-row window (a one-latent-frame clip has no latter frames) gives empty
+        // projections that the reference's rearrange does not handle, so both are refused here rather than run on empty tensors.
+        if (f1 == 0)
+            throw new ArgumentException("The first-frame audio must have one row; it has none.", nameof(audioFirst));
+        if (f2 == 0)
+            throw new ArgumentException("The latter-frame audio has no rows: a clip of one latent frame has no latter frames to project.", nameof(audioLatter));
 
         // proj1 and proj1_vf, each with ReLU (LeakyRelu at slope 0 is ReLU).
         using Tensor firstLinear = new(new TensorShape(f1, _intermediate), DType.F32);
@@ -137,6 +153,12 @@ public sealed class LongCatAudioProjection : IDisposable
         foreach (Tensor t in _owned)
             t.Dispose();
         _owned = [];
+    }
+
+    private static void RequirePositive(int value, string name)
+    {
+        if (value < 1)
+            throw new ArgumentOutOfRangeException(name, value, $"{name} must be at least 1.");
     }
 
     private static Tensor Expect(Tensor tensor, long[] shape, string key)
