@@ -57,8 +57,9 @@ internal sealed class HunyuanVideo15VaeWeights(IReadOnlyDictionary<string, Tenso
 /// <summary>Layout of the HunyuanVideo-1.5 VAE's DCAE resamplers and shortcuts, on the backend. Tensors are <c>[1, C, T, H, W]</c> F32 and
 /// batch 1 only. Every DCAE shuffle is one <see cref="PixelShuffles"/> move with time outermost, then height and width, channel innermost
 /// (<c>((t·fH + h)·fW + w)·C + c</c>, MovieRoll's <c>(r1 r2 r3 c)</c> packing). A factor of 1 makes the time position irrelevant, so the first-frame
-/// branches (time factor 1) use the same order. The shortcut group means (<see cref="GroupMean"/>) are the only host arithmetic: the backend has no
-/// grouped reduction, so they read the packed tensors on the host.</summary>
+/// branches (time factor 1) use the same order. Intermediates are disposed as soon as they are consumed; the returned tensor is owned by the caller.
+/// The shortcut group means (<see cref="GroupMean"/>) are the only host arithmetic: the backend has no grouped reduction, so they read the packed
+/// tensors on the host. That read is safe after a backend write: <c>AsReadOnlySpan</c> syncs any cached device copy first.</summary>
 internal static class HunyuanVideo15VaeShuffle
 {
     private static readonly ChannelOrder Order = new(ShuffleAxis.Time, ShuffleAxis.Height, ShuffleAxis.Width, ShuffleAxis.Channel);
@@ -85,7 +86,7 @@ internal static class HunyuanVideo15VaeShuffle
     {
         Int128 count = (Int128)c * t * h * w;
         if (count > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(c), $"A [1, {c}, {t}, {h}, {w}] tensor has {count} elements; the VAE indexes with int, so the limit is {int.MaxValue}. Chunk the clip.");
+            throw new ArgumentException($"A [1, {c}, {t}, {h}, {w}] tensor has {count} elements; the VAE indexes with int, so the limit is {int.MaxValue}. Chunk the clip.");
     }
 
     private static void RequireEvenSpatial(int h, int w, string what)
@@ -108,14 +109,15 @@ internal static class HunyuanVideo15VaeShuffle
         return 1 + (t - 1) / 2;
     }
 
-    /// <summary>Unpacks <paramref name="packed"/> (<c>channels·fT·fH·fW</c> channels on a small grid) to <c>[1, channels, frames·fT, H·fH, W·fW]</c>.</summary>
+    /// <summary>Unpacks <paramref name="packed"/> to <c>[1, channels, frames·fT, H·fH, W·fW]</c>. The caller disposes the result.</summary>
     private static Tensor Unshuffle(IBackend backend, Tensor packed, int channels, int fT, int fH, int fW)
     {
         (int c, int frames, int hp, int wp) = Dims(packed);
         if (c != channels * fT * fH * fW)
             throw new ArgumentException($"Unshuffle of {packed.Shape} by {fT}x{fH}x{fW} to {channels} channels needs {channels * fT * fH * fW} packed channels.", nameof(packed));
         Tensor output = Alloc(channels, frames * fT, hp * fH, wp * fW);
-        PixelShuffles.DepthToSpace(backend, output, packed, ShuffleSpec.ChannelsFirst(1, frames, hp, wp, channels, fT, fH, fW, Order));
+        ShuffleSpec spec = ShuffleSpec.ChannelsFirst(1, frames, hp, wp, channels, fT, fH, fW, Order);
+        PixelShuffles.DepthToSpace(backend, output, packed, spec);
         return output;
     }
 
@@ -131,34 +133,26 @@ internal static class HunyuanVideo15VaeShuffle
         return packed;
     }
 
-    /// <summary>Frames <c>[start, start + count)</c> of a <c>[1, C, T, H, W]</c> tensor.</summary>
+    /// <summary>Frames <c>[start, start + count)</c> of a <c>[1, C, T, H, W]</c> tensor. The caller disposes the result.</summary>
     private static Tensor Frames(IBackend backend, Tensor x, int start, int count)
     {
-        (int c, int _, int h, int w) = Dims(x);
+        (int c, _, int h, int w) = Dims(x);
         Tensor output = Alloc(c, count, h, w);
         StridedCopies.SliceAxis(backend, output, x, 2, start, count);
         return output;
     }
 
-    /// <summary>The first <paramref name="count"/> channels of a <c>[1, C, T, H, W]</c> tensor.</summary>
+    /// <summary>The first <paramref name="count"/> channels of a <c>[1, C, T, H, W]</c> tensor. The caller disposes the result.</summary>
     private static Tensor Channels(IBackend backend, Tensor x, int count)
     {
-        (int _, int t, int h, int w) = Dims(x);
+        (_, int t, int h, int w) = Dims(x);
         Tensor output = Alloc(count, t, h, w);
         StridedCopies.SliceAxis(backend, output, x, 1, 0, count);
         return output;
     }
 
-    /// <summary>Each channel repeated <paramref name="repeats"/> times in place: channel <c>k</c> of the output reads input channel <c>k / repeats</c>.</summary>
-    private static Tensor RepeatChannels(IBackend backend, Tensor x, int repeats)
-    {
-        (int c, int t, int h, int w) = Dims(x);
-        Tensor output = Alloc(c * repeats, t, h, w);
-        StridedCopies.RepeatInterleave(backend, output, x, 1, repeats);
-        return output;
-    }
-
-    /// <summary>Concatenates along <paramref name="dim"/> (1 channels, 2 frames) on the backend.</summary>
+    /// <summary>Concatenates along <paramref name="dim"/> (1 channels, 2 frames) by writing each part into one output, so no copy of the
+    /// parts is made and the parts can be disposed as soon as this returns.</summary>
     private static Tensor Concat(IBackend backend, int dim, params Tensor[] parts)
     {
         (int c0, int t0, int h0, int w0) = Dims(parts[0]);
@@ -171,7 +165,12 @@ internal static class HunyuanVideo15VaeShuffle
             if (dim == 1) c += ci; else t += ti;
         }
         Tensor output = Alloc(c, t, h0, w0);
-        backend.Concat(output, parts, dim);
+        long offset = 0;
+        foreach (Tensor part in parts)
+        {
+            StridedCopies.ScatterAxis(backend, output, part, dim, offset);
+            offset += part.Shape[dim];
+        }
         return output;
     }
 
@@ -188,12 +187,20 @@ internal static class HunyuanVideo15VaeShuffle
         }
         if (cout != 8 * co) throw new ArgumentException($"temporal downsample: cout {cout} must be 8·{co}.");
         DownFrames(t);
-        // h_first is packed (r2 r3 c) into 4·co channels and concatenated with itself to 8·co, as the reference does.
-        Tensor first = Shuffle(backend, Frames(backend, h, 0, 1), 1, 2, 2);
+        // h_first is packed (r2 r3 c) into 4·co channels and duplicated to 8·co, as the reference does.
+        Tensor firstFrame = Frames(backend, h, 0, 1);
+        Tensor first = Shuffle(backend, firstFrame, 1, 2, 2);
+        firstFrame.Dispose();
         Tensor firstDup = Concat(backend, 1, first, first);
+        first.Dispose();
         if (t == 1) return firstDup;
-        Tensor rest = Shuffle(backend, Frames(backend, h, 1, t - 1), 2, 2, 2);
-        return Concat(backend, 2, firstDup, rest);
+        Tensor restFrames = Frames(backend, h, 1, t - 1);
+        Tensor rest = Shuffle(backend, restFrames, 2, 2, 2);
+        restFrames.Dispose();
+        Tensor result = Concat(backend, 2, firstDup, rest);
+        firstDup.Dispose();
+        rest.Dispose();
+        return result;
     }
 
     /// <summary>Downsample shortcut: the input packed the same way, then each group of <c>C/cout</c> packed channels averaged.</summary>
@@ -204,16 +211,30 @@ internal static class HunyuanVideo15VaeShuffle
         if (!temporal)
         {
             Quotient(4 * cin, cout, "spatial downsample shortcut group");
-            return GroupMean(Shuffle(backend, x, 1, 2, 2), cout);
+            Tensor packed = Shuffle(backend, x, 1, 2, 2);
+            Tensor mean = GroupMean(packed, cout);
+            packed.Dispose();
+            return mean;
         }
         DownFrames(t);
         // The first frame averages half a group, as the reference does: 4·cin packed channels into cout.
         Quotient(4 * cin, cout, "temporal downsample first-frame group");
         Quotient(8 * cin, cout, "temporal downsample rest group");
-        Tensor first = GroupMean(Shuffle(backend, Frames(backend, x, 0, 1), 1, 2, 2), cout);
+        Tensor firstFrame = Frames(backend, x, 0, 1);
+        Tensor firstPacked = Shuffle(backend, firstFrame, 1, 2, 2);
+        firstFrame.Dispose();
+        Tensor first = GroupMean(firstPacked, cout);
+        firstPacked.Dispose();
         if (t == 1) return first;
-        Tensor rest = GroupMean(Shuffle(backend, Frames(backend, x, 1, t - 1), 2, 2, 2), cout);
-        return Concat(backend, 2, first, rest);
+        Tensor restFrames = Frames(backend, x, 1, t - 1);
+        Tensor restPacked = Shuffle(backend, restFrames, 2, 2, 2);
+        restFrames.Dispose();
+        Tensor rest = GroupMean(restPacked, cout);
+        restPacked.Dispose();
+        Tensor result = Concat(backend, 2, first, rest);
+        first.Dispose();
+        rest.Dispose();
+        return result;
     }
 
     /// <summary>Upsample main path. <paramref name="h"/> has <c>factor·cout</c> channels; the result has <c>cout</c> channels and twice the spatial
@@ -228,30 +249,63 @@ internal static class HunyuanVideo15VaeShuffle
         }
         if (ch != 8 * cout) throw new ArgumentException($"temporal upsample: channels {ch} must be 8·{cout}.");
         // h_first is packed (r2 r3 c) with 2·cout channels; the first cout are kept.
-        Tensor first = Channels(backend, Unshuffle(backend, Frames(backend, h, 0, 1), 2 * cout, 1, 2, 2), cout);
+        Tensor firstFrame = Frames(backend, h, 0, 1);
+        Tensor firstUnpacked = Unshuffle(backend, firstFrame, 2 * cout, 1, 2, 2);
+        firstFrame.Dispose();
+        Tensor first = Channels(backend, firstUnpacked, cout);
+        firstUnpacked.Dispose();
         if (t == 1) return first;
-        Tensor rest = Unshuffle(backend, Frames(backend, h, 1, t - 1), cout, 2, 2, 2);
-        return Concat(backend, 2, first, rest);
+        Tensor restFrames = Frames(backend, h, 1, t - 1);
+        Tensor rest = Unshuffle(backend, restFrames, cout, 2, 2, 2);
+        restFrames.Dispose();
+        Tensor result = Concat(backend, 2, first, rest);
+        first.Dispose();
+        rest.Dispose();
+        return result;
     }
 
-    /// <summary>Upsample shortcut: <paramref name="x"/> unpacked the way <see cref="UnpackUpsample"/> unpacks the main path, then each channel
-    /// repeated to <paramref name="cout"/> channels.</summary>
+    /// <summary>Upsample shortcut: <paramref name="x"/> unpacked the way <see cref="UnpackUpsample"/> unpacks the main path, then each channel repeated,
+    /// as the reference does. The repeat is explicit on both paths: <c>ChannelRepeat</c> needs the channel axis outermost, and this packing has it innermost.</summary>
     public static Tensor UpsampleShortcut(IBackend backend, Tensor x, int cout, bool temporal)
     {
         (int cin, int t, int hh, int ww) = Dims(x);
         if (!temporal)
         {
-            int rep = Quotient(4 * cout, cin, "spatial upsample shortcut repeat");
-            return Unshuffle(backend, RepeatChannels(backend, x, rep), cout, 1, 2, 2);
+            int repeat = Quotient(4 * cout, cin, "spatial upsample shortcut repeat");
+            Tensor repeated = RepeatChannels(backend, x, repeat);
+            Tensor output = Unshuffle(backend, repeated, cout, 1, 2, 2);
+            repeated.Dispose();
+            return output;
         }
         int rep1 = Quotient(4 * cout, cin, "temporal upsample first-frame repeat");   // repeats // 2
         int rep2 = Quotient(8 * cout, cin, "temporal upsample rest repeat");
         int cFirst = Quotient(cin, 4, "temporal upsample first-frame pack");
         int cRest = Quotient(cin, 8, "temporal upsample rest pack");
-        Tensor first = RepeatChannels(backend, Unshuffle(backend, Frames(backend, x, 0, 1), cFirst, 1, 2, 2), rep1);
+        Tensor firstFrame = Frames(backend, x, 0, 1);
+        Tensor firstUnpacked = Unshuffle(backend, firstFrame, cFirst, 1, 2, 2);
+        firstFrame.Dispose();
+        Tensor first = RepeatChannels(backend, firstUnpacked, rep1);
+        firstUnpacked.Dispose();
         if (t == 1) return first;
-        Tensor rest = RepeatChannels(backend, Unshuffle(backend, Frames(backend, x, 1, t - 1), cRest, 2, 2, 2), rep2);
-        return Concat(backend, 2, first, rest);
+        Tensor restFrames = Frames(backend, x, 1, t - 1);
+        Tensor restUnpacked = Unshuffle(backend, restFrames, cRest, 2, 2, 2);
+        restFrames.Dispose();
+        Tensor rest = RepeatChannels(backend, restUnpacked, rep2);
+        restUnpacked.Dispose();
+        Tensor result = Concat(backend, 2, first, rest);
+        first.Dispose();
+        rest.Dispose();
+        return result;
+    }
+
+    /// <summary>Each channel repeated <paramref name="repeats"/> times in place: channel <c>k</c> of the output reads input channel <c>k / repeats</c>.
+    /// The caller disposes the result.</summary>
+    private static Tensor RepeatChannels(IBackend backend, Tensor x, int repeats)
+    {
+        (int c, int t, int h, int w) = Dims(x);
+        Tensor output = Alloc(c * repeats, t, h, w);
+        StridedCopies.RepeatInterleave(backend, output, x, 1, repeats);
+        return output;
     }
 
     /// <summary>Encoder end shortcut: consecutive groups of <c>C / outC</c> channels averaged into <paramref name="outC"/> channels. Host arithmetic.</summary>
@@ -260,7 +314,7 @@ internal static class HunyuanVideo15VaeShuffle
         (int c, int t, int hh, int ww) = Dims(h);
         int gs = Quotient(c, outC, "encoder end shortcut group");
         Tensor o = Alloc(outC, t, hh, ww);
-        ReadOnlySpan<float> s = h.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> s = h.AsReadOnlySpan<float>();   // syncs any cached device copy before the host read
         Span<float> d = o.AsSpan<float>();
         int plane = t * hh * ww;
         for (int oc = 0; oc < outC; oc++)
@@ -273,7 +327,7 @@ internal static class HunyuanVideo15VaeShuffle
         return o;
     }
 
-    /// <summary>Decoder start shortcut: the latent with each channel repeated <c>outC / C</c> times, on the backend.</summary>
+    /// <summary>Decoder start shortcut: the latent with each channel repeated <c>outC / C</c> times, on the backend. The caller disposes the result.</summary>
     public static Tensor RepeatToChannels(IBackend backend, Tensor z, int outC)
         => RepeatChannels(backend, z, Quotient(outC, (int)z.Shape[1], "decoder start shortcut repeat"));
 

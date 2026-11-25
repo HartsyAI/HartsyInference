@@ -43,7 +43,7 @@ public sealed class HunyuanVideo15VaeTests
     public void EncodeRejectsAClipThatIsNotATemporalAndSpatialMultiple(int frames, int height, int width)
     {
         using Fixture fixture = new();
-        Tensor video = HunyuanVideo15VaeShuffle.Alloc(3, frames, height, width);
+        using Tensor video = HunyuanVideo15VaeShuffle.Alloc(3, frames, height, width);
         Assert.Throws<ArgumentException>(() => fixture.Vae.EncodeMoments(fixture.Backend, video));
     }
 
@@ -55,8 +55,8 @@ public sealed class HunyuanVideo15VaeTests
     public void ShuffleRefusesOddSpatialSizes(bool temporal, int height, int width)
     {
         using Fixture fixture = new();
-        Tensor h = HunyuanVideo15VaeShuffle.Alloc(temporal ? 2 : 1, 3, height, width);
-        Tensor x = HunyuanVideo15VaeShuffle.Alloc(4, 3, height, width);
+        using Tensor h = HunyuanVideo15VaeShuffle.Alloc(temporal ? 2 : 1, 3, height, width);
+        using Tensor x = HunyuanVideo15VaeShuffle.Alloc(4, 3, height, width);
         Assert.Throws<ArgumentException>(() => HunyuanVideo15VaeShuffle.PackDownsample(fixture.Backend, h, temporal ? 16 : 4, temporal));
         Assert.Throws<ArgumentException>(() => HunyuanVideo15VaeShuffle.DownsampleShortcut(fixture.Backend, x, 4, temporal));
     }
@@ -64,7 +64,7 @@ public sealed class HunyuanVideo15VaeTests
     [Fact]
     public void AllocRefusesAnElementCountThatCannotBeIndexed()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => HunyuanVideo15VaeShuffle.Alloc(256, 2048, 1024, 1024));
+        Assert.Throws<ArgumentException>(() => HunyuanVideo15VaeShuffle.Alloc(256, 2048, 1024, 1024));
     }
 
     [Fact]
