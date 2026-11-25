@@ -98,6 +98,15 @@ public sealed class FastFramesPixelDecoder : IDisposable
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_loaded)
             throw new InvalidOperationException("The decoder's weights are already loaded; a decoder loads once.");
+        bool prefixed = weights.ContainsKey("pixel_head.modulation");
+        foreach ((string name, long[] shape) in ExpectedShapes(_config, prefixed))
+        {
+            // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
+            if (!weights.TryGetValue(name, out Tensor? tensor))
+                throw new ArgumentException($"The decoder checkpoint has no '{name}'.", nameof(weights));
+            if (!ShapeIs(tensor.Shape, shape))
+                throw new ArgumentException($"'{name}' is {tensor.Shape}; the decoder expects [{string.Join(", ", shape)}].", nameof(weights));
+        }
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";
         int dim = _config.Dim;
         if (_config.HasBridge)
@@ -131,8 +140,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
         ArgumentNullException.ThrowIfNull(state);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ObjectDisposedException.ThrowIf(state.IsDisposed, state);
-        if (!_loaded)
-            throw new InvalidOperationException("The decoder has no weights yet; call LoadWeights first.");
+        RequireLoaded();
         int dim = _config.Dim, tokens = gridH * gridW;
         if (hidden.Shape.Rank != 2 || hidden.Shape[0] != tokens || hidden.Shape[1] != _config.InputDim)
             throw new ArgumentException($"hidden is {hidden.Shape}; expected [{tokens}, {_config.InputDim}].", nameof(hidden));
@@ -140,6 +148,10 @@ public sealed class FastFramesPixelDecoder : IDisposable
             throw new ArgumentException("The state belongs to a different decoder.", nameof(state));
         if (temb.Shape.Rank != 2 || temb.Shape[0] != 1 || temb.Shape[1] != _config.InputDim)
             throw new ArgumentException($"temb is {temb.Shape}; expected [1, {_config.InputDim}].", nameof(temb));
+        if (hidden.DType != DType.F32 || temb.DType != DType.F32)
+            throw new ArgumentException($"hidden and temb must be F32 (got {hidden.DType} and {temb.DType}); cast the features first.", nameof(hidden));
+        if (state.Faulted)
+            throw new InvalidOperationException("This state faulted on an earlier frame; create a new state for the next clip.");
         if (state.Grid is { } grid && grid != (gridH, gridW))
             throw new ArgumentException($"This state decodes {grid.H}x{grid.W} token grids; this frame is {gridH}x{gridW}.", nameof(state));
         state.Grid = (gridH, gridW);
@@ -150,16 +162,26 @@ public sealed class FastFramesPixelDecoder : IDisposable
         x = FastFramesOps.Linear(backend, entryNormed, _entryW, _entryB);
         entryNormed.Dispose();
 
-        for (int b = 0; b < _blocks.Length; b++)
+        Tensor current = x;
+        try
         {
-            Tensor next = RunBlock(backend, _blocks[b], x, gridH, gridW, state, b);
-            x.Dispose();
-            x = next;
+            for (int b = 0; b < _blocks.Length; b++)
+            {
+                Tensor next = RunBlock(backend, _blocks[b], current, gridH, gridW, state, b);
+                current.Dispose();
+                current = next;
+            }
+            using Tensor tokensOut = FastFramesOps.Linear(backend, current, _outW, _outB);
+            current.Dispose();
+            return Unpatchify(tokensOut, gridH, gridW);
         }
-
-        using Tensor tokensOut = FastFramesOps.Linear(backend, x, _outW, _outB);
-        x.Dispose();
-        return Unpatchify(tokensOut, gridH, gridW);
+        catch
+        {
+            // The blocks before the failure have already slid their windows: the state no longer matches a clip.
+            state.Faulted = true;
+            current.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The adaLN of the decoder's entry: <c>norm(x) · (1 + scale) + shift</c> with <c>(shift, scale) = chunk(modulation +
@@ -247,10 +269,12 @@ public sealed class FastFramesPixelDecoder : IDisposable
     /// <summary>A channel-first <c>[C, S]</c> tensor to <c>[S, C]</c> tokens.</summary>
     private static Tensor ToTokenMajor(IBackend backend, Tensor channelFirst, int channels, int tokens)
     {
+        // The owned result is returned as it is; only the transpose writes through a non-owning view of it.
+        Tensor output = new(new TensorShape(tokens, channels), DType.F32);
         using Tensor shaped = channelFirst.Reshape(new TensorShape(1, channels, tokens));
-        Tensor output = new(new TensorShape(1, tokens, channels), DType.F32);
-        backend.Transpose2D(output, shaped, channels, tokens);
-        return output.Reshape(new TensorShape(tokens, channels));
+        using Tensor target = output.Reshape(new TensorShape(1, tokens, channels));
+        backend.Transpose2D(target, shaped, channels, tokens);
+        return output;
     }
 
     /// <summary>Linear unpatchify (the reference's <c>fhwpqrc -&gt; cfphqwr</c>; the result is frame-major <c>[PatchT, C, H, W]</c>): token <c>(h, w)</c> channel
@@ -311,6 +335,18 @@ public sealed class FastFramesPixelDecoder : IDisposable
     private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
         FastFramesOps.CopyF32(weights[key], weights[key].Shape);
 
+    private static bool ShapeIs(TensorShape actual, long[] expected)
+    {
+        if (actual.Rank != expected.Length)
+            return false;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            if (actual[i] != expected[i])
+                return false;
+        }
+        return true;
+    }
+
     private void RequireLoaded()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -343,6 +379,10 @@ public sealed class FastFramesPixelDecoder : IDisposable
 
         /// <summary>Whether this state has been disposed.</summary>
         public bool IsDisposed { get; private set; }
+
+        /// <summary>Set when a frame failed partway: the blocks before the failure have already advanced, so the state no longer
+        /// matches a clip and refuses further frames.</summary>
+        internal bool Faulted { get; set; }
 
         /// <summary>The token grid of the frames decoded so far, height and width; null before the first frame.</summary>
         internal (int H, int W)? Grid { get; set; }

@@ -26,7 +26,7 @@ internal static class NpyReader
         return (shape, data);
     }
 
-    /// <summary>Reads a little-endian int32 <c>.npy</c> (version 1 header, C order).</summary>
+    /// <summary>Reads a little-endian int32 <c>.npy</c> (version 1 or 2 header, C order).</summary>
     public static (long[] Shape, int[] Data) ReadInt32(string path)
     {
         byte[] bytes = File.ReadAllBytes(path);

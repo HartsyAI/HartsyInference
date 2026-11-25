@@ -34,14 +34,16 @@ public sealed partial class Fibo2RecipePipeline
     internal static bool RoutesToEdit(ImageRequest request, bool editOnly) =>
         editOnly || request.ReferenceImages is { Count: > 0 } || request.Img2Img is { Mode: Img2ImgMode.Reference };
 
-    private bool IsEdit(ImageRequest request) => RoutesToEdit(request, _variant.Is(Fibo2Variants.EditTurbo));
+    private bool IsEditOnly => _variant.Is(Fibo2Variants.EditTurbo) || _variant.Is(Fibo2Variants.Rmbg3);
+
+    private bool IsEdit(ImageRequest request) => RoutesToEdit(request, IsEditOnly);
 
     private ImageResult GenerateEdit(ImageRequest request, ImageEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)
     {
         // The edit-only build has no denoise mode, so an init image in Auto or Denoise mode is its source image (strength is ignored);
         // the dev build only gets here with references or Reference mode, where a Denoise-mode init image is ambiguous.
-        if (request.Img2Img is { Mode: Img2ImgMode.Denoise } && !_variant.Is(Fibo2Variants.EditTurbo))
+        if (request.Img2Img is { Mode: Img2ImgMode.Denoise } && !IsEditOnly)
             throw new NotSupportedException("A Fibo 2.0 request cannot mix reference images with a denoise-mode init image. "
                 + "Send the init image in Reference mode, or drop the references for strength-based img2img.");
         if (!IsDefaultSampler(request.Sampler) || !IsDefaultSchedule(request.Scheduler))
@@ -55,6 +57,13 @@ public sealed partial class Fibo2RecipePipeline
         }
         if (request.Inpaint is not null && sources.Count != 1)
             throw new NotSupportedException($"A Fibo 2.0 masked edit takes exactly one image; {sources.Count} were supplied.");
+        bool rmbg3 = _variant.Is(Fibo2Variants.Rmbg3);
+        if (rmbg3)
+        {
+            Rmbg3Matte.RequireInstruction(request.Prompt);
+            if (sources.Count != 1 || request.Inpaint is not null)
+                throw new NotSupportedException("RMBG 3.0 mattes exactly one image: no extra references and no mask.");
+        }
         Fibo2EditSupport support = EditSupport
             ?? throw new InvalidOperationException("This Fibo 2.0 pipeline was built without its editing components.");
 
@@ -78,7 +87,7 @@ public sealed partial class Fibo2RecipePipeline
         }
 
         using Fibo2EditImages.Prepared prepared = Fibo2EditImages.Prepare(images, width, height, support.Processor, support.VisionFactor);
-        string editJson = Fibo2EditPrompt.Build(request.Prompt, images.Length);
+        string editJson = Fibo2EditPrompt.Build(rmbg3 ? Rmbg3Matte.Instruction : request.Prompt, images.Length);
         int[] conditional = Fibo2EditPrompt.Tokenize(_tokenizer, editJson, prepared.PadCounts);
         int[] unconditional = Fibo2PromptTemplate.Tokenize(_tokenizer, Fibo2PromptTemplate.NullCaption);
         Fibo2EditInputs edit = new()
@@ -91,7 +100,8 @@ public sealed partial class Fibo2RecipePipeline
         };
 
         int steps = settings.Steps;
-        float shift = Fibo2Recipe.SchedulerShift(request.SigmaShift ?? _defaults.SigmaShift);
+        double shiftExponent = request.SigmaShift ?? (rmbg3 ? Fibo2Recipe.DynamicShift(width, height) : _defaults.SigmaShift ?? 1.15);
+        float shift = Fibo2Recipe.SchedulerShift(shiftExponent);
         int? seed = RecipeRequestMapper.MapSeed(request.Seed);
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
         (byte[] rgb, int outWidth, int outHeight, int usedSeed) = _pipeline.GenerateEdit(edit, unconditional, width, height, steps, guidance,
