@@ -197,14 +197,12 @@ public sealed class LongCatBlock : IStreamingBlock
         Tensor q = new(new TensorShape(1, rows, heads, headDim), DType.F32);
         Tensor k = new(new TensorShape(1, textRows, heads, headDim), DType.F32);
         Tensor v = new(new TensorShape(1, textRows, heads, headDim), DType.F32);
-        Tensor flat;
         try
         {
             backend.Linear(q, queryInput, _crossQ!, _crossQBias);
             // kv_linear is one [2·dim, dim] weight: k is its first dim rows, v the next; windowed so a LoRA adjunct on it applies per part.
             backend.LinearWeightRows(k, text, _crossKv!, _crossKvBias, 0, dim);
             backend.LinearWeightRows(v, text, _crossKv!, _crossKvBias, dim, dim);
-            flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
         }
         catch
         {
@@ -213,6 +211,8 @@ public sealed class LongCatBlock : IStreamingBlock
             v.Dispose();
             throw;
         }
+        // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
+        Tensor flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
         using (flat)
         {
             Tensor projected = new(new TensorShape(rows, dim), DType.F32);

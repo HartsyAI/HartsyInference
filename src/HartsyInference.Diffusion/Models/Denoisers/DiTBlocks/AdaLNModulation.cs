@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -60,24 +61,11 @@ public sealed unsafe class AdaLNModulation(int hiddenSize, int numParams)
         }
         else
         {
-            float* projPtr = (float*)projected.DataPointer;
-
+            // B>1: each param is the column block [p·hidden, (p+1)·hidden) of every row, sliced on the backend (no host copy).
             for (int p = 0; p < _numParams; p++)
             {
-                TensorShape paramShape = new TensorShape(batch, _hiddenSize);
-                Tensor param = new Tensor(paramShape, projected.DType);
-                float* paramPtr = (float*)param.DataPointer;
-
-                for (int b = 0; b < batch; b++)
-                {
-                    int srcOffset = b * outDim + p * _hiddenSize;
-                    int dstOffset = b * _hiddenSize;
-                    for (int d = 0; d < _hiddenSize; d++)
-                    {
-                        paramPtr[dstOffset + d] = projPtr[srcOffset + d];
-                    }
-                }
-
+                Tensor param = new Tensor(new TensorShape(batch, _hiddenSize), projected.DType);
+                StridedCopies.SliceAxis(backend, param, projected, 1, (long)p * _hiddenSize, _hiddenSize);
                 results[p] = param;
             }
         }
