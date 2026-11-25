@@ -61,7 +61,10 @@ public static class OvbDecoder
     /// <summary>Per-pixel majority vote over label maps decoded from different colour legends (legend ensembling): the maps
     /// share label space, so the vote is valid there. <see cref="Ignore"/> abstains; a pixel every map abstained on stays
     /// <see cref="Ignore"/>; ties go to the lowest class. Also returns the winner's share among the non-abstaining votes
-    /// (0 where all abstained), a stability diagnostic and not a probability.</summary>
+    /// (0 where all abstained), a stability diagnostic and not a probability.
+    /// <para>Reached from src through <c>OvbPerception.SegmentAsync</c> when <c>legends</c> is above 1. The vision route passes 1,
+    /// so only direct callers of <c>OvbPerception.SegmentAsync</c> and the tests reach it today. Pinned by the parity fixture's
+    /// <c>voted</c> and <c>agreement</c> tensors; <c>passes</c> and <c>legends</c> in <c>meta.json</c> give the setup.</para></summary>
     public static (byte[] Labels, float[] Agreement) MajorityVote(IReadOnlyList<byte[]> maps, int classCount)
     {
         ArgumentNullException.ThrowIfNull(maps);
@@ -109,7 +112,11 @@ public static class OvbDecoder
     /// <summary>Merges single-group decodes into one label map: per pixel the pass that decoded a real class with the smallest
     /// snap distance wins (the first pass on a tie); a pixel void in every pass stays <see cref="Ignore"/>. This is the grouped
     /// protocol for taxonomies larger than one prompt can legend. The maps must carry GLOBAL class ids: decode each group with
-    /// <see cref="SnapToLegend"/>'s <c>classIds</c>, or two groups' local label 0 would be merged as one class.</summary>
+    /// <see cref="SnapToLegend"/>'s <c>classIds</c>, or two groups' local label 0 would be merged as one class.
+    /// <para>Not reached from src: the segmentation path merges legends by majority vote (<see cref="MajorityVote"/>). Planned
+    /// use: a grouped-taxonomy run with more classes than one legend holds, once the segmentation route accepts a grouped
+    /// taxonomy. Pinned by the parity fixture's <c>merged</c> and <c>grp_merged</c> maps; <c>grp_merged</c> is the
+    /// disjoint-groups case.</para></summary>
     public static byte[] MergeGrouped(IReadOnlyList<byte[]> labelMaps, IReadOnlyList<float[]> distanceMaps)
     {
         ArgumentNullException.ThrowIfNull(labelMaps);
