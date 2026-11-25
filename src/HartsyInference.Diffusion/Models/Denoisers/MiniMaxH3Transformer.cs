@@ -312,8 +312,8 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
                 ? "chunking is forced by the vram.h3ChunkRows setting; clear that setting to run dense"
                 : $"free VRAM is {freeBytes} bytes, too little for dense attention at this length; free more VRAM or shorten the sequence";
             throw new NotSupportedException(
-                $"A Duo attention bias needs dense, unchunked attention, but this forward chunks at {chunkRows} rows "
-                + $"(seq={seq}): {cause}. A chunked bias path is not implemented.");
+                $"A dense attention bias needs unchunked attention, but this forward chunks at {chunkRows} rows "
+                + $"(seq={seq}): {cause}. Chunked Duo forwards take the tiled route in ForwardDuo.");
         }
     }
 
@@ -653,6 +653,17 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
         Func<int, int, Tensor>? biasTile = null)
     {
         int seq = (int)h.Shape[0];
+        // A bias must run on the route it was built for. A dense bias on the chunked route, or a tile builder on the dense
+        // route, would drop the mask silently, so both throw here.
+        bool chunkedRoute = sparseAttention is null && seq > chunkRows;
+        if (biasTile is not null && !chunkedRoute)
+        {
+            throw new InvalidOperationException($"A tiled bias needs the chunked attention route; this block runs dense at seq={seq}, chunkRows={chunkRows}, so the mask would be dropped.");
+        }
+        if (attentionBias is not null && chunkedRoute)
+        {
+            throw new NotSupportedException($"A dense attention bias cannot run on the chunked route (seq={seq}, chunkRows={chunkRows}); use a tiled bias.");
+        }
         Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
         try
         {
@@ -1083,8 +1094,8 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
                         backend.Rotary(RotaryCall.HeadMajor(qc, cosChunk, sinChunk, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rot2));
                     }
                     using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                    // A tiled Duo bias supplies this query tile's [c, seq] rows; the plain path passes no mask.
-                    using Tensor? tileMask = biasTile?.Invoke(r0, c);
+                    // A tiled Duo bias supplies this query tile's [c, seq] rows, borrowed: the caller owns and reuses them.
+                    Tensor? tileMask = biasTile?.Invoke(r0, c);
                     backend.ScaledDotProductAttention(attnChunk, qc, kFull, vFull, tileMask, 1f / MathF.Sqrt(hd));
                     using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
                     backend.Permute0213(merged, attnChunk, heads, c, hd);

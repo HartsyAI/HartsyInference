@@ -17,8 +17,78 @@ public sealed unsafe partial class MiniMaxH3Transformer
     /// per-tile bias instead; the dense bias is never built past this length.</summary>
     internal const int MaxDuoDenseBiasRows = 32768;
 
-    /// <summary>Query rows per tile on the tiled route: each tile's bias is [rows, S] floats, so this bounds the bias at tile height.</summary>
-    internal const int DuoBiasTileRows = 4096;
+    /// <summary>Byte budget for one query tile's bias ([rows, S] F32). Tile rows are this budget divided by 4·S, so a longer layout
+    /// gets a narrower tile rather than a larger mask. 256 MiB is 1024 rows at S = 65536.</summary>
+    internal const long DuoTileBudgetBytes = 256L * 1024 * 1024;
+
+    /// <summary>The narrowest tile the budget may force. Below it the layout is refused rather than tiled into slivers.</summary>
+    internal const int MinDuoTileRows = 64;
+
+    /// <summary>The route one Duo forward takes: the chunk width attention runs at, and whether that width is a bias tile.</summary>
+    internal readonly record struct DuoRoute(int ChunkRows, bool Tiled);
+
+    /// <summary>Picks the route for a sequence of <paramref name="seq"/> rows given the policy's chunk width. A sequence that fits that
+    /// width and the dense cap is dense. Anything longer is tiled, and the tile is the chunk width clamped to the byte budget for one
+    /// [tile, seq] mask, so the mask lives inside the budget and the chunk policy's own choice is never exceeded.</summary>
+    /// <exception cref="NotSupportedException">The budget leaves fewer than <see cref="MinDuoTileRows"/> rows per tile.</exception>
+    internal static DuoRoute ResolveDuoRoute(int seq, int chunkRows)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seq);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(chunkRows);
+        bool tiled = seq > chunkRows || seq > MaxDuoDenseBiasRows;
+        if (!tiled)
+        {
+            return new DuoRoute(chunkRows, false);
+        }
+        int budgetRows = DuoTileRowsFor(seq);
+        if (budgetRows < MinDuoTileRows)
+        {
+            throw new NotSupportedException(
+                $"A Duo layout of {seq} rows leaves {budgetRows} tile rows in the {DuoTileBudgetBytes}-byte mask budget; "
+                + $"the minimum is {MinDuoTileRows}. Shorten the clip or the reference.");
+        }
+        return new DuoRoute(Math.Min(chunkRows, budgetRows), true);
+    }
+
+    /// <summary>Query rows one [rows, seq] F32 mask may take inside <see cref="DuoTileBudgetBytes"/>.</summary>
+    internal static int DuoTileRowsFor(int seq) => (int)Math.Min(int.MaxValue, DuoTileBudgetBytes / ((long)seq * sizeof(float)));
+
+    /// <summary>Per-forward tile masks: one reused [rows, seq] F32 buffer per tile height in use (the full tile and the shorter last one).
+    /// Each call refills the buffer from the rectangles, so host work is O(rows·seq) per tile per layer, while memory stays at two tiles
+    /// however long the layout is.</summary>
+    private sealed class DuoTileMasks : IDisposable
+    {
+        private readonly IReadOnlyList<DuoMaskRect> _rects;
+        private readonly int _seq;
+        private readonly Dictionary<int, Tensor> _byRows = new();
+
+        public DuoTileMasks(IReadOnlyList<DuoMaskRect> rects, int seq)
+        {
+            _rects = rects;
+            _seq = seq;
+        }
+
+        /// <summary>Fills the tile of rows <c>[rowStart, rowStart + rows)</c> and returns it. Borrowed: valid until the next call or <see cref="Dispose"/>.</summary>
+        public Tensor Tile(int rowStart, int rows)
+        {
+            if (!_byRows.TryGetValue(rows, out Tensor? tile))
+            {
+                tile = new Tensor(new TensorShape(rows, _seq), DType.F32);
+                _byRows[rows] = tile;
+            }
+            DuoAttentionBias.BuildRowsInto(_rects, _seq, rowStart, rows, _seq, tile.AsSpan<float>());
+            return tile;
+        }
+
+        public void Dispose()
+        {
+            foreach (Tensor tile in _byRows.Values)
+            {
+                tile.Dispose();
+            }
+            _byRows.Clear();
+        }
+    }
 
     /// <summary>Runs one Duo denoise evaluation over <paramref name="layout"/>.</summary>
     /// <param name="mode">The visibility rule: causal for a denoise against a committed history, bidirectional for a full-context pass.</param>
@@ -31,8 +101,8 @@ public sealed unsafe partial class MiniMaxH3Transformer
     /// <param name="chunkRowsOverride">Test seam: forces the chunk width instead of the VRAM policy. A width below the sequence takes the
     /// tiled route, so the tiled bias can be checked against the dense bias on a small layout.</param>
     /// <remarks>A sequence that fits the chunk width and <see cref="MaxDuoDenseBiasRows"/> takes one dense [S, S] bias through the dense
-    /// attention path. Any longer sequence takes the chunked route with a bias built per query tile of at most <see cref="DuoBiasTileRows"/>
-    /// rows, so no S x S matrix is built. All inputs are validated before the first device allocation. The body is F32. The bias and index
+    /// attention path. Any longer sequence takes the chunked route with a bias built per query tile, the tile sized by
+    /// <see cref="DuoTileBudgetBytes"/>, so no S x S matrix is built. All inputs are validated before the first device allocation. The body is F32. The bias and index
     /// tensors are written through host pointers, as <c>BuildModulationIndex</c> does, so they must live where the host can write. The tiled
     /// bias is applied through the chunked path's score mask, which CPU SDPA reads; the GPU backends' mask support is not verified here.</remarks>
     internal (Tensor Video, Tensor? Audio) ForwardDuo(IBackend backend, DuoLayout layout, DuoAttentionMode mode,
@@ -79,28 +149,30 @@ public sealed unsafe partial class MiniMaxH3Transformer
         }
         ValidateDuoRefinerGroups(refinerGroups, (int)textStates.Shape[0]);
         ValidateDuoTimeIds(layout, times.Length);
+        if (chunkRowsOverride is int forcedRows)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(forcedRows);
+        }
 
         int hidden = _config.HiddenSize;
         int seq = layout.Length;
         int headDim = _config.AttentionHeadDim;
         int textCount = layout.TextRows.Length, videoCount = layout.VideoRows.Length, audioCount = layout.AudioRows.Length;
 
-        // Route first. A sequence that fits the chunk width and the dense cap takes one dense [S, S] bias. Anything longer takes
-        // the chunked route with a per-tile bias, so no S x S matrix is built. Every allocation below is a `using`, so a throw
-        // disposes whatever was already built.
+        // Route first: one dense bias for a sequence that fits, a reused per-tile bias for anything longer. No S x S matrix is built
+        // on the tiled route. Every allocation below is a `using`, so a throw disposes whatever was already built.
         (long freeBytes, _) = backend.GetVramInfo();
         int chunkRows = chunkRowsOverride ?? MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
-        bool tiled = seq > chunkRows || seq > MaxDuoDenseBiasRows;
-        if (tiled)
-        {
-            chunkRows = Math.Min(chunkRows, DuoBiasTileRows);
-        }
+        DuoRoute route = ResolveDuoRoute(seq, chunkRows);
         IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(layout.Groups, layout.Groups, mode);
         DuoAttentionBias.ValidateRows(rects, seq, seq);
-        using Tensor? bias = tiled ? null : HostTensor(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
-        Func<int, int, Tensor>? biasTile = tiled
-            ? (r0, rows) => HostTensor(new TensorShape(rows, seq), DuoAttentionBias.BuildRows(rects, seq, r0, rows, seq))
-            : null;
+        using Tensor? bias = route.Tiled ? null : HostTensor(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
+        using DuoTileMasks? tiles = route.Tiled ? new DuoTileMasks(rects, seq) : null;
+        Func<int, int, Tensor>? biasTile = null;
+        if (tiles is not null)
+        {
+            biasTile = (r0, rows) => tiles.Tile(r0, rows);
+        }
         using Tensor tEmb = BuildTimeEmbedding(backend, times);
         using Tensor modIndex = BuildDuoModulationIndex(layout);
         (float[] cosValues, float[] sinValues) = DuoRope.Tables(layout.Positions, headDim);
@@ -113,7 +185,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         {
             for (int i = 0; i < _config.NumLayers; i++)
             {
-                ForwardBlock(backend, ref stream, tEmb, modIndex, cos, sin, i, chunkRows, null, bias, biasTile);
+                ForwardBlock(backend, ref stream, tEmb, modIndex, cos, sin, i, route.ChunkRows, null, bias, biasTile);
             }
 
             // norm_out: the shift/scale table has one row per timestep; every row is addressed by its own time index.

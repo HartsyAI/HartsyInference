@@ -197,6 +197,51 @@ public sealed class MiniMaxH3DuoForwardTests
         Assert.True(MaxDiff(dense, tiled, 0, VideoRowCount) <= 1e-5f, $"tiled differs from dense by {MaxDiff(dense, tiled, 0, VideoRowCount)}.");
     }
 
+    [Theory]
+    [InlineData(128, int.MaxValue, false, int.MaxValue)]
+    [InlineData(128, 128, false, 128)]
+    [InlineData(128, 32, true, 32)]
+    [InlineData(128, 40, true, 40)]
+    [InlineData(40000, int.MaxValue, true, 1677)]
+    [InlineData(40000, 512, true, 512)]
+    [InlineData(65536, int.MaxValue, true, 1024)]
+    public void RouteIsDenseWhenItFitsAndTiledWithinTheBudgetOtherwise(int seq, int chunkRows, bool tiled, int expectedChunk)
+    {
+        MiniMaxH3Transformer.DuoRoute route = MiniMaxH3Transformer.ResolveDuoRoute(seq, chunkRows);
+        Assert.Equal(tiled, route.Tiled);
+        Assert.Equal(expectedChunk, route.ChunkRows);
+    }
+
+    [Fact]
+    public void RouteRefusesALayoutWhoseBudgetLeavesTooFewTileRows()
+    {
+        // 2^21 rows: the 256 MiB budget leaves 32 rows per [tile, S] mask, below the 64-row minimum.
+        Assert.Throws<NotSupportedException>(() => MiniMaxH3Transformer.ResolveDuoRoute(1 << 21, int.MaxValue));
+    }
+
+    [Fact]
+    public void TileIntoABufferMatchesTheWholeBiasAndRefusesBadRanges()
+    {
+        IReadOnlyList<DuoMaskRect> rects = [new DuoMaskRect(0, 6, 0, 3), new DuoMaskRect(2, 6, 3, 6)];
+        float[] whole = DuoAttentionBias.Build(rects, 6, 6);
+        float[] tile = new float[2 * 6];
+        DuoAttentionBias.BuildRowsInto(rects, 6, 2, 2, 6, tile);
+        Assert.Equal(whole[12..24], tile);
+
+        // rowStart + rowCount must not be evaluated in a way that overflows.
+        Assert.Throws<ArgumentOutOfRangeException>(() => DuoAttentionBias.BuildRowsInto(rects, 6, int.MaxValue, 2, 6, tile));
+        Assert.Throws<ArgumentException>(() => DuoAttentionBias.BuildRowsInto(rects, 6, 2, 2, 6, new float[5]));
+    }
+
+    [Fact]
+    public void ChunkRowsOverrideMustBePositive()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Run(transformer, backend, layout, DuoAttentionMode.Causal, Values(1, VideoRowCount * VideoIn), chunkRows: 0));
+    }
+
     private static float[] Run(MiniMaxH3Transformer transformer, IBackend backend, DuoLayout layout, DuoAttentionMode mode,
         float[] videoValues, int? chunkRows = null)
     {
