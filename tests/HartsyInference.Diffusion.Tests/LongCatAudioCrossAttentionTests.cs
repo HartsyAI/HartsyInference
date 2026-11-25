@@ -78,6 +78,81 @@ public sealed class LongCatAudioCrossAttentionTests
         Assert.Throws<ArgumentException>(() => new LongCatAudioCrossAttention(Dim, Enc, 3));
     }
 
+    [Fact]
+    public void AFailedLoadKeepsThePreviousWeightsAndTheLayerStillRuns()
+    {
+        using LongCatAudioCrossAttention layer = new(Dim, Enc, Heads);
+        Dictionary<string, Tensor> good = Weights(seed: 30);
+        Dictionary<string, Tensor> bad = Weights(seed: 31);
+        try
+        {
+            layer.LoadWeights(good);
+            // A wrong-shaped k norm: the whole load is refused, and the previous set stays in use.
+            bad["attn.k_norm.weight"].Dispose();
+            bad["attn.k_norm.weight"] = Filled(Dim / Heads + 1, 0, seed: 32, rank1: true);
+            Assert.Throws<InvalidDataException>(() => layer.LoadWeights(bad));
+
+            using Tensor x = Filled(Frames * Tokens, Dim, seed: 33);
+            using Tensor audio = Filled(Frames * Ctx, Enc, seed: 34);
+            using CpuBackend backend = new();
+            using Tensor output = layer.Forward(backend, x, audio, Frames, numCond: 0);
+            Assert.Equal(Frames * Tokens, output.Shape[0]);
+        }
+        finally
+        {
+            DisposeAll(good);
+            DisposeAll(bad);
+        }
+    }
+
+    [Fact]
+    public void ForwardRefusesAWrongAudioWidthAndARowCountThatIsNotAMultipleOfFrames()
+    {
+        using LongCatAudioCrossAttention layer = new(Dim, Enc, Heads);
+        Dictionary<string, Tensor> weights = Weights(seed: 35);
+        try
+        {
+            layer.LoadWeights(weights);
+            using Tensor x = Filled(Frames * Tokens, Dim, seed: 36);
+            using Tensor narrowAudio = Filled(Frames * Ctx, Enc - 1, seed: 37);
+            using Tensor ragged = Filled(7, Enc, seed: 38);
+            using CpuBackend backend = new();
+
+            Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, narrowAudio, Frames, numCond: 0));
+            ArgumentException error = Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, ragged, Frames, numCond: 0));
+            Assert.Equal("audio", error.ParamName);
+        }
+        finally
+        {
+            DisposeAll(weights);
+        }
+    }
+
+    [Fact]
+    public void ForwardRefusesANonF32InputAndAfterDispose()
+    {
+        LongCatAudioCrossAttention layer = new(Dim, Enc, Heads);
+        Dictionary<string, Tensor> weights = Weights(seed: 39);
+        try
+        {
+            layer.LoadWeights(weights);
+            using Tensor half = new(new TensorShape(Frames * Tokens, Dim), DType.F16);
+            using Tensor audio = Filled(Frames * Ctx, Enc, seed: 40);
+            using CpuBackend backend = new();
+
+            ArgumentException error = Assert.Throws<ArgumentException>(() => layer.Forward(backend, half, audio, Frames, numCond: 0));
+            Assert.Equal("x", error.ParamName);
+
+            layer.Dispose();
+            using Tensor x = Filled(Frames * Tokens, Dim, seed: 41);
+            Assert.Throws<ObjectDisposedException>(() => layer.Forward(backend, x, audio, Frames, numCond: 0));
+        }
+        finally
+        {
+            DisposeAll(weights);
+        }
+    }
+
     private static Dictionary<string, Tensor> Weights(int seed) => new()
     {
         ["attn.q_linear.weight"] = Filled(Dim, Dim, seed + 1),
