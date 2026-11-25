@@ -57,14 +57,16 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
     public void Cuda_HunyuanVideo15_WithF16Attention_StaysWithinItsTolerance() =>
         Compare("hunyuanvideo15 f16 attention", GpuDevices.OpenCuda, HunyuanVideo15, Math32.F16Attention);
 
-    /// <summary>The path a generation takes. Only the tolerance differs from the cases above.</summary>
+    // The path a generation takes; only the tolerance differs.
     [CudaDeviceFact]
-    public void Cuda_WithDefaultGemms_StaysWithinTheTf32Tolerance()
-    {
-        Compare("longcat tf32", GpuDevices.OpenCuda, LongCat, Math32.Default);
+    public void Cuda_LongCat_WithDefaultGemms_StaysWithinTheTf32Tolerance() => Compare("longcat tf32", GpuDevices.OpenCuda, LongCat, Math32.Default);
+
+    [CudaDeviceFact]
+    public void Cuda_HunyuanVideo15_WithDefaultGemms_StaysWithinTheTf32Tolerance() =>
         Compare("hunyuanvideo15 tf32", GpuDevices.OpenCuda, HunyuanVideo15, Math32.Default);
-        Compare("duo tf32", GpuDevices.OpenCuda, Duo, Math32.Default);
-    }
+
+    [CudaDeviceFact]
+    public void Cuda_Duo_WithDefaultGemms_StaysWithinTheTf32Tolerance() => Compare("duo tf32", GpuDevices.OpenCuda, Duo, Math32.Default);
 
     private void Compare(string name, Func<IBackend> open, Func<IBackend, float[]> run, Math32 math = Math32.Exact)
     {
@@ -133,7 +135,7 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
         return velocity.AsReadOnlySpan<float>().ToArray();
     }
 
-    // The dense causal forward, then a cached pair over the same model: a committed prefix and one denoise that reads it.
+    // A cached pair (a committed prefix and one denoise that reads it), then the dense causal forward over the same rows at once.
     private static float[] Duo(IBackend backend)
     {
         using MiniMaxH3Transformer transformer = DuoTransformer(blocks: 2, out List<Tensor> weights);
@@ -145,6 +147,9 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
             using Tensor text = Wave(textRows, DuoTextDim, 2);
             using Tensor reference = Wave(refRows, DuoVideoIn, 5);
             using Tensor noisy = Wave(noisyRows, DuoVideoIn, 6);
+            using Tensor video = new(new TensorShape(refRows + noisyRows, DuoVideoIn), DType.F32);
+            reference.AsReadOnlySpan<float>().CopyTo(video.AsSpan<float>());
+            noisy.AsReadOnlySpan<float>().CopyTo(video.AsSpan<float>()[(refRows * DuoVideoIn)..]);
             DuoStreamCache cache = new(blocks: 2, width: inner, capacityRows: 16);
 
             DuoLayout prefix = DuoLayoutOf(
@@ -153,19 +158,21 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
                 [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [], 0);
             (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, reference, null, times, cache,
                 commit: true);
+            using Tensor prefixResult = prefixOut;
             DuoLayout current = DuoLayoutOf([new DuoGroup(0, 0, DuoGroupKind.Noisy, DuoModality.Video, 0, noisyRows)],
                 [0, 0, 0, 0], [1, 1, 1, 1], [0, 1, 2, 3], [], [0], 4);
             (Tensor currentOut, _) = transformer.ForwardDuoCached(backend, current, DuoAttentionMode.Causal, [], null, noisy, null, times, cache,
                 commit: false);
+            using Tensor currentResult = currentOut;
+            const int prefixRows = textRows + refRows;
             DuoLayout whole = DuoLayoutOf(
                 [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, textRows),
-                 new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, textRows, textRows + refRows)],
-                [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [], 0);
-            (Tensor dense, _) = transformer.ForwardDuo(backend, whole, DuoAttentionMode.Causal, refiner, text, reference, null, times);
-            using (prefixOut)
-            using (currentOut)
-            using (dense)
-                return [.. prefixOut.AsReadOnlySpan<float>(), .. currentOut.AsReadOnlySpan<float>(), .. dense.AsReadOnlySpan<float>()];
+                 new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, textRows, prefixRows),
+                 new DuoGroup(0, 0, DuoGroupKind.Noisy, DuoModality.Video, prefixRows, prefixRows + noisyRows)],
+                [1, 1, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 1, 1, 1, 1], [2, 3, 4, 5, 6, 7], [0, 1], [2], 0);
+            (Tensor dense, _) = transformer.ForwardDuo(backend, whole, DuoAttentionMode.Causal, refiner, text, video, null, times);
+            using Tensor denseResult = dense;
+            return [.. prefixOut.AsReadOnlySpan<float>(), .. currentOut.AsReadOnlySpan<float>(), .. dense.AsReadOnlySpan<float>()];
         }
         finally
         {
