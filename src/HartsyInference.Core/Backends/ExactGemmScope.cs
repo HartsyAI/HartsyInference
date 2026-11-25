@@ -4,6 +4,8 @@ namespace HartsyInference.Core.Backends;
 /// Turns <see cref="IBackend.HighPrecisionGemm"/> on for a model's forward pass and puts the previous setting back, even when the pass throws. For models whose
 /// reference is plain F32 and whose output is a measured quantity (metric depth): on CUDA the F32 GEMMs and attention then skip TF32, which is about
 /// 1e-3 off a plain-F32 lane, instead of the engine-wide TF32 default. Backends without TF32 ignore the switch.
+/// <para>On CUDA the switch also makes a BF16 weight upcast to F32 on every call (no cached cast), so a BF16 or F16 model would not get half-precision GEMMs under
+/// this scope; it is meant for models whose weights are F32.</para>
 /// </summary>
 public readonly struct ExactGemmScope : IDisposable
 {

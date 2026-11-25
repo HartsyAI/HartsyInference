@@ -77,8 +77,12 @@ public sealed class DepthPro2Network
 
     /// <summary>The tapped token sequences (<c>[1, 5 + patches, width]</c> each, in <see cref="DepthPro2Preset.ReassembledBlocks"/> order) for pixels whose sides
     /// are multiples of 32; the caller owns them.</summary>
-    public Tensor[] EncodeTaps(IBackend backend, Tensor paddedPixels) =>
-        _encoder.EncodeIntermediates(backend, paddedPixels, _preset.ReassembledBlocks, _preset.CrossFrameBlocks);
+    public Tensor[] EncodeTaps(IBackend backend, Tensor paddedPixels)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        using ExactGemmScope exact = new(backend);
+        return _encoder.EncodeIntermediates(backend, paddedPixels, _preset.ReassembledBlocks, _preset.CrossFrameBlocks);
+    }
 
     private Tensor InverseDepthOfPadded(IBackend backend, Tensor padded, Action<string, Tensor>? observe, CrossFrameKvRing? ring = null)
     {

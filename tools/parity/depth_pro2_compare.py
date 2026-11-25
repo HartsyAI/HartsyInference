@@ -41,8 +41,8 @@ def load(path: Path, name: str) -> tuple[np.ndarray, np.ndarray]:
 
 def inverse(depth: np.ndarray, f: np.ndarray) -> np.ndarray:
     width = depth.shape[-1]
-    inv = np.where(np.isinf(depth) | (depth <= 0), 0.0, f.reshape(-1, 1, 1) / (width * np.where(np.isinf(depth) | (depth <= 0), 1.0, depth)))
-    return inv
+    far = np.isinf(depth) | (depth <= 0)
+    return np.where(far, 0.0, f.reshape(-1, 1, 1) / (width * np.where(far, 1.0, depth)))
 
 
 def rel_rms(a: np.ndarray, b: np.ndarray) -> float:

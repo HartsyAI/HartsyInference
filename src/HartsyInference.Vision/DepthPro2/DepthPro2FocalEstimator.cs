@@ -130,6 +130,7 @@ public sealed class DepthPro2FocalEstimator
     /// <summary>The four tapped trunk outputs concatenated on channels: <c>[1, 5 + patches, 4·384]</c>.</summary>
     public Tensor EncodeTaps(IBackend backend, Tensor input)
     {
+        using ExactGemmScope exact = new(backend);
         Tensor[] taps = _trunk.EncodeIntermediates(backend, input, TappedBlocks, PrefixResetBlocks);
         try
         {
