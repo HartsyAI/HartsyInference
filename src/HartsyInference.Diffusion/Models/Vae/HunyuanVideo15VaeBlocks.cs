@@ -341,20 +341,24 @@ internal static class HunyuanVideo15VaeShuffle
         int hw = hh * ww;
         long n = (long)t * hw;
         RequireFrameAttention(c, t, hw);
-        Tensor qt = TokenMajorTokens(backend, q, c, n), kt = TokenMajorTokens(backend, k, c, n), vt = TokenMajorTokens(backend, v, c, n);
-        Tensor tokens = new(new TensorShape([1L, 1L, n, c]), DType.F32);
+        Tensor? qt = null, kt = null, vt = null, tokens = null;
         try
         {
+            qt = TokenMajorTokens(backend, q, c, n);
+            kt = TokenMajorTokens(backend, k, c, n);
+            vt = TokenMajorTokens(backend, v, c, n);
+            tokens = new Tensor(new TensorShape([1L, 1L, n, c]), DType.F32);
             float scale = 1f / MathF.Sqrt(c);
             for (int f = 0; f < t; f++)
             {
                 long visible = (long)(f + 1) * hw;
-                Tensor qf = new(new TensorShape([1L, 1L, hw, c]), DType.F32);
-                Tensor kf = new(new TensorShape([1L, 1L, visible, c]), DType.F32);
-                Tensor vf = new(new TensorShape([1L, 1L, visible, c]), DType.F32);
-                Tensor of = new(new TensorShape([1L, 1L, hw, c]), DType.F32);
+                Tensor? qf = null, kf = null, vf = null, of = null;
                 try
                 {
+                    qf = new Tensor(new TensorShape([1L, 1L, hw, c]), DType.F32);
+                    kf = new Tensor(new TensorShape([1L, 1L, visible, c]), DType.F32);
+                    vf = new Tensor(new TensorShape([1L, 1L, visible, c]), DType.F32);
+                    of = new Tensor(new TensorShape([1L, 1L, hw, c]), DType.F32);
                     StridedCopies.SliceAxis(backend, qf, qt, 2, (long)f * hw, hw);
                     StridedCopies.SliceAxis(backend, kf, kt, 2, 0, visible);
                     StridedCopies.SliceAxis(backend, vf, vt, 2, 0, visible);
@@ -363,24 +367,32 @@ internal static class HunyuanVideo15VaeShuffle
                 }
                 finally
                 {
-                    qf.Dispose(); kf.Dispose(); vf.Dispose(); of.Dispose();
+                    qf?.Dispose();
+                    kf?.Dispose();
+                    vf?.Dispose();
+                    of?.Dispose();
                 }
             }
             return ChannelFirst(backend, tokens, c, t, hh, ww);
         }
         finally
         {
-            qt.Dispose(); kt.Dispose(); vt.Dispose(); tokens.Dispose();
+            qt?.Dispose();
+            kt?.Dispose();
+            vt?.Dispose();
+            tokens?.Dispose();
         }
     }
 
-    /// <summary>Size guard for the frame-causal attention: the token count and each frame's score block must be indexable.</summary>
-    private static void RequireFrameAttention(int c, int t, int hw)
+    /// <summary>Size guard for the frame-causal attention. Two things must be indexable: the token count (its K and V are <c>[1, 1, N, C]</c>
+    /// tensors) and the per-frame score block, <c>hw × N</c> elements, which is the largest matrix a single frame's SDPA materialises on a backend
+    /// that does not tile it. Refusing here keeps the indexing failure in this layer's message instead of an out-of-range deep in a kernel.</summary>
+    internal static void RequireFrameAttention(int c, int t, int hw)
     {
-        long n = (long)t * hw;
         if (c <= 0 || t <= 0 || hw <= 0) throw new ArgumentException("Frame attention needs positive channels, frames and tokens per frame.");
+        long n = (long)t * hw;
         if (n > int.MaxValue || (long)hw * n > int.MaxValue)
-            throw new ArgumentException($"Frame-causal attention over {n} tokens ({hw} per frame) exceeds the indexable score block; the clip is too large for one attention.");
+            throw new ArgumentException($"Frame-causal attention over {n} tokens ({hw} per frame) needs a score block of {(long)hw * n} elements, beyond the indexable limit; the clip is too large for one attention.");
     }
 
     /// <summary>The channel-first <c>[1, C, N]</c> view of <paramref name="src"/> as token-major <c>[1, 1, N, C]</c>, copied on the backend.</summary>
