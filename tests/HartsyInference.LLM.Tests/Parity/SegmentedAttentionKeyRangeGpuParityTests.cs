@@ -38,6 +38,8 @@ public sealed class SegmentedAttentionKeyRangeGpuParityTests(ITestOutputHelper o
             float[] expected;
             using (Tensor cpu = SegmentedAttention.RunHeadMajor(new CpuBackend(), layer, q, k, v, segments))
                 expected = cpu.AsReadOnlySpan<float>().ToArray();
+            // CUDA attention runs its F32 GEMMs in TF32 by default; this test is about the segments, so it compares exact ones.
+            using ExactGemmScope exact = new(device);
             using Tensor qd = OnDevice(device, q), kd = OnDevice(device, k), vd = OnDevice(device, v);
             device.ResetD2hSyncCount();
             using Tensor result = SegmentedAttention.RunHeadMajor(device, layer, qd, kd, vd, segments);
