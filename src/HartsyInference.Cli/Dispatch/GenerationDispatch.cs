@@ -707,7 +707,7 @@ public static class GenerationDispatch
             Sampler = parameters.GetStringOrNull("sampler"),
             Scheduler = parameters.GetStringOrNull("scheduler"),
             Frames = parameters.GetIntOrNull("frames"),
-            ChainTotalFrames = ResolveChainTotalFrames(parameters),
+            ChainTotalFrames = ResolveChainTotalFrames(parameters, spec),
             ChainContextFrames = parameters.GetIntOrNull("chain-context-frames")
                 ?? MiniMaxH3ChainPlanner.DefaultContextFrames,
             Fps = parameters.GetIntOrNull("fps"),
@@ -1575,14 +1575,17 @@ public static class GenerationDispatch
 
     /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip; a missing entry leaves that clip silent rather than shifting the pairing.</summary>
     /// <summary>Total chain frames from either the frame or the seconds flag; seconds convert at H3's native rate.</summary>
-    private static int? ResolveChainTotalFrames(ParamState parameters)
+    private static int? ResolveChainTotalFrames(ParamState parameters, ModelSpec spec)
     {
         if (parameters.GetIntOrNull("chain-frames") is int frames)
         {
             return frames;
         }
+        // Seconds convert at the family's native rate: LongCat-Video-Avatar generates at 25 fps, MiniMax-H3 at its own rate.
+        bool longCatAvatar = spec.Catalog?.Id == "longcat-avatar" || spec.Requested.StartsWith("longcat-avatar", StringComparison.OrdinalIgnoreCase);
+        int nativeFps = longCatAvatar ? 25 : MiniMaxH3Geometry.Fps;
         return parameters.GetDoubleOrNull("chain-seconds") is double seconds
-            ? (int)Math.Round(seconds * MiniMaxH3Geometry.Fps)
+            ? (int)Math.Round(seconds * nativeFps)
             : null;
     }
 

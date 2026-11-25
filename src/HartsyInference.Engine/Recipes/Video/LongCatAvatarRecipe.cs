@@ -44,7 +44,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>The init image is the identity reference (the first latent frame). The driving speech is <c>VideoRequest.VideoAudioReference</c>.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio;
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase);

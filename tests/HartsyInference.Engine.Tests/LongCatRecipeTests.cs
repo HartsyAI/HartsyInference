@@ -60,8 +60,7 @@ public sealed class LongCatRecipeTests
     {
         LongCatAvatarRecipe avatar = new();
 
-        Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio, avatar.Supports);
-        Assert.False(avatar.Supports.HasFlag(VideoFeatures.LongFormChain));
+        Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain, avatar.Supports);
     }
 
     [Fact]
