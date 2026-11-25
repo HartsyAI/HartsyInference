@@ -1,7 +1,6 @@
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
-using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Glm5Next;
 using Xunit;
 using Xunit.Abstractions;
@@ -22,7 +21,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     {
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
         int[] ids = [.. NpyReader.ReadInt64(Path.Combine(Dir, "input_ids.npy")).Data.Select(v => (int)v)];
-        using Ernie5CheckpointWeights source = Ernie5CheckpointWeights.Open(Dir);
+        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         using Glm5NextModel model = new(new CpuBackend(), c, source);
         using Glm5NextState state = new(c, ids.Length);
         Dictionary<int, float[]> streams = [];
@@ -46,8 +45,8 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
         // rounding (embedding rounding alone moves its logits by about 1), so the comparison is against the rounded F32 run, not the original.
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
         int[] ids = [.. NpyReader.ReadInt64(Path.Combine(Dir, "input_ids.npy")).Data.Select(v => (int)v)];
-        float[] rounded = Logits(c, ids, new Bf16Source(Ernie5CheckpointWeights.Open(Dir), storeBf16: false));
-        float[] stored = Logits(c, ids, new Bf16Source(Ernie5CheckpointWeights.Open(Dir), storeBf16: true));
+        float[] rounded = Logits(c, ids, new Bf16Source(BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType), storeBf16: false));
+        float[] stored = Logits(c, ids, new Bf16Source(BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType), storeBf16: true));
         float worst = 0f;
         for (int i = 0; i < rounded.Length; i++) worst = MathF.Max(worst, MathF.Abs(rounded[i] - stored[i]));
         output.WriteLine($"BF16-stored vs rounded-F32 logits: max abs difference {worst:E3}");
@@ -59,7 +58,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     {
         // The refusal is the observable behaviour; the constructor also releases what it had read, which this test does not measure.
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using Ernie5CheckpointWeights inner = Ernie5CheckpointWeights.Open(Dir);
+        using BlockFp8CheckpointWeights inner = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         InvalidDataException ex = Assert.Throws<InvalidDataException>(() => new Glm5NextModel(new CpuBackend(), c, new WrongEmbedding(inner)));
         Assert.Contains("embed_tokens", ex.Message);
     }
@@ -90,7 +89,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     }
 
     // Replaces the embedding with a tensor of the wrong shape and passes every other read through.
-    private sealed class WrongEmbedding(IErnie5WeightSource inner) : IErnie5WeightSource
+    private sealed class WrongEmbedding(IModelWeightSource inner) : IModelWeightSource
     {
         public IEnumerable<string> Names => inner.Names;
 
@@ -99,7 +98,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
             : inner.Read(name);
     }
 
-    private static float[] Logits(Glm5NextConfig c, int[] ids, IErnie5WeightSource source)
+    private static float[] Logits(Glm5NextConfig c, int[] ids, IModelWeightSource source)
     {
         using IDisposable owned = (IDisposable)source;
         using Glm5NextModel model = new(new CpuBackend(), c, source);
@@ -108,7 +107,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     }
 
     // Presents every F32 tensor of an inner source rounded to BF16: kept as BF16 storage, or read back as F32 holding the rounded values.
-    private sealed class Bf16Source(IErnie5WeightSource inner, bool storeBf16) : IErnie5WeightSource, IDisposable
+    private sealed class Bf16Source(IModelWeightSource inner, bool storeBf16) : IModelWeightSource, IDisposable
     {
         public IEnumerable<string> Names => inner.Names;
 
@@ -132,7 +131,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     {
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
         int[] ids = [.. NpyReader.ReadInt64(Path.Combine(Dir, "input_ids.npy")).Data.Select(v => (int)v)];
-        using Ernie5CheckpointWeights source = Ernie5CheckpointWeights.Open(Dir);
+        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         using Glm5NextModel model = new(new CpuBackend(), c, source);
         using Glm5NextState state = new(c, ids.Length);
         List<float> logits = [];
@@ -145,7 +144,7 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     {
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json"))) with { IndexTopK = 1000 };
         int[] ids = [.. NpyReader.ReadInt64(Path.Combine(Dir, "input_ids.npy")).Data.Select(v => (int)v)];
-        using Ernie5CheckpointWeights source = Ernie5CheckpointWeights.Open(Dir);
+        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         using Glm5NextModel model = new(new CpuBackend(), c, source);
         using Glm5NextState state = new(c, ids.Length);
         float[] logits = model.Forward(ids, state), expected = Npy("logits.npy");

@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Glm5Next;
@@ -16,7 +15,7 @@ public sealed class Glm5NextModel : IDisposable
 
     /// <summary>Loads every decoder layer, the embedding, the final norm and the LM head from <paramref name="source"/>. The model keeps the source's
     /// tensors; the source must outlive it.</summary>
-    public Glm5NextModel(IBackend backend, Glm5NextConfig config, IErnie5WeightSource source)
+    public Glm5NextModel(IBackend backend, Glm5NextConfig config, IModelWeightSource source)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
