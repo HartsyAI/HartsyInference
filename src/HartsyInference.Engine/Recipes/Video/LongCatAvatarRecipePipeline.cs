@@ -79,7 +79,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
             audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear, settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift,
-            settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame);
+            settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame,
+            OnProgress: RecipeProgressAdapter.Create(progress, cancel), Cancel: cancel);
 
         float[] latents;
         _backend.PreloadWeights(_parts.Dit.EnumerateWeights());

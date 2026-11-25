@@ -57,7 +57,7 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
 
         LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
             settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale, Mode: mode,
-            NumCondLatents: condLatents, CondLatents: firstFrame);
+            NumCondLatents: condLatents, CondLatents: firstFrame, OnProgress: RecipeProgressAdapter.Create(progress, cancel), Cancel: cancel);
 
         float[] latents;
         _backend.PreloadWeights(_parts.Dit.EnumerateWeights());

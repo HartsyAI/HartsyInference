@@ -75,6 +75,26 @@ public sealed class LongCatPipelineTests
     }
 
     [Fact]
+    public void ADefaultRunKeepsNoTraceReportsEachStepAndStopsWhenCancelled()
+    {
+        WithTinyPipeline(static (pipeline, config) =>
+        {
+            float[] cond = Ramp(Channels * Height * Width, 0.3f);
+            LongCatRun template = Run(config, LongCatConditioningMode.Image, frames: 3, numCond: 1, cond, Prompt(config, 1), Prompt(config, 2), guidance: 4f);
+            List<int> reported = [];
+
+            Assert.Empty(pipeline.Denoise(template with { RecordTrace = false }).Steps);
+            LongCatResult watched = pipeline.Denoise(template with { RecordTrace = false, OnProgress = progress => reported.Add(progress.Step) });
+            Assert.Empty(watched.Steps);
+            Assert.Equal([1, 2, 3], reported);
+
+            using CancellationTokenSource stop = new();
+            stop.Cancel();
+            Assert.Throws<OperationCanceledException>(() => pipeline.Denoise(template with { RecordTrace = false, Cancel = stop.Token }));
+        });
+    }
+
+    [Fact]
     public void ContinuationKeepsItsContextAndChainsTwoSegments()
     {
         WithTinyPipeline(static (pipeline, config) =>
@@ -144,7 +164,7 @@ public sealed class LongCatPipelineTests
     {
         float[] initial = noise ?? Ramp(Channels * frames * Height * Width, 0.5f);
         return new LongCatRun(config.InChannels, frames, Height, Width, initial, positive, negative, Steps: 3, Distill: false, Shift: 3f,
-            Guidance: guidance, Mode: mode, NumCondLatents: numCond, CondLatents: cond, EnhanceHf: enhance);
+            Guidance: guidance, Mode: mode, NumCondLatents: numCond, CondLatents: cond, EnhanceHf: enhance, RecordTrace: true);
     }
 
     private static LongCatPrompt Prompt(LongCatConfig config, int seed)

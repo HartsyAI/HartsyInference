@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Requests;
 
 namespace HartsyInference.Diffusion.Pipelines.LongCat;
 
@@ -33,7 +34,8 @@ public sealed record LongCatRun(
     int Steps, bool Distill, float Shift, float Guidance,
     LongCatConditioningMode Mode = LongCatConditioningMode.Text,
     int NumCondLatents = 0, float[]? CondLatents = null,
-    bool EnhanceHf = false);
+    bool EnhanceHf = false,
+    bool RecordTrace = false, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default);
 
 /// <summary>One step as the reference records it: the guided, negated velocity over the stepped frames, and the latent after the step.</summary>
 public sealed record LongCatStepTrace(float Timestep, float Sigma, float[] Velocity, float[] SampleOut);
@@ -78,10 +80,12 @@ public sealed class LongCatVideoPipeline
         // The guidance scale covers the frames the reference's guidance sees: all of them, except in continuation's cached path.
         int guidedFrom = run.Mode == LongCatConditioningMode.Continuation ? cond : 0;
         bool guided = run.Guidance > 1f;
-        List<LongCatStepTrace> trace = new(schedule.Steps);
+        List<LongCatStepTrace> trace = new(run.RecordTrace ? schedule.Steps : 0);
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
 
         for (int i = 0; i < schedule.Steps; i++)
         {
+            run.Cancel.ThrowIfCancellationRequested();
             float timestep = schedule.Timesteps[i];
             float dt = schedule.Sigmas[i + 1] - schedule.Sigmas[i];
             float[] frameTimesteps = conditioning.FrameTimesteps(timestep, frames);
@@ -100,7 +104,7 @@ public sealed class LongCatVideoPipeline
                     for (int e = 0; e < hw; e++, k++)
                         stepped[k] = -velocity[(c * frames + f) * hw + e];
 
-            float[] sampleOut = new float[stepped.Length];
+            float[]? sampleOut = run.RecordTrace ? new float[stepped.Length] : null;
             k = 0;
             for (int c = 0; c < channels; c++)
                 for (int f = cond; f < frames; f++)
@@ -108,9 +112,12 @@ public sealed class LongCatVideoPipeline
                     {
                         int index = (c * frames + f) * hw + e;
                         latents[index] += dt * stepped[k];
-                        sampleOut[k] = latents[index];
+                        if (sampleOut is not null)
+                            sampleOut[k] = latents[index];
                     }
-            trace.Add(new LongCatStepTrace(timestep, schedule.Sigmas[i], stepped, sampleOut));
+            if (sampleOut is not null)
+                trace.Add(new LongCatStepTrace(timestep, schedule.Sigmas[i], stepped, sampleOut));
+            run.OnProgress?.Invoke(new GenerationProgress(i + 1, schedule.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
         }
         return new LongCatResult(latents, schedule, trace);
     }
