@@ -1005,9 +1005,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         if (output.Shape.Rank != 2 || input.Shape.Rank != 2 || weight.Shape.Rank != 2) return false;
         if (output.DType != DType.F32 || input.DType != DType.F32 || weight.DType != DType.F32) return false;
 
-        int M = (int)output.Shape[0], N = (int)output.Shape[1], K = (int)input.Shape[1];
+        // Sized from the operands, as every other Linear path is: a caller may shape the output differently over the same elements.
+        int M = (int)input.Shape[0], N = (int)weight.Shape[0], K = (int)input.Shape[1];
         if ((K & 3) != 0) return false;
-        if ((int)weight.Shape[0] != N || (int)weight.Shape[1] != K) return false;
+        if ((int)weight.Shape[1] != K || output.ElementCount != (long)M * N) return false;
         if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != N)) return false;
 
         // The activation is quantized per call into a transient; the weight once, cached beside its other casts.
