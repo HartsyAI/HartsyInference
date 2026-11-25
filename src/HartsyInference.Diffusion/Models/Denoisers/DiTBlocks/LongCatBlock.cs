@@ -20,6 +20,19 @@ public sealed partial class LongCatBlock : IStreamingBlock
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
     private Tensor? _w1, _w2, _w3;
     private AttentionLayer? _selfAttention, _crossAttention;
+
+    /// <summary>Rows per FFN tile. The SwiGLU intermediates are [rows, FFN] F32 each; untiled, a 37,440-token clip holds four of 1.57 GB apiece.
+    /// Tiling bounds them to <c>tile × FFN</c> while the output stays whole.</summary>
+    internal const int DefaultFfnTileRows = 4096;
+
+    private int _ffnTileRows = DefaultFfnTileRows;
+
+    /// <summary>Sets the FFN tile height. A value at or above the token count runs the FFN untiled; tests use small tiles to exercise the seams.</summary>
+    internal void SetFfnTileRows(int rows)
+    {
+        if (rows < 1) throw new ArgumentOutOfRangeException(nameof(rows));
+        _ffnTileRows = rows;
+    }
     private LongCatAvatarAudioStep? _audio;
 
     /// <summary>Creates a block of the given geometry; <see cref="LoadWeights"/> fills it.</summary>
@@ -259,7 +272,44 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
+    /// <summary>The SwiGLU FFN over row tiles: each tile's intermediates are freed before the next, so the peak is one tile's FFN plus the output.</summary>
     private Tensor FeedForward(IBackend backend, Tensor x)
+    {
+        int s = (int)x.Shape[0];
+        int dim = _config.HiddenSize;
+        int tile = Math.Min(_ffnTileRows, s);
+        if (tile >= s)
+            return FeedForwardRows(backend, x);
+
+        List<Tensor> parts = new((s + tile - 1) / tile);
+        try
+        {
+            for (int start = 0; start < s; start += tile)
+            {
+                int rows = Math.Min(tile, s - start);
+                using Tensor chunk = SliceRows(backend, x, start, rows, dim);
+                parts.Add(FeedForwardRows(backend, chunk));
+            }
+            Tensor output = new(new TensorShape(s, dim), DType.F32);
+            try
+            {
+                backend.Concat(output, parts.ToArray(), 0);
+            }
+            catch
+            {
+                output.Dispose();
+                throw;
+            }
+            return output;
+        }
+        finally
+        {
+            foreach (Tensor part in parts)
+                part.Dispose();
+        }
+    }
+
+    private Tensor FeedForwardRows(IBackend backend, Tensor x)
     {
         int s = (int)x.Shape[0];
         int hidden = _config.FfnHiddenDim;
