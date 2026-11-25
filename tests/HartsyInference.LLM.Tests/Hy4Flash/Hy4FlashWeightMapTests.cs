@@ -35,7 +35,7 @@ public sealed class Hy4FlashWeightMapTests
     {
         Hy4FlashWeightCoverage coverage = Hy4FlashWeightMap.Check(Config(variant), Tensors(variant));
         coverage.RequireComplete();
-        Assert.Equal(Tensors(variant).Count, coverage.Total);
+        Assert.Equal(Tensors(variant).Count, coverage.Keys.Total);
     }
 
     [Fact]
@@ -137,8 +137,8 @@ public sealed class Hy4FlashWeightMapTests
     [Fact]
     public void Drafter_IsSkippedNotMappedAndTheBaseHasNone()
     {
-        Assert.Equal(87, Hy4FlashWeightMap.Check(Config("instruct"), Tensors("instruct")).SkippedDrafter);
-        Assert.Equal(0, Hy4FlashWeightMap.Check(Config("base"), Tensors("base")).SkippedDrafter);
+        Assert.Equal(87, Hy4FlashWeightMap.Check(Config("instruct"), Tensors("instruct")).Keys.SkippedMtp);
+        Assert.Equal(0, Hy4FlashWeightMap.Check(Config("base"), Tensors("base")).Keys.SkippedMtp);
     }
 
     [Fact]
@@ -148,7 +148,7 @@ public sealed class Hy4FlashWeightMapTests
         Hy4FlashWeightCoverage coverage = Hy4FlashWeightMap.Check(Config("fp8"), tensors);
         coverage.RequireComplete();
         Assert.Equal(tensors.Count(static t => t.DType == "F8_E4M3" && !t.Name.StartsWith("model.dfly_layers.", StringComparison.Ordinal)),
-            coverage.ScaleCompanions);
+            coverage.Keys.ScaleCompanions);
         Hy4FlashTensorInfo gateUpScale = tensors.Single(t => t.Name == "model.layers.3.mlp.experts.gate_up_proj_scale_inv");
         Assert.Equal([512L, 24, 12], gateUpScale.Shape);
     }
@@ -162,8 +162,8 @@ public sealed class Hy4FlashWeightMapTests
         tensors.Add(new Hy4FlashTensorInfo("model.layers.3.mlp.bogus", "BF16", [1], 2));
         tensors[tensors.IndexOf(gate)] = gate with { Shape = [gate.Shape[0] + 1, gate.Shape[1]] };
         Hy4FlashWeightCoverage coverage = Hy4FlashWeightMap.Check(Config("instruct"), tensors);
-        Assert.Contains("model.layers.3.self_attn.o_proj.weight", coverage.Missing);
-        Assert.Contains("model.layers.3.mlp.bogus", coverage.Unmapped);
+        Assert.Contains("model.layers.3.self_attn.o_proj.weight", coverage.Keys.Missing);
+        Assert.Contains("model.layers.3.mlp.bogus", coverage.Keys.Unmapped);
         Assert.Single(coverage.ShapeMismatches);
         Assert.Throws<InvalidDataException>(coverage.RequireComplete);
     }

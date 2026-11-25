@@ -83,10 +83,9 @@ public sealed class LongCatRecipeTests
     }
 
     [Fact]
-    public void AUnnamedOr15RequestPassesTheRefusalAndA16RequestIsRefusedBeforeAnyWeightIsRead()
+    public void A16RequestIsRefusedBeforeAnyWeightIsRead()
     {
         using CpuBackend backend = new();
-        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
         ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
 
         NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
@@ -94,12 +93,48 @@ public sealed class LongCatRecipeTests
             CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
         }));
         Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
+    }
 
-        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+    [Fact]
+    public void ADistilledBuildWithoutItsLoraIsRefusedBeforeAnyWeightIsRead()
+    {
+        using CpuBackend backend = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
+
+        foreach (ResolvedModelVariant variant in new[] { unnamed, named15 })
         {
-            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
-        }));
-        Assert.IsNotType<NotSupportedException>(error);
+            NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+            {
+                CheckpointPath = "no-such-folder/base_model_int8", Backend = backend, Variant = variant,
+            }));
+            Assert.Contains("dmd_lora.safetensors", refused.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TheStreamingHeadroomCoversTheFullAvatarRunsActivationsWithAMargin()
+    {
+        // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 24 x 30 x 52 = 37,440 tokens; hidden 4096, FFN 11,008.
+        long tokens = LongCatRecipeSupport.TokenCount(latentFrames: 24, latentHeight: 60, latentWidth: 104);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(tokens, hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(37_440, tokens);
+        Assert.Equal(37_440L * (10L * 4096 + 3L * 11008) * 4 * 3 / 2, headroom);
+        Assert.InRange(headroom, 15L << 30, 16L << 30);
+    }
+
+    [Fact]
+    public void TheSmallerFirstRunNeedsAboutAThirdOfTheFullHeadroom()
+    {
+        // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens.
+        long small = LongCatRecipeSupport.ActivationHeadroomBytes(
+            LongCatRecipeSupport.TokenCount(latentFrames: 13, latentHeight: 46, latentWidth: 80), hidden: 4096, ffnHidden: 11008);
+        long full = LongCatRecipeSupport.ActivationHeadroomBytes(
+            LongCatRecipeSupport.TokenCount(latentFrames: 24, latentHeight: 60, latentWidth: 104), hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(11_960, LongCatRecipeSupport.TokenCount(latentFrames: 13, latentHeight: 46, latentWidth: 80));
+        Assert.InRange((double)small / full, 0.30, 0.34);
     }
 
     private static CheckpointProbe EmptyProbe() =>
