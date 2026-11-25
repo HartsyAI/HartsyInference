@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Audio.Layers;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
@@ -263,7 +264,7 @@ public sealed class VoiceIsolatorNetwork : IDisposable
             Tensor hidden = WhisperOps.ProjectLinear(backend, normed, _weights[$"denoise_decoder.heads.{band}.1.weight"],
                 _weights[$"denoise_decoder.heads.{band}.1.bias"], 1, frames, width, width);
             normed.Dispose();
-            VoiceIsolatorOps.Gelu(hidden);
+            Activations.ErfGelu(hidden);
             Tensor head = WhisperOps.ProjectLinear(backend, hidden, _weights[$"denoise_decoder.heads.{band}.3.weight"],
                 _weights[$"denoise_decoder.heads.{band}.3.bias"], 1, frames, width, 4 * bandBins);
             hidden.Dispose();
