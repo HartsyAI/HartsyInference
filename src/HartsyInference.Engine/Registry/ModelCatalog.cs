@@ -1184,8 +1184,13 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
+            // Text / LLM — Maxwell-V1.0-Flash: host reference model (MaxwellModel, block-sparse attention with its indexer) on the Text path; structural until a real-weight run.
+            MaxwellCatalog.Build(),
+
             // Text / LLM — Kimi K3.1 Pro: text decoder on the Text path (device-chosen backend, no vision, single device); structural until a real run.
             KimiK31Catalog.Build(),
+            // Text / LLM - Sage S2.1 Flash (glm5_next): host reference decoder on the Text path, tiny-config parity only; structural until a real run.
+            SageS21FlashCatalog.Build(),
 
             // Text / LLM — MOSS-VL-Realtime: cross-attention VLM; GGUF (vision inside) or the official BF16 checkpoint.
             MossVlCatalog.Build(),

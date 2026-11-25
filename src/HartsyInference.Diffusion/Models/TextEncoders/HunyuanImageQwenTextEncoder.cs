@@ -53,14 +53,24 @@ public sealed class HunyuanImageQwenTextEncoder : IDisposable
 
         // Causal attention: hidden states of the first realLen tokens don't depend on trailing pad,
         // so encoding the trimmed sequence matches the masked padded forward exactly.
-        int[] trimmed = paddedTokenIds[..realLen];
-        Tensor full = _encoder.EncodeMultiLayer(backend, [trimmed], [_hiddenStateLayer]);
+        return EncodeCropped(backend, paddedTokenIds[..realLen], TemplatePrefixTokens);
+    }
+
+    /// <summary>Encodes <paramref name="tokenIds"/> as given (no padding) and returns <c>[1, length − cropStart, hidden]</c> F32 with the first
+    /// <paramref name="cropStart"/> template rows dropped. For templates whose prefix length differs from HunyuanImage's (HunyuanVideo-1.5 and
+    /// MovieRoll measure theirs from the tokenised prompt, see <c>HunyuanVideo15Prompt</c>).</summary>
+    public Tensor EncodeCropped(IBackend backend, int[] tokenIds, int cropStart)
+    {
+        ArgumentNullException.ThrowIfNull(tokenIds);
+        if (cropStart < 0 || cropStart >= tokenIds.Length)
+            throw new ArgumentOutOfRangeException(nameof(cropStart), $"Crop {cropStart} must leave at least one of {tokenIds.Length} tokens.");
+        Tensor full = _encoder.EncodeMultiLayer(backend, [tokenIds], [_hiddenStateLayer]);
 
         int hidden = (int)full.Shape[2];
-        int keep = realLen - TemplatePrefixTokens;
+        int keep = tokenIds.Length - cropStart;
         Tensor result = new Tensor(new TensorShape(1, keep, hidden), DType.F32);
         ReadOnlySpan<float> src = full.AsReadOnlySpan<float>();
-        src.Slice(TemplatePrefixTokens * hidden, keep * hidden).CopyTo(result.AsSpan<float>());
+        src.Slice(cropStart * hidden, keep * hidden).CopyTo(result.AsSpan<float>());
         full.Dispose();
         return result;
     }

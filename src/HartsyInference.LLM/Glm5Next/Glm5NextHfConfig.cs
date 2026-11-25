@@ -30,7 +30,7 @@ public static class Glm5NextHfConfig
         if (!Bool(t, "index_kpool_compress")) throw new InvalidDataException("The indexer runs on compressed key pools: index_kpool_compress must be true.");
         if (Int(t, "n_group") != 1 || Int(t, "topk_group") != 1) throw new InvalidDataException("Grouped expert routing is not used by this model: n_group and topk_group must be 1.");
         int topK = Int(t, "index_topk"), pool = Int(t, "index_kpool");
-        if (pool < 1 || topK % pool != 0) throw new InvalidDataException($"index_topk ({topK}) must be a positive multiple of index_kpool ({pool}).");
+        if (topK < 1 || pool < 1 || topK % pool != 0) throw new InvalidDataException($"index_topk ({topK}) must be a positive multiple of index_kpool ({pool}).");
         int qkNope = Int(t, "qk_nope_head_dim");
         if (Int(t, "qk_head_dim") != qkNope) throw new InvalidDataException("qk_head_dim must equal qk_nope_head_dim for a NoPE layer.");
 
@@ -83,6 +83,14 @@ public static class Glm5NextHfConfig
             ImageTokenId = hasVision ? Int(root, "image_token_id") : IntOr(root, "image_token_id"),
             VideoTokenId = hasVision ? Int(root, "video_token_id") : IntOr(root, "video_token_id"),
         };
+    }
+
+    /// <summary>Parses only the <c>vision_config</c> object of a <c>config.json</c> (a vision-tower test or tool needs no text config).</summary>
+    /// <exception cref="InvalidDataException">The config has no vision tower or it is not a <c>glm5_next_vision</c> the engine can build.</exception>
+    public static Glm5NextVisionConfig ParseVision(string json)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        return doc.RootElement.TryGetProperty("vision_config", out JsonElement v) ? ParseVision(v) : throw new InvalidDataException("config.json has no vision_config.");
     }
 
     private static Glm5NextVisionConfig ParseVision(JsonElement v)

@@ -36,6 +36,9 @@ Snapshot 2026-11-24. Huge MoE: no real-weight run is planned; the bar is tiny-co
 
 The scientific encoders are not part of the checkpoint. `Sage-SciPerception` ships trained projectors (feature rows in, 4096-wide rows out) and says encoder weights and preprocessing are separate dependencies. The Flash repo carries 8 projectors under `projectors/sage-s2.1-flash/` (CIF/CHGNet 64-d, DNA readout 3-d, ECG 768-d, EEG/REVE 512-d, protein sequence/ESM-2 1280-d, protein structure/ProteinMPNN 384-d, RNA 640-d, spectra patches 50-d). All are `AtomProjector` MLPs (`modeling_projector.py` at SciPerception `7c228fc03394027fed19bda1ff26388394b0031a`). Output rows replace the placeholder span of the templated prompt embeddings.
 
-## Evidence
+## Evidence and what is open
 
-`Glm5NextWeightCoverageTests` proves every key of both real index key sets (38,770 BF16, 76,108 FP8; fixtures under `tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next`) is named by `Glm5NextWeightNames`, and that FP8 differs only by the scale companions `IsFp8Weight` predicts. Shapes come from header reads of shards 1, 11 and 120 (BF16) and shards 1 and 6 (FP8) and are checked by the loader, not here.
+Header-only: `Glm5NextWeightCoverageTests` proves every key of both real index key sets (38,770 BF16, 76,108 FP8; fixtures under `tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next`) is named by `Glm5NextWeightNames`, and that FP8 differs only by the scale companions `IsFp8Weight` predicts. Tiny-config numerical evidence (decoder, vision tower, chat template, projectors) is in [PARITY_VERIFICATION.md](../Checklists/PARITY_VERIFICATION.md); the reference tools are `tools/parity/glm5_next_*.py` and `sciperception_reference.py`, run in the `hartsy-ref:cpu` container with transformers installed from `52bac5d0e0da56e26289c072f306877ff5870262`.
+
+Open: no real weights ran; the MTP layer, image and scientific input on the Text path, `reasoning_effort`, tool-call parsing, the real `tokenizer.json`, a memory guard, expert offload and GPU runs are not done. The `Glm5NextKpoolIndexer` rebuilds the pools from the cached keys on every call (host reference, cost grows with context).
+

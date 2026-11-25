@@ -50,7 +50,7 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
         (string? bosLiteral, string? eosLiteral) = HfChatAssets.SpecialTokenLiterals(directory);
         ILlmTokenizer tokenizer;
         IChatTemplate template;
-        List<int> stopIds = StopIds(directory, config);
+        List<int> stopIds = HfStopIds.Read(directory, config.EosTokenId);
         try
         {
             if (chat)
@@ -88,36 +88,6 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
             model.Dispose();
             throw;
         }
-    }
-
-    /// <summary>The end-of-sequence ids from <c>config.json</c> and <c>generation_config.json</c> (an int or a list), which end generation
-    /// alongside the end token.</summary>
-    private static List<int> StopIds(string directory, Ernie5Config config)
-    {
-        List<int> ids = [];
-        if (config.EosTokenId is { } eos) ids.Add(eos);
-        string path = Path.Combine(directory, "generation_config.json");
-        if (!File.Exists(path)) return ids;
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
-            if (!document.RootElement.TryGetProperty("eos_token_id", out JsonElement value)) return ids;
-            if (value.ValueKind == JsonValueKind.Number) ids.Add(StopId(value, path));
-            else if (value.ValueKind == JsonValueKind.Array)
-                foreach (JsonElement item in value.EnumerateArray())
-                    if (item.ValueKind == JsonValueKind.Number) ids.Add(StopId(item, path));
-        }
-        catch (JsonException ex)
-        {
-            throw new HartsyInferenceException($"'{path}' is not valid JSON: {ex.Message}", ex);
-        }
-        return [.. ids.Distinct()];
-    }
-
-    private static int StopId(JsonElement value, string path)
-    {
-        if (value.TryGetInt32(out int id)) return id;
-        throw new HartsyInferenceException($"'{path}' names eos_token_id {value.GetRawText()}, which is not a 32-bit token id.");
     }
 
     /// <inheritdoc />

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Mhc;
@@ -7,7 +8,7 @@ namespace HartsyInference.LLM.Maxwell;
 
 /// <summary>The Maxwell-V1.0-Flash text decoder on the CPU, CUDA or Vulkan backend: every projection and the MoE run through <see cref="IBackend"/>;
 /// the residual stream, norms, RoPE and block-sparse attention are host arrays, so each op round-trips. MTP layers are not loaded.</summary>
-public sealed class MaxwellModel : IDisposable
+public sealed class MaxwellModel : IDisposable, IExpertOffloadTarget
 {
     private readonly IBackend _backend;
     private readonly IModelWeightSource _source;
@@ -82,6 +83,55 @@ public sealed class MaxwellModel : IDisposable
 
     /// <summary>The checkpoint's config.</summary>
     public MaxwellConfig Config { get; }
+
+    /// <inheritdoc />
+    public int ExpertHiddenSize => Config.HiddenSize;
+
+    /// <inheritdoc />
+    public int ExpertIntermediateSize => Config.MoeIntermediateSize;
+
+    /// <summary>Every weight except the routed experts, each as a group, for preloading onto a device before an expert offload attaches.</summary>
+    /// <exception cref="InvalidOperationException">The model streams its layers: a streamed layer's weights are new tensors on every forward.</exception>
+    public IEnumerable<IReadOnlyList<Tensor>> EnumerateDenseWeightGroups()
+    {
+        RequireResidentForOffload();
+        foreach (MaxwellLayer? layer in _layers)
+            if (layer is not null)
+                foreach (IReadOnlyList<Tensor> group in layer.EnumerateDenseGroups()) yield return group;
+        if (_lmHead is not null) yield return [_lmHead];
+    }
+
+    /// <inheritdoc />
+    /// <exception cref="InvalidOperationException">The model streams its layers.</exception>
+    public IEnumerable<Tensor> EnumerateExpertWeights()
+    {
+        RequireResidentForOffload();
+        return _layers.Where(static l => l is not null).SelectMany(static l => l!.Moe?.EnumerateExpertWeights() ?? []);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Attach before the first forward: a backend that keeps reused weights on its own may already hold experts the cache cannot evict.</remarks>
+    /// <exception cref="InvalidOperationException">The model streams its layers.</exception>
+    public IReadOnlyList<(int Layer, int ExpertCount)> AttachExpertOffload(MoeExpertOffload offload)
+    {
+        ArgumentNullException.ThrowIfNull(offload);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        RequireResidentForOffload();
+        List<(int Layer, int ExpertCount)> layers = [];
+        foreach (MaxwellLayer? layer in _layers)
+        {
+            if (layer?.Moe is not { } moe) continue;
+            layer.AttachOffload(offload);
+            layers.Add((layer.Index, moe.NumExperts));
+        }
+        return layers;
+    }
+
+    private void RequireResidentForOffload()
+    {
+        if (!_options.ResidentWeights)
+            throw new InvalidOperationException("Expert offload needs ResidentWeights: streamed layers build new expert tensors on every forward.");
+    }
 
     /// <summary>How the checkpoint's keys mapped onto the model at load.</summary>
     public CheckpointKeyCoverage Coverage { get; }

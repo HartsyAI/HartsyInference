@@ -472,7 +472,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// <paramref name="output"/>.</summary>
     private void AddSharedExpert(IBackend backend, Tensor output, Tensor x, int n)
     {
-        Tensor shared = SwiGlu(backend, x, n, _shGateW!, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize, _modelHidden);
+        Tensor shared = SwiGlu(backend, x, n, _shGateW!, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize, _modelHidden, shared: true);
         int[] identity = new int[n];
         for (int i = 0; i < n; i++) identity[i] = i;
         float[] gateVals;
@@ -907,7 +907,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         Tensor? shared = null, sharedGate = null;
         if (FoldsSharedExpert)
         {
-            shared = SwiGlu(backend, x, n, _shGateW!, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize, _modelHidden);
+            shared = SwiGlu(backend, x, n, _shGateW!, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize, _modelHidden, shared: true);
             if (_shGateScoreW is not null)
             {
                 sharedGate = new(new TensorShape(1, n, 1), DType.F32);
@@ -1114,7 +1114,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         Tensor? shared = null, sharedGate = null;
         if (FoldsSharedExpert)
         {
-            shared = SwiGlu(backend, x, n, _shGateW!, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize, _modelHidden);
+            shared = SwiGlu(backend, x, n, _shGateW!, _shUpW!, _shDownW!, _moe.SharedExpertIntermediateSize, _modelHidden, shared: true);
             if (_shGateScoreW is not null)
             {
                 sharedGate = new(new TensorShape(1, n, 1), DType.F32);
@@ -1126,23 +1126,25 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
     /// <summary>Gated FFN over <paramref name="rows"/> tokens to <paramref name="width"/> outputs: down(act(gate(x)) * up(x)) under
     /// <see cref="MoeConfig.Activation"/>: SiLU, tanh-GELU, ReLU or ReLU², the clamped alpha-SwiGLU, or SiTU-GLU. Any other activation throws.</summary>
-    private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter, int width)
+    private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter, int width, bool shared = false)
     {
         TensorShape ff = new(1, rows, inter);
         Tensor gate = new(ff, DType.F32);
         GenericTransformer.Project(backend, gate, x, gateW, null, _lowVram);
         Tensor comb;
-        if (_moe.Activation is ActivationKind.SwigluOai or ActivationKind.Situ)
+        // The clamp belongs to the routed experts unless ClampSharedExpert says otherwise; a shared expert beside them is then plain SiLU.
+        ActivationKind activation = shared && !_moe.ClampSharedExpert && _moe.Activation == ActivationKind.SwigluClamped ? ActivationKind.Silu : _moe.Activation;
+        if (activation is ActivationKind.SwigluOai or ActivationKind.SwigluClamped or ActivationKind.Situ)
         {
             Tensor gatedUp = new(ff, DType.F32);
             GenericTransformer.Project(backend, gatedUp, x, upW, null, _lowVram);
-            comb = GatedFfn.SwiGlu(backend, _moe.Activation, gate, gatedUp, _moe.SwigluLimit, _moe.SwigluAlpha,
+            comb = GatedFfn.SwiGlu(backend, activation, gate, gatedUp, _moe.SwigluLimit, _moe.SwigluAlpha,
                 _moe.ActivationSituBeta, _moe.ActivationSituLinearBeta);
         }
         else
         {
             Tensor act = new(ff, DType.F32);
-            GatedFfn.Activate(backend, _moe.Activation, act, gate);
+            GatedFfn.Activate(backend, activation, act, gate);
             gate.Dispose();
             Tensor up = new(ff, DType.F32);
             GenericTransformer.Project(backend, up, x, upW, null, _lowVram);
