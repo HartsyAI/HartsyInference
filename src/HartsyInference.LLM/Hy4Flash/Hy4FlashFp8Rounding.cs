@@ -6,6 +6,15 @@ public static class Hy4FlashFp8Rounding
     private const float E4M3Max = 448f;
     private static readonly float[] Values = BuildValues();
 
+    /// <summary>The value of an e4m3fn code: sign bit, 4 exponent bits (bias 7), 3 mantissa bits; <c>0x7F</c> and <c>0xFF</c> are NaN.</summary>
+    public static float Decode(byte code)
+    {
+        int magnitude = code & 0x7F;
+        if (magnitude == 0x7F) return float.NaN;
+        float value = Values[magnitude];
+        return (code & 0x80) != 0 ? -value : value;
+    }
+
     /// <summary>The nearest e4m3fn value to <paramref name="value"/>, ties to the even code; magnitudes past 448 saturate.</summary>
     public static float RoundE4M3(float value)
     {
