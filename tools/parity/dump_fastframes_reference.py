@@ -150,11 +150,43 @@ def checkpoint(args):
     spec = pipeline.MODELS[args.model]
     root = Path(args.checkpoints)
     dtype = torch.float32 if args.precision == "fp32" else torch.bfloat16
-    from fastframes.checkpoints import build_wan, load_state_dict
+    from fastframes.checkpoints import build_wan
+    from fastframes import checkpoints as upstream_checkpoints
+
+    def load_state_dict(path, key=None):
+        # Upstream's loader, except for safetensors: the --precision fp32 patch above rebinds torch.bfloat16, which
+        # makes safetensors read BF16 tensors at twice their size. So the file is read here from its JSON header and
+        # the raw bytes, with BF16 widened to F32 by bit shift and no torch dtype involved.
+        if str(path).endswith(".safetensors"):
+            import json
+            import numpy as np
+            with open(str(path), "rb") as fh:
+                header_len = int.from_bytes(fh.read(8), "little")
+                header = json.loads(fh.read(header_len))
+                base = 8 + header_len
+                state = {}
+                for name, info in header.items():
+                    if name == "__metadata__":
+                        continue
+                    start, end = info["data_offsets"]
+                    fh.seek(base + start)
+                    raw = fh.read(end - start)
+                    if info["dtype"] == "BF16":
+                        values = (np.frombuffer(raw, dtype="<u2").astype(np.uint32) << 16).view(np.float32)
+                    elif info["dtype"] == "F32":
+                        values = np.frombuffer(raw, dtype="<f4")
+                    elif info["dtype"] == "F16":
+                        values = np.frombuffer(raw, dtype="<f2").astype(np.float32)
+                    else:
+                        raise ValueError(f"{path}: {name} is {info['dtype']}; this reader handles BF16, F16 and F32")
+                    state[upstream_checkpoints._strip(name)] = torch.from_numpy(values.reshape(info["shape"]).copy())
+            return state
+        return upstream_checkpoints.load_state_dict(path, key)
     from fastframes.models.kv_refinement import KVRefinementNetwork
     from fastframes.models.pixel_decoder import BridgedPixelDecoder, PixelDecoder
 
-    dit = build_wan(spec.config.wan_model, load_state_dict(root / spec.dit, "generator_ema"), dtype=dtype, device="cpu")
+    dit_path = Path(args.dit_file) if args.dit_file else root / spec.dit
+    dit = build_wan(spec.config.wan_model, load_state_dict(dit_path, "generator_ema"), dtype=dtype, device="cpu")
     wan = model.WAN_CONFIGS[spec.config.wan_model]
     refiner_state = load_state_dict(root / spec.refiner, "adapter")
     refiner = KVRefinementNetwork(dim=wan.dim, num_heads=wan.num_heads, head_dim=wan.dim // wan.num_heads,
@@ -174,6 +206,7 @@ def checkpoint(args):
     config = spec.config.__class__(**{**spec.config.__dict__, "num_frames": frames, "num_pixel_frames": 4 * frames - 3,
                                       "decoder_dtype": dtype, "autocast": False, "fast_ops": False, "allow_tf32": False})
     prompt_embeds = load_file(args.prompt_embeds)["prompt_embeds"].to(dtype)
+    prompt_embeds = prompt_embeds.reshape(-1, prompt_embeds.shape[-1])  # the engine saves [1, 512, 4096]
     if prompt_embeds.shape[0] < wan.text_len:
         # The C# side takes the umT5 output already zero-padded to the generator's text length, as upstream does.
         pad = prompt_embeds.new_zeros(wan.text_len - prompt_embeds.shape[0], prompt_embeds.shape[1])
@@ -212,6 +245,9 @@ def main():
     c.add_argument("--out", required=True)
     c.add_argument("--frames", type=int, default=4)
     c.add_argument("--seed", type=int, default=0)
+    c.add_argument("--dit-file", default=None,
+                   help="Generator as .safetensors (keys as the pickle's generator_ema dict, FSDP prefix kept); "
+                        "replaces <checkpoints>/<spec.dit> so no pickle is loaded.")
     c.add_argument("--precision", choices=["fp32", "bf16"], default="fp32")
     c.set_defaults(func=checkpoint)
     args = parser.parse_args()
