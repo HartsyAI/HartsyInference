@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.DepthAnything;
 
@@ -88,11 +89,10 @@ public sealed class DepthPro2Head
                 Tensor tap = taps[i];
                 if (tap.DType != DType.F32 || tap.Shape.Rank != 3 || tap.Shape[0] != 1 || tap.Shape[1] != prefixTokens + patches || tap.Shape[2] != _backboneWidth)
                     throw new ArgumentException($"Tap {i} must be F32 [1, {prefixTokens + patches}, {_backboneWidth}]; got {tap.DType} {tap.Shape}.", nameof(taps));
-                using Tensor rows = tap.Reshape(new TensorShape(prefixTokens + patches, _backboneWidth));
-                using Tensor patchRows = rows.SliceRows(prefixTokens, patches);
-                using Tensor channelsFirst = new(new TensorShape(_backboneWidth, patches), DType.F32);
-                backend.Transpose2D(channelsFirst, patchRows, patches, _backboneWidth);
-                using Tensor grid = channelsFirst.Reshape(new TensorShape(1, _backboneWidth, gridH, gridW));
+                // Drop the prefix tokens and move channels first in one backend copy: Tensor.Reshape and SliceRows read the tap on the host.
+                using Tensor grid = new(new TensorShape(1, _backboneWidth, gridH, gridW), DType.F32);
+                StridedView patchGrid = StridedView.Of(tap.Shape).Select(0, 0).Slice(0, prefixTokens, patches).Split(0, gridH, gridW).Permute([2, 0, 1]);
+                backend.CopyStrided(grid, tap, StridedCopySpec.Gather(patchGrid));
                 string p = $"encoder.reassemble.{i}.";
                 Tensor projected = Conv(backend, grid, W(p + "0.weight", _dims[i], _backboneWidth, 1, 1), W(p + "0.bias", _dims[i]), 1, 0);
                 if (i == 2)
