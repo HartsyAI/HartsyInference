@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
@@ -65,6 +66,112 @@ public static class SegmentedAttention
             foreach (Tensor part in parts)
                 part.Dispose();
         }
+    }
+
+    /// <summary>Attends head-major operands with key and value rows that may outnumber the queries: <paramref name="q"/>
+    /// <c>[B, heads, Sq, headDim]</c>, <paramref name="k"/> and <paramref name="v"/> <c>[B, heads, Skv, headDim]</c>. Each segment's queries read
+    /// the key ranges it names. Nothing is masked: a key outside a segment's ranges is not in its call, so there is no <c>[Sq, Skv]</c> bias and every
+    /// call is the layer's ordinary unmasked attention. The operands stay the caller's. Returns <c>[B, heads, Sq, headDim]</c>, which the caller owns.</summary>
+    /// <remarks>Equal to one attention with a bias of 0 on the named pairs and negative infinity elsewhere. Segments that name the same ranges share
+    /// one gathered copy of the keys and values, and a segment that reads every key reads the operands themselves.</remarks>
+    public static Tensor RunHeadMajor(IBackend backend, AttentionLayer layer, Tensor q, Tensor k, Tensor v, ReadOnlySpan<KeyRangeSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(layer);
+        if (q.Shape.Rank != 4 || k.Shape.Rank != 4 || !v.Shape.Equals(k.Shape))
+            throw new ArgumentException($"Segmented attention takes head-major [B, heads, S, headDim] operands; got {q.Shape}, {k.Shape}, {v.Shape}.");
+        int queryTokens = (int)q.Shape[2], keyTokens = (int)k.Shape[2];
+        KeyRangeSegment.Validate(segments, queryTokens, keyTokens);
+        if (segments.Length == 1 && ReadsEveryKey(segments[0], keyTokens))
+            return layer.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
+
+        List<Tensor> parts = new(segments.Length);
+        Tensor? keys = null, values = null;
+        try
+        {
+            for (int i = 0; i < segments.Length; i++)
+            {
+                KeyRangeSegment s = segments[i];
+                bool every = ReadsEveryKey(s, keyTokens);
+                if (!every && (keys is null || !SameKeys(s, segments[i - 1])))
+                {
+                    keys?.Dispose();
+                    values?.Dispose();
+                    keys = values = null;
+                    keys = GatherTokens(backend, k, s);
+                    values = GatherTokens(backend, v, s);
+                }
+                using Tensor queries = SliceTokens(backend, q, s.QueryStart, s.QueryCount);
+                parts.Add(layer.AttendHeadMajorOperands(backend, queries, every ? k : keys!, every ? v : values!, default, OperandOwnership.None));
+                if (every || i + 1 == segments.Length || !SameKeys(segments[i + 1], s))
+                {
+                    keys?.Dispose();
+                    values?.Dispose();
+                    keys = values = null;
+                }
+            }
+
+            if (parts.Count == 1)
+            {
+                Tensor only = parts[0];
+                parts.Clear();
+                return only;
+            }
+            Tensor joined = new(new TensorShape(q.Shape[0], q.Shape[1], queryTokens, q.Shape[3]), parts[0].DType);
+            backend.Concat(joined, parts.ToArray(), 2);
+            return joined;
+        }
+        finally
+        {
+            keys?.Dispose();
+            values?.Dispose();
+            foreach (Tensor part in parts)
+                part.Dispose();
+        }
+    }
+
+    private static bool ReadsEveryKey(in KeyRangeSegment segment, int keyTokens) => segment.KeyCount == keyTokens;
+
+    private static bool SameKeys(in KeyRangeSegment a, in KeyRangeSegment b)
+    {
+        if (ReferenceEquals(a.Keys, b.Keys))
+            return true;
+        if (a.Keys.Count != b.Keys.Count)
+            return false;
+        for (int i = 0; i < a.Keys.Count; i++)
+        {
+            if (a.Keys[i] != b.Keys[i])
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>The key or value rows a segment names, in order, as one head-major tensor.</summary>
+    private static Tensor GatherTokens(IBackend backend, Tensor source, in KeyRangeSegment segment)
+    {
+        if (segment.Keys.Count == 1)
+            return SliceTokens(backend, source, segment.Keys[0].Start, segment.Keys[0].Count);
+        Tensor[] slices = new Tensor[segment.Keys.Count];
+        try
+        {
+            for (int i = 0; i < slices.Length; i++)
+                slices[i] = SliceTokens(backend, source, segment.Keys[i].Start, segment.Keys[i].Count);
+            Tensor gathered = new(new TensorShape(source.Shape[0], source.Shape[1], segment.KeyCount, source.Shape[3]), source.DType);
+            backend.Concat(gathered, slices, 2);
+            return gathered;
+        }
+        finally
+        {
+            foreach (Tensor? slice in slices)
+                slice?.Dispose();
+        }
+    }
+
+    private static Tensor SliceTokens(IBackend backend, Tensor source, int start, int count)
+    {
+        Tensor slice = new(new TensorShape(source.Shape[0], source.Shape[1], count, source.Shape[3]), source.DType);
+        StridedCopies.SliceAxis(backend, slice, source, 2, start, count);
+        return slice;
     }
 
     /// <summary>Rows <c>[start, start + count)</c> of a token-major operand as head-major <c>[1, heads, count, headDim]</c>.</summary>
