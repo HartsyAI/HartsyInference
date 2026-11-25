@@ -7,13 +7,14 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests.Parity;
 
 /// <summary>The avatar KV-cache path (the reference's <c>return_kv</c> pass and <c>kv_cache_dict</c> denoising, as the pipeline's use_kv_cache
-/// runs them) against the pinned model on the tiny config (tests/python-reference/longcat_avatar/dump_longcat_avatar_dit.py). The cache's keys of
-/// block 0 and the denoising velocity over the last two frames must match. CPU F32. Skipped until HARTSY_LONGCAT_AVATAR_DIT_DIR names the dump.</summary>
+/// runs them) against the pinned model on the tiny config (tests/python-reference/longcat_avatar/dump_longcat_avatar_dit.py). The cached keys and
+/// values of blocks 0 and 1 must match within relRMS 1e-6, and the cached denoising velocity within 1e-5. CPU F32. Skipped until
+/// HARTSY_LONGCAT_AVATAR_DIT_DIR names the dump.</summary>
 [Trait("Category", "Integration")]
 public sealed class LongCatAvatarKvParityTests
 {
     private const string EnvName = "HARTSY_LONGCAT_AVATAR_DIT_DIR";
-    private const double Tolerance = 1e-5;
+    private const double Tolerance = 1e-5, KvTolerance = 1e-6;
 
     [LongCatAvatarKvFact]
     public void TheCachePassAndTheCachedDenoisingMatchTheReference()
@@ -58,9 +59,13 @@ public sealed class LongCatAvatarKvParityTests
 
             float[] referenceK = LongCatReferenceDump.Read(dir, document, "kv.block0.k");
             double kRelRms = RelRms(cache.Blocks[0].K.AsReadOnlySpan<float>(), referenceK);
-            Assert.True(kRelRms <= Tolerance, $"block 0 cached keys relRMS {kRelRms:E3} exceeds {Tolerance:E0}.");
+            Assert.True(kRelRms <= KvTolerance, $"block 0 cached keys relRMS {kRelRms:E3} exceeds {KvTolerance:E0}.");
+            double block0V = RelRms(cache.Blocks[0].V.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "kv.block0.v"));
+            Assert.True(block0V <= KvTolerance, $"block 0 cached values relRMS {block0V:E3} exceeds {KvTolerance:E0}.");
             double block1K = RelRms(cache.Blocks[1].K.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "kv.block1.k"));
-            Assert.True(block1K <= Tolerance, $"block 1 cached keys relRMS {block1K:E3} exceeds {Tolerance:E0}.");
+            Assert.True(block1K <= KvTolerance, $"block 1 cached keys relRMS {block1K:E3} exceeds {KvTolerance:E0}.");
+            double block1V = RelRms(cache.Blocks[1].V.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "kv.block1.v"));
+            Assert.True(block1V <= KvTolerance, $"block 1 cached values relRMS {block1V:E3} exceeds {KvTolerance:E0}.");
 
             using Tensor velocity = transformer.ForwardCached(backend, noisy, encoder, [500f], conditioning, cache, audioTokens: noisyAudio);
             double vRelRms = RelRms(velocity.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "velocity.avc_cache"));
