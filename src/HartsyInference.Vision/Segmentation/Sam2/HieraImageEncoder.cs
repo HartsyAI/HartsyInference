@@ -149,11 +149,12 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         int hp = (inH + 2 * PatchPad - PatchKernel) / PatchStride + 1;
         int wp = (inW + 2 * PatchPad - PatchKernel) / PatchStride + 1;
 
-        Tensor patch = new Tensor(new TensorShape(1, _embedDim, hp, wp), DType.F32);
+        using Tensor patch = new Tensor(new TensorShape(1, _embedDim, hp, wp), DType.F32);
         backend.Conv2D(patch, pixelValues, _patchProjW!, _patchProjB, PatchStride, PatchStride, PatchPad, PatchPad);
 
-        Tensor tokens = NchwToNhwc(backend, patch, 1, _embedDim, hp, wp);
-        tokens = AddPosEmbed(backend, tokens, hp, wp);
+        Tensor embedded = NchwToNhwc(backend, patch, 1, _embedDim, hp, wp);
+        Tensor tokens = AddPosEmbed(backend, embedded, hp, wp);
+        if (!ReferenceEquals(tokens, embedded)) embedded.Dispose();
 
         Tensor[] stageFeats = new Tensor[4];
         int[] stageH = new int[4];
@@ -175,6 +176,7 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
                 stageIdx++;
             }
         }
+        x.Dispose();
 
         return NeckForward(backend, stageFeats, stageH, stageW);
     }

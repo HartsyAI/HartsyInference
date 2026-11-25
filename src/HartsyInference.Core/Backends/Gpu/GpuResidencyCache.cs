@@ -344,7 +344,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         BindingKey,
         sync: () => SyncActivationToHost(tensor),
         dispose: () => ReleaseActivation(tensor),
-        move: to => MoveActivation(tensor, to));
+        move: (to, handOver) => MoveActivation(tensor, to, handOver));
 
     private void CacheActivationCore(Tensor tensor, TBuffer buffer, long bytes)
     {
@@ -392,11 +392,14 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     private void DemotePromotedWeight(Tensor tensor) => RunCallback(tensor, Callback.Demote);
 
     /// <summary>The tensor handed its storage to <paramref name="to"/> (<see cref="Tensor.IntoShape"/>): the device buffer and its pin
-    /// follow, with no transfer. Waits for the op in flight, as a host read does, because the caller uses the result at once.</summary>
-    private void MoveActivation(Tensor from, Tensor to)
+    /// follow, with no transfer. Waits for the op in flight, as a host read does, because the caller uses the result at once.
+    /// <paramref name="handOver"/> moves the host side and runs inside the exclusive section, so nothing on this cache sees the old tensor spent
+    /// while it is still an entry.</summary>
+    private void MoveActivation(Tensor from, Tensor to, Action handOver)
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
+            handOver();
             return;
         }
         nint previous = CaptureCurrent();
@@ -407,10 +410,12 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             {
                 if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
                 {
+                    handOver();
                     return;
                 }
                 try
                 {
+                    handOver();
                     MoveActivationCore(from, to);
                 }
                 catch (InvalidOperationException ex) when (IsCorruption(ex))

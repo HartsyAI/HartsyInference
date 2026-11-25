@@ -158,6 +158,36 @@ public sealed class TensorIntoShapeTests
         Assert.Equal(8, source.AsSpan<sbyte>().Length);
     }
 
+    [Fact]
+    public void ATensorHeldOnTwoDevices_IsReadBackFirst()
+    {
+        using FakeResidency first = new();
+        using FakeResidency second = new();
+        Tensor source = new(new TensorShape(4), DType.F32);
+        float[] values = [1, 2, 3, 4];
+        values.CopyTo(source.AsSpan<float>());
+        second.Promote(source);
+        first.Promote(source);
+
+        using Tensor moved = source.IntoShape(new TensorShape(2, 2));
+
+        Assert.Equal(1, first.Freed);
+        Assert.Equal(1, second.Freed);
+        Assert.Equal(values, moved.AsReadOnlySpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void AViewTakenEarlier_KeepsTheResultAlive()
+    {
+        Tensor source = new(new TensorShape(4), DType.F32);
+        using Tensor view = source.Reshape(new TensorShape(2, 2));
+
+        using Tensor moved = source.IntoShape(new TensorShape(1, 4));
+
+        Assert.Same(source, view.KeepAliveOwner);
+        Assert.Same(moved, source.KeepAliveOwner);
+    }
+
     private static unsafe nint Pointer(Tensor tensor) => (nint)tensor.DataPointer;
 
     private static unsafe Tensor Borrow(Tensor owner) => new(owner.DataPointer, owner.Shape, owner.DType);

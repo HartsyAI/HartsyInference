@@ -41,9 +41,10 @@ public sealed unsafe class Tensor : IDisposable
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
     internal Action? _gpuDisposeCallback;
 
-    /// <summary>Backend-set callback: hands the device copy to another tensor without a transfer (see <see cref="IntoShape"/>). Null when the
-    /// binding is not a device-only activation; meaningful only while <see cref="_gpuSyncCallback"/> is set.</summary>
-    private Action<Tensor>? _gpuMoveCallback;
+    /// <summary>Backend-set callback: hands the device copy to another tensor without a transfer (see <see cref="IntoShape"/>), running the given
+    /// action, which hands over the host side, inside the cache's exclusive section. Set only for a cached activation
+    /// (<c>GpuResidencyCache.BindActivation</c>); meaningful only while <see cref="_gpuSyncCallback"/> is set.</summary>
+    private Action<Tensor, Action>? _gpuMoveCallback;
 
     /// <summary>True when the host buffer holds the current bytes: no device copy is waiting to be read back, so reading
     /// <see cref="DataPointer"/> costs no synchronization. A contract validates host-built index operands only in this state.</summary>
@@ -60,10 +61,10 @@ public sealed unsafe class Tensor : IDisposable
     private List<GpuBinding>? _extraGpuBindings;
 
     /// <summary>One backend's (sync, dispose, owner-key) triple for <see cref="_extraGpuBindings"/>.</summary>
-    private readonly record struct GpuBinding(nint Key, Action Sync, Action Dispose, Action<Tensor>? Move);
+    private readonly record struct GpuBinding(nint Key, Action Sync, Action Dispose, Action<Tensor, Action>? Move);
 
     /// <summary>Registers backend callbacks for this tensor's device copy, keyed by the owning backend's cleanup key. First owner takes the fast single-slot fields; a DIFFERENT owner lands in the overflow list instead of overwriting; a repeat plant by the same owner replaces its own entry (the pre-existing semantics).</summary>
-    internal void SetGpuBinding(nint key, Action sync, Action dispose, Action<Tensor>? move = null)
+    internal void SetGpuBinding(nint key, Action sync, Action dispose, Action<Tensor, Action>? move = null)
     {
         bool disposeImmediately = false;
         lock (this)
@@ -475,7 +476,10 @@ public sealed unsafe class Tensor : IDisposable
     /// residency is kept per tensor; the next op then uploads it again. Here there is one tensor before and after, so the device buffer
     /// and its pin move with it. A tensor that also holds a binding a backend cannot move is read back first, as <see cref="Reshape"/> does.</para>
     /// <para>A borrowed tensor owns no storage to hand over, so for one this is <see cref="Reshape"/> and this tensor stays valid. Do not
-    /// use it on a preloaded weight or on a tensor a captured graph writes: both are known to the backend by identity.</para></remarks>
+    /// use it on a preloaded weight or on a tensor a captured graph writes: both are known to the backend by identity.</para>
+    /// <para>The result is this tensor under another shape, so it keeps the GEMM hints a view does not carry
+    /// (<see cref="SkipNativeFp8Gemm"/>, <see cref="ForceF32Gemm"/>). A view taken earlier stays readable: it roots this spent tensor, which
+    /// roots the result.</para></remarks>
     /// <exception cref="ObjectDisposedException">This tensor was disposed or already handed over.</exception>
     public Tensor IntoShape(TensorShape newShape)
     {
@@ -491,17 +495,31 @@ public sealed unsafe class Tensor : IDisposable
         result.SkipNativeFp8Gemm = SkipNativeFp8Gemm;
         result.ForceF32Gemm = ForceF32Gemm;
 
-        Action<Tensor>? move;
+        Action<Tensor, Action>? move;
         lock (this)
         {
             move = _gpuSyncCallback is not null && _extraGpuBindings is not { Count: > 0 } ? _gpuMoveCallback : null;
         }
         if (move is null)
+        {
             EnsureCpuData();
+            HandStorageTo(result);
+        }
+        else
+        {
+            move(result, () => HandStorageTo(result));
+        }
+        GC.SuppressFinalize(this);
+        return result;
+    }
 
+    private void HandStorageTo(Tensor result)
+    {
         lock (this)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_extraGpuBindings is { Count: > 0 })
+                throw new InvalidOperationException($"Tensor {Shape} was bound on another device while it was being reshaped in place.");
             _disposed = true;
             _gpuSyncCallback = null;
             _gpuDisposeCallback = null;
@@ -512,11 +530,8 @@ public sealed unsafe class Tensor : IDisposable
             result._keepAlive = _keepAlive;
             _ownedBuffer = null;
             _dataPointer = 0;
-            _keepAlive = null;
+            _keepAlive = result;
         }
-        GC.SuppressFinalize(this);
-        move?.Invoke(result);
-        return result;
     }
 
     /// <summary>Creates a view over the same bytes under a different dtype and shape — no copy, no reinterpretation of the bytes themselves, only of what they are declared to mean.</summary>
