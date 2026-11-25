@@ -17,6 +17,9 @@ public sealed class WanForwardCaches
     private readonly Dictionary<(int T, int H, int W, int Extra), (Tensor Cos, Tensor Sin)> _rope = new();
     private readonly Dictionary<Tensor, Tensor> _textProj = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>How many text projections were computed (cache misses). A caller that hands a fresh encoder tensor to every pass misses on every pass.</summary>
+    internal int TextProjBuilds { get; private set; }
+
     /// <summary>Returns the cached cos/sin pair for <paramref name="key"/>, building it via <paramref name="build"/>
     /// on first use. <c>Extra</c> disambiguates composite tables (e.g. S2V's video⊕reference concat).</summary>
     public (Tensor Cos, Tensor Sin) RopeCosSin((int T, int H, int W, int Extra) key, Func<(Tensor Cos, Tensor Sin)> build)
@@ -49,6 +52,7 @@ public sealed class WanForwardCaches
             _textProj.Clear();
         }
         Tensor proj = WanDitOps.TextEmbed(backend, encoder, dim, w1, b1, w2, b2);
+        TextProjBuilds++;
         unsafe { _ = (nint)proj.DataPointer; }   // host-materialize (see class doc)
         _textProj[encoder] = proj;
         return proj;
