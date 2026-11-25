@@ -604,18 +604,6 @@ public static class SideModels
         Sha256 = null
     };
 
-    /// <summary>Whisper-large-v3 (128 mel bins, 32 encoder layers) for the LongCat-Video-Avatar 1.5 and 1.6 audio front-end, from the upstream OpenAI repo.
-    /// Pinned to openai/whisper-large-v3 @ 06f233fe (the HF tree LFS oid); the Avatar 1.5 repo bundles the same file.</summary>
-    public static readonly ModelAsset WhisperLargeV3 = new ModelAsset
-    {
-        Repo = "openai/whisper-large-v3",
-        RepoPath = "model.safetensors",
-        TargetSubdir = "audio",
-        TargetName = "Whisper/whisper-large-v3.safetensors",
-        Role = "audio encoder",
-        Sha256 = "a8e94b85976e5864ba3e9525c7e6c83b2a1eca42d4b797a0c7c24d778e40fd95"
-    };
-
     /// <summary>wav2vec2-large (hidden 1024, 24 layers) for S2V checkpoints expecting 1024-dim audio features — the Comfy-Org Wan 2.2 repackage the S2V parity harness validated against; hash unpinned.</summary>
     public static readonly ModelAsset Wav2Vec2Large = new ModelAsset
     {
