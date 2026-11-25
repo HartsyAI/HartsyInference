@@ -39,7 +39,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
     private JointAttention? _attention;
     private AttentionLayer? _imgAttn, _txtAttn;
 
-    // The flat, QK-norm-free attention the window path runs over the cache-extended keys (the joint layer's config, without the
+    // The token-major, QK-norm-free attention the window path runs over the cache-extended keys (the joint layer's config, without the
     // stream norms, which the window path applies to its own rows before the RoPE).
     private AttentionLayer? _windowAttend;
 
@@ -127,6 +127,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
                 TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
             },
             [_imgAttn, _txtAttn]);
+        // AllowF16 as the joint layer: the QK RMS norm bounds the scores, so the window attention may narrow to F16 too.
         _windowAttend = new AttentionLayer(new AttentionLayerConfig
         {
             Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, AllowF16 = true,
@@ -367,6 +368,8 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             throw new ArgumentException($"{sc + sw} cached and window tokens over {axes} axes take {(sc + sw) * axes} positions; got {positions.Length}.",
                 nameof(positions));
 
+        if (rope.HeadDim != _headDim)
+            throw new ArgumentException($"The rope is {rope.HeadDim} wide per head; the block has {_headDim}.", nameof(rope));
         int st = returnKv ? 0 : (int)text!.Shape[1];
         int total = sw + st;
         TensorShape imgShape = new(1, sw, _hiddenSize);
@@ -375,6 +378,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         SegmentModulation? attnMod = null, ffnMod = null;
         Tensor? imgQ = null, imgK = null, imgV = null, txtQ = null, txtK = null, txtV = null;
         Tensor? keysOut = null, valuesOut = null;
+        Tensor? attendQ = null, attendK = null, attendV = null, attended = null, imgAttended = null, txtAttended = null;
         try
         {
             imgMod = _imgModulation.Forward(backend, frameTemb);
@@ -402,37 +406,44 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             // The cache is concatenated before the RoPE; the window's rows take the trailing positions.
             if (cacheKeys is not null && cacheValues is not null)
             {
+                // headOwned false: the cache belongs to the caller, so only the window's own K and V are consumed here.
                 imgK = ConcatTokens(backend, cacheKeys, imgK!, sc + sw, headOwned: false);
                 imgV = ConcatTokens(backend, cacheValues, imgV!, sc + sw, headOwned: false);
             }
-            rope.RotateRows(backend, imgQ!, positions.AsSpan(sc * axes), sw, _numHeads);
-            rope.RotateRows(backend, imgK!, positions, sc + sw, _numHeads);
+            // Separate slots: the query and key tables keep their own signatures, so every block of this window reuses them.
+            rope.RotateRows(backend, imgQ!, positions.AsSpan(sc * axes), sw, _numHeads, slot: 0);
+            rope.RotateRows(backend, imgK!, positions, sc + sw, _numHeads, slot: 1);
 
-            // Joint attention over [cache, window] keys and [window, text] queries; the text rows attend over everything.
-            Tensor q = imgQ!, k = imgK!, v = imgV!;
+            // Joint attention over [cache, window] keys and [window, text] queries; the text rows attend over everything. Each operand stays
+            // tracked by the finally until the attention call takes it, so a throw before that disposes it exactly once.
+            attendQ = imgQ; attendK = imgK; attendV = imgV;
             imgQ = imgK = imgV = null;
             if (!returnKv)
             {
-                q = ConcatTokens(backend, q, txtQ!, total);
-                k = ConcatTokens(backend, k, txtK!, total + sc);
-                v = ConcatTokens(backend, v, txtV!, total + sc);
-                txtQ = txtK = txtV = null;
+                attendQ = ConcatTokens(backend, attendQ!, txtQ!, total);
+                txtQ = null;
+                attendK = ConcatTokens(backend, attendK!, txtK!, total + sc);
+                txtK = null;
+                attendV = ConcatTokens(backend, attendV!, txtV!, total + sc);
+                txtV = null;
             }
             TensorShape flatShape = new(1, total, _hiddenSize);
-            Tensor attended = _windowAttend.Attend(backend, q, k, v, flatShape, default(AttentionCallContext));
+            attended = _windowAttend.Attend(backend, attendQ!, attendK!, attendV!, flatShape, default(AttentionCallContext));
+            attendQ = attendK = attendV = null;   // Attend took the operands
 
-            Tensor imgAttended = new(new TensorShape(1, sw, _hiddenSize), DType.F32);
+            imgAttended = new Tensor(new TensorShape(1, sw, _hiddenSize), DType.F32);
             JointAttention.SplitRows(backend, imgAttended, attended, 1, total, 0);
-            Tensor? txtAttended = null;
             if (!returnKv)
             {
                 txtAttended = new Tensor(txtShape, DType.F32);
                 JointAttention.SplitRows(backend, txtAttended, attended, 1, total, sw);
             }
             attended.Dispose();
+            attended = null;
 
             // Image path: output projection, gated residual, then the per-frame FFN.
-            Tensor imgAttnProj = _imgAttn.ProjectOutput(backend, imgAttended);
+            Tensor imgAttnProj = _imgAttn.ProjectOutput(backend, imgAttended!);
+            imgAttended = null;
             Tensor imgAfterAttn = attnMod.GatedResidual(backend, image, imgAttnProj);
             imgAttnProj.Dispose();
             Tensor imgMlpModulated = ffnMod.NormAffine(backend, imgAfterAttn, 1e-6f);
@@ -451,6 +462,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
 
             // Text path: one shared modulation, as in ForwardPerFrame.
             Tensor txtAttnProj = _txtAttn.ProjectOutput(backend, txtAttended!);
+            txtAttended = null;
             Tensor txtAfterAttn = new(txtShape, DType.F32);
             backend.GatedResidualLastDim(txtAfterAttn, text!, txtAttnProj, txtMod![2]);
             txtAttnProj.Dispose();
@@ -479,6 +491,12 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             txtV?.Dispose();
             keysOut?.Dispose();
             valuesOut?.Dispose();
+            attendQ?.Dispose();
+            attendK?.Dispose();
+            attendV?.Dispose();
+            attended?.Dispose();
+            imgAttended?.Dispose();
+            txtAttended?.Dispose();
         }
     }
 
