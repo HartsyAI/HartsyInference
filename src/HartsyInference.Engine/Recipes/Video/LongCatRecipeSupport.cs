@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Video;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -35,6 +36,17 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
+
+    /// <summary>Device headroom the stream plans around for activations and workspace.</summary>
+    internal const long StreamHeadroomBytes = 3L * 1024 * 1024 * 1024;
+
+    /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
+    /// memory when it does not. Disposing the scope evicts whatever it placed.</summary>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName) =>
+        BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = StreamHeadroomBytes,
+        });
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>

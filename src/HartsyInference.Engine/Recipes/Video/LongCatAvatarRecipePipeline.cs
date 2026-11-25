@@ -2,6 +2,8 @@ using HartsyInference.Audio.Models.LongCat;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -77,22 +79,19 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             condLatents = 1;
         }
 
-        LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-            audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear, settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift,
-            settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame,
-            OnProgress: RecipeProgressAdapter.Create(progress, cancel), Cancel: cancel);
-
+        // The DiT is placed by the streaming scope (see the base recipe); each finished step returns the stream's reservations.
         float[] latents;
-        _backend.PreloadWeights(_parts.Dit.EnumerateWeights());
-        try
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
+        using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar"))
         {
+            LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
+                audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear,
+                settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance,
+                mode, condLatents, firstFrame, OnProgress: step => { stream.EndStep(); bridge(step); }, Cancel: cancel);
             latents = _pipeline.Denoise(run).Latents;
         }
-        finally
-        {
-            _backend.Sync();
-            _backend.FreeWeights(_parts.Dit.EnumerateWeights());
-        }
+        _backend.Sync();
+        _backend.FreeWeights(_parts.Dit.EnumerateWeights());
         cancel.ThrowIfCancellationRequested();
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);

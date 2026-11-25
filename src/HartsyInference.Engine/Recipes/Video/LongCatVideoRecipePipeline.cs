@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Planning;
@@ -55,21 +57,21 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
             condLatents = 1;
         }
 
-        LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-            settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale, Mode: mode,
-            NumCondLatents: condLatents, CondLatents: firstFrame, OnProgress: RecipeProgressAdapter.Create(progress, cancel), Cancel: cancel);
-
+        // The DiT is placed by the streaming scope: resident when it fits, block-streamed when it does not. Each finished step
+        // returns the stream's pool reservations (EndStep), which the scope requires.
         float[] latents;
-        _backend.PreloadWeights(_parts.Dit.EnumerateWeights());
-        try
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
+        using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-video"))
         {
+            LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
+                settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale,
+                Mode: mode, NumCondLatents: condLatents, CondLatents: firstFrame,
+                OnProgress: step => { stream.EndStep(); bridge(step); }, Cancel: cancel);
             latents = _pipeline.Denoise(run).Latents;
         }
-        finally
-        {
-            _backend.Sync();
-            _backend.FreeWeights(_parts.Dit.EnumerateWeights());
-        }
+        // The VAE decode runs next, so the DiT leaves the device now (the scope has already evicted any streamed blocks).
+        _backend.Sync();
+        _backend.FreeWeights(_parts.Dit.EnumerateWeights());
         cancel.ThrowIfCancellationRequested();
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
