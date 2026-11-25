@@ -2,6 +2,8 @@ using HartsyInference.Audio.Models.LongCat;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -79,22 +81,19 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             condLatents = 1;
         }
 
-        LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-            audioTokens, unconditionalTokens, settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear, settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift,
-            settings.CfgScale, _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame,
-            OnProgress: RecipeProgressAdapter.Create(progress, cancel), Cancel: cancel);
-
-        float[] latents;
-        _backend.PreloadWeights(_parts.Dit.EnumerateWeights());
-        try
-        {
-            latents = _pipeline.Denoise(run).Latents;
-        }
-        finally
-        {
-            _backend.Sync();
-            _backend.FreeWeights(_parts.Dit.EnumerateWeights());
-        }
+        // The DiT is placed by the streaming scope (see the base recipe); each finished step returns the stream's reservations.
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
+        float[] latents = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+            () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar"),
+            onStep =>
+            {
+                LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
+                    audioTokens, unconditionalTokens, settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
+                    settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale, _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance,
+                    mode, condLatents, firstFrame, OnProgress: onStep, Cancel: cancel);
+                return _pipeline.Denoise(run).Latents;
+            },
+            bridge);
         cancel.ThrowIfCancellationRequested();
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);

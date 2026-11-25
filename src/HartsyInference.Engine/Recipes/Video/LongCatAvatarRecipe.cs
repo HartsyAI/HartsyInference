@@ -79,6 +79,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     };
 
     /// <inheritdoc/>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // The 1.6 settings apply only with a 1.6 INT8 catalog row, which does not exist yet; a 1.6 request is refused before any weight is read.

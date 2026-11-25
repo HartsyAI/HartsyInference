@@ -4,8 +4,10 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Video;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -35,6 +37,17 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
+
+    /// <summary>Device headroom the stream plans around for activations and workspace.</summary>
+    internal const long StreamHeadroomBytes = 3L * 1024 * 1024 * 1024;
+
+    /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
+    /// memory when it does not. Disposing the scope evicts whatever it placed.</summary>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName) =>
+        BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = StreamHeadroomBytes,
+        });
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
@@ -124,6 +137,32 @@ internal static class LongCatRecipeSupport
         using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
         using Tensor host = VideoRecipeUtils.HostCopy(latent);
         return host.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>Runs one denoise loop with the DiT placed by a streaming scope, and frees the DiT on every path. The scope is disposed inside
+    /// the try (evicting the streamed window), then the DiT's weights are freed in the finally, so a cancel or an exception mid-denoise does not
+    /// leave the resident prefix on the device. Each finished step calls the scope's EndStep before the caller's progress callback.</summary>
+    internal static float[] RunDenoiseStreamed(IBackend backend, LongCatTransformer dit, Func<BlockStreamingScope> openScope,
+        Func<Action<GenerationProgress>, float[]> denoise, Action<GenerationProgress>? progress)
+    {
+        float[] latents;
+        try
+        {
+            using (BlockStreamingScope stream = openScope())
+            {
+                latents = denoise(step =>
+                {
+                    stream.EndStep();
+                    progress?.Invoke(step);
+                });
+            }
+            backend.Sync();
+        }
+        finally
+        {
+            backend.FreeWeights(dit.EnumerateWeights());
+        }
+        return latents;
     }
 
     /// <summary>Decodes a denoised latent of <c>[channels, frames, height, width]</c> to RGB24 frames.</summary>
