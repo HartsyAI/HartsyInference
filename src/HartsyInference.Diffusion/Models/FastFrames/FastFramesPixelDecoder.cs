@@ -286,7 +286,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
     private static Tensor ReorderOutputRows(Tensor source, FastFramesPixelDecoderConfig config)
     {
         int pt = config.PatchT, ph = config.PatchH, pw = config.PatchW, c = config.OutChannels;
-        long rowLength = source.Shape.ElementCount / (pt * ph * pw * c);
+        int rowLength = (int)(source.Shape.ElementCount / (pt * ph * pw * c));
         Tensor output = new(source.Shape, DType.F32);
         ReadOnlySpan<float> from = source.AsReadOnlySpan<float>();
         Span<float> to = output.AsSpan<float>();
@@ -300,7 +300,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
                     {
                         int released = ((p * ph + q) * pw + r) * c + ch;
                         int reordered = ((q * pw + r) * pt + p) * c + ch;
-                        from.Slice((int)(released * rowLength), (int)rowLength).CopyTo(to.Slice((int)(reordered * rowLength), (int)rowLength));
+                        from.Slice(released * rowLength, rowLength).CopyTo(to.Slice(reordered * rowLength, rowLength));
                     }
                 }
             }
