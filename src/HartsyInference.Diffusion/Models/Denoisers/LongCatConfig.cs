@@ -47,6 +47,28 @@ public sealed record LongCatConfig
     /// set this); off drops them.</summary>
     public bool TextTokensZeroPad { get; init; } = true;
 
+    /// <summary>Width of the audio tokens the avatar's audio cross-attention reads (the reference's <c>output_dim</c>). Used only when a block
+    /// is given audio weights.</summary>
+    public int AudioOutputDim { get; init; } = 768;
+
+    /// <summary>Audio window of the avatar projection (the reference's <c>audio_window</c>).</summary>
+    public int AudioWindow { get; init; } = 5;
+
+    /// <summary>Audio blocks per window (the reference's <c>audio_block</c>; 5 for Avatar 1.6).</summary>
+    public int AudioBlock { get; init; } = 5;
+
+    /// <summary>Channels per audio block (the reference's <c>audio_channel</c>; 1280 for Avatar 1.6, the Whisper hidden size).</summary>
+    public int AudioChannel { get; init; } = 1280;
+
+    /// <summary>Hidden width of the avatar audio projection (the reference's <c>intermediate_dim</c>).</summary>
+    public int AudioIntermediateDim { get; init; } = 512;
+
+    /// <summary>Audio tokens per latent frame (the reference's <c>context_tokens</c>).</summary>
+    public int AudioContextTokens { get; init; } = 32;
+
+    /// <summary>Video frames per latent frame (the reference's <c>vae_scale</c>); the latter audio windows are grouped by it.</summary>
+    public int AudioVaeScale { get; init; } = 4;
+
     /// <summary>Width of one attention head.</summary>
     public int HeadDim => HiddenSize / NumHeads;
 
