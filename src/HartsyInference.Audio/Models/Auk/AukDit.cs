@@ -51,30 +51,29 @@ public sealed unsafe class AukDit : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         _loaded = false;
         ReleaseOwned();
-        List<Tensor> owned = _owned;
         int dim = _config.Dim;
         string time = $"{prefix}.time_embed.time_mlp";
         Dictionary<string, Tensor> timeWeights = new()
         {
-            [$"{time}.0.weight"] = AukOps.Take(weights, $"{time}.0.weight", owned, dim, _config.TimeFreqEmbedDim),
-            [$"{time}.0.bias"] = AukOps.Take(weights, $"{time}.0.bias", owned, dim),
-            [$"{time}.2.weight"] = AukOps.Take(weights, $"{time}.2.weight", owned, dim, dim),
-            [$"{time}.2.bias"] = AukOps.Take(weights, $"{time}.2.bias", owned, dim),
+            [$"{time}.0.weight"] = AukOps.Take(weights, $"{time}.0.weight", _owned, dim, _config.TimeFreqEmbedDim),
+            [$"{time}.0.bias"] = AukOps.Take(weights, $"{time}.0.bias", _owned, dim),
+            [$"{time}.2.weight"] = AukOps.Take(weights, $"{time}.2.weight", _owned, dim, dim),
+            [$"{time}.2.bias"] = AukOps.Take(weights, $"{time}.2.bias", _owned, dim),
         };
         _timeEmbed.LoadWeights(timeWeights, $"{prefix}.time_embed");
-        _audioEmbed.LoadWeights(weights, $"{prefix}.audio_embed", owned);
-        _txtProjW = AukOps.Take(weights, $"{prefix}.txt_proj.weight", owned, dim, _config.TextDim);
-        _txtProjB = AukOps.Take(weights, $"{prefix}.txt_proj.bias", owned, dim);
-        _txtNormW = AukOps.Take(weights, $"{prefix}.txt_norm.weight", owned, dim);
-        for (int i = 0; i < _double.Length; i++) _double[i].LoadWeights(weights, $"{prefix}.transformer_blocks.{i}", owned);
-        for (int i = 0; i < _single.Length; i++) _single[i].LoadWeights(weights, $"{prefix}.single_transformer_blocks.{i}", owned);
-        _normOutW = AukOps.Take(weights, $"{prefix}.norm_out.linear.weight", owned, 2 * dim, dim);
-        _normOutB = AukOps.Take(weights, $"{prefix}.norm_out.linear.bias", owned, 2 * dim);
-        _projOutW = AukOps.Take(weights, $"{prefix}.proj_out.weight", owned, _config.LatentDim, dim);
-        _projOutB = AukOps.Take(weights, $"{prefix}.proj_out.bias", owned, _config.LatentDim);
+        _audioEmbed.LoadWeights(weights, $"{prefix}.audio_embed", _owned);
+        _txtProjW = AukOps.Take(weights, $"{prefix}.txt_proj.weight", _owned, dim, _config.TextDim);
+        _txtProjB = AukOps.Take(weights, $"{prefix}.txt_proj.bias", _owned, dim);
+        _txtNormW = AukOps.Take(weights, $"{prefix}.txt_norm.weight", _owned, dim);
+        for (int i = 0; i < _double.Length; i++) _double[i].LoadWeights(weights, $"{prefix}.transformer_blocks.{i}", _owned);
+        for (int i = 0; i < _single.Length; i++) _single[i].LoadWeights(weights, $"{prefix}.single_transformer_blocks.{i}", _owned);
+        _normOutW = AukOps.Take(weights, $"{prefix}.norm_out.linear.weight", _owned, 2 * dim, dim);
+        _normOutB = AukOps.Take(weights, $"{prefix}.norm_out.linear.bias", _owned, 2 * dim);
+        _projOutW = AukOps.Take(weights, $"{prefix}.proj_out.weight", _owned, _config.LatentDim, dim);
+        _projOutB = AukOps.Take(weights, $"{prefix}.proj_out.bias", _owned, _config.LatentDim);
 
         // The checkpoint's bf16-rounded inv_freq differs from theta^(-2i/d), so it is the source of truth.
-        Tensor inv = AukOps.Take(weights, $"{prefix}.rotary_embed.inv_freq", owned, _config.HeadDim / 2);
+        Tensor inv = AukOps.Take(weights, $"{prefix}.rotary_embed.inv_freq", _owned, _config.HeadDim / 2);
         _invFreq = new ReadOnlySpan<float>((float*)inv.DataPointer, (int)inv.ElementCount).ToArray();
         _ropeCos?.Dispose();
         _ropeSin?.Dispose();
