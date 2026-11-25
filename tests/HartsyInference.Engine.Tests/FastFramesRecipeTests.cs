@@ -66,11 +66,14 @@ public sealed class FastFramesRecipeTests
     }
 
     [Fact]
-    public void TheSamplerIsSolverOwnedUnderEveryCatalogId()
+    public void TheSamplerIsTheSolverOwnedRowUnderEveryCatalogId()
     {
+        // Solver-owned and unknown are both empty lists, so compare the row itself: the solver-owned row is one shared
+        // object, and an unlisted family gets the unknown object.
         FastFramesRecipe recipe = new();
-        Assert.Empty(recipe.SamplingSupportFor("fastframes-s", null).Samplers);
-        Assert.Empty(recipe.SamplingSupportFor("fastframes-l", null).Samplers);
+        Assert.Same(SamplingCapabilities.ForVideo("wan"), recipe.SamplingSupportFor("fastframes-s", null));
+        Assert.Same(SamplingCapabilities.ForVideo("wan"), recipe.SamplingSupportFor("fastframes-l", null));
+        Assert.NotSame(SamplingCapabilities.Unknown, recipe.SamplingSupportFor("fastframes-s", null));
     }
 
     [Fact]
@@ -84,12 +87,15 @@ public sealed class FastFramesRecipeTests
     }
 
     [Fact]
-    public void AFolderWithoutItsCompanionsFailsBeforeAnyDownload()
+    public void AFolderMissingOneCompanionNamesThatCompanionAndNoOther()
     {
+        // The refiner is present and the decoder is not: the error must name the decoder, which shows both files are checked
+        // and that nothing is attempted before the check. The text encoder is never resolved here, so no download can start.
         string dir = Path.Combine(Path.GetTempPath(), "fastframes-recipe-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
         {
+            File.WriteAllBytes(Path.Combine(dir, "kv_refiner.safetensors"), []);
             using CpuBackend backend = new();
             RecipeContext context = new()
             {
@@ -97,7 +103,8 @@ public sealed class FastFramesRecipeTests
                 Backend = backend,
             };
             FileNotFoundException error = Assert.Throws<FileNotFoundException>(() => new FastFramesRecipe().Construct(context));
-            Assert.Contains("kv_refiner.safetensors", error.Message);
+            Assert.Contains("pixel_decoder.safetensors", error.Message);
+            Assert.DoesNotContain("kv_refiner.safetensors", error.Message);
         }
         finally
         {
