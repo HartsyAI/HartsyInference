@@ -118,11 +118,15 @@ public static class MatMulKernels
         // decoder + T5 now keep their big projection weights in native fp16 to halve host RAM; the GPU GEMM casts
         // them itself, and on CPU we cast here so those models still run on the F32-only CPU kernels. output/input/
         // bias must already be F32.
+        // The bias is widened the same way: a checkpoint's BF16 or F16 bias (the Qwen3-VL vision tower and the Fibo 2.0
+        // denoiser carry them) is a few hundred to a few thousand values, so the copy costs nothing next to the GEMM.
         Tensor? weightF32 = weight.DType != DType.F32 ? weight.CastTo(DType.F32) : null;
+        Tensor? biasF32 = bias is not null && bias.DType != DType.F32 ? bias.CastTo(DType.F32) : null;
         Tensor w = weightF32 ?? weight;
+        Tensor? b = biasF32 ?? bias;
         try
         {
-            RequireF32(output, input, w, bias, nameof(LinearTransB));
+            RequireF32(output, input, w, b, nameof(LinearTransB));
             int N = (int)w.Shape[0]; // outDim
             int K = (int)w.Shape[1]; // inDim
             int M = (int)(input.ElementCount / K); // batch*seqLen
@@ -150,9 +154,9 @@ public static class MatMulKernels
             CpuParallel.For(iTiles * jTiles, (long)M * N * K, new LinearTiles(pIn, pW, pOut, M, N, K, jTiles),
                 LinearTileBody);
 
-            if (bias is not null)
+            if (b is not null)
             {
-                float* bPtr = (float*)bias.DataPointer;
+                float* bPtr = (float*)b.DataPointer;
                 for (int m = 0; m < M; m++)
                 {
                     int rowOffset = m * N;
@@ -166,6 +170,7 @@ public static class MatMulKernels
         finally
         {
             weightF32?.Dispose();
+            biasF32?.Dispose();
         }
     }
 
