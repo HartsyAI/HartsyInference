@@ -50,7 +50,12 @@ public sealed class LongCatCheckpoint : IDisposable
             foreach ((string name, TensorLocation location) in shards.Inventory)
             {
                 if (int8 && name.EndsWith(LongCatInt8Converter.ScaleSuffix, StringComparison.Ordinal))
+                {
+                    string quantized = name[..^LongCatInt8Converter.ScaleSuffix.Length] + LongCatInt8Converter.QuantizedSuffix;
+                    if (!shards.Inventory.ContainsKey(quantized))
+                        throw new InvalidDataException($"'{name}' has no '{quantized}'; an orphan dequant scale is refused.");
                     continue;
+                }
                 shapes[int8 && name.EndsWith(LongCatInt8Converter.QuantizedSuffix, StringComparison.Ordinal)
                     ? name[..^LongCatInt8Converter.QuantizedSuffix.Length] + ".weight" : name] = location.Shape;
             }
