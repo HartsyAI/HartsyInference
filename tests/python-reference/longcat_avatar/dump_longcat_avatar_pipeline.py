@@ -64,14 +64,6 @@ def sigmas_with_shift(method, steps, distill, model_type, shift):
     return sigmas, timesteps
 
 
-def cfg(model, latents, t, positive, negative, audio_raw, audio_zero, text_scale, audio_scale, **kwargs):
-    pos = model(latents, torch.tensor([t]), positive, audio_embs=audio_raw, **kwargs)
-    uncond_text = model(latents, torch.tensor([t]), negative, audio_embs=audio_raw, **kwargs)
-    uncond = model(latents, torch.tensor([t]), negative, audio_embs=audio_zero, **kwargs)
-    noise = uncond + text_scale * (pos - uncond_text) + audio_scale * (uncond_text - uncond)
-    return -noise
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
@@ -99,12 +91,43 @@ def main():
     encoder = read_tensor(args.dit, meta, "inputs.encoder").reshape(1, 1, meta["text_len"], config["caption_channels"])
     audio = read_tensor(args.dit, meta, "inputs.audio").reshape(
         1, 1 + config["vae_scale"] * (meta["frames"] - 1), config["audio_window"], config["audio_block"], config["audio_channel"])
-    audio_zero = torch.zeros_like(audio)
+    # The negative prompt is a stand-in (the encoder scaled by 0.5): it is not a real negative prompt. It only makes the unconditional pass
+    # differ from the conditional one, so the three-pass CFG is exercised.
     negative = encoder * 0.5
+    # The reference zeroes the raw audio for the unconditional audio pass, and the DiT then projects those zeros.
+    audio_zero = torch.zeros_like(audio)
     method = load_sigma_method(args.repo)
     steps, shift, text_scale, audio_scale = 4, 7.0, 4.0, 4.0
 
     sigmas, timesteps = sigmas_with_shift(method, steps, False, "avatar-v1.6", shift)
+    frames_total = meta["frames"]
+
+    def cfg(latents, timestep, prompt_pos, prompt_neg, audio_raw, audio_unc, **kwargs):
+        """The reference's three passes and their combination (negated for the scheduler), as in generate_at2v and generate_avc."""
+        pos = model(latents, timestep, prompt_pos, audio_embs=audio_raw, **kwargs)
+        uncond_text = model(latents, timestep, prompt_neg, audio_embs=audio_raw, **kwargs)
+        uncond = model(latents, timestep, prompt_neg, audio_embs=audio_unc, **kwargs)
+        return -(uncond + text_scale * (pos - uncond_text) + audio_scale * (uncond_text - uncond))
+
+    def ref_kwargs(cond_frames, num_ref):
+        # The reference reads num_ref_latents and ref_img_index only when a reference frame exists (the rope depends on it).
+        if num_ref:
+            return {"num_cond_latents": cond_frames, "num_ref_latents": num_ref, "ref_img_index": 10}
+        return {"num_cond_latents": cond_frames}
+
+    def uncached_loop(latent_full, cond_frames, num_ref):
+        """generate_* without use_kv_cache: every step runs all frames; the conditioning frames' timesteps are zero; only the noisy frames step."""
+        latents = latent_full.clone()
+        kwargs = ref_kwargs(cond_frames, num_ref)
+        with torch.no_grad():
+            for i in range(steps):
+                t = float(timesteps[i])
+                dt = float(sigmas[i + 1] - sigmas[i])
+                time_t = torch.full((1, frames_total), t)
+                time_t[:, :cond_frames] = 0.0
+                noise = cfg(latents, time_t, encoder, negative, audio, audio_zero, **kwargs)
+                latents[:, :, cond_frames:] = latents[:, :, cond_frames:] + dt * noise[:, :, cond_frames:]
+        return latents
 
     # at2v: no conditioning frames, the full latent stepped.
     with torch.no_grad():
@@ -112,32 +135,36 @@ def main():
         for i in range(steps):
             t = float(timesteps[i])
             dt = float(sigmas[i + 1] - sigmas[i])
-            noise = cfg(model, latents, t, encoder, negative, audio, audio_zero, text_scale, audio_scale)
+            noise = cfg(latents, torch.tensor([t]), encoder, negative, audio, audio_zero)
             latents = latents + dt * noise
     at2v = latents
 
-    # avc: two conditioning frames (the first two of the latent), cached; only the noisy frames are stepped.
+    # avc with the cache: two conditioning frames (the first two of the latent; the first is the reference slot), the cache built by a pass that
+    # skips the text and audio steps (skip_crs_attn) and keeps each block's keys and values. Only the noisy frames are stepped.
     cond_frames = 2
     with torch.no_grad():
         cond = latent[:, :, :cond_frames].clone()
         _, kv = model(cond, torch.tensor([0.0]), encoder, audio_embs=audio, num_cond_latents=cond_frames, num_ref_latents=1,
                       ref_img_index=10, return_kv=True, skip_crs_attn=True)
         noisy = latent[:, :, cond_frames:].clone()
+        kwargs = ref_kwargs(cond_frames, 1)
         for i in range(steps):
             t = float(timesteps[i])
             dt = float(sigmas[i + 1] - sigmas[i])
-            pos = model(noisy, torch.tensor([t]), encoder, audio_embs=audio, num_cond_latents=cond_frames, num_ref_latents=1,
-                        ref_img_index=10, kv_cache_dict=kv)
-            uncond_text = model(noisy, torch.tensor([t]), negative, audio_embs=audio, num_cond_latents=cond_frames, num_ref_latents=1,
-                                ref_img_index=10, kv_cache_dict=kv)
-            uncond = model(noisy, torch.tensor([t]), negative, audio_embs=audio_zero, num_cond_latents=cond_frames, num_ref_latents=1,
-                           ref_img_index=10, kv_cache_dict=kv)
-            noise = -(uncond + text_scale * (pos - uncond_text) + audio_scale * (uncond_text - uncond))
+            noise = cfg(noisy, torch.tensor([t]), encoder, negative, audio, audio_zero, kv_cache_dict=kv, **kwargs)
             noisy = noisy + dt * noise
     avc = torch.cat([cond, noisy], dim=2)
 
+    # avc without the cache: the same loop with full forwards and zero conditioning timesteps.
+    avc_nocache = uncached_loop(latent, cond_frames, 1)
+
+    # ai2v: one conditioning frame (the image), no reference, no cache.
+    ai2v = uncached_loop(latent, 1, 0)
+
     os.makedirs(args.dit, exist_ok=True)
-    for name, value in (("pipeline.at2v.latents", at2v), ("pipeline.avc.latents", avc), ("pipeline.negative", negative)):
+    outputs = (("pipeline.at2v.latents", at2v), ("pipeline.avc.latents", avc), ("pipeline.avc_nocache.latents", avc_nocache),
+               ("pipeline.ai2v.latents", ai2v), ("pipeline.negative", negative))
+    for name, value in outputs:
         array = np.ascontiguousarray(value.detach().cpu().numpy().astype(np.float32))
         array.tofile(os.path.join(args.dit, name + ".f32"))
         meta["tensors"][name] = list(array.shape)

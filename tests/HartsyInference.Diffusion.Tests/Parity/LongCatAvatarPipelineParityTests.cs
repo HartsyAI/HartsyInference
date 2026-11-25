@@ -76,6 +76,17 @@ public sealed class LongCatAvatarPipelineParityTests
             LongCatAvatarResult cached = pipelineRunner.Denoise(avc);
             double avcError = RelRms(cached.Latents, LongCatReferenceDump.Read(dir, document, "pipeline.avc.latents"));
             Assert.True(avcError <= Tolerance, $"avc loop relRMS {avcError:E3} exceeds {Tolerance:E0}.");
+            // The same continuation without the cache: full forwards with the conditioning frames' timesteps at zero.
+            LongCatAvatarRun avcNoCache = avc with { UseKvCache = false };
+            double noCacheError = RelRms(pipelineRunner.Denoise(avcNoCache).Latents, LongCatReferenceDump.Read(dir, document, "pipeline.avc_nocache.latents"));
+            Assert.True(noCacheError <= Tolerance, $"avc without the cache relRMS {noCacheError:E3} exceeds {Tolerance:E0}.");
+
+            // Image to video: one conditioning frame (the image), no reference, no cache.
+            float[] firstFrame = Frames(latent, channels, frames, hw, 0, 1);
+            LongCatAvatarRun ai2v = new(channels, frames, height, width, latent, positive, negative, audioTokens, unconditional, 4,
+                LongCatAvatarSchedule.Kind.Linear, 7f, 4f, 4f, LongCatAvatarMode.Ai2v, NumCondLatents: 1, CondLatents: firstFrame);
+            double ai2vError = RelRms(pipelineRunner.Denoise(ai2v).Latents, LongCatReferenceDump.Read(dir, document, "pipeline.ai2v.latents"));
+            Assert.True(ai2vError <= Tolerance, $"ai2v loop relRMS {ai2vError:E3} exceeds {Tolerance:E0}.");
         }
         finally
         {
