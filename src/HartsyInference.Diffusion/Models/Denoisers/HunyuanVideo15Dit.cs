@@ -541,29 +541,34 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         return (frames, height, width);
     }
 
-    /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project.</summary>
+    /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project. Everything runs on the
+    /// backend: the latent and conditioning are read as <c>[1, channels, tokens]</c> views, concatenated on channels, transposed, then projected.</summary>
     private Tensor EmbedImage(IBackend backend, Tensor latent, Tensor? conditioning, int tokens)
     {
         int latentChannels = _config.LatentChannels;
         int extraChannels = _config.ImgInChannels - latentChannels;
-        Tensor channelsFirst = new(new TensorShape(_config.ImgInChannels, tokens), DType.F32);
-        float* destination = (float*)channelsFirst.DataPointer;
-        long latentCount = (long)latentChannels * tokens;
-        new ReadOnlySpan<float>((void*)latent.DataPointer, (int)latentCount).CopyTo(new Span<float>(destination, (int)latentCount));
         long extraCount = (long)extraChannels * tokens;
-        Span<float> extra = new(destination + latentCount, (int)extraCount);
-        if (conditioning is null) extra.Clear();
+        using Tensor latentRows = latent.Reshape(new TensorShape(1, latentChannels, tokens));
+        using Tensor extra = new(new TensorShape(1, extraChannels, tokens), DType.F32);
+        if (conditioning is null)
+        {
+            using Tensor zero = new(new TensorShape(1), DType.F32);
+            zero.AsSpan<float>()[0] = 0f;
+            StridedCopies.FillFrom(backend, extra, zero);
+        }
         else
         {
             if (conditioning.Shape.ElementCount != extraCount)
                 throw new ArgumentException($"conditioning must hold {extraChannels} channels over {tokens} tokens, got {conditioning.Shape}.", nameof(conditioning));
-            new ReadOnlySpan<float>((void*)conditioning.DataPointer, (int)extraCount).CopyTo(extra);
+            using Tensor conditioningRows = conditioning.Reshape(new TensorShape(1, extraChannels, tokens));
+            backend.CopyTo(extra, conditioningRows);
         }
 
+        Tensor channelsFirst = new(new TensorShape(1, _config.ImgInChannels, tokens), DType.F32);
+        backend.Concat(channelsFirst, [latentRows, extra], 1);
         Tensor tokenMajor = new(new TensorShape(1, tokens, _config.ImgInChannels), DType.F32);
         backend.Transpose2D(tokenMajor, channelsFirst, _config.ImgInChannels, tokens);
         channelsFirst.Dispose();
-
         Tensor img = new(new TensorShape(1, tokens, _config.HiddenSize), DType.F32);
         backend.Linear(img, tokenMajor, _imgInW!, _imgInB!);
         tokenMajor.Dispose();
@@ -601,12 +606,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private Tensor BuildText(IBackend backend, Tensor qwen, Tensor? byt5, float timestep)
     {
         int hidden = _config.HiddenSize;
-        Tensor refined = _refiner.Forward(backend, qwen, timestep);
-        AddTypeRow(refined, 0);
+        Tensor refined0 = _refiner.Forward(backend, qwen, timestep);
+        Tensor refined = AddTypeRow(backend, refined0, 0);
+        refined0.Dispose();
         if (byt5 is null) return refined;
 
-        Tensor mapped = MapByT5(backend, byt5);
-        AddTypeRow(mapped, 1);
+        Tensor mapped0 = MapByT5(backend, byt5);
+        Tensor mapped = AddTypeRow(backend, mapped0, 1);
+        mapped0.Dispose();
         Tensor joined = new(new TensorShape(1, mapped.Shape[1] + refined.Shape[1], hidden), DType.F32);
         backend.Concat(joined, [mapped, refined], 1);
         mapped.Dispose(); refined.Dispose();
@@ -634,17 +641,18 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     }
 
     /// <summary>Adds <c>cond_type_embedding[row]</c> to every token in place.</summary>
-    private void AddTypeRow(Tensor tokens, int row)
+    /// <summary>Adds the type embedding row <paramref name="row"/> to every token of <paramref name="tokens"/> on the backend and returns the sum,
+    /// a new tensor; the input is left alone.</summary>
+    private Tensor AddTypeRow(IBackend backend, Tensor tokens, int row)
     {
         int hidden = _config.HiddenSize;
-        long count = tokens.ElementCount / hidden;
-        float* data = (float*)tokens.DataPointer;
-        float* type = (float*)_condType!.DataPointer + (long)row * hidden;
-        for (long i = 0; i < count; i++)
-        {
-            float* tokenRow = data + i * hidden;
-            for (int c = 0; c < hidden; c++) tokenRow[c] += type[c];
-        }
+        using Tensor typeRow = new(new TensorShape(hidden), DType.F32);
+        backend.SliceRows(typeRow, _condType!, row);
+        using Tensor ones = new(new TensorShape(hidden), DType.F32);
+        ones.AsSpan<float>().Fill(1f);
+        Tensor output = new(tokens.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(output, tokens, ones, typeRow);
+        return output;
     }
 
     /// <summary><c>FinalLayer</c>: LayerNorm (no affine) modulated by <c>chunk(adaLN(SiLU(temb)))</c> = <c>[shift, scale]</c>, then Linear, and the
