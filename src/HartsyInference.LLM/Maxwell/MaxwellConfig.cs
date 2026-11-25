@@ -71,6 +71,12 @@ public sealed record MaxwellConfig
     /// <summary>Block edge of the FP8 scale grids, or 0 when the checkpoint is not block-FP8.</summary>
     public int Fp8Block { get; init; }
 
+    /// <summary>The begin-of-sequence id from <c>config.json</c>, or null when it has none.</summary>
+    public int? BosTokenId { get; init; }
+
+    /// <summary>The end-of-sequence id from <c>config.json</c>, or null when it has none.</summary>
+    public int? EosTokenId { get; init; }
+
     /// <summary>The context the model card states as supported: 262,144 tokens.</summary>
     public const int SupportedContext = 262_144;
 
@@ -119,6 +125,8 @@ public sealed record MaxwellConfig
             HcSinkhornIters = r.Int("mhc_sinkhorn_iterations"),
             Sparse = MaxwellSparseConfig.Parse(r),
             Fp8Block = ReadFp8Block(root),
+            BosTokenId = r.OptionalInt("bos_token_id"),
+            EosTokenId = r.OptionalInt("eos_token_id"),
         };
         config.RequireSupported(r);
         return config;

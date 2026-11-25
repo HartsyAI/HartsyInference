@@ -18,6 +18,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
+using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Kimi;
@@ -928,6 +929,9 @@ public sealed partial class TextService : ITextService, IDisposable
         bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
         if (ernie)
             RequireRunnableErnie5Placement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
+        bool maxwell = string.Equals(checkpoint.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal);
+        if (maxwell && ResolveShardDevices(deviceKey).Length >= 2)
+            throw new NotSupportedException("Maxwell has no split placement yet: load it on one device.");
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -947,6 +951,11 @@ public sealed partial class TextService : ITextService, IDisposable
         if (ernie)
         {
             LoadErnie5Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
+        if (maxwell)
+        {
+            LoadMaxwellDirectory(slot, deviceKey, checkpoint, path);
             return;
         }
         // after the unload, so the memory of a model this load replaces counts as free
@@ -1069,6 +1078,17 @@ public sealed partial class TextService : ITextService, IDisposable
             ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
             : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
         Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
+    }
+
+    /// <summary>Loads a Maxwell directory on one device, as a host reference model; its layers are resident on a GPU and read per forward on the CPU.</summary>
+    private void LoadMaxwellDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        IBackend backend = CreateBackendFor(deviceKey);
+        LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning("[TextService] Maxwell has no memory guard yet; host RAM and VRAM are not checked before the load.");
+        Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
     }
 
     /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed
