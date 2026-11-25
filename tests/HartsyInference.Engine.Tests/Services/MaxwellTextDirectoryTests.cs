@@ -1,4 +1,8 @@
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
@@ -56,5 +60,53 @@ public sealed class MaxwellTextDirectoryTests : IDisposable
     public void Directory_WithConfigAndTemplate_PassesTheCheck()
     {
         HfTextDirectoryLoader.RequireSupported(Info(withTemplate: true));
+    }
+
+    [Theory]
+    [InlineData("vulkan:0")]
+    [InlineData("vulkan")]
+    public void NonCudaGpu_IsRefusedForMaxwell(string device)
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => TextService.RequireMaxwellPlacement(device));
+
+        Assert.Contains("CUDA", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("cuda:0")]
+    [InlineData("cpu")]
+    public void CudaAndCpu_PassTheMaxwellPlacementCheck(string device)
+    {
+        TextService.RequireMaxwellPlacement(device);
+    }
+
+    /// <summary>A refused non-CUDA Maxwell request leaves the model its slot holds in place: the refusal is raised before the slot unloads.
+    /// The slot's backend is a sentinel that must come back unchanged, with the path of the model it was loaded from.</summary>
+    [Fact]
+    public async Task RefusedNonCudaMaxwell_LeavesTheLoadedModelInPlace()
+    {
+        HfCheckpointInfo info = Info(withTemplate: true);
+        // An empty safetensors header ("{}", eight length bytes first): the placement planner maps the weights before the load is refused.
+        File.WriteAllBytes(Path.Combine(info.Root, "model.safetensors"), [2, 0, 0, 0, 0, 0, 0, 0, (byte)'{', (byte)'}']);
+        using InferenceEngine engine = new("cpu");
+        TextService text = (TextService)engine.Text;
+        TextDeviceSlot slot = text.EnsureSlot("vulkan:0");
+        CpuBackend previous = new();
+        slot.Backend = previous;
+        slot.LoadedPath = "previous-model-directory";
+
+        ModelSpec spec = new() { Requested = info.Root, Modality = Modality.Text, LocalPath = info.Root };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "Hello" }],
+            Device = "vulkan:0",
+            Temperature = 0,
+            MaxTokens = 1,
+        };
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(() => engine.Text.GenerateAsync(spec, request));
+
+        Assert.Contains("CUDA", error.Message, StringComparison.Ordinal);
+        Assert.Same(previous, slot.Backend);
+        Assert.Equal("previous-model-directory", slot.LoadedPath);
     }
 }

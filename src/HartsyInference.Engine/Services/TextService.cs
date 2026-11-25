@@ -932,6 +932,9 @@ public sealed partial class TextService : ITextService, IDisposable
         bool maxwell = string.Equals(checkpoint.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal);
         if (maxwell && ResolveShardDevices(deviceKey).Length >= 2)
             throw new NotSupportedException("Maxwell has no split placement yet: load it on one device.");
+        // Refused here, before UnloadSlot: a refused request leaves the model the slot holds in place.
+        if (maxwell)
+            RequireMaxwellPlacement(deviceKey);
         if (HfTextDirectoryLoader.IsGlm5Next(checkpoint))
             RequireRunnableGlm5NextPlacement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
         UnloadSlot(slot);
@@ -1111,15 +1114,25 @@ public sealed partial class TextService : ITextService, IDisposable
     /// <summary>Device memory kept free after the expert cache is sized: the activations of a prefill and the cuBLAS and kernel workspace.</summary>
     private const long MaxwellDeviceHeadroomBytes = 2L << 30;
 
+    /// <summary>Refuses a Maxwell placement the engine cannot run, before the slot unloads its current model. A GPU other than CUDA is refused: the
+    /// device expert cache is CUDA-only, and without it the whole checkpoint would have to fit in device memory. The kind is read from the key
+    /// (<see cref="NormalizeDeviceKey"/> resolves <c>auto</c>; it is resolved again here so a raw key cannot slip past).</summary>
+    /// <exception cref="NotSupportedException">The device is a GPU other than CUDA.</exception>
+    internal static void RequireMaxwellPlacement(string deviceKey)
+    {
+        string kind = BackendFactory.Kind(deviceKey);
+        if (kind == "auto")
+            kind = BackendFactory.Resolve(deviceKey);
+        if (BackendFactory.IsDeviceKind(kind) && kind != "cuda")
+            throw new NotSupportedException($"Maxwell on a GPU needs CUDA for its device expert cache; '{deviceKey}' is not CUDA. Load it on cuda:0 or cpu.");
+    }
+
     /// <summary>Loads a Maxwell directory on one device, as a host reference model. On CUDA the dense weights are preloaded to the device and the
     /// routed experts sit behind a device expert cache sized from the free memory that remains; the cache is device-only, so a miss uploads the
     /// expert for that call. On the CPU every weight is read on the host. A GPU other than CUDA is refused: the expert cache is CUDA-only, and
     /// without it the whole checkpoint would have to fit in device memory.</summary>
     private void LoadMaxwellDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
-        string kind = BackendFactory.Kind(deviceKey);
-        if (BackendFactory.IsDeviceKind(kind) && !string.Equals(kind, "cuda", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException($"Maxwell on a GPU needs CUDA for its device expert cache; '{deviceKey}' is not CUDA. Load it on cuda:0 or cpu.");
         DisposeSlotBackends(slot);
         IBackend backend = CreateBackendFor(deviceKey);
         // Logged before the load, so it still shows when the load runs out of memory.
@@ -1482,6 +1495,9 @@ public sealed partial class TextService : ITextService, IDisposable
 
     /// <summary>The slot serving <paramref name="device"/>, or null before anything ran there. For tests that hold a slot's lease as a running scheduled request does.</summary>
     internal TextDeviceSlot? SlotFor(string? device) => _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? slot) ? slot : null;
+
+    /// <summary>The slot for <paramref name="device"/>, created when absent: a test seam for the state an earlier load left on a slot.</summary>
+    internal TextDeviceSlot EnsureSlot(string? device) => _slots.GetOrAdd(NormalizeDeviceKey(device), static _ => new TextDeviceSlot());
 
     /// <summary>The ordinals a generation on <paramref name="slot"/> gates: the devices its planned placement runs on when the
     /// planner split it, otherwise those its key names.</summary>
