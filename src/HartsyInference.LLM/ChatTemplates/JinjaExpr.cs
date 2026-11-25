@@ -228,7 +228,12 @@ internal sealed class IndexExpr(Expr target, Expr index) : Expr
         object? t = target.Eval(scope);
         object? k = index.Eval(scope);
         if (t is Dictionary<string, object?> d) return d.TryGetValue(Values.ToStr(k), out object? v) ? v : null;
-        if (t is List<object?> l && k is long i && i >= 0 && i < l.Count) return l[(int)i];
+        // Python semantics: a negative index counts from the end, so split('</think>')[-1] is the last piece.
+        if (t is List<object?> l && k is long i)
+        {
+            long at = i < 0 ? i + l.Count : i;
+            if (at >= 0 && at < l.Count) return l[(int)at];
+        }
         return null;
     }
 }
@@ -358,6 +363,10 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "join":
                 { string sep = args.Count > 0 ? Values.ToStr(args[0].Eval(scope)) : "";
                   return string.Join(sep, Values.AsList(v).Select(Values.ToStr)); }
+            // Filter form of dict.items(): the template's tool_call.arguments|items.
+            case "items":
+                if (v is Dictionary<string, object?> dict) return dict.Select(kv => (object?)new List<object?> { kv.Key, kv.Value }).ToList();
+                throw new InvalidOperationException("Jinja filter 'items' needs a mapping.");
             case "tojson": return Values.ToJson(v);
             case "list": return Values.AsList(v);
             case "string": return Values.ToStr(v);

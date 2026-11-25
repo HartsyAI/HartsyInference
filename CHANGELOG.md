@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.447
+
+- Added support for Depth Pro 2 S (`hartsy vision -m depthpro2-s`): metric depth in metres with an estimated or given focal length, for one image,
+  several views of one scene and video frames, on CPU, CUDA and Vulkan.
+
 ## alpha.446
 
 - Added Bria RMBG 3.0 background removal (`rmbg3`, `rmbg3-int8`; CC BY-NC 4.0): `hartsy vision removebg` and matting draw the alpha matte with the Fibo 2.0 editor. `--remove-background-model rmbg3` also uses it as the cutout step of an image generation (RMBG-1.4 stays the default). Not yet run on real weights.
