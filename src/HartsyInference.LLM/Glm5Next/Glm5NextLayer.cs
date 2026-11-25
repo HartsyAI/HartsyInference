@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Dsa;
 using HartsyInference.LLM.Transformer.Kda;
@@ -27,7 +26,7 @@ public sealed class Glm5NextLayer : IDisposable
 
     /// <summary>Builds layer <paramref name="index"/>, reading its tensors from <paramref name="source"/> (the checkpoint's own key names).</summary>
     /// <exception cref="InvalidDataException">A tensor is missing or does not have the shape the config implies.</exception>
-    public Glm5NextLayer(IBackend backend, Glm5NextConfig config, int index, IErnie5WeightSource source)
+    public Glm5NextLayer(IBackend backend, Glm5NextConfig config, int index, IModelWeightSource source)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -141,7 +140,7 @@ public sealed class Glm5NextLayer : IDisposable
         output.AsReadOnlySpan<float>().CopyTo(y);
     }
 
-    private HyperConnection Hc(IErnie5WeightSource source, string prefix)
+    private HyperConnection Hc(IModelWeightSource source, string prefix)
     {
         int hc = _c.HcMult, mixes = (2 + hc) * hc, flat = hc * _c.Hidden;
         float[] fn = Host(source, prefix + "fn", mixes * flat), bias = Host(source, prefix + "base", mixes), scale = Host(source, prefix + "scale", 3);
@@ -149,7 +148,7 @@ public sealed class Glm5NextLayer : IDisposable
     }
 
     // The checkpoint keeps q, k and v separate; the shared KDA layer takes one fused projection and one fused conv, in q, k, v order.
-    private KdaWeights KdaWeightsOf(IErnie5WeightSource source, string p)
+    private KdaWeights KdaWeightsOf(IModelWeightSource source, string p)
     {
         int h = _c.Hidden, key = _c.KdaKeyDim, r = _c.KdaHeadDim, k = _c.ConvKernel;
         float[] qkv = [.. Host(source, p + "q_proj.weight", key * h), .. Host(source, p + "k_proj.weight", key * h), .. Host(source, p + "v_proj.weight", key * h)];
@@ -172,7 +171,7 @@ public sealed class Glm5NextLayer : IDisposable
             OutGateUp: Own(HostMath.Tensor(Host(source, p + "g_b_proj.weight", key * r), key, r)));
     }
 
-    private DsaAttention DsaOf(IErnie5WeightSource source, string p)
+    private DsaAttention DsaOf(IModelWeightSource source, string p)
     {
         DsaAttentionWeights w = new()
         {
@@ -199,16 +198,16 @@ public sealed class Glm5NextLayer : IDisposable
     }
 
     /// <summary>Reads a vector as an F32 host tensor of <paramref name="elements"/> values, whatever dtype the checkpoint stores it in.</summary>
-    internal static Tensor F32(IErnie5WeightSource source, string name, long elements)
+    internal static Tensor F32(IModelWeightSource source, string name, long elements)
     {
         float[] v = Host(source, name, elements);
         return HostMath.Tensor(v, v.Length);
     }
 
-    private static float[] Host(IErnie5WeightSource source, string name, long elements)
+    private static float[] Host(IModelWeightSource source, string name, long elements)
     {
         Tensor raw = source.Read(name);
-        Tensor f32 = TensorCasts.EnsureF32(raw);
+        Tensor f32 = ProjectionOps.EnsureF32(raw);
         try
         {
             if (f32.ElementCount != elements) throw new InvalidDataException($"'{name}' holds {f32.ElementCount} values; the config implies {elements}.");
