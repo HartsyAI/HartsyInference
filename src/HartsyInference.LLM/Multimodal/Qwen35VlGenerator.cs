@@ -20,7 +20,9 @@ public sealed class Qwen35VlGenerator
         _model = model; _tok = tok; _vision = vision; _backend = backend;
     }
 
-    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    /// <param name="grid">The image's merged token grid, read from the pixels the tower encodes (<see cref="Qwen3VlEncoder.MergedGrid"/>).
+    /// Required: the M-RoPE positions of the image run cannot be inferred from its token count (a 2×8 grid has 16 tokens, as does 4×4).</param>
+    public unsafe string Generate(Tensor pixelValues, MRopeImageGrid grid, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler (matches MultimodalGenerator).
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
@@ -64,15 +66,7 @@ public sealed class Qwen35VlGenerator
         _model.ResetState();
         float[] logits;
         {
-            // Multimodal RoPE: the image's placeholder run takes (start + t, start + row, start + col) over its merged grid and the text after it
-            // resumes at start + max(T, H, W), not at the sequence index. The decode steps below follow that offset.
-            int side = (int)Math.Round(Math.Sqrt(imgTokens));
-            if (side * side != imgTokens)
-                throw new NotSupportedException($"The image encoder returned {imgTokens} tokens, which is not a square merged grid.");
-            const int placeholder = -1;
-            int[] layout = new int[seqLen];
-            for (int i = 0; i < seqLen; i++) layout[i] = i >= pre.Length && i < pre.Length + imgTokens ? placeholder : 0;
-            int[] positions = MRopePositions.Build(layout, placeholder, [new MRopeImageGrid(1, side, side)], out int nextPosition);
+            int[] positions = BuildPositions(seqLen, pre.Length, imgTokens, grid, out int nextPosition);
             (Tensor cos, Tensor sin) = _model.BuildMultimodalRope(positions, seqLen, 0, seqLen);
             using (cos)
             using (sin)
@@ -90,5 +84,20 @@ public sealed class Qwen35VlGenerator
             token = sampler.Next(new Span<float>(logits), history);
         }
         return sb.ToString();
+    }
+
+    /// <summary>Axis-major M-RoPE positions <c>[3 · seqLen]</c> for <c>[pre][image][post]</c>: the image's placeholder run at
+    /// <paramref name="imageStart"/> takes <c>(start + t, start + row, start + col)</c> over <paramref name="grid"/>, and the text after it
+    /// resumes at <c>start + max(T, H, W)</c>, not at the sequence index. Refuses a grid that does not hold exactly the encoder's tokens.</summary>
+    internal static int[] BuildPositions(int seqLen, int imageStart, int imageTokens, MRopeImageGrid grid, out int nextPosition)
+    {
+        if (grid.Tokens != imageTokens)
+            throw new ArgumentException($"The image grid {grid} holds {grid.Tokens} tokens but the encoder returned {imageTokens}.", nameof(grid));
+        if (imageStart < 0 || imageStart + imageTokens > seqLen)
+            throw new ArgumentOutOfRangeException(nameof(imageStart), "The image run does not fit in the sequence.");
+        const int placeholder = -1;
+        int[] layout = new int[seqLen];
+        for (int i = 0; i < seqLen; i++) layout[i] = i >= imageStart && i < imageStart + imageTokens ? placeholder : 0;
+        return MRopePositions.Build(layout, placeholder, [grid], out nextPosition);
     }
 }

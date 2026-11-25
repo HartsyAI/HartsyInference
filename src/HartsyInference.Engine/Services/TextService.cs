@@ -8,6 +8,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Moe;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -904,9 +905,18 @@ public sealed partial class TextService : ITextService, IDisposable
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
             // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
             // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
-            answer = slot.SsmModel is not null
-                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, question, maxTokens, sampling)
-                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            if (slot.SsmModel is not null)
+            {
+                // The image grid is read from the pixels the Qwen3-VL tower encodes, never inferred from the token count.
+                if (vision is not Qwen3VlEncoder qwen)
+                    throw new NotSupportedException("Qwen3.5-VL image input needs the Qwen3-VL vision tower (mmproj); the loaded projector does not supply the image grid.");
+                MRopeImageGrid grid = Qwen3VlEncoder.MergedGrid(px, qwen.PatchSize, qwen.Merge);
+                answer = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, grid, question, maxTokens, sampling);
+            }
+            else
+            {
+                answer = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            }
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
         int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
