@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Ernie5;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Glm5Next;
 using Xunit;
 
@@ -50,7 +50,7 @@ public sealed class Glm5NextFp8ReaderTests
 
     private static float[] ReadAsF32(Func<Tensor> make)
     {
-        IErnie5WeightSource source = new OneWeight(make);
+        IModelWeightSource source = new OneWeight(make);
         using Tensor f32 = Glm5NextLayer.F32(source, "w", elements: 256);
         return f32.AsReadOnlySpan<float>().ToArray();
     }
@@ -73,7 +73,7 @@ public sealed class Glm5NextFp8ReaderTests
     }
 
     // Hands out a fresh tensor for the one name; the reader owns and disposes what it is given.
-    private sealed class OneWeight(Func<Tensor> make) : IErnie5WeightSource
+    private sealed class OneWeight(Func<Tensor> make) : IModelWeightSource
     {
         public IEnumerable<string> Names => ["w"];
 

@@ -67,13 +67,13 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
     public void ScaledFp8Embedding_IsRefusedByName()
     {
         Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using Ernie5CheckpointWeights inner = Ernie5CheckpointWeights.Open(Dir);
+        using BlockFp8CheckpointWeights inner = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         InvalidDataException ex = Assert.Throws<InvalidDataException>(() => new Glm5NextModel(new CpuBackend(), c, new ScaledEmbedding(inner, c)));
         Assert.Contains("embed_tokens", ex.Message);
     }
 
     // Replaces the embedding with a block-scaled FP8 table of the right shape and passes every other read through.
-    private sealed class ScaledEmbedding(IErnie5WeightSource inner, Glm5NextConfig c) : IErnie5WeightSource
+    private sealed class ScaledEmbedding(IModelWeightSource inner, Glm5NextConfig c) : IModelWeightSource
     {
         public IEnumerable<string> Names => inner.Names;
 
