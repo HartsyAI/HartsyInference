@@ -23,42 +23,43 @@ public static class CrossFrameTokens
         ArgumentNullException.ThrowIfNull(backend);
         (int count, int seq, int width) = Check(frames, prefix);
         long patches = seq - prefix, prefixWidth = (long)prefix * width, patchWidth = patches * width, frameWidth = (long)seq * width;
-        Tensor joint = new(new TensorShape(1, prefix + count * patches, width), DType.F32);
+
+        // Every output is written whole by its first op (a gather, a scale or a concat), so a GPU backend allocates it on the device instead of
+        // uploading the host buffer first.
+        Tensor allPatches = new(new TensorShape(1, count * patches, width), DType.F32);
+        bool keep = false;
         try
         {
-            if (prefixWidth > 0)
+            backend.CopyStrided(allPatches, frames, StridedCopySpec.Gather(new StridedView([count, patchWidth], [frameWidth, 1], prefixWidth)));
+            if (prefixWidth == 0)
             {
-                // The mean of the prefix rows over the frames, summed in frame order: the first frame's rows, each later frame added in place.
-                Tensor mean = new(new TensorShape(1, prefix, width), DType.F32);
-                try
-                {
-                    backend.CopyStrided(mean, frames, StridedCopySpec.Gather(Flat(0, prefixWidth)));
-                    for (int t = 1; t < count; t++)
-                        backend.AccumulateStrided(mean, frames, new StridedCopySpec(Flat(0, prefixWidth), Flat(t * frameWidth, prefixWidth)));
-                    if (count > 1)
-                    {
-                        Tensor scaled = new(mean.Shape, DType.F32);
-                        backend.Scale(scaled, mean, 1f / count);
-                        mean.Dispose();
-                        mean = scaled;
-                    }
-
-                    backend.CopyStrided(joint, mean, StridedCopySpec.Scatter(Flat(0, prefixWidth)));
-                }
-                finally
-                {
-                    mean.Dispose();
-                }
+                keep = true;
+                return allPatches;
             }
 
-            backend.CopyStrided(joint, frames, new StridedCopySpec(
-                new StridedView([count, patchWidth], [patchWidth, 1], prefixWidth), new StridedView([count, patchWidth], [frameWidth, 1], prefixWidth)));
-            return joint;
+            // The mean of the prefix rows over the frames, summed in frame order: the first frame's rows, each later frame added in place.
+            using Tensor sum = new(new TensorShape(1, prefix, width), DType.F32);
+            backend.CopyStrided(sum, frames, StridedCopySpec.Gather(Flat(0, prefixWidth)));
+            for (int t = 1; t < count; t++)
+                backend.AccumulateStrided(sum, frames, new StridedCopySpec(Flat(0, prefixWidth), Flat(t * frameWidth, prefixWidth)));
+            using Tensor mean = new(sum.Shape, DType.F32);
+            backend.Scale(mean, sum, 1f / count);
+
+            Tensor joint = new(new TensorShape(1, prefix + count * patches, width), DType.F32);
+            try
+            {
+                backend.Concat(joint, [mean, allPatches], 1);
+                return joint;
+            }
+            catch
+            {
+                joint.Dispose();
+                throw;
+            }
         }
-        catch
+        finally
         {
-            joint.Dispose();
-            throw;
+            if (!keep) allPatches.Dispose();
         }
     }
 
@@ -75,12 +76,12 @@ public static class CrossFrameTokens
             || joint.Shape[2] != width)
             throw new ArgumentException(
                 $"The joint output must be F32 [1, {prefix + count * patches}, {width}]; got {joint.DType} {joint.Shape}.", nameof(joint));
+        // The first write copies the whole input (its prefix rows are the ones to keep), so the output is allocated on the device, not uploaded;
+        // the patch rows then overwrite it in place.
         Tensor frames = new(input.Shape, DType.F32);
         try
         {
-            if (prefixWidth > 0)
-                backend.CopyStrided(frames, input, new StridedCopySpec(
-                    new StridedView([count, prefixWidth], [frameWidth, 1], 0), new StridedView([count, prefixWidth], [frameWidth, 1], 0)));
+            backend.CopyStrided(frames, input, StridedCopySpec.Gather(Flat(0, input.ElementCount)));
             backend.CopyStrided(frames, joint, new StridedCopySpec(
                 new StridedView([count, patchWidth], [frameWidth, 1], prefixWidth), new StridedView([count, patchWidth], [patchWidth, 1], prefixWidth)));
             return frames;
@@ -103,7 +104,8 @@ public static class CrossFrameTokens
         ArgumentNullException.ThrowIfNull(source);
         if (target.DType != DType.F32 || source.DType != DType.F32 || target.Shape.Rank != 3 || !target.Shape.Equals(source.Shape) || prefixRows < 0
             || prefixRows > target.Shape[1])
-            throw new ArgumentException($"Target and source must be F32 [B, S, C] of one shape with at most S prefix rows; got {target.Shape}, {source.Shape}, {prefixRows}.");
+            throw new ArgumentException($"Target and source must be F32 [B, S, C] of one shape with at most S prefix rows; got {target.Shape}, {source.Shape}, {prefixRows}.",
+                nameof(target));
         if (prefixRows == 0) return;
         long batch = target.Shape[0], frameWidth = target.Shape[1] * target.Shape[2], prefixWidth = prefixRows * target.Shape[2];
         StridedView view = new([batch, prefixWidth], [frameWidth, 1], 0);

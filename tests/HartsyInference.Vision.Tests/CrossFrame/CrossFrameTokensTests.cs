@@ -15,6 +15,7 @@ public sealed class CrossFrameTokensTests : IDisposable
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
     [InlineData(5)]
     public void JoinAveragesThePrefixAndStacksThePatches(int count)
     {
@@ -64,6 +65,18 @@ public sealed class CrossFrameTokensTests : IDisposable
         using Tensor frames = Make(values, 2, Prefix + Patches, Width);
         using Tensor joint = CrossFrameTokens.Join(_backend, frames, Prefix);
         using Tensor back = CrossFrameTokens.Split(_backend, joint, frames, Prefix);
+        Assert.Equal(values, back.AsReadOnlySpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void WithoutPrefixRowsJoinAndSplitAreTheFramesStackedAndUnstacked()
+    {
+        float[] values = Random(new Random(8), 2 * Patches * Width);
+        using Tensor frames = Make(values, 2, Patches, Width);
+        using Tensor joint = CrossFrameTokens.Join(_backend, frames, 0);
+        Assert.Equal(new TensorShape(1, 2 * Patches, Width), joint.Shape);
+        Assert.Equal(values, joint.AsReadOnlySpan<float>().ToArray());
+        using Tensor back = CrossFrameTokens.Split(_backend, joint, frames, 0);
         Assert.Equal(values, back.AsReadOnlySpan<float>().ToArray());
     }
 
