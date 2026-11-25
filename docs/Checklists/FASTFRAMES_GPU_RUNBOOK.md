@@ -47,24 +47,27 @@ Until #1209 and #1214 merge, use the branch `hartsy/fastframes-gpu-candidate` (m
 
 ## Runs
 
-Set `MODELS` to the models root and `REPO` to the checkout. The script `tools/fastframes/run_pod.sh` wraps these commands and writes
-logs to `$OUT`.
+Use `hartsy/fastframes-gpu-candidate` (or the newer `main` once #1209 and #1214 merge) so every step below is on the code under test.
 
-1. Verify weights: `run_pod.sh verify`.
-2. Decoder parity, both lanes (expect the exact lane under 1e-5; the default lane is TF32):
-   `FF_GPU_TESTS=1 dotnet test tests/HartsyInference.Engine.Tests -c Release --filter FullyQualifiedName~FastFramesDecoderGpuParityTests`
-   Record the measured relative difference for the exact lane; it goes into `FastFramesDecoderGpuParityTests.cs`'s doc comment.
-3. Streamed vs resident (tiny model, CUDA):
-   `FF_GPU_TESTS=1 dotnet test tests/HartsyInference.Diffusion.Tests -c Release --filter FullyQualifiedName~TheStreamedRolloutMatchesTheResidentOneOnCuda`
-4. S clip: `HartsyInference.Cli.exe video "a cat walking through a sunlit garden" -m fastframes-s --frames 81 --seed 1 --gpu 0 -o $OUT/s-clip`
-   Reference from the 4090 run: 93 s total, steps 0.85 to 1.1 s, peak VRAM 20.0 GB, all 30 blocks resident.
-5. L clip: `HartsyInference.Cli.exe video "a cat walking through a sunlit garden" -m fastframes-l --frames 81 --seed 1 --gpu 0 -o $OUT/l-clip`
-   Caveat: `fastframes-l` is `CliDrivable=false` in the catalog, so the CLI may refuse it. If it does, do not flip the flag on a
-   merged branch; the L run is a pod-only decision for the parent to make.
-6. Renorm D2H count (#1209): run the refiner path with `GetD2hSyncCount` before and after the renorm change, on the same clip.
+`tools/fastframes/run_pod.sh` runs the steps. It needs `MODELS` (the models root) and `REPO` (the checkout). It exports
+`HARTSYINFERENCE_MODELS` from `MODELS`, so the CLI reads the verified weights and does not download them again. Run it with `bash`:
 
-Sample `nvidia-smi --query-gpu=memory.used --format=csv -l 2` into a log during each clip, and keep the CLI log with its per-step
-`denoise` timings.
+    MODELS=/path/to/Models REPO=/path/to/HartsyInference bash tools/fastframes/run_pod.sh build
+    MODELS=/path/to/Models REPO=/path/to/HartsyInference bash tools/fastframes/run_pod.sh verify
+
+1. Build the CLI: `run_pod.sh build` (net10.0; the CLI runs as a `.dll`, so no `.exe` is needed on Linux).
+2. Verify the weights: `run_pod.sh verify` (byte counts and sha256 of all seven files).
+3. Decoder parity, both lanes: `run_pod.sh decoder`. The exact lane must be under 1e-5. Record its measured value; it goes into
+   `FastFramesDecoderGpuParityTests.cs`'s doc comment.
+4. Streamed vs resident: `run_pod.sh streamed`.
+5. S clip: `run_pod.sh clip-s`. Reference from the 4090 run: 93 s total, steps 0.85 to 1.1 s, peak VRAM 20.0 GB, all 30 blocks resident.
+6. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog marks `fastframes-l` as not CLI-drivable, so the
+   CLI may refuse it; if so, do not flip the flag on a merged branch. That is a decision for the parent.
+7. Renorm D2H count (#1209): not runnable yet. It needs a harness that logs `GetD2hSyncCount` around the refiner's renorm; none is
+   merged. Do not run this step until one is.
+
+Each run writes its log and an `nvidia-smi` sample (every 2 s) under `OUT`. `run_pod.sh all` runs steps 1 to 6 in order and stops at the first
+failure; on a card under 79 GB it skips L with a message.
 
 ## Return
 
