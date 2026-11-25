@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -129,13 +130,13 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         int hidden = _config.HiddenSize;
 
         using TokenSegmentLayout layout = new(Enumerable.Repeat(height * width, frames).ToArray(), Enumerable.Range(0, frames).ToArray());
-        Tensor[] frameTemb = new Tensor[frames];
-        Tensor img = EmbedImage(backend, latent, conditioning, tokens);
-        Tensor txtTemb = TimestepMlp(backend, windowTimestep);
-        Tensor txt = BuildText(backend, qwen, byt5, windowTimestep);
+        Tensor? img = null, txt = null, txtTemb = null, frameTemb = null;
         try
         {
-            for (int f = 0; f < frames; f++) frameTemb[f] = TimestepMlp(backend, frameTimesteps[f]);
+            img = EmbedImage(backend, latent, conditioning, tokens);
+            txtTemb = TimestepMlp(backend, windowTimestep);
+            txt = BuildText(backend, qwen, byt5, windowTimestep);
+            frameTemb = TimestepMlpRows(backend, frameTimesteps);
             for (int i = 0; i < _blocks.Length; i++)
             {
                 BeforeBlockForward?.Invoke(i);
@@ -144,43 +145,42 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
                 img = nextImg; txt = nextTxt;
             }
             txt.Dispose();
-            return ApplyFinalPerFrame(backend, img, frameTemb, layout, tokens, hidden, frames, height, width);
+            txt = null;
+            Tensor finalInput = img;
+            img = null;
+            return ApplyFinalPerFrame(backend, finalInput, frameTemb, layout, tokens, hidden, frames, height, width);
         }
         finally
         {
-            foreach (Tensor t in frameTemb) t?.Dispose();
-            txtTemb.Dispose();
+            img?.Dispose();
+            txt?.Dispose();
+            txtTemb?.Dispose();
+            frameTemb?.Dispose();
         }
     }
 
-    /// <summary>The final layer with each latent frame's adaLN shift and scale (1 + scale, applied by the segment op) from that frame's embedding.</summary>
-    private Tensor ApplyFinalPerFrame(IBackend backend, Tensor img, IReadOnlyList<Tensor> frameTemb, TokenSegmentLayout layout,
+    /// <summary>The final layer with each latent frame's adaLN shift and scale (1 + scale, applied by the segment op). The projection is one batched
+    /// Linear over all frames, and the shift and scale columns are split on the device. Consumes <paramref name="img"/>: it is disposed on every path.</summary>
+    private Tensor ApplyFinalPerFrame(IBackend backend, Tensor img, Tensor frameTemb, TokenSegmentLayout layout,
         int tokens, int hidden, int frames, int height, int width)
     {
-        List<(Tensor Shift, Tensor Scale, Tensor Gate)> rows = new(frames);
-        Tensor zeroGate = new(new TensorShape(1, hidden), DType.F32);
-        List<Tensor> owned = new(frames * 2);
         SegmentModulation? modulation = null;
+        Tensor? modulated = null;
         try
         {
-            foreach (Tensor embedding in frameTemb)
-            {
-                using Tensor activated = new(embedding.Shape, DType.F32);
-                backend.Silu(activated, embedding);
-                using Tensor mod = new(new TensorShape(1, 2 * hidden), DType.F32);
-                backend.Linear(mod, activated, _finalModW!, _finalModB!);
-                Tensor shift = new(new TensorShape(1, hidden), DType.F32);
-                backend.SliceRows(shift, mod, 0);
-                Tensor scale = new(new TensorShape(1, hidden), DType.F32);
-                backend.SliceRows(scale, mod, 1);
-                owned.Add(shift);
-                owned.Add(scale);
-                rows.Add((shift, scale, zeroGate));
-            }
-            modulation = SegmentModulation.Build(backend, rows, layout);
-            Tensor modulated = modulation.NormAffine(backend, img, 1e-6f);
-            img.Dispose();
+            using Tensor activated = new(frameTemb.Shape, DType.F32);
+            backend.Silu(activated, frameTemb);
+            using Tensor mod = new(new TensorShape(frames, 2 * hidden), DType.F32);
+            backend.Linear(mod, activated, _finalModW!, _finalModB!);
+            Tensor shift = new(new TensorShape(frames, hidden), DType.F32);
+            StridedCopies.SliceAxis(backend, shift, mod, 1, 0, hidden);
+            Tensor scale = new(new TensorShape(frames, hidden), DType.F32);
+            StridedCopies.SliceAxis(backend, scale, mod, 1, hidden, hidden);
+            // NormAffine never reads the gate. The table is never touched, so Tensor never allocates its memory.
+            Tensor gate = new(new TensorShape(frames, hidden), DType.F32);
+            modulation = SegmentModulation.FromTables(shift, scale, gate, layout);
 
+            modulated = modulation.NormAffine(backend, img, 1e-6f);
             int channels = _config.LatentChannels;
             using Tensor projected = new(new TensorShape(tokens, channels), DType.F32);
             using Tensor flat = modulated.Reshape(new TensorShape(tokens, hidden));
@@ -192,8 +192,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         finally
         {
             modulation?.Dispose();
-            foreach (Tensor t in owned) t.Dispose();
-            zeroGate.Dispose();
+            modulated?.Dispose();
+            img.Dispose();
         }
     }
 
@@ -245,17 +245,29 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         return img;
     }
 
-    /// <summary>Sinusoid(256) then Linear, SiLU, Linear: <c>time_in.mlp</c>.</summary>
-    private Tensor TimestepMlp(IBackend backend, float timestep)
+    /// <summary>Sinusoid(256) then Linear, SiLU, Linear: <c>time_in.mlp</c>, for one clip-wide timestep. Returns <c>[1, hidden]</c>.</summary>
+    private Tensor TimestepMlp(IBackend backend, float timestep) => TimestepMlpRows(backend, [timestep]);
+
+    /// <summary>The <c>time_in.mlp</c> of each timestep in one batched pass: <c>[timesteps.Length, hidden]</c>, row <c>f</c> for <c>timesteps[f]</c>.</summary>
+    private Tensor TimestepMlpRows(IBackend backend, float[] timesteps)
     {
+        int rows = timesteps.Length;
         int hidden = _config.HiddenSize;
-        using Tensor sinusoid = new(new TensorShape(1, TimestepEmbedDim), DType.F32);
-        DiTUtils.SinusoidalTimestepEmbedding(sinusoid, timestep, 1, TimestepEmbedDim);
-        using Tensor first = new(new TensorShape(1, hidden), DType.F32);
+        using Tensor sinusoid = new(new TensorShape(rows, TimestepEmbedDim), DType.F32);
+        using (Tensor row = new(new TensorShape(1, TimestepEmbedDim), DType.F32))
+        {
+            Span<float> dst = sinusoid.AsSpan<float>();
+            for (int r = 0; r < rows; r++)
+            {
+                DiTUtils.SinusoidalTimestepEmbedding(row, timesteps[r], 1, TimestepEmbedDim);
+                row.AsReadOnlySpan<float>().CopyTo(dst.Slice(r * TimestepEmbedDim, TimestepEmbedDim));
+            }
+        }
+        using Tensor first = new(new TensorShape(rows, hidden), DType.F32);
         backend.Linear(first, sinusoid, _timeW0!, _timeB0!);
         using Tensor activated = new(first.Shape, DType.F32);
         backend.Silu(activated, first);
-        Tensor temb = new(new TensorShape(1, hidden), DType.F32);
+        Tensor temb = new(new TensorShape(rows, hidden), DType.F32);
         backend.Linear(temb, activated, _timeW1!, _timeB1!);
         return temb;
     }
