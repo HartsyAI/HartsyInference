@@ -20,10 +20,12 @@ public sealed class Qwen35VlGenerator
         _model = model; _tok = tok; _vision = vision; _backend = backend;
     }
 
-    /// <param name="grid">The image's merged token grid, read from the pixels the tower encodes (<see cref="Qwen3VlEncoder.MergedGrid"/>).
-    /// Required: the M-RoPE positions of the image run cannot be inferred from its token count (a 2×8 grid has 16 tokens, as does 4×4).</param>
-    public unsafe string Generate(Tensor pixelValues, MRopeImageGrid grid, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    /// <summary>Generates an answer about <paramref name="pixelValues"/>. The image's merged grid is read from those pixels via the Qwen3-VL tower
+    /// (<see cref="Qwen3VlEncoder.MergedGrid"/>), never inferred from the token count: a 2×8 grid and a 4×4 grid both hold 16 tokens.</summary>
+    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
+        Qwen3VlEncoder tower = RequireQwen3Vl(_vision);
+        MRopeImageGrid grid = Qwen3VlEncoder.MergedGrid(pixelValues, tower.PatchSize, tower.Merge);
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler (matches MultimodalGenerator).
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
@@ -85,6 +87,10 @@ public sealed class Qwen35VlGenerator
         }
         return sb.ToString();
     }
+
+    /// <summary>The Qwen3-VL tower behind <paramref name="vision"/>: the only encoder whose merged grid the M-RoPE positions are read from. Refuses any other.</summary>
+    internal static Qwen3VlEncoder RequireQwen3Vl(IVlmImageEncoder vision) =>
+        vision as Qwen3VlEncoder ?? throw new NotSupportedException("Qwen3.5-VL image input needs the Qwen3-VL vision tower (mmproj); the loaded projector does not supply the image grid.");
 
     /// <summary>Axis-major M-RoPE positions <c>[3 · seqLen]</c> for <c>[pre][image][post]</c>: the image's placeholder run at
     /// <paramref name="imageStart"/> takes <c>(start + t, start + row, start + col)</c> over <paramref name="grid"/>, and the text after it
