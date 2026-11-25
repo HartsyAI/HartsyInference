@@ -3083,6 +3083,45 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "fastframes-s", Modality = vid, DisplayName = "FastFrames S (1.3B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Apple's FastFrames-S companions plus the Causal Forcing++ generator they were trained with (Apache-2.0).
+                    // The generator is a PyTorch pickle read through the safe subset reader; nothing in it is executed.
+                    new() { Repo = "zhuhz22/Causal-Forcing", RepoPath = "causal-forcing++/framewise-2step.pt",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "framewise-2step.pt", Role = "transformer",
+                        Sha256 = "8f899a016dffb9539788fac82c6200e43ef6e23b6e61ec6b885bb507a760ce42" },
+                    new() { Repo = "apple/FastFrames-S", RepoPath = "fastframes-s/kv_refiner.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "kv_refiner.safetensors", Role = "kv refiner",
+                        Sha256 = "b4f36d00effd78a60435526dcc2b1a0e6bbed0f09621ee8ab4019460769a7bbb" },
+                    new() { Repo = "apple/FastFrames-S", RepoPath = "fastframes-s/pixel_decoder.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "pixel_decoder.safetensors", Role = "pixel decoder",
+                        Sha256 = "815682581f6376d2cdacc60568facf1bd979112091e4157fb6c00ae946b89b32" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "fastframes-l", Modality = vid, DisplayName = "FastFrames L (14B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
+                // Not CLI-drivable until block streaming lands: the 28.6 GB BF16 generator does not fit a 24 GB card, and the CLI would
+                // download about 30 GB before failing. The recipe still constructs for engine-level runs.
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    // Apple's FastFrames-L, all three files.
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/dit.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "dit.safetensors", Role = "transformer",
+                        Sha256 = "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de" },
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/kv_refiner.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "kv_refiner.safetensors", Role = "kv refiner",
+                        Sha256 = "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74" },
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/pixel_decoder.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "pixel_decoder.safetensors", Role = "pixel decoder",
+                        Sha256 = "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "ltx-2", Modality = vid, DisplayName = "LTX-2.3 (22B, video + audio)", Architecture = "dual-stream DiT + video/audio VAE", Status = vp,
                 CliDrivable = true,
                 Assets = new ModelAsset[]

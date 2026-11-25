@@ -95,6 +95,8 @@ public static class SamplingCapabilities
         ["wan-22-5b"] = SolverOwned,
         ["wan-21-1_3b"] = SolverOwned,
         ["wan-21-14b"] = SolverOwned,
+        // FastFrames runs its own released schedule; no sampler or scheduler is selectable.
+        ["fastframes"] = SolverOwned,
         ["wan-vace"] = SolverOwned,
         ["wan-s2v"] = SolverOwned,
         ["ltx-video"] = SolverOwned,
