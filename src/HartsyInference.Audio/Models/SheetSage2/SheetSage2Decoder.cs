@@ -1,4 +1,3 @@
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Logging;
@@ -414,19 +413,6 @@ internal static class SheetSage2Weights
 {
     /// <summary>Reads one tensor by key, refuses it unless its shape is exactly <paramref name="shape"/>, and
     /// returns it as F32 — appending the cast to <paramref name="ownedCasts"/> when one was needed.</summary>
-    public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> ownedCasts, params int[] shape)
-    {
-        if (!weights.TryGetValue(key, out Tensor? raw))
-            throw new ArgumentException($"The SheetSage2 checkpoint is missing '{key}'.", nameof(weights));
-        if (raw.Shape.Rank != shape.Length)
-            throw new ArgumentException($"SheetSage2 '{key}' must have rank {shape.Length}; the checkpoint has {raw.Shape}.", nameof(weights));
-        for (int i = 0; i < shape.Length; i++)
-        {
-            if (raw.Shape[i] != shape[i])
-                throw new ArgumentException($"SheetSage2 '{key}' must be [{string.Join(", ", shape)}]; the checkpoint has {raw.Shape}.", nameof(weights));
-        }
-        Tensor cast = WhisperOps.EnsureF32(raw);
-        if (!ReferenceEquals(cast, raw)) ownedCasts.Add(cast);
-        return cast;
-    }
+    public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> ownedCasts, params long[] shape) =>
+        CheckpointTensors.RequireF32(weights, "SheetSage2", key, ownedCasts, shape);
 }

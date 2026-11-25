@@ -69,16 +69,25 @@ public sealed class SheetSage2Pipeline : IDisposable
     public static SheetSage2Pipeline LoadFrom(string checkpointPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(checkpointPath);
-        SafeTensorsLoader loader = new();
-        loader.Load(checkpointPath);
-        Dictionary<string, Tensor> weights = loader.GetAllTensors();
-
         ScoreTokenizer tokenizer = new();
+        SafeTensorsLoader loader = new();
         Mert2AudioEncoder encoder = new(new Mert2Config());
         SheetSage2Decoder decoder = new(SheetSage2Config.Released, tokenizer);
-        encoder.LoadWeights(weights);
-        decoder.LoadWeights(weights);
-        return new SheetSage2Pipeline(encoder, decoder, tokenizer, loader);
+        try
+        {
+            loader.Load(checkpointPath);
+            Dictionary<string, Tensor> weights = loader.GetAllTensors();
+            encoder.LoadWeights(weights);
+            decoder.LoadWeights(weights);
+            return new SheetSage2Pipeline(encoder, decoder, tokenizer, loader);
+        }
+        catch
+        {
+            encoder.Dispose();
+            decoder.Dispose();
+            loader.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Transcribes a mono clip already at <see cref="SampleRate"/> into both renderings of its score.</summary>
