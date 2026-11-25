@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VoiceIsolator;
@@ -27,7 +28,6 @@ internal sealed class VoiceIsolatorAttentionLane : IDisposable
 internal sealed unsafe class VoiceIsolatorStreamAttention
 {
     private const int FirstSlots = 64;
-    private const float MaskedScore = -1e9f;
 
     private readonly float[] _cos;
     private readonly float[] _sin;
@@ -36,7 +36,8 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
     {
         CacheFrames = cacheFrames;
         Capacity = capacity;
-        Window = window;
+        // Each query keeps at most CacheFrames past keys, and the checkpoint's own window when that is shorter.
+        SlidingWindow = window > 0 ? Math.Min(window, cacheFrames) : cacheFrames;
         (_cos, _sin) = VoiceIsolatorOps.RopeTables(capacity, headDim);
     }
 
@@ -44,7 +45,8 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
 
     public int Capacity { get; }
 
-    public int Window { get; }
+    /// <summary>Keys a query sees, itself included: the window the attention kernel applies.</summary>
+    public int SlidingWindow { get; }
 
     public float[] Cos => _cos;
 
@@ -74,33 +76,12 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
             Buffer.MemoryCopy(vs + (long)bh * count * hd, vc + ((long)bh * held + first) * hd, (long)count * hd * 4, (long)count * hd * 4);
         }
         lane.End = first + count;
-        int past = Math.Min(first, CacheFrames);
-        int total = past + count;
-        Tensor keys = new(new TensorShape(bands, heads, total, hd), DType.F32);
-        Tensor values = new(new TensorShape(bands, heads, total, hd), DType.F32);
-        float* kd = (float*)keys.DataPointer;
-        float* vd = (float*)values.DataPointer;
-        for (int bh = 0; bh < bands * heads; bh++)
-        {
-            Buffer.MemoryCopy(kc + ((long)bh * held + first - past) * hd, kd + (long)bh * total * hd, (long)total * hd * 4, (long)total * hd * 4);
-            Buffer.MemoryCopy(vc + ((long)bh * held + first - past) * hd, vd + (long)bh * total * hd, (long)total * hd * 4, (long)total * hd * 4);
-        }
-        Tensor mask = new(new TensorShape(1, 1, count, total), DType.F32);
-        float* mp = (float*)mask.DataPointer;
-        for (int i = 0; i < count; i++)
-        {
-            int query = past + i;
-            for (int j = 0; j < total; j++)
-            {
-                bool visible = j <= query && (Window == 0 || j > query - Window);
-                mp[(long)i * total + j] = visible ? 0f : MaskedScore;
-            }
-        }
+        // The cached buffers are attended in place: rows [0, first + count) are valid, query row i sits at first + i, and the
+        // sliding window keeps each query to the last SlidingWindow keys. No past is copied.
         Tensor attended = new(new TensorShape(bands, heads, count, hd), DType.F32);
-        backend.ScaledDotProductAttention(attended, q, keys, values, mask, 1f / MathF.Sqrt(hd));
-        keys.Dispose();
-        values.Dispose();
-        mask.Dispose();
+        AttentionCall call = AttentionCall.FromFlashAttention(attended, q, lane.Keys!, lane.Values!, first + count, causal: true,
+            qOffset: first, scale: 1f / MathF.Sqrt(hd), softcap: 0f, sink: null, slidingWindow: SlidingWindow, alibiSlopes: null);
+        backend.Attention(in call);
         return attended;
     }
 
