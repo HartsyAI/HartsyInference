@@ -12,6 +12,9 @@ public static unsafe class Fp8BlockF32Codec
     /// <summary>The block edge of every checkpoint this layout is known in.</summary>
     public const int DefaultBlock = 128;
 
+    /// <summary>The F32 value of one E4M3 code (sign bit, 4 exponent bits, 3 mantissa bits; <c>0x7F</c> and <c>0xFF</c> are NaN).</summary>
+    public static float E4M3Value(byte code) => CheckpointConvertUtils.E4M3Table[code];
+
     /// <summary>Dequantizes <paramref name="weight"/> (<c>[rows, cols]</c> F8E4M3) with <paramref name="scaleInv"/> (F32 or BF16 scale grid)
     /// into a new F32 tensor the caller owns.</summary>
     public static Tensor Dequantize(Tensor weight, Tensor scaleInv, int blockRows = DefaultBlock, int blockCols = DefaultBlock)

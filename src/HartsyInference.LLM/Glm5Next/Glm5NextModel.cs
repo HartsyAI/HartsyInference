@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Glm5Next;
@@ -16,7 +15,7 @@ public sealed class Glm5NextModel : IDisposable
 
     /// <summary>Loads every decoder layer, the embedding, the final norm and the LM head from <paramref name="source"/>. The model keeps the source's
     /// tensors; the source must outlive it.</summary>
-    public Glm5NextModel(IBackend backend, Glm5NextConfig config, IErnie5WeightSource source)
+    public Glm5NextModel(IBackend backend, Glm5NextConfig config, IModelWeightSource source)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -29,6 +28,10 @@ public sealed class Glm5NextModel : IDisposable
         {
             embedding = source.Read(Glm5NextWeightNames.Embedding);
             RequireShape(embedding, config.Vocab, config.Hidden, "embed_tokens");
+            // Rows are gathered by SliceRows, which drops the per-row QuantInfo, so a scaled FP8 table would decode without its grid. The
+            // checkpoints store the table plain (the FP8 index has no embed_tokens scale), so a scaled one is refused rather than read wrong.
+            if (embedding.QuantInfo?.Fp8BlockScaleInv is not null)
+                throw new InvalidDataException("'embed_tokens' is stored FP8 with block scales; the glm5_next row gather cannot apply that grid, so it is refused.");
             // The final norm is read as F32 whatever the checkpoint stores: the norm kernel reads its weight as F32.
             finalNorm = Glm5NextLayer.F32(source, Glm5NextWeightNames.FinalNorm, config.Hidden);
             lmHead = source.Read(Glm5NextWeightNames.LmHead);
@@ -64,7 +67,7 @@ public sealed class Glm5NextModel : IDisposable
         {
             if ((uint)ids[t] >= (uint)_c.Vocab) throw new ArgumentOutOfRangeException(nameof(ids), $"Token id {ids[t]} is outside the {_c.Vocab}-entry vocabulary.");
             using Tensor row = _embedding.SliceRows(ids[t], 1);
-            Tensor f32 = TensorCasts.EnsureF32(row);
+            Tensor f32 = ProjectionOps.EnsureF32(row);
             try
             {
                 f32.AsReadOnlySpan<float>().CopyTo(rows.AsSpan(t * d, d));

@@ -158,7 +158,10 @@ public sealed class MaxwellModel : IDisposable, IExpertOffloadTarget
     {
         if (capacity > _options.MaxSequenceTokens)
             throw new ArgumentOutOfRangeException(nameof(capacity), capacity, $"The model was loaded for sequences of up to {_options.MaxSequenceTokens} tokens.");
-        return new MaxwellSequenceState(Config, capacity);
+        MaxwellSequenceState state = new(Config, capacity);
+        if (_options.DeviceDenseAttention)
+            state.AttachDense(new KvCache(Config.NumHiddenLayers, 1, Config.NumKeyValueHeads, Config.HeadDim));
+        return state;
     }
 
     /// <summary>Appends <paramref name="tokenIds"/> to <paramref name="state"/> and returns the logits, <c>[rows, vocab]</c>: the last row only, or
@@ -202,6 +205,7 @@ public sealed class MaxwellModel : IDisposable, IExpertOffloadTarget
                     if (!ReferenceEquals(layer, _layers[i])) layer.Dispose();
                 }
             }
+            state.CommitDense(startPos, tokens, Config.Sparse.DenseCausalLimit);
             completed = true;
         }
         finally

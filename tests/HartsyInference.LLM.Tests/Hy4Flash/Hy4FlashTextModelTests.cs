@@ -186,7 +186,7 @@ public sealed class Hy4FlashTextModelTests(ITestOutputHelper output)
     [Fact]
     public void Reset_ClearsTheImageRunFlagAndTheCounters()
     {
-        using Hy4FlashSequenceState state = new([], 8) { EndsInImageRun = true, NextPosition = 5, ImagesUsed = 1 };
+        using Hy4FlashSequenceState state = new([], new Hy4FlashMropeRows(2, 8, 10000.0, [2, 0, 0]), new Hy4FlashMropeRows(2, 8, 10000.0, [2, 0, 0])) { EndsInImageRun = true, NextPosition = 5, ImagesUsed = 1 };
         state.Reset();
         Assert.False(state.EndsInImageRun);
         Assert.Equal(0, state.NextPosition);

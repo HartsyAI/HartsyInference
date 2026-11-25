@@ -174,7 +174,7 @@ public sealed class SciProjector
         if (t.Shape.Rank != shape.Length) throw new InvalidDataException($"'{name}' has rank {t.Shape.Rank}; the projector config needs {shape.Length}.");
         for (int i = 0; i < shape.Length; i++)
             if (t.Shape[i] != shape[i]) throw new InvalidDataException($"'{name}' has shape {t.Shape}; the projector config needs dimension {i} = {shape[i]}.");
-        Tensor f32 = TensorCasts.EnsureF32(t);
+        Tensor f32 = ProjectionOps.EnsureF32(t);
         try
         {
             return f32.AsReadOnlySpan<float>().ToArray();

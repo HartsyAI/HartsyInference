@@ -92,7 +92,7 @@ public sealed class LongCatRecipeWiringTests
             LongCatParts parts = new(Dit, Channels, LongCatTestData.Tiny.CaptionChannels, HasAudio: false, Decoder: null!, Encoder: null!,
                 Umt5: null!, Tokenizer: null!);
             return LongCatRecipeSupport.RunDenoiseStreamed(_backend, Dit,
-                () => Scope = LongCatRecipeSupport.OpenDenoiseStream(_backend, parts, "longcat-test"),
+                () => Scope = LongCatRecipeSupport.OpenDenoiseStream(_backend, parts, "longcat-test", tokens: 1),
                 denoise, progress: null);
         }
 
