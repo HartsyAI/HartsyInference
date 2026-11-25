@@ -19,6 +19,7 @@ public static class Glm5NextHfConfig
         RequireString(t, "scoring_func", "sigmoid");
         RequireString(t, "topk_method", "noaux_tc");
         JsonElement lin = Object(t, "linear_attn_config");
+        bool hasVision = root.TryGetProperty("vision_config", out _);
 
         int layers = Int(t, "num_hidden_layers");
         int heads = Int(t, "num_attention_heads");
@@ -34,9 +35,12 @@ public static class Glm5NextHfConfig
         if (Int(t, "qk_head_dim") != qkNope) throw new InvalidDataException("qk_head_dim must equal qk_nope_head_dim for a NoPE layer.");
 
         Glm5NextAttentionKind[] kinds = LayerKinds(t, lin, layers);
-        foreach (JsonElement v in Array(t, "indexer_types").EnumerateArray())
+        JsonElement indexerTypes = Array(t, "indexer_types");
+        if (indexerTypes.GetArrayLength() != layers) throw new InvalidDataException("indexer_types must name every decoder layer.");
+        foreach (JsonElement v in indexerTypes.EnumerateArray())
             if (v.GetString() != "full") throw new InvalidDataException("Shared indexer layers (indexer_types 'shared') are not run by this engine; no released checkpoint uses them.");
-        if (Array(t, "indexer_types").GetArrayLength() != layers) throw new InvalidDataException("indexer_types must name every decoder layer.");
+        int mtpLayers = Int(t, "num_nextn_predict_layers");
+        if (mtpLayers < 0) throw new InvalidDataException("num_nextn_predict_layers must not be negative.");
 
         int[] eos = Array(t, "eos_token_id").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         return new Glm5NextConfig
@@ -44,7 +48,7 @@ public static class Glm5NextHfConfig
             Hidden = Int(t, "hidden_size"),
             Vocab = Int(t, "vocab_size"),
             Layers = layers,
-            MtpLayers = Int(t, "num_nextn_predict_layers"),
+            MtpLayers = mtpLayers,
             Heads = heads,
             LayerKinds = kinds,
             SparseMlp = MlpKinds(t, layers),
@@ -74,9 +78,10 @@ public static class Glm5NextHfConfig
             RmsNormEps = Float(t, "rms_norm_eps"),
             EosTokenIds = eos,
             PadTokenId = Int(t, "pad_token_id"),
-            Vision = root.TryGetProperty("vision_config", out JsonElement vc) ? ParseVision(vc) : null,
-            ImageTokenId = IntOr(root, "image_token_id"),
-            VideoTokenId = IntOr(root, "video_token_id"),
+            Vision = hasVision ? ParseVision(root.GetProperty("vision_config")) : null,
+            // A vision tower needs its placeholder ids; text-only configs have none.
+            ImageTokenId = hasVision ? Int(root, "image_token_id") : IntOr(root, "image_token_id"),
+            VideoTokenId = hasVision ? Int(root, "video_token_id") : IntOr(root, "video_token_id"),
         };
     }
 
@@ -84,7 +89,7 @@ public static class Glm5NextHfConfig
     {
         RequireString(v, "model_type", "glm5_next_vision");
         RequireString(v, "hidden_act", "silu");
-        return new Glm5NextVisionConfig
+        Glm5NextVisionConfig config = new()
         {
             Depth = Int(v, "depth"),
             Hidden = Int(v, "hidden_size"),
@@ -98,6 +103,8 @@ public static class Glm5NextHfConfig
             RmsNormEps = Float(v, "rms_norm_eps"),
             SwigluLimit = Float(v, "swiglu_limit"),
         };
+        config.Validate();
+        return config;
     }
 
     // layer_types spells DSA layers deepseek_sparse_attention (transformers 5.16-5.18), indexed_attention (5.19+) or full_attention; each
@@ -114,6 +121,7 @@ public static class Glm5NextHfConfig
             kinds[i++] = s switch
             {
                 "linear_attention" => Glm5NextAttentionKind.Kda,
+                // transformers' configuration_glm5_next.py (52bac5d0, L166-168) maps a 'full_attention' layer to 'indexed_attention', so it is the DSA spelling too.
                 "deepseek_sparse_attention" or "indexed_attention" or "full_attention" => Glm5NextAttentionKind.Dsa,
                 _ => throw new InvalidDataException($"layer_types has the unknown layer type '{s}'."),
             };
