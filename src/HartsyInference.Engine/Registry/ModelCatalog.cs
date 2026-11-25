@@ -3127,11 +3127,14 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                // LongCat-Video-Avatar 1.5 from the upstream repo (meituan-longcat, MIT on the card; the project page says academic use only,
-                // upstream issue #165 open). Speech-driven video from one portrait: likeness generation, use only with the depicted person's
-                // consent. The 1.5 layout is the bf16 base_model (distilled 8-step sampling); the recipe's 50-step defaults are the 1.6 undistilled
-                // path, so 1.5 needs its own sampling settings before it is run. Revisions: model repo @ 92016c71, Whisper @ 06f233fe.
-                // The Hartsy-hosted repack is a later swap that needs the user's upload OK. Shard sha256 from the HF tree (LFS oids).
+                // LongCat-Video-Avatar 1.5 weights from the upstream repo, pinned to meituan-longcat/LongCat-Video-Avatar-1.5 @ 92016c71
+                // (bf16 base_model; shard sha256 are the HF tree's LFS oids; index and config are git blobs and carry no hash here).
+                // Licence conflict, recorded not resolved: MIT on the model card, "academic use only and commercial use is not permitted" on the
+                // project page, upstream issue #165 unanswered. Likeness generation: the depicted person's consent is required.
+                // The 1.5 layout is distilled (8 steps, guidance off); the recipe refuses this row unless a 1.6 build is named, until the
+                // distilled path is wired. The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
+                // (stt/openai--whisper-large-v3 @ 06f233fe). TargetSubdir is LongCat/<row>, the family-folder convention (FastFrames/, Vision/,
+                // LLM/), not the Comfy-style diffusion_models/ layout. The Hartsy-hosted repack is a later swap that needs the user's upload OK.
                 Id = "longcat-avatar", Modality = vid, DisplayName = "LongCat-Video-Avatar 1.5 (speech and image to video, consent required)",
                 Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = false,
                 HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
@@ -3153,8 +3156,7 @@ public static class ModelCatalog
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/config.json",
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
-                    // The side models the recipe resolves itself: the same objects as SideModels, so the files are shared, not fetched twice.
-                    SideModels.WhisperLargeV3,
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
                     SideModels.Umt5Xxl,
                     SideModels.Wan21Vae,
                 },
