@@ -85,7 +85,6 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
         int keep = Math.Min(_c.IndexSelectedPools, pools);
 
         List<int>[] rows = new List<int>[tokens];
-        int maxWidth = 0;
         float[] scores = new float[pools];
         for (int t = 0; t < tokens; t++)
         {
@@ -102,11 +101,8 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
                 }
                 scores[g] = sum;
             }
-            int[] order = [.. Enumerable.Range(0, visiblePools)];
-            Array.Sort(order, (a, b) => scores[a] != scores[b] ? scores[b].CompareTo(scores[a]) : a.CompareTo(b));
-            List<int> picked = [.. order.Take(Math.Min(keep, visiblePools)).Order()];
             List<int> row = [];
-            foreach (int g in picked)
+            foreach (int g in DsaCompressedPool.TopK(scores.AsSpan(0, visiblePools), keep).Order())
                 for (int i = 0; i < pool; i++) row.Add(g * pool + i);
             if (_c.IndexAlwaysSelectTail)
             {
@@ -114,16 +110,8 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
                 for (int i = tail; i >= 1; i--) row.Add(position + 1 - i);
             }
             rows[t] = row;
-            maxWidth = Math.Max(maxWidth, row.Count);
         }
-        int[] packed = new int[tokens * maxWidth], counts = new int[tokens];
-        Array.Fill(packed, -1);
-        for (int t = 0; t < tokens; t++)
-        {
-            rows[t].CopyTo(packed, t * maxWidth);
-            counts[t] = rows[t].Count;
-        }
-        return new DsaKeySelection(packed, maxWidth, counts);
+        return DsaCompressedPool.Pack(rows);
     }
 
     /// <inheritdoc />
@@ -137,20 +125,8 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
         int hd = _c.IndexHeadDim, pool = _c.IndexPool;
         ReadOnlySpan<float> ape = _ape.AsReadOnlySpan<float>();
         float[] keys = new float[pools * hd];
-        for (int g = 0; g < pools; g++)
-            for (int d = 0; d < hd; d++)
-            {
-                float max = float.NegativeInfinity;
-                for (int j = 0; j < pool; j++) max = MathF.Max(max, store[(g * pool + j) * width + hd + d] + ape[j * hd + d]);
-                float denominator = 0f, acc = 0f;
-                for (int j = 0; j < pool; j++)
-                {
-                    float e = MathF.Exp(store[(g * pool + j) * width + hd + d] + ape[j * hd + d] - max);
-                    denominator += e;
-                    acc += store[(g * pool + j) * width + d] * e;
-                }
-                keys[g * hd + d] = acc / denominator;
-            }
+        // Values are the first HeadDim of each slot, gates the rest of it, so the gate view starts HeadDim in.
+        DsaCompressedPool.GatedSoftmaxPool(store, store.Slice(hd), width, ape, pools, pool, hd, keys);
         return keys;
     }
 }
