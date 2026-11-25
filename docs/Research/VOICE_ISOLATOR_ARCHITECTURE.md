@@ -30,11 +30,11 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Engine surface
 
-`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. It runs on the engine's backend with the STFT on the host; `IBackend.SelectiveScan` has a host reference (no CUDA kernel yet). 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
+`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. It always runs on the CPU backend: `FxService` pins both isolators to CPU, and the CLI forces CPU for every `fx separate`. The GPU route has not been run, and the STFT is on the host either way; `IBackend.SelectiveScan` has a host reference (no CUDA kernel yet). 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
 
 ## Reuse map
 
-`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1). LLM `MambaModel` still carries its own host scan.
+`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1), which the LLM `MambaModel` now uses as well.
 
 ## Reference runs
 

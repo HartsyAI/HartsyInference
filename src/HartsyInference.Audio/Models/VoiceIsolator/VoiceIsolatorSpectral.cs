@@ -21,11 +21,7 @@ public sealed class VoiceIsolatorSpectral
         NFft = nFft;
         HopLength = hopLength;
         _plan = new FftPlan(nFft);
-        _window = new float[nFft];
-        for (int i = 0; i < nFft; i++)
-        {
-            _window[i] = (float)(0.5 - 0.5 * Math.Cos(2.0 * Math.PI * i / nFft));
-        }
+        _window = HannWindow.Get(nFft);
     }
 
     /// <summary>Window and transform size.</summary>
@@ -54,16 +50,17 @@ public sealed class VoiceIsolatorSpectral
             throw new ArgumentException("Analysis needs audio and output buffers of frames x bins.");
         }
         int half = NFft / 2;
-        float[] padded = new float[audio.Length + NFft];
+        // Reflect-101 padding (torch's pad_mode="reflect") for clips longer than half a window; zeros otherwise.
         bool mirror = reflect && audio.Length > half;
-        audio.CopyTo(padded.AsSpan(half));
+        float[] padded;
         if (mirror)
         {
-            for (int i = 1; i <= half; i++)
-            {
-                padded[half - i] = audio[i];
-                padded[half + audio.Length - 1 + i] = audio[audio.Length - 1 - i];
-            }
+            padded = SignalPadding.Reflect(audio, half);
+        }
+        else
+        {
+            padded = new float[audio.Length + NFft];
+            audio.CopyTo(padded.AsSpan(half));
         }
         int bins = Bins;
         CpuParallel.For(frames, (long)frames * NFft * 16, frame =>
