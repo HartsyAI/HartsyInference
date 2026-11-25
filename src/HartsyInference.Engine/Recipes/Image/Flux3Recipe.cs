@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -83,6 +84,7 @@ public sealed class Flux3Recipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        UnhonouredBackends.Refuse(context, "FLUX.3");
         string fileName = Path.GetFileName(context.CheckpointPath);
         ResolvedModelVariant variant = context.ResolveVariant(Flux3Variants.Catalog);
         List<IDisposable> owned = new List<IDisposable>();
