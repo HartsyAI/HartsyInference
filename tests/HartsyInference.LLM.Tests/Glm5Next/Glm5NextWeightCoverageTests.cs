@@ -42,6 +42,30 @@ public sealed class Glm5NextWeightCoverageTests
     }
 
     [Fact]
+    public void TinyReferenceCheckpoint_KeysAreExactlyTheNamedKeys()
+    {
+        string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Glm5Next", "tiny");
+        Glm5NextConfig tiny = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(dir, "config.json")));
+        using System.Text.Json.JsonDocument index = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "model.safetensors.index.json")));
+        HashSet<string> keys = index.RootElement.GetProperty("weight_map").EnumerateObject().Select(p => p.Name).ToHashSet();
+        HashSet<string> named = Glm5NextWeightNames.AllKeys(tiny, includeVision: false).ToHashSet();
+        Assert.Empty(keys.Except(named));
+        Assert.Empty(named.Except(keys));
+        Assert.Contains(tiny.LayerKinds, k => k == Glm5NextAttentionKind.Kda);
+        Assert.Contains(tiny.LayerKinds, k => k == Glm5NextAttentionKind.Dsa);
+    }
+
+    [Fact]
+    public void KeysOfLayersTheConfigDoesNotName_AreNotFp8OrMtp()
+    {
+        // A checkpoint key can name any layer; the predicates answer false for a number the config does not have instead of throwing.
+        Assert.False(Glm5NextWeightNames.IsFp8Weight(Config, "model.language_model.layers.99.mlp.gate_proj.weight"));
+        Assert.False(Glm5NextWeightNames.IsMtpKey(Config, "model.language_model.layers.99.enorm.weight"));
+        Assert.False(Glm5NextWeightNames.IsFp8Weight(Config, "model.language_model.layers.x.mlp.gate_proj.weight"));
+        Assert.False(Glm5NextWeightNames.IsMtpKey(Config, "model.language_model.embed_tokens.weight"));
+    }
+
+    [Fact]
     public void ExpertKeys_GateComesBeforeUp()
     {
         Assert.Equal(["gate_proj", "up_proj", "down_proj"], Glm5NextWeightNames.ExpertProjections);

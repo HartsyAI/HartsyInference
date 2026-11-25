@@ -132,12 +132,20 @@ public static class Glm5NextWeightNames
         }
     }
 
-    /// <summary>Whether <paramref name="key"/> is an MTP-layer tensor or a <c>shared_head</c> tensor, which the reference leaves unloaded.</summary>
+    /// <summary>Whether <paramref name="key"/> belongs to an MTP layer, which the reference leaves unloaded. The layer number decides it; a key of a
+    /// decoder layer, or one whose layer number is not in the checkpoint, returns false.</summary>
     public static bool IsMtpKey(Glm5NextConfig c, string key)
     {
+        return TryLayer(key, out int layer) && c.IsMtpLayer(layer);
+    }
+
+    // The number N of a key named model.language_model.layers.N.…; the callers check it against the config's layer count.
+    private static bool TryLayer(string key, out int layer)
+    {
+        layer = -1;
         if (!key.StartsWith(Root + "layers.", StringComparison.Ordinal)) return false;
         int start = (Root + "layers.").Length, dot = key.IndexOf('.', start);
-        return dot > start && int.TryParse(key.AsSpan(start, dot - start), out int layer) && c.IsMtpLayer(layer);
+        return dot > start && int.TryParse(key.AsSpan(start, dot - start), out layer);
     }
 
     /// <summary>Whether the FP8 checkpoint stores <paramref name="weightKey"/> as E4M3 with a <see cref="ScaleSuffix"/> companion. Quantized:
@@ -145,10 +153,9 @@ public static class Glm5NextWeightNames
     /// projections, <c>kv_b_proj</c>, indexer, router, embedding, LM head, vision, hyper-connections) stays BF16 or F32.</summary>
     public static bool IsFp8Weight(Glm5NextConfig c, string weightKey)
     {
-        if (!weightKey.StartsWith(Root + "layers.", StringComparison.Ordinal) || !weightKey.EndsWith(".weight", StringComparison.Ordinal)) return false;
-        int start = (Root + "layers.").Length, dot = weightKey.IndexOf('.', start);
-        if (dot <= start || !int.TryParse(weightKey.AsSpan(start, dot - start), out int layer)) return false;
-        string leaf = weightKey[(dot + 1)..];
+        if (!weightKey.EndsWith(".weight", StringComparison.Ordinal) || !TryLayer(weightKey, out int layer)) return false;
+        if ((uint)layer >= (uint)(c.Layers + c.MtpLayers)) return false;
+        string leaf = weightKey[(weightKey.IndexOf('.', (Root + "layers.").Length) + 1)..];
         if (leaf.StartsWith("mlp.", StringComparison.Ordinal))
             return leaf.StartsWith("mlp.experts.", StringComparison.Ordinal) || leaf.StartsWith("mlp.shared_experts.", StringComparison.Ordinal)
                 || (!c.IsSparse(layer) && leaf is "mlp.gate_proj.weight" or "mlp.up_proj.weight" or "mlp.down_proj.weight");
