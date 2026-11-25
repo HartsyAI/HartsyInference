@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.451
+
+- Depth Pro 2 B, L and H+ run on real weights and match the reference on CPU and CUDA, and Depth Pro 2 now computes in plain F32 on CUDA by default (the engine TF32 default was up to 1e-3 off).
+
 ## alpha.450
 
 - Added Apple FastFrames S (1.3B, `fastframes-s`) to the video path: frame-wise causal text-to-video at 832x480, 81 frames at 16 fps, with a KV-cached rollout, a KV refiner and a pixel decoder; L (14B, `fastframes-l`) is wired but not CLI-drivable until block streaming lands.
