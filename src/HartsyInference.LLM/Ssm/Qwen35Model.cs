@@ -231,6 +231,9 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     /// rows <paramref name="ropeCos"/>/<paramref name="ropeSin"/> (host F32 <c>[1, seq, AttnHeadDim]</c>, split-half over the
     /// first <see cref="RotaryDim"/> channels) instead of the sequence positions: multimodal RoPE, where text after an image
     /// resumes at a position past its grid. Causality and the cache still follow the sequence index.</summary>
+    /// <remarks>The model does not rescale caller rows: they must already carry this model's RoPE scaling, which
+    /// <see cref="BuildMultimodalRope"/> applies. A YaRN model (SenseNova-Loop) given unscaled rows rotates without YaRN and gives wrong output
+    /// with no error, so build rows through <see cref="BuildMultimodalRope"/> rather than by hand.</remarks>
     public Tensor ForwardEmbedsHidden(IBackend backend, Tensor embeds, int seq, Tensor? ropeCos, Tensor? ropeSin)
     {
         ArgumentNullException.ThrowIfNull(embeds);
@@ -329,7 +332,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
             string arch = (m.GetString("general.architecture") ?? "qwen35").ToLowerInvariant();
             int dModel = (int)m.GetUInt32($"{arch}.embedding_length");
             // block_count includes the appended MTP/NextN block(s); exclude them from the executed trunk.
-            int nextn = (int)m.GetUInt32($"{arch}.nextn.predict_layers", 0u);
+            int nextn = (int)m.GetUInt32($"{arch}.nextn_predict_layers", m.GetUInt32($"{arch}.nextn.predict_layers", 0u));
             int layers = (int)m.GetUInt32($"{arch}.block_count") - nextn;
             int vocab = (int)w["token_embd.weight"].Shape[0];   // relabeled to [vocab, dModel]
             float eps = m.GetFloat32($"{arch}.attention.layer_norm_rms_epsilon", 1e-6f);
@@ -357,6 +360,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
             // hybrid attention path is identical to the dense tier, so only the FFN differs.
             MoeFeedForward?[] moe = new MoeFeedForward?[layers];
             int expertCount = (int)m.GetUInt32($"{arch}.expert_count", 0u);
+            if (expertCount > 0 && arch == SenseNovaLoopArchitecture)
+                throw new NotSupportedException("A SenseNova-Loop GGUF with routed experts is not supported (the dense Loop trunk only).");
             if (expertCount > 0)
             {
                 int expertFfn = (int)m.GetUInt32($"{arch}.expert_feed_forward_length", 0u);
@@ -384,9 +389,35 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 }
             }
 
-            Qwen35Model model = new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, recrOverride,
+            // SenseNova-Loop: execution slots with shared weights, hyper-connection routers, tiled value heads and fused projections.
+            // Plain qwen35 files load exactly as before: no RoPE scaling is applied to them.
+            SenseNovaLoopConfig? loop = null;
+            Dictionary<int, MhcRouterWeights>? routers = null;
+            List<Tensor> converted = [];
+            RopeScaling ropeScaling = RopeScaling.None;
+            bool[]? slotRecr = recrOverride;
+            if (arch == SenseNovaLoopArchitecture)
+            {
+                loop = ReadSenseNovaLoop(m, arch, layers);
+                // The file's recurrent_layers is per execution slot (the converter rewrites layer_types through the plan). Without
+                // it, the kind is the physical layer's, as the HF route reads it; a later visit of a layer then runs the same kind.
+                bool[] linear = new bool[loop.Slots];
+                for (int slot = 0; slot < loop.Slots; slot++)
+                {
+                    int physical = loop.Plan[slot];
+                    linear[slot] = recrOverride is { Length: > 0 } ? recrOverride[slot] : (physical + 1) % fullAttnInterval != 0;
+                }
+                slotRecr = linear;
+                routers = PrepareSenseNovaWeights(w, handle.Weights, loop, linear, numKHeads, numVHeads, headKvDim, headVDim, convK, converted);
+                ropeScaling = ReadGgufRopeScaling(m, arch);
+            }
+
+            Qwen35Model model = new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, slotRecr,
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
                 convK, headKvDim, headVDim, numKHeads, numVHeads, moe);
+            model._ownedTensors.AddRange(converted);
+            if (loop is not null) model.ConfigureLoop(loop, routers!, ropeScaling);
+            else model.ConfigureRope(ropeScaling);
             int[]? sections = m.GetIntArray($"{arch}.rope.dimension_sections");
             if (sections is { Length: > 0 })
                 model.MropeSection = Array.FindAll(sections, static s => s > 0);
