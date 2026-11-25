@@ -253,11 +253,12 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         IReadOnlyList<MiniMaxH3FunControlCondition>? controls = null,
         int[]? videoTimestepRows = null,
         int[]? audioTimestepRows = null,
-        IVideoSparseAttentionSession? sparseAttention = null)
+        IVideoSparseAttentionSession? sparseAttention = null,
+        Tensor? attentionBias = null)
     {
         (Tensor video, Tensor? audio) = ForwardCore(backend, layout, videoRows, audioRows, textStates, cos, sin,
             uniqueTimesteps, timestepRowOf, textTagRuns, pddHeads, controls, videoTimestepRows, audioTimestepRows,
-            sparseAttention);
+            sparseAttention, attentionBias);
         return (video, audio ?? throw new InvalidOperationException("MiniMax-H3 video forward produced no audio head."));
     }
 
@@ -289,13 +290,18 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         IReadOnlyList<MiniMaxH3FunControlCondition>? controls,
         int[]? videoTimestepRows,
         int[]? audioTimestepRows,
-        IVideoSparseAttentionSession? sparseAttention)
+        IVideoSparseAttentionSession? sparseAttention,
+        Tensor? attentionBias = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
         if (!_config.HasAudio && controls is { Count: > 0 })
         {
             throw new NotSupportedException("Fun ControlNet is not supported on the MiniMax-H3-Image build.");
+        }
+        if (attentionBias is not null && controls is { Count: > 0 })
+        {
+            throw new NotSupportedException("A Duo attention bias cannot be combined with Fun ControlNet: the control blocks attend unmasked.");
         }
 
         int seq = layout.SequenceLength;
@@ -308,6 +314,11 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         if (chunkRows != int.MaxValue)
         {
             Logs.Info($"[MiniMaxH3] chunked attention/MLP: seq={seq} chunkRows={chunkRows} freeBytes={freeBytes}.");
+        }
+        if (attentionBias is not null && (sparseAttention is not null || seq > chunkRows))
+        {
+            // Chunked and sparse attention take no bias; refuse rather than attend unmasked.
+            throw new NotSupportedException("A Duo attention bias needs dense, unchunked attention; this forward is chunked or sparse.");
         }
 
         Tensor h = EmbedSegments(backend, layout, videoRows, audioRows, textStates);
@@ -327,7 +338,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 }
                 for (int i = 0; i < _config.NumLayers; i++)
                 {
-                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows, sparseAttention);
+                    ForwardBlock(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows, sparseAttention, attentionBias);
                     ApplyFunControlAtLayer(backend, ref h, tEmb, modIndex, cos, sin, i, chunkRows,
                         controlRuntimes, controlTargetAudio);
                 }
@@ -587,16 +598,19 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
-        Tensor cos, Tensor sin, int index, int chunkRows, IVideoSparseAttentionSession? sparseAttention = null)
+        Tensor cos, Tensor sin, int index, int chunkRows, IVideoSparseAttentionSession? sparseAttention = null,
+        Tensor? attentionBias = null)
     {
         ForwardNamedBlock(backend, ref h, tEmb, modIndex, cos, sin, $"blocks.{index}", chunkRows,
-            sparseAttention);
+            sparseAttention, attentionBias);
     }
 
-    /// <summary>Shared H3 block implementation used by both the main 50-block trunk and each Fun control block.</summary>
+    /// <summary>Shared H3 block implementation used by both the main 50-block trunk and each Fun control block.
+    /// <paramref name="attentionBias"/> is borrowed and applied only to the dense attention call; the caller has already refused
+    /// chunked or sparse attention with a bias.</summary>
     private void ForwardNamedBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
         Tensor cos, Tensor sin, string p, int chunkRows,
-        IVideoSparseAttentionSession? sparseAttention = null)
+        IVideoSparseAttentionSession? sparseAttention = null, Tensor? attentionBias = null)
     {
         int seq = (int)h.Shape[0];
         Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
@@ -609,7 +623,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor attn = sparseAttention is not null
                 ? AttentionSparse(backend, modulated, $"{p}.attn", cos, sin, sparseAttention)
                 : seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
-                    : Attention(backend, modulated, $"{p}.attn", cos, sin);
+                    : Attention(backend, modulated, $"{p}.attn", cos, sin, attentionBias);
             modulated.Dispose();
             Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
             attn.Dispose();
@@ -813,9 +827,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// rope and SDPA all consume them directly — only the attention output needs a permute back.
     /// The qkv buffer through to the attention output stays F32: rope and SDPA have no 16-bit path, so a bf16 qkv
     /// would only add casts around them. Only the projection's input and output ride the body-dtype residual stream.</summary>
-    private Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin)
+    internal Tensor Attention(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin, Tensor? bias = null)
     {
         int seq = (int)x.Shape[0];
+        if (bias is not null && (bias.DType != DType.F32 || bias.Shape.Rank != 2 || bias.Shape[0] != seq || bias.Shape[1] != seq))
+        {
+            throw new ArgumentException($"The attention bias must be F32 [{seq}, {seq}]; got {bias.DType} {bias.Shape}.", nameof(bias));
+        }
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
         TensorShape headed = new TensorShape(1, heads, seq, hd);
 
@@ -840,7 +858,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             }
 
             ProbeV(v, prefix);
-            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
+            Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, new AttentionCallContext { Bias = bias },
+                OperandOwnership.None);
             try
             {
                 Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
