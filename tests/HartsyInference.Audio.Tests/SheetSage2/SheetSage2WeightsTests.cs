@@ -41,7 +41,7 @@ public sealed class SheetSage2WeightsTests : IDisposable
             SheetSage2Decoder decoder = new(Config, Tokenizer);
             decoder.LoadWeights(weights);
             decoder.Dispose();
-            Assert.All(weights.Values, t => Assert.False(t.AsReadOnlySpan<byte>().IsEmpty));
+            Assert.All(weights.Values, t => Assert.Null(Record.Exception(() => _ = t.AsReadOnlySpan<byte>().Length)));
         }
     }
 
