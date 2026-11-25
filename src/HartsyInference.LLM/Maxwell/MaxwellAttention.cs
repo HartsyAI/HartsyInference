@@ -1,12 +1,15 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Maxwell;
 
-/// <summary>One layer's block-sparse GQA attention with its indexer. The projections run on the backend; norms, RoPE, the block route and the
-/// attention itself run on the host, so every backend serves any sequence length. Below <see cref="MaxwellSparseConfig.DenseCausalLimit"/> a query's
-/// route holds every causal block and the indexer is not consulted.</summary>
+/// <summary>One layer's block-sparse GQA attention with its indexer. The projections run on the backend; norms, RoPE and the block route run on the
+/// host. Below <see cref="MaxwellSparseConfig.DenseCausalLimit"/> a query's route holds every causal block, so the attention there is plain causal
+/// GQA: it runs through the backend's attention path over the state's device key/value cache when the state has one
+/// (<see cref="MaxwellSequenceState.UsesDense"/>), and otherwise on the host over the host caches. From the limit on, the sparse route runs on the
+/// host.</summary>
 internal sealed class MaxwellAttention : IDisposable
 {
     private readonly IBackend _backend;
@@ -14,6 +17,7 @@ internal sealed class MaxwellAttention : IDisposable
     private readonly MaxwellRope _rope;
     private readonly Tensor _q, _k, _v, _o, _indexQ, _indexK;
     private readonly float[] _qNorm, _kNorm, _indexQNorm, _indexKNorm;
+    private readonly AttentionLayer _dense;
     private int _disposed;
 
     /// <param name="prefix">The layer's key prefix, <c>model.layers.N</c>.</param>
@@ -26,6 +30,8 @@ internal sealed class MaxwellAttention : IDisposable
         _backend = backend;
         _cfg = cfg;
         _rope = rope;
+        // No projections or norms: the layer only runs the attention over key/value operands this class supplies.
+        _dense = new AttentionLayer(new AttentionLayerConfig { Heads = cfg.NumAttentionHeads, KvHeads = cfg.NumKeyValueHeads, HeadDim = cfg.HeadDim });
         List<Tensor> read = [];
         try
         {
@@ -97,6 +103,35 @@ internal sealed class MaxwellAttention : IDisposable
         v.CopyTo(values.AsSpan(startPos * kvHeads * dim));
         indexK.CopyTo(indexKeys.AsSpan(startPos * indexDim));
 
+        float[] attended = state.UsesDense(startPos, tokens, sparse.DenseCausalLimit)
+            ? AttendDense(q, k, v, tokens, startPos, state, layer)
+            : AttendSparse(q, indexQ, keys, values, indexKeys, tokens, startPos);
+        float[] projected = HostOps.Project(_backend, attended, tokens, heads * dim, _o, hidden);
+        projected.CopyTo(output);
+    }
+
+    /// <summary>Causal GQA over the state's device key/value cache for queries whose every key is in the dense range: the new keys and values are
+    /// appended to the cache on the device, and the attention runs through <see cref="AttentionLayer.AttendOverKv"/>. Returns the output
+    /// <c>[tokens, heads * head dim]</c>, the layout the host route writes.</summary>
+    private float[] AttendDense(float[] q, float[] k, float[] v, int tokens, int startPos, MaxwellSequenceState state, int layer)
+    {
+        int heads = _cfg.NumAttentionHeads, kvHeads = _cfg.NumKeyValueHeads, dim = _cfg.HeadDim;
+        // AttendOverKv consumes its operands, so they are not disposed here.
+        Tensor qTokens = HostMath.Tensor(q, 1, tokens, heads, dim);
+        Tensor kTokens = HostMath.Tensor(k, 1, tokens, kvHeads, dim);
+        Tensor vTokens = HostMath.Tensor(v, 1, tokens, kvHeads, dim);
+        KvAttentionCall call = new() { KvLength = startPos + tokens, QueryOffset = startPos };
+        using Tensor attnHeads = _dense.AttendOverKv(_backend, qTokens, kTokens, vTokens, state.Dense!, layer, layer, in call);
+        using Tensor merged = _dense.MergeHeads(_backend, attnHeads, new TensorShape(1, tokens, heads * dim));
+        return merged.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>The block-sparse route on the host: each query reads the causal keys of its route, and every causal key below the dense limit.</summary>
+    private float[] AttendSparse(float[] q, float[] indexQ, float[] keys, float[] values, float[] indexKeys, int tokens, int startPos)
+    {
+        int heads = _cfg.NumAttentionHeads, kvHeads = _cfg.NumKeyValueHeads, dim = _cfg.HeadDim;
+        MaxwellSparseConfig sparse = _cfg.Sparse;
+        int groups = sparse.IndexerGroups, indexDim = sparse.IndexerHeadDim;
         float[] attended = new float[tokens * heads * dim];
         int perGroup = heads / groups, maxBlocks = MaxwellBlockRoute.MaxBlocks(sparse);
         // Queries below the dense limit see every causal key; later ones read their route's blocks.
@@ -145,8 +180,7 @@ internal sealed class MaxwellAttention : IDisposable
                 System.Buffers.ArrayPool<float>.Shared.Return(scores);
             }
         });
-        float[] projected = HostOps.Project(_backend, attended, tokens, heads * dim, _o, hidden);
-        projected.CopyTo(output);
+        return attended;
     }
 
     // Range r of the keys a query reads: every causal key without a route, else block r of the route clipped at the query.
