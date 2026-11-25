@@ -328,13 +328,13 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
     /// re-packed after a trim need not share with the position it was captured at. <paramref name="returnKv"/> encodes the window
     /// for the cache: the text stream is skipped and the window's own pre-RoPE K and V are returned. Otherwise the window attends
     /// over its text rows too. Inputs are not disposed; the result is owned by the caller.</summary>
-    public MovieRollWindowOutput ForwardWindow(IBackend backend, Tensor image, Tensor? text, Tensor txtTemb, Tensor frameTemb,
+    public MovieRollWindowOutput ForwardWindow(IBackend backend, Tensor image, Tensor? text, Tensor? txtTemb, Tensor frameTemb,
         TokenSegmentLayout layout, HunyuanImageRope rope, float[] positions, Tensor? cacheKeys, Tensor? cacheValues, bool returnKv)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(image);
-        ArgumentNullException.ThrowIfNull(txtTemb);
         ArgumentNullException.ThrowIfNull(frameTemb);
+        if (!returnKv) ArgumentNullException.ThrowIfNull(txtTemb);
         ArgumentNullException.ThrowIfNull(layout);
         ArgumentNullException.ThrowIfNull(rope);
         ArgumentNullException.ThrowIfNull(positions);
@@ -381,7 +381,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             attnMod = SegmentModulation.FromTables(imgMod[0], imgMod[1], imgMod[2], layout);
             ffnMod = SegmentModulation.FromTables(imgMod[3], imgMod[4], imgMod[5], layout);
             imgMod = null;   // the segment tables now own the six projections
-            if (!returnKv) txtMod = _txtModulation.Forward(backend, txtTemb);
+            if (!returnKv) txtMod = _txtModulation.Forward(backend, txtTemb!);
 
             // Projection and QK norm of the window, before any rotation: the cache stores exactly these K and V.
             Tensor imgModulated = attnMod.NormAffine(backend, image, 1e-6f);
