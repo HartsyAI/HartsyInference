@@ -77,7 +77,7 @@ public sealed record LongCatConfig
         LongCatConfig defaults = new();
         (int T, int H, int W) patch = defaults.PatchSize;
         if (root.TryGetProperty("patch_size", out JsonElement patchElement) && patchElement.GetArrayLength() == 3)
-            patch = (patchElement[0].GetInt32(), patchElement[1].GetInt32(), patchElement[2].GetInt32());
+            patch = (Whole(patchElement[0], "patch_size"), Whole(patchElement[1], "patch_size"), Whole(patchElement[2], "patch_size"));
         bool zeroPad = defaults.TextTokensZeroPad;
         if (root.TryGetProperty("text_tokens_zero_pad", out JsonElement zero) && zero.ValueKind is JsonValueKind.True or JsonValueKind.False)
             zeroPad = zero.GetBoolean();
@@ -132,5 +132,16 @@ public sealed record LongCatConfig
         shapeOf(key) ?? throw new ArgumentException($"The checkpoint has no {key}.");
 
     private static int Int(JsonElement root, string name, int fallback) =>
-        root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Number ? value.GetInt32() : fallback;
+        root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Number ? Whole(value, name) : fallback;
+
+    /// <summary>A JSON number that is a whole value, written as an integer or as an integral float (<c>4.0</c>, which diffusers configs use).</summary>
+    private static int Whole(JsonElement value, string name)
+    {
+        if (value.TryGetInt32(out int whole))
+            return whole;
+        double real = value.GetDouble();
+        if (real == Math.Floor(real) && real is >= int.MinValue and <= int.MaxValue)
+            return (int)real;
+        throw new InvalidDataException($"The LongCat config field '{name}' must be a whole number; got {value.GetRawText()}.");
+    }
 }

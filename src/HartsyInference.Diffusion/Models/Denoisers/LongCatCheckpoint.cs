@@ -1,25 +1,34 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>A LongCat-Video DiT checkpoint folder: the diffusers-named sharded safetensors index (bf16 or F32 shards, reference key names) and its
-/// <c>config.json</c>. Tensors are borrowed views of the shard mappings and live until this is disposed. The INT8 layout
-/// (<c>.weight_int8</c> keys) is a
-/// separate loader.</summary>
+/// <summary>A LongCat-Video DiT checkpoint folder: a sharded safetensors index with reference key names, either dense (bf16 or F32, the
+/// diffusers-named index) or the per-row INT8 release (<c>quantized_model.safetensors.index.json</c>, <c>.weight_int8</c> plus
+/// <c>.weight_scale</c>), and its <c>config.json</c>. Tensors are borrowed views of the shard mappings and live until this is disposed. INT8
+/// weights come back under the dense key names as I8 tensors carrying their row scale (<see cref="LongCatInt8Converter"/>).</summary>
 public sealed class LongCatCheckpoint : IDisposable
 {
-    /// <summary>The index file the base and avatar repositories ship.</summary>
+    /// <summary>The index file the dense base and avatar repositories ship.</summary>
     public const string IndexFileName = "diffusion_pytorch_model.safetensors.index.json";
+
+    /// <summary>The index file of the per-row INT8 release.</summary>
+    public const string Int8IndexFileName = "quantized_model.safetensors.index.json";
 
     private readonly ShardedSafeTensorSet _shards;
 
-    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights)
+    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8)
     {
         _shards = shards;
         Config = config;
         Weights = weights;
+        IsInt8 = isInt8;
     }
+
+    /// <summary>True for the per-row INT8 release: its linears are I8 tensors carrying <see cref="Tensor.QuantInfo"/>. Those need
+    /// <c>QuantizedWeightPolicy.PrepareForBackends</c> (or a backend with a resident int8 path) before a forward.</summary>
+    public bool IsInt8 { get; }
 
     /// <summary>The geometry read from <c>config.json</c>, or derived from the tensor shapes when the folder has none.</summary>
     public LongCatConfig Config { get; }
@@ -27,18 +36,29 @@ public sealed class LongCatCheckpoint : IDisposable
     /// <summary>Every tensor by checkpoint key.</summary>
     public IReadOnlyDictionary<string, Tensor> Weights { get; }
 
-    /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors.</summary>
+    /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors. When both index
+    /// files are present the dense one is used; the INT8 index is read only in a folder that has no dense one.</summary>
     public static LongCatCheckpoint Open(string directory)
     {
-        ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, IndexFileName);
+        string indexName = File.Exists(Path.Combine(directory, IndexFileName)) || !File.Exists(Path.Combine(directory, Int8IndexFileName))
+            ? IndexFileName : Int8IndexFileName;
+        ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, indexName);
         try
         {
+            bool int8 = LongCatInt8Converter.IsInt8Layout(shards.Inventory.Keys);
             Dictionary<string, TensorShape> shapes = new(shards.Inventory.Count, StringComparer.Ordinal);
             foreach ((string name, TensorLocation location) in shards.Inventory)
-                shapes[name] = location.Shape;
-            if (shapes.Keys.Any(static key => key.EndsWith(".weight_int8", StringComparison.Ordinal)))
-                throw new NotSupportedException(
-                    $"'{directory}' is the per-row INT8 layout, which its own loader reads; point this at the bf16 or F32 folder.");
+            {
+                if (int8 && name.EndsWith(LongCatInt8Converter.ScaleSuffix, StringComparison.Ordinal))
+                {
+                    string quantized = name[..^LongCatInt8Converter.ScaleSuffix.Length] + LongCatInt8Converter.QuantizedSuffix;
+                    if (!shards.Inventory.ContainsKey(quantized))
+                        throw new InvalidDataException($"'{name}' has no '{quantized}'; an orphan dequant scale is refused.");
+                    continue;
+                }
+                shapes[int8 && name.EndsWith(LongCatInt8Converter.QuantizedSuffix, StringComparison.Ordinal)
+                    ? name[..^LongCatInt8Converter.QuantizedSuffix.Length] + ".weight" : name] = location.Shape;
+            }
 
             string configPath = Path.Combine(directory, "config.json");
             LongCatConfig config = File.Exists(configPath)
@@ -50,11 +70,14 @@ public sealed class LongCatCheckpoint : IDisposable
             Dictionary<string, Tensor> weights = new(shards.Inventory.Count, StringComparer.Ordinal);
             foreach ((string name, TensorLocation location) in shards.Inventory)
             {
-                if (location.DType != DType.BF16 && location.DType != DType.F16 && location.DType != DType.F32)
-                    throw new NotSupportedException($"'{name}' is {location.DType}; the LongCat loader reads BF16, F16 and F32 tensors.");
+                bool quantized = int8 && name.EndsWith(LongCatInt8Converter.QuantizedSuffix, StringComparison.Ordinal);
+                if (location.DType != DType.BF16 && location.DType != DType.F16 && location.DType != DType.F32
+                    && !(quantized && location.DType == DType.I8))
+                    throw new NotSupportedException($"'{name}' is {location.DType}; the LongCat loader reads BF16, F16 and F32 tensors"
+                        + (int8 ? " and I8 .weight_int8 weights." : "."));
                 weights[name] = shards.GetTensor(name);
             }
-            return new LongCatCheckpoint(shards, config, weights);
+            return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8);
         }
         catch
         {

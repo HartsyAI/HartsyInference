@@ -18,7 +18,7 @@ public static class DuoSchedule
     /// <summary>The time of a clean (committed) chunk in inference.</summary>
     public const float CleanTime = 1.0f;
 
-    /// <summary>The <paramref name="steps"/> + 1 grid points, evaluated in F32 the way torch evaluates them. Five times for the distill, 51 for the causal student; a consumer addresses a table row by step index, not by comparing floats.</summary>
+    /// <summary>The <paramref name="steps"/> + 1 grid points, evaluated in F32 the way torch evaluates them (agrees with the upstream grid to one F32 ulp). Five times for the distill, 51 for the causal student; a consumer addresses a table row by step index, not by comparing floats.</summary>
     public static float[] Grid(int steps, double shift)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(steps, 1);
@@ -29,7 +29,7 @@ public static class DuoSchedule
         float[] times = new float[points];
         for (int i = 0; i < points; i++)
         {
-            // torch.linspace counts from the start for the first half of the points and back from the end for the rest.
+            // torch.linspace counts from the start for the first half and back from the end for the rest, in F32.
             float t = i < points / 2 ? step * i : 1f - step * (points - i - 1);
             float noise = 1f - t;
             times[i] = 1f - shiftF * noise / (1f + shiftMinusOne * noise);

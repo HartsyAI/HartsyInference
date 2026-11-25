@@ -70,7 +70,8 @@ internal static class LongCatReferenceDump
         int frames, int hw, LongCatConditioning conditioning, Stage check)
     {
         LongCatBlock block = new(checkpoint.Config);
-        block.LoadWeights(checkpoint.Weights, $"blocks.{index}");
+        List<Tensor> owned = [];
+        block.LoadWeights(checkpoint.Weights, $"blocks.{index}", owned);
         using Tensor hidden = Load(dir, meta, index == 0 ? $"{name}.x_embedder" : $"{name}.block{index - 1}.out");
         using Tensor text = Load(dir, meta, $"{name}.y_embedder");
         using Tensor timeEmbed = Load(dir, meta, $"{name}.t_embedder");
@@ -88,6 +89,8 @@ internal static class LongCatReferenceDump
         if (index == 0)
             foreach (string stage in new[] { "block0.q", "block0.k", "block0.v" })
                 check.Compare("isolated", stage, got.GetValueOrDefault(stage), conditioning.NumCondLatents == 0);
+        foreach (Tensor copy in owned)
+            copy.Dispose();
     }
 
     public static Tensor Load(string dir, JsonDocument meta, string name)

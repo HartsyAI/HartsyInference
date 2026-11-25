@@ -42,6 +42,26 @@ public static class ModelCatalog
         Role = "config",
     };
 
+    /// <summary>One transformer shard of an Open Vision Banana build, kept under its own folder so the index beside it resolves
+    /// the set. <paramref name="checkpoint"/> is the release folder, e.g. <c>final_models/4B/zeroshot/checkpoint-87500-95000-w25</c>.</summary>
+    private static ModelAsset OvbShard(string folder, string checkpoint, int index, int count, string sha256) => new ModelAsset
+    {
+        Repo = "FunAILab/Open-Vision-Banana",
+        RepoPath = $"{checkpoint}/transformer/diffusion_pytorch_model-{index:D5}-of-{count:D5}.safetensors",
+        TargetSubdir = $"Stable-Diffusion/OpenVisionBanana/{folder}",
+        Role = "transformer",
+        Sha256 = sha256,
+    };
+
+    /// <summary>The shard index of an Open Vision Banana build.</summary>
+    private static ModelAsset OvbIndex(string folder, string checkpoint) => new ModelAsset
+    {
+        Repo = "FunAILab/Open-Vision-Banana",
+        RepoPath = $"{checkpoint}/transformer/diffusion_pytorch_model.safetensors.index.json",
+        TargetSubdir = $"Stable-Diffusion/OpenVisionBanana/{folder}",
+        Role = "config",
+    };
+
     /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
     private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10, LiveControls = OasisControlScheme.Instance };
@@ -743,6 +763,26 @@ public static class ModelCatalog
                 },
             },
 
+            // SenseNova-Loop-9B (SenseTime, Apache-2.0: "Licensed under the Apache License, Version 2.0"; no territory or commercial limit found).
+            // Qwen3.5 trunk with layers 4-27 run twice (own cache per visit), two-stream mHC and YaRN. The official GGUF (OpenSenseNova/llama.cpp
+            // layout, sensenova_loop) at sensenova/SenseNova-Loop-9B-GGUF @ b489b15c; the official AWQ build has no reader and is not offered.
+            // Pending until the real-weight run is green.
+            new CatalogEntry
+            {
+                Id = "sensenova-loop-9b", Modality = txt, DisplayName = "SenseNova-Loop-9B (looped Qwen3.5 + mHC, text and image)",
+                Architecture = "Qwen3.5 Gated-DeltaNet + full-attn hybrid, layers 4-27 looped x2, two-stream mHC, YaRN (+Qwen3-VL vision)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "sensenova/SenseNova-Loop-9B-GGUF", RepoPath = "SenseNova-Loop-9B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/sensenova-loop-9b", Role = "transformer",
+                        Sha256 = "5528b06c41a92d0a2413e827ab08531be56b10f881606c6659361b5da507eeed" },
+                    new() { Repo = "sensenova/SenseNova-Loop-9B-GGUF", RepoPath = "mmproj-SenseNova-Loop-9B-F16.gguf",
+                        TargetSubdir = "LLM/sensenova-loop-9b", Role = "mmproj",
+                        Sha256 = "1bb6afd085020f555b3dca73b6d2139f3a7b28455228b0f07285d0f0ebc61481" },
+                },
+            },
+
             // Text / LLM — dense families. `hartsy text -m <id>` verified end-to-end 2026-07-22 (CLI catalog
             // pass) on the 3060 (--low-vram-quant) unless noted; see MODEL_STATUS_LLM.md for the exact
             // prompt/output per model and PARITY_VERIFICATION.md for the full session record.
@@ -1285,6 +1325,45 @@ public static class ModelCatalog
                     IrisZIndex("big"),
                     SideModels.IrisZBigEmptyPrompt,
                     SideModels.MistralSmallFlux2,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Open Vision Banana 4B, zero-shot averaged checkpoint (FunAILab/Open-Vision-Banana @ 558ea8a): FLUX.2 [klein] Base 4B
+                // fine-tuned so a task prompt about a photo is answered with a painted image (segmentation, depth, normals, editing).
+                // Served by Flux2Recipe's open-vision-banana-4b variant (reference edit, true CFG, 28 steps). fp32 shards (15.5 GB).
+                // Licence: weights FLUX Non-Commercial (the release's own statement: "The released model weights are derived from FLUX.2
+                // [klein] Base and are distributed under the FLUX Non-Commercial License ... Use of the weights, and of any output
+                // produced with them, is subject to the terms of that license."); code Apache-2.0. Built and parity-tested on a tiny
+                // diffusers fixture; no real-weight run yet.
+                Id = "open-vision-banana-4b", Modality = img, DisplayName = "Open Vision Banana 4B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 1, 2, "e0eb9850ca1be16a9e48f5d00dd5309c4d024c7592f56d61c33efdeb6a74a0a0"),
+                    OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 2, 2, "4f55e02ea4862375e4250205ba9d83a0fb035f83475a7467f80ce9baa36c5e72"),
+                    OvbIndex("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25"),
+                    SideModels.Qwen3_4B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Open Vision Banana 9B, zero-shot averaged checkpoint: FLUX.2 [klein] Base 9B fine-tune; fp32 shards (36.3 GB). Same
+                // licence terms as the 4B. Klein 9B has never run on real weights here, so this inherits that risk.
+                Id = "open-vision-banana-9b", Modality = img, DisplayName = "Open Vision Banana 9B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 1, 4, "88eba535a98b57af3196ff325cfaacb029e24cf6083dd6fe839cf6bdd7a65ae3"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 2, 4, "139c6462cbdd4d6b23728bb3dcc8f6ce8a53e610471160d3104daf986dc7c7c2"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 3, 4, "c68b36de4303583c63f6f9f5a0e8ad72e5d8c6e2399de00277afbc7b5fcfd078"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 4, 4, "f6cb6c2128fd06a8ad8aadd8c66bce362d387c61cb904097730a9743dd3a435a"),
+                    OvbIndex("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25"),
+                    SideModels.Qwen3_8B_Fp4Mixed,
                     SideModels.Flux2Vae,
                 },
             },
@@ -2469,6 +2548,21 @@ public static class ModelCatalog
                 // FxCatalog), read straight from the .onnx by ModelAssets/Onnx. Licence: not stated by the file, the repo or UVR's model repository
                 // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend; no numerical match against
                 // onnxruntime yet, hence ValidationPending (docs/Checklists/MODEL_STATUS_AUDIO.md).
+            },
+
+            new CatalogEntry
+            {
+                Id = "voice-isolator", Modality = fx, DisplayName = "Inworld Voice Isolator (offline)", Architecture = "Band-split dual-path attention and Mamba speech isolator, 48 kHz, 64M", Status = vp,
+                CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator` writes a `voice` and a `background` stem (mono, 48 kHz).
+                // Weights: inworld/voice-isolator denoiser.safetensors (256,260,128 bytes, sha256 pinned in FxCatalog). Licence: Apache-2.0 for code and
+                // weights; trained on Inworld first-party data plus VocalSet (CC BY 4.0), IndicVoices-R (CC BY 4.0) and VCTK (ODC-By 1.0), credited in the
+                // upstream NOTICE. Matches the upstream PyTorch network on tiny random weights; real-weight parity pending (docs/Checklists/MODEL_STATUS_AUDIO.md).
+            },
+            new CatalogEntry
+            {
+                Id = "voice-isolator-realtime", Modality = fx, DisplayName = "Inworld Voice Isolator (realtime)", Architecture = "Causal band-split dual-path attention and Mamba speech isolator, 48 kHz, 58M, look-ahead 0/20/40 ms", Status = vp,
+                CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator-realtime` runs the causal stream over the clip (look-ahead 20 ms, about 63 ms latency).
+                // Weights: inworld/voice-isolator denoiser_realtime.safetensors (232,780,800 bytes, sha256 pinned in FxCatalog); same licence as the offline model.
             },
 
             // Vision
