@@ -195,11 +195,11 @@ public sealed unsafe partial class MiniMaxH3Transformer
         }
         if (timestepCount == 0)
         {
-            throw new ArgumentException("At least one timestep is needed.", nameof(timestepCount));
+            throw new ArgumentException("At least one timestep is needed.", "times");
         }
         if (textRows == 0 && layout.TextRows.Length > 0)
         {
-            throw new ArgumentException("The layout has text rows, so textStates must be given with at least one row.", nameof(textRows));
+            throw new ArgumentException("The layout has text rows, so textStates must be given with at least one row.", "textStates");
         }
         ValidateDuoRefinerGroups(refinerGroups, textRows);
         ValidateDuoTimeIds(layout, timestepCount);
