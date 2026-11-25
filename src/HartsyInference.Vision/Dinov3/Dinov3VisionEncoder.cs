@@ -196,7 +196,7 @@ public sealed unsafe class Dinov3VisionEncoder
                 Tensor next = !crossFrameBlocks.Contains(i) ? _layers[i].Forward(backend, h, cos, sin)
                     : ring is null ? JointBlock(backend, _layers[i], h, prefix, frameRope!)
                     : CachedBlock(backend, i, h, prefix, frameRope!, ring);
-                if (prefixResetBlocks.Contains(i)) CopyPrefix(next, h, batch, seqLen, prefix * hidden);
+                if (prefixResetBlocks.Contains(i)) CrossFrameTokens.RestorePrefix(backend, next, h, prefix);
                 if (!hIsTap) h.Dispose();
                 h = next;
                 hIsTap = taps is not null && tapBlocks.Contains(i);
@@ -213,11 +213,20 @@ public sealed unsafe class Dinov3VisionEncoder
     }
 
     // One block over every frame as one sequence; each frame keeps the prefix it went in with.
+    // A lone frame is its own joint sequence (the mean of one prefix is that prefix, and the rope table of one frame is the ordinary one), so it skips
+    // Join and Split and only puts its prefix back.
     private static Tensor JointBlock(IBackend backend, Dinov3Layer layer, Tensor frames, int prefix, CrossFrameRope rope)
     {
-        using Tensor joint = CrossFrameTokens.Join(frames, prefix);
+        if (frames.Shape[0] == 1)
+        {
+            Tensor alone = layer.Forward(backend, frames, rope.Cos, rope.Sin);
+            CrossFrameTokens.RestorePrefix(backend, alone, frames, prefix);
+            return alone;
+        }
+
+        using Tensor joint = CrossFrameTokens.Join(backend, frames, prefix);
         using Tensor output = layer.Forward(backend, joint, rope.Cos, rope.Sin);
-        return CrossFrameTokens.Split(output, frames, prefix);
+        return CrossFrameTokens.Split(backend, output, frames, prefix);
     }
 
     // One block over one frame whose patches attend to [pooled-prefix keys, the ring's patch keys]; the prefix passes through unchanged.
@@ -316,19 +325,6 @@ public sealed unsafe class Dinov3VisionEncoder
         {
             Cos.Dispose();
             Sin.Dispose();
-        }
-    }
-
-    // The first prefixWidth values of every batch item's sequence, from source to target.
-    private static void CopyPrefix(Tensor target, Tensor source, int batch, int seqLen, int prefixWidth)
-    {
-        int hidden = (int)source.Shape[2];
-        ReadOnlySpan<float> src = source.AsReadOnlySpan<float>();
-        Span<float> dst = target.AsSpan<float>();
-        for (int b = 0; b < batch; b++)
-        {
-            int start = b * seqLen * hidden;
-            src.Slice(start, prefixWidth).CopyTo(dst.Slice(start, prefixWidth));
         }
     }
 
