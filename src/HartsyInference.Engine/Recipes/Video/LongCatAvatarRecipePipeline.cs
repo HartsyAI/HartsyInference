@@ -60,7 +60,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
-        float[] noise = LongCatRecipeSupport.Noise(seed, latentFrames, latentHeight, latentWidth);
+        float[] noise = LongCatRecipeSupport.Noise(seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
 
         LongCatAvatarMode mode = LongCatAvatarMode.At2v;
         int condLatents = 0;
@@ -68,12 +68,12 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         if (request.InitImage is not null)
         {
             byte[] rgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
-            firstFrame = LongCatRecipeSupport.EncodeFirstFrame(_backend, _parts.Encoder, rgb, width, height);
+            firstFrame = LongCatRecipeSupport.EncodeFirstFrame(_backend, _parts.Encoder, rgb, width, height, _parts.Channels);
             mode = LongCatAvatarMode.Ai2v;
             condLatents = 1;
         }
 
-        LongCatAvatarRun run = new(LongCatRecipeSupport.LatentChannels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
+        LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
             audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear, LongCatAvatarPipelineSettings.Shift,
             settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame);
 
@@ -90,7 +90,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         }
         cancel.ThrowIfCancellationRequested();
 
-        byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, latentFrames, latentHeight, latentWidth);
+        byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
         Logs.Info($"[LongCatAvatarRecipePipeline] Decoded {decoded.Length} frames {width}x{height}.");
         return VideoRecipeUtils.ToResult(decoded, width, height, request, drivingSpeech.IsEmpty ? null : drivingSpeech, settings.Fps);
     }

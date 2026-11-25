@@ -9,6 +9,19 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// (<see cref="LongCatVideoPipeline"/>). Long video, video continuation and the 720p refinement are not wired here yet.</summary>
 public sealed class LongCatVideoRecipe : IVideoRecipe
 {
+    private readonly LongCatSideModels? _sides;
+
+    /// <summary>The production recipe: umT5 and the VAE come from the engine's side-model downloads.</summary>
+    public LongCatVideoRecipe() : this(null)
+    {
+    }
+
+    /// <summary>A recipe whose umT5 and VAE come from <paramref name="sides"/> (null for the downloads); the tests inject stand-ins here.</summary>
+    internal LongCatVideoRecipe(LongCatSideModels? sides)
+    {
+        _sides = sides;
+    }
+
     /// <inheritdoc/>
     public string Name => "longcat-video";
 
@@ -46,7 +59,7 @@ public sealed class LongCatVideoRecipe : IVideoRecipe
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders);
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, _sides);
             LongCatVideoPipeline pipeline = new LongCatVideoPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatVideoRecipe] LongCat-Video ready (text and image to video).");
             return new LongCatVideoRecipePipeline(context.Backend, pipeline, parts, loaders);

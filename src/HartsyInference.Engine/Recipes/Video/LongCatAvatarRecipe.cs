@@ -54,7 +54,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders);
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null);
 
             string whisperPath = ModelDownloader.EnsureSideModelAsync(SideModels.WhisperLargeV3, onProgress: null, context.Cancel)
                 .GetAwaiter().GetResult();
