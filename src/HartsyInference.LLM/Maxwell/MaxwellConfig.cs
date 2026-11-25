@@ -74,6 +74,9 @@ public sealed record MaxwellConfig
     /// <summary>The context the model card states as supported: 262,144 tokens.</summary>
     public const int SupportedContext = 262_144;
 
+    /// <summary>The epsilon of every hyper-connection formula (the reference's <c>self.eps</c>) and of its read-out head.</summary>
+    public const double HcEpsilon = 1e-6;
+
     /// <summary>Total layers including MTP layers; MTP layer <c>k</c> is layer <c>NumHiddenLayers + k</c>.</summary>
     public int TotalLayers => NumHiddenLayers + MtpLayers;
 
@@ -146,6 +149,12 @@ public sealed record MaxwellConfig
             throw new HartsyInferenceException("Maxwell config: the indexer needs one group per key/value head, and the heads must divide evenly.");
         // The device stream kernels hold at most eight residual streams per thread (HcReference.MaxHc).
         if (HcMult < 1 || HcMult > 8) throw new HartsyInferenceException($"Maxwell config: num_residual_streams {HcMult} is outside 1..8.");
+        if (Sparse.IndexerHeadDim != HeadDim)
+            throw new HartsyInferenceException("Maxwell config: the indexer shares the attention's RoPE, so its head width must equal attention_head_size.");
+        // The hyper-connections fix their own epsilon at 1e-6 and share this one in the engine's head read-out.
+        if (RmsNormEps != HcEpsilon) throw new HartsyInferenceException($"Maxwell config: rms_norm_eps {RmsNormEps} must be {HcEpsilon}.");
+        if (!DenseLayers.OrderBy(static l => l).SequenceEqual(Enumerable.Range(0, DenseLayers.Count)))
+            throw new HartsyInferenceException("Maxwell config: mlp_only_layers must be the first layers of the model.");
     }
 
     private static int ReadFp8Block(JsonElement root)

@@ -37,6 +37,24 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = 1.15,
     };
 
+    /// <summary>RMBG 3.0's sampling settings: 4 steps and no guidance, as on the Bria model card (briaai/RMBG-3.0); the card sets no size,
+    /// because the size follows the source image's aspect ratio (<see cref="Features.Rmbg3Matte"/>).</summary>
+    public static ImageDefaults Rmbg3Defaults { get; } = new ImageDefaults
+    {
+        Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024, SigmaShift = null,
+    };
+
+    /// <summary>The flow-match shift exponent diffusers derives from the latent token count (<c>calculate_shift</c> with the pipeline's
+    /// scheduler config: tokens 256 to 4096 map linearly from 0.5 to 1.15, unclamped). A 1024×1024 image is 4096 tokens, so it gives
+    /// ComfyUI's fixed 1.15 there and less for smaller images.</summary>
+    public static double DynamicShift(int width, int height)
+    {
+        const double baseShift = 0.5, maxShift = 1.15, baseTokens = 256, maxTokens = 4096;
+        double tokens = (width / 16) * (double)(height / 16);
+        double slope = (maxShift - baseShift) / (maxTokens - baseTokens);
+        return tokens * slope + (baseShift - baseTokens * slope);
+    }
+
     /// <inheritdoc/>
     public string Name => "fibo2";
 
@@ -68,7 +86,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is not null && variant.Is(Fibo2Variants.EditTurbo) ? EditTurboDefaults : FamilyDefaults;
+        variant is null ? FamilyDefaults
+        : variant.Is(Fibo2Variants.Rmbg3) ? Rmbg3Defaults
+        : variant.Is(Fibo2Variants.EditTurbo) ? EditTurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
     /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id.</remarks>
@@ -76,7 +96,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         string.Equals(familyId, "fibo2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev-int8", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "fibo2-edit-turbo-int8", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(familyId, "fibo2-edit-turbo-int8", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "rmbg3", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "rmbg3-int8", StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

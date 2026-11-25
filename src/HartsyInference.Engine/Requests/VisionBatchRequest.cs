@@ -8,7 +8,7 @@ public enum VisionSequenceKind
     /// <summary>Several views of one scene with no time order (multi-view depth, geometry and camera estimation).</summary>
     Views,
 
-    /// <summary>Frames of a video in time order (tracking, interpolation).</summary>
+    /// <summary>Frames of a video in time order (tracking, interpolation, video metric depth).</summary>
     Frames,
 }
 
@@ -48,6 +48,18 @@ public sealed record VisionBatchRequest
     /// <summary><see cref="VisionMode.MetricDepth"/> only: the focal length in pixels every image shares. Null lets the model estimate one
     /// for all of them. The value used comes back in each result's <see cref="VisionResult.Camera"/>.</summary>
     public double? FocalLengthPx { get; init; }
+
+    /// <summary><see cref="VisionMode.MetricDepth"/> frames only: how many frames attend to each other, the clip length when buffered or the cached
+    /// frames with the current one when unbuffered. Null takes the model's default (16 for Depth Pro 2).</summary>
+    public int? FrameWindow { get; init; }
+
+    /// <summary><see cref="VisionMode.MetricDepth"/> buffered frames only: frames shared by consecutive clips, whose depth is cross-faded; 0 to
+    /// <see cref="FrameWindow"/> - 1. Null takes the model's default (4 for Depth Pro 2, fewer when the window is shorter).</summary>
+    public int? FrameOverlap { get; init; }
+
+    /// <summary><see cref="VisionMode.MetricDepth"/> frames only: whether a frame also sees later frames (buffered, the default) or only itself and
+    /// earlier frames (unbuffered).</summary>
+    public VisionFrameBuffering? FrameBuffering { get; init; }
 
     /// <summary>Score threshold for detections, masks and tracks.</summary>
     public double Threshold { get; init; } = 0.25;
