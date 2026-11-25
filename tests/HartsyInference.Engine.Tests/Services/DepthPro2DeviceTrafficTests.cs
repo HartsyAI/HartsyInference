@@ -8,8 +8,9 @@ using Xunit.Abstractions;
 namespace HartsyInference.Engine.Tests.Services;
 
 /// <summary>
-/// How often Depth Pro 2 reads a tensor back from the CUDA device (<c>GetD2hSyncCount</c>) while it runs one warm image, three joint views and an
-/// unbuffered video, on the S weights with synthetic frames. It asserts only that the regions run, and prints one <c>D2H_SYNCS</c> line per region
+/// How often Depth Pro 2 moves tensors between the host and the CUDA device while it runs one warm image, three joint views and an unbuffered video,
+/// on the S weights with synthetic frames: device-to-host syncs (<c>GetD2hSyncCount</c>) and residency-cache misses (<c>GetGpuCacheStats</c>; each miss
+/// is a host-to-device upload). It asserts only that the regions run, and prints one <c>D2H_SYNCS</c> line per region
 /// so a change can be compared with a baseline run of the same test. Needs <c>HARTSY_DEPTHPRO2_WEIGHTS</c>, <c>HARTSY_DEPTHPRO2_FOCAL_WEIGHTS</c> and a
 /// CUDA device; otherwise it is reported as skipped (a skip is not a measurement).
 /// </summary>
@@ -34,17 +35,17 @@ public sealed class DepthPro2DeviceTrafficTests(ITestOutputHelper output)
         const int imageW = 1024, imageH = 576;
         byte[] image = Frame(imageW, imageH, 0);
         model.Predict(device, [image], imageW, imageH, null, estimator);
-        (long imageSyncs, double imageMs) = CountedValue(device, () => model.Predict(device, [image], imageW, imageH, null, estimator));
+        (long imageSyncs, long imageUploads, double imageMs) = CountedValue(device, () => model.Predict(device, [image], imageW, imageH, null, estimator));
 
         // Three joint 384x216 views.
         const int viewW = 384, viewH = 216;
         byte[][] views = [Frame(viewW, viewH, 1), Frame(viewW, viewH, 2), Frame(viewW, viewH, 3)];
         model.Predict(device, views, viewW, viewH, null, estimator);
-        (long viewSyncs, double viewMs) = CountedValue(device, () => model.Predict(device, views, viewW, viewH, null, estimator));
+        (long viewSyncs, long viewUploads, double viewMs) = CountedValue(device, () => model.Predict(device, views, viewW, viewH, null, estimator));
 
         // An unbuffered video of 6 frames at 384x216 with a window of 4: frames 0 to 2 fill the ring, 3 to 5 run with a full ring.
         const int window = 4, frames = 6;
-        long[] perFrame = new long[frames];
+        long[] perFrame = new long[frames], perFrameUploads = new long[frames];
         double[] perFrameMs = new double[frames];
         using (DepthPro2VideoStream warm = new(model.Network, device, viewW, viewH, 600, window, 0, DepthPro2VideoMode.Unbuffered))
             for (int i = 0; i < frames; i++) warm.Step(Frame(viewW, viewH, 10 + i));
@@ -52,25 +53,26 @@ public sealed class DepthPro2DeviceTrafficTests(ITestOutputHelper output)
             for (int i = 0; i < frames; i++)
             {
                 byte[] frame = Frame(viewW, viewH, 10 + i);
-                (perFrame[i], perFrameMs[i]) = CountedValue(device, () => stream.Step(frame));
+                (perFrame[i], perFrameUploads[i], perFrameMs[i]) = CountedValue(device, () => stream.Step(frame));
             }
 
-        output.WriteLine($"D2H_SYNCS image {imageW}x{imageH}: {imageSyncs} syncs, {imageMs:F0} ms");
-        output.WriteLine($"D2H_SYNCS views 3x{viewW}x{viewH}: {viewSyncs} syncs, {viewMs:F0} ms");
+        output.WriteLine($"D2H_SYNCS image {imageW}x{imageH}: {imageSyncs} syncs, {imageUploads} uploads, {imageMs:F0} ms");
+        output.WriteLine($"D2H_SYNCS views 3x{viewW}x{viewH}: {viewSyncs} syncs, {viewUploads} uploads, {viewMs:F0} ms");
         output.WriteLine($"D2H_SYNCS unbuffered window {window} {viewW}x{viewH} per frame: [{string.Join(", ", perFrame)}] syncs, "
-            + $"[{string.Join(", ", perFrameMs.Select(ms => ms.ToString("F0")))}] ms");
+            + $"[{string.Join(", ", perFrameUploads)}] uploads, [{string.Join(", ", perFrameMs.Select(ms => ms.ToString("F0")))}] ms");
         Assert.True(imageSyncs >= 0 && viewSyncs >= 0 && perFrame.All(count => count >= 0));
     }
 
-    private static (long Syncs, double Milliseconds) Counted(CudaBackend device, Action work)
+    private static (long Syncs, long Uploads, double Milliseconds) Counted(CudaBackend device, Action work)
     {
         device.ResetD2hSyncCount();
+        long missesBefore = device.GetGpuCacheStats().misses;
         Stopwatch clock = Stopwatch.StartNew();
         work();
-        return (device.GetD2hSyncCount(), clock.Elapsed.TotalMilliseconds);
+        return (device.GetD2hSyncCount(), device.GetGpuCacheStats().misses - missesBefore, clock.Elapsed.TotalMilliseconds);
     }
 
-    private static (long Syncs, double Milliseconds) CountedValue<T>(CudaBackend device, Func<T> work) => Counted(device, () => { _ = work(); });
+    private static (long Syncs, long Uploads, double Milliseconds) CountedValue<T>(CudaBackend device, Func<T> work) => Counted(device, () => { _ = work(); });
 
     // A smooth gradient with a few sinusoids and mild noise, the same for a given seed.
     private static byte[] Frame(int width, int height, int seed)
