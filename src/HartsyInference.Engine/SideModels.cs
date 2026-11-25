@@ -377,13 +377,16 @@ public static class SideModels
     };
 
     /// <summary>Qwen3-VL-4B text encoder as the Comfy-Org <c>int8_tensorwise</c> + ConvRot 256 build (4.86 GB), the encoder
-    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).
+    /// <para>The target name is its own folder, not <c>fibo2/qwen3vl_4b_int8_convrot.safetensors</c>: a same-named file from another
+    /// build (4,450,477,142 B, an int8 vision tower) sat there and satisfied the existence check, so the RMBG 3.0 run loaded it.
+    /// The pinned build lands beside it and nothing overwrites the other file.</para></summary>
     public static readonly ModelAsset Fibo2Qwen3VL4BInt8 = new ModelAsset
     {
         Repo = "Comfy-Org/Fibo-2.0",
         RepoPath = "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
         TargetSubdir = "text_encoders",
-        TargetName = "fibo2/qwen3vl_4b_int8_convrot.safetensors",
+        TargetName = "fibo2/comfy-org/qwen3vl_4b_int8_convrot.safetensors",
         Role = "text encoder",
         Sha256 = "32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c"
     };
