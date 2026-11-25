@@ -2,7 +2,6 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Transformer;
 
@@ -28,7 +27,7 @@ public sealed class Glm5NextVisionTower : IDisposable
     /// <summary>Loads the tower from <paramref name="source"/> (keys <c>model.visual.*</c>).</summary>
     /// <exception cref="InvalidDataException">The config is not one the tower runs (see <see cref="Glm5NextVisionConfig.Validate"/>), or a tensor is
     /// missing or does not have the shape the config implies.</exception>
-    public Glm5NextVisionTower(IBackend backend, Glm5NextVisionConfig config, IErnie5WeightSource source, float ropeTheta = 10000f)
+    public Glm5NextVisionTower(IBackend backend, Glm5NextVisionConfig config, IModelWeightSource source, float ropeTheta = 10000f)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -218,7 +217,7 @@ public sealed class Glm5NextVisionTower : IDisposable
         return (cos, sin, segments);
     }
 
-    private Block LoadBlock(IErnie5WeightSource source, string p, int h, int inter, int hd) => new(
+    private Block LoadBlock(IModelWeightSource source, string p, int h, int inter, int hd) => new(
         Norm1: Own(HostTensor(source, p + "norm1.weight", h)), Norm2: Own(HostTensor(source, p + "norm2.weight", h)),
         Qkv: Own(Matrix(source, p + "attn.qkv.weight", 3 * h, h)), QkvBias: Host(source, p + "attn.qkv.bias", 3 * h),
         Proj: Own(Matrix(source, p + "attn.proj.weight", h, h)), ProjBias: Host(source, p + "attn.proj.bias", h),
@@ -228,7 +227,7 @@ public sealed class Glm5NextVisionTower : IDisposable
         Down: Own(Matrix(source, p + "mlp.down_proj.weight", h, inter)), DownBias: Host(source, p + "mlp.down_proj.bias", h));
 
     // A 2-D weight with exactly the shape the config implies.
-    private Tensor Matrix(IErnie5WeightSource source, string name, int rows, int cols)
+    private Tensor Matrix(IModelWeightSource source, string name, int rows, int cols)
     {
         Tensor t = Read(source, name);
         if (t.Shape.Rank != 2 || t.Shape[0] != rows || t.Shape[1] != cols)
@@ -240,7 +239,7 @@ public sealed class Glm5NextVisionTower : IDisposable
     }
 
     // A conv weight stored flat, with rows x cols values: the same values in the row-major [rows, cols] layout.
-    private Tensor Flat(IErnie5WeightSource source, string name, int rows, int cols)
+    private Tensor Flat(IModelWeightSource source, string name, int rows, int cols)
     {
         Tensor t = Read(source, name);
         if (t.ElementCount != (long)rows * cols)
@@ -252,7 +251,7 @@ public sealed class Glm5NextVisionTower : IDisposable
     }
 
     // A checkpoint read that reports a missing tensor as the constructor documents.
-    private static Tensor Read(IErnie5WeightSource source, string name)
+    private static Tensor Read(IModelWeightSource source, string name)
     {
         try
         {
@@ -277,13 +276,13 @@ public sealed class Glm5NextVisionTower : IDisposable
             for (int j = 0; j < n; j++) y[r * n + j] += bias[j];
     }
 
-    private static Tensor HostTensor(IErnie5WeightSource source, string name, long elements)
+    private static Tensor HostTensor(IModelWeightSource source, string name, long elements)
     {
         float[] v = Host(source, name, elements);
         return HostMath.Tensor(v, v.Length);
     }
 
-    private static float[] Host(IErnie5WeightSource source, string name, long elements)
+    private static float[] Host(IModelWeightSource source, string name, long elements)
     {
         Tensor raw = Read(source, name);
         Tensor f32 = TensorCasts.EnsureF32(raw);
