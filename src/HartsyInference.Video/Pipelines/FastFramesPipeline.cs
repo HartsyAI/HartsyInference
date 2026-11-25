@@ -84,6 +84,7 @@ public sealed class FastFramesPipeline
     private readonly FastFramesConfig _config;
     private readonly FastFramesFlowSchedule _schedule;
     private readonly int _gridHeight, _gridWidth;
+    private readonly ResidentPrefixPin _generatorPin = new ResidentPrefixPin();
 
     /// <summary>Pairs a transformer, a refiner, a decoder and a recipe. Refuses a combination that cannot run, naming both sides, so
     /// the mismatch shows here rather than in the middle of a clip.</summary>
@@ -182,6 +183,8 @@ public sealed class FastFramesPipeline
         // must keep its size free before it decides how many blocks stay resident. On a CPU backend the scope is resident-only.
         long cacheBytes = FrameKvCache.EstimateBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth,
             _transformer.Config.InnerDim, DType.F16);
+        // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
+        // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
         using BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
         {
             Backend = _backend,
@@ -189,7 +192,10 @@ public sealed class FastFramesPipeline
             ModelName = _config.Name,
             HeadroomBytes = StreamingHeadroomOverride ?? cacheBytes + DefaultStreamingHeadroomBytes,
             Mode = StreamingMode,
+            Pin = _generatorPin,
+            TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
         });
+        LastStreamedBlocks = streaming.StreamedBlocks;
         for (int frame = 0; frame < latentFrames; frame++)
         {
             cancel.ThrowIfCancellationRequested();
@@ -218,6 +224,9 @@ public sealed class FastFramesPipeline
     /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
     /// (for tests); ForceOff keeps every block resident.</summary>
     public LowVramMode? StreamingMode { get; set; }
+
+    /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
+    public int LastStreamedBlocks { get; private set; }
 
     /// <summary>The activation, refiner and decoder allowance on top of the frame cache when the placement is planned.</summary>
     public const long DefaultStreamingHeadroomBytes = 1L << 30;

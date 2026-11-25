@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.FastFrames;
@@ -72,14 +72,19 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             StreamingMode = LowVramMode.ForceOff,
         };
         List<FastFramesFrame> expected = resident.Rollout(prompt, noise, Frames).ToList();
+        // The resident run left every block on the device. Free them so the streamed run starts cold and really uploads.
+        cuda.FreeWeights(model.Transformer.EnumerateWeights());
 
         FastFramesPipeline streamed = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
         {
             StreamingMode = LowVramMode.ForceOn,
+            // Belt-and-braces: ForceOn keeps no prefix whatever the headroom, so this only documents that nothing is kept resident.
             StreamingHeadroomOverride = long.MaxValue / 4,
         };
         List<FastFramesFrame> actual = streamed.Rollout(prompt, noise, Frames).ToList();
 
+        // The streamed run must have streamed every block, or the test proves nothing about streaming.
+        Assert.Equal(model.Transformer.BlockCount, streamed.LastStreamedBlocks);
         Assert.Equal(Frames, actual.Count);
         for (int f = 0; f < Frames; f++)
         {
