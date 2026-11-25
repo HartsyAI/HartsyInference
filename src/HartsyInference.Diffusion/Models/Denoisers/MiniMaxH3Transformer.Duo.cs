@@ -188,38 +188,8 @@ public sealed unsafe partial class MiniMaxH3Transformer
                 ForwardBlock(backend, ref stream, tEmb, modIndex, cos, sin, i, route.ChunkRows, null, bias, biasTile);
             }
 
-            // norm_out: the shift/scale table has one row per timestep; every row is addressed by its own time index.
-            Tensor normed = Norm(backend, stream, "final_layer.norm.weight", _config.FinalNormEps, DType.F32);
-            try
-            {
-                Tensor[] headMod = Adaln(backend, tEmb, "final_layer.adaln_proj", expand: 2, modalities: 1);
-                try
-                {
-                    using Tensor timeIndex = BuildDuoTimeIndex(layout);
-                    using Tensor modulated = Modulate(backend, normed, headMod[0], headMod[1], timeIndex);
-                    Tensor video = LinearDuoHead(backend, Gather(backend, modulated, layout.VideoRows), "final_layer.video_out");
-                    try
-                    {
-                        Tensor? audio = audioCount > 0
-                            ? LinearDuoHead(backend, Gather(backend, modulated, layout.AudioRows), "final_layer.audio_out")
-                            : null;
-                        return (video, audio);
-                    }
-                    catch
-                    {
-                        video.Dispose();
-                        throw;
-                    }
-                }
-                finally
-                {
-                    foreach (Tensor t in headMod) t.Dispose();
-                }
-            }
-            finally
-            {
-                normed.Dispose();
-            }
+            // norm_out and the output heads: shared with the cached forward.
+            return DuoHead(backend, stream, tEmb, layout, times.Length, audioCount > 0);
         }
         finally
         {
@@ -255,11 +225,14 @@ public sealed unsafe partial class MiniMaxH3Transformer
     /// <summary>Refines the text rows, projects video and audio, and gathers all three into the packed stream [S, hidden].
     /// Source row <c>k</c> of the concatenation is text <c>k</c>, then video, then audio; the last source row is zero for padding.</summary>
     private Tensor BuildDuoStream(IBackend backend, DuoLayout layout, IReadOnlyList<DuoGroup> refinerGroups,
-        DuoAttentionMode mode, Tensor textStates, Tensor videoRows, Tensor? audioRows, int hidden,
+        DuoAttentionMode mode, Tensor? textStates, Tensor videoRows, Tensor? audioRows, int hidden,
         int textCount, int videoCount, int audioCount)
     {
-        using Tensor refined = RefineDuoText(backend, textStates, refinerGroups, mode);
-        using Tensor? selected = textCount > 0 ? Gather(backend, refined, layout.TextSourceRows) : null;
+        // Text is optional: a layout with no text rows, or an empty text stream, skips the refiner.
+        using Tensor? refined = textStates is not null && textStates.Shape[0] > 0
+            ? RefineDuoText(backend, textStates, refinerGroups, mode)
+            : null;
+        using Tensor? selected = textCount > 0 ? Gather(backend, refined!, layout.TextSourceRows) : null;
         using Tensor videoEmbed = ProjectIntoStream(backend, videoRows, "video_patch_proj", hidden);
         using Tensor? audioEmbed = audioCount > 0 ? ProjectIntoStream(backend, audioRows!, "audio_patch_proj", hidden) : null;
         using Tensor zero = new Tensor(new TensorShape(1, hidden), DType.F32);

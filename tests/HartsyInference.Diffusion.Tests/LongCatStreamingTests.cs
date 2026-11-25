@@ -51,8 +51,11 @@ public sealed class LongCatStreamingTests
             }
 
             Assert.Equal(resident, streamed);
-            // Each denoise step visits every block once, so every block is uploaded at least once per step.
-            Assert.True(cache.Uploads >= blocks.Length * run.Steps, $"{cache.Uploads} uploads for {blocks.Length} blocks over {run.Steps} steps.");
+            // Every block was actually brought in, and the stream made no more uploads than one per block visit (guided denoising runs two
+            // forwards per step, and each forward visits every block). The controller may keep a block across visits, so the count is a range.
+            for (int b = 0; b < blocks.Length; b++)
+                Assert.Contains(blocks[b].EnumerateWeights(), cache.Uploaded.Contains);
+            Assert.InRange(cache.Uploads, blocks.Length, blocks.Length * 2 * run.Steps);
         }
         finally
         {
@@ -80,12 +83,17 @@ public sealed class LongCatStreamingTests
     /// <summary>A stand-in upload cache: every upload is an immediate no-op, and the count is kept for the test.</summary>
     private sealed class CountingCache : IStreamingWeightCache
     {
+        /// <summary>The number of block uploads: one per call, since the controller issues one upload for each block it brings in.</summary>
         public int Uploads { get; private set; }
+
+        /// <summary>The weight tensors that were uploaded at least once, by reference.</summary>
+        public HashSet<Tensor> Uploaded { get; } = new(ReferenceEqualityComparer.Instance);
 
         public StreamingUploadToken BeginUploadAsync(IEnumerable<Tensor> weights)
         {
-            foreach (Tensor _ in weights)
-                Uploads++;
+            Uploads++;
+            foreach (Tensor weight in weights)
+                Uploaded.Add(weight);
             return new StreamingUploadToken(1, this);
         }
 
