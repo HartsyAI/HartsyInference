@@ -244,7 +244,13 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
 
     /// <summary>Runs the packed sequence through the token refiner, all blocks, and the dual output heads.
     /// <paramref name="videoRows"/>/<paramref name="audioRows"/> are the patchified latent rows in segment order;
-    /// <paramref name="textStates"/> is the Qwen3-VL hidden state <c>[textLen, textDim]</c>.</summary>
+    /// <paramref name="textStates"/> is the Qwen3-VL hidden state <c>[textLen, textDim]</c>.
+    /// <paramref name="attentionBias"/> is an optional additive score bias for the main trunk's dense attention: F32
+    /// <c>[S, S]</c> with <c>S = layout.SequenceLength</c>, on this backend's device, added before softmax, where a
+    /// <c>-inf</c> entry excludes that key. It is borrowed for the call and not disposed. Only the main trunk's dense attention
+    /// applies it; the token refiner stays unmasked. A biased forward refuses Fun ControlNet, sparse attention, and any forward
+    /// that chunks attention, because the chunked and sparse paths take no bias. A biased call also skips the Sage and INT8 fast
+    /// paths, which take no bias, so it runs the dense path. The score matrix costs 4·S² bytes, about 3.6 GB at S ≈ 30k.</summary>
     internal (Tensor Video, Tensor Audio) ForwardPlanned(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
         Tensor audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
         IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
@@ -282,6 +288,31 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return video;
     }
 
+    /// <summary>Checks a Duo attention bias against the packed sequence, once per forward: F32 <c>[seq, seq]</c>.</summary>
+    internal static void ValidateAttentionBias(Tensor bias, int seq)
+    {
+        ArgumentNullException.ThrowIfNull(bias);
+        if (bias.DType != DType.F32 || bias.Shape.Rank != 2 || bias.Shape[0] != seq || bias.Shape[1] != seq)
+        {
+            throw new ArgumentException($"The attention bias must be F32 [{seq}, {seq}]; got {bias.DType} {bias.Shape}.", nameof(bias));
+        }
+    }
+
+    /// <summary>Refuses a biased forward that would not run dense, unchunked attention, and says why.</summary>
+    internal static void CheckBiasedRoute(int seq, int chunkRows, long freeBytes, bool sparse)
+    {
+        if (sparse)
+        {
+            throw new NotSupportedException("A Duo attention bias cannot run with sparse attention: the sparse path takes no bias.");
+        }
+        if (seq > chunkRows)
+        {
+            throw new NotSupportedException(
+                $"A Duo attention bias needs dense, unchunked attention, but this forward chunks at {chunkRows} rows "
+                + $"(seq={seq}, free VRAM {freeBytes} bytes). Free more VRAM or shorten the sequence; a chunked bias path is not implemented.");
+        }
+    }
+
     private (Tensor Video, Tensor? Audio) ForwardCore(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
         Tensor? audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
         IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
@@ -305,6 +336,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         }
 
         int seq = layout.SequenceLength;
+        if (attentionBias is not null)
+        {
+            ValidateAttentionBias(attentionBias, seq);
+        }
         // Resolved once per forward, not per block: free VRAM only needs a cheap driver query (no stream sync, so
         // this cannot affect the GPU-resident-loop D2H-sync count), but re-querying inside the block loop would let
         // the chunk size drift mid-generation as VRAM usage elsewhere changes — non-deterministic and hostile to
@@ -315,10 +350,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         {
             Logs.Info($"[MiniMaxH3] chunked attention/MLP: seq={seq} chunkRows={chunkRows} freeBytes={freeBytes}.");
         }
-        if (attentionBias is not null && (sparseAttention is not null || seq > chunkRows))
+        if (attentionBias is not null)
         {
-            // Chunked and sparse attention take no bias; refuse rather than attend unmasked.
-            throw new NotSupportedException("A Duo attention bias needs dense, unchunked attention; this forward is chunked or sparse.");
+            CheckBiasedRoute(seq, chunkRows, freeBytes, sparse: sparseAttention is not null);
         }
 
         Tensor h = EmbedSegments(backend, layout, videoRows, audioRows, textStates);
