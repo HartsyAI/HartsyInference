@@ -327,7 +327,6 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         // An in-place op re-caches the same tensor. The previous callbacks close over the OLD buffer and would free
         // it out from under the new one, so clear first — keyed, so another device's binding on this tensor stands.
         tensor.ClearGpuBinding(BindingKey);
-        tensor.MarkViewedOwnersStale();
 
         try
         {
@@ -342,6 +341,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             BindingKey,
             sync: () => SyncActivationToHost(tensor),
             dispose: () => ReleaseActivation(tensor));
+        tensor.MarkViewedOwnersStale();
     }
 
     private void CacheActivationCore(Tensor tensor, TBuffer buffer, long bytes)
