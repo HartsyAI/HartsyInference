@@ -54,12 +54,23 @@ public sealed class Hy4FlashVisionTower : IDisposable
             _mergeW2 = Flat(source.Read("vit.perceive.proj.2.weight"), config.OutHiddenSize, d * m * m);
             _mergeB2 = F32(source, "vit.perceive.proj.2.bias");
             _newline = F32(source, "vit.perceive.image_newline");
+            // The position lookup skips a leading row (1 + y * edge + x), so the table must hold PositionRows rows; a checkpoint with another max_image_size fails here, not inside a read.
+            RequireShape(_positions, "vit.embeddings.position_embedding.weight", config.PositionRows, d);
+            RequireShape(_newline, "vit.perceive.image_newline", config.OutHiddenSize);
         }
         catch
         {
             Dispose();
             throw;
         }
+    }
+
+    private static void RequireShape(Tensor t, string name, params long[] dims)
+    {
+        bool ok = t.Shape.Rank == dims.Length;
+        for (int i = 0; ok && i < dims.Length; i++) ok = t.Shape[i] == dims[i];
+        if (!ok)
+            throw new InvalidDataException($"{name} must be [{string.Join(", ", dims)}] but the checkpoint holds [{string.Join(", ", Enumerable.Range(0, t.Shape.Rank).Select(i => t.Shape[i]))}].");
     }
 
     /// <summary>Tokens a <paramref name="gridHeight"/> by <paramref name="gridWidth"/> patch image yields: merged rows of merged columns plus one newline each.</summary>

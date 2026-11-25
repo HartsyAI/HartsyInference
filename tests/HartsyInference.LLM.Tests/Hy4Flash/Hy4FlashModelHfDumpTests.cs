@@ -117,6 +117,41 @@ public sealed class Hy4FlashModelHfDumpTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void TwoStates_InterleavedWithAnImage_EachMatchesItsOwnSoloRun()
+    {
+        Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(DataDir, "config.json"));
+        using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenFiles([Path.Combine(DataDir, "weights.safetensors")]);
+        SetSource source = new(set);
+        CpuBackend backend = new();
+        float[] features;
+        using (Hy4FlashVisionTower tower = new(backend, config.Vision, source)) features = tower.Forward(Npy("image__pixel_values"), 4, 4);
+        using Hy4FlashModel model = new(backend, config, source, 64);
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(DataDir, "inputs_image.json")));
+        int[] imageIds = [.. document.RootElement.GetProperty("input_ids").EnumerateArray().Select(static e => e.GetInt32())];
+        int[] textIds = Ids();
+        Hy4FlashImage image = new(4, 4, features);
+
+        // Reference: the image sequence alone, then one cached decode step.
+        float[] solo;
+        using (Hy4FlashSequenceState alone = model.CreateState())
+        {
+            model.Forward(imageIds, alone, images: [image]);
+            solo = model.Forward(textIds.AsSpan(0, 1), alone);
+        }
+
+        // Two states on one model: the image sequence, a text prefill on a second state, then the first state's decode step.
+        using Hy4FlashSequenceState a = model.CreateState();
+        using Hy4FlashSequenceState b = model.CreateState();
+        model.Forward(imageIds, a, images: [image]);
+        model.Forward(textIds, b);
+        float[] interleaved = model.Forward(textIds.AsSpan(0, 1), a);
+
+        float diff = RelativeMax(solo, interleaved, config.VocabSize, out _);
+        output.WriteLine($"two states: {diff:E2}");
+        Assert.True(diff < 1e-5f, $"the first state's decode changed after a second state ran: {diff:E2}");
+    }
+
+    [Fact]
     public void ImageSequence_MatchesEveryStageOfTheHfDump()
     {
         Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(DataDir, "config.json"));
