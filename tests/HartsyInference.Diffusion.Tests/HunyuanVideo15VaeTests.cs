@@ -35,6 +35,38 @@ public sealed class HunyuanVideo15VaeTests
         AssertClose(fixture.Reference("moments"), moments, "video moments", Tolerance);
     }
 
+    [Theory]
+    [InlineData(4, 16, 32)]
+    [InlineData(5, 20, 32)]
+    [InlineData(5, 16, 24)]
+    [InlineData(5, 16, 33)]
+    public void EncodeRejectsAClipThatIsNotATemporalAndSpatialMultiple(int frames, int height, int width)
+    {
+        using Fixture fixture = new();
+        Tensor video = HunyuanVideo15VaeShuffle.Alloc(3, frames, height, width);
+        Assert.Throws<ArgumentException>(() => fixture.Vae.EncodeMoments(fixture.Backend, video));
+    }
+
+    [Theory]
+    [InlineData(true, 3, 4)]
+    [InlineData(true, 4, 3)]
+    [InlineData(false, 3, 4)]
+    [InlineData(false, 4, 3)]
+    public void ShuffleRefusesOddSpatialSizes(bool temporal, int height, int width)
+    {
+        using Fixture fixture = new();
+        Tensor h = HunyuanVideo15VaeShuffle.Alloc(temporal ? 2 : 1, 3, height, width);
+        Tensor x = HunyuanVideo15VaeShuffle.Alloc(4, 3, height, width);
+        Assert.Throws<ArgumentException>(() => HunyuanVideo15VaeShuffle.PackDownsample(fixture.Backend, h, temporal ? 16 : 4, temporal));
+        Assert.Throws<ArgumentException>(() => HunyuanVideo15VaeShuffle.DownsampleShortcut(fixture.Backend, x, 4, temporal));
+    }
+
+    [Fact]
+    public void AllocRefusesAnElementCountThatCannotBeIndexed()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => HunyuanVideo15VaeShuffle.Alloc(256, 2048, 1024, 1024));
+    }
+
     [Fact]
     public void EncodeMeanIsTheFirstLatentHalfOfTheMoments()
     {
@@ -74,8 +106,8 @@ public sealed class HunyuanVideo15VaeTests
         int cout = BlockOut[level + 1];
         bool temporal = config.EncoderTemporalDownsample(level);
         string stage = $"stage.enc.down.{level}.downsample";
-        using Tensor main = HunyuanVideo15VaeShuffle.PackDownsample(fixture.Reference($"{stage}.h"), cout, temporal);
-        using Tensor shortcut = HunyuanVideo15VaeShuffle.DownsampleShortcut(fixture.Reference($"{stage}.x"), cout, temporal);
+        using Tensor main = HunyuanVideo15VaeShuffle.PackDownsample(fixture.Backend, fixture.Reference($"{stage}.h"), cout, temporal);
+        using Tensor shortcut = HunyuanVideo15VaeShuffle.DownsampleShortcut(fixture.Backend, fixture.Reference($"{stage}.x"), cout, temporal);
         using Tensor sum = fixture.Add(main, shortcut);
         AssertClose(fixture.Reference($"{stage}.out"), sum, $"encoder downsample level {level} (temporal={temporal})", StageTolerance);
     }
@@ -93,8 +125,8 @@ public sealed class HunyuanVideo15VaeTests
         int cout = reversed[level + 1];
         bool temporal = config.DecoderTemporalUpsample(level);
         string stage = $"stage.dec.up.{level}.upsample";
-        using Tensor main = HunyuanVideo15VaeShuffle.UnpackUpsample(fixture.Reference($"{stage}.h"), cout, temporal);
-        using Tensor shortcut = HunyuanVideo15VaeShuffle.UpsampleShortcut(fixture.Reference($"{stage}.x"), cout, temporal);
+        using Tensor main = HunyuanVideo15VaeShuffle.UnpackUpsample(fixture.Backend, fixture.Reference($"{stage}.h"), cout, temporal);
+        using Tensor shortcut = HunyuanVideo15VaeShuffle.UpsampleShortcut(fixture.Backend, fixture.Reference($"{stage}.x"), cout, temporal);
         using Tensor sum = fixture.Add(main, shortcut);
         AssertClose(fixture.Reference($"{stage}.out"), sum, $"decoder upsample level {level} (temporal={temporal})", StageTolerance);
     }

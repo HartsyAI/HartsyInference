@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -53,21 +54,45 @@ internal sealed class HunyuanVideo15VaeWeights(IReadOnlyDictionary<string, Tenso
     }
 }
 
-/// <summary>Index maps of the HunyuanVideo-1.5 VAE's shuffle resamplers and shortcuts, transcribed from MovieRoll's <c>causal_vae.py</c>
-/// (einops patterns and <c>repeat_interleave</c>). Tensors are <c>[1, C, T, H, W]</c> F32. These run on the host: correct, not fast.</summary>
+/// <summary>Layout of the HunyuanVideo-1.5 VAE's DCAE resamplers and shortcuts, on the backend. Tensors are <c>[1, C, T, H, W]</c> F32 and
+/// batch 1 only. Every DCAE shuffle is one <see cref="PixelShuffles"/> move with time outermost, then height and width, channel innermost
+/// (<c>((t·fH + h)·fW + w)·C + c</c>, MovieRoll's <c>(r1 r2 r3 c)</c> packing). A factor of 1 makes the time position irrelevant, so the first-frame
+/// branches (time factor 1) use the same order. The shortcut group means (<see cref="GroupMean"/>) are the only host arithmetic: the backend has no
+/// grouped reduction, so they read the packed tensors on the host.</summary>
 internal static class HunyuanVideo15VaeShuffle
 {
+    private static readonly ChannelOrder Order = new(ShuffleAxis.Time, ShuffleAxis.Height, ShuffleAxis.Width, ShuffleAxis.Channel);
+
+    /// <summary>The <c>[1, C, T, H, W]</c> extents of an F32 tensor, after checking the rank, the batch and that the element count fits an int index.</summary>
     public static (int C, int T, int H, int W) Dims(Tensor x)
     {
         if (x.Shape.Rank != 5 || x.Shape[0] != 1 || x.DType != DType.F32)
             throw new ArgumentException($"HunyuanVideo-1.5 VAE layers take an F32 [1, C, T, H, W] tensor, got {x.Shape} {x.DType}.", nameof(x));
+        RequireIndexable(x.Shape[1], x.Shape[2], x.Shape[3], x.Shape[4]);
         return ((int)x.Shape[1], (int)x.Shape[2], (int)x.Shape[3], (int)x.Shape[4]);
     }
 
-    public static Tensor Alloc(int c, int t, int h, int w) => new(new TensorShape([1L, c, t, h, w]), DType.F32);
+    /// <summary>A new F32 <c>[1, C, T, H, W]</c> tensor. Throws when the element count would not fit the int indices the layers use.</summary>
+    public static Tensor Alloc(int c, int t, int h, int w)
+    {
+        RequireIndexable(c, t, h, w);
+        return new(new TensorShape([1L, c, t, h, w]), DType.F32);
+    }
 
-    private static int Idx(int c, int t, int h, int w, int ct, int ch, int cw)
-        => (((c * ct) + t) * ch + h) * cw + w;
+    /// <summary>Throws when <c>C·T·H·W</c> exceeds <see cref="int.MaxValue"/>: the span indices here are ints, so a larger clip would truncate
+    /// silently. The fix is to chunk the clip, not to widen the indices.</summary>
+    private static void RequireIndexable(long c, long t, long h, long w)
+    {
+        Int128 count = (Int128)c * t * h * w;
+        if (count > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(c), $"A [1, {c}, {t}, {h}, {w}] tensor has {count} elements; the VAE indexes with int, so the limit is {int.MaxValue}. Chunk the clip.");
+    }
+
+    private static void RequireEvenSpatial(int h, int w, string what)
+    {
+        if (h % 2 != 0 || w % 2 != 0)
+            throw new ArgumentException($"The {what} needs even H and W (a 2x2 spatial shuffle); got H={h}, W={w}.", nameof(h));
+    }
 
     private static int Quotient(int value, int divisor, string what)
     {
@@ -76,232 +101,160 @@ internal static class HunyuanVideo15VaeShuffle
         return value / divisor;
     }
 
-    /// <summary>Temporal frame count after a temporal downsample: the first frame stays alone and the rest pair up, so <c>T' = 1 + (T−1)/2</c>.</summary>
+    /// <summary>Frames after a temporal downsample: the first frame stays alone and the rest pair up, <c>T' = 1 + (T−1)/2</c>.</summary>
     private static int DownFrames(int t)
     {
         if ((t - 1) % 2 != 0) throw new ArgumentException($"A temporal downsample needs 1 + 2n frames, got {t}.");
         return 1 + (t - 1) / 2;
     }
 
-    /// <summary>Main path of a downsample: the conv output <paramref name="h"/> (<c>cout / 8</c> or <c>cout / 4</c> channels) packed into
-    /// <paramref name="cout"/> channels, spatially 2× smaller (and temporally halved after the first frame when <paramref name="temporal"/>).</summary>
-    public static Tensor PackDownsample(Tensor h, int cout, bool temporal)
+    /// <summary>Unpacks <paramref name="packed"/> (<c>channels·fT·fH·fW</c> channels on a small grid) to <c>[1, channels, frames·fT, H·fH, W·fW]</c>.</summary>
+    private static Tensor Unshuffle(IBackend backend, Tensor packed, int channels, int fT, int fH, int fW)
+    {
+        (int c, int frames, int hp, int wp) = Dims(packed);
+        if (c != channels * fT * fH * fW)
+            throw new ArgumentException($"Unshuffle of {packed.Shape} by {fT}x{fH}x{fW} to {channels} channels needs {channels * fT * fH * fW} packed channels.", nameof(packed));
+        Tensor output = Alloc(channels, frames * fT, hp * fH, wp * fW);
+        PixelShuffles.DepthToSpace(backend, output, packed, ShuffleSpec.ChannelsFirst(1, frames, hp, wp, channels, fT, fH, fW, Order));
+        return output;
+    }
+
+    /// <summary>Packs <paramref name="unpacked"/> to <c>[1, C·fT·fH·fW, T/fT, H/fH, W/fW]</c>: the inverse of <see cref="Unshuffle"/>.</summary>
+    private static Tensor Shuffle(IBackend backend, Tensor unpacked, int fT, int fH, int fW)
+    {
+        (int channels, int t, int h, int w) = Dims(unpacked);
+        if (t % fT != 0 || h % fH != 0 || w % fW != 0)
+            throw new ArgumentException($"Shuffle of {unpacked.Shape} by {fT}x{fH}x{fW} needs each extent divisible by its factor.", nameof(unpacked));
+        int frames = t / fT, hp = h / fH, wp = w / fW;
+        Tensor packed = Alloc(channels * fT * fH * fW, frames, hp, wp);
+        PixelShuffles.SpaceToDepth(backend, packed, unpacked, ShuffleSpec.ChannelsFirst(1, frames, hp, wp, channels, fT, fH, fW, Order));
+        return packed;
+    }
+
+    /// <summary>Frames <c>[start, start + count)</c> of a <c>[1, C, T, H, W]</c> tensor.</summary>
+    private static Tensor Frames(IBackend backend, Tensor x, int start, int count)
+    {
+        (int c, int _, int h, int w) = Dims(x);
+        Tensor output = Alloc(c, count, h, w);
+        StridedCopies.SliceAxis(backend, output, x, 2, start, count);
+        return output;
+    }
+
+    /// <summary>The first <paramref name="count"/> channels of a <c>[1, C, T, H, W]</c> tensor.</summary>
+    private static Tensor Channels(IBackend backend, Tensor x, int count)
+    {
+        (int _, int t, int h, int w) = Dims(x);
+        Tensor output = Alloc(count, t, h, w);
+        StridedCopies.SliceAxis(backend, output, x, 1, 0, count);
+        return output;
+    }
+
+    /// <summary>Each channel repeated <paramref name="repeats"/> times in place: channel <c>k</c> of the output reads input channel <c>k / repeats</c>.</summary>
+    private static Tensor RepeatChannels(IBackend backend, Tensor x, int repeats)
+    {
+        (int c, int t, int h, int w) = Dims(x);
+        Tensor output = Alloc(c * repeats, t, h, w);
+        StridedCopies.RepeatInterleave(backend, output, x, 1, repeats);
+        return output;
+    }
+
+    /// <summary>Concatenates along <paramref name="dim"/> (1 channels, 2 frames) on the backend.</summary>
+    private static Tensor Concat(IBackend backend, int dim, params Tensor[] parts)
+    {
+        (int c0, int t0, int h0, int w0) = Dims(parts[0]);
+        int c = c0, t = t0;
+        for (int i = 1; i < parts.Length; i++)
+        {
+            (int ci, int ti, int hi, int wi) = Dims(parts[i]);
+            if (hi != h0 || wi != w0 || (dim == 1 && ti != t0) || (dim == 2 && ci != c0))
+                throw new ArgumentException("Concatenated parts disagree outside the concatenation axis.");
+            if (dim == 1) c += ci; else t += ti;
+        }
+        Tensor output = Alloc(c, t, h0, w0);
+        backend.Concat(output, parts, dim);
+        return output;
+    }
+
+    /// <summary>Downsample main path. <paramref name="h"/> is the conv output (<c>cout/8</c> or <c>cout/4</c> channels); the result is <c>cout</c>
+    /// channels, half the spatial size, and with <paramref name="temporal"/> the first frame alone then frame pairs packed.</summary>
+    public static Tensor PackDownsample(IBackend backend, Tensor h, int cout, bool temporal)
     {
         (int co, int t, int hh, int ww) = Dims(h);
-        int oh = hh / 2, ow = ww / 2;
-        ReadOnlySpan<float> s = h.AsReadOnlySpan<float>();
-
+        RequireEvenSpatial(hh, ww, "downsample");
         if (!temporal)
         {
             if (4 * co != cout) throw new ArgumentException($"spatial downsample: 4·{co} must equal cout {cout}.");
-            Tensor o = Alloc(cout, t, oh, ow);
-            Span<float> d = o.AsSpan<float>();
-            for (int oc = 0; oc < cout; oc++)
-                for (int tt = 0; tt < t; tt++)
-                    for (int i = 0; i < oh; i++)
-                        for (int j = 0; j < ow; j++)
-                        {
-                            int rr = oc / co, c = oc % co;
-                            d[Idx(oc, tt, i, j, t, oh, ow)] = s[Idx(c, tt, 2 * i + rr / 2, 2 * j + rr % 2, t, hh, ww)];
-                        }
-            return o;
+            return Shuffle(backend, h, 1, 2, 2);
         }
-
         if (cout != 8 * co) throw new ArgumentException($"temporal downsample: cout {cout} must be 8·{co}.");
-        int tOut = DownFrames(t);
-        Tensor r = Alloc(cout, tOut, oh, ow);
-        Span<float> dst = r.AsSpan<float>();
-        for (int oc = 0; oc < cout; oc++)
-            for (int u = 0; u < tOut; u++)
-                for (int i = 0; i < oh; i++)
-                    for (int j = 0; j < ow; j++)
-                    {
-                        int c, srcT, rr;
-                        if (u == 0)
-                        {
-                            // h_first is the first frame packed as (r2 r3 c) into 4·co channels, then concatenated with itself.
-                            int kk = oc % (4 * co);
-                            rr = kk / co; c = kk % co; srcT = 0;
-                        }
-                        else
-                        {
-                            // h_next packs (r1 r2 r3 c) over frame pairs: output frame u = 1 + f, source frame 1 + 2f + r1.
-                            int f = u - 1;
-                            int r1 = oc / (4 * co), kk = oc % (4 * co);
-                            rr = kk / co; c = kk % co; srcT = 1 + 2 * f + r1;
-                        }
-                        dst[Idx(oc, u, i, j, tOut, oh, ow)] = s[Idx(c, srcT, 2 * i + rr / 2, 2 * j + rr % 2, t, hh, ww)];
-                    }
-        return r;
+        DownFrames(t);
+        // h_first is packed (r2 r3 c) into 4·co channels and concatenated with itself to 8·co, as the reference does.
+        Tensor first = Shuffle(backend, Frames(backend, h, 0, 1), 1, 2, 2);
+        Tensor firstDup = Concat(backend, 1, first, first);
+        if (t == 1) return firstDup;
+        Tensor rest = Shuffle(backend, Frames(backend, h, 1, t - 1), 2, 2, 2);
+        return Concat(backend, 2, firstDup, rest);
     }
 
-    /// <summary>Shortcut of a downsample: the input <paramref name="x"/> packed the same way and mean-pooled into <paramref name="cout"/> channels.</summary>
-    public static Tensor DownsampleShortcut(Tensor x, int cout, bool temporal)
+    /// <summary>Downsample shortcut: the input packed the same way, then each group of <c>C/cout</c> packed channels averaged.</summary>
+    public static Tensor DownsampleShortcut(IBackend backend, Tensor x, int cout, bool temporal)
     {
         (int cin, int t, int hh, int ww) = Dims(x);
-        int oh = hh / 2, ow = ww / 2;
-        ReadOnlySpan<float> s = x.AsReadOnlySpan<float>();
-
+        RequireEvenSpatial(hh, ww, "downsample shortcut");
         if (!temporal)
         {
-            int gs = Quotient(4 * cin, cout, "spatial downsample shortcut group");
-            Tensor o = Alloc(cout, t, oh, ow);
-            Span<float> d = o.AsSpan<float>();
-            for (int oc = 0; oc < cout; oc++)
-                for (int tt = 0; tt < t; tt++)
-                    for (int i = 0; i < oh; i++)
-                        for (int j = 0; j < ow; j++)
-                        {
-                            double sum = 0;
-                            for (int g = 0; g < gs; g++)
-                            {
-                                int k = oc * gs + g, rr = k / cin, c = k % cin;
-                                sum += s[Idx(c, tt, 2 * i + rr / 2, 2 * j + rr % 2, t, hh, ww)];
-                            }
-                            d[Idx(oc, tt, i, j, t, oh, ow)] = (float)(sum / gs);
-                        }
-            return o;
+            Quotient(4 * cin, cout, "spatial downsample shortcut group");
+            return GroupMean(Shuffle(backend, x, 1, 2, 2), cout);
         }
-
-        int tOut = DownFrames(t);
-        // Reference: x_first is (r2 r3 c) with 4·cin channels viewed as (cout, (8·cin/cout)//2) = (cout, 4·cin/cout).
-        int halfFirst = Quotient(4 * cin, cout, "temporal downsample first-frame group");
-        int gsRest = Quotient(8 * cin, cout, "temporal downsample rest group");
-        Tensor r = Alloc(cout, tOut, oh, ow);
-        Span<float> dst = r.AsSpan<float>();
-        for (int oc = 0; oc < cout; oc++)
-            for (int u = 0; u < tOut; u++)
-                for (int i = 0; i < oh; i++)
-                    for (int j = 0; j < ow; j++)
-                    {
-                        double sum = 0;
-                        if (u == 0)
-                        {
-                            // The first frame is packed (r2 r3 c) into 4·cin channels; the shortcut averages half a group of them.
-                            for (int g = 0; g < halfFirst; g++)
-                            {
-                                int k = oc * halfFirst + g, rr = k / cin, c = k % cin;
-                                sum += s[Idx(c, 0, 2 * i + rr / 2, 2 * j + rr % 2, t, hh, ww)];
-                            }
-                            dst[Idx(oc, u, i, j, tOut, oh, ow)] = (float)(sum / halfFirst);
-                        }
-                        else
-                        {
-                            int f = u - 1;
-                            for (int g = 0; g < gsRest; g++)
-                            {
-                                int k = oc * gsRest + g, r1 = k / (4 * cin), kk = k % (4 * cin), rr = kk / cin, c = kk % cin;
-                                sum += s[Idx(c, 1 + 2 * f + r1, 2 * i + rr / 2, 2 * j + rr % 2, t, hh, ww)];
-                            }
-                            dst[Idx(oc, u, i, j, tOut, oh, ow)] = (float)(sum / gsRest);
-                        }
-                    }
-        return r;
+        DownFrames(t);
+        // The first frame averages half a group, as the reference does: 4·cin packed channels into cout.
+        Quotient(4 * cin, cout, "temporal downsample first-frame group");
+        Quotient(8 * cin, cout, "temporal downsample rest group");
+        Tensor first = GroupMean(Shuffle(backend, Frames(backend, x, 0, 1), 1, 2, 2), cout);
+        if (t == 1) return first;
+        Tensor rest = GroupMean(Shuffle(backend, Frames(backend, x, 1, t - 1), 2, 2, 2), cout);
+        return Concat(backend, 2, first, rest);
     }
 
-    /// <summary>Main path of an upsample: the conv output <paramref name="h"/> (<c>factor · cout</c> channels) unpacked to <paramref name="cout"/>
-    /// channels with 2× spatial (and, when <paramref name="temporal"/>, 2× temporal after the first frame) expansion.</summary>
-    public static Tensor UnpackUpsample(Tensor h, int cout, bool temporal)
+    /// <summary>Upsample main path. <paramref name="h"/> has <c>factor·cout</c> channels; the result has <c>cout</c> channels and twice the spatial
+    /// size, and with <paramref name="temporal"/> the first frame alone then frame pairs unpacked.</summary>
+    public static Tensor UnpackUpsample(IBackend backend, Tensor h, int cout, bool temporal)
     {
         (int ch, int t, int hh, int ww) = Dims(h);
-        int oh = hh * 2, ow = ww * 2;
-        ReadOnlySpan<float> s = h.AsReadOnlySpan<float>();
-
         if (!temporal)
         {
             if (ch != 4 * cout) throw new ArgumentException($"spatial upsample: channels {ch} must be 4·{cout}.");
-            Tensor o = Alloc(cout, t, oh, ow);
-            Span<float> d = o.AsSpan<float>();
-            for (int oc = 0; oc < cout; oc++)
-                for (int tt = 0; tt < t; tt++)
-                    for (int i = 0; i < oh; i++)
-                        for (int j = 0; j < ow; j++)
-                        {
-                            int rr = (i % 2) * 2 + (j % 2);
-                            d[Idx(oc, tt, i, j, t, oh, ow)] = s[Idx(rr * cout + oc, tt, i / 2, j / 2, t, hh, ww)];
-                        }
-            return o;
+            return Unshuffle(backend, h, cout, 1, 2, 2);
         }
-
         if (ch != 8 * cout) throw new ArgumentException($"temporal upsample: channels {ch} must be 8·{cout}.");
-        int tOut = 1 + 2 * (t - 1);
-        Tensor r = Alloc(cout, tOut, oh, ow);
-        Span<float> dst = r.AsSpan<float>();
-        for (int oc = 0; oc < cout; oc++)
-            for (int u = 0; u < tOut; u++)
-                for (int i = 0; i < oh; i++)
-                    for (int j = 0; j < ow; j++)
-                    {
-                        int rr = (i % 2) * 2 + (j % 2), k, srcT;
-                        if (u == 0)
-                        {
-                            // h_first: the first frame packed (r2 r3 c) with 2·cout channels, keeping the first cout of them.
-                            k = rr * (2 * cout) + oc; srcT = 0;
-                        }
-                        else
-                        {
-                            // h_next: the remaining frames packed (r1 r2 r3 c); output frame u = 1 + 2f + r1 from source frame 1 + f.
-                            int v = u - 1, f = v / 2, r1 = v % 2;
-                            k = (r1 * 4 + rr) * cout + oc; srcT = 1 + f;
-                        }
-                        dst[Idx(oc, u, i, j, tOut, oh, ow)] = s[Idx(k, srcT, i / 2, j / 2, t, hh, ww)];
-                    }
-        return r;
+        // h_first is packed (r2 r3 c) with 2·cout channels; the first cout are kept.
+        Tensor first = Channels(backend, Unshuffle(backend, Frames(backend, h, 0, 1), 2 * cout, 1, 2, 2), cout);
+        if (t == 1) return first;
+        Tensor rest = Unshuffle(backend, Frames(backend, h, 1, t - 1), cout, 2, 2, 2);
+        return Concat(backend, 2, first, rest);
     }
 
-    /// <summary>Shortcut of an upsample: <paramref name="x"/> channel-repeated and unpacked the way <see cref="UnpackUpsample"/> unpacks the main path.</summary>
-    public static Tensor UpsampleShortcut(Tensor x, int cout, bool temporal)
+    /// <summary>Upsample shortcut: <paramref name="x"/> unpacked the way <see cref="UnpackUpsample"/> unpacks the main path, then each channel
+    /// repeated to <paramref name="cout"/> channels.</summary>
+    public static Tensor UpsampleShortcut(IBackend backend, Tensor x, int cout, bool temporal)
     {
         (int cin, int t, int hh, int ww) = Dims(x);
-        int oh = hh * 2, ow = ww * 2;
-        ReadOnlySpan<float> s = x.AsReadOnlySpan<float>();
-
         if (!temporal)
         {
             int rep = Quotient(4 * cout, cin, "spatial upsample shortcut repeat");
-            Tensor o = Alloc(cout, t, oh, ow);
-            Span<float> d = o.AsSpan<float>();
-            for (int oc = 0; oc < cout; oc++)
-                for (int tt = 0; tt < t; tt++)
-                    for (int i = 0; i < oh; i++)
-                        for (int j = 0; j < ow; j++)
-                        {
-                            int rr = (i % 2) * 2 + (j % 2);
-                            int src = (rr * cout + oc) / rep;
-                            d[Idx(oc, tt, i, j, t, oh, ow)] = s[Idx(src, tt, i / 2, j / 2, t, hh, ww)];
-                        }
-            return o;
+            return Unshuffle(backend, RepeatChannels(backend, x, rep), cout, 1, 2, 2);
         }
-
         int rep1 = Quotient(4 * cout, cin, "temporal upsample first-frame repeat");   // repeats // 2
         int rep2 = Quotient(8 * cout, cin, "temporal upsample rest repeat");
         int cFirst = Quotient(cin, 4, "temporal upsample first-frame pack");
         int cRest = Quotient(cin, 8, "temporal upsample rest pack");
-        int tOut = 1 + 2 * (t - 1);
-        Tensor r = Alloc(cout, tOut, oh, ow);
-        Span<float> dst = r.AsSpan<float>();
-        for (int oc = 0; oc < cout; oc++)
-            for (int u = 0; u < tOut; u++)
-                for (int i = 0; i < oh; i++)
-                    for (int j = 0; j < ow; j++)
-                    {
-                        int rr = (i % 2) * 2 + (j % 2);
-                        if (u == 0)
-                        {
-                            int k = rr * cFirst + oc / rep1;
-                            dst[Idx(oc, u, i, j, tOut, oh, ow)] = s[Idx(k, 0, i / 2, j / 2, t, hh, ww)];
-                        }
-                        else
-                        {
-                            int v = u - 1, f = v / 2, r1 = v % 2;
-                            int k = (r1 * 4 + rr) * cRest + oc / rep2;
-                            dst[Idx(oc, u, i, j, tOut, oh, ow)] = s[Idx(k, 1 + f, i / 2, j / 2, t, hh, ww)];
-                        }
-                    }
-        return r;
+        Tensor first = RepeatChannels(backend, Unshuffle(backend, Frames(backend, x, 0, 1), cFirst, 1, 2, 2), rep1);
+        if (t == 1) return first;
+        Tensor rest = RepeatChannels(backend, Unshuffle(backend, Frames(backend, x, 1, t - 1), cRest, 2, 2, 2), rep2);
+        return Concat(backend, 2, first, rest);
     }
 
-    /// <summary>Encoder end shortcut: consecutive groups of <c>C / outC</c> channels averaged into <paramref name="outC"/> channels.</summary>
+    /// <summary>Encoder end shortcut: consecutive groups of <c>C / outC</c> channels averaged into <paramref name="outC"/> channels. Host arithmetic.</summary>
     public static Tensor GroupMean(Tensor h, int outC)
     {
         (int c, int t, int hh, int ww) = Dims(h);
@@ -320,25 +273,12 @@ internal static class HunyuanVideo15VaeShuffle
         return o;
     }
 
-    /// <summary>Decoder start shortcut: each latent channel repeated <c>outC / C</c> times, consecutively.</summary>
-    public static Tensor RepeatChannels(Tensor z, int outC)
-    {
-        (int c, int t, int hh, int ww) = Dims(z);
-        int rep = Quotient(outC, c, "decoder start shortcut repeat");
-        Tensor o = Alloc(outC, t, hh, ww);
-        ReadOnlySpan<float> s = z.AsReadOnlySpan<float>();
-        Span<float> d = o.AsSpan<float>();
-        int plane = t * hh * ww;
-        for (int oc = 0; oc < outC; oc++)
-        {
-            int src = (oc / rep) * plane, dst = oc * plane;
-            for (int p = 0; p < plane; p++) d[dst + p] = s[src + p];
-        }
-        return o;
-    }
+    /// <summary>Decoder start shortcut: the latent with each channel repeated <c>outC / C</c> times, on the backend.</summary>
+    public static Tensor RepeatToChannels(IBackend backend, Tensor z, int outC)
+        => RepeatChannels(backend, z, Quotient(outC, (int)z.Shape[1], "decoder start shortcut repeat"));
 
     /// <summary>Single-head attention over all <c>T·H·W</c> tokens with MovieRoll's frame-causal mask: a token attends to every token of its own
-    /// frame and of earlier frames. Scale is <c>1/√C</c> (SDPA over one head of width C). Quadratic in tokens: host and tiny-config only.</summary>
+    /// frame and of earlier frames. Scale is <c>1/√C</c>. Host arithmetic, quadratic in tokens: tiny-config only.</summary>
     public static Tensor FrameCausalAttention(Tensor q, Tensor k, Tensor v)
     {
         (int c, int t, int hh, int ww) = Dims(q);
@@ -466,9 +406,9 @@ internal sealed class HunyuanVideo15VaeDownsample
     public Tensor Forward(IBackend backend, Tensor x)
     {
         Tensor h = _conv.Forward(backend, x);
-        Tensor main = HunyuanVideo15VaeShuffle.PackDownsample(h, _cout, _temporal);
+        Tensor main = HunyuanVideo15VaeShuffle.PackDownsample(backend, h, _cout, _temporal);
         h.Dispose();
-        Tensor shortcut = HunyuanVideo15VaeShuffle.DownsampleShortcut(x, _cout, _temporal);
+        Tensor shortcut = HunyuanVideo15VaeShuffle.DownsampleShortcut(backend, x, _cout, _temporal);
         Tensor output = new(main.Shape, DType.F32);
         backend.Add(output, main, shortcut);
         main.Dispose(); shortcut.Dispose();
@@ -493,9 +433,9 @@ internal sealed class HunyuanVideo15VaeUpsample
     public Tensor Forward(IBackend backend, Tensor x)
     {
         Tensor h = _conv.Forward(backend, x);
-        Tensor main = HunyuanVideo15VaeShuffle.UnpackUpsample(h, _cout, _temporal);
+        Tensor main = HunyuanVideo15VaeShuffle.UnpackUpsample(backend, h, _cout, _temporal);
         h.Dispose();
-        Tensor shortcut = HunyuanVideo15VaeShuffle.UpsampleShortcut(x, _cout, _temporal);
+        Tensor shortcut = HunyuanVideo15VaeShuffle.UpsampleShortcut(backend, x, _cout, _temporal);
         Tensor output = new(main.Shape, DType.F32);
         backend.Add(output, main, shortcut);
         main.Dispose(); shortcut.Dispose();
