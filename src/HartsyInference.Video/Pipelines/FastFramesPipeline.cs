@@ -148,24 +148,36 @@ public sealed class FastFramesPipeline
         ArgumentNullException.ThrowIfNull(promptEmbeds);
         ArgumentNullException.ThrowIfNull(noise);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
+        CheckKvFitsNow(latentFrames);
+    }
+
+    /// <summary>Checks the clip's frame cache against the free VRAM the backend reports now. Called at admission and again once the
+    /// block placement has run, so the weights it uploaded are counted as used.</summary>
+    private void CheckKvFitsNow(int latentFrames)
+    {
         (long freeBytes, long totalBytes) = _backend.GetVramInfo();
         CheckKvFits(_config.Name, _transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
-            freeBytes, totalBytes);
+            _transformer.BranchActivation(_backend, singleGroup: true), freeBytes, totalBytes);
     }
 
     /// <summary>Refuses a clip whose frame-wise cache cannot fit in the free VRAM, before any frame is denoised. The cache keeps every
-    /// frame's keys and values for every block until the clip ends, in F16 on a GPU; <see cref="FrameKvCache.EstimateBytes"/> gives
-    /// its size. A backend that reports no VRAM (CPU) is not checked.</summary>
+    /// frame's keys and values for every block until the clip ends, in the dtype the slots take (<paramref name="slot"/>: the attention
+    /// branch's activation, F32 when F16 branches are off or the backend lacks F16 activations). It also reserves one block's joined
+    /// prefix, the copy the rewrite makes per block. A backend that reports no VRAM (CPU) is not checked. This is a lower bound: the
+    /// attention scratch, the decoder and the refiner come on top.</summary>
     /// <exception cref="InvalidOperationException">The cache for <paramref name="latentFrames"/> does not fit in <paramref name="freeBytes"/>.</exception>
-    public static void CheckKvFits(string name, int blocks, int latentFrames, int tokensPerFrame, int hidden, long freeBytes, long totalBytes)
+    public static void CheckKvFits(string name, int blocks, int latentFrames, int tokensPerFrame, int hidden, DType slot,
+        long freeBytes, long totalBytes)
     {
         if (totalBytes <= 0)
             return;
-        long need = FrameKvCache.EstimateBytes(blocks, latentFrames, tokensPerFrame, hidden, DType.F16);
+        long cache = FrameKvCache.EstimateBytes(blocks, latentFrames, tokensPerFrame, hidden, slot);
+        long joinedPrefix = FrameKvCache.EstimateBytes(1, latentFrames, tokensPerFrame, hidden, slot);
+        long need = cache + joinedPrefix;
         if (need > freeBytes)
         {
             throw new InvalidOperationException(
-                $"{name} needs {need >> 20} MiB of frame KV cache for {latentFrames} latent frames; the device has {freeBytes >> 20} MiB free "
+                $"{name} needs {need >> 20} MiB of frame KV cache ({slot}) for {latentFrames} latent frames; the device has {freeBytes >> 20} MiB free "
                 + $"of {totalBytes >> 20} MiB. Generate fewer frames, or free VRAM first.");
         }
     }
