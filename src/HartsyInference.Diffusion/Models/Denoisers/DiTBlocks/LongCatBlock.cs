@@ -106,19 +106,29 @@ public sealed partial class LongCatBlock : IStreamingBlock
     }
 
     /// <summary>The adapter operands of this block's gated LoRA terms (each term's Down and Up). They are shared-resident, not streamed with the block:
-    /// the transformer reports them with its shared weights, so they are preloaded once and held for the run. Row windows are left out: they are
-    /// memoized slices the backend promotes on use, and listing them would count the same operand twice.</summary>
+    /// the transformer reports them with its shared weights, so they are preloaded once and held for the run. The cross-attention key/value
+    /// projection runs in two row windows (keys, then values), each memoized on first use; those windows are created here, so their operands are the
+    /// ones that stay resident, and the parent's Up (which only the windows read) is not listed. A Down shared between windows is listed once.</summary>
     public IEnumerable<Tensor> EnumerateAdapterOperands()
     {
+        int dim = _config.HiddenSize;
+        HashSet<Tensor> seen = new(ReferenceEqualityComparer.Instance);
         foreach (Tensor weight in EnumerateWeights())
         {
             if (weight.LowRankAdjunct is null)
                 continue;
-            foreach (LowRankAdjunctTerm term in weight.LowRankAdjunct.Terms)
+            IEnumerable<LowRankAdjunct> adjuncts = ReferenceEquals(weight, _crossKv)
+                ? [weight.LowRankAdjunct.SliceRows(0, dim), weight.LowRankAdjunct.SliceRows(dim, dim)]
+                : [weight.LowRankAdjunct];
+            foreach (LowRankAdjunct adjunct in adjuncts)
             {
-                yield return term.Down;
-                if (term.Up is not null)
-                    yield return term.Up;
+                foreach (LowRankAdjunctTerm term in adjunct.Terms)
+                {
+                    if (seen.Add(term.Down))
+                        yield return term.Down;
+                    if (term.Up is not null && seen.Add(term.Up))
+                        yield return term.Up;
+                }
             }
         }
     }

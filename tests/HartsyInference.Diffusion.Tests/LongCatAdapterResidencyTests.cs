@@ -47,16 +47,26 @@ public sealed class LongCatAdapterResidencyTests : IDisposable
         Dictionary<string, Tensor> patched = new(_dense, StringComparer.Ordinal);
         stack.ApplyTo(patched, LoraTarget.Transformer, _backend);
 
+        // The operands the transformer reports: each block's terms, and for the cross-attention key/value projection its two row windows.
         long adapterBytes = 0;
+        int dim = _config.HiddenSize;
+        HashSet<Tensor> seen = new(ReferenceEqualityComparer.Instance);
         foreach ((string key, Tensor tensor) in patched)
         {
             if (!key.StartsWith("blocks.", StringComparison.Ordinal) || tensor.LowRankAdjunct is null)
                 continue;
-            foreach (LowRankAdjunctTerm term in tensor.LowRankAdjunct.Terms)
+            IEnumerable<LowRankAdjunct> adjuncts = key.EndsWith("cross_attn.kv_linear.weight", StringComparison.Ordinal)
+                ? [tensor.LowRankAdjunct.SliceRows(0, dim), tensor.LowRankAdjunct.SliceRows(dim, dim)]
+                : [tensor.LowRankAdjunct];
+            foreach (LowRankAdjunct adjunct in adjuncts)
             {
-                adapterBytes += term.Down.DType.ComputeByteCount(term.Down.ElementCount);
-                if (term.Up is not null)
-                    adapterBytes += term.Up.DType.ComputeByteCount(term.Up.ElementCount);
+                foreach (LowRankAdjunctTerm term in adjunct.Terms)
+                {
+                    if (seen.Add(term.Down))
+                        adapterBytes += term.Down.DType.ComputeByteCount(term.Down.ElementCount);
+                    if (term.Up is not null && seen.Add(term.Up))
+                        adapterBytes += term.Up.DType.ComputeByteCount(term.Up.ElementCount);
+                }
             }
         }
         Assert.True(adapterBytes > 0, "the gated LoRA must put adapter operands on the blocks");
