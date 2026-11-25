@@ -99,15 +99,17 @@ public sealed class LongCatCheckpointTests : IDisposable
     }
 
     [Fact]
-    public void Int8LayoutIsRefusedWithAPointerToItsLoader()
+    public void Int8NameOnADenseTensorIsRefused()
     {
-        Dictionary<string, Tensor> source = WriteCheckpoint(writeConfig: true);
+        Dictionary<string, Tensor> source = LongCatTestData.Weights(_config, 9);
         try
         {
-            string index = Path.Combine(_directory, LongCatCheckpoint.IndexFileName);
-            File.WriteAllText(index, File.ReadAllText(index).Replace("blocks.0.ffn.w1.weight", "blocks.0.ffn.w1.weight_int8"));
+            Dictionary<string, Tensor> renamed = new(source);
+            renamed["blocks.0.ffn.w1.weight_int8"] = renamed["blocks.0.ffn.w1.weight"];
+            renamed.Remove("blocks.0.ffn.w1.weight");
+            LongCatTestData.WriteCheckpoint(_directory, renamed);
 
-            Assert.ThrowsAny<Exception>(() => LongCatCheckpoint.Open(_directory));
+            Assert.Throws<InvalidDataException>(() => LongCatCheckpoint.Open(_directory));
         }
         finally
         {
