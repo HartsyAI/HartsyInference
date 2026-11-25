@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Duo;
@@ -8,16 +10,17 @@ using HartsyInference.Diffusion.Models.Duo;
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>The cached Duo forward (PR 2h): a denoise that reads a committed history and, when asked, commits its own clean rows.
-/// Attention keys are <c>[cache | current]</c>, so the bias is <c>[S, past + S]</c>. Each block projects the current rows, rotates
-/// their keys, and concatenates them after the cached keys. Only the dense route is implemented; a layout past
-/// <see cref="MaxDuoDenseBiasRows"/> in either direction is refused.</summary>
+/// Attention keys are <c>[cache | current]</c>, so the bias is <c>[S, past + S]</c>. Each block runs the shared H3 block body, with the
+/// attention step supplied as a delegate. Only the dense route is implemented; a layout past <see cref="MaxDuoDenseBiasRows"/> in either
+/// direction is refused.</summary>
 public sealed unsafe partial class MiniMaxH3Transformer
 {
     /// <summary>Runs one causal Duo denoise over <paramref name="layout"/>, reading <paramref name="cache"/>. When <paramref name="commit"/>
-    /// is true, the reference, shared and clean rows of this forward are appended to the cache after the outputs are computed. An uncommitted
-    /// forward leaves the cache unchanged.</summary>
+    /// is true, the reference, shared and clean rows of this forward are appended to the cache after the outputs are computed, all or nothing.
+    /// An uncommitted forward leaves the cache unchanged.</summary>
     /// <param name="textStates">Text conditioning rows before <c>context_embedder</c>, or null when the layout has no text rows.</param>
-    /// <exception cref="NotSupportedException">A bidirectional mode, a tiled-size layout, or a route this path does not implement.</exception>
+    /// <exception cref="NotSupportedException">A bidirectional mode, a layout past the dense limit, or a route this path does not implement.</exception>
+    /// <exception cref="InvalidOperationException">A commit would exceed the cache capacity. Refused before any allocation.</exception>
     internal (Tensor Video, Tensor? Audio) ForwardDuoCached(IBackend backend, DuoLayout layout, DuoAttentionMode mode,
         IReadOnlyList<DuoGroup> refinerGroups, Tensor? textStates, Tensor videoRows, Tensor? audioRows,
         float[] times, DuoStreamCache cache, bool commit)
@@ -81,6 +84,13 @@ public sealed unsafe partial class MiniMaxH3Transformer
                 $"The cached Duo forward is dense: {past} cached rows and {seq} current rows exceed {MaxDuoDenseBiasRows}. "
                 + "Tiled cached attention is not implemented.");
         }
+        // Refuse an overflowing commit before anything is allocated, so a refused commit costs nothing.
+        int retained = RetainedRows(layout);
+        if (commit && retained > cache.CapacityRows - past)
+        {
+            throw new InvalidOperationException(
+                $"Committing {retained} rows to {past} would exceed the {cache.CapacityRows}-row cache capacity.");
+        }
 
         // The keys are the cache groups, then this forward's groups shifted past the cache.
         List<DuoGroup> keyGroups = [.. cache.Groups];
@@ -98,48 +108,42 @@ public sealed unsafe partial class MiniMaxH3Transformer
         using Tensor cos = HostTensor(new TensorShape(seq, hd), cosValues);
         using Tensor sin = HostTensor(new TensorShape(seq, hd), sinValues);
 
-        Tensor stream = BuildDuoStreamCached(backend, layout, refinerGroups, textStates, textRows, videoRows, audioRows, hidden);
+        Tensor stream = BuildDuoStream(backend, layout, refinerGroups, DuoAttentionMode.Causal, textStates, videoRows, audioRows,
+            hidden, layout.TextRows.Length, layout.VideoRows.Length, layout.AudioRows.Length);
         float[][] keptKeys = new float[_config.NumLayers][];
         float[][] keptValues = new float[_config.NumLayers][];
         try
         {
             for (int i = 0; i < _config.NumLayers; i++)
             {
+                int block = i;
                 string p = $"blocks.{i}";
-                Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
-                try
-                {
-                    Tensor normed = Norm(backend, stream, $"{p}.norm1.weight", _config.NormEps, BodyDType);
-                    Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex);
-                    normed.Dispose();
-                    Tensor attn = CachedAttention(backend, modulated, $"{p}.attn", cos, sin, cache.Layer(i), bias,
-                        out float[] keysNow, out float[] valuesNow);
-                    modulated.Dispose();
-                    keptKeys[i] = keysNow;
-                    keptValues[i] = valuesNow;
-                    Tensor gatedAttn = Gate(backend, stream, attn, mod[2], modIndex);
-                    attn.Dispose();
-                    Swap(ref stream, gatedAttn);
-
-                    Tensor normed2 = Norm(backend, stream, $"{p}.norm2.weight", _config.NormEps, BodyDType);
-                    Tensor modulated2 = Modulate(backend, normed2, mod[3], mod[4], modIndex);
-                    normed2.Dispose();
-                    Tensor mlp = Mlp(backend, modulated2, $"{p}.mlp");
-                    modulated2.Dispose();
-                    Tensor gatedMlp = Gate(backend, stream, mlp, mod[5], modIndex);
-                    mlp.Dispose();
-                    Swap(ref stream, gatedMlp);
-                }
-                finally
-                {
-                    foreach (Tensor t in mod) t.Dispose();
-                }
+                // The block body is the shared H3 one. Only the attention step differs: it reads the cache and keeps this block's rows
+                // for a commit. No chunking applies here, so the block runs unchunked and the delegate is the whole attention.
+                ForwardNamedBlock(backend, ref stream, tEmb, modIndex, cos, sin, p, int.MaxValue, null, null, null,
+                    attentionOverride: x =>
+                    {
+                        Tensor attn = CachedAttention(backend, x, $"{p}.attn", cos, sin, cache.Layer(block), bias, commit,
+                            out float[]? keys, out float[]? values);
+                        keptKeys[block] = keys!;
+                        keptValues[block] = values!;
+                        return attn;
+                    });
             }
 
             (Tensor video, Tensor? audio) = DuoHead(backend, stream, tEmb, layout, times.Length, audioRows is not null);
             if (commit)
             {
-                CommitDuoRows(layout, cache, keptKeys, keptValues, heads, hd, seq);
+                try
+                {
+                    CommitDuoRows(layout, cache, keptKeys, keptValues, heads, hd, seq);
+                }
+                catch
+                {
+                    video.Dispose();
+                    audio?.Dispose();
+                    throw;
+                }
             }
             return (video, audio);
         }
@@ -149,18 +153,26 @@ public sealed unsafe partial class MiniMaxH3Transformer
         }
     }
 
-    /// <summary>Attention over <c>[cache | current]</c>. Returns the output projection for the current rows, and the current rows' keys
-    /// and values as head-major <c>[heads, rows, hd]</c> host arrays (keys already rotated), for a commit.</summary>
+    /// <summary>Attention over <c>[cache | current]</c>, on the shared attention dispatcher. Returns the output projection for the current
+    /// rows. When <paramref name="keepRows"/> is true, also returns the current rows' keys and values as head-major <c>[heads, rows, hd]</c>
+    /// host arrays, keys already rotated, for a commit; otherwise both are null and nothing is copied.</summary>
     private Tensor CachedAttention(IBackend backend, Tensor x, string prefix, Tensor cos, Tensor sin, DuoKvCache past,
-        Tensor bias, out float[] keysNow, out float[] valuesNow)
+        Tensor bias, bool keepRows, out float[]? keysNow, out float[]? valuesNow)
     {
         int seq = (int)x.Shape[0];
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
+        int rows = past.Rows;
+        if (bias.Shape.Rank != 2 || bias.Shape[0] != seq || bias.Shape[1] != rows + seq || bias.DType != DType.F32)
+        {
+            throw new ArgumentException($"The cached bias must be F32 [{seq}, {rows + seq}]; got {bias.DType} {bias.Shape}.", nameof(bias));
+        }
+
         using Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32);
         backend.Linear(qkv, x, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias"));
         Tensor q = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         Tensor k = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         Tensor v = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
+        Tensor? kAll = null, vAll = null;
         try
         {
             backend.QkvSplitNormHeadMajor(q, k, v, qkv, Require($"{prefix}.q_norm.weight"), Require($"{prefix}.k_norm.weight"),
@@ -168,33 +180,50 @@ public sealed unsafe partial class MiniMaxH3Transformer
             int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
             backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
-            keysNow = k.AsSpan<float>().ToArray();
-            valuesNow = v.AsSpan<float>().ToArray();
+            if (keepRows)
+            {
+                keysNow = k.AsSpan<float>().ToArray();
+                valuesNow = v.AsSpan<float>().ToArray();
+            }
+            else
+            {
+                keysNow = null;
+                valuesNow = null;
+            }
 
-            int rows = past.Rows;
-            using Tensor kAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
-                HeadMajorWithPast(past.Keys, rows, keysNow, seq, heads, hd));
-            using Tensor vAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
-                HeadMajorWithPast(past.Values, rows, valuesNow, seq, heads, hd));
-            using Tensor scores = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
-            backend.ScaledDotProductAttention(scores, q, kAll, vAll, bias, 1f / MathF.Sqrt(hd));
-            using Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
-            backend.Permute0213(merged, scores, heads, seq, hd);
-            Tensor outT = new Tensor(x.Shape, BodyDType);
-            backend.Linear(outT, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
-            return outT;
+            // ProbeV is a diagnostic logger for the dense path and is not run here.
+            kAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
+                HeadMajorWithPast(past.Keys, rows, k.AsSpan<float>(), seq, heads, hd));
+            vAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
+                HeadMajorWithPast(past.Values, rows, v.AsSpan<float>(), seq, heads, hd));
+            Tensor scores = _attention.AttendHeadMajorOperands(backend, q, kAll, vAll, new AttentionCallContext { Bias = bias },
+                OperandOwnership.None);
+            try
+            {
+                using Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
+                backend.Permute0213(merged, scores, heads, seq, hd);
+                Tensor outT = new Tensor(x.Shape, BodyDType);
+                backend.Linear(outT, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
+                return outT;
+            }
+            finally
+            {
+                scores.Dispose();
+            }
         }
         finally
         {
             q.Dispose();
             k.Dispose();
             v.Dispose();
+            kAll?.Dispose();
+            vAll?.Dispose();
         }
     }
 
     /// <summary>Head-major <c>[heads, pastRows + curRows, hd]</c> from the cache's row-major past and the current head-major rows.</summary>
-    private static float[] HeadMajorWithPast(ReadOnlySpan<float> pastRowMajor, int pastRows, float[] curHeadMajor, int curRows,
-        int heads, int hd)
+    private static float[] HeadMajorWithPast(ReadOnlySpan<float> pastRowMajor, int pastRows, ReadOnlySpan<float> curHeadMajor,
+        int curRows, int heads, int hd)
     {
         int inner = heads * hd, total = pastRows + curRows;
         float[] all = new float[heads * total * hd];
@@ -206,13 +235,29 @@ public sealed unsafe partial class MiniMaxH3Transformer
             }
             for (int t = 0; t < curRows; t++)
             {
-                curHeadMajor.AsSpan((h * curRows + t) * hd, hd).CopyTo(all.AsSpan((h * total + pastRows + t) * hd, hd));
+                curHeadMajor.Slice((h * curRows + t) * hd, hd).CopyTo(all.AsSpan((h * total + pastRows + t) * hd, hd));
             }
         }
         return all;
     }
 
-    /// <summary>Appends the reference, shared and clean rows of this forward to the cache, in group order, as upstream's retain does.</summary>
+    /// <summary>Rows of this forward that a commit keeps: the reference, shared and clean groups, as upstream's retain selects them.</summary>
+    private static int RetainedRows(DuoLayout layout)
+    {
+        int rows = 0;
+        foreach (DuoGroup g in layout.Groups)
+        {
+            if (IsRetained(g.Kind))
+            {
+                rows += g.End - g.Start;
+            }
+        }
+        return rows;
+    }
+
+    private static bool IsRetained(DuoGroupKind kind) => kind is DuoGroupKind.Reference or DuoGroupKind.Shared or DuoGroupKind.Clean;
+
+    /// <summary>Appends the retained rows of this forward to the cache, in group order. Builds every array before the cache is touched.</summary>
     private static void CommitDuoRows(DuoLayout layout, DuoStreamCache cache, float[][] keysHeadMajor, float[][] valuesHeadMajor,
         int heads, int hd, int seq)
     {
@@ -222,7 +267,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         int cursor = cache.Length;
         foreach (DuoGroup g in layout.Groups)
         {
-            if (g.Kind is not (DuoGroupKind.Reference or DuoGroupKind.Shared or DuoGroupKind.Clean))
+            if (!IsRetained(g.Kind))
             {
                 continue;
             }
@@ -235,7 +280,6 @@ public sealed unsafe partial class MiniMaxH3Transformer
             cursor += n;
         }
 
-        int rows = retained.Count;
         float[][] keysRowMajor = new float[cache.Blocks][];
         float[][] valuesRowMajor = new float[cache.Blocks][];
         for (int b = 0; b < cache.Blocks; b++)
@@ -243,7 +287,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
             keysRowMajor[b] = ToRowMajor(keysHeadMajor[b], retained, seq, heads, hd, inner);
             valuesRowMajor[b] = ToRowMajor(valuesHeadMajor[b], retained, seq, heads, hd, inner);
         }
-        cache.Commit(keysRowMajor, valuesRowMajor, rows, newGroups);
+        cache.Commit(keysRowMajor, valuesRowMajor, retained.Count, newGroups);
     }
 
     /// <summary>Picks rows from head-major <c>[heads, seq, hd]</c> and returns them row-major <c>[rows, heads * hd]</c>.</summary>
@@ -258,37 +302,6 @@ public sealed unsafe partial class MiniMaxH3Transformer
             }
         }
         return outRows;
-    }
-
-    /// <summary>The packed stream for a cached forward: refined text rows when present, projected video and audio, and a zero row for padding.</summary>
-    private Tensor BuildDuoStreamCached(IBackend backend, DuoLayout layout, IReadOnlyList<DuoGroup> refinerGroups,
-        Tensor? textStates, int textRows, Tensor videoRows, Tensor? audioRows, int hidden)
-    {
-        int textCount = layout.TextRows.Length, videoCount = layout.VideoRows.Length, audioCount = layout.AudioRows.Length;
-        using Tensor? refined = textRows > 0 ? RefineDuoText(backend, textStates!, refinerGroups, DuoAttentionMode.Causal) : null;
-        using Tensor? selected = textCount > 0 ? Gather(backend, refined!, layout.TextSourceRows) : null;
-        using Tensor videoEmbed = ProjectIntoStream(backend, videoRows, "video_patch_proj", hidden);
-        using Tensor? audioEmbed = audioCount > 0 ? ProjectIntoStream(backend, audioRows!, "audio_patch_proj", hidden) : null;
-        using Tensor zero = new Tensor(new TensorShape(1, hidden), DType.F32);
-        zero.AsSpan<float>().Clear();
-
-        List<Tensor> pieces = new List<Tensor>(4);
-        if (selected is not null) pieces.Add(selected);
-        pieces.Add(videoEmbed);
-        if (audioEmbed is not null) pieces.Add(audioEmbed);
-        pieces.Add(zero);
-
-        int sourceRows = textCount + videoCount + audioCount + 1;
-        using Tensor source = new Tensor(new TensorShape(sourceRows, hidden), DType.F32);
-        backend.Concat(source, CollectionsMarshal.AsSpan(pieces), 0);
-
-        int zeroRow = sourceRows - 1;
-        int[] packed = new int[layout.Length];
-        Array.Fill(packed, zeroRow);
-        for (int k = 0; k < textCount; k++) packed[layout.TextRows[k]] = k;
-        for (int k = 0; k < videoCount; k++) packed[layout.VideoRows[k]] = textCount + k;
-        for (int k = 0; k < audioCount; k++) packed[layout.AudioRows[k]] = textCount + videoCount + k;
-        return Gather(backend, source, packed);
     }
 
     /// <summary>norm_out and the two output heads over the packed stream. Shared by the cached and the uncached forward.</summary>

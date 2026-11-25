@@ -291,6 +291,58 @@ public sealed class MiniMaxH3DuoForwardTests
     }
 
     [Fact]
+    public void CommitBeyondTheCacheCapacityLeavesTheCacheUnchanged()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        float[] times = Times();
+        IReadOnlyList<DuoGroup> refiner = [new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 0, 2)];
+        float[] videoAll = Values(5, 6 * VideoIn);
+        using Tensor text = MakeTensor(new TensorShape(2, TextDim), Values(2, 2 * TextDim));
+        DuoLayout prefix = CachedLayout(
+            [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 2, 4)],
+            [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
+        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 5);
+        using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
+        (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
+        prefixOut.Dispose();
+        Assert.Equal(4, cache.Length);
+
+        // Two more reference rows would take the cache to 6 of 5. The refusal must leave the cache exactly as it was.
+        DuoLayout overflow = CachedLayout(
+            [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 2)],
+            [0, 0], [0, 0], [0, 1], [], [], [], 4);
+        using Tensor overflowVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
+        Assert.Throws<InvalidOperationException>(() => transformer.ForwardDuoCached(backend, overflow, DuoAttentionMode.Causal, [], null,
+            overflowVideo, null, times, cache, commit: true));
+        Assert.Equal(4, cache.Length);
+        Assert.Equal(2, cache.Groups.Count);
+    }
+
+    [Fact]
+    public void StreamCacheCommitIsAllOrNothing()
+    {
+        DuoStreamCache cache = new DuoStreamCache(blocks: 2, width: 4, capacityRows: 3);
+        float[][] keys = [new float[4], new float[3]];
+        float[][] values = [new float[4], new float[4]];
+        IReadOnlyList<DuoGroup> groups = [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 1)];
+
+        // Block 1's keys are the wrong length: nothing may be appended to block 0 either.
+        Assert.Throws<ArgumentException>(() => cache.Commit(keys, values, 1, groups));
+        Assert.Equal(0, cache.Length);
+        Assert.Empty(cache.Groups);
+
+        // A group that names rows outside the committed range is refused the same way.
+        float[][] goodKeys = [new float[4], new float[4]];
+        Assert.Throws<ArgumentException>(() => cache.Commit(goodKeys, values, 1,
+            [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 2)]));
+        Assert.Equal(0, cache.Length);
+
+        cache.Commit(goodKeys, values, 1, groups);
+        Assert.Equal(1, cache.Length);
+    }
+
+    [Fact]
     public void CachedForwardRefusesBidirectionalMode()
     {
         using MiniMaxH3Transformer transformer = Transformer();
