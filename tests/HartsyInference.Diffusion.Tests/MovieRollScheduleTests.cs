@@ -19,7 +19,7 @@ public sealed class MovieRollScheduleTests
         MovieRollSchedule schedule = MovieRollSchedule.Base(50, 5, 5.0);
 
         AssertClose(baseRef.GetProperty("sigmas"), schedule.Sigmas, "base sigmas");
-        AssertClose(baseRef.GetProperty("timesteps"), schedule.Timesteps, "base timesteps", 1e-2f);
+        AssertClose(baseRef.GetProperty("timesteps"), schedule.Timesteps, "base timesteps", 1e-3f);
         Assert.Equal(baseRef.GetProperty("steps_per_window").GetInt32(), schedule.StepsPerWindow);
     }
 
@@ -31,7 +31,7 @@ public sealed class MovieRollScheduleTests
         MovieRollSchedule schedule = MovieRollSchedule.Distilled([1000, 800, 600, 400, 200], 5, 5.0);
 
         AssertClose(distilledRef.GetProperty("sigmas"), schedule.Sigmas, "distilled sigmas");
-        AssertClose(distilledRef.GetProperty("timesteps"), schedule.Timesteps, "distilled timesteps", 1e-2f);
+        AssertClose(distilledRef.GetProperty("timesteps"), schedule.Timesteps, "distilled timesteps", 1e-3f);
         Assert.Equal(1, schedule.StepsPerWindow);
     }
 
@@ -54,6 +54,17 @@ public sealed class MovieRollScheduleTests
     public void BaseRefusesAStepCountThatTheWindowDoesNotDivide()
     {
         Assert.Throws<ArgumentException>(() => MovieRollSchedule.Base(50, 4, 5.0));
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-5.0)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void ShiftMustBeFiniteAndPositive(double shift)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => MovieRollSchedule.Base(50, 5, shift));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MovieRollSchedule.Distilled([1000, 800, 600, 400, 200], 5, shift));
     }
 
     private static void AssertIndices(JsonElement chain, MovieRollSchedule schedule, string label)
