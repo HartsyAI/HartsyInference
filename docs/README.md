@@ -26,6 +26,7 @@ git preserves removed history.
 | Hunyuan3D Paint (texturing): pins, hashes, licence, 2.5D UNet, renderer and bake, reuse map | [Research/HUNYUAN3D_PAINT_ARCHITECTURE.md](Research/HUNYUAN3D_PAINT_ARCHITECTURE.md) |
 | Hunyuan3D Part (P3-SAM segmentation, X-Part decomposition): pins, weights, licence, reuse map | [Research/HUNYUAN3D_PART_ARCHITECTURE.md](Research/HUNYUAN3D_PART_ARCHITECTURE.md) |
 | Haru-4B (full-duplex speech-to-speech): pins, constants, frame loop, codec key map, reuse map, evidence | [Research/HARU_ARCHITECTURE.md](Research/HARU_ARCHITECTURE.md) |
+| Duo v1 weights (inclusionAI): pins and hashes, distributed-checkpoint format, qkv and fc1 layout traps, merge numerics, AdaLN tables, licence terms | [Research/DUO_V1_WEIGHTS.md](Research/DUO_V1_WEIGHTS.md) |
 | Kim_Vocal_2 vocal separator (UVR MDX-Net): pins, graph, pipeline constants, licence status, engine surface | [Research/KIM_VOCAL2_SEPARATOR.md](Research/KIM_VOCAL2_SEPARATOR.md) |
 | Inworld Voice Isolator (48 kHz speech isolation, offline and realtime): pins, hashes, licence, network, stream semantics, engine surface | [Research/VOICE_ISOLATOR_ARCHITECTURE.md](Research/VOICE_ISOLATOR_ARCHITECTURE.md) |
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
@@ -35,8 +36,10 @@ git preserves removed history.
 | Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
 | What a 3D host needs from the engine: today's mesh contract, the additive API proposal | [Research/HARTSY3D_ENGINE_PREREQS.md](Research/HARTSY3D_ENGINE_PREREQS.md) |
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
+| Bria RMBG 3.0 (background removal as a Fibo 2.0 edit): pins, weights layout, fixed instruction, dynamic shift, licence, why VRMBG-3.0 is out | [Research/RMBG3_ARCHITECTURE.md](Research/RMBG3_ARCHITECTURE.md) |
 | Idol, Idol-turbo and Budget3D (image to Gaussian splats, token budget): pins, files and hashes, pipeline constants, licences, settled reference questions | [Research/IDOL_BUDGET3D_ARCHITECTURE.md](Research/IDOL_BUDGET3D_ARCHITECTURE.md) |
 | SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
+| Hy4 Flash (Tencent, 220B MoE with Engram, iHC and indexed attention): pins, licence terms, architecture constants, weight sizes, key map, open questions | [Research/HY4_FLASH_ARCHITECTURE.md](Research/HY4_FLASH_ARCHITECTURE.md) |
 | Sage S2.1 Flash (`glm5_next`: KDA + NoPE compressed-pool DSA layers under mHC, 288-expert clamped-SwiGLU MoE, MTP, vision, SciPerception projectors): pins, licence, key layout traps, FP8 quantized set | [Research/SAGE_S21_FLASH_ARCHITECTURE.md](Research/SAGE_S21_FLASH_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
