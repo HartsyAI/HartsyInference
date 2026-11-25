@@ -79,7 +79,25 @@ public sealed partial class LongCatBlock : IStreamingBlock
     }
 
     /// <inheritdoc/>
-    public IEnumerable<Tensor> EnumerateWeights() => LowRankAdjunct.ExpandWeights(OwnWeights());
+    public IEnumerable<Tensor> EnumerateWeights() => OwnWeights();
+
+    /// <summary>The adapter operands of this block's gated LoRA terms (each term's Down and Up). They are shared-resident, not streamed with the block:
+    /// the transformer reports them with the shared weights, so they are preloaded once and held for the run. Row windows are left out: they are
+    /// memoized slices that the backend promotes on use, and listing them would count the same operand twice.</summary>
+    public IEnumerable<Tensor> EnumerateAdapterOperands()
+    {
+        foreach (Tensor weight in OwnWeights())
+        {
+            if (weight.LowRankAdjunct is null)
+                continue;
+            foreach (LowRankAdjunctTerm term in weight.LowRankAdjunct.Terms)
+            {
+                yield return term.Down;
+                if (term.Up is not null)
+                    yield return term.Up;
+            }
+        }
+    }
 
     /// <summary>The block's own weights, without the adapter operands their LoRA terms carry.</summary>
     private IEnumerable<Tensor> OwnWeights()

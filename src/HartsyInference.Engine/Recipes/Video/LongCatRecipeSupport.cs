@@ -40,14 +40,28 @@ internal static class LongCatRecipeSupport
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
 
-    /// <summary>The device headroom the streaming plan reserves for one denoise step's activations, sized from the token count. Per token, one
-    /// block holds in F32: q, k, v and their head-major copies, the attention output and the residual and norm copies (about 10 × hidden), and
-    /// the SwiGLU gate, up and product intermediates (3 × FFN). The result carries a 1.5× margin. The first 4090 runs showed the earlier 2 ×
-    /// (4 × hidden + 2 × FFN) estimate was short: at 37,440 tokens a [37,440, 11,008] F32 FFN intermediate (1.6 GB) was refused with 1.1 GB free.</summary>
+    /// <summary>One binary gibibyte, the unit of the streaming headroom terms.</summary>
+    private const long GiB = 1L << 30;
+
+    /// <summary>The context the device holds for a denoise run whatever the clip size (about 0.8 GiB), from the 4090 calibration runs.</summary>
+    internal const long ContextBytes = GiB * 4 / 5;
+
+    /// <summary>The allocator pool's transients for one denoise step, independent of the token count (about 6.5 GiB), from the 4090 calibration runs.</summary>
+    internal const long FixedPoolBytes = GiB * 13 / 2;
+
+    /// <summary>The safety margin Auto leaves on top of the fixed terms (1 GiB): the conservative slack that keeps a near-full card from streaming
+    /// too late.</summary>
+    internal const long SafetyBytes = GiB;
+
+    /// <summary>The device headroom the streaming plan reserves before it sizes the resident prefix: the fixed context, pool and safety terms, plus
+    /// the step's activations. Per token, one block holds about 17 × hidden and 3 × FFN F32 elements (the attention and norm copies, the residual, and the
+    /// SwiGLU intermediates). The first 4090 runs showed the earlier estimates short: at 37,440 tokens a [37,440, 11,008] F32 FFN intermediate (1.6 GB)
+    /// was refused with 1.1 GB free.</summary>
     internal static long ActivationHeadroomBytes(long tokens, int hidden, int ffnHidden)
     {
-        const long marginNumerator = 3, marginDenominator = 2, bytesPerElement = 4;
-        return tokens * (10L * hidden + 3L * ffnHidden) * bytesPerElement * marginNumerator / marginDenominator;
+        const long bytesPerElement = 4;
+        long perToken = (17L * hidden + 3L * ffnHidden) * bytesPerElement;
+        return ContextBytes + FixedPoolBytes + SafetyBytes + tokens * perToken;
     }
 
     /// <summary>The attention tokens one denoise step sees at a latent grid: latent frames × (latent height / 2) × (latent width / 2), the DiT's 2×2 patch.</summary>
@@ -55,7 +69,8 @@ internal static class LongCatRecipeSupport
         (long)latentFrames * (latentHeight / 2) * (latentWidth / 2);
 
     /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
-    /// memory when it does not. Disposing the scope evicts whatever it placed.</summary>
+    /// memory when it does not. Disposing the scope evicts the streamed window; the resident prefix stays on the device until the pipeline's pin
+    /// releases it (the denoise loop's finally frees the whole DiT).</summary>
     internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens) =>
         BlockStreamingScope.Open(new BlockStreamingOptions
         {

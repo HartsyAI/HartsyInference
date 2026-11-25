@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
@@ -120,21 +121,26 @@ public sealed class LongCatRecipeTests
         long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(tokens, hidden: 4096, ffnHidden: 11008);
 
         Assert.Equal(37_440, tokens);
-        Assert.Equal(37_440L * (10L * 4096 + 3L * 11008) * 4 * 3 / 2, headroom);
-        Assert.InRange(headroom, 15L << 30, 16L << 30);
+        Assert.Equal(LongCatRecipeSupport.ContextBytes + LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes
+            + 37_440L * (17L * 4096 + 3L * 11008) * 4, headroom);
+        Assert.InRange(headroom, 22L << 30, 23L << 30);
     }
 
-    [Fact]
-    public void TheSmallerFirstRunNeedsAboutAThirdOfTheFullHeadroom()
+    [Theory]
+    // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens.
+    [InlineData(13, 46, 80, 27)]
+    // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens.
+    [InlineData(24, 60, 104, 0)]
+    public void TheResidentPrefixOnA228GbCardMatchesTheCalibration(int latentFrames, int latentHeight, int latentWidth, int expectedPrefix)
     {
-        // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens.
-        long small = LongCatRecipeSupport.ActivationHeadroomBytes(
-            LongCatRecipeSupport.TokenCount(latentFrames: 13, latentHeight: 46, latentWidth: 80), hidden: 4096, ffnHidden: 11008);
-        long full = LongCatRecipeSupport.ActivationHeadroomBytes(
-            LongCatRecipeSupport.TokenCount(latentFrames: 24, latentHeight: 60, latentWidth: 104), hidden: 4096, ffnHidden: 11008);
+        // 22.8 GB free (22,849 MiB), the shared weights (about 1 GiB) preloaded before the free-memory read, then 313 MiB blocks across 48 blocks.
+        const long freeBytes = 22_849L << 20, sharedBytes = 1L << 30, blockBytes = 313L << 20;
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(
+            LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth), hidden: 4096, ffnHidden: 11008);
 
-        Assert.Equal(11_960, LongCatRecipeSupport.TokenCount(latentFrames: 13, latentHeight: 46, latentWidth: 80));
-        Assert.InRange((double)small / full, 0.30, 0.34);
+        int prefix = ResidentPrefixSizing.Size(freeBytes - sharedBytes, headroom, blockBytes, blockCount: 48);
+
+        Assert.Equal(expectedPrefix, prefix);
     }
 
     private static CheckpointProbe EmptyProbe() =>

@@ -126,7 +126,15 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     }
 
     /// <inheritdoc/>
-    public IEnumerable<Tensor> EnumerateSharedWeights() => LowRankAdjunct.ExpandWeights(OwnSharedWeights());
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
+        // The gated LoRA adapter operands of every block stay resident for the run, so they are shared (not streamed with their block).
+        foreach (Tensor t in OwnSharedWeights())
+            yield return t;
+        foreach (LongCatBlock block in _blocks)
+            foreach (Tensor operand in block.EnumerateAdapterOperands())
+                yield return operand;
+    }
 
     private IEnumerable<Tensor> OwnSharedWeights()
     {
