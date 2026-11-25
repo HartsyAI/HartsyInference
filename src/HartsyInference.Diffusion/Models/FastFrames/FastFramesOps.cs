@@ -104,7 +104,7 @@ internal static class FastFramesOps
     /// <c>t · 10000^(-i/half)</c>, computed in double and stored as float32, as a <c>[1, dim]</c> row.</summary>
     public static Tensor SinusoidalEmbedding(float timestep, int dim)
     {
-        // The shared helper in double precision: the same frequencies and phases this file used to compute inline.
+        // Double precision to match kv_refinement.py.
         Tensor row = new(new TensorShape(1, dim), DType.F32);
         DiTUtils.SinusoidalTimestepEmbedding(row, timestep, 1, dim, 10000f, doublePrecision: true);
         return row;
