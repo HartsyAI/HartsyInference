@@ -3,7 +3,10 @@ using System.Text;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
 using HartsyInference.Cuda;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Transformer;
@@ -78,6 +81,68 @@ public sealed class MaxwellRealWeightsGpuTests(ITestOutputHelper output)
 
         Assert.NotEmpty(generated);
         Assert.All(logits, static v => Assert.True(float.IsFinite(v), "a logit is not finite"));
+    }
+
+    /// <summary>The same question through the engine's Text service on the device MAXWELL_SERVICE_DEVICE names (cuda:0 by default): the load
+    /// path a user's request takes, with the dense weights resident and the device expert cache attached by TextService. Records the load,
+    /// prefill and decode timings, and the device memory from nvidia-smi after the answer.</summary>
+    [MaxwellRealFact]
+    public async Task Cuda_TextService_ChatAnswer_RunsOnTheRealCheckpoint()
+    {
+        string directory = Path.GetDirectoryName(Environment.GetEnvironmentVariable("MAXWELL_MODEL_FILE")!)!;
+        string device = Environment.GetEnvironmentVariable("MAXWELL_SERVICE_DEVICE") ?? "cuda:0";
+        int maxTokens = int.TryParse(Environment.GetEnvironmentVariable("MAXWELL_NEW_TOKENS"), out int n) && n > 0 ? n : 16;
+        string? resultPath = Environment.GetEnvironmentVariable("MAXWELL_SERVICE_OUT");
+
+        using InferenceEngine engine = new(device);
+        ModelSpec spec = new() { Requested = directory, Modality = Modality.Text, LocalPath = directory };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = Question }],
+            Device = device,
+            Temperature = 0,
+            MaxTokens = maxTokens,
+            EnableThinking = false,
+        };
+
+        Stopwatch total = Stopwatch.StartNew();
+        TextResult result = await engine.Text.GenerateAsync(spec, request);
+        total.Stop();
+        string smi = QueryNvidiaSmi();
+
+        StringBuilder report = new();
+        report.AppendLine($"Maxwell-V1.0-Flash FP8 through TextService on {device}");
+        report.AppendLine($"total with load {total.Elapsed.TotalSeconds:F1} s; prompt {result.PromptTokens} tokens, prefill {result.PrefillMilliseconds / 1000:F1} s");
+        report.AppendLine($"generated {result.CompletionTokens} tokens (stop {result.Stop}), decode {result.DecodeMilliseconds / 1000:F1} s, "
+            + $"{(result.CompletionTokens > 1 ? (result.CompletionTokens - 1) / (result.DecodeMilliseconds / 1000) : 0):F2} tok/s after the first");
+        report.AppendLine($"nvidia-smi after the answer: {smi}");
+        report.AppendLine("generated:");
+        report.AppendLine(result.Text);
+        output.WriteLine(report.ToString());
+        if (resultPath is not null) File.WriteAllText(resultPath, report.ToString());
+
+        Assert.InRange(result.CompletionTokens, 1, maxTokens);
+        Assert.False(string.IsNullOrWhiteSpace(result.Text));
+    }
+
+    /// <summary>Used memory and total memory of GPU 0 as nvidia-smi reports them, or the reason it could not be read.</summary>
+    private static string QueryNvidiaSmi()
+    {
+        try
+        {
+            using Process smi = Process.Start(new ProcessStartInfo("nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            })!;
+            string text = smi.StandardOutput.ReadLine() ?? "no output";
+            smi.WaitForExit();
+            return text.Trim();
+        }
+        catch (Exception ex)
+        {
+            return $"not read ({ex.Message})";
+        }
     }
 
     private static int Argmax(float[] logits)

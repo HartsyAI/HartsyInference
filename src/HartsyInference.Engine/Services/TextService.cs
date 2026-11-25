@@ -1108,16 +1108,43 @@ public sealed partial class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
     }
 
-    /// <summary>Loads a Maxwell directory on one device, as a host reference model; its layers are resident on a GPU and read per forward on the CPU.</summary>
+    /// <summary>Device memory kept free after the expert cache is sized: the activations of a prefill and the cuBLAS and kernel workspace.</summary>
+    private const long MaxwellDeviceHeadroomBytes = 2L << 30;
+
+    /// <summary>Loads a Maxwell directory on one device, as a host reference model. On CUDA the dense weights are preloaded to the device and the
+    /// routed experts sit behind a device expert cache sized from the free memory that remains; the cache is device-only, so a miss uploads the
+    /// expert for that call. On the CPU every weight is read on the host. A GPU other than CUDA is refused: the expert cache is CUDA-only, and
+    /// without it the whole checkpoint would have to fit in device memory.</summary>
     private void LoadMaxwellDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
+        string kind = BackendFactory.Kind(deviceKey);
+        if (BackendFactory.IsDeviceKind(kind) && !string.Equals(kind, "cuda", StringComparison.OrdinalIgnoreCase))
+            throw new NotSupportedException($"Maxwell on a GPU needs CUDA for its device expert cache; '{deviceKey}' is not CUDA. Load it on cuda:0 or cpu.");
         DisposeSlotBackends(slot);
         IBackend backend = CreateBackendFor(deviceKey);
         // Logged before the load, so it still shows when the load runs out of memory.
         Logs.Warning("[TextService] Maxwell has no memory guard yet; host RAM and VRAM are not checked before the load.");
         LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
         string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
-        Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
+        if (backend.Device.IsGpu)
+        {
+            try
+            {
+                MaxwellModel model = ((MaxwellTextModel)slot.HostReference!).Model;
+                backend.PreloadWeightGroups(model.EnumerateDenseWeightGroups());
+                long budget = Math.Max(0, backend.GetDeviceMemoryUsage().FreeBytes - MaxwellDeviceHeadroomBytes);
+                slot.ExpertOffload = ExpertOffloadSetup.AttachDeviceOnly(backend, model, budget, "[TextService]");
+            }
+            catch
+            {
+                // Without the cache the experts would be uploaded on every forward, so a half-attached model is unloaded rather than kept.
+                UnloadSlot(slot);
+                throw;
+            }
+            Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey} with dense weights resident and a device expert cache.");
+            return;
+        }
+        Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey}.");
     }
 
     /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed

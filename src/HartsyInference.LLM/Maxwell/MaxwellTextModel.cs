@@ -21,6 +21,9 @@ public sealed class MaxwellTextModel : IHostReferenceTextModel
     /// <summary>The engine-facing model.</summary>
     public MaxwellGenerationModel Generation { get; }
 
+    /// <summary>The loaded checkpoint model under <see cref="Generation"/>.</summary>
+    public MaxwellModel Model => Generation.Model;
+
     /// <inheritdoc />
     public ILlmTokenizer Tokenizer { get; }
 

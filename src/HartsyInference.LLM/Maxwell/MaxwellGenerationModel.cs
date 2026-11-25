@@ -30,6 +30,9 @@ public sealed class MaxwellGenerationModel : IGenerationModel
     /// <summary>The longest sequence the model was loaded for.</summary>
     public int MaxTokens { get; }
 
+    /// <summary>The loaded model this adapter drives, for the caller that attaches expert offload to it.</summary>
+    public MaxwellModel Model => _model;
+
     /// <inheritdoc />
     public GenerationModelInfo Info { get; }
 
