@@ -26,11 +26,13 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly WhisperEncoder _whisper;
     private readonly MelSpectrogramExtractor _mel;
     private readonly List<IDisposable> _loaders;
+    private readonly bool _distilled;
 
     /// <summary>Wraps the constructed pipeline, taking ownership of every disposable in <paramref name="loaders"/>.</summary>
     internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, WhisperEncoder whisper,
-        MelSpectrogramExtractor mel, List<IDisposable> loaders)
+        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled)
     {
+        _distilled = distilled;
         _backend = backend;
         _pipeline = pipeline;
         _parts = parts;
@@ -85,8 +87,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar"))
         {
             LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-                audioTokens, unconditionalTokens, settings.Steps, LongCatAvatarSchedule.Kind.Linear,
-                settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale, LongCatAvatarPipelineSettings.AudioGuidance,
+                audioTokens, unconditionalTokens, settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
+                settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale, _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance,
                 mode, condLatents, firstFrame, OnProgress: step => { stream.EndStep(); bridge(step); }, Cancel: cancel);
             latents = _pipeline.Denoise(run).Latents;
         }
