@@ -500,6 +500,46 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         }
     }
 
+    /// <summary>The window's own post-norm, pre-RoPE K and V of this block, without the attention, the FFN or the output: what an encode pass
+    /// stores in the cache when the block's output is discarded (the last block of a window). The same K and V as
+    /// <see cref="ForwardWindow"/> with <c>returnKv</c>, which depend only on the window's input. Batch 1, F32; the input is not disposed.</summary>
+    public (Tensor Keys, Tensor Values) EncodeWindowKeysAndValues(IBackend backend, Tensor image, Tensor frameTemb, TokenSegmentLayout layout)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(frameTemb);
+        ArgumentNullException.ThrowIfNull(layout);
+        if (_imgAttn is null) throw new InvalidOperationException("LoadWeights before EncodeWindowKeysAndValues.");
+        if (image.Shape.Rank != 3 || image.Shape[0] != 1 || image.DType != DType.F32)
+            throw new ArgumentException($"EncodeWindowKeysAndValues takes a batch-1 F32 image; got {image.Shape} {image.DType}.", nameof(image));
+        if (layout.TotalLength != image.Shape[1])
+            throw new ArgumentException($"The layout covers {layout.TotalLength} image tokens; the image has {image.Shape[1]}.", nameof(layout));
+        if (frameTemb.Shape.Rank != 2 || frameTemb.Shape[1] != _hiddenSize || frameTemb.Shape[0] != layout.GroupCount)
+            throw new ArgumentException($"frameTemb must be [{layout.GroupCount}, {_hiddenSize}], got {frameTemb.Shape}.", nameof(frameTemb));
+        Tensor[]? imgMod = null;
+        SegmentModulation? attnMod = null;
+        try
+        {
+            imgMod = _imgModulation.Forward(backend, frameTemb);
+            attnMod = SegmentModulation.FromTables(imgMod[0], imgMod[1], imgMod[2], layout);
+            // The FFN's shift, scale and gate are not needed here; the segment tables above took the first three.
+            imgMod[3].Dispose();
+            imgMod[4].Dispose();
+            imgMod[5].Dispose();
+            imgMod = null;
+            Tensor modulated = attnMod.NormAffine(backend, image, 1e-6f);
+            (Tensor q, Tensor k, Tensor v) = ProjectWindowStream(backend, _imgAttn, modulated);
+            q.Dispose();
+            return (k, v);
+        }
+        finally
+        {
+            attnMod?.Dispose();
+            if (imgMod is not null)
+                foreach (Tensor m in imgMod) m.Dispose();
+        }
+    }
+
     /// <summary>Projects one stream's modulated rows to Q, K and V and QK-norms Q and K, before any rotation. Releases the input.</summary>
     private static (Tensor Q, Tensor K, Tensor V) ProjectWindowStream(IBackend backend, AttentionLayer stream, Tensor modulated)
     {

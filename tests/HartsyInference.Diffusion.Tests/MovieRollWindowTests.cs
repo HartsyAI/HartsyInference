@@ -149,8 +149,31 @@ public sealed class MovieRollWindowTests
             Tensor latent = fixture.Ref($"win.stream.latent{window}");
             using Tensor velocity = fixture.Dit.StreamDenoise(fixture.Backend, latent, timesteps, windowTimestep, qwen, byt5, cache, FullHistoryBlocks);
             AssertValues(fixture.Ref($"win.stream.velocity{window}"), velocity, $"window {window} velocity");
-            fixture.Dit.StreamEncode(fixture.Backend, latent, timesteps, qwen, byt5, cache, FullHistoryBlocks, startFrame: Frames * window);
+            fixture.Dit.StreamEncode(fixture.Backend, latent, timesteps, cache, FullHistoryBlocks, startFrame: Frames * window);
         }
+    }
+
+    [Fact]
+    public void StreamRefusesALatentThatDoesNotMatchTheCacheGrid()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height + 1, Width);
+
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamEncode(fixture.Backend, fixture.Ref("win.stream.latent0"), [700f, 537f, 300f],
+            cache, FullHistoryBlocks, startFrame: 0));
+    }
+
+    [Fact]
+    public void CacheRefusesAChunkThatStartsBeforeTheLastCachedChunkEnds()
+    {
+        using MovieRollKvCache cache = new(new CpuBackend());
+        cache.Init(["layer"], Height, Width);
+        using Tensor first = new(new TensorShape(1, 2 * PerFrame, Heads, HeadDim), DType.F32);
+        using Tensor overlap = new(new TensorShape(1, PerFrame, Heads, HeadDim), DType.F32);
+        cache.Update("layer", first, first, 0, 2);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.Update("layer", overlap, overlap, 1, 2));
     }
 
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
