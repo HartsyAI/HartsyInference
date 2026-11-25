@@ -115,14 +115,40 @@ public sealed class LongCatAudioProjectionTests
         }
     }
 
+    [Fact]
+    public void ForwardRefusesAFirstWindowThatIsNotOneRow()
+    {
+        using LongCatAudioProjection projection = NewProjection();
+        Dictionary<string, Tensor> weights = Weights(seed: 20);
+        try
+        {
+            projection.LoadWeights(weights);
+            using Tensor twoRows = Filled(2, SeqLen * Blocks * Channels, seed: 21);
+            using Tensor latter = Filled(3, SeqLenVf * Blocks * Channels, seed: 22);
+            using CpuBackend backend = new();
+
+            ArgumentException error = Assert.Throws<ArgumentException>(() => projection.Forward(backend, twoRows, latter));
+            Assert.Equal("audioFirst", error.ParamName);
+        }
+        finally
+        {
+            DisposeAll(weights);
+        }
+    }
+
     [Theory]
-    [InlineData(0, 8, 3, "seqLen")]
-    [InlineData(5, 0, 3, "seqLenVf")]
-    [InlineData(5, 8, 0, "blocks")]
-    public void ConstructorNamesTheArgumentThatIsNotPositive(int seqLen, int seqLenVf, int blocks, string expectedName)
+    [InlineData(0, 8, 3, 6, 16, 10, 4, "seqLen")]
+    [InlineData(5, 0, 3, 6, 16, 10, 4, "seqLenVf")]
+    [InlineData(5, 8, 0, 6, 16, 10, 4, "blocks")]
+    [InlineData(5, 8, 3, 0, 16, 10, 4, "channels")]
+    [InlineData(5, 8, 3, 6, 0, 10, 4, "intermediate")]
+    [InlineData(5, 8, 3, 6, 16, 0, 4, "outputDim")]
+    [InlineData(5, 8, 3, 6, 16, 10, 0, "contextTokens")]
+    public void ConstructorNamesTheArgumentThatIsNotPositive(int seqLen, int seqLenVf, int blocks, int channels, int intermediate,
+        int outputDim, int contextTokens, string expectedName)
     {
         ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() =>
-            new LongCatAudioProjection(seqLen, seqLenVf, blocks, Channels, Intermediate, OutputDim, Context));
+            new LongCatAudioProjection(seqLen, seqLenVf, blocks, channels, intermediate, outputDim, contextTokens));
         Assert.Equal(expectedName, error.ParamName);
     }
 
