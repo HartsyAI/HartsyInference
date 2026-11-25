@@ -9,9 +9,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// separately, joined along the frame axis, passed through a second ReLU projection, and expanded to <c>context_tokens</c> tokens of
 /// <c>output_dim</c> per frame, then normalised with a LayerNorm over <c>output_dim</c>.</summary>
 /// <remarks>
-/// Input rows are one per frame: <c>audioFirst</c> is <c>[f1, seqLen·blocks·channels]</c> and <c>audioLatter</c> is
-/// <c>[f2, seqLenVf·blocks·channels]</c>, each row flattened in (window, block, channel) order. The output is
-/// <c>[(f1+f2)·contextTokens, outputDim]</c>, frame f's tokens in rows <c>f·contextTokens .. (f+1)·contextTokens−1</c>.
+/// Input rows are one per frame: <c>audioFirst</c> is <c>[1, seqLen·blocks·channels]</c> (the first frame is always one row) and
+/// <c>audioLatter</c> is <c>[f2, seqLenVf·blocks·channels]</c>, each row flattened in (window, block, channel) order. The output is
+/// <c>[(1+f2)·contextTokens, outputDim]</c>, frame f's tokens in rows <c>f·contextTokens .. (f+1)·contextTokens−1</c>.
 /// Weights are read under <c>audio_proj.</c> with the reference's names. All-or-nothing, like <see cref="LongCatTransformer.LoadWeights"/>.
 /// </remarks>
 public sealed class LongCatAudioProjection : IDisposable
@@ -104,12 +104,14 @@ public sealed class LongCatAudioProjection : IDisposable
             throw new ArgumentException($"The latter-frame audio must be [frames, {inLatter}], got {audioLatter.Shape}.", nameof(audioLatter));
 
         int f1 = (int)audioFirst.Shape[0], f2 = (int)audioLatter.Shape[0], frames = f1 + f2;
-        // The runtime cannot allocate zero-row tensors, and the DiT handles a one-latent-frame clip before it calls this projection.
-        // The DiT passes exactly one first-frame row, so any other count is refused by name.
+        // Contract: callers pass exactly one first-frame row, and any other count is refused by name. The avatar DiT (not yet in src/; the
+        // audio projection has no caller there yet) is to handle a one-latent-frame clip before it calls this projection.
         if (f1 != 1)
             throw new ArgumentException($"The first-frame audio must have exactly one row; it has {f1}.", nameof(audioFirst));
+        // Defensive: the runtime cannot build a zero-row tensor, so this is reached only through a zero-row view. It states the reason for the
+        // edge case the DiT is meant to avoid: a one-latent-frame clip has no latter frames.
         if (f2 == 0)
-            throw new ArgumentException("The latter-frame audio has no rows: a clip of one latent frame has no latter frames to project.", nameof(audioLatter));
+            throw new ArgumentException("The latter-frame audio has no rows. A one-latent-frame clip has no latter frames; the DiT must not call this with one.", nameof(audioLatter));
 
         // proj1 and proj1_vf, each with ReLU (LeakyRelu at slope 0 is ReLU).
         using Tensor firstLinear = new(new TensorShape(f1, _intermediate), DType.F32);
