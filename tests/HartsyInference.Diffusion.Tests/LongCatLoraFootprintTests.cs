@@ -6,8 +6,8 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>The block footprint the streaming planner reads counts a gated LoRA's adapter operands, not only the base weights: the planner must
-/// size the resident prefix against what the device actually holds.</summary>
+/// <summary>A block's footprint counts its own weights only. A gated LoRA's adapter operands count with the transformer's shared weights, which the
+/// transformer preloads once; the planner sizes the resident prefix against shared plus blocks.</summary>
 [Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatLoraFootprintTests : IDisposable
 {
@@ -68,9 +68,8 @@ public sealed class LongCatLoraFootprintTests : IDisposable
         // The operands are resident for the run, so they count with the shared weights (preloaded once), and the block streams its base weights only.
         long blockBytes = gated.GetBlock(0).EstimatedWeightBytes;
         long sharedBytes = SharedBytes(gated);
-        Assert.True(blockBytes == baseBytes, $"block {blockBytes} != base {baseBytes} (adapter {adapterBytes})");
-        Assert.True(sharedBytes == baseSharedBytes + adapterBytes,
-            $"shared {sharedBytes} != base shared {baseSharedBytes} + adapter {adapterBytes}");
+        Assert.Equal(baseBytes, blockBytes);
+        Assert.Equal(baseSharedBytes + adapterBytes, sharedBytes);
     }
 
     private static long SharedBytes(LongCatTransformer transformer)

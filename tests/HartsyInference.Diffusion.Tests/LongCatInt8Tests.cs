@@ -136,7 +136,10 @@ public sealed class LongCatInt8Tests : IDisposable
 
         long packedBlock = packed.GetBlock(0).EstimatedWeightBytes, widenedBlock = widenedDit.GetBlock(0).EstimatedWeightBytes;
         Assert.True(packedBlock < widenedBlock, $"packed {packedBlock} against widened {widenedBlock}");
-        Assert.Equal(9, packed.GetBlock(0).EnumerateWeights().Count(static t => t.DType == DType.I8));
+        // Nine packed linears per block, each one byte per element.
+        List<Tensor> packedLinears = packed.GetBlock(0).EnumerateWeights().Where(static t => t.DType == DType.I8).ToList();
+        Assert.Equal(9, packedLinears.Count);
+        Assert.All(packedLinears, t => Assert.Equal(t.ElementCount, t.DType.ComputeByteCount(t.ElementCount)));
     }
 
     [Fact]

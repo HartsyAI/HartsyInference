@@ -157,6 +157,9 @@ public sealed class BlockStreamingScope : IDisposable
             // (LTX-2 replays one over this very scope), so the graph has to go before the memory does.
             VramGraphGuard.InvalidateBeforeRelease(backend);
             backend.FreeWeights(BlockRangeWeights(denoiser, 0, pin.PinnedBlocks));
+            // Freeing a block also frees the LoRA adapter operands it expands to, and those are shared-resident: restore them before the
+            // free-memory read, or the prefix is sized against memory the forward still needs.
+            backend.PreloadWeights(denoiser.EnumerateSharedWeights());
             backend.TrimMemoryPool();
             pin.Resident = false;
             pin.PinnedBlocks = -1;
@@ -240,6 +243,8 @@ public sealed class BlockStreamingScope : IDisposable
         int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : blockCount;
         VramGraphGuard.InvalidateBeforeRelease(options.Backend);
         options.Backend.FreeWeights(BlockRangeWeights(options.Denoiser, 0, residentBlocks));
+        // As in PlanResidentPrefix: the freed blocks' adapter operands are shared-resident, so restore them before the planner reads free memory.
+        options.Backend.PreloadWeights(options.Denoiser.EnumerateSharedWeights());
         options.Backend.TrimMemoryPool();
         pin.Resident = false;
         pin.PinnedBlocks = -1;
