@@ -62,13 +62,13 @@ public sealed class LongCatAudioProjection : IDisposable
         try
         {
             int inFirst = _seqLen * _blocks * _channels, inLatter = _seqLenVf * _blocks * _channels;
-            Tensor p1w = Expect(LongCatOps.WidenF32(weights, prefix + "proj1.weight", owned), [_intermediate, inFirst], prefix + "proj1.weight");
+            Tensor p1w = Expect(weights[prefix + "proj1.weight"], [_intermediate, inFirst], prefix + "proj1.weight");
             Tensor p1b = Expect(LongCatOps.WidenF32(weights, prefix + "proj1.bias", owned), [_intermediate], prefix + "proj1.bias");
-            Tensor pvw = Expect(LongCatOps.WidenF32(weights, prefix + "proj1_vf.weight", owned), [_intermediate, inLatter], prefix + "proj1_vf.weight");
+            Tensor pvw = Expect(weights[prefix + "proj1_vf.weight"], [_intermediate, inLatter], prefix + "proj1_vf.weight");
             Tensor pvb = Expect(LongCatOps.WidenF32(weights, prefix + "proj1_vf.bias", owned), [_intermediate], prefix + "proj1_vf.bias");
-            Tensor p2w = Expect(LongCatOps.WidenF32(weights, prefix + "proj2.weight", owned), [_intermediate, _intermediate], prefix + "proj2.weight");
+            Tensor p2w = Expect(weights[prefix + "proj2.weight"], [_intermediate, _intermediate], prefix + "proj2.weight");
             Tensor p2b = Expect(LongCatOps.WidenF32(weights, prefix + "proj2.bias", owned), [_intermediate], prefix + "proj2.bias");
-            Tensor p3w = Expect(LongCatOps.WidenF32(weights, prefix + "proj3.weight", owned), [_contextTokens * _outputDim, _intermediate], prefix + "proj3.weight");
+            Tensor p3w = Expect(weights[prefix + "proj3.weight"], [_contextTokens * _outputDim, _intermediate], prefix + "proj3.weight");
             Tensor p3b = Expect(LongCatOps.WidenF32(weights, prefix + "proj3.bias", owned), [_contextTokens * _outputDim], prefix + "proj3.bias");
             Tensor nw = Expect(LongCatOps.WidenF32(weights, prefix + "norm.weight", owned), [_outputDim], prefix + "norm.weight");
             Tensor nb = Expect(LongCatOps.WidenF32(weights, prefix + "norm.bias", owned), [_outputDim], prefix + "norm.bias");
@@ -139,6 +139,14 @@ public sealed class LongCatAudioProjection : IDisposable
         Tensor output = new(tokens.Shape, DType.F32);
         backend.LayerNorm(output, tokens, _normW!, _normB!, NormEps);
         return output;
+    }
+
+    /// <summary>The loaded weights: matrices as stored, vectors widened; empty before a load.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _proj1W, _proj1B, _proj1VfW, _proj1VfB, _proj2W, _proj2B, _proj3W, _proj3B, _normW, _normB })
+            if (t is not null)
+                yield return t;
     }
 
     /// <inheritdoc/>

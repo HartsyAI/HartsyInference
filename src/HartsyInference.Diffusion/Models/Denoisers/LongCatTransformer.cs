@@ -21,6 +21,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     private readonly WanForwardCaches _caches = new();
     private readonly Dictionary<(int Frames, int TokensPerFrame), Tensor> _frameIndexes = [];
     private int _disposed;
+    private LongCatAudioProjection? _audioProjection;
 
     private Tensor? _patchW2d, _patchBias;
     private Tensor? _time1W, _time1B, _time2W, _time2B;
@@ -63,6 +64,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     {
         List<Tensor> previous = _owned;
         List<Tensor> owned = [];
+        LongCatAudioProjection? nextAudio = null;
         _loaded = false;
         try
         {
@@ -85,6 +87,14 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             _finalB = LongCatOps.WidenF32(w, "final_layer.linear.bias", owned);
             for (int i = 0; i < _blocks.Length; i++)
                 _blocks[i].LoadWeights(w, $"blocks.{i}", owned);
+            // The avatar projection loads into a local and is swapped in only when the whole load has succeeded. A base checkpoint has no
+            // audio_proj keys: nextAudio stays null and the previous projection (if any) is released on the swap.
+            if (w.ContainsKey("audio_proj.proj1.weight"))
+            {
+                nextAudio = new LongCatAudioProjection(_config.AudioWindow, _config.AudioWindow + _config.AudioVaeScale - 1,
+                    _config.AudioBlock, _config.AudioChannel, _config.AudioIntermediateDim, _config.AudioOutputDim, _config.AudioContextTokens);
+                nextAudio.LoadWeights(w, "audio_proj.");
+            }
         }
         catch
         {
@@ -92,6 +102,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
                 copy.Dispose();
             foreach (Tensor stale in previous)
                 stale.Dispose();
+            nextAudio?.Dispose();
             _owned = [];
             throw;
         }
@@ -99,6 +110,9 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         _loaded = true;
         foreach (Tensor stale in previous)
             stale.Dispose();
+        LongCatAudioProjection? staleAudio = _audioProjection;
+        _audioProjection = nextAudio;
+        staleAudio?.Dispose();
     }
 
     /// <summary>Every weight: the shared ones, then each block's.</summary>
@@ -120,6 +134,9 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             if (t is not null)
                 yield return t;
         }
+        if (_audioProjection is not null)
+            foreach (Tensor t in _audioProjection.EnumerateWeights())
+                yield return t;
     }
 
     /// <summary>Velocity prediction (the model output, before the sampler's sign flip). <paramref name="latent"/> is <c>[1, z, T, H, W]</c>;
@@ -129,11 +146,17 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     /// Rows past it are zeroed after the caption projection and still attended when <see cref="LongCatConfig.TextTokensZeroPad"/>
     /// is set, else dropped.
     /// Returns <c>[1, z, T, H, W]</c>.</summary>
+    /// <paramref name="audioTokens"/> are the avatar's per-frame audio tokens <c>[frames·contextTokens, audioOutputDim]</c> from
+    /// <see cref="ProjectAudio"/>; a checkpoint with audio weights needs them, and a base checkpoint must not get them.
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, ReadOnlySpan<float> frameTimesteps, in LongCatConditioning conditioning,
-        int validTextTokens = -1)
+        int validTextTokens = -1, Tensor? audioTokens = null)
     {
         if (!_loaded)
             throw new InvalidOperationException("The transformer has no weights: LoadWeights was never called, or it failed.");
+        if (_audioProjection is null && audioTokens is not null)
+            throw new ArgumentException("This checkpoint has no audio projection, so audio tokens do not apply.", nameof(audioTokens));
+        if (_audioProjection is not null && audioTokens is null)
+            throw new ArgumentException("This avatar checkpoint needs audio tokens; project the raw audio with ProjectAudio first.", nameof(audioTokens));
         if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != _config.InChannels)
             throw new ArgumentException($"The latent is [1, {_config.InChannels}, T, H, W]; got {latent.Shape}.", nameof(latent));
         int frames = (int)latent.Shape[2], height = (int)latent.Shape[3], width = (int)latent.Shape[4];
@@ -171,7 +194,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         for (int i = 0; i < _blocks.Length; i++)
         {
             BeforeBlockForward?.Invoke(i);
-            Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, Probe, Probe is null ? "" : $"block{i}");
+            Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, Probe, Probe is null ? "" : $"block{i}", audioTokens);
             cur.Dispose();
             cur = next;
         }
@@ -205,6 +228,18 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         Tensor embedding = new(first.Shape, DType.F32);
         backend.Linear(embedding, activated, _time2W!, _time2B);
         return embedding;
+    }
+
+    /// <summary>The avatar's per-frame audio tokens <c>[frames·contextTokens, audioOutputDim]</c> from the raw audio windows (see
+    /// <see cref="LongCatAvatarAudio.FrameTokens"/>). Needs a checkpoint loaded with audio weights.</summary>
+    public Tensor ProjectAudio(IBackend backend, Tensor rawAudio, int frames)
+    {
+        if (!_loaded)
+            throw new InvalidOperationException("The transformer has no weights: LoadWeights was never called, or it failed.");
+        if (_audioProjection is null)
+            throw new InvalidOperationException("This checkpoint has no audio projection.");
+        return LongCatAvatarAudio.FrameTokens(backend, _audioProjection, rawAudio, frames, _config.AudioWindow, _config.AudioBlock,
+            _config.AudioChannel, _config.AudioVaeScale);
     }
 
     private Tensor CaptionEmbedding(IBackend backend, Tensor encoder, int validTextTokens)
@@ -281,6 +316,10 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             foreach (Tensor owned in _owned)
                 owned.Dispose();
             _owned.Clear();
+            foreach (LongCatBlock block in _blocks)
+                block.Dispose();
+            _audioProjection?.Dispose();
+            _audioProjection = null;
             _patchW2d = _patchBias = _time1W = _time1B = _time2W = _time2B = _text1W = _text1B = _text2W = _text2B = null;
             _finalAdaW = _finalAdaB = _finalW = _finalB = null;
         }
