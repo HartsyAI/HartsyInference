@@ -96,6 +96,8 @@ public sealed class LongCatVideoPipeline
             float[] velocity;
             if (guided)
             {
+                // Both velocities stay live until the reduction, which reads both. The positive one is one latent-sized tensor
+                // (about 9.6 MB at 832 x 480 x 93), so keeping it through the negative forward costs little next to the activations.
                 using Tensor positive = Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors);
                 using Tensor negative = Predict(latents, run, channels, frames, run.Negative, frameTimesteps, conditioning, tensors);
                 velocity = Guide(positive, negative, guidedFrom, channels, frames, hw, run.Guidance);
@@ -189,7 +191,8 @@ public sealed class LongCatVideoPipeline
         if (guidedFrom >= frames)
             return guided;
         float[] negatives = negative.AsReadOnlySpan<float>().ToArray();
-        StridedView region = StridedView.Of(new long[] { channels, frames, hw }).Slice(1, guidedFrom, frames - guidedFrom);
+        StridedView region = StridedView.Of([channels, frames, hw]).Slice(1, guidedFrom, frames - guidedFrom);
+        // The host still reads both velocities for the combine below. The readback saving appears only once the combine moves to the device (after #1210).
         (double dot, double squared) = ProductSums.DotAndSquaredB(_backend, positive, negative, region);
         float scale = (float)(dot / (squared + 1e-8));
         for (int c = 0; c < channels; c++)
