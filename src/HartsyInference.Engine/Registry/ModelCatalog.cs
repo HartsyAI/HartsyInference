@@ -42,6 +42,26 @@ public static class ModelCatalog
         Role = "config",
     };
 
+    /// <summary>One transformer shard of an Open Vision Banana build, kept under its own folder so the index beside it resolves
+    /// the set. <paramref name="checkpoint"/> is the release folder, e.g. <c>final_models/4B/zeroshot/checkpoint-87500-95000-w25</c>.</summary>
+    private static ModelAsset OvbShard(string folder, string checkpoint, int index, int count, string sha256) => new ModelAsset
+    {
+        Repo = "FunAILab/Open-Vision-Banana",
+        RepoPath = $"{checkpoint}/transformer/diffusion_pytorch_model-{index:D5}-of-{count:D5}.safetensors",
+        TargetSubdir = $"Stable-Diffusion/OpenVisionBanana/{folder}",
+        Role = "transformer",
+        Sha256 = sha256,
+    };
+
+    /// <summary>The shard index of an Open Vision Banana build.</summary>
+    private static ModelAsset OvbIndex(string folder, string checkpoint) => new ModelAsset
+    {
+        Repo = "FunAILab/Open-Vision-Banana",
+        RepoPath = $"{checkpoint}/transformer/diffusion_pytorch_model.safetensors.index.json",
+        TargetSubdir = $"Stable-Diffusion/OpenVisionBanana/{folder}",
+        Role = "config",
+    };
+
     /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
     private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10, LiveControls = OasisControlScheme.Instance };
@@ -1303,6 +1323,45 @@ public static class ModelCatalog
                     IrisZIndex("big"),
                     SideModels.IrisZBigEmptyPrompt,
                     SideModels.MistralSmallFlux2,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Open Vision Banana 4B, zero-shot averaged checkpoint (FunAILab/Open-Vision-Banana @ 558ea8a): FLUX.2 [klein] Base 4B
+                // fine-tuned so a task prompt about a photo is answered with a painted image (segmentation, depth, normals, editing).
+                // Served by Flux2Recipe's open-vision-banana-4b variant (reference edit, true CFG, 28 steps). fp32 shards (15.5 GB).
+                // Licence: weights FLUX Non-Commercial (the release's own statement: "The released model weights are derived from FLUX.2
+                // [klein] Base and are distributed under the FLUX Non-Commercial License ... Use of the weights, and of any output
+                // produced with them, is subject to the terms of that license."); code Apache-2.0. Built and parity-tested on a tiny
+                // diffusers fixture; no real-weight run yet.
+                Id = "open-vision-banana-4b", Modality = img, DisplayName = "Open Vision Banana 4B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 1, 2, "e0eb9850ca1be16a9e48f5d00dd5309c4d024c7592f56d61c33efdeb6a74a0a0"),
+                    OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 2, 2, "4f55e02ea4862375e4250205ba9d83a0fb035f83475a7467f80ce9baa36c5e72"),
+                    OvbIndex("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25"),
+                    SideModels.Qwen3_4B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Open Vision Banana 9B, zero-shot averaged checkpoint: FLUX.2 [klein] Base 9B fine-tune; fp32 shards (36.3 GB). Same
+                // licence terms as the 4B. Klein 9B has never run on real weights here, so this inherits that risk.
+                Id = "open-vision-banana-9b", Modality = img, DisplayName = "Open Vision Banana 9B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 1, 4, "88eba535a98b57af3196ff325cfaacb029e24cf6083dd6fe839cf6bdd7a65ae3"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 2, 4, "139c6462cbdd4d6b23728bb3dcc8f6ce8a53e610471160d3104daf986dc7c7c2"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 3, 4, "c68b36de4303583c63f6f9f5a0e8ad72e5d8c6e2399de00277afbc7b5fcfd078"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 4, 4, "f6cb6c2128fd06a8ad8aadd8c66bce362d387c61cb904097730a9743dd3a435a"),
+                    OvbIndex("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25"),
+                    SideModels.Qwen3_8B_Fp4Mixed,
                     SideModels.Flux2Vae,
                 },
             },

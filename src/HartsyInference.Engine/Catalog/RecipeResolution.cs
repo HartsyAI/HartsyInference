@@ -45,7 +45,7 @@ internal static class RecipeResolution
     internal static ImageFeatures ImageFeaturesFor(IArchitectureRecipe recipe, ResolvedModelVariant? variant)
     {
         ImageFeatures declared = recipe.SupportsFor(variant);
-        return AppliesWeighting(recipe.PromptWeighting) ? declared | ImageFeatures.PromptWeighting : declared;
+        return AppliesWeighting(recipe.PromptWeightingFor(variant)) ? declared | ImageFeatures.PromptWeighting : declared;
     }
 
     /// <summary>Features of <paramref name="recipe"/> for <paramref name="variant"/>, plus the prompt-weighting bit its mode

@@ -556,8 +556,11 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
     /// registry lookup the construction path uses.</summary>
-    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec) =>
-        ResolveRecipe(spec).PromptWeighting;
+    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec)
+    {
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return recipe.PromptWeightingFor(RecipeResolution.ResolveVariant(recipe.Variants, spec));
+    }
 
     /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
     internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
