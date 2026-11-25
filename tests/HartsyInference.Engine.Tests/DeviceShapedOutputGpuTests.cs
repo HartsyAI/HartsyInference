@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Vision.DepthPro2;
 using Xunit.Abstractions;
 
@@ -16,7 +17,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
     public void Cuda_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenCuda);
 
     [VulkanDeviceFact]
-    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(static () => new HartsyInference.Vulkan.VulkanBackend(),
+    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan,
         hostOps: true);
 
     [CudaDeviceFact]
@@ -24,7 +25,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
 
     [VulkanDeviceFact]
     public void Vulkan_LongCatAudioProjection_StaysOnTheDevice() =>
-        LongCatAudioProjectionForward(static () => new HartsyInference.Vulkan.VulkanBackend());
+        LongCatAudioProjectionForward(GpuDevices.OpenVulkan);
 
     // hostOps: ConvTranspose2d runs on the host on Vulkan (VULKAN_STATUS.md), so the count is printed and only the values are checked there.
     private void DepthPro2Reassemble(Func<IBackend> open, bool hostOps = false)
