@@ -8,7 +8,8 @@ namespace HartsyInference.Vision.CrossFrame;
 /// The unbuffered form of <see cref="CrossFrameTokens"/> (upstream <c>KVCache</c>): per cross-frame block, a FIFO of the last <see cref="Window"/>
 /// frames, the current one included. Each block keeps a ring of the frames' prefix tokens and a head-major key/value cache <c>[1, heads, prefix +
 /// Window·N, D]</c> whose first <c>prefix</c> rows hold the keys and values of the pooled prefix (the mean of the visible frames' prefixes) and
-/// whose slot <c>s</c> holds the patch keys and values of a frame. The current frame's patches attend to the first <see cref="LiveRows"/> rows.
+/// whose slot <c>s</c> holds the patch keys and values of a frame. The current frame's patches attend to the first <see cref="LiveRows"/> rows,
+/// which <see cref="LiveCopy"/> reads.
 /// Slots fill in arrival order and then wrap, so the oldest frame is overwritten; attention has no temporal position, so slot order changes only
 /// rounding. Per frame and block, call <see cref="UpdatePrefix"/>, then <see cref="Update"/>. Every write and read is a backend op
 /// (<see cref="IBackend.CopyStrided"/>, <see cref="IBackend.AccumulateStrided"/>), so on a GPU backend the caches stay on the device and a frame
