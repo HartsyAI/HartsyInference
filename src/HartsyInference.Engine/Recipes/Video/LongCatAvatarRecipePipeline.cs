@@ -27,12 +27,17 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly MelSpectrogramExtractor _mel;
     private readonly List<IDisposable> _loaders;
     private readonly bool _distilled;
+    private readonly AdjunctGate? _loraGate;
 
     /// <summary>Wraps the constructed pipeline, taking ownership of every disposable in <paramref name="loaders"/>.</summary>
     internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, WhisperEncoder whisper,
-        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled)
+        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate)
     {
+        // A distilled pipeline is only valid with its LoRA gate: the gate is what makes it the distilled model.
+        if (distilled && loraGate is null)
+            throw new InvalidOperationException("The distilled avatar pipeline needs its DMD LoRA gate; refusing to run the bare base.");
         _distilled = distilled;
+        _loraGate = loraGate;
         _backend = backend;
         _pipeline = pipeline;
         _parts = parts;
@@ -90,7 +95,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
                 audioTokens, unconditionalTokens, settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
                 settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale, _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance,
-                mode, condLatents, firstFrame, OnProgress: step => { stream.EndStep(); bridge(step); }, Cancel: cancel);
+                mode, condLatents, firstFrame, OnProgress: step => { stream.EndStep(); bridge(step); }, Cancel: cancel, LoraGate: _loraGate);
             latents = _pipeline.Denoise(run).Latents;
         }
         _backend.Sync();

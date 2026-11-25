@@ -83,21 +83,33 @@ public sealed class LongCatRecipeTests
     }
 
     [Fact]
-    public void AUnnamedOr15RequestPassesTheRefusalAndA16RequestIsRefusedBeforeAnyWeightIsRead()
+    public void A16RequestIsRefusedBeforeAnyWeightIsRead()
     {
         using CpuBackend backend = new();
-        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
         ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
 
-        Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
         {
             CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
         }));
-        Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+        Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ADistilledBuildWithoutItsLoraIsRefusedBeforeAnyWeightIsRead()
+    {
+        using CpuBackend backend = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+        ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
+
+        foreach (ResolvedModelVariant variant in new[] { unnamed, named15 })
         {
-            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
-        }));
-        Assert.IsNotType<NotSupportedException>(error);
+            NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+            {
+                CheckpointPath = "no-such-folder/base_model_int8", Backend = backend, Variant = variant,
+            }));
+            Assert.Contains("dmd_lora.safetensors", refused.Message, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.Video;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -15,7 +16,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <summary>What every LongCat recipe loads: the DiT from the checkpoint directory, the VAE, and umT5 with its tokenizer. The latent channel count
 /// is the DiT's own <see cref="LongCatConfig.InChannels"/>, so a tiny config and the release (16 channels) share one path.</summary>
 internal sealed record LongCatParts(LongCatTransformer Dit, int Channels, int CaptionChannels, bool HasAudio, IWanVaeDecoder Decoder,
-    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer);
+    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer, AdjunctGate? DmdGate = null);
 
 /// <summary>Where the umT5 and VAE come from. Null in production (the engine's side-model downloads); a test injects small stand-ins here, so the
 /// recipe path runs end to end without the multi-gigabyte files. Each factory returns objects the caller owns.</summary>
@@ -63,7 +64,17 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
-    internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides)
+    /// <summary>The DMD distillation LoRA's static multiplier: the reference's <c>--lora_multiplier</c> default, applied when the LoRA is gated on.</summary>
+    internal const float DmdMultiplier = 0.8f;
+
+    /// <summary>Where the 1.5 distillation LoRA sits: <c>lora/dmd_lora.safetensors</c> beside the checkpoint's own folder (the reference layout).</summary>
+    internal static string DmdLoraPath(string checkpointPath) =>
+        Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
+
+    /// <summary>Loads the parts. With <paramref name="attachDmd"/>, the DMD LoRA is attached as a runtime gated term on the DiT's weights (the
+    /// INT8 base included), so it is live only while its <see cref="AdjunctGate"/> is enabled. A missing LoRA file is refused here, before any
+    /// weight is read, so a distilled request never runs on the bare base.</summary>
+    internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false)
     {
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
@@ -71,9 +82,28 @@ internal static class LongCatRecipeSupport
         // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
         loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
+        AdjunctGate? dmdGate = null;
+        LoraStack? loras = null;
+        LoraFile? dmd = null;
+        if (attachDmd)
+        {
+            string dmdPath = DmdLoraPath(context.CheckpointPath);
+            if (!File.Exists(dmdPath))
+                throw new NotSupportedException($"The distilled build needs its distillation LoRA at '{dmdPath}', which is not there. Refusing to run the bare base as the distilled model.");
+            dmd = LoraFile.Load(dmdPath);
+            loras = new LoraStack();
+            dmdGate = new AdjunctGate();
+            loras.AddGated(dmd, dmdGate, DmdMultiplier);
+            loras.ApplyTo(weights, LoraTarget.Transformer, context.Backend);
+        }
         LongCatTransformer dit = new(checkpoint.Config);
         loaders.Add(dit);
         dit.LoadWeights(weights);
+        if (dmd is not null)
+        {
+            loaders.Add(dmd);
+            loaders.Add(loras!);
+        }
 
         (IWanVaeDecoder decoder, IWanVaeEncoder encoder) = sides is null
             ? LoadProductionVae(loaders, context.Cancel)
@@ -90,7 +120,7 @@ internal static class LongCatRecipeSupport
         loaders.Add(tokenizer);
         // The avatar's audio modules are the audio_proj.* weights; a base checkpoint has none.
         bool hasAudio = checkpoint.Weights.Keys.Any(key => key.StartsWith("audio_proj.", StringComparison.Ordinal));
-        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer);
+        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer, dmdGate);
     }
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>
