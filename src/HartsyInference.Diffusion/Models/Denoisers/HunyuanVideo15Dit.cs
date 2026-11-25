@@ -292,7 +292,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// cache is the pre-RoPE K and V of the earlier chunks, so no attention matrix bigger than one chunk is ever built. The full-history blocks
     /// replace their cache layers with the whole clip. Each sink-recent block then replaces its layer with the sink (the first chunk) and the
     /// recent one (the last), computed from the same pass after the full-history blocks, so every block describes the same input. The cache is
-    /// soft-cleared first, as in MovieRoll. If a block throws, the layers already replaced hold the new clip and the rest hold the old state, so
+    /// soft-cleared first, as in MovieRoll, but only after the budget has admitted the clip: a refusal leaves the cache as it was. If a block throws, the layers already replaced hold the new clip and the rest hold the old state, so
     /// call <see cref="MovieRollKvCache.Clear"/> before reusing the cache. Frame coordinates: after a recompute the cached ranges are packed from
     /// frame 0 over the returned <c>T</c> frames, not the absolute frames the chunks came from, so the next window starts at frame <c>T</c>.
     /// The reference for this path is a transcription of MovieRoll's function, not the upstream code. Returns <c>T</c>.</summary>
@@ -318,23 +318,19 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             throw new ArgumentException($"The cache holds {cache.Height}×{cache.Width} latent tokens per frame; this latent is {height}×{width}.", nameof(latent));
         int perFrame = height * width;
 
+        cache.RequireFits(MovieRollKvCache.BytesPerFrame(_blocks.Length, height, width, _config.HiddenSize) * frames);
         cache.SoftClear();
         using Tensor image = EmbedImage(backend, latent, null, frames * perFrame);
-        Tensor[] chunks = SplitChunks(backend, image, chunkFrames, perFrame);
+        Tensor[]? chunks = null;
+        ChunkInputs? inputs = null;
         try
         {
+            chunks = SplitChunks(backend, image, chunkFrames, perFrame);
+            inputs = new ChunkInputs(this, backend, chunkFrames, perFrame);
             for (int i = 0; i < fullHistoryBlocks; i++)
             {
-                (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, chunks, chunkFrames, height, width);
-                try
-                {
-                    cache.ReplaceLayer(StreamLayerName(i), keys, values, PackedRanges(chunkFrames));
-                }
-                finally
-                {
-                    keys.Dispose();
-                    values.Dispose();
-                }
+                (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, chunks!, chunkFrames, height, width, inputs!.Temb, inputs!.Layouts);
+                AdoptOrDispose(cache, StreamLayerName(i), keys, values, PackedRanges(chunkFrames));
             }
             if (fullHistoryBlocks == _blocks.Length)
                 return frames;
@@ -342,8 +338,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             // The sink-recent blocks see the sink and the recent chunk of the full-history output, as two chunks of their own.
             int sinkFrames = chunkFrames[0];
             int recentFrames = chunkFrames.Length > 1 ? chunkFrames[chunkFrames.Length - 1] : 0;
-            Tensor[] sinkRecent = recentFrames > 0 ? new[] { CopyOf(backend, chunks[0]), CopyOf(backend, chunks[chunks.Length - 1]) } : new[] { CopyOf(backend, chunks[0]) };
+            Tensor[] sinkRecent = recentFrames > 0
+                ? new[] { CopyOf(backend, chunks![0]), CopyOf(backend, chunks![chunks!.Length - 1]) }
+                : new[] { CopyOf(backend, chunks![0]) };
             int[] srChunkFrames = recentFrames > 0 ? new[] { sinkFrames, recentFrames } : new[] { sinkFrames };
+            Tensor[] srTemb = recentFrames > 0 ? new[] { inputs!.Temb[0], inputs!.Temb[chunks!.Length - 1] } : new[] { inputs!.Temb[0] };
+            TokenSegmentLayout[] srLayouts = recentFrames > 0
+                ? new[] { inputs!.Layouts[0], inputs!.Layouts[chunks!.Length - 1] }
+                : new[] { inputs!.Layouts[0] };
             List<(int Start, int End)> srRanges = recentFrames > 0
                 ? new List<(int Start, int End)> { (0, sinkFrames), (frames - recentFrames, frames) }
                 : new List<(int Start, int End)> { (0, sinkFrames) };
@@ -351,16 +353,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             {
                 for (int i = fullHistoryBlocks; i < _blocks.Length; i++)
                 {
-                    (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, sinkRecent, srChunkFrames, height, width);
-                    try
-                    {
-                        cache.ReplaceLayer(StreamLayerName(i), keys, values, srRanges);
-                    }
-                    finally
-                    {
-                        keys.Dispose();
-                        values.Dispose();
-                    }
+                    (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, sinkRecent, srChunkFrames, height, width, srTemb, srLayouts);
+                    AdoptOrDispose(cache, StreamLayerName(i), keys, values, srRanges);
                 }
             }
             finally
@@ -371,20 +365,105 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         }
         finally
         {
-            foreach (Tensor chunk in chunks) chunk.Dispose();
+            if (chunks is not null)
+                foreach (Tensor chunk in chunks) chunk.Dispose();
+            inputs?.Dispose();
+        }
+    }
+
+    /// <summary>Hands a layer's K and V to the cache. On success the cache owns them; if the cache refuses (its checks or byte budget), the arrays
+    /// are disposed here and the refusal propagates.</summary>
+    private static void AdoptOrDispose(MovieRollKvCache cache, string layer, Tensor keys, Tensor values, IReadOnlyList<(int Start, int End)> ranges)
+    {
+        try
+        {
+            cache.AdoptLayer(layer, keys, values, ranges);
+        }
+        catch
+        {
+            keys.Dispose();
+            values.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The per-chunk inputs of a clip, built once per distinct chunk length and shared by every block: a zero-timestep row per frame and a
+    /// segment layout. Owns its tensors and layouts; <see cref="Dispose"/> releases them.</summary>
+    private sealed class ChunkInputs : IDisposable
+    {
+        private readonly List<IDisposable> _owned = new();
+
+        public ChunkInputs(HunyuanVideo15Dit dit, IBackend backend, int[] frames, int perFrame)
+        {
+            Temb = new Tensor[frames.Length];
+            Layouts = new TokenSegmentLayout[frames.Length];
+            Dictionary<int, Tensor> tembByLength = new();
+            Dictionary<int, TokenSegmentLayout> layoutByLength = new();
+            try
+            {
+                for (int c = 0; c < frames.Length; c++)
+                {
+                    int len = frames[c];
+                    if (!tembByLength.TryGetValue(len, out Tensor? temb))
+                    {
+                        temb = dit.TimestepMlpRows(backend, new float[len]);
+                        tembByLength[len] = temb;
+                        _owned.Add(temb);
+                    }
+                    if (!layoutByLength.TryGetValue(len, out TokenSegmentLayout? layout))
+                    {
+                        layout = FrameLayout(len, perFrame);
+                        layoutByLength[len] = layout;
+                        _owned.Add(layout);
+                    }
+                    Temb[c] = temb;
+                    Layouts[c] = layout;
+                }
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
+        }
+
+        public Tensor[] Temb { get; }
+
+        public TokenSegmentLayout[] Layouts { get; }
+
+        public void Dispose()
+        {
+            foreach (IDisposable owned in _owned) owned.Dispose();
+            _owned.Clear();
         }
     }
 
     /// <summary>One block over the chunks of a clip, with block-causal attention done chunk by chunk. Chunk <c>c</c> runs as a window whose cache is
     /// the pre-RoPE K and V of chunks <c>0..c-1</c>, and its RoPE positions are the packed frames before it plus its own. Each chunk's output
-    /// replaces <paramref name="chunks"/>[c] in place, so the next block reads it. The last block stores only its K and V, which depend on the
-    /// chunk's input alone. Returns the clip's K and V, token-major <c>[1, S, heads, D]</c>, owned by the caller.</summary>
-    private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width)
+    /// replaces <paramref name="chunks"/>[c] in place, so the next block reads it. The running prefix is the clip's K and V so far, so the final
+    /// prefix is the answer and is not concatenated again. The last block stores only its K and V, which depend on the chunk's input alone.
+    /// Returns the clip's K and V, token-major <c>[1, S, heads, D]</c>, owned by the caller.</summary>
+    private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width,
+        Tensor[] temb, TokenSegmentLayout[] layouts)
     {
-        int perFrame = height * width;
         bool lastBlock = block == _blocks.Length - 1;
-        Tensor[] keyParts = new Tensor[chunks.Length];
-        Tensor[] valueParts = new Tensor[chunks.Length];
+        if (lastBlock)
+        {
+            Tensor[] keyParts = new Tensor[chunks.Length];
+            Tensor[] valueParts = new Tensor[chunks.Length];
+            try
+            {
+                for (int c = 0; c < chunks.Length; c++)
+                    (keyParts[c], valueParts[c]) = _blocks[block].EncodeWindowKeysAndValues(backend, chunks[c], temb[c], layouts[c]);
+                return (ConcatTokenMajor(backend, keyParts), ConcatTokenMajor(backend, valueParts));
+            }
+            finally
+            {
+                foreach (Tensor t in keyParts) t?.Dispose();
+                foreach (Tensor t in valueParts) t?.Dispose();
+            }
+        }
+
         Tensor? prefixKeys = null, prefixValues = null;
         try
         {
@@ -392,38 +471,58 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             for (int c = 0; c < chunks.Length; c++)
             {
                 int len = frames[c];
-                using Tensor temb = TimestepMlpRows(backend, new float[len]);
-                using TokenSegmentLayout layout = FrameLayout(len, perFrame);
-                if (lastBlock)
+                float[] positions = HunyuanImagePosEmbed.GridRows([before + len, height, width]);
+                MovieRollWindowOutput output = _blocks[block].ForwardWindow(backend, chunks[c], null, null, temb[c], layouts[c], _rope,
+                    positions, prefixKeys, prefixValues, returnKv: true);
+                chunks[c].Dispose();
+                chunks[c] = output.Image;
+                Tensor? keys = output.Keys, values = output.Values;
+                Tensor? nextKeys = null, nextValues = null;
+                try
                 {
-                    (keyParts[c], valueParts[c]) = _blocks[block].EncodeWindowKeysAndValues(backend, chunks[c], temb, layout);
-                }
-                else
-                {
-                    float[] positions = HunyuanImagePosEmbed.GridRows([before + len, height, width]);
-                    MovieRollWindowOutput output = _blocks[block].ForwardWindow(backend, chunks[c], null, null, temb, layout, _rope, positions,
-                        prefixKeys, prefixValues, returnKv: true);
-                    chunks[c].Dispose();
-                    chunks[c] = output.Image;
-                    keyParts[c] = output.Keys!;
-                    valueParts[c] = output.Values!;
-                    Tensor nextKeys = prefixKeys is null ? ConcatTokenMajor(backend, keyParts[c]) : ConcatTokenMajor(backend, prefixKeys, keyParts[c]);
-                    Tensor nextValues = prefixValues is null ? ConcatTokenMajor(backend, valueParts[c]) : ConcatTokenMajor(backend, prefixValues, valueParts[c]);
+                    // The first chunk's K and V become the prefix as they are; later ones are appended to the running prefix.
+                    if (prefixKeys is null)
+                    {
+                        nextKeys = keys;
+                        keys = null;
+                    }
+                    else
+                    {
+                        nextKeys = ConcatTokenMajor(backend, prefixKeys, keys!);
+                    }
+                    if (prefixValues is null)
+                    {
+                        nextValues = values;
+                        values = null;
+                    }
+                    else
+                    {
+                        nextValues = ConcatTokenMajor(backend, prefixValues, values!);
+                    }
                     prefixKeys?.Dispose();
                     prefixValues?.Dispose();
                     prefixKeys = nextKeys;
                     prefixValues = nextValues;
+                    nextKeys = null;
+                    nextValues = null;
+                }
+                finally
+                {
+                    keys?.Dispose();
+                    values?.Dispose();
+                    nextKeys?.Dispose();
+                    nextValues?.Dispose();
                 }
                 before += len;
             }
-            return (ConcatTokenMajor(backend, keyParts), ConcatTokenMajor(backend, valueParts));
+            Tensor resultKeys = prefixKeys!, resultValues = prefixValues!;
+            prefixKeys = prefixValues = null;
+            return (resultKeys, resultValues);
         }
         finally
         {
             prefixKeys?.Dispose();
             prefixValues?.Dispose();
-            foreach (Tensor t in keyParts) t?.Dispose();
-            foreach (Tensor t in valueParts) t?.Dispose();
         }
     }
 

@@ -240,6 +240,43 @@ public sealed class MovieRollWindowTests
     }
 
     [Fact]
+    public void CacheRefusesAWriteOverItsByteBudgetAndKeepsItsState()
+    {
+        const long OneFrameKeyAndValue = 2L * PerFrame * Heads * HeadDim * sizeof(float);
+        using MovieRollKvCache cache = new(new CpuBackend(), OneFrameKeyAndValue);
+        cache.Init(["layer"], Height, Width);
+        using Tensor first = new(new TensorShape(1, PerFrame, Heads, HeadDim), DType.F32);
+        using Tensor second = new(new TensorShape(1, PerFrame, Heads, HeadDim), DType.F32);
+        cache.Update("layer", first, first, 0, 1);
+
+        Assert.Throws<InvalidOperationException>(() => cache.Update("layer", second, second, 1, 2));
+        Assert.Equal(new[] { (0, 1) }, cache.FrameRanges("layer").ToArray());
+        Assert.Equal(OneFrameKeyAndValue, cache.BytesHeld);
+    }
+
+    [Fact]
+    public void BytesPerFrameIsTheAuditEstimateAt480p()
+    {
+        // 480p latent grid 30 × 52 = 1,560 tokens per frame; 54 blocks; hidden 2,048; F32 K and V.
+        Assert.Equal(1_380_188_160L, MovieRollKvCache.BytesPerFrame(54, 30, 52, 2048));
+    }
+
+    [Fact]
+    public void RecomputeRefusedByTheBudgetLeavesTheCacheAsItWas()
+    {
+        using Fixture fixture = new();
+        const long OneFrameKeyAndValue = 2L * PerFrame * Heads * HeadDim * sizeof(float);
+        using MovieRollKvCache cache = new(fixture.Backend, OneFrameKeyAndValue);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+        using Tensor first = new(new TensorShape(1, PerFrame, Heads, HeadDim), DType.F32);
+        cache.Update(HunyuanVideo15Dit.StreamLayerName(0), first, first, 0, 1);
+
+        Assert.Throws<InvalidOperationException>(() => fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), new[] { 1, 2, 2 },
+            cache, FullHistoryBlocks));
+        Assert.Equal(new[] { (0, 1) }, cache.FrameRanges(HunyuanVideo15Dit.StreamLayerName(0)).ToArray());
+    }
+
+    [Fact]
     public void EncodeIgnoresATextStreamPassedWithReturnKv()
     {
         using Fixture fixture = new();
