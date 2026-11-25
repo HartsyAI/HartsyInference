@@ -23,6 +23,16 @@ public sealed class Hy4FlashSequenceState : IDisposable
     /// <summary>Images consumed so far, so a later chunk takes the next one.</summary>
     public int ImagesUsed { get; internal set; }
 
+    /// <summary>Empties every layer's cache and the token history; the next prefill starts at position 0.</summary>
+    public void Reset()
+    {
+        Length = 0;
+        NextPosition = 0;
+        ImagesUsed = 0;
+        Ids.Clear();
+        foreach (DsaAttentionState layer in Layers) layer.Reset();
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {

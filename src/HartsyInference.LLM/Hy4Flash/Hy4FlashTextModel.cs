@@ -1,0 +1,131 @@
+using System.Text.Json;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Generation;
+using HartsyInference.ModelAssets.Tokenizers;
+
+namespace HartsyInference.LLM.Hy4Flash;
+
+/// <summary>Everything the Text path needs to run a Hy4 Flash directory: the generation model, the tokenizer from the checkpoint's <c>tokenizer.json</c>, and the
+/// chat template from its <c>chat_template.jinja</c> (a file without one gets a completion template).</summary>
+/// <remarks>The host reference loads every weight as F32 in host memory, so only checkpoints up to <see cref="MaxHostWeightBytes"/> load; the released 220B
+/// checkpoint is refused by name. Owns the generation model and the checkpoint it reads.</remarks>
+public sealed class Hy4FlashTextModel : IHostReferenceTextModel
+{
+    /// <summary>Largest checkpoint the host reference loads (its safetensors bytes). The tiny test checkpoints are well under it.</summary>
+    public const long MaxHostWeightBytes = 1L << 30;
+
+    private readonly Hy4FlashCheckpoint _checkpoint;
+
+    private Hy4FlashTextModel(Hy4FlashGenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template, Hy4FlashCheckpoint checkpoint)
+    {
+        Generation = generation;
+        Tokenizer = tokenizer;
+        Template = template;
+        _checkpoint = checkpoint;
+    }
+
+    /// <summary>The engine-facing model.</summary>
+    public Hy4FlashGenerationModel Generation { get; }
+
+    /// <inheritdoc />
+    public ILlmTokenizer Tokenizer { get; }
+
+    /// <inheritdoc />
+    public IChatTemplate Template { get; }
+
+    IGenerationModel IHostReferenceTextModel.Generation => Generation;
+
+    /// <summary>Loads <paramref name="directory"/>; the result owns everything it opened.</summary>
+    /// <exception cref="HartsyInferenceException">The checkpoint is larger than <see cref="MaxHostWeightBytes"/>, the config is not runnable, the tokenizer is missing or
+    /// unusable, or its special ids disagree with <c>config.json</c>.</exception>
+    public static Hy4FlashTextModel Load(IBackend backend, string directory, int maxSequenceTokens) =>
+        Load(backend, directory, maxSequenceTokens, MaxHostWeightBytes);
+
+    /// <summary>As <see cref="Load(IBackend, string, int)"/> with an explicit limit on the weight bytes the host reference accepts.</summary>
+    internal static Hy4FlashTextModel Load(IBackend backend, string directory, int maxSequenceTokens, long maxWeightBytes)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentException.ThrowIfNullOrEmpty(directory);
+        Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(directory, "config.json"));
+        long bytes = WeightBytes(directory);
+        if (bytes > maxWeightBytes)
+            throw new HartsyInferenceException($"'{directory}' holds {bytes / (1 << 20)} MiB of weights. The Hy4 Flash host reference loads every weight as F32 in host "
+                + $"memory and runs only checkpoints up to {maxWeightBytes / (1 << 20)} MiB; the released checkpoints need the device path, which is not built.");
+
+        string tokenizerPath = Path.Combine(directory, "tokenizer.json"), chatPath = Path.Combine(directory, "chat_template.jinja");
+        if (!File.Exists(tokenizerPath))
+            throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the Hy4 Flash Text path needs to build its prompt.");
+        (string? bosLiteral, string? eosLiteral) = HfChatAssets.SpecialTokenLiterals(directory);
+        List<int> stopIds = StopIds(directory, config);
+        ILlmTokenizer tokenizer;
+        IChatTemplate template;
+        try
+        {
+            tokenizer = HfChatAssets.LoadTokenizer(directory, stopIds, bosLiteral, eosLiteral);
+            template = File.Exists(chatPath) ? new Hy4FlashChatTemplate(File.ReadAllText(chatPath)) : HfChatAssets.LoadCompletionTemplate(directory);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or JsonException or FormatException or IOException)
+        {
+            throw new HartsyInferenceException($"'{tokenizerPath}' or '{chatPath}' could not be loaded: {ex.Message}", ex);
+        }
+        // a mismatch would make the model read the wrong embeddings, so refuse rather than guess
+        if (config.BosTokenId is { } bos && tokenizer.BosId != bos)
+            throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
+        if (config.EosTokenId is { } eos && tokenizer.EosId != eos)
+            throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
+
+        Hy4FlashCheckpoint checkpoint = Hy4FlashCheckpoint.Open(directory);
+        try
+        {
+            Hy4FlashModel model = new(backend, config, checkpoint, maxSequenceTokens);
+            return new Hy4FlashTextModel(new Hy4FlashGenerationModel(model, backend, maxSequenceTokens), tokenizer, template, checkpoint);
+        }
+        catch
+        {
+            checkpoint.Dispose();
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        Generation.Dispose();
+        _checkpoint.Dispose();
+    }
+
+    // The safetensors bytes the directory holds, from its index when present, else every .safetensors file.
+    private static long WeightBytes(string directory) =>
+        Directory.GetFiles(directory, "*.safetensors").Sum(static f => new FileInfo(f).Length);
+
+    /// <summary>The end-of-sequence ids from <c>config.json</c> and <c>generation_config.json</c> (an int or a list), which end generation alongside the end token.</summary>
+    private static List<int> StopIds(string directory, Hy4FlashConfig config)
+    {
+        List<int> ids = [];
+        if (config.EosTokenId is { } eos) ids.Add(eos);
+        string path = Path.Combine(directory, "generation_config.json");
+        if (!File.Exists(path)) return ids;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
+            if (!document.RootElement.TryGetProperty("eos_token_id", out JsonElement value)) return ids;
+            if (value.ValueKind == JsonValueKind.Number) ids.Add(StopId(value, path));
+            else if (value.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement item in value.EnumerateArray())
+                    if (item.ValueKind == JsonValueKind.Number) ids.Add(StopId(item, path));
+        }
+        catch (JsonException ex)
+        {
+            throw new HartsyInferenceException($"'{path}' is not valid JSON: {ex.Message}", ex);
+        }
+        return [.. ids.Distinct()];
+    }
+
+    private static int StopId(JsonElement value, string path)
+    {
+        if (value.TryGetInt32(out int id)) return id;
+        throw new HartsyInferenceException($"'{path}' names eos_token_id {value.GetRawText()}, which is not a 32-bit token id.");
+    }
+}

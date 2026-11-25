@@ -90,6 +90,13 @@ public sealed class Hy4FlashModel : IDisposable
     /// height by merged row, width by merged column, all offset by the position the run starts at); a run must lie inside one call.</summary>
     public float[] Forward(ReadOnlySpan<int> tokenIds, Hy4FlashSequenceState state, bool allRows = false, IReadOnlyList<Hy4FlashImage>? images = null)
     {
+        int rows = allRows ? tokenIds.Length : 1;
+        return Logits(ForwardHidden(tokenIds, state, allRows, images), rows);
+    }
+
+    /// <summary>Runs the tokens and returns the final normed hidden rows, <c>[rows, HiddenSize]</c> (the last row only unless <paramref name="allRows"/>).</summary>
+    public float[] ForwardHidden(ReadOnlySpan<int> tokenIds, Hy4FlashSequenceState state, bool allRows = false, IReadOnlyList<Hy4FlashImage>? images = null)
+    {
         ArgumentNullException.ThrowIfNull(state);
         int tokens = tokenIds.Length, h = _cfg.HiddenSize, hc = _cfg.HcMult, start = state.Length;
         if (tokens < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
@@ -124,10 +131,15 @@ public sealed class Hy4FlashModel : IDisposable
         _trace?.Invoke("hc_head_out", collapsed.ToArray());
         HostOps.RmsNorm(_backend, collapsed, h, _finalNorm, (float)_cfg.RmsNormEps);
         _trace?.Invoke("final_norm_out", collapsed.ToArray());
-        int rows = allRows ? tokens : 1;
-        float[] last = allRows ? collapsed : collapsed.AsSpan((tokens - 1) * h, h).ToArray();
-        float[] logits = HostOps.Project(_backend, last, rows, h, _lmHead, _cfg.VocabSize);
-        _trace?.Invoke("logits", logits);
+        return allRows ? collapsed : collapsed.AsSpan((tokens - 1) * h, h).ToArray();
+    }
+
+    /// <summary>Projects final hidden rows through the LM head: F32 logits, <c>[rows, VocabSize]</c>.</summary>
+    public float[] Logits(ReadOnlySpan<float> hidden, int rows)
+    {
+        if (rows < 1 || hidden.Length != (long)rows * _cfg.HiddenSize) throw new ArgumentException($"hidden must hold {rows} rows of {_cfg.HiddenSize} values.", nameof(hidden));
+        float[] logits = HostOps.Project(_backend, hidden, rows, _cfg.HiddenSize, _lmHead, _cfg.VocabSize);
+        _trace?.Invoke("logits", logits.ToArray());
         return logits;
     }
 

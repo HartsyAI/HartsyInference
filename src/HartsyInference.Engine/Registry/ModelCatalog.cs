@@ -1144,6 +1144,11 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
+            // Text / LLM — Hy4 Flash (instruct, FP8, base): host reference text path for checkpoints up to 1 GiB; the released sizes are refused by name.
+            Hy4FlashCatalog.Instruct(),
+            Hy4FlashCatalog.Fp8(),
+            Hy4FlashCatalog.Base(),
+
             // Text / LLM — Kimi K3.1 Pro: text decoder on the Text path (device-chosen backend, no vision, single device); structural until a real run.
             KimiK31Catalog.Build(),
 

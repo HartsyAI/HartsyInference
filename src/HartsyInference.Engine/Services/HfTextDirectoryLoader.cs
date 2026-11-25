@@ -5,6 +5,7 @@ using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Models.Spark;
@@ -42,7 +43,11 @@ internal static class HfTextDirectoryLoader
     internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>
         string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
         || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal)
+        || IsHy4Flash(info)
         || IsKimiK31(info);
+
+    /// <summary>Whether <paramref name="info"/> is a Hy4 Flash checkpoint (<c>hy_v4_flash</c>, the base and instruct builds alike).</summary>
+    internal static bool IsHy4Flash(HfCheckpointInfo info) => string.Equals(info.ModelType, Hy4FlashConfig.ModelType, StringComparison.Ordinal);
 
     /// <summary>Whether <paramref name="info"/> is a Kimi K3.1 checkpoint. Its backend follows the requested device rather than the CPU.</summary>
     internal static bool IsKimiK31(HfCheckpointInfo info) => string.Equals(info.ModelType, KimiK31ModelType, StringComparison.Ordinal);
@@ -58,6 +63,8 @@ internal static class HfTextDirectoryLoader
             return Ernie5TextModel.Load(backend, info.Root, ernie5 ?? Ernie5OptionsFor(backend.Device));
         if (IsKimiK31(info))
             return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
+        if (IsHy4Flash(info))
+            return Hy4FlashTextModel.Load(backend, info.Root, MaxSequenceTokens);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
     }
 
@@ -111,6 +118,8 @@ internal static class HfTextDirectoryLoader
             Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
         if (IsKimiK31(info))
             RequireKimiK31Runnable(info);
+        if (IsHy4Flash(info))
+            Hy4FlashConfig.Load(info.ConfigPath);
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
         if (!stateful && !miniMax && !IsHostReferenceFamily(info))

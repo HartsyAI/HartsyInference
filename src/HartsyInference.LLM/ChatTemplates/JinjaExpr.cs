@@ -168,6 +168,27 @@ internal static class Values
 
     public static bool IsNum(object? v) => v is long or double or int;
     public static double ToD(object? v) => v switch { long l => l, int i => i, double d => d, _ => 0 };
+    /// <summary>Python <c>str.format</c> for the positional forms chat templates use: <c>{}</c> takes the next argument, <c>{n}</c> the nth, and doubled braces are literal.</summary>
+    internal static string PyFormat(string format, IReadOnlyList<object?> values)
+    {
+        StringBuilder sb = new();
+        int next = 0;
+        for (int i = 0; i < format.Length; i++)
+        {
+            char c = format[i];
+            if (c == '{' && i + 1 < format.Length && format[i + 1] == '{') { sb.Append('{'); i++; continue; }
+            if (c == '}' && i + 1 < format.Length && format[i + 1] == '}') { sb.Append('}'); i++; continue; }
+            if (c != '{') { sb.Append(c); continue; }
+            int close = format.IndexOf('}', i);
+            if (close < 0) throw new FormatException("Single '{' encountered in format string.");
+            string field = format[(i + 1)..close];
+            int index = field.Length == 0 ? next++ : int.TryParse(field, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int n) ? n : throw new FormatException($"Unsupported format field '{field}'.");
+            if (index >= values.Count) throw new FormatException($"Format index {index} is out of range.");
+            sb.Append(Values.ToStr(values[index]));
+            i = close;
+        }
+        return sb.ToString();
+    }
 }
 
 // ── Literal / variable / unary / binary / ternary ──────────────────────────────────────────────────────
@@ -411,6 +432,7 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
                 "endswith" => s.EndsWith(Values.ToStr(Arg(0)), StringComparison.Ordinal),
                 "replace" => s.Replace(Values.ToStr(Arg(0)), Values.ToStr(Arg(1))),
                 "split" => SplitString(s, Arg(0)),
+                "format" => Values.PyFormat(s, [.. args.Select(a => a.Eval(scope))]),
                 "get" => target is Dictionary<string, object?> d ? (d.TryGetValue(Values.ToStr(Arg(0)), out object? gv) ? gv : Arg(1)) : Arg(1),
                 "items" => Mapping(target, m.Name).Select(kv => (object?)new List<object?> { kv.Key, kv.Value }).ToList(),
                 "keys" => Mapping(target, m.Name).Keys.Cast<object?>().ToList(),
@@ -900,4 +922,5 @@ internal sealed class Tokenizer
     }
 
     private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
 }

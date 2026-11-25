@@ -1,0 +1,96 @@
+using System.Text.Json;
+using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Hy4Flash;
+using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.Engine.Services;
+
+namespace HartsyInference.Engine.Tests.Services;
+
+/// <summary>The Hy4 Flash Text path at the loader: a directory is probed as a Hugging Face checkpoint, recognised as a host reference family, and loaded as a
+/// <see cref="Hy4FlashTextModel"/>; the refusals name the file or the size. The directory is a tiny synthetic checkpoint built from the reference dump.</summary>
+public sealed class Hy4FlashTextPathTests : IDisposable
+{
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "hartsy-hy4-text-" + Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
+    }
+
+    private static string RepoDir
+    {
+        get
+        {
+            string? dir = AppContext.BaseDirectory;
+            while (dir is not null && !Directory.Exists(Path.Combine(dir, "tests", "python-reference", "hy4_flash", "data"))) dir = Path.GetDirectoryName(dir);
+            return dir ?? throw new DirectoryNotFoundException("tests/python-reference/hy4_flash/data not found.");
+        }
+    }
+
+    private static string Hy4Dir(string name) => Path.Combine(RepoDir, "tests", "python-reference", "hy4_flash", name);
+
+    // The loader needs config, weights, tokenizer and template; the tokenizer is the byte-level one the LLM tests build, with the template's own control tokens.
+    private string Synthetic()
+    {
+        string dir = Path.Combine(_root, "hy4");
+        Directory.CreateDirectory(dir);
+        File.Copy(Hy4Dir("data/config.json"), Path.Combine(dir, "config.json"));
+        File.Copy(Hy4Dir("data/weights.safetensors"), Path.Combine(dir, "weights.safetensors"));
+        File.Copy(Hy4Dir("chat_template.jinja"), Path.Combine(dir, "chat_template.jinja"));
+        string template = File.ReadAllText(Hy4Dir("chat_template.jinja"));
+        List<string> literals = [.. System.Text.RegularExpressions.Regex.Matches(template, @"'(<[^']*\{\}[^']*>)'")
+            .Select(static m => m.Groups[1].Value.Replace("{}", ":opensource")).Distinct()];
+        Dictionary<string, int> vocab = new(StringComparer.Ordinal);
+        for (int c = 33; c <= 126; c++) vocab[((char)c).ToString()] = vocab.Count + 3;
+        vocab["Ġ"] = vocab.Count + 3;
+        vocab["Ċ"] = vocab.Count + 3;
+        vocab["ĉ"] = vocab.Count + 3;
+        vocab["zq"] = vocab.Count + 3;
+        int next = vocab.Count + 3;
+        List<object> added = [new { id = 1, content = "<｜hy_start:opensource｜>", special = true }, new { id = 2, content = "<｜hy_end:opensource｜>", special = true }];
+        foreach (string literal in literals)
+        {
+            if (literal is "<｜hy_start:opensource｜>" or "<｜hy_end:opensource｜>") continue;
+            added.Add(new { id = next++, content = literal, special = true });
+        }
+        File.WriteAllText(Path.Combine(dir, "tokenizer.json"), JsonSerializer.Serialize(new
+        {
+            version = "1.0",
+            added_tokens = added,
+            pre_tokenizer = new { type = "ByteLevel", add_prefix_space = false, trim_offsets = true, use_regex = true },
+            post_processor = (object?)null,
+            decoder = new { type = "ByteLevel" },
+            model = new { type = "BPE", vocab, merges = new[] { "z q" }, ignore_merges = false },
+        }));
+        File.WriteAllText(Path.Combine(dir, "tokenizer_config.json"), JsonSerializer.Serialize(new { bos_token = "<｜hy_start:opensource｜>", eos_token = "<｜hy_end:opensource｜>" }));
+        File.WriteAllText(Path.Combine(dir, "generation_config.json"), "{\"eos_token_id\": 2}");
+        return dir;
+    }
+
+    [Fact]
+    public void Probe_RecognisesTheDirectoryAsAHostReferenceFamily_AndLoadsIt()
+    {
+        string dir = Synthetic();
+        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(dir) ?? throw new InvalidOperationException("not probed as a Hugging Face checkpoint");
+        Assert.Equal("hy_v4_flash", info.ModelType);
+        Assert.True(HfTextDirectoryLoader.IsHy4Flash(info));
+        Assert.True(HfTextDirectoryLoader.IsHostReferenceFamily(info));
+        HfTextDirectoryLoader.RequireSupported(info);
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        Assert.IsType<Hy4FlashTextModel>(model);
+        Assert.Equal(1, model.Tokenizer.BosId);
+    }
+
+    [Fact]
+    public void FileWithAMalformedConfig_IsRefusedWithTheFieldName()
+    {
+        string dir = Synthetic();
+        File.WriteAllText(Path.Combine(dir, "config.json"), File.ReadAllText(Path.Combine(dir, "config.json")).Replace("\"num_hidden_layers\": 3", "\"num_hidden_layers\": \"three\"", StringComparison.Ordinal));
+        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(dir) ?? throw new InvalidOperationException("not probed");
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(info));
+        Assert.Contains("num_hidden_layers", ex.Message, StringComparison.Ordinal);
+    }
+}
