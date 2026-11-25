@@ -352,7 +352,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         if (request is not ImageToImageRequest img2img)
             return (packedNoise, null);
         using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
-        Tensor source = Flux2LatentOps.ToPackedTokens(Backend, vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+        Tensor source = Flux2LatentOps.ToPackedTokensHost(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
         Tensor noised = new Tensor(packedNoise.Shape, DType.F32);
         scheduler.AddNoise(noised, source, packedNoise, startStep);
         packedNoise.Dispose();

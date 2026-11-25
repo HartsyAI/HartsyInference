@@ -652,7 +652,7 @@ _transformer.InvalidateStepGraph(Backend);
 
             // 2×2 patchify, BN normalize ((latent - running_mean) / sqrt(running_var + eps)) and pack:
             // [1, 32, latH, latW] → [1, S, 128]
-            Tensor sourcePacked = Flux2LatentOps.ToPackedTokens(Backend, sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+            Tensor sourcePacked = Flux2LatentOps.ToPackedTokensHost(sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
             sourceLatent32.Dispose();
 
             // AddNoise at sigma[startStep]: noisy = (1 - sigma) * source + sigma * noise

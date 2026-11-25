@@ -65,6 +65,23 @@ public sealed class Flux2LatentOpsTests
     }
 
     [Fact]
+    public void ToPackedTokensHost_equals_the_backend_form_and_is_host_resident()
+    {
+        float[] vae = RandomValues(Batch * Channels * GridH * Patch * GridW * Patch, 17);
+        float[] mean = RandomValues(TokenChannels, 18);
+        float[] var = RandomValues(TokenChannels, 19).Select(v => MathF.Abs(v) + 0.5f).ToArray();
+        using CpuBackend backend = new();
+        using Tensor latent = Make(new TensorShape(Batch, Channels, GridH * Patch, GridW * Patch), vae);
+        using Tensor meanT = Make(new TensorShape(TokenChannels), mean);
+        using Tensor varT = Make(new TensorShape(TokenChannels), var);
+        using Tensor viaBackend = Flux2LatentOps.ToPackedTokens(backend, latent, meanT, varT, Eps, Patch);
+
+        using Tensor host = Flux2LatentOps.ToPackedTokensHost(latent, meanT, varT, Eps, Patch);
+
+        Assert.Equal(viaBackend.AsSpan<float>().ToArray(), host.AsSpan<float>().ToArray());
+    }
+
+    [Fact]
     public void NormalizePatchified_matches_patchify_normalize_unpatchify_and_inverts()
     {
         float[] vae = RandomValues(Batch * Channels * GridH * Patch * GridW * Patch, 6);

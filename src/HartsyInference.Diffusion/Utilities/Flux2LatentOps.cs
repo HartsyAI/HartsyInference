@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
@@ -82,6 +83,14 @@ public static class Flux2LatentOps
         Tensor normalized = Affine(backend, tokens, mean, var, eps, unnormalize: false);
         tokens.Dispose();
         return normalized;
+    }
+
+    /// <summary>Host form of <see cref="ToPackedTokens"/>, for a packed source that feeds a host scheduler loop (AddNoise, once or per
+    /// step). It runs on a throwaway CPU backend, so the result is host-resident and nothing is uploaded or read back per step.</summary>
+    public static Tensor ToPackedTokensHost(Tensor vaeLatent, Tensor mean, Tensor var, float eps, int patchSize)
+    {
+        using CpuBackend cpu = new();
+        return ToPackedTokens(cpu, vaeLatent, mean, var, eps, patchSize);
     }
 
     /// <summary>Inverse of <see cref="ToPackedTokens"/>: packed tokens on an <c>h × w</c> grid → VAE latent <c>[B, C, h·P, w·P]</c>.</summary>

@@ -226,7 +226,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             // Exact inverse of the decode chain below (unpack → BN un-normalize → unpatchify → decode), so the
             // source enters the loop in the same representation the loop integrates in.
             Tensor sourceLatent32 = VaeEncoder!.Encode(Backend, img2imgReq.SourceImage);
-            Tensor sourcePacked = Flux2LatentOps.ToPackedTokens(Backend, sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+            Tensor sourcePacked = Flux2LatentOps.ToPackedTokensHost(sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
             sourceLatent32.Dispose();
 
             Tensor noised = new Tensor(packedShape, DType.F32);
