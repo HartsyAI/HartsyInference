@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
+using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.LLM.Glm5Next;
@@ -37,12 +38,17 @@ internal static class HfTextDirectoryLoader
     /// add host memory.</summary>
     internal static Ernie5LoadOptions Ernie5OptionsFor(DeviceKind device) => device.IsGpu ? Ernie5Resident : Ernie5Streamed;
 
+    /// <summary>The Maxwell options the Text path loads with on <paramref name="device"/>: resident layers on a GPU, read-and-drop layers on the CPU,
+    /// as ERNIE-5.5 does.</summary>
+    internal static MaxwellLoadOptions MaxwellOptionsFor(DeviceKind device) => new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = device.IsGpu };
+
     private static readonly Ernie5LoadOptions Ernie5Resident = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = true };
     private static readonly Ernie5LoadOptions Ernie5Streamed = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
 
     /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1) that <see cref="LoadHostReference"/> serves.</summary>
     internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>
         string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
+        || string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal)
         || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal)
         || IsHy4Flash(info)
         || IsKimiK31(info)
@@ -66,6 +72,8 @@ internal static class HfTextDirectoryLoader
         RequireSupported(info);
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             return Ernie5TextModel.Load(backend, info.Root, ernie5 ?? Ernie5OptionsFor(backend.Device));
+        if (string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal))
+            return MaxwellTextModel.Load(backend, info.Root, MaxwellOptionsFor(backend.Device));
         if (IsKimiK31(info))
             return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
         if (IsHy4Flash(info))
@@ -123,6 +131,13 @@ internal static class HfTextDirectoryLoader
     {
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
+        if (string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal))
+        {
+            MaxwellConfig.Parse(File.ReadAllText(info.ConfigPath));
+            // Refused here, before TextService unloads the model it replaces: the Maxwell Text path needs the template.
+            if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+                throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Maxwell Text path needs.");
+        }
         if (IsKimiK31(info))
             RequireKimiK31Runnable(info);
         if (IsHy4Flash(info))

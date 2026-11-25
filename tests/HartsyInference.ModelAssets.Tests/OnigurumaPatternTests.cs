@@ -70,4 +70,24 @@ public sealed class OnigurumaPatternTests
     [InlineData("a{2}{3}+")]
     [InlineData(@"\d+{2}+")]
     public void A_quantifier_with_nothing_to_repeat_is_refused(string pattern) => Assert.Throws<NotSupportedException>(() => OnigurumaPattern.ToDotNet(pattern));
+
+    // .NET has no script classes; the Han script is spelled as ranges, with the astral CJK extensions as surrogate pairs
+    [Theory]
+    [InlineData("中", true)]
+    [InlineData("文字", true)]
+    [InlineData("𠀀", true)]
+    [InlineData("a", false)]
+    [InlineData("ไทย", false)]
+    public void Han_script_class_matches_the_han_script(string text, bool han)
+    {
+        Regex regex = new(OnigurumaPattern.ToDotNet(@"[\p{Han}]+"));
+
+        Assert.Equal(han, regex.IsMatch(text));
+    }
+
+    [Fact]
+    public void Han_inside_a_larger_class_is_refused()
+    {
+        Assert.Throws<NotSupportedException>(() => OnigurumaPattern.ToDotNet(@"[^\p{L}\p{Han}]"));
+    }
 }
