@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -136,6 +137,32 @@ internal static class LongCatRecipeSupport
         using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
         using Tensor host = VideoRecipeUtils.HostCopy(latent);
         return host.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>Runs one denoise loop with the DiT placed by a streaming scope, and frees the DiT on every path. The scope is disposed inside
+    /// the try (evicting the streamed window), then the DiT's weights are freed in the finally, so a cancel or an exception mid-denoise does not
+    /// leave the resident prefix on the device. Each finished step calls the scope's EndStep before the caller's progress callback.</summary>
+    internal static float[] RunDenoiseStreamed(IBackend backend, LongCatTransformer dit, Func<BlockStreamingScope> openScope,
+        Func<Action<GenerationProgress>, float[]> denoise, Action<GenerationProgress>? progress)
+    {
+        float[] latents;
+        try
+        {
+            using (BlockStreamingScope stream = openScope())
+            {
+                latents = denoise(step =>
+                {
+                    stream.EndStep();
+                    progress?.Invoke(step);
+                });
+            }
+            backend.Sync();
+        }
+        finally
+        {
+            backend.FreeWeights(dit.EnumerateWeights());
+        }
+        return latents;
     }
 
     /// <summary>Decodes a denoised latent of <c>[channels, frames, height, width]</c> to RGB24 frames.</summary>
