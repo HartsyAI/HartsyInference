@@ -607,11 +607,13 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
     /// <summary>The text-side context the body receives: condition_proj, then the token refiner. Exposed for device checks against the reference's preprocessed context.</summary>
     internal Tensor RefinedText(IBackend backend, Tensor textStates) => RefineText(backend, textStates);
 
-    /// <summary>condition_proj to hidden width, then the token refiner's self-attention blocks (no modulation, no rope).</summary>
-    private Tensor RefineText(IBackend backend, Tensor textStates)
+    /// <summary>condition_proj to hidden width, then the token refiner's self-attention blocks (no modulation, no rope).
+    /// <paramref name="refinerBias"/> is borrowed and masks every refiner block when given; Duo passes its refiner graph here.
+    /// <paramref name="passthroughWhenHidden"/> keeps H3's shortcut for text already at hidden width. Duo turns it off, since its refiner always projects.</summary>
+    private Tensor RefineText(IBackend backend, Tensor textStates, Tensor? refinerBias = null, bool passthroughWhenHidden = true)
     {
         int hidden = _config.HiddenSize;
-        if (textStates.Shape[textStates.Shape.Rank - 1] == hidden)
+        if (passthroughWhenHidden && textStates.Shape[textStates.Shape.Rank - 1] == hidden)
         {
             Tensor passthrough = new Tensor(textStates.Shape, textStates.DType);
             backend.SliceRows(passthrough, textStates, 0);
@@ -622,7 +624,7 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
         {
             string p = $"token_refiner.blocks.{i}";
             Tensor normed = Norm(backend, x, $"{p}.norm1.weight", _config.NormEps, BodyDType);
-            Tensor attn = Attention(backend, normed, $"{p}.attn", cos: null, sin: null);
+            Tensor attn = Attention(backend, normed, $"{p}.attn", cos: null, sin: null, refinerBias);
             normed.Dispose();
             x = Residual(backend, x, attn);
 
@@ -638,29 +640,30 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
 
     private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
         Tensor cos, Tensor sin, int index, int chunkRows, IVideoSparseAttentionSession? sparseAttention = null,
-        Tensor? attentionBias = null, Func<int, int, Tensor>? biasTile = null)
+        Tensor? attentionBias = null)
     {
-        ForwardNamedBlock(backend, ref h, tEmb, modIndex, cos, sin, $"blocks.{index}", chunkRows,
-            sparseAttention, attentionBias, biasTile);
+        // Sparse wins over a bias, as before the attention value was introduced; the bias is dropped in that case.
+        BlockAttention attention = sparseAttention is not null ? BlockAttention.Sparse(sparseAttention)
+            : attentionBias is not null ? BlockAttention.Dense(attentionBias)
+            : BlockAttention.Plain;
+        ForwardNamedBlock(backend, ref h, tEmb, modIndex, cos, sin, $"blocks.{index}", chunkRows, attention);
     }
 
     /// <summary>Shared H3 block implementation used by both the main 50-block trunk and each Fun control block.
-    /// <paramref name="attentionBias"/> is borrowed and applied only to the dense attention call; the caller has already refused
-    /// chunked or sparse attention with a bias.</summary>
+    /// <paramref name="attention"/> picks the attention route. A dense bias is borrowed and applied only to the dense call; a tiled
+    /// bias only to the chunked call. Each throws here if it would run on the route it was not built for.</summary>
     private void ForwardNamedBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
-        Tensor cos, Tensor sin, string p, int chunkRows,
-        IVideoSparseAttentionSession? sparseAttention = null, Tensor? attentionBias = null,
-        Func<int, int, Tensor>? biasTile = null, Func<Tensor, Tensor>? attentionOverride = null)
+        Tensor cos, Tensor sin, string p, int chunkRows, BlockAttention attention = default)
     {
         int seq = (int)h.Shape[0];
         // A bias must run on the route it was built for. A dense bias on the chunked route, or a tile builder on the dense
         // route, would drop the mask silently, so both throw here.
-        bool chunkedRoute = sparseAttention is null && seq > chunkRows;
-        if (biasTile is not null && !chunkedRoute)
+        bool chunkedRoute = attention.SparseSession is null && seq > chunkRows;
+        if (attention.TiledBias is not null && !chunkedRoute)
         {
             throw new InvalidOperationException($"A tiled bias needs the chunked attention route; this block runs dense at seq={seq}, chunkRows={chunkRows}, so the mask would be dropped.");
         }
-        if (attentionBias is not null && chunkedRoute)
+        if (attention.DenseBias is not null && chunkedRoute)
         {
             throw new NotSupportedException($"A dense attention bias cannot run on the chunked route (seq={seq}, chunkRows={chunkRows}); use a tiled bias.");
         }
@@ -671,12 +674,12 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
             Tensor modulated = Modulate(backend, normed, mod[0], mod[1], modIndex,
                 Optional($"{p}.attn.qkv_proj.weight"));
             normed.Dispose();
-            // attentionOverride, when given, is the whole attention step (the cached Duo path); the route checks above do not apply to it.
-            Tensor attn = attentionOverride is not null ? attentionOverride(modulated)
-                : sparseAttention is not null
-                ? AttentionSparse(backend, modulated, $"{p}.attn", cos, sin, sparseAttention)
-                : seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows, biasTile)
-                    : Attention(backend, modulated, $"{p}.attn", cos, sin, attentionBias);
+            // An override is the whole attention step (the cached Duo path); the route checks above do not apply to it.
+            Tensor attn = attention.Run is not null ? attention.Run(modulated)
+                : attention.SparseSession is not null
+                ? AttentionSparse(backend, modulated, $"{p}.attn", cos, sin, attention.SparseSession)
+                : chunkedRoute ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows, attention.TiledBias)
+                    : Attention(backend, modulated, $"{p}.attn", cos, sin, attention.DenseBias);
             modulated.Dispose();
             Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
             attn.Dispose();

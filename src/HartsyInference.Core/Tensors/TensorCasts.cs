@@ -6,7 +6,8 @@ public static class TensorCasts
     /// <summary>Returns <paramref name="t"/> as F32, host-casting if needed. On the pass-through (already-F32) path the caller does not own the result.</summary>
     public static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
-    /// <summary>Looks up <paramref name="key"/> in <paramref name="weights"/> and returns it as F32 via <see cref="EnsureF32"/>.</summary>
+    /// <summary>Looks up <paramref name="key"/> in <paramref name="weights"/> and returns it as F32 via <see cref="EnsureF32"/>. New code reads
+    /// checkpoints through <see cref="CheckpointTensors"/>, which names a missing key, checks the shape, tracks the copy and refuses a quantized tensor.</summary>
     public static Tensor LoadF32(IReadOnlyDictionary<string, Tensor> weights, string key) => EnsureF32(weights[key]);
 
     /// <summary>As <see cref="LoadF32"/> but returns null when <paramref name="key"/> is absent, for optional weights.</summary>
