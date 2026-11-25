@@ -118,7 +118,12 @@ internal static class HfTextDirectoryLoader
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
         if (string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal))
+        {
             MaxwellConfig.Parse(File.ReadAllText(info.ConfigPath));
+            // Refused here, before TextService unloads the model it replaces: the Maxwell Text path needs the template.
+            if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+                throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Maxwell Text path needs.");
+        }
         if (IsKimiK31(info))
             RequireKimiK31Runnable(info);
         bool stateful = IsStatefulFamily(info);

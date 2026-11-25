@@ -1085,9 +1085,10 @@ public sealed partial class TextService : ITextService, IDisposable
     {
         DisposeSlotBackends(slot);
         IBackend backend = CreateBackendFor(deviceKey);
+        // Logged before the load, so it still shows when the load runs out of memory.
+        Logs.Warning("[TextService] Maxwell has no memory guard yet; host RAM and VRAM are not checked before the load.");
         LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
         string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
-        Logs.Warning("[TextService] Maxwell has no memory guard yet; host RAM and VRAM are not checked before the load.");
         Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
     }
 

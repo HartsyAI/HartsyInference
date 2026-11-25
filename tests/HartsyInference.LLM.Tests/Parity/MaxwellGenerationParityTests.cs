@@ -70,7 +70,9 @@ public sealed class MaxwellGenerationParityTests(ITestOutputHelper output)
         using MaxwellGenerationModel generation = new(model, new CpuBackend(), 64);
         MaxwellConfig c = model.Config;
 
-        long expected = 100L * c.NumHiddenLayers * (2L * c.NumKeyValueHeads * c.HeadDim + c.Sparse.IndexerHeadDim) * sizeof(float);
-        Assert.Equal(expected, generation.EstimateSequenceBytes(100));
+        long rowFloats = 2L * c.NumKeyValueHeads * c.HeadDim + c.Sparse.IndexerHeadDim;
+        // 20 tokens may double to 40 rows (within the 64-token limit); 100 tokens cannot exceed the 100 rows they need.
+        Assert.Equal(40L * c.NumHiddenLayers * rowFloats * sizeof(float), generation.EstimateSequenceBytes(20));
+        Assert.Equal(100L * c.NumHiddenLayers * rowFloats * sizeof(float), generation.EstimateSequenceBytes(100));
     }
 }

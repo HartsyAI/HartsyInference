@@ -110,12 +110,14 @@ public sealed class MaxwellGenerationModel : IGenerationModel
     /// <summary>Empty: the weights are host arrays and a checkpoint view, not engine tensors, so there is nothing for a residency planner to place.</summary>
     public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) => [];
 
-    /// <summary>An upper bound: each layer keeps keys, values and indexer keys for every context token, in F32.</summary>
+    /// <summary>An upper bound on the F32 caches of a sequence of <paramref name="contextTokens"/> tokens: each layer keeps keys, values and indexer
+    /// keys, and the caches grow by doubling but never past the state's capacity, which is at most <see cref="MaxTokens"/>.</summary>
     public long EstimateSequenceBytes(int contextTokens)
     {
         MaxwellConfig c = _model.Config;
         long rowFloats = 2L * c.NumKeyValueHeads * c.HeadDim + c.Sparse.IndexerHeadDim;
-        return (long)contextTokens * c.NumHiddenLayers * rowFloats * sizeof(float);
+        long rows = Math.Max(contextTokens, Math.Min(2L * contextTokens, MaxTokens));
+        return rows * c.NumHiddenLayers * rowFloats * sizeof(float);
     }
 
     /// <summary>Free and total host memory as the runtime sees it, also when the model runs on a GPU: the sequence states live on the host.</summary>

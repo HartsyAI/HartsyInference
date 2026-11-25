@@ -57,14 +57,15 @@ public sealed class MaxwellTextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
+        // A mismatch would make the model read the wrong embeddings, so refuse rather than guess; checked before the weight load.
+        if (config.BosTokenId is { } bos && tokenizer.BosId != bos)
+            throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
+        if (config.EosTokenId is { } eos && tokenizer.EosId != eos)
+            throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
+
         MaxwellModel model = MaxwellModel.Load(directory, backend, options);
         try
         {
-            // A mismatch would make the model read the wrong embeddings, so refuse rather than guess.
-            if (config.BosTokenId is { } bos && tokenizer.BosId != bos)
-                throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
-            if (config.EosTokenId is { } eos && tokenizer.EosId != eos)
-                throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
             MaxwellGenerationModel generation = new(model, backend, options.MaxSequenceTokens);
             return new MaxwellTextModel(generation, tokenizer, template);
         }
