@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -15,7 +16,7 @@ public sealed unsafe partial class Qwen35Model
     private SenseNovaLoopConfig? _loop;
     private IReadOnlyDictionary<int, MhcRouterWeights>? _mhcWeights;
     private readonly Dictionary<int, (HyperConnection Attn, HyperConnection Ffn)> _mhcRouters = [];
-    private IBackend? _mhcBackend;
+    private CpuBackend? _hostBackend;
 
     /// <summary>The RoPE frequency scaling the full-attention layers apply (YaRN on SenseNova-Loop; none otherwise).</summary>
     public RopeScaling RopeScaling => _ropeScaling;
@@ -46,21 +47,19 @@ public sealed unsafe partial class Qwen35Model
     /// <summary>Sets the RoPE scaling of a model built without a Loop plan.</summary>
     internal void ConfigureRope(RopeScaling ropeScaling) => _ropeScaling = ropeScaling;
 
-    private (HyperConnection Attn, HyperConnection Ffn) RoutersFor(IBackend backend, int physical)
+    /// <summary>The routers of one physical layer. Their projection (<c>[8, 8192]</c>) and Sinkhorn run on the host, so they get a CPU backend
+    /// of their own: handing them the GPU backend would upload and download a few kilobytes about two hundred times per token.</summary>
+    private (HyperConnection Attn, HyperConnection Ffn) RoutersFor(int physical)
     {
-        if (!ReferenceEquals(_mhcBackend, backend))
-        {
-            _mhcRouters.Clear();
-            _mhcBackend = backend;
-        }
         if (_mhcRouters.TryGetValue(physical, out (HyperConnection Attn, HyperConnection Ffn) cached)) return cached;
         SenseNovaLoopConfig loop = _loop!;
         MhcRouterWeights w = _mhcWeights![physical];
         HyperConnectionConfig config = loop.HyperConnection(DModel, Eps);
         float[] unitScale = [1f, 1f, 1f];
+        _hostBackend ??= new CpuBackend();
         (HyperConnection, HyperConnection) pair =
-            (new HyperConnection(backend, config, w.AttnProjection, unitScale, w.AttnBias),
-             new HyperConnection(backend, config, w.FfnProjection, unitScale, w.FfnBias));
+            (new HyperConnection(_hostBackend, config, w.AttnProjection, unitScale, w.AttnBias),
+             new HyperConnection(_hostBackend, config, w.FfnProjection, unitScale, w.FfnBias));
         _mhcRouters[physical] = pair;
         return pair;
     }
@@ -88,7 +87,7 @@ public sealed unsafe partial class Qwen35Model
         {
             throw new InvalidOperationException($"Slot {i} (layer {physical}) is inside the hyper-connection range but no layer entered it.");
         }
-        (HyperConnection attnRouter, HyperConnection ffnRouter) = RoutersFor(backend, physical);
+        (HyperConnection attnRouter, HyperConnection ffnRouter) = RoutersFor(physical);
 
         // Attention half: collapse, norm (inside the core), attention, mix and write back.
         Span<float> state = streams;

@@ -5,9 +5,8 @@ produces for it, for SenseNovaLoopHuggingFaceParityTests.
 Usage: python backbone_reference.py <SenseNova-Loop-9B dir holding config.json and modeling_sensenova_loop.py> <output dir>
 Needs transformers 5.18.0, torch 2.11 (CPU is enough), safetensors. Run it on WSL or a pod; never in the Windows venv.
 Reference: sensenova/SenseNova-Loop-9B @ 3cc220e9c14bd7a74813c1299765e22147b1a3d5.
-Then: SENSENOVA_LOOP_TINY_EXPECTED=<output dir>/sensenova_loop_tiny_expected.safetensors dotnet test --filter SenseNovaLoopHuggingFaceParity
-
-Not run yet: this machine has no Linux Python, so the script is written against the reference source but unexecuted.
+Output goes to tests/HartsyInference.LLM.Tests/Fixtures/SenseNovaLoop (committed). Run 2026-11-24 in the hartsy-ref:cpu container
+(torch 2.7.1, transformers 5.24.0); a run under the card's transformers 5.18.0 / torch 2.11 has not been done.
 """
 import importlib.util, json, sys
 from pathlib import Path
@@ -30,7 +29,7 @@ t.update(hidden_size=64, intermediate_size=96, num_hidden_layers=12,
          linear_num_key_heads=2, linear_num_value_heads=4, vocab_size=80, max_position_embeddings=256,
          eos_token_id=1, pad_token_id=0, mtp_num_hidden_layers=0)
 # YaRN stays on, with an original length small enough that the frequency blend is not a no-op over the 4 rotary pairs.
-t["rope_parameters"].update(original_max_position_embeddings=128, factor=2.0)
+t["rope_parameters"].update(original_max_position_embeddings=128, factor=2.0, mrope_section=[1, 1, 0])   # 2 rotary pairs: time and height
 cfg.update(pad_token_id=0, eos_token_id=1, image_token_id=2, video_token_id=3, vision_start_token_id=4, vision_end_token_id=5)
 cfg["loop_settings"] = dict(start=4, end=8, eval_count=2, counts=[2])
 cfg["mhc"] = dict(start=4, end=8, fixed_identity=False, iterations=20, pre_scale=1.0, streams=2)
@@ -64,10 +63,26 @@ with torch.no_grad():
         cache = step.past_key_values
     stepped_last = step.last_hidden_state[0, -1]
 
+# Image layout: the model's own get_rope_index gives the multimodal positions, so the engine's position builder is checked against
+# transformers rather than against itself. Tokens: [text, text, vision_start, 4 image placeholders (2x2 merged grid), vision_end, text, text, text].
+mm_ids = torch.tensor([[10, 11, 4, 2, 2, 2, 2, 5, 12, 13, 14]])
+grid = torch.tensor([[1, 4, 4]])   # pre-merge patch grid; spatial_merge_size 2 gives 2x2 tokens
+import inspect
+rope_args = inspect.signature(model.model.get_rope_index).parameters
+kwargs = dict(input_ids=mm_ids, image_grid_thw=grid, attention_mask=torch.ones_like(mm_ids))
+if "mm_token_type_ids" in rope_args:
+    kwargs["mm_token_type_ids"] = (mm_ids == 2).long()
+with torch.no_grad():
+    mm_positions = model.model.get_rope_index(**kwargs)[0]          # [3, 1, S]
+    text_positions = torch.arange(mm_ids.shape[1]).view(1, 1, -1)
+    mm_embeds = lm.embed_tokens(mm_ids)
+    mm_hidden = lm(inputs_embeds=mm_embeds, position_ids=torch.cat([text_positions, mm_positions], dim=0), use_cache=False).last_hidden_state[0]
+
 out.mkdir(parents=True, exist_ok=True)
 state = {k: v.contiguous() for k, v in model.state_dict().items() if "visual" not in k}
 save_file(state, str(out / "sensenova_loop_tiny.safetensors"))
-save_file({"hidden": hidden.contiguous(), "stepped_last": stepped_last.contiguous(), "input_ids": ids[0].to(torch.int32).contiguous()},
+save_file({"hidden": hidden.contiguous(), "stepped_last": stepped_last.contiguous(), "input_ids": ids[0].to(torch.int32).contiguous(),
+           "mm_input_ids": mm_ids[0].to(torch.int32).contiguous(), "mm_positions": mm_positions[:, 0].to(torch.int32).contiguous(), "mm_hidden": mm_hidden.contiguous()},
           str(out / "sensenova_loop_tiny_expected.safetensors"))
 json.dump(cfg, open(out / "sensenova_loop_tiny_config.json", "w"))
 print(hidden.shape, hidden.abs().max(), (hidden[-1] - stepped_last).abs().max())
