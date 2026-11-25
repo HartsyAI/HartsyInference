@@ -30,7 +30,8 @@ public static class CommandRunner
             : new InferenceEngine(backendSelector);
         try
         {
-            spec = ModelAcquisition.EnsurePresent(spec);
+            using AcquiredModel acquired = ModelAcquisition.EnsurePresent(spec);
+            spec = acquired.Spec;
 
             if (!quiet)
             {

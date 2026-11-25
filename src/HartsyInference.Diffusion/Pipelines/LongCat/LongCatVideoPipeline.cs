@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Reduction;
 using HartsyInference.Core.Tensors;
@@ -63,75 +64,130 @@ public sealed class LongCatVideoPipeline
         _dit = dit ?? throw new ArgumentNullException(nameof(dit));
     }
 
-    /// <summary>Runs the denoising loop of one run. Image and continuation runs write their conditioning latents into the leading frames
-    /// before the first step, and only the stepped frames change.</summary>
+    /// <summary>Runs the denoising loop of one run. Image and continuation runs keep their conditioning latents fixed in the leading frames, and only
+    /// the stepped frames change. The stepped and conditioning frames live on the device for the whole run; the host reads the latent back once, at
+    /// the end, and once per step only when a trace is recorded.</summary>
     public LongCatResult Denoise(LongCatRun run)
     {
         Validate(run);
         int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
         int cond = run.Mode == LongCatConditioningMode.Text ? 0 : run.NumCondLatents;
+        int stepped = frames - cond;
         LongCatSchedule schedule = LongCatSchedule.Build(run.Steps, run.Distill, run.Shift);
         if (run.Mode == LongCatConditioningMode.Continuation && run.EnhanceHf)
             schedule = schedule.EnhanceHf();
+        if (cond > 0 && run.CondLatents!.Length != channels * cond * hw)
+            throw new ArgumentException($"The conditioning latents hold {run.CondLatents.Length} values; expected {channels} x {cond} x {hw}.", nameof(run));
 
-        float[] latents = (float[])run.Noise.Clone();
-        if (cond > 0)
-            WriteFrames(latents, run.CondLatents!, channels, frames, hw, cond);
-
-        LongCatConditioning conditioning = new(cond, 0, -1, 0);
-        // The guidance scale covers the frames the reference's guidance sees: all of them, except in continuation's cached path.
-        int guidedFrom = run.Mode == LongCatConditioningMode.Continuation ? cond : 0;
-        bool guided = run.Guidance > 1f;
         List<LongCatStepTrace> trace = new(run.RecordTrace ? schedule.Steps : 0);
         long started = System.Diagnostics.Stopwatch.GetTimestamp();
-        using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
-
-        for (int i = 0; i < schedule.Steps; i++)
+        if (stepped == 0)
         {
-            run.Cancel.ThrowIfCancellationRequested();
-            float timestep = schedule.Timesteps[i];
-            float dt = schedule.Sigmas[i + 1] - schedule.Sigmas[i];
-            float[] frameTimesteps = conditioning.FrameTimesteps(timestep, frames);
-
-            float[] velocity;
-            if (guided)
+            // Every frame is conditioning: nothing is stepped, so the forwards could not change the output. Each step is still reported.
+            for (int i = 0; i < schedule.Steps; i++)
             {
-                // Both velocities stay live until the reduction, which reads both. The positive one is one latent-sized tensor
-                // (about 9.6 MB at 832 x 480 x 93), so keeping it through the negative forward costs little next to the activations.
-                using Tensor positive = Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors);
-                using Tensor negative = Predict(latents, run, channels, frames, run.Negative, frameTimesteps, conditioning, tensors);
-                velocity = Guide(positive, negative, guidedFrom, channels, frames, hw, run.Guidance);
+                run.Cancel.ThrowIfCancellationRequested();
+                if (run.RecordTrace)
+                    trace.Add(new LongCatStepTrace(schedule.Timesteps[i], schedule.Sigmas[i], [], []));
+                run.OnProgress?.Invoke(new GenerationProgress(i + 1, schedule.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
             }
-            else
-            {
-                using Tensor output = Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors);
-                velocity = output.AsReadOnlySpan<float>().ToArray();
-            }
-
-            // the reference negates the model output for its scheduler, then steps the frames after the conditioning ones.
-            float[] stepped = new float[channels * (frames - cond) * hw];
-            int k = 0;
-            for (int c = 0; c < channels; c++)
-                for (int f = cond; f < frames; f++)
-                    for (int e = 0; e < hw; e++, k++)
-                        stepped[k] = -velocity[(c * frames + f) * hw + e];
-
-            float[]? sampleOut = run.RecordTrace ? new float[stepped.Length] : null;
-            k = 0;
-            for (int c = 0; c < channels; c++)
-                for (int f = cond; f < frames; f++)
-                    for (int e = 0; e < hw; e++, k++)
-                    {
-                        int index = (c * frames + f) * hw + e;
-                        latents[index] += dt * stepped[k];
-                        if (sampleOut is not null)
-                            sampleOut[k] = latents[index];
-                    }
-            if (sampleOut is not null)
-                trace.Add(new LongCatStepTrace(timestep, schedule.Sigmas[i], stepped, sampleOut));
-            run.OnProgress?.Invoke(new GenerationProgress(i + 1, schedule.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+            return new LongCatResult(LongCatFrameOps.JoinFrames(run.CondLatents, [], channels, frames, hw, cond), schedule, trace);
         }
-        return new LongCatResult(latents, schedule, trace);
+
+        LongCatConditioning conditioning = new(cond, 0, -1, 0);
+        // The guidance scale covers the frames the reference's guidance sees: all of them, except in continuation's cached path. Every stepped
+        // frame lies in that range, because it starts at the conditioning frame count.
+        int guidedFrom = run.Mode == LongCatConditioningMode.Continuation ? cond : 0;
+        bool guided = run.Guidance > 1f;
+        using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
+        using Tensor? condState = cond > 0 ? LongCatFrameOps.FromHost(run.CondLatents!, new TensorShape(channels * cond, hw)) : null;
+        Tensor state = LongCatFrameOps.FromHost(LongCatFrameOps.SteppedFrames(run.Noise, channels, frames, hw, cond),
+            new TensorShape(channels * stepped, hw));
+        try
+        {
+            for (int i = 0; i < schedule.Steps; i++)
+            {
+                run.Cancel.ThrowIfCancellationRequested();
+                float timestep = schedule.Timesteps[i];
+                float dt = schedule.Sigmas[i + 1] - schedule.Sigmas[i];
+                float[] frameTimesteps = conditioning.FrameTimesteps(timestep, frames);
+
+                using Tensor clip = LongCatFrameOps.Clip(_backend, state, condState, channels, cond, stepped, hw);
+                using Tensor input = LongCatFrameOps.Reshape(_backend, clip, new TensorShape([1, channels, frames, run.Height, run.Width]));
+                // The reference negates the model output for its scheduler, then steps the stepped frames: state += dt · (−guided velocity).
+                if (guided)
+                {
+                    // Both velocities stay live until the reduction, which reads both. The positive one is one latent-sized tensor
+                    // (about 9.6 MB at 832 x 480 x 93), so keeping it through the negative forward costs little next to the activations.
+                    using Tensor positive = Predict(input, run, run.Positive, frameTimesteps, conditioning, tensors);
+                    using Tensor negative = Predict(input, run, run.Negative, frameTimesteps, conditioning, tensors);
+                    using Tensor positiveStep = StepRows(positive, channels, frames, cond, stepped, hw);
+                    using Tensor uncondStep = GuidedUncondRows(negative, positive, guidedFrom, channels, frames, cond, stepped, hw);
+                    if (run.RecordTrace)
+                        RecordStep(trace, timestep, schedule.Sigmas[i], state.Shape, positiveStep, uncondStep, run.Guidance, guidedFrom);
+                    _backend.GuidedEulerStep(state, positiveStep, uncondStep,
+                        new GuidedEulerSpec(run.Guidance, -dt, GuidanceForm.Extrapolate, GuidanceNorm.None));
+                }
+                else
+                {
+                    using Tensor output = Predict(input, run, run.Positive, frameTimesteps, conditioning, tensors);
+                    using Tensor velocity = StepRows(output, channels, frames, cond, stepped, hw);
+                    if (run.RecordTrace)
+                        RecordStep(trace, timestep, schedule.Sigmas[i], state.Shape, velocity, velocity, 1f, guidedFrom);
+                    _backend.GuidedEulerStep(state, velocity, velocity, GuidedEulerSpec.Lerp(1f, -dt));
+                }
+                if (run.RecordTrace)
+                    trace[^1] = trace[^1] with { SampleOut = state.AsReadOnlySpan<float>().ToArray() };
+                run.OnProgress?.Invoke(new GenerationProgress(i + 1, schedule.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
+            }
+            float[] latents = LongCatFrameOps.JoinFrames(run.CondLatents, state.AsReadOnlySpan<float>().ToArray(), channels, frames, hw, cond);
+            return new LongCatResult(latents, schedule, trace);
+        }
+        finally
+        {
+            state.Dispose();
+        }
+    }
+
+    /// <summary>The stepped rows of a full-clip prediction, <c>[channels·stepped, hw]</c>, on the device.</summary>
+    private Tensor StepRows(Tensor prediction, int channels, int frames, int cond, int stepped, int hw)
+    {
+        using Tensor flat = LongCatFrameOps.Reshape(_backend, prediction, new TensorShape(channels * frames, hw));
+        return LongCatFrameOps.Rows(_backend, flat, channels, frames, cond, stepped, hw);
+    }
+
+    /// <summary>The unconditional term of the CFG-zero combine over the stepped rows: the negative prediction scaled by the projection of the
+    /// positive one onto it, over the frames from <paramref name="guidedFrom"/> on. The two sums are one device reduction.</summary>
+    private Tensor GuidedUncondRows(Tensor negative, Tensor positive, int guidedFrom, int channels, int frames, int cond, int stepped, int hw)
+    {
+        if (guidedFrom > cond)
+            throw new InvalidOperationException("The guided frames must start at or before the first stepped frame.");
+        StridedView region = StridedView.Of([channels, frames, hw]).Slice(1, guidedFrom, frames - guidedFrom);
+        (double dot, double squared) = ProductSums.DotAndSquaredB(_backend, positive, negative, region);
+        float scale = (float)(dot / (squared + 1e-8));
+        using Tensor negativeRows = StepRows(negative, channels, frames, cond, stepped, hw);
+        Tensor uncond = new(negativeRows.Shape, DType.F32);
+        try
+        {
+            _backend.Scale(uncond, negativeRows, scale);
+            return uncond;
+        }
+        catch
+        {
+            uncond.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Records one step's trace: the negated guided velocity over the stepped frames. The sample is filled in after the step.</summary>
+    private void RecordStep(List<LongCatStepTrace> trace, float timestep, float sigma, TensorShape stateShape, Tensor cond, Tensor uncond, float guidance,
+        int guidedFrom)
+    {
+        // A zeroed tensor stepped with delta −1 holds −guided exactly: the same combine the step applies, read back once for the trace.
+        using Tensor negated = new(stateShape, DType.F32);
+        _backend.Fill(negated, 0f);
+        _backend.GuidedEulerStep(negated, cond, uncond, new GuidedEulerSpec(guidance, -1f, GuidanceForm.Extrapolate, GuidanceNorm.None));
+        trace.Add(new LongCatStepTrace(timestep, sigma, negated.AsReadOnlySpan<float>().ToArray(), []));
     }
 
     /// <summary>Continuation chain (long video): each segment's context is the last <paramref name="contextFrames"/> latent frames of the
@@ -173,48 +229,12 @@ public sealed class LongCatVideoPipeline
         return result;
     }
 
-    /// <summary>One forward pass; the velocity stays on the device, owned by the caller.</summary>
-    private Tensor Predict(float[] latents, LongCatRun run, int channels, int frames, LongCatPrompt prompt, float[] frameTimesteps,
-        LongCatConditioning conditioning, LongCatRunTensors tensors)
+    /// <summary>One forward pass over the whole clip; the velocity stays on the device, owned by the caller.</summary>
+    private Tensor Predict(Tensor input, LongCatRun run, LongCatPrompt prompt, float[] frameTimesteps, LongCatConditioning conditioning,
+        LongCatRunTensors tensors)
     {
-        using Tensor input = new(new TensorShape([1, channels, frames, run.Height, run.Width]), DType.F32);
-        latents.AsSpan().CopyTo(input.AsSpan<float>());
         Tensor text = tensors.Text(prompt);
         return _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens);
-    }
-
-    /// <summary>The optimized-scale guidance (CFG-zero): the unconditional prediction scaled by the projection of the conditional one onto it,
-    /// over the frames from <paramref name="guidedFrom"/> on. The two sums come from one device reduction over that frame range.</summary>
-    private float[] Guide(Tensor positive, Tensor negative, int guidedFrom, int channels, int frames, int hw, float guidance)
-    {
-        float[] guided = positive.AsReadOnlySpan<float>().ToArray();
-        if (guidedFrom >= frames)
-            return guided;
-        float[] negatives = negative.AsReadOnlySpan<float>().ToArray();
-        StridedView region = StridedView.Of([channels, frames, hw]).Slice(1, guidedFrom, frames - guidedFrom);
-        // The host still reads both velocities for the combine below. The readback saving appears only once the combine moves to the device (after #1210).
-        (double dot, double squared) = ProductSums.DotAndSquaredB(_backend, positive, negative, region);
-        float scale = (float)(dot / (squared + 1e-8));
-        for (int c = 0; c < channels; c++)
-            for (int f = guidedFrom; f < frames; f++)
-                for (int e = 0; e < hw; e++)
-                {
-                    int index = (c * frames + f) * hw + e;
-                    float uncond = negatives[index] * scale;
-                    guided[index] = uncond + guidance * (guided[index] - uncond);
-                }
-        return guided;
-    }
-
-    private static void WriteFrames(float[] latents, float[] source, int channels, int frames, int hw, int count)
-    {
-        if (source.Length != channels * count * hw)
-            throw new ArgumentException($"The conditioning latents hold {source.Length} values; expected {channels} x {count} x {hw}.", nameof(source));
-        int k = 0;
-        for (int c = 0; c < channels; c++)
-            for (int f = 0; f < count; f++)
-                for (int e = 0; e < hw; e++, k++)
-                    latents[(c * frames + f) * hw + e] = source[k];
     }
 
     private void Validate(LongCatRun run)

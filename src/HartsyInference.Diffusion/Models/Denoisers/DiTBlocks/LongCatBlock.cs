@@ -149,7 +149,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
     /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
     /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
-        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null, LongCatBlockKv? cache = null)
+        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null) =>
+        Forward(backend, hidden, text, timeEmbed, in inputs, null, probe, stage, audio);
+
+    /// <summary>The forward with <paramref name="past"/>, the cached conditioning rows of the denoising pass, in front of the rows' own keys.</summary>
+    internal Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs, LongCatPastKv? past,
+        Action<string, Tensor>? probe, string stage, Tensor? audio)
     {
         int dim = _config.HiddenSize;
         int s = checked(inputs.Frames * inputs.TokensPerFrame);
@@ -166,9 +171,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         probe?.Invoke($"{stage}.attn_in", normed1);
         // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
-        using Tensor attn = cache is null
-            ? SelfAttention(backend, normed1, in inputs, probe, stage)
-            : CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, cache, keep: false, inputs.Segments, out _);
+        using Tensor attn = past is { } cached
+            ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached)
+            : SelfAttention(backend, normed1, in inputs, probe, stage);
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
         probe?.Invoke($"{stage}.after_self", afterSelf);

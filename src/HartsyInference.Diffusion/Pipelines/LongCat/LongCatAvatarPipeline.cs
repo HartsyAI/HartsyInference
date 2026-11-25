@@ -86,8 +86,8 @@ public sealed class LongCatAvatarPipeline
 
         // The conditioning frames are fixed for the run; the noisy frames are the scheduler state. Both live on the device, per channel, so a step
         // never round-trips the latents through the host. The noisy state has the velocity's own layout, [channels·noisy, hw].
-        using Tensor? condState = cond > 0 ? FromHost(run.CondLatents!, new TensorShape(channels * cond, hw)) : null;
-        Tensor state = FromHost(NoisyFrames(run.Noise, channels, frames, hw, cond), new TensorShape(channels * noisy, hw));
+        using Tensor? condState = cond > 0 ? LongCatFrameOps.FromHost(run.CondLatents!, new TensorShape(channels * cond, hw)) : null;
+        Tensor state = LongCatFrameOps.FromHost(LongCatFrameOps.SteppedFrames(run.Noise, channels, frames, hw, cond), new TensorShape(channels * noisy, hw));
 
         LongCatKvCache? cache = null;
         Tensor? condClip = null;
@@ -95,7 +95,7 @@ public sealed class LongCatAvatarPipeline
         {
             if (useCache)
             {
-                condClip = Reshape(condState!, new TensorShape([1, channels, cond, run.Height, run.Width]));
+                condClip = LongCatFrameOps.Reshape(_backend, condState!, new TensorShape([1, channels, cond, run.Height, run.Width]));
                 cache = _dit.BuildKvCache(_backend, condClip, conditioning);
             }
 
@@ -125,7 +125,7 @@ public sealed class LongCatAvatarPipeline
                 run.OnProgress?.Invoke(new GenerationProgress(i + 1, run.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
             }
 
-            float[] latents = JoinFrames(run.CondLatents, state.AsReadOnlySpan<float>().ToArray(), channels, frames, hw, cond);
+            float[] latents = LongCatFrameOps.JoinFrames(run.CondLatents, state.AsReadOnlySpan<float>().ToArray(), channels, frames, hw, cond);
             return new LongCatAvatarResult(latents, sigmasWithZero, timesteps);
         }
         finally
@@ -146,16 +146,16 @@ public sealed class LongCatAvatarPipeline
         int inputFrames = cached ? noisy : frames;
         float[] timesteps = cached ? [t] : conditioning.FrameTimesteps(t, frames);
         using Tensor input = cached
-            ? Reshape(state, new TensorShape([1, channels, noisy, run.Height, run.Width]))
-            : Reshape(Clip(state, condState, channels, cond, noisy, hw), new TensorShape([1, channels, frames, run.Height, run.Width]));
+            ? LongCatFrameOps.Reshape(_backend, state, new TensorShape([1, channels, noisy, run.Height, run.Width]))
+            : LongCatFrameOps.Reshape(_backend, LongCatFrameOps.Clip(_backend, state, condState, channels, cond, noisy, hw), new TensorShape([1, channels, frames, run.Height, run.Width]));
         return Guided(run, guided, (promptIsPositive, audioOn) =>
         {
             using Tensor output = Predict(input, inputFrames, promptIsPositive ? run.Positive : run.Negative, audioOn ? audioCond : audioUncond!,
                 timesteps, conditioning, cache, tensors);
             if (cached)
-                return Reshape(output, new TensorShape(channels * noisy, hw));
-            using Tensor flat = Reshape(output, new TensorShape(channels * frames, hw));
-            return Rows(flat, channels, frames, cond, noisy, hw);
+                return LongCatFrameOps.Reshape(_backend, output, new TensorShape(channels * noisy, hw));
+            using Tensor flat = LongCatFrameOps.Reshape(_backend, output, new TensorShape(channels * frames, hw));
+            return LongCatFrameOps.Rows(_backend, flat, channels, frames, cond, noisy, hw);
         });
     }
 
@@ -217,104 +217,6 @@ public sealed class LongCatAvatarPipeline
         return cache is null
             ? _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens, audioTokens)
             : _dit.ForwardCached(_backend, input, text, frameTimesteps, in conditioning, cache, prompt.ValidTokens, audioTokens);
-    }
-
-    private Tensor FromHost(float[] data, TensorShape shape)
-    {
-        Tensor tensor = new(shape, DType.F32);
-        data.AsSpan().CopyTo(tensor.AsSpan<float>());
-        return tensor;
-    }
-
-    /// <summary>The same elements under another shape. A scale by one is an elementwise device op on the flat data: CopyTo would move a
-    /// default-device tensor through the host on CUDA, which is the sync this loop exists to avoid.</summary>
-    private Tensor Reshape(Tensor source, TensorShape shape)
-    {
-        Tensor result = new(shape, DType.F32);
-        try
-        {
-            _backend.Scale(result, source, 1f);
-            return result;
-        }
-        catch
-        {
-            result.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>The <paramref name="count"/> rows of a 2-D tensor from row <paramref name="offset"/>, as a new tensor.</summary>
-    private Tensor RowsOf(Tensor source, int offset, int count, int hw)
-    {
-        Tensor rows = new(new TensorShape(count, hw), DType.F32);
-        _backend.SliceRows(rows, source, offset);
-        return rows;
-    }
-
-    /// <summary>The noisy rows of a <c>[channels·frames, hw]</c> clip: each channel's last <paramref name="noisy"/> frames, joined in order.</summary>
-    private Tensor Rows(Tensor clip, int channels, int frames, int cond, int noisy, int hw)
-    {
-        List<Tensor> pieces = new(channels);
-        try
-        {
-            for (int c = 0; c < channels; c++)
-                pieces.Add(RowsOf(clip, c * frames + cond, noisy, hw));
-            Tensor joined = new(new TensorShape(channels * noisy, hw), DType.F32);
-            _backend.Concat(joined, pieces.ToArray(), 0);
-            return joined;
-        }
-        finally
-        {
-            foreach (Tensor piece in pieces)
-                piece.Dispose();
-        }
-    }
-
-    /// <summary>The whole clip <c>[channels·frames, hw]</c> from the conditioning frames and the noisy state, per channel.</summary>
-    private Tensor Clip(Tensor state, Tensor? condState, int channels, int cond, int noisy, int hw)
-    {
-        List<Tensor> pieces = new(2 * channels);
-        try
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                if (cond > 0)
-                    pieces.Add(RowsOf(condState!, c * cond, cond, hw));
-                pieces.Add(RowsOf(state, c * noisy, noisy, hw));
-            }
-            Tensor clip = new(new TensorShape(channels * (cond + noisy), hw), DType.F32);
-            _backend.Concat(clip, pieces.ToArray(), 0);
-            return clip;
-        }
-        finally
-        {
-            foreach (Tensor piece in pieces)
-                piece.Dispose();
-        }
-    }
-
-    /// <summary>The noisy frames of the host noise, as the <c>[channels·noisy, hw]</c> state.</summary>
-    private static float[] NoisyFrames(float[] noise, int channels, int frames, int hw, int cond)
-    {
-        int noisy = frames - cond;
-        float[] result = new float[channels * noisy * hw];
-        for (int c = 0; c < channels; c++)
-            Array.Copy(noise, (c * frames + cond) * hw, result, c * noisy * hw, noisy * hw);
-        return result;
-    }
-
-    /// <summary>The host latents <c>[channels, frames, hw]</c> from the conditioning frames and the noisy state.</summary>
-    private static float[] JoinFrames(float[]? condLatents, float[] noisyState, int channels, int frames, int hw, int cond)
-    {
-        int noisy = frames - cond;
-        float[] result = new float[channels * frames * hw];
-        for (int c = 0; c < channels; c++)
-        {
-            if (cond > 0)
-                Array.Copy(condLatents!, c * cond * hw, result, c * frames * hw, cond * hw);
-            Array.Copy(noisyState, c * noisy * hw, result, (c * frames + cond) * hw, noisy * hw);
-        }
-        return result;
     }
 
     /// <summary>The audio tokens of <paramref name="count"/> frames from <paramref name="from"/>, copied out of <paramref name="tokens"/>.</summary>
