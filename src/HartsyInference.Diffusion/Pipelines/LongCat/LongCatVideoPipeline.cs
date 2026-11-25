@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Reduction;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Requests;
@@ -82,6 +84,7 @@ public sealed class LongCatVideoPipeline
         bool guided = run.Guidance > 1f;
         List<LongCatStepTrace> trace = new(run.RecordTrace ? schedule.Steps : 0);
         long started = System.Diagnostics.Stopwatch.GetTimestamp();
+        using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
 
         for (int i = 0; i < schedule.Steps; i++)
         {
@@ -90,11 +93,20 @@ public sealed class LongCatVideoPipeline
             float dt = schedule.Sigmas[i + 1] - schedule.Sigmas[i];
             float[] frameTimesteps = conditioning.FrameTimesteps(timestep, frames);
 
-            float[] velocity = guided
-                ? Guide(Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning),
-                    Predict(latents, run, channels, frames, run.Negative, frameTimesteps, conditioning),
-                    guidedFrom, channels, frames, hw, run.Guidance)
-                : Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning);
+            float[] velocity;
+            if (guided)
+            {
+                // Both velocities stay live until the reduction, which reads both. The positive one is one latent-sized tensor
+                // (about 9.6 MB at 832 x 480 x 93), so keeping it through the negative forward costs little next to the activations.
+                using Tensor positive = Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors);
+                using Tensor negative = Predict(latents, run, channels, frames, run.Negative, frameTimesteps, conditioning, tensors);
+                velocity = Guide(positive, negative, guidedFrom, channels, frames, hw, run.Guidance);
+            }
+            else
+            {
+                using Tensor output = Predict(latents, run, channels, frames, run.Positive, frameTimesteps, conditioning, tensors);
+                velocity = output.AsReadOnlySpan<float>().ToArray();
+            }
 
             // the reference negates the model output for its scheduler, then steps the frames after the conditioning ones.
             float[] stepped = new float[channels * (frames - cond) * hw];
@@ -161,39 +173,35 @@ public sealed class LongCatVideoPipeline
         return result;
     }
 
-    private float[] Predict(float[] latents, LongCatRun run, int channels, int frames, LongCatPrompt prompt, float[] frameTimesteps,
-        LongCatConditioning conditioning)
+    /// <summary>One forward pass; the velocity stays on the device, owned by the caller.</summary>
+    private Tensor Predict(float[] latents, LongCatRun run, int channels, int frames, LongCatPrompt prompt, float[] frameTimesteps,
+        LongCatConditioning conditioning, LongCatRunTensors tensors)
     {
         using Tensor input = new(new TensorShape([1, channels, frames, run.Height, run.Width]), DType.F32);
         latents.AsSpan().CopyTo(input.AsSpan<float>());
-        using Tensor text = new(new TensorShape(prompt.Length, _dit.Config.CaptionChannels), DType.F32);
-        prompt.Embeds.AsSpan().CopyTo(text.AsSpan<float>());
-        using Tensor output = _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens);
-        return output.AsReadOnlySpan<float>().ToArray();
+        Tensor text = tensors.Text(prompt);
+        return _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens);
     }
 
-    /// <summary>The optimized-scale guidance of the reference (CFG-zero): the unconditional prediction scaled by the projection of the
-    /// conditional one onto it, over the frames from <paramref name="guidedFrom"/> on.</summary>
-    private static float[] Guide(float[] positive, float[] negative, int guidedFrom, int channels, int frames, int hw, float guidance)
+    /// <summary>The optimized-scale guidance (CFG-zero): the unconditional prediction scaled by the projection of the conditional one onto it,
+    /// over the frames from <paramref name="guidedFrom"/> on. The two sums come from one device reduction over that frame range.</summary>
+    private float[] Guide(Tensor positive, Tensor negative, int guidedFrom, int channels, int frames, int hw, float guidance)
     {
-        double dot = 0, squared = 0;
-        for (int c = 0; c < channels; c++)
-            for (int f = guidedFrom; f < frames; f++)
-                for (int e = 0; e < hw; e++)
-                {
-                    int index = (c * frames + f) * hw + e;
-                    dot += positive[index] * negative[index];
-                    squared += negative[index] * negative[index];
-                }
+        float[] guided = positive.AsReadOnlySpan<float>().ToArray();
+        if (guidedFrom >= frames)
+            return guided;
+        float[] negatives = negative.AsReadOnlySpan<float>().ToArray();
+        StridedView region = StridedView.Of([channels, frames, hw]).Slice(1, guidedFrom, frames - guidedFrom);
+        // The host still reads both velocities for the combine below. The readback saving appears only once the combine moves to the device (after #1210).
+        (double dot, double squared) = ProductSums.DotAndSquaredB(_backend, positive, negative, region);
         float scale = (float)(dot / (squared + 1e-8));
-        float[] guided = (float[])positive.Clone();
         for (int c = 0; c < channels; c++)
             for (int f = guidedFrom; f < frames; f++)
                 for (int e = 0; e < hw; e++)
                 {
                     int index = (c * frames + f) * hw + e;
-                    float uncond = negative[index] * scale;
-                    guided[index] = uncond + guidance * (positive[index] - uncond);
+                    float uncond = negatives[index] * scale;
+                    guided[index] = uncond + guidance * (guided[index] - uncond);
                 }
         return guided;
     }

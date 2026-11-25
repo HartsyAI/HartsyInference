@@ -12,17 +12,17 @@ public sealed class AukDoubleBlock(AukConfig config)
     private readonly AukSwiGluFfn _ffC = new();
     private Tensor? _modXW, _modXB, _modCW, _modCB;
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, ICollection<Tensor> owned)
     {
         int dim = config.Dim;
-        _modXW = AukOps.Take(weights, $"{prefix}.attn_norm_x.linear.weight", 6 * dim, dim);
-        _modXB = AukOps.Take(weights, $"{prefix}.attn_norm_x.linear.bias", 6 * dim);
-        _modCW = AukOps.Take(weights, $"{prefix}.attn_norm_c.linear.weight", 6 * dim, dim);
-        _modCB = AukOps.Take(weights, $"{prefix}.attn_norm_c.linear.bias", 6 * dim);
-        _attnX.Load(weights, $"{prefix}.attn", "to_qkv", "q_norm", "k_norm", "to_out.0", dim, config.Heads);
-        _attnC.Load(weights, $"{prefix}.attn", "to_qkv_c", "c_q_norm", "c_k_norm", "to_out_c", dim, config.Heads);
-        _ffX.Load(weights, $"{prefix}.ff_x", dim, config.FfInner);
-        _ffC.Load(weights, $"{prefix}.ff_c", dim, config.FfInner);
+        _modXW = AukOps.Take(weights, $"{prefix}.attn_norm_x.linear.weight", owned, 6 * dim, dim);
+        _modXB = AukOps.Take(weights, $"{prefix}.attn_norm_x.linear.bias", owned, 6 * dim);
+        _modCW = AukOps.Take(weights, $"{prefix}.attn_norm_c.linear.weight", owned, 6 * dim, dim);
+        _modCB = AukOps.Take(weights, $"{prefix}.attn_norm_c.linear.bias", owned, 6 * dim);
+        _attnX.Load(weights, $"{prefix}.attn", "to_qkv", "q_norm", "k_norm", "to_out.0", dim, config.Heads, owned);
+        _attnC.Load(weights, $"{prefix}.attn", "to_qkv_c", "c_q_norm", "c_k_norm", "to_out_c", dim, config.Heads, owned);
+        _ffX.Load(weights, $"{prefix}.ff_x", dim, config.FfInner, owned);
+        _ffC.Load(weights, $"{prefix}.ff_c", dim, config.FfInner, owned);
     }
 
     /// <summary>Returns new (text, audio) streams; inputs stay with the caller. Both streams rotate at positions starting at 0 of the shared tables.</summary>

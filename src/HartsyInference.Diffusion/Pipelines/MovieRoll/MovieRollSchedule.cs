@@ -44,6 +44,7 @@ public sealed class MovieRollSchedule
     /// The step count must divide evenly into the window.</summary>
     public static MovieRollSchedule Base(int numInferenceSteps, int windowSize, double shift)
     {
+        ValidateShift(shift);
         if (numInferenceSteps <= 0 || windowSize <= 0 || numInferenceSteps % windowSize != 0)
             throw new ArgumentException($"The base chain needs a positive step count that a window of {windowSize} divides; got {numInferenceSteps}.");
         double[] sigmas = new double[numInferenceSteps + 1];
@@ -56,6 +57,7 @@ public sealed class MovieRollSchedule
     public static MovieRollSchedule Distilled(int[] denoisingStepList, int windowSize, double shift)
     {
         ArgumentNullException.ThrowIfNull(denoisingStepList);
+        ValidateShift(shift);
         if (denoisingStepList.Length == 0 || denoisingStepList.Length != windowSize)
             throw new ArgumentException($"The distilled ladder needs one step per window slot: {windowSize} slots, {denoisingStepList.Length} steps.");
         for (int i = 0; i + 1 < denoisingStepList.Length; i++)
@@ -72,7 +74,12 @@ public sealed class MovieRollSchedule
         return new MovieRollSchedule(sigmas, denoisingStepList.Length, windowSize, 1);
     }
 
-    /// <summary>The ladder index of each window slot at a global step, slot 0 first. Slots are ordered as the queue: the oldest chunk is slot 0.</summary>
+    /// <summary>The ladder index of each window slot at a global step, slot 0 first. Slots are ordered as the queue: the oldest chunk is slot 0.
+    /// <para>Warmup: the table is not a fresh start at every global step. At global 0, slot <c>k</c> reads ladder index <c>(N − k·StepsPerWindow) mod N</c>, so
+    /// slot 0 begins at the first ladder entry and slots 1 to W−1 begin mid-ladder (for the base chain of 50 steps and a window of 5, at 40, 30, 20, 10).
+    /// Before global N, slot <c>k</c> wraps to index 0 at global <c>k·StepsPerWindow</c>, the round in which its chunk entered, so a fresh noisy chunk is
+    /// enqueued exactly there. From global N on, the tail slot is at index 0 at every round start. The pipeline must enqueue a fresh chunk at the tail of
+    /// every round, as the reference does.</para></summary>
     public int[] StepIndices(int globalStep)
     {
         if (globalStep < 0) throw new ArgumentOutOfRangeException(nameof(globalStep));
@@ -82,6 +89,12 @@ public sealed class MovieRollSchedule
         int[] indices = new int[WindowSize];
         for (int k = 0; k < WindowSize; k++) indices[k] = _rows[(offset + k) % WindowSize][stepIdx];
         return indices;
+    }
+
+    private static void ValidateShift(double shift)
+    {
+        if (!double.IsFinite(shift) || shift <= 0)
+            throw new ArgumentOutOfRangeException(nameof(shift), shift, "The flow shift must be finite and positive.");
     }
 
     private static double Shift(double t, double shift) => shift * t / (1 + (shift - 1) * t);

@@ -13,7 +13,11 @@ public enum OvbSemsegStyle
     Quickstart,
 
     /// <summary>The benchmark prompt of the evaluation code (<c>make_selective_prompt</c>): <c>{ 'road': [8, 4, 249], ... }</c>,
-    /// pixels outside the listed classes "must be black and must not be forced into a listed class".</summary>
+    /// pixels outside the listed classes "must be black and must not be forced into a listed class".
+    /// <para>Not reached from src: the vision route sends <see cref="Quickstart"/>. Planned use: a COCO run that matches the
+    /// evaluation code's protocol, through the generator overload of <c>OvbPerception.SegmentAsync</c>, which takes a style (the
+    /// engine overload does not). Pinned by the <c>selectivePrompt</c> entry of the parity fixture
+    /// (<c>Fixtures/ovb_decoders/meta.json</c>).</para></summary>
     Selective,
 }
 

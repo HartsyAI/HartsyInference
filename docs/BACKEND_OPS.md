@@ -254,6 +254,28 @@ blend forms are one value in exact arithmetic and differ in the last bit in F32,
 The norms sum in F64. A zero delta leaves the latent untouched. F32; the predictions may be one tensor but neither may share
 storage with the latent.
 
+Over a zero `z`, with guidance 0 and delta 1, the per-row form is a row-norm match: `z = uncond · ‖cond‖₂ / (‖uncond‖₂ + eps)` per
+row (FastFrames' per-head renorm). A zero keeps no sign there.
+
+## SumProducts
+
+```
+output[g, t] = Σ_r term_t(a[viewA(g, r)], b[viewB(g, r)])     g over the kept leading axes, r over the rest
+term         = a·b (Dot), a·a (SquaredA), b·b (SquaredB); the chosen ones in that order
+```
+
+Reference: `SumProductsReference.Apply`. Contract: `SumProductsContract.Validate`. A `SumProductsSpec` carries one `StridedView` per
+operand with equal extents, the number of kept axes and the `ProductTerms`. A range is a `Slice` of the view; `PerRow(elements, width)`
+gives every row inside a longer dimension its own sums; `Over(view)` gives one group.
+
+- Each product of two F32 elements is formed in F64, where it is exact, and the sums accumulate in F64. An F64 output holds the sum, an
+  F32 output the sum rounded once. A backend without F64 arithmetic takes the reference.
+- The order of the additions is free, so two implementations agree within `n · 2⁻⁵² · Σ|term|` over the `n` elements of a group, not bit for
+  bit, plus one rounding each when the output is F32. The reference adds in the order of the view.
+- An element the view addresses more than once (a broadcast axis) counts each time. NaN and infinity propagate.
+- F32 operands, which may be one tensor. The output holds exactly groups times terms elements and shares no storage with either.
+- The result is a tensor. `ProductSums.DotAndSquaredB` is the one helper that reads it on the host, which is a sync.
+
 ## TopKGuidedLogits
 
 ```
@@ -453,7 +475,8 @@ Every implementation of these ops:
 - is graph-capture safe: the geometry is passed by value as kernel parameters or push constants, never through
   constant memory or a device-side spec buffer;
 - is one launch per call, except the globally normalized `GuidedEulerStep`, which is three (the partial sums, the
-  ratio, the update), as the op it replaced was.
+  ratio, the update), as the op it replaced was, and `SumProducts` over one large group, which may be two (the partial sums, their sum)
+  through a scratch buffer.
 
 ## Backend coverage
 
@@ -470,6 +493,7 @@ Every implementation of these ops:
 | `GroupScale` | reference | `group_scale_f32`, `_f16_f32`, `_f16_f16`, `_bf16_f32`, `_bf16_bf16` | `group_scale_f32/f16/f16_f16`; BF16 takes the reference |
 | `LinearFused` | composed | int8 fused epilogues where eligible, else composed | composed |
 | `GuidedEulerStep` | reference | `guided_euler.ptx` (`guided_euler_f32`; `_reduce/_finalize/_scaled` for the global norm; `_rows` per row) | `guided_euler`; the normalized forms take the reference |
+| `SumProducts` | reference | reference | reference |
 | `TopKGuidedLogits` | reference | `topk_guided_logits.ptx` (`topk_guided_logits_f32`, rows up to 16448 wide) | reference |
 | `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
 | `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |

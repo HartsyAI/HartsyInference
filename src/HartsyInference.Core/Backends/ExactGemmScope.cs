@@ -6,6 +6,9 @@ namespace HartsyInference.Core.Backends;
 /// 1e-3 off a plain-F32 lane, instead of the engine-wide TF32 default. Backends without TF32 ignore the switch.
 /// <para>On CUDA the switch also makes a BF16 weight upcast to F32 on every call (no cached cast), so a BF16 or F16 model would not get half-precision GEMMs under
 /// this scope; it is meant for models whose weights are F32.</para>
+/// <para>Thread safety: the switch is one property of the backend, saved and restored with no synchronisation. Two threads that open scopes
+/// on one backend can restore each other's value, and work another thread runs on that backend while a scope is open also gets exact GEMMs.
+/// Give each concurrent request its own backend, or serialise the requests that use scopes.</para>
 /// </summary>
 public readonly struct ExactGemmScope : IDisposable
 {

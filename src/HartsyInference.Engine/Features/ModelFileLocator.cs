@@ -1,6 +1,7 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Planning;
 
 namespace HartsyInference.Engine.Features;
 
@@ -47,7 +48,10 @@ public static class ModelFileLocator
     }
 
     /// <summary>Resolves a caller's component override when one is given; otherwise ensures <paramref name="fallback"/> is
-    /// on disk (downloading it if needed — the token is honored because that may transfer several gigabytes).</summary>
+    /// on disk (downloading it if needed — the token is honored because that may transfer several gigabytes). A file found on
+    /// disk at the pinned path is hash-checked against <see cref="ModelAsset.Sha256"/> and refused when it differs: the existence
+    /// check alone let a same-named file from another build load in place of the pinned one.</summary>
+    /// <exception cref="InvalidDataException">The file at the pinned path is not the pinned build.</exception>
     public static string RequireOrEnsure(string? requested, ModelAsset fallback, string role, CancellationToken cancel,
         params string[] subfolders)
     {
@@ -56,8 +60,25 @@ public static class ModelFileLocator
         {
             return Require(requested, role, subfolders);
         }
-        return ModelDownloader.EnsureSideModelAsync(fallback, EngineKnobs.SideModelAutofetch.Value, onProgress: null, cancel)
+        string path = ModelDownloader.EnsureSideModelAsync(fallback, EngineKnobs.SideModelAutofetch.Value, onProgress: null, cancel)
             .GetAwaiter().GetResult();
+        if (!string.IsNullOrWhiteSpace(fallback.Sha256))
+        {
+            string actual = VideoCheckpointHashCache.GetSha256Async(path, cancel).GetAwaiter().GetResult();
+            RequirePinnedBuild(path, fallback, role, actual);
+        }
+        return path;
+    }
+
+    /// <summary>Throws when a file's SHA-256 is not the pinned asset's. Matching is case-insensitive.</summary>
+    internal static void RequirePinnedBuild(string path, ModelAsset asset, string role, string actualSha256)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        if (string.IsNullOrWhiteSpace(asset.Sha256) || string.Equals(actualSha256, asset.Sha256, StringComparison.OrdinalIgnoreCase))
+            return;
+        throw new InvalidDataException(
+            $"{role} '{path}' is not the pinned build: its SHA-256 is {actualSha256}, expected {asset.Sha256} ({asset.Repo}/{asset.RepoPath}). "
+            + "Refusing to load it. Move or rename that file, then run again so the pinned build is fetched.");
     }
 
     /// <summary>Each name candidate directly under <paramref name="root"/> (when given) and in each folder, then a

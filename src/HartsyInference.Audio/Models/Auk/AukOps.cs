@@ -11,19 +11,13 @@ public static class AukOps
     /// <summary>float32 machine epsilon, the value <c>nn.RMSNorm(eps=None)</c> uses; upstream runs these norms in the model dtype, the engine in F32.</summary>
     public const float RmsEps = 1.1920929e-7f;
 
-    /// <summary>Throws <see cref="InvalidDataException"/> unless <paramref name="key"/> exists with exactly <paramref name="shape"/>.</summary>
-    public static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape)
-    {
-        if (!weights.TryGetValue(key, out Tensor? t)) throw new InvalidDataException($"AuK checkpoint is missing tensor '{key}'.");
-        bool ok = t.Shape.Rank == shape.Length;
-        for (int i = 0; ok && i < shape.Length; i++) ok = t.Shape[i] == shape[i];
-        if (!ok) throw new InvalidDataException($"AuK tensor '{key}' has shape {t.Shape}, expected [{string.Join(", ", shape)}].");
-        return t;
-    }
+    /// <summary>The tensor under <paramref name="key"/>, borrowed, refused unless it has exactly <paramref name="shape"/>.</summary>
+    public static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape) =>
+        CheckpointTensors.Require(weights, "AuK", key, shape);
 
-    /// <summary>Validated lookup that returns the tensor as F32 (the input itself when already F32, so the dictionary keeps ownership).</summary>
-    public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape) =>
-        WhisperOps.EnsureF32(Require(weights, key, shape));
+    /// <summary>As <see cref="Require"/> in F32: the input itself when already F32, otherwise a copy that joins <paramref name="owned"/>.</summary>
+    public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, ICollection<Tensor> owned, params long[] shape) =>
+        CheckpointTensors.RequireF32(weights, "AuK", key, owned, shape);
 
     /// <summary><c>LayerNorm(x) * scale + shift</c>; <paramref name="scale"/> must already include the +1.</summary>
     public static Tensor AdaNorm(IBackend backend, Tensor x, Tensor scale, Tensor shift, float eps)

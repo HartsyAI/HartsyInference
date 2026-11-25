@@ -213,7 +213,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
 
             TensorShape noiseShape = new TensorShape(1, _config.InChannels, patH, patW);
             using (Tensor noise = TakeOrCreateNoise(request, noiseShape, seed))
-                latent = Flux2LatentOps.Pack(noise);
+                latent = Flux2LatentOps.PackHost(noise);
 
             // An explicit shift is the schedule's mu, as for FLUX.2; otherwise diffusers' empirical mu on the TARGET tokens.
             float mu = request.SigmaShift ?? FlowMatchEulerDiscreteScheduler.EmpiricalMu(gridTokens, steps);
@@ -252,7 +252,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
                 Logs.Debug($"{Family} step {i + 1}/{steps} done in {stepSw.ElapsedMilliseconds}ms");
                 if (onProgress is not null)
                 {
-                    using Tensor preview = Flux2LatentOps.FromPackedTokens(latent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    using Tensor preview = Flux2LatentOps.FromPackedTokens(Backend, latent, patH, patW, _bnMean, _bnVar, _bnEps,
                         _config.VaeLatentChannels, _config.PatchSize);
                     onProgress(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
@@ -263,7 +263,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
             }
             ReleaseTransformer();
 
-            using Tensor vaeLatent = Flux2LatentOps.FromPackedTokens(latent, patH, patW, _bnMean, _bnVar, _bnEps,
+            using Tensor vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, latent, patH, patW, _bnMean, _bnVar, _bnEps,
                 _config.VaeLatentChannels, _config.PatchSize);
             using Tensor image = _vaeDecoder.DecodeTiled(Backend, vaeLatent);
             byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);

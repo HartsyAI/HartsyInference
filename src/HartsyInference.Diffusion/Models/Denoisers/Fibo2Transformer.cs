@@ -159,9 +159,9 @@ public sealed unsafe class Fibo2Transformer : IDisposable
             Tensor projected = FinalLayer(backend, imageTokens, noisyEmbedding, imageLen);
             imageTokens.Dispose();
 
-            Tensor unpacked = Flux2LatentOps.Unpack(projected, gridH, gridW);
+            Tensor unpacked = Flux2LatentOps.Unpack(backend, projected, gridH, gridW);
             projected.Dispose();
-            Tensor velocity = Flux2LatentOps.Unpatchify(unpacked, _config.InChannels, patch);
+            Tensor velocity = Flux2LatentOps.Unpatchify(backend, unpacked, _config.InChannels, patch);
             unpacked.Dispose();
             return velocity;
         }
@@ -207,8 +207,8 @@ public sealed unsafe class Fibo2Transformer : IDisposable
     private Tensor EmbedLatent(IBackend backend, Tensor latent)
     {
         int tokens = (int)(latent.Shape[2] / _config.PatchSize * (latent.Shape[3] / _config.PatchSize));
-        Tensor patched = Flux2LatentOps.Patchify(latent, _patchVolume, _config.PatchSize);
-        Tensor packed = Flux2LatentOps.Pack(patched);
+        Tensor patched = Flux2LatentOps.Patchify(backend, latent, _patchVolume, _config.PatchSize);
+        Tensor packed = Flux2LatentOps.Pack(backend, patched);
         patched.Dispose();
         Tensor embedded = new(new TensorShape(1, tokens, _config.Dim), DType.F32);
         backend.Linear(embedded, packed, _xEmbedderWeight!, _xEmbedderBias);

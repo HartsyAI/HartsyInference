@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Core.Backends;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
@@ -52,15 +53,13 @@ public sealed unsafe partial class Fibo2Pipeline
     private Tensor EncodeInitLatent(Tensor image)
     {
         using Tensor raw = _vaeEncoder!.Encode(Backend, image);
-        return NormalizeVaeLatent(raw, _config, _bnMean, _bnVar, _bnEps);
+        return NormalizeVaeLatent(Backend, raw, _config, _bnMean, _bnVar, _bnEps);
     }
 
     /// <summary>VAE latent to denoiser latent: 2×2 patchify, BatchNorm normalisation on the 128 channels, unpatchify.</summary>
-    internal static Tensor NormalizeVaeLatent(Tensor vaeLatent, Fibo2Config config, Tensor bnMean, Tensor bnVar, float bnEps)
+    internal static Tensor NormalizeVaeLatent(IBackend backend, Tensor vaeLatent, Fibo2Config config, Tensor bnMean, Tensor bnVar, float bnEps)
     {
-        using Tensor patched = Flux2LatentOps.Patchify(vaeLatent, config.InChannels * config.PatchSize * config.PatchSize, config.PatchSize);
-        using Tensor normalized = Flux2LatentOps.BnNormalize(patched, bnMean, bnVar, bnEps);
-        return Flux2LatentOps.Unpatchify(normalized, config.InChannels, config.PatchSize);
+        return Flux2LatentOps.NormalizePatchified(backend, vaeLatent, bnMean, bnVar, bnEps, config.PatchSize);
     }
 
     /// <summary>The latent the loop starts from. Text-to-image scales the noise by the schedule's initial sigma; img2img mixes

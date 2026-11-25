@@ -182,7 +182,7 @@ public sealed class FastFramesPipeline
             (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
             FastFramesFrame output;
             using (pixels)
-                output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), (int)pixels.Shape[0],
+                output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
                     (int)pixels.Shape[2], (int)pixels.Shape[3]);
             yield return output;
 

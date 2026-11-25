@@ -8,7 +8,6 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Moe;
-using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -905,18 +904,9 @@ public sealed partial class TextService : ITextService, IDisposable
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
             // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
             // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
-            if (slot.SsmModel is not null)
-            {
-                // The image grid is read from the pixels the Qwen3-VL tower encodes, never inferred from the token count.
-                if (vision is not Qwen3VlEncoder qwen)
-                    throw new NotSupportedException("Qwen3.5-VL image input needs the Qwen3-VL vision tower (mmproj); the loaded projector does not supply the image grid.");
-                MRopeImageGrid grid = Qwen3VlEncoder.MergedGrid(px, qwen.PatchSize, qwen.Merge);
-                answer = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, grid, question, maxTokens, sampling);
-            }
-            else
-            {
-                answer = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
-            }
+            answer = slot.SsmModel is not null
+                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector."), slot.Backend!).Generate(px, question, maxTokens, sampling)
+                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
         int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
@@ -1458,7 +1448,7 @@ public sealed partial class TextService : ITextService, IDisposable
             // SSM has its own loader with no EnumerateWeights/redundant-split concept at all.
             slot.PreloadRedundantWeightSplitsApplied = null;
             slot.LoadedPath = path;
-            LoadVisionInto(slot, path);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
+            LoadVisionInto(slot, path, ssmBackbone: true);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
             Logs.Info($"[TextService] Loaded GGUF SSM model '{Path.GetFileName(path)}' ({architecture}) on {deviceKey}."
                 + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
             return;
@@ -1766,7 +1756,8 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.</summary>
-    private static void LoadVisionInto(TextDeviceSlot slot, string textPath)
+    /// <param name="ssmBackbone">The SSM backbone (Qwen3.5-VL) accepts only a Qwen3-VL tower; any other projector is refused here with a warning and the model stays text-only.</param>
+    private static void LoadVisionInto(TextDeviceSlot slot, string textPath, bool ssmBackbone = false)
     {
         string? mmproj = FindMmproj(textPath);
         if (mmproj is null)
@@ -1779,6 +1770,11 @@ public sealed partial class TextService : ITextService, IDisposable
                 slot.MllamaVision = MllamaVisionEncoder.Load(mmproj);
             else if (IsQwen3Vl(mmproj))   // must precede IsQwen25Vl (which greedily matches any "qwen" projector).
                 slot.SpliceVision = Qwen3VlEncoder.Load(mmproj);
+            else if (ssmBackbone)
+            {
+                Logs.Warning($"[TextService] '{Path.GetFileName(mmproj)}' is not a Qwen3-VL projector, which the SSM backbone needs for the image grid. Model stays text-only.");
+                return;
+            }
             else if (IsLlavaNext(mmproj))
                 slot.SpliceVision = LlavaNextEncoder.Load(mmproj);
             else
