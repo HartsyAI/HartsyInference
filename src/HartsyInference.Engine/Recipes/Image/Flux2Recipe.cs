@@ -140,6 +140,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
+        UnhonouredBackends.Refuse(context, "FLUX.2");
         // TODO(E-IMG-4/5): split-file / user overrides from ImageRequest.Components, and img2img are deferred —
         // this ports the text-to-image core.
         // IDisposable, not SafeTensorsLoader: the text encoder now opens through CheckpointSource. Same widening
@@ -179,6 +180,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             Flux2CheckpointConverter converter = new Flux2CheckpointConverter(config.HiddenSize, mlpInner);
             Dictionary<string, Tensor> converted = converter.ConvertTransformer(castWeights);
             castWeights.Clear();
+            // context.TransformerBackends is the primary alone: UnhonouredBackends.Refuse above rejected every other transformer placement.
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =

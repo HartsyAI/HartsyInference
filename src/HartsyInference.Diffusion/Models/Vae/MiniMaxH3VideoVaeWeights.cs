@@ -7,27 +7,16 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// the norm kernels and must be promoted. Cast copies are appended to <c>owned</c> so the decoder can free them.</summary>
 internal static class MiniMaxH3VideoVaeWeights
 {
+    private const string Family = "MiniMax-H3 video VAE";
+
     /// <summary>Weight as stored, naming the key when it is absent.</summary>
-    public static Tensor Raw(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        weights.TryGetValue(key, out Tensor? t) ? t
-            : throw new KeyNotFoundException($"MiniMax-H3 video VAE weight '{key}' is missing.");
+    public static Tensor Raw(IReadOnlyDictionary<string, Tensor> weights, string key) => CheckpointTensors.Require(weights, Family, key);
 
-    /// <summary>F32 view of a required weight.</summary>
+    /// <summary>F32 form of a required weight.</summary>
     public static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned) =>
-        Promote(Raw(weights, key), owned);
+        CheckpointTensors.RequireF32(weights, Family, key, owned);
 
-    /// <summary>F32 view of an optional weight (biases are optional in the reference's <c>bias=False</c> variants).</summary>
+    /// <summary>F32 form of an optional weight (biases are optional in the reference's <c>bias=False</c> variants).</summary>
     public static Tensor? OptionalF32(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned) =>
-        weights.TryGetValue(key, out Tensor? t) ? Promote(t, owned) : null;
-
-    private static Tensor Promote(Tensor t, List<Tensor> owned)
-    {
-        if (t.DType == DType.F32)
-        {
-            return t;
-        }
-        Tensor cast = t.CastTo(DType.F32);
-        owned.Add(cast);
-        return cast;
-    }
+        CheckpointTensors.OptionalF32(weights, Family, key, owned);
 }
