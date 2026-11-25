@@ -1,6 +1,8 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Variants;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -51,6 +53,23 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         Frames = FrameGrid.StepPlusOne(LongCatRecipeSupport.TemporalCompressionFactor, FrameNormalization.SnapNearest, SegmentFrames),
     };
 
+    /// <summary>The 1.5 distilled build: 8 steps, guidance off (1.0), the 1.5 scheduler's shift 7. Steps and guidance are fixed by the
+    /// distillation, so the planner locks them.</summary>
+    public static VideoDefaults DistilledDefaults { get; } = new VideoDefaults
+    {
+        Steps = 8, CfgScale = 1.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
+        FlowShift = LongCatAvatarPipelineSettings.Shift,
+        LockedFields = VideoLockedFields.Steps | VideoLockedFields.CfgScale,
+    };
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => LongCatAvatarVariants.Catalog;
+
+    /// <inheritdoc/>
+    /// <remarks>Only a named build (a caller hint) imposes the 1.5 settings; a name-only or unnamed request keeps the 1.6 numbers.</remarks>
+    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(LongCatAvatarVariants.Avatar15) && variant.IsDefinitive ? DistilledDefaults : Defaults;
+
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
 
@@ -79,7 +98,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders);
+            ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
+            bool distilled = variant.Is(LongCatAvatarVariants.Avatar15) && variant.IsDefinitive;
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled);
         }
         catch (Exception ex)
         {
