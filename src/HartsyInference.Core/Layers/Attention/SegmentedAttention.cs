@@ -72,8 +72,8 @@ public static class SegmentedAttention
     /// <c>[B, heads, Sq, headDim]</c>, <paramref name="k"/> and <paramref name="v"/> <c>[B, heads, Skv, headDim]</c>. Each segment's queries read
     /// the key ranges it names. Nothing is masked: a key outside a segment's ranges is not in its call, so there is no <c>[Sq, Skv]</c> bias and every
     /// call is the layer's ordinary unmasked attention. The operands stay the caller's. Returns <c>[B, heads, Sq, headDim]</c>, which the caller owns.</summary>
-    /// <remarks>Equal to one attention with a bias of 0 on the named pairs and negative infinity elsewhere. Segments that name the same ranges share
-    /// one gathered copy of the keys and values, and a segment that reads every key reads the operands themselves.</remarks>
+    /// <remarks>Equal to one attention with a bias of 0 on the named pairs and negative infinity elsewhere. Neighbouring segments that name the same
+    /// ranges run as one call, and a call that reads every key reads the operands themselves; any other gathers its keys and values once.</remarks>
     public static Tensor RunHeadMajor(IBackend backend, AttentionLayer layer, Tensor q, Tensor k, Tensor v, ReadOnlySpan<KeyRangeSegment> segments)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -82,33 +82,22 @@ public static class SegmentedAttention
             throw new ArgumentException($"Segmented attention takes head-major [B, heads, S, headDim] operands; got {q.Shape}, {k.Shape}, {v.Shape}.");
         int queryTokens = (int)q.Shape[2], keyTokens = (int)k.Shape[2];
         KeyRangeSegment.Validate(segments, queryTokens, keyTokens);
-        if (segments.Length == 1 && ReadsEveryKey(segments[0], keyTokens))
-            return layer.AttendHeadMajorOperands(backend, q, k, v, default, OperandOwnership.None);
 
         List<Tensor> parts = new(segments.Length);
-        Tensor? keys = null, values = null;
         try
         {
-            for (int i = 0; i < segments.Length; i++)
+            for (int i = 0; i < segments.Length;)
             {
                 KeyRangeSegment s = segments[i];
-                bool every = ReadsEveryKey(s, keyTokens);
-                if (!every && (keys is null || !SameKeys(s, segments[i - 1])))
-                {
-                    keys?.Dispose();
-                    values?.Dispose();
-                    keys = values = null;
-                    keys = GatherTokens(backend, k, s);
-                    values = GatherTokens(backend, v, s);
-                }
-                using Tensor queries = SliceTokens(backend, q, s.QueryStart, s.QueryCount);
-                parts.Add(layer.AttendHeadMajorOperands(backend, queries, every ? k : keys!, every ? v : values!, default, OperandOwnership.None));
-                if (every || i + 1 == segments.Length || !SameKeys(segments[i + 1], s))
-                {
-                    keys?.Dispose();
-                    values?.Dispose();
-                    keys = values = null;
-                }
+                int queries = s.QueryCount;
+                for (i++; i < segments.Length && SameKeys(segments[i], s); i++)
+                    queries += segments[i].QueryCount;
+
+                bool everyKey = s.KeyCount == keyTokens;
+                using Tensor? querySlice = queries == queryTokens ? null : SliceTokens(backend, q, s.QueryStart, queries);
+                using Tensor? keySlice = everyKey ? null : GatherTokens(backend, k, s);
+                using Tensor? valueSlice = everyKey ? null : GatherTokens(backend, v, s);
+                parts.Add(layer.AttendHeadMajorOperands(backend, querySlice ?? q, keySlice ?? k, valueSlice ?? v, default, OperandOwnership.None));
             }
 
             if (parts.Count == 1)
@@ -123,14 +112,10 @@ public static class SegmentedAttention
         }
         finally
         {
-            keys?.Dispose();
-            values?.Dispose();
             foreach (Tensor part in parts)
                 part.Dispose();
         }
     }
-
-    private static bool ReadsEveryKey(in KeyRangeSegment segment, int keyTokens) => segment.KeyCount == keyTokens;
 
     private static bool SameKeys(in KeyRangeSegment a, in KeyRangeSegment b)
     {

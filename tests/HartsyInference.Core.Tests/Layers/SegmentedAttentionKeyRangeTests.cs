@@ -14,7 +14,7 @@ public sealed class SegmentedAttentionKeyRangeTests
     private const float Tolerance = 1e-5f;
     private static readonly IBackend Backend = new CpuBackend();
 
-    public static TheoryData<string> Plans => new() { "cached", "groups", "prefix", "shared", "dense", "single" };
+    public static TheoryData<string> Plans => new() { "cached", "groups", "prefix", "shared", "returning", "dense", "single" };
 
     private static (int Queries, int Keys, KeyRangeSegment[] Segments) Plan(string name) => name switch
     {
@@ -26,6 +26,8 @@ public sealed class SegmentedAttentionKeyRangeTests
         "prefix" => (5, 14, [KeyRangeSegment.Of(0, 5, 0, 14)]),
         // Frame-causal (MovieRoll's VAE) with two segments that name the same keys.
         "shared" => (9, 9, [KeyRangeSegment.Of(0, 3, 0, 3), KeyRangeSegment.Of(3, 2, 0, 6), KeyRangeSegment.Of(5, 1, 0, 6), KeyRangeSegment.Of(6, 3, 0, 9)]),
+        // The same ranges again after a segment that reads others: not neighbours, so two calls.
+        "returning" => (6, 10, [KeyRangeSegment.Of(0, 2, 1, 4), KeyRangeSegment.Of(2, 1, 6, 4), KeyRangeSegment.Of(3, 3, 1, 4)]),
         "dense" => (7, 7, [KeyRangeSegment.Of(0, 4, 0, 7), KeyRangeSegment.Of(4, 3, 0, 7)]),
         _ => (1, 11, [new(0, 1, [new(2, 1), new(7, 3)])]),
     };
@@ -58,12 +60,16 @@ public sealed class SegmentedAttentionKeyRangeTests
         float[] before = Run(q, k, v, segments);
         for (int key = 0; key < keys; key++)
         {
-            using Tensor poisoned = Poisoned(v, key, keys);
-            float[] after = Run(q, k, poisoned, segments);
+            using Tensor poisonedKey = Poisoned(k, key, keys);
+            using Tensor poisonedValue = Poisoned(v, key, keys);
+            float[] afterKey = Run(q, poisonedKey, v, segments);
+            float[] afterValue = Run(q, k, poisonedValue, segments);
             foreach (KeyRangeSegment s in segments)
             {
                 bool reads = s.Keys.Any(range => key >= range.Start && key < range.End);
-                Assert.Equal(reads, Differs(before, after, s, queries));
+                Assert.Equal(reads, Differs(before, afterValue, s, queries));
+                // A segment with one key gives it all the weight, so its score cannot move the output.
+                Assert.Equal(reads && s.KeyCount > 1, Differs(before, afterKey, s, queries));
             }
         }
     }
