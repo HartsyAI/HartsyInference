@@ -86,7 +86,7 @@ public sealed unsafe class F5Dit : IDisposable
         // (and 2i+1) of each [maxPos, headDim] row, so the interleaved pair (2i, 2i+1) reads its angle at index
         // 2i. This lets RoPE run via the on-device the interleaved rotary (RotaryCall.Rows) kernel — the previous the interleaved rotary (RotaryCall.TokenMajor)
         // has no CUDA override, so it yanked q/k to the host and back ~2800× per generation (the F5 slowdown).
-        // The tables are long-lived, so weight auto-promotion keeps them GPU-resident.
+        // The tables live until the next load or Dispose, so weight auto-promotion keeps them GPU-resident.
         const int maxPos = 8_192;
         (float[] cos, float[] sin) = RotaryEmbedding.GetTables(_cfg.HeadDim, _cfg.RopeTheta, maxPos);
         int half = _cfg.HeadDim / 2;
@@ -248,6 +248,8 @@ public sealed unsafe class F5Dit : IDisposable
     public (Tensor TextEmb, Tensor XInput, Tensor Block0, Tensor PreNorm) DebugForward(
         IBackend backend, Tensor noisyMel, Tensor condMel, ReadOnlySpan<int> textIds, float timestep)
     {
+        ThrowIfDisposed();
+        if (!_loaded) throw new InvalidOperationException("Call LoadWeights first.");
         int t = (int)noisyMel.Shape[2];
         Tensor timeEmb = _timeEmb.Forward(backend, timestep);
         Tensor textHidden = _textEmb.Forward(backend, textIds, t, false);
@@ -327,13 +329,14 @@ public sealed unsafe class F5Dit : IDisposable
         _textEmb.Dispose();
         _xFixed?.Dispose(); _siluFixed?.Dispose(); _graphVelocity?.Dispose();
         _xFixed = _siluFixed = _graphVelocity = null;
-        _txtCond?.Dispose(); _txtUncond?.Dispose();
-        _txtCond = _txtUncond = null;
     }
 
     /// <summary>Frees what this instance made itself at load: the widened weights and the RoPE tables. Free the weights from a device first.</summary>
     private void ReleaseOwned()
     {
+        // What was computed from, or captured with, the weights that go now.
+        ResetTextCache();
+        _graphSig = long.MinValue;
         foreach (Tensor copy in _owned) copy.Dispose();
         _owned.Clear();
         _ropeCos?.Dispose();

@@ -49,6 +49,15 @@ internal static unsafe class F5Ops
     public static Tensor Take(IReadOnlyDictionary<string, Tensor> weights, string key, ICollection<Tensor> owned, params long[] shape) =>
         CheckpointTensors.RequireF32(weights, "F5-TTS", key, owned, shape);
 
+    /// <summary>As <see cref="Take"/>, for a vector of <paramref name="count"/> elements that may carry leading axes of 1.</summary>
+    public static Tensor TakeVector(IReadOnlyDictionary<string, Tensor> weights, string key, ICollection<Tensor> owned, int count)
+    {
+        Tensor taken = Take(weights, key, owned);
+        if (taken.ElementCount != count || taken.Shape[taken.Shape.Rank - 1] != count)
+            throw new InvalidDataException($"The F5-TTS checkpoint tensor '{key}' is {taken.Shape}; expected a vector of {count}.");
+        return taken;
+    }
+
     /// <summary>Global Response Normalization (ConvNeXt-V2 Eq. 4) on the channel-last layout <c>[B, T, D]</c>: <c>out = gamma * (x * Gx/(mean(Gx)+eps)) + beta + x</c> where <c>Gx = ||x||_2</c> along the time axis.</summary>
     public static void Grn(Tensor x, Tensor gamma, Tensor beta, int batch, int t, int dim)
     {

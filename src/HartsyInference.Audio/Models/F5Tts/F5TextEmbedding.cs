@@ -28,7 +28,11 @@ internal sealed unsafe class F5TextEmbedding : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
-        _embedWeight = F5Ops.Take(w, $"{prefix}.text_embed.weight", owned);
+        string embedKey = $"{prefix}.text_embed.weight";
+        _embedWeight = F5Ops.Take(w, embedKey, owned);
+        // The row count follows the tokenizer's vocabulary; Forward checks the ids against it.
+        if (_embedWeight.Shape.Rank != 2 || _embedWeight.Shape[1] != _cfg.TextDim)
+            throw new InvalidDataException($"The F5-TTS checkpoint tensor '{embedKey}' is {_embedWeight.Shape}; expected [tokens, {_cfg.TextDim}].");
         for (int i = 0; i < _blocks.Length; i++)
             _blocks[i].LoadWeights(w, $"{prefix}.text_blocks.{i}", owned);
 
@@ -44,6 +48,14 @@ internal sealed unsafe class F5TextEmbedding : IDisposable
         if (_embedWeight is null || _freqsCis is null)
             throw new InvalidOperationException("Call LoadWeights first.");
 
+        int validLen = Math.Min(textIds.Length, seqLen);
+        long rows = _embedWeight.Shape[0];
+        for (int t = 0; t < validLen; t++)
+        {
+            if (textIds[t] < -1 || textIds[t] + 1L >= rows)
+                throw new ArgumentOutOfRangeException(nameof(textIds), textIds[t], $"The text embedding has tokens -1 (the filler) to {rows - 2}.");
+        }
+
         int textDim = _cfg.TextDim;
         Tensor textHidden = new(new TensorShape(1, seqLen, textDim), DType.F32);
         float* hp = (float*)textHidden.DataPointer;
@@ -52,7 +64,6 @@ internal sealed unsafe class F5TextEmbedding : IDisposable
         // 1. Token embed lookup. Upstream adds +1 to every token id (use 0 as filler), then looks up the row —
         //    row 0 is the (learned, generally non-zero) filler embedding, NOT a zero vector. drop_text (CFG
         //    uncond) sets every id to 0 so the whole valid region maps to that filler row.
-        int validLen = Math.Min(textIds.Length, seqLen);
         for (int t = 0; t < seqLen; t++)
         {
             int rowOff = t * textDim;
@@ -162,8 +173,8 @@ internal sealed unsafe class F5ConvNeXtV2Block(int dim, int intermediate)
         _pwConv1B = F5Ops.Take(w, $"{prefix}.pwconv1.bias", owned, _intermediate);
         _pwConv2W = F5Ops.Take(w, $"{prefix}.pwconv2.weight", owned, _dim, _intermediate);
         _pwConv2B = F5Ops.Take(w, $"{prefix}.pwconv2.bias", owned, _dim);
-        _grnGamma = F5Ops.Take(w, $"{prefix}.grn.gamma", owned);
-        _grnBeta = F5Ops.Take(w, $"{prefix}.grn.beta", owned);
+        _grnGamma = F5Ops.TakeVector(w, $"{prefix}.grn.gamma", owned, _intermediate);
+        _grnBeta = F5Ops.TakeVector(w, $"{prefix}.grn.beta", owned, _intermediate);
     }
 
     /// <summary>Forward: x in channels-last <c>[1, T, dim]</c>. Returns same shape.</summary>

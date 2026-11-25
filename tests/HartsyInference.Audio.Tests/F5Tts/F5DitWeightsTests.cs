@@ -73,7 +73,6 @@ public sealed class F5DitWeightsTests : IDisposable
         float[] before = Velocity(dit);
 
         dit.LoadWeights(_half, "m");
-        dit.ResetTextCache();
 
         Assert.All(first, t => Assert.False(Alive(t)));
         Assert.Equal(before, Velocity(dit));
@@ -90,12 +89,46 @@ public sealed class F5DitWeightsTests : IDisposable
         Assert.Throws<KeyNotFoundException>(() => dit.LoadWeights(broken, "m"));
 
         Assert.Throws<InvalidOperationException>(() => Velocity(dit));
+        Assert.Throws<InvalidOperationException>(() => Debug(dit));
+        dit.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Debug(dit));
+    }
+
+    [Theory]
+    [InlineData(-2)]
+    [InlineData(9)]
+    [InlineData(int.MaxValue)]
+    public void ATokenTheEmbeddingLacks_IsRefused(int token)
+    {
+        using F5Dit dit = new(Tiny);
+        dit.LoadWeights(_full, "m");
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => Velocity(dit, token));
+        Velocity(dit, 8);
+        dit.ResetTextCache();
+        Velocity(dit, -1);
+    }
+
+    [Fact]
+    public void AReload_DropsTheTextEmbeddingOfTheOldWeights()
+    {
+        using F5Dit dit = new(Tiny);
+        dit.LoadWeights(_full, "m");
+        float[] first = Velocity(dit);
+        using Tensor other = Filled(new Random(9), DType.F32, 10, Text);
+
+        dit.LoadWeights(new Dictionary<string, Tensor>(_full) { ["m.text_embed.text_embed.weight"] = other }, "m");
+
+        Assert.NotEqual(first, Velocity(dit));
     }
 
     [Theory]
     [InlineData("m.time_embed.time_mlp.2.bias")]
     [InlineData("m.input_embed.conv_pos_embed.conv1d.0.weight")]
+    [InlineData("m.text_embed.text_embed.weight")]
     [InlineData("m.text_embed.text_blocks.0.dwconv.weight")]
+    [InlineData("m.text_embed.text_blocks.0.grn.gamma")]
+    [InlineData("m.text_embed.text_blocks.0.grn.beta")]
     [InlineData("m.transformer_blocks.1.attn.to_out.0.weight")]
     [InlineData("m.proj_out.bias")]
     public void AMissingOrMisshapenTensor_IsNamed(string key)
@@ -121,12 +154,19 @@ public sealed class F5DitWeightsTests : IDisposable
             Assert.Throws<NotSupportedException>(() => dit.LoadWeights(new Dictionary<string, Tensor>(_full) { [Key] = fp8 }, "m")).Message);
     }
 
-    private static float[] Velocity(F5Dit dit)
+    private static void Debug(F5Dit dit)
+    {
+        using CpuBackend backend = new();
+        using Tensor mel = Filled(new Random(5), DType.F32, 1, Mel, 7);
+        _ = dit.DebugForward(backend, mel, mel, [1, 4, 2], 0.3f);
+    }
+
+    private static float[] Velocity(F5Dit dit, int token = 4)
     {
         const int frames = 7;
         using CpuBackend backend = new();
         using Tensor noisy = Filled(new Random(5), DType.F32, 1, Mel, frames), cond = Filled(new Random(6), DType.F32, 1, Mel, frames);
-        using Tensor velocity = dit.Forward(backend, noisy, cond, [1, 4, 2], 0.3f, dropAudioCond: false, dropText: false);
+        using Tensor velocity = dit.Forward(backend, noisy, cond, [1, token, 2], 0.3f, dropAudioCond: false, dropText: false);
         float[] values = velocity.AsReadOnlySpan<float>().ToArray();
         Assert.All(values, v => Assert.True(float.IsFinite(v)));
         Assert.Contains(values, v => v != 0f);
