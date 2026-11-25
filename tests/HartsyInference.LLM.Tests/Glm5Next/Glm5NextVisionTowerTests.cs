@@ -18,7 +18,7 @@ public sealed class Glm5NextVisionTowerTests(ITestOutputHelper output)
     public void MergerRows_MatchTheReference()
     {
         Glm5NextVisionConfig config = Glm5NextHfConfig.ParseVision(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, "glm5_next");
+        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         using Glm5NextVisionTower tower = new(new CpuBackend(), config, source);
         float[] patches = NpyReader.ReadFloat32(Path.Combine(Dir, "patches.npy")).Data;
         int[] grid = NpyReader.ReadInt32(Path.Combine(Dir, "grid_thw.npy")).Data;
@@ -43,7 +43,7 @@ public sealed class Glm5NextVisionTowerTests(ITestOutputHelper output)
     {
         // The fixture's tower.npy is transformers' last_hidden_state: the tower after the downsample, before the merger.
         Glm5NextVisionConfig config = Glm5NextHfConfig.ParseVision(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, "glm5_next");
+        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         using Glm5NextVisionTower tower = new(new CpuBackend(), config, source);
         float[] patches = NpyReader.ReadFloat32(Path.Combine(Dir, "patches.npy")).Data;
         int[] grid = NpyReader.ReadInt32(Path.Combine(Dir, "grid_thw.npy")).Data;
@@ -64,7 +64,7 @@ public sealed class Glm5NextVisionTowerTests(ITestOutputHelper output)
     {
         // blocks.0.attn.qkv.weight is [3h, h]; the transposed [h, 3h] holds the same values and must still be refused.
         Glm5NextVisionConfig config = Glm5NextHfConfig.ParseVision(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using BlockFp8CheckpointWeights inner = BlockFp8CheckpointWeights.Open(Dir, "glm5_next");
+        using BlockFp8CheckpointWeights inner = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         string name = "model.visual.blocks.0.attn.qkv.weight";
         float[] values = inner.Read(name).AsReadOnlySpan<float>().ToArray();
         InvalidDataException ex = Assert.Throws<InvalidDataException>(() =>
@@ -76,7 +76,7 @@ public sealed class Glm5NextVisionTowerTests(ITestOutputHelper output)
     public void MissingTensor_IsRefusedAsInvalidData()
     {
         Glm5NextVisionConfig config = Glm5NextHfConfig.ParseVision(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using BlockFp8CheckpointWeights inner = BlockFp8CheckpointWeights.Open(Dir, "glm5_next");
+        using BlockFp8CheckpointWeights inner = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         InvalidDataException ex = Assert.Throws<InvalidDataException>(() =>
             new Glm5NextVisionTower(new CpuBackend(), config, new Missing(inner, "model.visual.merger.proj.weight")));
         Assert.Contains("merger.proj.weight", ex.Message);
@@ -109,7 +109,7 @@ public sealed class Glm5NextVisionTowerTests(ITestOutputHelper output)
     public void GridThatTheMergeSizeDoesNotDivide_IsRefused()
     {
         Glm5NextVisionConfig config = Glm5NextHfConfig.ParseVision(File.ReadAllText(Path.Combine(Dir, "config.json")));
-        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, "glm5_next");
+        using BlockFp8CheckpointWeights source = BlockFp8CheckpointWeights.Open(Dir, Glm5NextTextModel.ModelType);
         using Glm5NextVisionTower tower = new(new CpuBackend(), config, source);
         Assert.Throws<ArgumentException>(() => tower.Forward(new float[tower.PatchRowWidth * 15], [(1, 3, 5)]));
     }
