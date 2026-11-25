@@ -180,6 +180,78 @@ public sealed class KvSegmentStoreTests : IDisposable
     }
 
     [Fact]
+    public void WritingASlotWithTensorsItHolds_KeepsThem_AndFreesOnlyTheOther()
+    {
+        using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 0);
+        Tensor keys = Filled(1, 2, 2), values = Filled(2, 2, 2), newValues = Filled(3, 2, 2);
+        store.Set(0, 0, keys, values);
+        store.Set(0, 0, keys, values);
+        Assert.False(IsDisposed(keys));
+        Assert.False(IsDisposed(values));
+
+        store.Set(0, 0, keys, newValues);
+        Assert.False(IsDisposed(keys));
+        Assert.True(IsDisposed(values));
+        Assert.Same(newValues, store.Values(0, 0));
+    }
+
+    [Fact]
+    public void OneTensorForBothIsRefused_AndDisposed()
+    {
+        using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 0);
+        Tensor both = Filled(1, 2, 2);
+        Assert.Throws<ArgumentException>(() => store.Set(0, 0, both, both));
+        Assert.True(IsDisposed(both));
+    }
+
+    [Fact]
+    public void AFailedPin_ChangesNothingButDisposesTheOperands()
+    {
+        IBackend backend = DispatchProxy.Create<IBackend, PinRecorder>();
+        PinRecorder pins = (PinRecorder)backend;
+        KvSegmentStore store = new(backend, layers: 1, tokenAxis: 0);
+        store.Append(0, Filled(1, 2, 2), Filled(1, 2, 2));
+        Tensor keys = Filled(2, 2, 2), values = Filled(2, 2, 2);
+        pins.Refuse = values;
+
+        Assert.Throws<InvalidOperationException>(() => store.Append(0, keys, values));
+
+        Assert.Equal(1, store.Count(0));
+        Assert.True(IsDisposed(keys));
+        Assert.True(IsDisposed(values));
+        Assert.Equal(2, pins.Pinned.Count);
+        store.Dispose();
+        Assert.Empty(pins.Pinned);
+    }
+
+    [Fact]
+    public void AnEmptiedStore_TakesAnotherShape()
+    {
+        using KvSegmentStore store = new(_backend, layers: 2, tokenAxis: 0);
+        store.Append(0, Filled(1, 2, 2), Filled(1, 2, 2));
+        store.Append(1, Filled(1, 2, 2), Filled(1, 2, 2));
+        store.Clear(0);
+        Assert.Throws<ArgumentException>(() => store.Append(0, Filled(1, 2, 5), Filled(1, 2, 5)));
+        store.Clear(1);
+        store.Append(0, Filled(1, 2, 5), Filled(1, 2, 5));
+        Assert.Equal(2, store.Tokens(0));
+    }
+
+    [Fact]
+    public void ALayerOutOfRange_AndReadsAfterDispose_AreRefused()
+    {
+        KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 0);
+        Tensor keys = Filled(1, 2, 2), values = Filled(1, 2, 2);
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.Append(3, keys, values));
+        Assert.True(IsDisposed(keys));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.Keys(-1, 0));
+        store.Append(0, Filled(1, 2, 2), Filled(1, 2, 2));
+        store.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => store.Keys(0, 0));
+        Assert.Throws<ObjectDisposedException>(() => store.Join(0, 0, 1));
+    }
+
+    [Fact]
     public void EveryStoredTensorIsPinned_AndEveryFreedOneIsUnpinnedFirst()
     {
         IBackend backend = DispatchProxy.Create<IBackend, PinRecorder>();
@@ -212,12 +284,16 @@ public sealed class KvSegmentStoreTests : IDisposable
 
         public bool UnpinnedAfterDispose { get; private set; }
 
+        /// <summary>The tensor whose pin fails.</summary>
+        public Tensor? Refuse { get; set; }
+
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
             Tensor tensor = (Tensor)args![0]!;
             switch (targetMethod!.Name)
             {
                 case nameof(IBackend.PinActivation):
+                    if (ReferenceEquals(tensor, Refuse)) throw new InvalidOperationException("the pin was refused");
                     Assert.True(Pinned.Add(tensor));
                     break;
                 case nameof(IBackend.UnpinActivation):

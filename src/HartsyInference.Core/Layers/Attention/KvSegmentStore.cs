@@ -7,7 +7,7 @@ namespace HartsyInference.Core.Layers.Attention;
 /// of rows. The store owns what it is given, pins it so the activation sweep between steps leaves it on the device, and unpins and frees it when
 /// it is replaced, removed or the store is disposed. Which segments an attention reads, and when one is dropped, stay with the model.</summary>
 /// <remarks>Segments may differ in length; every other extent, and the dtype, must agree. Nothing is copied on the way in. A read that needs one
-/// tensor is a <see cref="Join"/>, or a <see cref="Compact"/> once for a history many blocks read.</remarks>
+/// tensor is a <see cref="Join"/>, or a <see cref="Compact"/> once for a history many blocks read. Used from one thread at a time.</remarks>
 public sealed class KvSegmentStore : IDisposable
 {
     private readonly IBackend _backend;
@@ -86,16 +86,21 @@ public sealed class KvSegmentStore : IDisposable
         bool stored = false;
         try
         {
-            List<Segment?> segments = _layers[layer];
-            ArgumentOutOfRangeException.ThrowIfNegative(slot);
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            List<Segment?> segments = Layer(layer);
+            ArgumentOutOfRangeException.ThrowIfNegative(slot);
             Validate(keys, values);
-            while (segments.Count <= slot)
-                segments.Add(null);
             Pin(keys, values);
             stored = true;
-            Release(segments[slot]);
+            while (segments.Count <= slot)
+                segments.Add(null);
+            Segment? replaced = segments[slot];
             segments[slot] = new Segment(keys, values);
+            // A slot may be written again with a tensor it already holds; that one stays.
+            if (replaced is not null && !ReferenceEquals(replaced.Keys, keys) && !ReferenceEquals(replaced.Keys, values))
+                Free(replaced.Keys);
+            if (replaced is not null && !ReferenceEquals(replaced.Values, keys) && !ReferenceEquals(replaced.Values, values))
+                Free(replaced.Values);
             _shape = keys.Shape;
             _dtype = keys.DType;
             _shaped = true;
@@ -111,12 +116,13 @@ public sealed class KvSegmentStore : IDisposable
     }
 
     /// <summary>Adds a segment after the last one; ownership as for <see cref="Set"/>.</summary>
-    public void Append(int layer, Tensor keys, Tensor values) => Set(layer, _layers[layer].Count, keys, values);
+    public void Append(int layer, Tensor keys, Tensor values) =>
+        Set(layer, (uint)layer < (uint)_layers.Length ? _layers[layer].Count : 0, keys, values);
 
     /// <summary>Drops <paramref name="count"/> segments from <paramref name="first"/> on; the later ones move down.</summary>
     public void RemoveRange(int layer, int first, int count)
     {
-        List<Segment?> segments = _layers[layer];
+        List<Segment?> segments = Layer(layer);
         ArgumentOutOfRangeException.ThrowIfNegative(first);
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         if (first + count > segments.Count)
@@ -124,6 +130,9 @@ public sealed class KvSegmentStore : IDisposable
         for (int i = first; i < first + count; i++)
             Release(segments[i]);
         segments.RemoveRange(first, count);
+        // An empty store takes any shape again, so one store can serve runs of different sizes.
+        if (_layers.All(static layerSegments => layerSegments.TrueForAll(static s => s is null)))
+            _shaped = false;
     }
 
     /// <summary>Drops every segment of <paramref name="layer"/>.</summary>
@@ -171,12 +180,25 @@ public sealed class KvSegmentStore : IDisposable
             Clear(layer);
     }
 
-    private Segment At(int layer, int slot) =>
-        (slot >= 0 && slot < _layers[layer].Count ? _layers[layer][slot] : null)
-        ?? throw new InvalidOperationException($"Layer {layer} has no keys and values stored in slot {slot}.");
+    private Segment At(int layer, int slot)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        List<Segment?> segments = Layer(layer);
+        return (slot >= 0 && slot < segments.Count ? segments[slot] : null)
+            ?? throw new InvalidOperationException($"Layer {layer} has no keys and values stored in slot {slot}.");
+    }
+
+    private List<Segment?> Layer(int layer)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(layer);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(layer, _layers.Length);
+        return _layers[layer];
+    }
 
     private void Validate(Tensor keys, Tensor values)
     {
+        if (ReferenceEquals(keys, values))
+            throw new ArgumentException("Keys and values are the same tensor; each is owned and freed on its own.", nameof(values));
         if (keys.Shape != values.Shape || keys.DType != values.DType)
             throw new ArgumentException($"Keys {keys.Shape} {keys.DType} and values {values.Shape} {values.DType} must match.", nameof(values));
         if (_tokenAxis >= keys.Shape.Rank)
@@ -208,10 +230,14 @@ public sealed class KvSegmentStore : IDisposable
     {
         if (segment is null)
             return;
-        _backend.UnpinActivation(segment.Keys);
-        _backend.UnpinActivation(segment.Values);
-        segment.Keys.Dispose();
-        segment.Values.Dispose();
+        Free(segment.Keys);
+        Free(segment.Values);
+    }
+
+    private void Free(Tensor stored)
+    {
+        _backend.UnpinActivation(stored);
+        stored.Dispose();
     }
 
     private Tensor Join(Tensor[] parts)
