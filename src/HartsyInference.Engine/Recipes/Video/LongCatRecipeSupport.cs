@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Video;
@@ -55,14 +56,13 @@ internal static class LongCatRecipeSupport
     {
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
-        if (checkpoint.IsInt8)
-        {
-            throw new NotSupportedException(
-                $"'{context.CheckpointPath}' is an INT8 LongCat checkpoint. The INT8 weight route is not wired into the LongCat recipes yet.");
-        }
+        // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
+        // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
+        Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
+        loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
         LongCatTransformer dit = new(checkpoint.Config);
         loaders.Add(dit);
-        dit.LoadWeights(checkpoint.Weights);
+        dit.LoadWeights(weights);
 
         (IWanVaeDecoder decoder, IWanVaeEncoder encoder) = sides is null
             ? LoadProductionVae(loaders, context.Cancel)
