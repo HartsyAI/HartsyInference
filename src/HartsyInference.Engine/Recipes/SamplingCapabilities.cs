@@ -99,6 +99,9 @@ public static class SamplingCapabilities
         ["fastframes"] = SolverOwned,
         ["wan-vace"] = SolverOwned,
         ["wan-s2v"] = SolverOwned,
+        // LongCat runs its own flow-match Euler with the reference's sigma lists; no sampler or schedule is selectable.
+        ["longcat-video"] = SolverOwned,
+        ["longcat-avatar"] = SolverOwned,
         ["ltx-video"] = SolverOwned,
         ["ltx-video-2"] = SolverOwned,
         ["ltx-2.5-distilled"] = SolverOwned,

@@ -3127,6 +3127,42 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // LongCat-Video-Avatar 1.5 weights from the upstream repo, pinned to meituan-longcat/LongCat-Video-Avatar-1.5 @ 92016c71
+                // (bf16 base_model; shard sha256 are the HF tree's LFS oids; index and config are git blobs and carry no hash here).
+                // Licence conflict, recorded not resolved: MIT on the model card, "academic use only and commercial use is not permitted" on the
+                // project page, upstream issue #165 unanswered. Likeness generation: the depicted person's consent is required.
+                // The 1.5 layout is distilled (8 steps, guidance off); the recipe refuses this row unless a 1.6 build is named, until the
+                // distilled path is wired. The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
+                // (stt/openai--whisper-large-v3 @ 06f233fe). TargetSubdir is LongCat/<row>, the family-folder convention (FastFrames/, Vision/,
+                // LLM/), not the Comfy-style diffusion_models/ layout. The Hartsy-hosted repack is a later swap that needs the user's upload OK.
+                Id = "longcat-avatar", Modality = vid, DisplayName = "LongCat-Video-Avatar 1.5 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = false,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00001-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "c6140bdeb791620f2caa1f7c4d931dd4499bbafd148acdd65f1cdc254bd45eb2" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00002-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "90f71c9038c3d5fc596cc2bb2fc74c598b289bc76f57096277a42ff5bc9c37d9" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00003-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "bf69617758bfb0a2ca73d97341725dada77cc5fd2f07d07806beac3ecc5e0e6a" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00004-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "0540804fa47d2558ddc88d19dcf4a58ff7739673ec4da56cb2b1c5623810c57c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00005-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "91eedc26cf8a11a147cb0b29d640ccbd0c411c1b5f1949fad12003f48a9906c8" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00006-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "5fdb0fbff4bc75ea9bf1573c3551a974da4ab05b64b7cdd835a9b0d377374d1d" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/config.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "ltx-2", Modality = vid, DisplayName = "LTX-2.3 (22B, video + audio)", Architecture = "dual-stream DiT + video/audio VAE", Status = vp,
                 CliDrivable = true,
                 Assets = new ModelAsset[]
