@@ -18,7 +18,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
 
     [VulkanDeviceFact]
     public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan,
-        hostOps: true);
+        hostConvTransposes: 2);
 
     [CudaDeviceFact]
     public void Cuda_LongCatAudioProjection_StaysOnTheDevice() => LongCatAudioProjectionForward(GpuDevices.OpenCuda);
@@ -27,8 +27,8 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
     public void Vulkan_LongCatAudioProjection_StaysOnTheDevice() =>
         LongCatAudioProjectionForward(GpuDevices.OpenVulkan);
 
-    // hostOps: ConvTranspose2d runs on the host on Vulkan (VULKAN_STATUS.md), so the count is printed and only the values are checked there.
-    private void DepthPro2Reassemble(Func<IBackend> open, bool hostOps = false)
+    // On Vulkan ConvTranspose2d has no shader and runs on the host (VULKAN_STATUS.md). Levels 0 and 1 each have one, and each reads its input back.
+    private void DepthPro2Reassemble(Func<IBackend> open, int hostConvTransposes = 0)
     {
         const int width = 5, prefix = 2, gridH = 2, gridW = 4, decoder = 4;
         int[] dims = [3, 4, 5, 6];
@@ -48,7 +48,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
                 long syncs = device.GetD2hSyncCount();
                 output.WriteLine($"D2H_SYNCS depthpro2 reassemble: {syncs}");
                 AssertClose(expected, Values(levels), 1e-4f);
-                if (!hostOps) Assert.Equal(0, syncs);
+                Assert.Equal(hostConvTransposes, syncs);
             }
             finally
             {
@@ -87,6 +87,9 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
             projection.LoadWeights(weights);
             float[][] expected = Values([projection.Forward(new CpuBackend(), first, latter)]);
             using IBackend device = open();
+            // The projection's GEMMs run in TF32 on CUDA by default, which is about 4e-4 off the CPU here; this test is about the layout, so it
+            // compares exact ones. DepthPro2Head opens the same scope itself.
+            using ExactGemmScope exact = new(device);
             using Tensor firstDevice = OnDevice(device, first);
             using Tensor latterDevice = OnDevice(device, latter);
             device.ResetD2hSyncCount();

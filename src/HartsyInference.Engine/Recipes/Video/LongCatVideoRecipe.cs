@@ -62,7 +62,7 @@ public sealed class LongCatVideoRecipe : IVideoRecipe
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, _sides);
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, _sides, attachDmd: false);
             LongCatVideoPipeline pipeline = new LongCatVideoPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatVideoRecipe] LongCat-Video ready (text and image to video).");
             return new LongCatVideoRecipePipeline(context.Backend, pipeline, parts, loaders);

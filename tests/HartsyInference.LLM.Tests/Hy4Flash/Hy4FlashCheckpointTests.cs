@@ -60,7 +60,8 @@ public sealed class Hy4FlashCheckpointTests(ITestOutputHelper output)
         float[] scale = Floats(root.GetProperty("scale_b64").GetString()!);
         float[] expected = Floats(root.GetProperty("expected_b64").GetString()!);
 
-        float[] actual = Hy4FlashFp8.DequantizeBlocks(codes, shape, scale);
+        float[] actual = new float[codes.Length];
+        Hy4FlashCheckpoint.DequantizeStack(codes, shape, scale, actual);
         Assert.Equal(expected.Length, actual.Length);
         float worst = MaxRelative(expected, actual);
         output.WriteLine($"block dequant max relative difference {worst:E2} over {actual.Length} values in 4 blocks (3 partial)");
@@ -72,7 +73,7 @@ public sealed class Hy4FlashCheckpointTests(ITestOutputHelper output)
     {
         byte[] codes = new byte[130 * 150];
         float[] scale = new float[3];
-        Assert.Throws<InvalidDataException>(() => Hy4FlashFp8.DequantizeBlocks(codes, [1, 130, 150], scale));
+        Assert.Throws<InvalidDataException>(() => Hy4FlashCheckpoint.DequantizeStack(codes, [1, 130, 150], scale, new float[codes.Length]));
     }
 
     [Fact]

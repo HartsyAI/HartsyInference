@@ -2,8 +2,8 @@ using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.ChatTemplates;
-using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Glm5Next;
@@ -18,9 +18,9 @@ public sealed class Glm5NextTextModel : IHostReferenceTextModel
     /// <summary>The <c>model_type</c> of a glm5_next checkpoint.</summary>
     public const string ModelType = "glm5_next";
 
-    private readonly Ernie5CheckpointWeights _weights;
+    private readonly BlockFp8CheckpointWeights _weights;
 
-    private Glm5NextTextModel(Glm5NextGenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template, Ernie5CheckpointWeights weights)
+    private Glm5NextTextModel(Glm5NextGenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template, BlockFp8CheckpointWeights weights)
     {
         Generation = generation;
         Tokenizer = tokenizer;
@@ -62,7 +62,7 @@ public sealed class Glm5NextTextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
-        Ernie5CheckpointWeights weights = Ernie5CheckpointWeights.Open(directory);
+        BlockFp8CheckpointWeights weights = BlockFp8CheckpointWeights.Open(directory, ModelType);
         Glm5NextModel? model = null;
         try
         {

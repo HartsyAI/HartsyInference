@@ -80,12 +80,11 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
         float[] scores = Scores(x, qLatent, positions, length, keyStore, out int groups);
         int recalled = Math.Min(_s.RecalledGroups, groups);
         List<int>[] rows = new List<int>[tokens];
-        int width = 0;
         for (int t = 0; t < tokens; t++)
         {
             int slot = positions[t], own = slot / kpool;
             HashSet<int> chosen = [own];
-            foreach (int g in TopGroups(scores.AsSpan(t * groups, groups), recalled)) chosen.Add(g);
+            foreach (int g in DsaCompressedPool.TopK(scores.AsSpan(t * groups, groups), recalled)) chosen.Add(g);
             List<int> list = [];
             foreach (int g in chosen.Order())
                 for (int i = 0; i < kpool; i++)
@@ -94,9 +93,8 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
                     if (token <= slot && token < length) list.Add(token);
                 }
             rows[t] = list;
-            width = Math.Max(width, list.Count);
         }
-        return Pack(rows, width);
+        return DsaCompressedPool.Pack(rows);
     }
 
     /// <summary>The group scores of every query, <c>[tokens, groups]</c>, with groups at or after the query own group at -inf. Only meaningful past <c>TopK</c> keys.</summary>
@@ -157,54 +155,15 @@ public sealed class Hy4FlashGroupIndexer : IDsaKeySelector
         float[] gates = HostOps.Project(_backend, tokenKeys, rows, hd, _w.KeyGateProjection, hd);
         ReadOnlySpan<float> ape = _w.IntraGroupApe.AsReadOnlySpan<float>();
         float[] pooled = new float[groups * hd];
-        for (int g = 0; g < groups; g++)
-            for (int d = 0; d < hd; d++)
-            {
-                float max = float.NegativeInfinity;
-                for (int s = 0; s < kpool; s++) max = MathF.Max(max, gates[(g * kpool + s) * hd + d] + ape[s * hd + d]);
-                float denominator = 0f, acc = 0f;
-                for (int s = 0; s < kpool; s++)
-                {
-                    float e = MathF.Exp(gates[(g * kpool + s) * hd + d] + ape[s * hd + d] - max);
-                    denominator += e;
-                    acc += values[(g * kpool + s) * hd + d] * e;
-                }
-                pooled[g * hd + d] = acc / denominator;
-            }
+        DsaCompressedPool.GatedSoftmaxPool(values, gates, hd, ape, groups, kpool, hd, pooled);
         HostOps.RmsNorm(_backend, pooled, hd, _w.KeyNorm, _s.NormEps);
         return pooled;
-    }
-
-    // The best groups by score, ties to the lower index; groups scored -inf are taken last, as the reference top-k does when fewer groups are valid.
-    internal static IEnumerable<int> TopGroups(ReadOnlySpan<float> scores, int count)
-    {
-        float[] copy = scores.ToArray();
-        int[] order = [.. Enumerable.Range(0, copy.Length)];
-        Array.Sort(order, (a, b) => copy[a] != copy[b] ? copy[b].CompareTo(copy[a]) : a.CompareTo(b));
-        return order.Take(count);
     }
 
     private static DsaKeySelection Dense(ReadOnlySpan<int> positions)
     {
         List<int>[] rows = new List<int>[positions.Length];
-        int width = 0;
-        for (int t = 0; t < positions.Length; t++)
-        {
-            rows[t] = [.. Enumerable.Range(0, positions[t] + 1)];
-            width = Math.Max(width, rows[t].Count);
-        }
-        return Pack(rows, width);
-    }
-
-    private static DsaKeySelection Pack(List<int>[] rows, int width)
-    {
-        int[] packed = new int[rows.Length * width], counts = new int[rows.Length];
-        Array.Fill(packed, -1);
-        for (int t = 0; t < rows.Length; t++)
-        {
-            rows[t].CopyTo(packed, t * width);
-            counts[t] = rows[t].Count;
-        }
-        return new DsaKeySelection(packed, width, counts);
+        for (int t = 0; t < positions.Length; t++) rows[t] = [.. Enumerable.Range(0, positions[t] + 1)];
+        return DsaCompressedPool.Pack(rows);
     }
 }
