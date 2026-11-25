@@ -107,7 +107,7 @@ public sealed class RecipeCatalog : IRecipeCatalog
             Defaults = defaults,
             Features = RecipeResolution.ImageFeaturesFor(recipe, variant),
             InputLimits = recipe.InputLimitsFor(variant),
-            PromptWeighting = recipe.PromptWeighting,
+            PromptWeighting = recipe.PromptWeightingFor(variant),
         };
     }
 

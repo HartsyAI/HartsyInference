@@ -18,7 +18,7 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
 
         /// <summary>Model id, optionally with a variant (e.g. demucs:htdemucs_6s).</summary>
         [CommandOption("-m|--model")]
-        [Description("Model: demucs, optionally 'demucs:<variant>' (htdemucs, htdemucs_6s, htdemucs_ft).")]
+        [Description("Model: demucs, optionally 'demucs:<variant>' (htdemucs, htdemucs_6s, htdemucs_ft); kim-vocal-2; voice-isolator or voice-isolator-realtime (voice and background stems).")]
         public string Model { get; init; } = "demucs";
 
         /// <summary>Path to a local htdemucs checkpoint (.th/.safetensors).</summary>
