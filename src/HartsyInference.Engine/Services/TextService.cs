@@ -960,8 +960,8 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         if (HfTextDirectoryLoader.IsHy4Flash(checkpoint))
         {
-            // A host reference on the CPU, as DeepSeek-V4.1 runs. RequireSupported has already refused an oversize or incomplete checkpoint (RequireLoadable), so the slot is
-            // unloaded only for a directory that will load; Hy4FlashTextModel.Load checks the same again.
+            // A host reference on the CPU, as DeepSeek-V4.1 runs. An oversize or tokenizer-less checkpoint is refused before the unload (RequireSupported);
+            // the BOS/EOS check, tokenizer parse and template compile still run after it, in Hy4FlashTextModel.Load.
             LoadHostReferenceInto(slot, checkpoint, path, ReplaceWithHostBackend(slot, deviceKey, "Hy4 Flash"), gateOrdinals: [], plan: null);
             Logs.Info($"[TextService] Loaded Hy4 Flash '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the CPU host reference.");
             return;

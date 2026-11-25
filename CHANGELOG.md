@@ -5,7 +5,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.449
 
-- Added Hy4 Flash (Tencent, 220B MoE with 12B active; `hy4-flash`, `-fp8`, `-base`) to the Text path as a host reference model on CPU: text chat with its chat template, thinking off or low effort selecting the no_think template, a size and tokenizer check before any model is unloaded, and tiny-config parity with the HF classes; the released checkpoints are refused by size, and the device path, image chat and the reasoning split are not built.
+- Added Hy4 Flash (Tencent, 220B MoE with 12B active; `hy4-flash`, `-fp8`, `-base`) to the Text path as a host reference model on CPU: text chat with its chat template, thinking off or low effort selecting the no_think template, a size check and a tokenizer.json presence check before any model is unloaded, and tiny-config parity with the HF classes; the released checkpoints are refused by size, and the device path, image chat and the reasoning split are not built.
 
 ## alpha.448
 
