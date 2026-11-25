@@ -111,7 +111,15 @@ public sealed class LongCatAvatarPipeline
                 using Tensor step = new(state.Shape, DType.F32);
                 _backend.Scale(step, velocity, -dt);
                 Tensor next = new(state.Shape, DType.F32);
-                _backend.Add(next, state, step);
+                try
+                {
+                    _backend.Add(next, state, step);
+                }
+                catch
+                {
+                    next.Dispose();
+                    throw;
+                }
                 state.Dispose();
                 state = next;
                 run.OnProgress?.Invoke(new GenerationProgress(i + 1, run.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
@@ -157,9 +165,12 @@ public sealed class LongCatAvatarPipeline
     {
         if (!guided)
             return pass(true, true);
-        Tensor cond = pass(true, true), uncondText = pass(false, true), uncond = pass(false, false);
+        Tensor? cond = null, uncondText = null, uncond = null;
         try
         {
+            cond = pass(true, true);
+            uncondText = pass(false, true);
+            uncond = pass(false, false);
             using Tensor textDelta = Difference(cond, uncondText);
             using Tensor audioDelta = Difference(uncondText, uncond);
             using Tensor textTerm = new(textDelta.Shape, DType.F32);
@@ -169,14 +180,22 @@ public sealed class LongCatAvatarPipeline
             using Tensor withText = new(uncond.Shape, DType.F32);
             _backend.Add(withText, uncond, textTerm);
             Tensor result = new(uncond.Shape, DType.F32);
-            _backend.Add(result, withText, audioTerm);
+            try
+            {
+                _backend.Add(result, withText, audioTerm);
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
             return result;
         }
         finally
         {
-            cond.Dispose();
-            uncondText.Dispose();
-            uncond.Dispose();
+            cond?.Dispose();
+            uncondText?.Dispose();
+            uncond?.Dispose();
         }
     }
 
@@ -207,12 +226,21 @@ public sealed class LongCatAvatarPipeline
         return tensor;
     }
 
-    /// <summary>The same elements under another shape: a device copy that keeps the flat order.</summary>
+    /// <summary>The same elements under another shape. A scale by one is an elementwise device op on the flat data: CopyTo would move a
+    /// default-device tensor through the host on CUDA, which is the sync this loop exists to avoid.</summary>
     private Tensor Reshape(Tensor source, TensorShape shape)
     {
         Tensor result = new(shape, DType.F32);
-        _backend.CopyTo(result, source);
-        return result;
+        try
+        {
+            _backend.Scale(result, source, 1f);
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The <paramref name="count"/> rows of a 2-D tensor from row <paramref name="offset"/>, as a new tensor.</summary>

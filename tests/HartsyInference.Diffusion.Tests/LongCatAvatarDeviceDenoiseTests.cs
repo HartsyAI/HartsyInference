@@ -34,15 +34,16 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
     }
 
     [Theory]
+    [InlineData(LongCatAvatarMode.At2v, false, 2f, 1.5f)]
     [InlineData(LongCatAvatarMode.Ai2v, false, 1f, 1f)]
     [InlineData(LongCatAvatarMode.Ai2v, false, 2f, 1.5f)]
     [InlineData(LongCatAvatarMode.Avc, true, 2f, 1.5f)]
     public void TheDeviceLoopMatchesTheHostLoopWithinAMicroFloat(LongCatAvatarMode mode, bool cached, float textGuidance, float audioGuidance)
     {
-        int cond = mode == LongCatAvatarMode.Avc ? 2 : 1;
+        int cond = mode switch { LongCatAvatarMode.At2v => 0, LongCatAvatarMode.Avc => 2, _ => 1 };
         Random rng = new(5);
         float[] noise = RandomArray(rng, _config.InChannels * Frames * Hw);
-        float[] condLatents = RandomArray(rng, _config.InChannels * cond * Hw);
+        float[]? condLatents = cond == 0 ? null : RandomArray(rng, _config.InChannels * cond * Hw);
         float[] audio = RandomArray(rng, Frames * _config.AudioContextTokens * _config.AudioOutputDim);
         float[] unconditionalAudio = RandomArray(rng, audio.Length);
         LongCatPrompt positive = new(RandomArray(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
@@ -61,11 +62,18 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
         for (int i = 0; i < host.Length; i++)
             worst = Math.Max(worst, Math.Abs(host[i] - device[i]));
         Assert.True(worst <= 1e-5, $"device loop drifted from the host loop by {worst}");
-        // The loop moved the noisy frames, so the parity is not vacuous: the conditioning frames and the noisy frames both differ from the start.
+        // The conditioning frames come back exactly as given, and the noisy frames moved, so the parity is not vacuous.
+        int hw = Hw;
+        for (int c = 0; c < _config.InChannels; c++)
+            for (int f = 0; f < cond; f++)
+                for (int e = 0; e < hw; e++)
+                    Assert.Equal(condLatents![(c * cond + f) * hw + e], device[(c * Frames + f) * hw + e]);
         double moved = 0;
-        for (int i = 0; i < device.Length; i++)
-            moved = Math.Max(moved, Math.Abs(device[i] - run.Noise[i]));
-        Assert.True(moved > 1e-3, $"the denoise loop left the latents where they started (moved {moved})");
+        for (int c = 0; c < _config.InChannels; c++)
+            for (int f = cond; f < Frames; f++)
+                for (int e = 0; e < hw; e++)
+                    moved = Math.Max(moved, Math.Abs(device[(c * Frames + f) * hw + e] - run.Noise[(c * Frames + f) * hw + e]));
+        Assert.True(moved > 1e-3, $"the denoise loop left the noisy frames where they started (moved {moved})");
     }
 
     /// <summary>The host loop the device version replaces: the same forwards, the three-pass combine and the Euler step on host arrays.</summary>
@@ -75,11 +83,14 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
         bool guided = run.TextGuidance > 1f || run.AudioGuidance > 1f;
         float[] sigmas = Shifted(LongCatAvatarSchedule.Sigmas(run.Steps, run.Kind), run.Shift);
         float[] sigmasWithZero = [.. sigmas, 0f];
-        LongCatConditioning conditioning = run.Mode == LongCatAvatarMode.Avc
-            ? LongCatConditioning.Avatar(cond, run.RefImgIndex)
-            : new LongCatConditioning(NumCondLatents: 1);
+        LongCatConditioning conditioning = run.Mode switch
+        {
+            LongCatAvatarMode.At2v => new LongCatConditioning(),
+            LongCatAvatarMode.Avc => LongCatConditioning.Avatar(cond, run.RefImgIndex),
+            _ => new LongCatConditioning(NumCondLatents: 1),
+        };
         float[] latents = (float[])run.Noise.Clone();
-        for (int c = 0; c < channels; c++)
+        for (int c = 0; c < channels && cond > 0; c++)
             Array.Copy(run.CondLatents!, c * cond * hw, latents, c * frames * hw, cond * hw);
 
         using Tensor condClip = cached ? Shaped(Frame(latents, channels, frames, hw, 0, cond), [1, channels, cond, run.Height, run.Width]) : null!;
