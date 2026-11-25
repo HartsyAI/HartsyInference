@@ -291,9 +291,9 @@ public sealed class FastFramesKvRefiner : IDisposable
         using Tensor v = HeadMajor(backend, parts[2], tokens, heads, headDim);
         using Tensor attended = new(new TensorShape(1, heads, tokens, headDim), DType.F32);
         backend.ScaledDotProductAttention(attended, q, k, v, null, 1f / MathF.Sqrt(headDim));
-        using Tensor merged = new(new TensorShape(1, tokens, heads, headDim), DType.F32);
-        backend.Permute0213(merged, attended, heads, tokens, headDim);
-        using Tensor flat = merged.Reshape(new TensorShape(tokens, dA));
+        // Written straight into the [S, dA] tensor the projection takes, not a view of a [1, S, heads, headDim] one (see HeadMajor).
+        using Tensor flat = new(new TensorShape(tokens, dA), DType.F32);
+        backend.Permute0213(flat, attended, heads, tokens, headDim);
         using Tensor projected = FastFramesOps.Linear(backend, flat, block.ProjW, block.ProjB);
         using Tensor afterAttention = FastFramesOps.GatedAdd(backend, x, projected, gate1);
 
@@ -309,9 +309,9 @@ public sealed class FastFramesKvRefiner : IDisposable
     {
         using (columns)
         {
-            using Tensor shaped = columns.Reshape(new TensorShape(1, tokens, heads, headDim));
+            // The columns are read as they are: a Reshape view of a device-produced tensor would be read from its stale host copy.
             Tensor output = new(new TensorShape(1, heads, tokens, headDim), DType.F32);
-            backend.Permute0213(output, shaped, tokens, heads, headDim);
+            backend.Permute0213(output, columns, tokens, heads, headDim);
             return output;
         }
     }

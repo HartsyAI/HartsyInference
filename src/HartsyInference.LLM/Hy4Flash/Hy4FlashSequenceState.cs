@@ -6,33 +6,29 @@ namespace HartsyInference.LLM.Hy4Flash;
 public sealed class Hy4FlashSequenceState : IDisposable
 {
     /// <param name="layers">One cache per decoder layer.</param>
-    /// <param name="capacity">Cache slots, the positions the state can hold.</param>
-    public Hy4FlashSequenceState(DsaAttentionState[] layers, int capacity)
+    /// <param name="indexedRope">This state's rotary rows of the indexed base, one slot per position it can hold.</param>
+    /// <param name="slidingRope">This state's rotary rows of the sliding base, the same size as <paramref name="indexedRope"/>.</param>
+    internal Hy4FlashSequenceState(DsaAttentionState[] layers, Hy4FlashMropeRows indexedRope, Hy4FlashMropeRows slidingRope)
     {
         Layers = layers ?? throw new ArgumentNullException(nameof(layers));
-        ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
-        Times = new int[capacity];
-        Heights = new int[capacity];
-        Widths = new int[capacity];
+        IndexedRope = indexedRope ?? throw new ArgumentNullException(nameof(indexedRope));
+        SlidingRope = slidingRope ?? throw new ArgumentNullException(nameof(slidingRope));
     }
 
     /// <summary>Per-layer caches.</summary>
     public DsaAttentionState[] Layers { get; }
 
-    /// <summary>The (time, height, width) rotary position of every cache slot this state wrote. The model's shared M-RoPE rows are restamped from these when another state used them last.</summary>
-    internal int[] Times { get; }
+    /// <summary>This state's rotary rows of the indexed base; each slot's row is written when the slot is given its position.</summary>
+    internal Hy4FlashMropeRows IndexedRope { get; }
+
+    /// <summary>This state's rotary rows of the sliding base, written alongside <see cref="IndexedRope"/>.</summary>
+    internal Hy4FlashMropeRows SlidingRope { get; }
 
     /// <summary>The model that created this state; the model refuses a state of another model, whose rotary rows and slots would not match.</summary>
     internal object? Owner { get; set; }
 
     /// <summary>Whether the last call ended inside an image placeholder run, so the next call must not open with another one.</summary>
     internal bool EndsInImageRun { get; set; }
-
-    /// <summary>Height plane of each slot, see <see cref="Times"/>.</summary>
-    internal int[] Heights { get; }
-
-    /// <summary>Width plane of each slot, see <see cref="Times"/>.</summary>
-    internal int[] Widths { get; }
 
     /// <summary>Every token id fed so far.</summary>
     public List<int> Ids { get; } = [];

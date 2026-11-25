@@ -219,11 +219,14 @@ public sealed class FastFramesPixelDecoder : IDisposable
     private Tensor RunBlock(IBackend backend, Block block, Tensor x, int gridH, int gridW, State state, int index)
     {
         int dim = _config.Dim, tokens = gridH * gridW;
+        // Every backend input below is the tensor the previous op produced, never a Reshape view of it. A device result is
+        // bound to the tensor it was written into, so a view reads the host copy, which is never written on a GPU. Each
+        // layout change is therefore a transpose straight into an owned tensor of the shape the next op takes.
         // Channel-first [1, dim, H, W] for the spatial depthwise convs.
-        Tensor current = ToChannelFirst(backend, x, tokens, dim);
+        Tensor current = new(new TensorShape(1, dim, gridH, gridW), DType.F32);
+        backend.Transpose2D(current, x, tokens, dim);
         Tensor conv = new(new TensorShape(1, dim, gridH, gridW), DType.F32);
-        using Tensor currentView = current.Reshape(new TensorShape(1, dim, gridH, gridW));
-        backend.Conv2dDepthwise(conv, currentView, block.Taps[2], block.DwBias, 1, 1, 1, 1);
+        backend.Conv2dDepthwise(conv, current, block.Taps[2], block.DwBias, 1, 1, 1, 1);
         Tensor? previous1 = state.Previous1[index], previous2 = state.Previous2[index];
         conv = AddTap(backend, conv, previous1, block.Taps[1], gridH, gridW, dim);
         conv = AddTap(backend, conv, previous2, block.Taps[0], gridH, gridW, dim);
@@ -232,8 +235,8 @@ public sealed class FastFramesPixelDecoder : IDisposable
         state.Previous2[index] = previous1;
         state.Previous1[index] = current;
 
-        using Tensor convFlat = conv.Reshape(new TensorShape(dim, tokens));
-        using Tensor tokenMajor = ToTokenMajor(backend, convFlat, dim, tokens);
+        Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
+        backend.Transpose2D(tokenMajor, conv, dim, tokens);
         conv.Dispose();
         using Tensor normed = FastFramesOps.LayerNormAffine(backend, tokenMajor, block.NormW, block.NormB, _config.Eps);
         using Tensor up = FastFramesOps.Linear(backend, normed, block.Pw1W, block.Pw1B);
@@ -248,33 +251,13 @@ public sealed class FastFramesPixelDecoder : IDisposable
     {
         if (earlierInput is null)
             return sum;
-        using Tensor earlier = earlierInput.Reshape(new TensorShape(1, dim, gridH, gridW));
+        // The earlier frame is passed as stored, not as a view (see RunBlock).
         using Tensor tapOutput = new(new TensorShape(1, dim, gridH, gridW), DType.F32);
-        backend.Conv2dDepthwise(tapOutput, earlier, tap, null, 1, 1, 1, 1);
+        backend.Conv2dDepthwise(tapOutput, earlierInput, tap, null, 1, 1, 1, 1);
         Tensor added = new(sum.Shape, DType.F32);
         backend.Add(added, sum, tapOutput);
         sum.Dispose();
         return added;
-    }
-
-    /// <summary><c>[S, C]</c> tokens to a channel-first <c>[C, S]</c> tensor.</summary>
-    private static Tensor ToChannelFirst(IBackend backend, Tensor tokenMajor, int tokens, int channels)
-    {
-        using Tensor shaped = tokenMajor.Reshape(new TensorShape(1, tokens, channels));
-        Tensor output = new(new TensorShape(1, channels, tokens), DType.F32);
-        backend.Transpose2D(output, shaped, tokens, channels);
-        return output;
-    }
-
-    /// <summary>A channel-first <c>[C, S]</c> tensor to <c>[S, C]</c> tokens.</summary>
-    private static Tensor ToTokenMajor(IBackend backend, Tensor channelFirst, int channels, int tokens)
-    {
-        // The owned result is returned as it is; only the transpose writes through a non-owning view of it.
-        Tensor output = new(new TensorShape(tokens, channels), DType.F32);
-        using Tensor shaped = channelFirst.Reshape(new TensorShape(1, channels, tokens));
-        using Tensor target = output.Reshape(new TensorShape(1, tokens, channels));
-        backend.Transpose2D(target, shaped, channels, tokens);
-        return output;
     }
 
     /// <summary>Linear unpatchify (the reference's <c>fhwpqrc -&gt; cfphqwr</c>; the result is frame-major <c>[PatchT, C, H, W]</c>): token <c>(h, w)</c> channel
