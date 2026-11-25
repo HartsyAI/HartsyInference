@@ -44,6 +44,15 @@ internal static class HostMath
         }
     }
 
+    /// <summary>The inner product of two equal-length spans, in the fixed summation order <see cref="Linear"/> uses.</summary>
+    public static unsafe float Dot(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
+    {
+        if (a.Length != b.Length) throw new ArgumentException("Dot operands must have the same length.");
+        fixed (float* ap = a)
+        fixed (float* bp = b)
+            return Dot(ap, bp, a.Length);
+    }
+
     /// <summary>One dot product in a fixed order: four accumulators of <see cref="Vector{T}"/> lanes, then the scalar tail.</summary>
     /// <remarks>The order depends only on <paramref name="n"/> and the machine's vector width, so one machine gives one value for the same
     /// inputs however the caller splits its outputs.</remarks>
