@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Vision.DepthPro2;
 using Xunit.Abstractions;
 
@@ -16,7 +17,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
     public void Cuda_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenCuda);
 
     [VulkanDeviceFact]
-    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(static () => new HartsyInference.Vulkan.VulkanBackend(),
+    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan,
         hostConvTransposes: 2);
 
     [CudaDeviceFact]
@@ -24,7 +25,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
 
     [VulkanDeviceFact]
     public void Vulkan_LongCatAudioProjection_StaysOnTheDevice() =>
-        LongCatAudioProjectionForward(static () => new HartsyInference.Vulkan.VulkanBackend());
+        LongCatAudioProjectionForward(GpuDevices.OpenVulkan);
 
     // On Vulkan ConvTranspose2d has no shader and runs on the host (VULKAN_STATUS.md). Levels 0 and 1 each have one, and each reads its input back.
     private void DepthPro2Reassemble(Func<IBackend> open, int hostConvTransposes = 0)
@@ -86,7 +87,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
             projection.LoadWeights(weights);
             float[][] expected = Values([projection.Forward(new CpuBackend(), first, latter)]);
             using IBackend device = open();
-            // The projection's GEMMs run in TF32 on CUDA by default, which is about 4e-4 off the CPU here; this test is about the layout, so it
+            // The projection's GEMMs run in TF32 on CUDA by default, which measured 1.4e-4 off the CPU here; this test is about the layout, so it
             // compares exact ones. DepthPro2Head opens the same scope itself.
             using ExactGemmScope exact = new(device);
             using Tensor firstDevice = OnDevice(device, first);
