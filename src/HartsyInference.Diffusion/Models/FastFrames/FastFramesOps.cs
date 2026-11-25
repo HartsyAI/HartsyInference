@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.FastFrames;
 
@@ -103,15 +104,9 @@ internal static class FastFramesOps
     /// <c>t · 10000^(-i/half)</c>, computed in double and stored as float32, as a <c>[1, dim]</c> row.</summary>
     public static Tensor SinusoidalEmbedding(float timestep, int dim)
     {
-        int half = dim / 2;
+        // The shared helper in double precision: the same frequencies and phases this file used to compute inline.
         Tensor row = new(new TensorShape(1, dim), DType.F32);
-        Span<float> span = row.AsSpan<float>();
-        for (int i = 0; i < half; i++)
-        {
-            double angle = (double)timestep * Math.Pow(10000.0, -(double)i / half);
-            span[i] = (float)Math.Cos(angle);
-            span[half + i] = (float)Math.Sin(angle);
-        }
+        DiTUtils.SinusoidalTimestepEmbedding(row, timestep, 1, dim, 10000f, doublePrecision: true);
         return row;
     }
 
