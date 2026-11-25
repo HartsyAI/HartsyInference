@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.453
+
+- Fixed the Fibo 2.0 int8 loader rejecting ComfyUI's `layers.N.attention.comfy_attention.config` hints (U8 `{"attention": "comfy_kitchen_int8"}`): they are now checked, logged as float attention, and dropped, and an unknown backend is refused.
+
 ## alpha.451
 
 - Added Maxwell-V1.0-Flash (`maxwell-v1-flash`, 35B total / 3B active, Apache-2.0) to the Text path: the official FP8 checkpoint runs through the engine's Text service on CUDA, with a device expert cache, and gave a coherent answer on an RTX 4090; not CLI-drivable yet, and no Vulkan or split-device placement.

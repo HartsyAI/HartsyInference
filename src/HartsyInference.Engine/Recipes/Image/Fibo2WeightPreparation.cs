@@ -25,6 +25,8 @@ internal static class Fibo2WeightPreparation
         foreach (KeyValuePair<string, Tensor> pair in source)
         {
             Tensor tensor = pair.Value;
+            if (Fibo2AttentionHints.IsHint(pair.Key))
+                continue; // A ComfyUI attention hint, validated by Fibo2AttentionHints.Requested; not a weight.
             if (IsPackedInt8(tensor))
             {
                 weights[pair.Key] = tensor;
