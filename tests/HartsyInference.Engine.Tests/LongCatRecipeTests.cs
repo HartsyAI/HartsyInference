@@ -124,7 +124,7 @@ public sealed class LongCatRecipeTests
         // The whole-token term (14 × hidden per token) and one 4096-row tile of the QKV and FFN intermediates (3 × hidden + 3 × FFN per row).
         Assert.Equal(LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes
             + 37_440L * 14 * 4096 * 4 + 4096L * (3 * 4096 + 3 * 11008) * 4, headroom);
-        Assert.InRange(headroom, 13L << 30, 14L << 30);
+        Assert.InRange(headroom, 15L << 30, 16L << 30);
     }
 
     [Fact]
@@ -138,11 +138,11 @@ public sealed class LongCatRecipeTests
     }
 
     [Theory]
-    // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens. The 4090 small-config Auto run (planner: prefix 15,
-    // headroom 11,823 MB) had about 16.6 to 16.8 GB free once the shared weights were in; 16,700 MiB here.
-    [InlineData(13, 46, 80, 16_700, 26)]
-    // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens. Under this formula the prefix is 0 only when the free memory after the
-    // shared weights is below about 14.3 GiB; the full run's logged free value is still needed to confirm that point.
+    // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens. The 4090 small-config Auto run logged 22,847 MB free before
+    // the shared preload; 16,700 MiB free after it is assumed here (the planner does not log that figure yet). Headroom 9,980 MiB gives 21 blocks.
+    [InlineData(13, 46, 80, 16_700, 21)]
+    // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 37,440 tokens. Headroom 15,769 MiB: the prefix is 0 only below about 16.1 GiB free after
+    // the shared weights. The full run logged 22,852 MB free before the shared preload; the prefix-0 result pins the after-shared figure only by this bound.
     [InlineData(24, 60, 104, 14_000, 0)]
     public void TheResidentPrefixMatchesTheCalibrationForTheFreeMemoryAfterTheSharedWeights(int latentFrames, int latentHeight, int latentWidth,
         int freeAfterSharedMib, int expectedPrefix)

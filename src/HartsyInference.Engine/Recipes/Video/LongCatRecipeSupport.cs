@@ -44,10 +44,11 @@ internal static class LongCatRecipeSupport
     /// <summary>One binary gibibyte, the unit of the streaming headroom terms.</summary>
     private const long GiB = 1L << 30;
 
-    /// <summary>The allocator pool's transients for one denoise step, independent of the token count: 4 GiB. With the safety margin the fixed part is
-    /// 5 GiB. Measured on the 4090 (Auto, 22.85 GB free): peak VRAM left 3.6 to 3.7 GB spare at both points, so the earlier 8.3 GiB fixed part
-    /// (which also counted a 0.8 GiB CUDA context that the free-memory read already excludes) was about 3 GiB too large.</summary>
-    internal const long FixedPoolBytes = GiB * 4;
+    /// <summary>The allocator pool's transients for one denoise step, independent of the token count: 5.5 GiB. With the safety margin the fixed part
+    /// is 6.5 GiB. The 5 GiB fixed part was lowered from the 8.3 GiB estimate on the basis of spare VRAM at peak; the 4090 full-clip run gave
+    /// prefix 0 with 22,852 MB free before the shared preload, so the lower figure is not yet measured safe. 6.5 GiB stays until the
+    /// logged plan (free after shared, shared, headroom, block) settles it on a measured run.</summary>
+    internal const long FixedPoolBytes = GiB * 11 / 2;
 
     /// <summary>The safety margin Auto leaves on top of the fixed terms (1 GiB): the conservative slack that keeps a near-full card from streaming
     /// too late.</summary>
