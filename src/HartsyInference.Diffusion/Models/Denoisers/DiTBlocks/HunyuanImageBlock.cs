@@ -196,16 +196,10 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         // ── 2-9. Joint attention over [img, txt]: per-head QK-norm, image-only RoPE (before the concat for one batch item,
         //         on the image rows of the joint head-major Q/K for a batch), attention (QK RMS-norm bounds the scores),
         //         split, output projections, gated residuals ──
-        HunyuanImageRotation imageRope = new(rope, imgPackedT, imgPackedH, imgPackedW);
-        JointCallContext context = batch == 1
-            ? new JointCallContext { RotatedStream = 0, StreamRotation = new AttentionCallContext { Rotation = imageRope }, ReleaseInputs = true }
-            : new JointCallContext
-            {
-                Joint = new AttentionCallContext { HeadMajorRotation = new LeadingRowsRotation(imgSeqLen, imageRope) }, ReleaseInputs = true,
-            };
-        Span<Tensor?> attended = [null, null];
-        _attention!.Attend(backend, [imgModulated, txtModulated], attended, in context);
-        Tensor imgAttnProj = _attention.ProjectOutput(backend, 0, attended[0]!);
+        Tensor[] attended = batch == 1
+            ? JointAttend(backend, imgModulated, txtModulated, rope, imgPackedT, imgPackedH, imgPackedW)
+            : JointAttendHeadMajor(backend, imgModulated, txtModulated, rope, imgSeqLen, imgPackedT, imgPackedH, imgPackedW);
+        Tensor imgAttnProj = _attention!.ProjectOutput(backend, 0, attended[0]);
         Tensor imgAfterAttn = new Tensor(imgShape, act);
         backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
         imgAttnProj.Dispose();
@@ -239,39 +233,42 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         return (imgFinal, txtFinal);
     }
 
-    /// <summary>Dual-stream forward with per-frame image modulation (MovieRoll's per-frame timestep). Each image token takes the adaLN row of its
-    /// latent frame: <paramref name="frameTemb"/> holds one <c>[1, hidden]</c> temb per frame, in frame order, and <paramref name="layout"/> maps the
-    /// image tokens onto those frames. The text stream keeps one shared modulation from <paramref name="txtTemb"/>. Batch 1, F32 streams; inputs are
-    /// not disposed. Attention, RoPE and the FFNs match <see cref="Forward"/>.</summary>
+    /// <summary>Dual-stream forward with per-frame image modulation (MovieRoll's per-frame timestep). Image token i takes the adaLN row of its
+    /// group: <paramref name="frameTemb"/> is one <c>[groups, hidden]</c> embedding per group, and <paramref name="layout"/> maps the image tokens
+    /// onto those groups (a group may span several frames). The text stream keeps one shared modulation from <paramref name="txtTemb"/>.
+    /// The six adaLN projections run as one batched Linear over all groups. Batch 1, F32 streams; inputs are not disposed.</summary>
     public (Tensor image, Tensor text) ForwardPerFrame(IBackend backend, Tensor image, Tensor text, Tensor txtTemb,
-        IReadOnlyList<Tensor> frameTemb, TokenSegmentLayout layout, HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT)
+        Tensor frameTemb, TokenSegmentLayout layout, HunyuanImageRope rope, int imgPackedH, int imgPackedW, int imgPackedT)
     {
         ArgumentNullException.ThrowIfNull(frameTemb);
+        ArgumentNullException.ThrowIfNull(layout);
         if (image.Shape[0] != 1 || text.Shape[0] != 1)
             throw new ArgumentException($"ForwardPerFrame takes batch 1; got image {image.Shape}, text {text.Shape}.", nameof(image));
         if (image.DType != DType.F32 || text.DType != DType.F32)
             throw new ArgumentException("ForwardPerFrame takes F32 streams.", nameof(image));
-        if (layout.GroupCount != frameTemb.Count)
-            throw new ArgumentException($"{frameTemb.Count} frame embeddings for a layout with {layout.GroupCount} groups.", nameof(frameTemb));
+        if (frameTemb.Shape.Rank != 2 || frameTemb.Shape[1] != _hiddenSize)
+            throw new ArgumentException($"frameTemb must be [groups, {_hiddenSize}], got {frameTemb.Shape}.", nameof(frameTemb));
+        if (frameTemb.Shape[0] != layout.GroupCount)
+            throw new ArgumentException($"{frameTemb.Shape[0]} frame embeddings for a layout with {layout.GroupCount} groups.", nameof(frameTemb));
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
         if (layout.TotalLength != imgSeqLen)
             throw new ArgumentException($"The layout covers {layout.TotalLength} image tokens; the image has {imgSeqLen}.", nameof(layout));
-        if (imgPackedT != frameTemb.Count)
-            throw new ArgumentException($"{imgPackedT} latent frames but {frameTemb.Count} frame embeddings.", nameof(frameTemb));
 
         TensorShape imgShape = new(1, imgSeqLen, _hiddenSize);
         TensorShape txtShape = new(1, txtSeqLen, _hiddenSize);
         Tensor[] txtMod = _txtModulation.Forward(backend, txtTemb);
-        Tensor[][] frameMod = new Tensor[frameTemb.Count][];
+        Tensor[]? imgMod = null;
         SegmentModulation? attnMod = null, ffnMod = null;
         try
         {
-            for (int f = 0; f < frameMod.Length; f++) frameMod[f] = _imgModulation.Forward(backend, frameTemb[f]);
-            attnMod = SegmentModulation.Build(backend, frameMod.Select(m => (m[0], m[1], m[2])).ToList(), layout);
-            ffnMod = SegmentModulation.Build(backend, frameMod.Select(m => (m[3], m[4], m[5])).ToList(), layout);
+            // One batched projection for every group: [groups, 6·hidden] split into six [groups, hidden] tables.
+            imgMod = _imgModulation.Forward(backend, frameTemb);
+            attnMod = SegmentModulation.FromTables(imgMod[0], imgMod[1], imgMod[2], layout);
+            ffnMod = SegmentModulation.FromTables(imgMod[3], imgMod[4], imgMod[5], layout);
+            imgMod = null;   // the segment tables now own the six projections
 
-            // Image attention: LayerNorm, then this token's frame row (1 + scale) and shift, as the reference's modulate(thw=...).
+            // Image attention: LayerNorm, then this token's group row (1 + scale) and shift.
             Tensor imgModulated = attnMod.NormAffine(backend, image, 1e-6f);
             Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
             Tensor[] attended = JointAttend(backend, imgModulated, txtModulated, rope, imgPackedT, imgPackedH, imgPackedW);
@@ -285,7 +282,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             backend.GatedResidualLastDim(txtAfterAttn, text, txtAttnProj, txtMod[2]);
             txtAttnProj.Dispose();
 
-            // Image FFN, per-frame rows again.
+            // Image FFN, per-group rows again.
             Tensor imgMlpModulated = ffnMod.NormAffine(backend, imgAfterAttn, 1e-6f);
             Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, 1, imgSeqLen);
             imgMlpModulated.Dispose();
@@ -306,21 +303,35 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         {
             attnMod?.Dispose();
             ffnMod?.Dispose();
-            foreach (Tensor[] mods in frameMod)
-                if (mods is not null)
-                    foreach (Tensor m in mods) m.Dispose();
+            if (imgMod is not null)
+                foreach (Tensor m in imgMod) m.Dispose();
             foreach (Tensor m in txtMod) m.Dispose();
         }
     }
 
-    /// <summary>Joint attention over batch 1 with image-only RoPE: the same call as <see cref="Forward"/>'s batch-1 branch. Both streams are
-    /// released into the call; the returned attended streams are owned by the caller.</summary>
+    /// <summary>Joint attention over batch 1 with image-only RoPE: the call <see cref="Forward"/> makes for batch 1. Both streams are released
+    /// into the call; the returned attended streams are owned by the caller.</summary>
     private Tensor[] JointAttend(IBackend backend, Tensor imgModulated, Tensor txtModulated, HunyuanImageRope rope, int packedT, int packedH, int packedW)
     {
         HunyuanImageRotation imageRope = new(rope, packedT, packedH, packedW);
         JointCallContext context = new()
         {
             RotatedStream = 0, StreamRotation = new AttentionCallContext { Rotation = imageRope }, ReleaseInputs = true,
+        };
+        Span<Tensor?> attended = [null, null];
+        _attention!.Attend(backend, [imgModulated, txtModulated], attended, in context);
+        return [attended[0]!, attended[1]!];
+    }
+
+    /// <summary>Joint attention for batch greater than 1 with head-major RoPE on the leading image rows (the call <see cref="Forward"/> makes).
+    /// Both streams are released into the call; the attended streams are owned by the caller.</summary>
+    private Tensor[] JointAttendHeadMajor(IBackend backend, Tensor imgModulated, Tensor txtModulated, HunyuanImageRope rope,
+        int imgSeqLen, int packedT, int packedH, int packedW)
+    {
+        HunyuanImageRotation imageRope = new(rope, packedT, packedH, packedW);
+        JointCallContext context = new()
+        {
+            Joint = new AttentionCallContext { HeadMajorRotation = new LeadingRowsRotation(imgSeqLen, imageRope) }, ReleaseInputs = true,
         };
         Span<Tensor?> attended = [null, null];
         _attention!.Attend(backend, [imgModulated, txtModulated], attended, in context);
