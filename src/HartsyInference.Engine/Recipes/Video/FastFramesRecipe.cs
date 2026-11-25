@@ -171,20 +171,75 @@ public sealed class FastFramesRecipe : IVideoRecipe
     /// <summary>Reads the generator as the Wan converter's input: original Wan key names, no wrapper prefix. A PyTorch pickle
     /// (the Causal Forcing++ S file) is a training checkpoint whose <c>generator_ema</c> dict holds the generator; only that dict
     /// is read, and the FSDP wrapper prefix is stripped. The <c>generator</c> and <c>critic</c> dicts are never touched. A
-    /// safetensors file (L) is passed through as the file stores it.</summary>
-    private static Dictionary<string, Tensor> ReadGenerator(string path, DType pickleDType, List<IDisposable> loaders)
+    /// safetensors file (L) is passed through as the file stores it on a GPU; on CPU, whose kernels read F32, each tensor is
+    /// cast once to <paramref name="dtype"/> and the copies are freed with the loaders.</summary>
+    private static Dictionary<string, Tensor> ReadGenerator(string path, DType dtype, List<IDisposable> loaders)
     {
         if (!path.EndsWith(".pt", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".pth", StringComparison.OrdinalIgnoreCase))
         {
             CheckpointSource source = CheckpointSource.Open(path);
             loaders.Add(source);
-            return new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
+            Dictionary<string, Tensor> passthrough = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
+            if (dtype == DType.F32)
+            {
+                CastOnCpu(passthrough, dtype, loaders);
+            }
+            return passthrough;
         }
 
         // The owner is registered before anything else touches the tensors, so every later failure frees them.
         (Dictionary<string, Tensor> weights, IDisposable owner) = PytorchEnvelopeReader.Read(
-            path, "generator_ema", "model._fsdp_wrapped_module.", pickleDType);
+            path, "generator_ema", "model._fsdp_wrapped_module.", dtype);
         loaders.Add(owner);
         return weights;
+    }
+
+    /// <summary>Replaces each tensor not already in <paramref name="dtype"/> with an owned copy in that dtype, and registers the
+    /// copies so that they are freed with the loaders.</summary>
+    private static void CastOnCpu(Dictionary<string, Tensor> weights, DType dtype, List<IDisposable> loaders)
+    {
+        List<Tensor> copies = new List<Tensor>();
+        try
+        {
+            foreach (string name in weights.Keys.ToList())
+            {
+                Tensor tensor = weights[name];
+                if (tensor.DType == dtype)
+                {
+                    continue;
+                }
+                Tensor copy = tensor.CastTo(dtype);
+                copies.Add(copy);
+                weights[name] = copy;
+            }
+        }
+        catch
+        {
+            foreach (Tensor copy in copies)
+            {
+                copy.Dispose();
+            }
+            throw;
+        }
+        loaders.Add(new OwnedTensors(copies));
+    }
+
+    /// <summary>Frees the tensors it was given, once.</summary>
+    private sealed class OwnedTensors(List<Tensor> tensors) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            foreach (Tensor tensor in tensors)
+            {
+                tensor.Dispose();
+            }
+        }
     }
 }

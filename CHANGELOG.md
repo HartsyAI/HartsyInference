@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.449
+
+- Added Apple FastFrames S (1.3B, `fastframes-s`) to the video path: frame-wise causal text-to-video at 832x480, 81 frames at 16 fps, with a KV-cached rollout, a KV refiner and a pixel decoder; L (14B, `fastframes-l`) is wired but not CLI-drivable until block streaming lands.
+
 ## alpha.448
 
 - Added Sage S2.1 Flash (320B scientific multimodal MoE, `internlm/Sage-S2.1-Flash`) to the Text path as a host reference model: text chat with its own chat template on one device, a catalog row for the BF16 and FP8 checkpoints, and the vision tower and scientific-data projectors as engine pieces; checked against transformers on a tiny random model only, no real weights have run.
