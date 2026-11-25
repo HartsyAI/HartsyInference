@@ -66,4 +66,14 @@ public sealed class MiniMaxH3BiasRouteTests
         // The forced setting only matters when the sequence actually exceeds the chunk rows.
         MiniMaxH3Transformer.CheckBiasedRoute(seq: 512, chunkRows: int.MaxValue, freeBytes: 0, sparse: false, chunkForced: true);
     }
+
+    [Fact]
+    public void SequenceEqualToChunkRowsIsNotChunked()
+    {
+        // The route check refuses only when seq > chunkRows, so seq == chunkRows stays dense, forced or not.
+        MiniMaxH3Transformer.CheckBiasedRoute(seq: 1024, chunkRows: 1024, freeBytes: 0, sparse: false, chunkForced: true);
+        MiniMaxH3Transformer.CheckBiasedRoute(seq: 1024, chunkRows: 1024, freeBytes: 0, sparse: false, chunkForced: false);
+        Assert.Throws<NotSupportedException>(() =>
+            MiniMaxH3Transformer.CheckBiasedRoute(seq: 1025, chunkRows: 1024, freeBytes: 0, sparse: false, chunkForced: true));
+    }
 }

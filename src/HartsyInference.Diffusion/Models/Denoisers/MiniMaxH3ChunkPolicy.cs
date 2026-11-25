@@ -24,18 +24,21 @@ public static class MiniMaxH3ChunkPolicy
     /// single digits buys nothing.</summary>
     public const int MinChunkableRows = 8192;
 
+    /// <summary>The positive <c>vram.h3ChunkRows</c> setting, or null when it is unset. The one place that reads the knob.</summary>
+    private static int? ForcedChunkRows() => EngineKnobs.H3ChunkRows.Value is int forced && forced > 0 ? forced : null;
+
+    /// <summary>Whether <c>vram.h3ChunkRows</c> forces the chunk size. When it does, free VRAM does not decide chunking at all.</summary>
+    public static bool ChunkRowsForced() => ForcedChunkRows() is not null;
+
     /// <summary>Returns <see cref="int.MaxValue"/> (never chunk — <see cref="MiniMaxH3Transformer.ForwardBlock"/>'s
     /// <c>seq &gt; chunkRows</c> check then always takes the exact-legacy path) when the unchunked per-block peak
     /// comfortably fits <paramref name="freeBytes"/>, else a chunk scaled by the VRAM tier. The
     /// <c>vram.h3ChunkRows</c> setting overrides the decision outright (any positive integer) — the CPU backend's
     /// <c>GetVramInfo</c> always reports (0, 0), so that is also how a CPU-only test forces the chunked path.</summary>
-    /// <summary>Whether <c>vram.h3ChunkRows</c> forces the chunk size. When it does, free VRAM does not decide chunking at all.</summary>
-    public static bool ChunkRowsForced() => EngineKnobs.H3ChunkRows.Value is int forced && forced > 0;
-
     public static int ResolveChunkRows(
         int seq, MiniMaxH3Config config, DType bodyDType, long freeBytes, IBackend? backend = null)
     {
-        if (EngineKnobs.H3ChunkRows.Value is int forced && forced > 0)
+        if (ForcedChunkRows() is int forced)
         {
             return forced;
         }
@@ -71,7 +74,7 @@ public static class MiniMaxH3ChunkPolicy
     /// <c>vram.h3ChunkRows</c> when it is set — the same two answers <see cref="ResolveChunkRows"/> gives once it
     /// has decided to chunk at all. Sizes the seq-independent reserve taken at construction.</summary>
     public static int ScaledChunkRows(IBackend? backend = null)
-        => EngineKnobs.H3ChunkRows.Value is int forced && forced > 0
+        => ForcedChunkRows() is int forced
             ? forced
             : Math.Max(512, (int)(DefaultChunkRows * ClampedScale(backend)));
 
