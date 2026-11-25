@@ -1339,7 +1339,8 @@ public static class ModelCatalog
                 // Licence: weights FLUX Non-Commercial (the release's own statement: "The released model weights are derived from FLUX.2
                 // [klein] Base and are distributed under the FLUX Non-Commercial License ... Use of the weights, and of any output
                 // produced with them, is subject to the terms of that license."); code Apache-2.0. Built and parity-tested on a tiny
-                // diffusers fixture; no real-weight run yet.
+                // diffusers fixture. One real-weight run on the RTX 3060 (2026-11-24): qualitative depth and normals; segmentation mIoU 0.779
+                // over 40 COCO val2017 images (five object classes, our protocol; docs/Checklists/MODEL_STATUS_IMAGE.md).
                 Id = "open-vision-banana-4b", Modality = img, DisplayName = "Open Vision Banana 4B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
                 Status = vp,
                 CliDrivable = true,
