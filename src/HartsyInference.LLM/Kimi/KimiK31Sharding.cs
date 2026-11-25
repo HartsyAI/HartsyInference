@@ -70,7 +70,7 @@ public static class KimiK31Sharding
             ForgetUp: Track(owned, TensorParallelTransformer.SliceOutRows(f.ForgetUp, rank, ranks, "kda.forget_up")),
             ForgetBias: Track(owned, TensorParallelTransformer.SliceOutRows(f.ForgetBias, rank, ranks, "kda.forget_bias")),
             BetaProj: Track(owned, TensorParallelTransformer.SliceOutRows(f.BetaProj, rank, ranks, "kda.beta_proj")),
-            OutGateProj: Track(owned, TensorParallelTransformer.SliceOutRows(f.OutGateProj, rank, ranks, "kda.g_proj")),
+            OutGateProj: Track(owned, TensorParallelTransformer.SliceOutRows(f.OutGateProj ?? throw new InvalidOperationException("Kimi KDA layers carry a full output gate."), rank, ranks, "kda.g_proj")),
             OutNorm: Replica(f.OutNorm, owned, ranks),
             OutProj: Track(owned, TensorParallelTransformer.SliceInCols(f.OutProj, rank, ranks, "kda.o_proj")));
     }

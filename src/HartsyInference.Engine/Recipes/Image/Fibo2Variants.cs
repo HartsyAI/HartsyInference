@@ -24,6 +24,17 @@ public static class Fibo2Variants
         FilenameTokenSets = [["edit"]],
     };
 
+    /// <summary>Bria RMBG 3.0: Fibo 2.0 tuned to draw an alpha matte as an edit of one image. Edit-only, 4 steps, no guidance and
+    /// one fixed instruction; its weights carry the same keys and shapes as the other builds, so only the catalog id or file name
+    /// tells it apart.</summary>
+    public static ModelVariant Rmbg3 { get; } = new ModelVariant
+    {
+        Id = "rmbg3",
+        DisplayName = "Bria RMBG 3.0",
+        HintAliases = ["rmbg3-int8"],
+        FilenameTokenSets = [["rmbg3"]],
+    };
+
     /// <summary>The catalog <see cref="Fibo2Recipe"/> declares.</summary>
-    public static ModelVariantCatalog Catalog { get; } = new ModelVariantCatalog("fibo2", Dev, [EditTurbo, Dev]);
+    public static ModelVariantCatalog Catalog { get; } = new ModelVariantCatalog("fibo2", Dev, [Rmbg3, EditTurbo, Dev]);
 }

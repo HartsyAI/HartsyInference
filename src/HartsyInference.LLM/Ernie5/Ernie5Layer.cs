@@ -321,20 +321,10 @@ internal sealed class Ernie5Layer : IDisposable
     }
 
     /// <summary>A weight as an F32 tensor the caller owns.</summary>
-    internal static Tensor ReadF32(IErnie5WeightSource source, string name)
-    {
-        Tensor t = source.Read(name);
-        if (t.DType == DType.F32) return t;
-        // EnsureF32 decodes a block-scaled FP8 weight through its grid, and casts the others.
-        using (t) return ProjectionOps.EnsureF32(t);
-    }
+    internal static Tensor ReadF32(IErnie5WeightSource source, string name) => WeightReads.ReadF32(source, name);
 
     /// <summary>A weight copied to a host F32 array.</summary>
-    internal static float[] HostF32(IErnie5WeightSource source, string name)
-    {
-        using Tensor t = ReadF32(source, name);
-        return t.AsReadOnlySpan<float>().ToArray();
-    }
+    internal static float[] HostF32(IErnie5WeightSource source, string name) => WeightReads.HostF32(source, name);
 
     private Tensor Own(Tensor t)
     {
