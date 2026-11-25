@@ -37,6 +37,8 @@ public sealed class FastFramesPixelDecoder : IDisposable
     public FastFramesPixelDecoder(FastFramesPixelDecoderConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
+        if (config.PatchH != config.PatchW)
+            throw new NotSupportedException($"The shared unpatchify needs square patches; this decoder has {config.PatchH}x{config.PatchW}.");
         _config = config;
     }
 
@@ -139,7 +141,8 @@ public sealed class FastFramesPixelDecoder : IDisposable
 
     /// <summary>Decodes one latent frame. <paramref name="hidden"/> is the generator's pre-head hidden states
     /// <c>[gridH·gridW, InputDim]</c>, <paramref name="temb"/> its head time embedding <c>[1, InputDim]</c>. Returns
-    /// <c>[PatchT, OutChannels, gridH·PatchH, gridW·PatchW]</c> F32 in about <c>[-1, 1]</c> (not clamped); the caller disposes it.
+    /// <c>[1, PatchT·OutChannels, gridH·PatchH, gridW·PatchW]</c> F32 in about <c>[-1, 1]</c> (not clamped); the caller disposes it. Its
+    /// memory is the frame-major <c>[PatchT, OutChannels, H, W]</c>, so the frame count is <c>PatchT</c>, not <c>Shape[0]</c>.
     /// Frames must be passed in order on the same <paramref name="state"/>.</summary>
     public Tensor DecodeFrame(IBackend backend, Tensor hidden, Tensor temb, int gridH, int gridW, State state)
     {
@@ -273,8 +276,6 @@ public sealed class FastFramesPixelDecoder : IDisposable
     private Tensor Unpatchify(IBackend backend, Tensor tokensOut, int gridH, int gridW)
     {
         int pt = _config.PatchT, ph = _config.PatchH, pw = _config.PatchW, c = _config.OutChannels;
-        if (ph != pw)
-            throw new NotSupportedException($"The shared unpatchify needs square patches; this decoder has {ph}x{pw}.");
         Tensor output = new(new TensorShape(1, pt * c, gridH * ph, gridW * pw), DType.F32);
         PixelShuffles.UnpatchifyTokens(backend, output, tokensOut, pt * c, gridH, gridW, ph, innerChannelFastest: true);
         return output;
