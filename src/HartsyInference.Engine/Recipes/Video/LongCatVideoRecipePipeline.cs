@@ -61,7 +61,8 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
         // returns the stream's pool reservations (EndStep), which the scope requires.
         float[] latents;
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
-        using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-video"))
+        using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-video",
+            LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth)))
         {
             LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
                 settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale,

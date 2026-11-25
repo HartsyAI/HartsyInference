@@ -100,6 +100,31 @@ public sealed class LongCatRecipeTests
         Assert.IsNotType<NotSupportedException>(error);
     }
 
+    [Fact]
+    public void TheStreamingHeadroomCoversTheFullAvatarRunsActivationsWithAMargin()
+    {
+        // 832 x 480 x 93: 24 latent frames on a 60 x 104 grid, so 24 x 30 x 52 = 37,440 tokens; hidden 4096, FFN 11,008.
+        long tokens = LongCatRecipeSupport.TokenCount(latentFrames: 24, latentHeight: 60, latentWidth: 104);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(tokens, hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(37_440, tokens);
+        Assert.Equal(2L * 37_440 * (4L * 4096 + 2L * 11008) * 4, headroom);
+        Assert.InRange(headroom, 10L << 30, 11L << 30);
+    }
+
+    [Fact]
+    public void TheSmallerFirstRunNeedsAboutAThirdOfTheFullHeadroom()
+    {
+        // 640 x 368 x 49: 13 latent frames on a 46 x 80 grid, so 13 x 23 x 40 = 11,960 tokens.
+        long small = LongCatRecipeSupport.ActivationHeadroomBytes(
+            LongCatRecipeSupport.TokenCount(latentFrames: 13, latentHeight: 46, latentWidth: 80), hidden: 4096, ffnHidden: 11008);
+        long full = LongCatRecipeSupport.ActivationHeadroomBytes(
+            LongCatRecipeSupport.TokenCount(latentFrames: 24, latentHeight: 60, latentWidth: 104), hidden: 4096, ffnHidden: 11008);
+
+        Assert.Equal(11_960, LongCatRecipeSupport.TokenCount(latentFrames: 13, latentHeight: 46, latentWidth: 80));
+        Assert.InRange((double)small / full, 0.30, 0.34);
+    }
+
     private static CheckpointProbe EmptyProbe() =>
         new(new HashSet<string>(StringComparer.Ordinal), new Dictionary<string, TensorShape>(StringComparer.Ordinal),
             new Dictionary<string, string>(StringComparer.Ordinal), []);

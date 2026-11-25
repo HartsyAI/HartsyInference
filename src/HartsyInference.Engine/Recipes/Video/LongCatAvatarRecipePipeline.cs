@@ -84,7 +84,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The DiT is placed by the streaming scope (see the base recipe); each finished step returns the stream's reservations.
         float[] latents;
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
-        using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar"))
+        using (BlockStreamingScope stream = LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
+            LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth)))
         {
             LongCatAvatarRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
                 audioTokens, unconditionalTokens, settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,

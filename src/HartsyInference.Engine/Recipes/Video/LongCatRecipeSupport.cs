@@ -38,15 +38,27 @@ internal static class LongCatRecipeSupport
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
 
-    /// <summary>Device headroom the stream plans around for activations and workspace.</summary>
-    internal const long StreamHeadroomBytes = 3L * 1024 * 1024 * 1024;
+    /// <summary>The device headroom the streaming plan reserves for one denoise step's activations, sized from the token count: each token of a
+    /// block holds the q, k and v projections and their head-major copies (4 × hidden) plus the SwiGLU intermediates (2 × FFN), in F32.
+    /// The result carries a 2× margin, because the first 4090 run used more than the estimate (a 585 MB QKV buffer was refused with 601 MB
+    /// free at 37,440 tokens while the planner had reserved only 3 GB).</summary>
+    internal static long ActivationHeadroomBytes(long tokens, int hidden, int ffnHidden)
+    {
+        const int marginFactor = 2, bytesPerElement = 4;
+        return marginFactor * tokens * (4L * hidden + 2L * ffnHidden) * bytesPerElement;
+    }
+
+    /// <summary>The attention tokens one denoise step sees at a latent grid: latent frames × (latent height / 2) × (latent width / 2), the DiT's 2×2 patch.</summary>
+    internal static long TokenCount(int latentFrames, int latentHeight, int latentWidth) =>
+        (long)latentFrames * (latentHeight / 2) * (latentWidth / 2);
 
     /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
     /// memory when it does not. Disposing the scope evicts whatever it placed.</summary>
-    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName) =>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens) =>
         BlockStreamingScope.Open(new BlockStreamingOptions
         {
-            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = StreamHeadroomBytes,
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName,
+            HeadroomBytes = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim),
         });
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
