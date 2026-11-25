@@ -1,16 +1,17 @@
 using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.LLM.Hy4Flash;
 
-/// <summary>A Hy4 Flash checkpoint directory as an <see cref="IHy4FlashWeightSource"/>: reads through <see cref="ShardedSafeTensorSet"/>, decodes block-scaled
+/// <summary>A Hy4 Flash checkpoint directory as an <see cref="IModelWeightSource"/>: reads through <see cref="ShardedSafeTensorSet"/>, decodes block-scaled
 /// e4m3 weights (a tensor whose companion <c>&lt;name&gt;_scale_inv</c> holds the 128x128 BF16 or F32 scale grid) to F32, and converts BF16 or F16 to F32.</summary>
 /// <remarks>Routed-expert stacks and the BF16 projections are returned as F32 copies, which is what the host reference computes in. That copies the whole model into host memory,
 /// so it holds for the tiny checkpoints only; the released 220B checkpoint needs the device-resident FP8 path, which is not part of this reference. The embedding table and the Engram
 /// tables are returned as mapped views in their stored dtype, read by row.</remarks>
-public sealed class Hy4FlashCheckpoint : IHy4FlashWeightSource, IDisposable
+public sealed class Hy4FlashCheckpoint : IModelWeightSource, IDisposable
 {
     private readonly ShardedSafeTensorSet _set;
     private int _disposed;
@@ -37,7 +38,7 @@ public sealed class Hy4FlashCheckpoint : IHy4FlashWeightSource, IDisposable
     }
 
     /// <inheritdoc />
-    public bool Contains(string name) => _set.Inventory.ContainsKey(name);
+    public IEnumerable<string> Names => _set.Inventory.Keys.Where(static k => !k.EndsWith(Hy4FlashWeightMap.ScaleSuffix, StringComparison.Ordinal));
 
     /// <inheritdoc />
     public Tensor Read(string name)
@@ -79,7 +80,7 @@ public sealed class Hy4FlashCheckpoint : IHy4FlashWeightSource, IDisposable
         Tensor output = new(new TensorShape(dims), DType.F32);
         try
         {
-            Hy4FlashFp8.DequantizeBlocks(codes, dims, scale, output.AsSpan<float>());
+            DequantizeStack(codes, dims, scale, output.AsSpan<float>());
         }
         catch
         {
@@ -87,5 +88,30 @@ public sealed class Hy4FlashCheckpoint : IHy4FlashWeightSource, IDisposable
             throw;
         }
         return output;
+    }
+
+    /// <summary>Decodes a block-scaled e4m3 stack (<c>[lead..., rows, cols]</c>, one scale grid per matrix) into F32, each matrix through <see cref="Fp8BlockF32Codec"/>; the last block row and column may be partial.</summary>
+    /// <exception cref="InvalidDataException">The scale grid does not have the size the shape implies.</exception>
+    internal static unsafe void DequantizeStack(ReadOnlySpan<byte> codes, ReadOnlySpan<long> shape, ReadOnlySpan<float> scale, Span<float> destination)
+    {
+        if (shape.Length < 2) throw new ArgumentException("An FP8 block-scaled weight has at least two dimensions.", nameof(shape));
+        long rows = shape[^2], cols = shape[^1], lead = 1;
+        for (int i = 0; i < shape.Length - 2; i++) lead *= shape[i];
+        if (codes.Length != lead * rows * cols) throw new ArgumentException($"{codes.Length} codes do not fill shape with {lead * rows * cols} elements.", nameof(codes));
+        if (destination.Length != codes.Length) throw new ArgumentException($"The destination holds {destination.Length} values for {codes.Length} codes.", nameof(destination));
+        int block = Fp8BlockF32Codec.DefaultBlock;
+        long gridRows = (rows + block - 1) / block, gridCols = (cols + block - 1) / block;
+        if (scale.Length != lead * gridRows * gridCols)
+            throw new InvalidDataException($"The scale grid holds {scale.Length} values; a [{lead}, {gridRows}, {gridCols}] grid is required.");
+        int matrix = checked((int)(rows * cols)), grid = checked((int)(gridRows * gridCols));
+        for (long e = 0; e < lead; e++)
+        {
+            using Tensor weight = new(new TensorShape(rows, cols), DType.F8E4M3);
+            codes.Slice(checked((int)e * matrix), matrix).CopyTo(new Span<byte>(weight.DataPointer, matrix));
+            using Tensor scales = new(new TensorShape(gridRows, gridCols), DType.F32);
+            scale.Slice(checked((int)e * grid), grid).CopyTo(scales.AsSpan<float>());
+            using Tensor decoded = Fp8BlockF32Codec.Dequantize(weight, scales, block, block);
+            decoded.AsReadOnlySpan<float>().CopyTo(destination.Slice(checked((int)e * matrix), matrix));
+        }
     }
 }
