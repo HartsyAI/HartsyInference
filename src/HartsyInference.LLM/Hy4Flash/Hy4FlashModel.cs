@@ -86,7 +86,7 @@ public sealed class Hy4FlashModel : IDisposable
     private Action<string, float[]>? _trace;
 
     /// <summary>A fresh sequence state.</summary>
-    public Hy4FlashSequenceState CreateState() => new([.. _layers.Select(l => l.CreateState(MaxPositions))], MaxPositions);
+    public Hy4FlashSequenceState CreateState() => new([.. _layers.Select(l => l.CreateState(MaxPositions))], MaxPositions) { Owner = this };
 
     /// <summary>Runs <paramref name="tokenIds"/> at the positions after the state's cache and returns the logits of the last token, or of every token with <paramref name="allRows"/>.
     /// With <paramref name="images"/> given, each run of image placeholder ids takes its next entry (without it the placeholder id is an ordinary token, as in the reference): its feature rows replace the embeddings and its tokens get the frame positions (time constant,
@@ -106,6 +106,7 @@ public sealed class Hy4FlashModel : IDisposable
     private float[] ForwardLocked(ReadOnlySpan<int> tokenIds, Hy4FlashSequenceState state, bool allRows, IReadOnlyList<Hy4FlashImage>? images)
     {
         ArgumentNullException.ThrowIfNull(state);
+        if (!ReferenceEquals(state.Owner, this)) throw new ArgumentException("The state was created by another model; use this model's CreateState.", nameof(state));
         int tokens = tokenIds.Length, h = _cfg.HiddenSize, hc = _cfg.HcMult, start = state.Length;
         if (tokens < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
         if (start + tokens > MaxPositions) throw new InvalidOperationException($"The state holds {MaxPositions} positions; {start + tokens} were asked for.");
@@ -121,7 +122,7 @@ public sealed class Hy4FlashModel : IDisposable
         float[] embedded = new float[tokens * h];
         for (int t = 0; t < tokens; t++) _embedding.Read(tokenIds[t], embedded.AsSpan(t * h, h));
         _trace?.Invoke("embed", embedded.ToArray());
-        AssignPositions(tokenIds, start, state, images, embedded);
+        AssignPositions(tokenIds, start, state, images, embedded, out int nextPosition, out int imagesUsed);
         float[] stream = new float[tokens * hc * h];
         for (int t = 0; t < tokens; t++)
             for (int i = 0; i < hc; i++) embedded.AsSpan(t * h, h).CopyTo(stream.AsSpan((t * hc + i) * h, h));
@@ -140,6 +141,9 @@ public sealed class Hy4FlashModel : IDisposable
         }
         state.Ids.AddRange(tokenIds.ToArray());
         state.Length = start + tokens;
+        state.NextPosition = nextPosition;
+        state.ImagesUsed = imagesUsed;
+        state.EndsInImageRun = images is not null && tokenIds[^1] == _cfg.ImageTokenId;
         _stamped = state;
 
         _head.Gates(stream, tokens, out float[] pre, out _);
@@ -160,10 +164,13 @@ public sealed class Hy4FlashModel : IDisposable
     }
 
     // Text tokens take consecutive positions; an image run takes its frame positions and its feature rows, and the next text token continues one past the largest.
-    private void AssignPositions(ReadOnlySpan<int> ids, int start, Hy4FlashSequenceState state, IReadOnlyList<Hy4FlashImage>? images, float[] embedded)
+    // Returns the next text position and the images used; the state keeps them only once the layers have run.
+    private void AssignPositions(ReadOnlySpan<int> ids, int start, Hy4FlashSequenceState state, IReadOnlyList<Hy4FlashImage>? images, float[] embedded, out int next, out int used)
     {
-        int h = _cfg.HiddenSize, m = _cfg.Vision.SpatialMergeSize, next = state.NextPosition, used = state.ImagesUsed;
-        if (images is not null && ids.Length > 0 && ids[0] == _cfg.ImageTokenId && state.Ids.Count > 0 && state.Ids[^1] == _cfg.ImageTokenId)
+        int h = _cfg.HiddenSize, m = _cfg.Vision.SpatialMergeSize;
+        next = state.NextPosition;
+        used = state.ImagesUsed;
+        if (images is not null && ids.Length > 0 && ids[0] == _cfg.ImageTokenId && state.EndsInImageRun)
             throw new ArgumentException("An image placeholder run is split across two Forward calls; a run must lie inside one call.", nameof(ids));
         for (int t = 0; t < ids.Length;)
         {
@@ -191,9 +198,6 @@ public sealed class Hy4FlashModel : IDisposable
             used++;
             t = end;
         }
-        // Committed only once every run has validated, so a refused call leaves the state's counters as they were.
-        state.NextPosition = next;
-        state.ImagesUsed = used;
     }
 
     // Writes one slot's position triple into the state (which keeps it for restamping) and into the shared rows.

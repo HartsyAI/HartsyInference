@@ -22,6 +22,12 @@ public sealed class Hy4FlashSequenceState : IDisposable
     /// <summary>The (time, height, width) rotary position of every cache slot this state wrote. The model's shared M-RoPE rows are restamped from these when another state used them last.</summary>
     internal int[] Times { get; }
 
+    /// <summary>The model that created this state; the model refuses a state of another model, whose rotary rows and slots would not match.</summary>
+    internal object? Owner { get; set; }
+
+    /// <summary>Whether the last call ended inside an image placeholder run, so the next call must not open with another one.</summary>
+    internal bool EndsInImageRun { get; set; }
+
     /// <summary>Height plane of each slot, see <see cref="Times"/>.</summary>
     internal int[] Heights { get; }
 
