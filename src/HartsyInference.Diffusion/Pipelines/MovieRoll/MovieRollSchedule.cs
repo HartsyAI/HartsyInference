@@ -75,10 +75,11 @@ public sealed class MovieRollSchedule
     }
 
     /// <summary>The ladder index of each window slot at a global step, slot 0 first. Slots are ordered as the queue: the oldest chunk is slot 0.
-    /// <para>Warmup: the table is not a fresh start at every global step. At global step 0 slot <c>k</c> reads row <c>k</c> at ladder step 0, which is ladder index
-    /// <c>(N − k·StepsPerWindow) mod N</c>: slot 0 begins at the first ladder entry, and slots 1 to W−1 begin mid-ladder (for the base chain of 50 steps and
-    /// a window of 5, at indices 40, 30, 20, 10). Each slot then advances one ladder entry per global step until it wraps, so the queue fills in
-    /// with chunks already partway through denoising. The pipeline must therefore feed a fresh noisy chunk at the tail of every round, as the reference does.</para></summary>
+    /// <para>Warmup: the table is not a fresh start at every global step. At global 0, slot <c>k</c> reads ladder index <c>(N − k·StepsPerWindow) mod N</c>, so
+    /// slot 0 begins at the first ladder entry and slots 1 to W−1 begin mid-ladder (for the base chain of 50 steps and a window of 5, at 40, 30, 20, 10).
+    /// Before global N, slot <c>k</c> wraps to index 0 at global <c>k·StepsPerWindow</c>, the round in which its chunk entered, so a fresh noisy chunk is
+    /// enqueued exactly there. From global N on, the tail slot is at index 0 at every round start. The pipeline must enqueue a fresh chunk at the tail of
+    /// every round, as the reference does.</para></summary>
     public int[] StepIndices(int globalStep)
     {
         if (globalStep < 0) throw new ArgumentOutOfRangeException(nameof(globalStep));

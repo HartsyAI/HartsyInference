@@ -61,6 +61,7 @@ public sealed class MovieRollScheduleTests
     [InlineData(-5.0)]
     [InlineData(double.NaN)]
     [InlineData(double.PositiveInfinity)]
+    [InlineData(double.NegativeInfinity)]
     public void ShiftMustBeFiniteAndPositive(double shift)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => MovieRollSchedule.Base(50, 5, shift));
