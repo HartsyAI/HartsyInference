@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Mhc;
@@ -69,6 +70,28 @@ internal sealed class MaxwellLayer : IDisposable
 
     /// <summary>The MoE block, or null for a dense-FFN layer.</summary>
     internal MoeFeedForward? Moe => _moe;
+
+    /// <summary>Every weight the layer reads per token except the routed experts, each as its own group (an FP8 weight's scale grid as a group
+    /// of its own), for preloading onto a device.</summary>
+    internal IEnumerable<IReadOnlyList<Tensor>> EnumerateDenseGroups()
+    {
+        foreach (Tensor t in new[] { _attnNorm, _ffnNorm }) yield return [t];
+        foreach (Tensor t in _attention.EnumerateWeights()) yield return [t];
+        if (_moe is not null)
+            foreach (Tensor t in _moe.EnumerateDenseWeights()) yield return [t];
+        foreach (Tensor? t in new[] { _denseGate, _denseUp, _denseDown })
+        {
+            if (t is null) continue;
+            yield return [t];
+            if (t.QuantInfo?.Fp8BlockScaleInv is { } scale) yield return [scale];
+        }
+    }
+
+    /// <summary>Routes this layer's routed experts through <paramref name="offload"/>; a dense-FFN layer has none.</summary>
+    internal void AttachOffload(MoeExpertOffload offload)
+    {
+        if (_moe is not null) _moe.AttachOffload(offload, Index);
+    }
 
     /// <summary>The MoE block of every layer past the dense ones.</summary>
     public static MoeConfig MoeSettings(MaxwellConfig cfg) => new()
