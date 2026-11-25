@@ -207,6 +207,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Array.Clear(_stateOnDevice);
         _kvCache.Reset();
         _pos = 0;
+        RopePositionOffset = 0;
     }
 
     /// <summary>Gathers token embeddings for <paramref name="ids"/> into <paramref name="dst"/> (<c>[1, ids.Count, DModel]</c>, host F32) from the F32 embedding copy — the text-token half of a VLM's spliced <c>[pre][image][post]</c> embedding sequence (image rows are memcpy'd in by the caller).</summary>
@@ -285,7 +286,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         if (w.TryGetValue(stackedKey, out Tensor? stacked)) StackedExperts.Split(dst, stacked, targetFormat, e, outDim, inDim);
     }
 
-    public static Qwen35Model Load(string ggufPath)
+    /// <param name="maxSequenceLength">Tokens the full-attention KV caches hold; the default is the fixed 8192 every earlier caller got.</param>
+    public static Qwen35Model Load(string ggufPath, int maxSequenceLength = MaxAttnSeqLen)
     {
         // QUANT-RESIDENT load (2026-07-24): weights stay in their GGUF quantization so every
         // backend.Linear dispatches the fused quant GEMV / dp4a decode paths — the previous
@@ -414,7 +416,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
             Qwen35Model model = new Qwen35Model(handle, w, dModel, layers, vocab, eps, fullAttnInterval, slotRecr,
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
-                convK, headKvDim, headVDim, numKHeads, numVHeads, moe);
+                convK, headKvDim, headVDim, numKHeads, numVHeads, moe, maxSequenceLength);
             model._ownedTensors.AddRange(converted);
             if (loop is not null) model.ConfigureLoop(loop, routers!, ropeScaling);
             else model.ConfigureRope(ropeScaling);
@@ -451,6 +453,45 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
     /// <summary>Shared decode core: consumes an initial hidden state <paramref name="h"/> (owned — disposed here), runs every layer (Gated-DeltaNet or full-attention), final RMSNorm, and projects the last position to vocab logits; the ids-in and embeds-in entry points differ only in how <paramref name="h"/> is seeded.</summary>
     private float[] ForwardFromHidden(IBackend backend, Tensor h, int seq) => ProjectLast(backend, RunTrunk(backend, h, seq), seq);
+
+    /// <summary><see cref="ForwardEmbedsLastLogits(IBackend, Tensor, int)"/> with the full-attention layers rotated by caller-built multimodal rows
+    /// (host F32 <c>[1, seq, AttnHeadDim]</c>, see <see cref="ForwardEmbedsHidden(IBackend, Tensor, int, Tensor?, Tensor?)"/>).</summary>
+    public float[] ForwardEmbedsLastLogits(IBackend backend, Tensor embeds, int seq, Tensor ropeCos, Tensor ropeSin)
+    {
+        int d = DModel;
+        Tensor h = new(new TensorShape(1, seq, d), DType.F32);
+        Buffer.MemoryCopy((void*)embeds.DataPointer, (void*)h.DataPointer, (long)seq * d * 4, (long)seq * d * 4);
+        return ProjectLast(backend, RunTrunk(backend, h, seq, ropeCos, ropeSin), seq);
+    }
+
+    /// <summary>How far the RoPE position of the next token lies behind the sequence index: after an image the text resumes at
+    /// <c>start + max(T, H, W)</c> of the image grid, which is below the number of rows consumed. Set by the multimodal generator after its
+    /// prefill, so single-token decode rotates by the right position; <see cref="ResetState"/> zeroes it. Ignored by graph decode, which a
+    /// multimodal generator does not use.</summary>
+    public int RopePositionOffset { get; internal set; }
+
+    /// <summary>Cos/sin rows of tokens <c>[first, first + count)</c> of multimodal positions (axis-major <c>[3 · tokens]</c>, see
+    /// <see cref="MRopePositions"/>), with this model's M-RoPE sections, interleaving and RoPE scaling. Every caller of multimodal rows goes
+    /// through here, so an image prompt and a text encode rotate the same way.</summary>
+    public (Tensor Cos, Tensor Sin) BuildMultimodalRope(ReadOnlySpan<int> positions, int tokens, int first, int count)
+    {
+        int rotaryDim = RotaryDim;
+        byte[] pairAxes = MRopePairAxes.Build([.. MropeSection], rotaryDim / 2, MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+        int maxPosition = 0;
+        foreach (int p in positions) maxPosition = Math.Max(maxPosition, p);
+        (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(rotaryDim, RopeTheta, _ropeScaling, maxPosition + 1);
+        return MRopeTable.BuildTensors(positions, tokens, first, count, invFreq, scaling, pairAxes, AttnHeadDim, rotaryDim);
+    }
+
+    /// <summary><see cref="ForwardEmbedsLastLogits(IBackend, Tensor, int, Tensor, Tensor)"/> and then sets <see cref="RopePositionOffset"/> so that
+    /// single-token decode continues at <paramref name="nextRopePosition"/> (the position a following token takes, from
+    /// <see cref="MRopePositions.Build"/>) rather than at the sequence index.</summary>
+    public float[] ForwardEmbedsLastLogits(IBackend backend, Tensor embeds, int seq, Tensor ropeCos, Tensor ropeSin, int nextRopePosition)
+    {
+        float[] logits = ForwardEmbedsLastLogits(backend, embeds, seq, ropeCos, ropeSin);
+        RopePositionOffset = nextRopePosition - seq;
+        return logits;
+    }
 
     private Tensor RunTrunk(IBackend backend, Tensor h, int seq, Tensor? ropeCos = null, Tensor? ropeSin = null)
     {
@@ -711,6 +752,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
         int half = rdim / 2;
+        posStart += RopePositionOffset;
         (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, _ropeScaling, posStart + t);
         float* pc = (float*)cos.DataPointer;
         float* ps = (float*)sin.DataPointer;
@@ -1029,6 +1071,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _kvCache.Dispose();
+        _hostBackend?.Dispose();
         _handle?.Dispose();
         foreach (Tensor t in _ownedTensors) t.Dispose();
     }
