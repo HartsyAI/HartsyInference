@@ -64,6 +64,31 @@ public sealed class Glm5NextReferenceParityTests(ITestOutputHelper output)
         Assert.Contains("embed_tokens", ex.Message);
     }
 
+    [Fact]
+    public void ScaledFp8Embedding_IsRefusedByName()
+    {
+        Glm5NextConfig c = Glm5NextHfConfig.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        using Ernie5CheckpointWeights inner = Ernie5CheckpointWeights.Open(Dir);
+        InvalidDataException ex = Assert.Throws<InvalidDataException>(() => new Glm5NextModel(new CpuBackend(), c, new ScaledEmbedding(inner, c)));
+        Assert.Contains("embed_tokens", ex.Message);
+    }
+
+    // Replaces the embedding with a block-scaled FP8 table of the right shape and passes every other read through.
+    private sealed class ScaledEmbedding(IErnie5WeightSource inner, Glm5NextConfig c) : IErnie5WeightSource
+    {
+        public IEnumerable<string> Names => inner.Names;
+
+        public Tensor Read(string name)
+        {
+            if (name != Glm5NextWeightNames.Embedding) return inner.Read(name);
+            Tensor table = new(new TensorShape(c.Vocab, c.Hidden), DType.F8E4M3);
+            Tensor grid = new(new TensorShape(1, 1), DType.F32);
+            grid.AsSpan<float>()[0] = 1f;
+            table.QuantInfo = new QuantWeightInfo { Format = "fp8_block_scale_inv", Fp8BlockScaleInv = grid, Fp8BlockSize = 128 };
+            return table;
+        }
+    }
+
     // Replaces the embedding with a tensor of the wrong shape and passes every other read through.
     private sealed class WrongEmbedding(IErnie5WeightSource inner) : IErnie5WeightSource
     {

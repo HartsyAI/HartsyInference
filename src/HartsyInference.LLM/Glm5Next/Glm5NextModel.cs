@@ -29,6 +29,10 @@ public sealed class Glm5NextModel : IDisposable
         {
             embedding = source.Read(Glm5NextWeightNames.Embedding);
             RequireShape(embedding, config.Vocab, config.Hidden, "embed_tokens");
+            // Rows are gathered by SliceRows, which drops the per-row QuantInfo, so a scaled FP8 table would decode without its grid. The
+            // checkpoints store the table plain (the FP8 index has no embed_tokens scale), so a scaled one is refused rather than read wrong.
+            if (embedding.QuantInfo?.Fp8BlockScaleInv is not null)
+                throw new InvalidDataException("'embed_tokens' is stored FP8 with block scales; the glm5_next row gather cannot apply that grid, so it is refused.");
             // The final norm is read as F32 whatever the checkpoint stores: the norm kernel reads its weight as F32.
             finalNorm = Glm5NextLayer.F32(source, Glm5NextWeightNames.FinalNorm, config.Hidden);
             lmHead = source.Read(Glm5NextWeightNames.LmHead);
@@ -64,7 +68,7 @@ public sealed class Glm5NextModel : IDisposable
         {
             if ((uint)ids[t] >= (uint)_c.Vocab) throw new ArgumentOutOfRangeException(nameof(ids), $"Token id {ids[t]} is outside the {_c.Vocab}-entry vocabulary.");
             using Tensor row = _embedding.SliceRows(ids[t], 1);
-            Tensor f32 = TensorCasts.EnsureF32(row);
+            Tensor f32 = ProjectionOps.EnsureF32(row);
             try
             {
                 f32.AsReadOnlySpan<float>().CopyTo(rows.AsSpan(t * d, d));
