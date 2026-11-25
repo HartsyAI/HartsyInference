@@ -165,12 +165,13 @@ public sealed class TensorIntoShapeTests
         using FakeResidency second = new();
         Tensor source = new(new TensorShape(4), DType.F32);
         float[] values = [1, 2, 3, 4];
-        values.CopyTo(source.AsSpan<float>());
-        second.Promote(source);
-        first.Promote(source);
+        // The first binding is the movable kind, so only the second one stops the move.
+        first.Produce(source, [.. values]);
+        second.Promote(source, [.. values]);
 
         using Tensor moved = source.IntoShape(new TensorShape(2, 2));
 
+        Assert.Equal(1, first.D2hSyncCount);
         Assert.Equal(1, first.Freed);
         Assert.Equal(1, second.Freed);
         Assert.Equal(values, moved.AsReadOnlySpan<float>().ToArray());
@@ -206,7 +207,10 @@ public sealed class TensorIntoShapeTests
         }
 
         /// <summary>Makes a host tensor a weight the cache promoted on its own.</summary>
-        public void Promote(Tensor tensor) => PromoteToWeight(tensor, tensor.AsReadOnlySpan<float>().ToArray());
+        public void Promote(Tensor tensor) => Promote(tensor, tensor.AsReadOnlySpan<float>().ToArray());
+
+        /// <summary>As <see cref="Promote(Tensor)"/> with the device copy given, so nothing reads the host.</summary>
+        public void Promote(Tensor tensor, float[] buffer) => PromoteToWeight(tensor, buffer);
 
         protected override float[] AllocateDevice(long bytes) => new float[bytes / sizeof(float)];
 

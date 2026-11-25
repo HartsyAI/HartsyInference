@@ -149,10 +149,12 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         int hp = (inH + 2 * PatchPad - PatchKernel) / PatchStride + 1;
         int wp = (inW + 2 * PatchPad - PatchKernel) / PatchStride + 1;
 
-        using Tensor patch = new Tensor(new TensorShape(1, _embedDim, hp, wp), DType.F32);
-        backend.Conv2D(patch, pixelValues, _patchProjW!, _patchProjB, PatchStride, PatchStride, PatchPad, PatchPad);
-
-        Tensor embedded = NchwToNhwc(backend, patch, 1, _embedDim, hp, wp);
+        Tensor embedded;
+        using (Tensor patch = new(new TensorShape(1, _embedDim, hp, wp), DType.F32))
+        {
+            backend.Conv2D(patch, pixelValues, _patchProjW!, _patchProjB, PatchStride, PatchStride, PatchPad, PatchPad);
+            embedded = NchwToNhwc(backend, patch, 1, _embedDim, hp, wp);
+        }
         Tensor tokens = AddPosEmbed(backend, embedded, hp, wp);
         if (!ReferenceEquals(tokens, embedded)) embedded.Dispose();
 

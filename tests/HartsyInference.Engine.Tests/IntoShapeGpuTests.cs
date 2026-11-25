@@ -35,6 +35,7 @@ public sealed class IntoShapeGpuTests
             device.Scale(twice, moved, 2f);
             Assert.Equal(0, device.GetD2hSyncCount());
             Assert.False(moved.HostBytesCurrent);
+            Assert.Equal(expected.Select(v => v * 2f), twice.AsReadOnlySpan<float>().ToArray());
 
             // The sweep frees a moved tensor like any other activation, unless the pin it came with keeps it.
             Tensor kept = new(host.Shape, DType.F32);
