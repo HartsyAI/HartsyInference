@@ -13,9 +13,12 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// The Duo attention bias is the square [S, S] mask of the live layout; the refiner has its own graph.</summary>
 public sealed unsafe partial class MiniMaxH3Transformer
 {
-    /// <summary>The longest packed layout whose dense [S, S] bias is built. The bias is 4·S² bytes, and the masked
-    /// dense path is the only route until the tiled bias lands (PR 2g). Past this length the forward is refused with a message.</summary>
+    /// <summary>The longest packed layout that takes one dense [S, S] bias (4·S² bytes). Longer layouts take the chunked route with a
+    /// per-tile bias instead; the dense bias is never built past this length.</summary>
     internal const int MaxDuoDenseBiasRows = 32768;
+
+    /// <summary>Query rows per tile on the tiled route: each tile's bias is [rows, S] floats, so this bounds the bias at tile height.</summary>
+    internal const int DuoBiasTileRows = 4096;
 
     /// <summary>Runs one Duo denoise evaluation over <paramref name="layout"/>.</summary>
     /// <param name="mode">The visibility rule: causal for a denoise against a committed history, bidirectional for a full-context pass.</param>
@@ -25,13 +28,16 @@ public sealed unsafe partial class MiniMaxH3Transformer
     /// <param name="audioRows">Audio rows [layout.AudioRows.Length, audioDim], in <c>AudioRows</c> order; null only when the layout has none.</param>
     /// <param name="times">The distinct timesteps in [0, 1], unscaled; <c>layout.TimeIds</c> indexes this array.</param>
     /// <param name="roleEmbeddingEnabled">Upstream keeps role embeddings disabled and zero-initialised. Passing true is refused, not ignored.</param>
-    /// <remarks>Every Duo forward is a bias forward: the dense attention path runs with the bias, so a sequence longer than the chunk
-    /// width is refused (see <see cref="CheckBiasedRoute"/>), and a sequence longer than <see cref="MaxDuoDenseBiasRows"/> is refused
-    /// before anything is allocated. All inputs are validated before the first device allocation. The body is F32. The bias and index
-    /// tensors are written through host pointers, as <c>BuildModulationIndex</c> does, so they must live where the host can write.</remarks>
+    /// <param name="chunkRowsOverride">Test seam: forces the chunk width instead of the VRAM policy. A width below the sequence takes the
+    /// tiled route, so the tiled bias can be checked against the dense bias on a small layout.</param>
+    /// <remarks>A sequence that fits the chunk width and <see cref="MaxDuoDenseBiasRows"/> takes one dense [S, S] bias through the dense
+    /// attention path. Any longer sequence takes the chunked route with a bias built per query tile of at most <see cref="DuoBiasTileRows"/>
+    /// rows, so no S x S matrix is built. All inputs are validated before the first device allocation. The body is F32. The bias and index
+    /// tensors are written through host pointers, as <c>BuildModulationIndex</c> does, so they must live where the host can write. The tiled
+    /// bias is applied through the chunked path's score mask, which CPU SDPA reads; the GPU backends' mask support is not verified here.</remarks>
     internal (Tensor Video, Tensor? Audio) ForwardDuo(IBackend backend, DuoLayout layout, DuoAttentionMode mode,
         IReadOnlyList<DuoGroup> refinerGroups, Tensor textStates, Tensor videoRows, Tensor? audioRows,
-        float[] times, bool roleEmbeddingEnabled = false)
+        float[] times, bool roleEmbeddingEnabled = false, int? chunkRowsOverride = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
@@ -73,21 +79,28 @@ public sealed unsafe partial class MiniMaxH3Transformer
         }
         ValidateDuoRefinerGroups(refinerGroups, (int)textStates.Shape[0]);
         ValidateDuoTimeIds(layout, times.Length);
-        ValidateDuoDenseBiasLength(layout.Length);
 
         int hidden = _config.HiddenSize;
         int seq = layout.Length;
         int headDim = _config.AttentionHeadDim;
         int textCount = layout.TextRows.Length, videoCount = layout.VideoRows.Length, audioCount = layout.AudioRows.Length;
 
-        // Route and VRAM are resolved before the dense bias exists, so a refused geometry costs no host or device allocation.
+        // Route first. A sequence that fits the chunk width and the dense cap takes one dense [S, S] bias. Anything longer takes
+        // the chunked route with a per-tile bias, so no S x S matrix is built. Every allocation below is a `using`, so a throw
+        // disposes whatever was already built.
         (long freeBytes, _) = backend.GetVramInfo();
-        int chunkRows = MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
-        CheckBiasedRoute(seq, chunkRows, freeBytes, sparse: false, chunkForced: MiniMaxH3ChunkPolicy.ChunkRowsForced());
-
-        // Every allocation below is a `using` declaration, so a throw disposes whatever was already built.
-        float[] biasValues = DuoAttentionBias.Build(DuoMask.Build(layout.Groups, layout.Groups, mode), seq, seq);
-        using Tensor bias = HostTensor(new TensorShape(seq, seq), biasValues);
+        int chunkRows = chunkRowsOverride ?? MiniMaxH3ChunkPolicy.ResolveChunkRows(seq, _config, BodyDType, freeBytes, backend);
+        bool tiled = seq > chunkRows || seq > MaxDuoDenseBiasRows;
+        if (tiled)
+        {
+            chunkRows = Math.Min(chunkRows, DuoBiasTileRows);
+        }
+        IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(layout.Groups, layout.Groups, mode);
+        DuoAttentionBias.ValidateRows(rects, seq, seq);
+        using Tensor? bias = tiled ? null : HostTensor(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
+        Func<int, int, Tensor>? biasTile = tiled
+            ? (r0, rows) => HostTensor(new TensorShape(rows, seq), DuoAttentionBias.BuildRows(rects, seq, r0, rows, seq))
+            : null;
         using Tensor tEmb = BuildTimeEmbedding(backend, times);
         using Tensor modIndex = BuildDuoModulationIndex(layout);
         (float[] cosValues, float[] sinValues) = DuoRope.Tables(layout.Positions, headDim);
@@ -100,7 +113,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         {
             for (int i = 0; i < _config.NumLayers; i++)
             {
-                ForwardBlock(backend, ref stream, tEmb, modIndex, cos, sin, i, chunkRows, null, bias);
+                ForwardBlock(backend, ref stream, tEmb, modIndex, cos, sin, i, chunkRows, null, bias, biasTile);
             }
 
             // norm_out: the shift/scale table has one row per timestep; every row is addressed by its own time index.
@@ -164,17 +177,6 @@ public sealed unsafe partial class MiniMaxH3Transformer
             {
                 throw new ArgumentOutOfRangeException(nameof(layout), time, $"Row {r} names timestep {time}; only {timestepCount} were given.");
             }
-        }
-    }
-
-    /// <summary>Refuses a dense bias longer than <see cref="MaxDuoDenseBiasRows"/> rows, which the tiled bias (PR 2g) will lift.</summary>
-    internal static void ValidateDuoDenseBiasLength(int seq)
-    {
-        if (seq > MaxDuoDenseBiasRows)
-        {
-            throw new NotSupportedException(
-                $"A Duo layout of {seq} rows needs a dense [S, S] attention bias, and the dense bias is capped at {MaxDuoDenseBiasRows} rows "
-                + "until the tiled bias lands. Shorten the clip or the reference.");
         }
     }
 

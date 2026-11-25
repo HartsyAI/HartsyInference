@@ -168,21 +168,43 @@ public sealed class MiniMaxH3DuoForwardTests
     }
 
     [Fact]
-    public void DenseBiasLengthCapRefusesRowsBeyondTheLimit()
+    public void TiledBiasMatchesTheDenseBiasCausal()
     {
-        MiniMaxH3Transformer.ValidateDuoDenseBiasLength(MiniMaxH3Transformer.MaxDuoDenseBiasRows);
-        NotSupportedException error = Assert.Throws<NotSupportedException>(() =>
-            MiniMaxH3Transformer.ValidateDuoDenseBiasLength(MiniMaxH3Transformer.MaxDuoDenseBiasRows + 1));
-        Assert.Contains("dense", error.Message);
+        // The dense route (one [S, S] bias) and the tiled route (a [tile, S] bias per query tile) must agree on the same layout.
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        float[] video = Values(1, VideoRowCount * VideoIn);
+
+        float[] dense = Run(transformer, backend, layout, DuoAttentionMode.Causal, video);
+        float[] tiled = Run(transformer, backend, layout, DuoAttentionMode.Causal, video, chunkRows: 32);
+
+        Assert.True(MaxDiff(dense, tiled, 0, VideoRowCount) <= 1e-5f, $"tiled differs from dense by {MaxDiff(dense, tiled, 0, VideoRowCount)}.");
+    }
+
+    [Fact]
+    public void TiledBiasHandlesAPartialLastTileAndBidirectionalMode()
+    {
+        // 40 does not divide the 128-row layout, so the last tile is 8 rows; the bidirectional mask has no zero tiles.
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
+        float[] video = Values(1, VideoRowCount * VideoIn);
+
+        float[] dense = Run(transformer, backend, layout, DuoAttentionMode.Bidirectional, video);
+        float[] tiled = Run(transformer, backend, layout, DuoAttentionMode.Bidirectional, video, chunkRows: 40);
+
+        Assert.True(MaxDiff(dense, tiled, 0, VideoRowCount) <= 1e-5f, $"tiled differs from dense by {MaxDiff(dense, tiled, 0, VideoRowCount)}.");
     }
 
     private static float[] Run(MiniMaxH3Transformer transformer, IBackend backend, DuoLayout layout, DuoAttentionMode mode,
-        float[] videoValues)
+        float[] videoValues, int? chunkRows = null)
     {
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), videoValues);
         using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
-        (Tensor v, Tensor? a) = transformer.ForwardDuo(backend, layout, mode, RefinerGroups(), text, video, audio, Times());
+        (Tensor v, Tensor? a) = transformer.ForwardDuo(backend, layout, mode, RefinerGroups(), text, video, audio, Times(),
+            chunkRowsOverride: chunkRows);
         float[] result = v.AsSpan<float>().ToArray();
         v.Dispose();
         a?.Dispose();

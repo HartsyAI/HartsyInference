@@ -638,10 +638,10 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
 
     private void ForwardBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
         Tensor cos, Tensor sin, int index, int chunkRows, IVideoSparseAttentionSession? sparseAttention = null,
-        Tensor? attentionBias = null)
+        Tensor? attentionBias = null, Func<int, int, Tensor>? biasTile = null)
     {
         ForwardNamedBlock(backend, ref h, tEmb, modIndex, cos, sin, $"blocks.{index}", chunkRows,
-            sparseAttention, attentionBias);
+            sparseAttention, attentionBias, biasTile);
     }
 
     /// <summary>Shared H3 block implementation used by both the main 50-block trunk and each Fun control block.
@@ -649,7 +649,8 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
     /// chunked or sparse attention with a bias.</summary>
     private void ForwardNamedBlock(IBackend backend, ref Tensor h, Tensor tEmb, Tensor modIndex,
         Tensor cos, Tensor sin, string p, int chunkRows,
-        IVideoSparseAttentionSession? sparseAttention = null, Tensor? attentionBias = null)
+        IVideoSparseAttentionSession? sparseAttention = null, Tensor? attentionBias = null,
+        Func<int, int, Tensor>? biasTile = null)
     {
         int seq = (int)h.Shape[0];
         Tensor[] mod = Adaln(backend, tEmb, $"{p}.adaln_proj", expand: 6, modalities: 3);
@@ -661,7 +662,7 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
             normed.Dispose();
             Tensor attn = sparseAttention is not null
                 ? AttentionSparse(backend, modulated, $"{p}.attn", cos, sin, sparseAttention)
-                : seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows)
+                : seq > chunkRows ? AttentionChunked(backend, modulated, $"{p}.attn", cos, sin, chunkRows, biasTile)
                     : Attention(backend, modulated, $"{p}.attn", cos, sin, attentionBias);
             modulated.Dispose();
             Tensor gatedAttn = Gate(backend, h, attn, mod[2], modIndex);
@@ -1008,7 +1009,8 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
     /// <see cref="ForwardBlock"/>'s dispatch, which sends anything under <c>chunkRows</c> to the exact original
     /// <see cref="Attention"/> path so small/legacy-path calls stay bit-identical (chunked GEMMs pick different
     /// cuBLASLt algorithms and are not bitwise equal to a single full-width GEMM).</summary>
-    private Tensor AttentionChunked(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin, int chunkRows)
+    private Tensor AttentionChunked(IBackend backend, Tensor x, string prefix, Tensor? cos, Tensor? sin, int chunkRows,
+        Func<int, int, Tensor>? biasTile = null)
     {
         int seq = (int)x.Shape[0];
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
@@ -1081,7 +1083,9 @@ public sealed unsafe partial class MiniMaxH3Transformer : IDisposable
                         backend.Rotary(RotaryCall.HeadMajor(qc, cosChunk, sinChunk, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rot2));
                     }
                     using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
-                    backend.ScaledDotProductAttention(attnChunk, qc, kFull, vFull, null, 1f / MathF.Sqrt(hd));
+                    // A tiled Duo bias supplies this query tile's [c, seq] rows; the plain path passes no mask.
+                    using Tensor? tileMask = biasTile?.Invoke(r0, c);
+                    backend.ScaledDotProductAttention(attnChunk, qc, kFull, vFull, tileMask, 1f / MathF.Sqrt(hd));
                     using Tensor merged = new Tensor(new TensorShape(c, inner), DType.F32);
                     backend.Permute0213(merged, attnChunk, heads, c, hd);
                     using Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
