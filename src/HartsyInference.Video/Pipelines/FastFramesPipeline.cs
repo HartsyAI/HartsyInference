@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -176,6 +178,18 @@ public sealed class FastFramesPipeline
         using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
+        // The block placement reserves the frame cache for this clip: the cache is device-resident until the clip ends, so the planner
+        // must keep its size free before it decides how many blocks stay resident. On a CPU backend the scope is resident-only.
+        long cacheBytes = FrameKvCache.EstimateBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth,
+            _transformer.Config.InnerDim, DType.F16);
+        using BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = _backend,
+            Denoiser = _transformer,
+            ModelName = _config.Name,
+            HeadroomBytes = StreamingHeadroomOverride ?? cacheBytes + DefaultStreamingHeadroomBytes,
+            Mode = StreamingMode,
+        });
         for (int frame = 0; frame < latentFrames; frame++)
         {
             cancel.ThrowIfCancellationRequested();
@@ -192,9 +206,21 @@ public sealed class FastFramesPipeline
                 CleanPass(promptEmbeds, latent, frame, cache);
             else
                 Refine(latent, frame, cache, conditioning);
+            streaming.EndStep();
             progress?.Invoke(frame + 1, latentFrames);
         }
     }
+
+    /// <summary>Bytes the block placement keeps free beyond the clip's frame cache: activations, the refiner and the decoder. When
+    /// null, <see cref="DefaultStreamingHeadroomBytes"/> is used.</summary>
+    public long? StreamingHeadroomOverride { get; set; }
+
+    /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
+    /// (for tests); ForceOff keeps every block resident.</summary>
+    public LowVramMode? StreamingMode { get; set; }
+
+    /// <summary>The activation, refiner and decoder allowance on top of the frame cache when the placement is planned.</summary>
+    public const long DefaultStreamingHeadroomBytes = 1L << 30;
 
     private IEnumerable<VideoFrame> GenerateCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)
