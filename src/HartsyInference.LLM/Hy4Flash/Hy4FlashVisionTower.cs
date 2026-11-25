@@ -21,7 +21,7 @@ public sealed class Hy4FlashVisionTower : IDisposable
     /// <param name="backend">Provides linear, norm, attention and activation ops.</param>
     /// <param name="config">The model config; supplies the vision shape.</param>
     /// <param name="source">Reads the <c>vit.*</c> tensors.</param>
-    public Hy4FlashVisionTower(IBackend backend, Hy4FlashVisionConfig config, IHy4FlashWeightSource source)
+    public Hy4FlashVisionTower(IBackend backend, Hy4FlashVisionConfig config, IModelWeightSource source)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -189,12 +189,7 @@ public sealed class Hy4FlashVisionTower : IDisposable
         return view;
     }
 
-    private Tensor F32(IHy4FlashWeightSource source, string name)
-    {
-        Tensor t = source.Read(name);
-        if (t.DType == DType.F32) return Own(t);
-        using (t) return Own(ProjectionOps.EnsureF32(t));
-    }
+    private Tensor F32(IModelWeightSource source, string name) => Own(WeightReads.ReadF32(source, name));
 
     private Tensor Own(Tensor t)
     {

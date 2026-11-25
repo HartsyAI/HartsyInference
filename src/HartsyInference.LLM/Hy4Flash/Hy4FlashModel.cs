@@ -28,7 +28,7 @@ public sealed class Hy4FlashModel : IDisposable
 
     /// <param name="maxPositions">Positions the rotary tables and caches cover.</param>
     /// <param name="engramNormEps">Epsilon of every Engram norm.</param>
-    public Hy4FlashModel(IBackend backend, Hy4FlashConfig config, IHy4FlashWeightSource source, int maxPositions, float engramNormEps = 1.1920929e-7f)
+    public Hy4FlashModel(IBackend backend, Hy4FlashConfig config, IModelWeightSource source, int maxPositions, float engramNormEps = 1.1920929e-7f)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -221,7 +221,7 @@ public sealed class Hy4FlashModel : IDisposable
         }
     }
 
-    private Hy4FlashEngramLayer BuildEngram(int layerIndex, IHy4FlashWeightSource source, float eps)
+    private Hy4FlashEngramLayer BuildEngram(int layerIndex, IModelWeightSource source, float eps)
     {
         string e = $"{Hy4FlashWeightMap.Layer(layerIndex)}.engram_layer.";
         int hc = _cfg.HcMult;
@@ -242,12 +242,7 @@ public sealed class Hy4FlashModel : IDisposable
         return new Hy4FlashEngramLayer(_backend, _cfg, layerIndex + 1, weights, new Hy4FlashEngramRows(Own(source.Read(e + "multi_head_embedding.embedding.weight"))), lookup, eps);
     }
 
-    private Tensor F32(IHy4FlashWeightSource source, string name)
-    {
-        Tensor t = source.Read(name);
-        if (t.DType == DType.F32) return Own(t);
-        using (t) return Own(ProjectionOps.EnsureF32(t));
-    }
+    private Tensor F32(IModelWeightSource source, string name) => Own(WeightReads.ReadF32(source, name));
 
     private Tensor Own(Tensor t)
     {
