@@ -7,6 +7,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Transformer;
@@ -110,9 +111,15 @@ public sealed class MaxwellRealWeightsGpuTests(ITestOutputHelper output)
         TextResult result = await engine.Text.GenerateAsync(spec, request);
         total.Stop();
         string smi = QueryNvidiaSmi();
+        // The expert cache TextService sized from the free VRAM left after the dense preload (budget in bytes, then what it held).
+        TextDeviceSlot slot = ((TextService)engine.Text).SlotFor(device) ?? throw new InvalidOperationException($"No slot ran on '{device}'.");
+        string offload = slot.ExpertOffload is { } cache
+            ? $"expert cache budget {cache.CacheBase.Stats.BudgetBytes} bytes ({cache.CacheBase.Stats.BudgetBytes / (double)(1L << 30):F2} GiB); {TextService.DescribeOffload(cache)}"
+            : "no expert offload attached";
 
         StringBuilder report = new();
         report.AppendLine($"Maxwell-V1.0-Flash FP8 through TextService on {device}");
+        report.AppendLine(offload);
         report.AppendLine($"total with load {total.Elapsed.TotalSeconds:F1} s; prompt {result.PromptTokens} tokens, prefill {result.PrefillMilliseconds / 1000:F1} s");
         report.AppendLine($"generated {result.CompletionTokens} tokens (stop {result.Stop}), decode {result.DecodeMilliseconds / 1000:F1} s, "
             + $"{(result.CompletionTokens > 1 ? (result.CompletionTokens - 1) / (result.DecodeMilliseconds / 1000) : 0):F2} tok/s after the first");
