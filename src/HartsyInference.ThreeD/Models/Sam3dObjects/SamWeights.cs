@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 
-/// <summary>Weight lookups shared by the SAM 3D modules: every tensor must be present, F32 and of the expected shape.</summary>
+/// <summary>Weight lookups shared by the SAM 3D modules: every tensor must be present, of the expected dtype and of the expected shape. Name every dimension: an empty shape checks none.</summary>
 internal static class SamWeights
 {
     private const string Family = "SAM 3D";
