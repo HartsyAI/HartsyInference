@@ -504,7 +504,7 @@ _transformer.InvalidateStepGraph(Backend);
                 if (nextStep < steps)
                 {
                     Tensor freshNoise = SeedGenerator.CreateNoise(noiseShape, seed + nextStep);
-                    Tensor freshPackedNoise = Flux2LatentOps.Pack(freshNoise);
+                    Tensor freshPackedNoise = Flux2LatentOps.PackHost(freshNoise);
                     freshNoise.Dispose();
                     noisedSource = new Tensor(packedShape, DType.F32);
                     scheduler.AddNoise(noisedSource, packedSourceLatent, freshPackedNoise, nextStep);
@@ -576,18 +576,11 @@ _transformer.InvalidateStepGraph(Backend);
             _ditResident = true;
         }
 
-        // ── 5. Unpack [B, S, 128] → [B, 128, patH, patW] ──────────────
-        Tensor unpackedPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
+        // ── 5–7. BN un-normalize, unpack and 2×2 unpatchify: [B, S, 128] → [B, 32, latH, latW] ──
+        // latent = latent * sqrt(running_var + eps) + running_mean, per channel, on the tokens
+        Tensor latent32 = Flux2LatentOps.FromPackedTokens(Backend, packedLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+            _config.VaeLatentChannels, _config.PatchSize);
         packedLatent.Dispose();
-
-        // ── 6. BN un-normalize on the 128-channel patchified latent ──
-        // latent = latent * sqrt(running_var + eps) + running_mean
-        Tensor unBn = Flux2LatentOps.BnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
-        unpackedPatched.Dispose();
-
-        // ── 7. 2×2 unpatchify: [B, 128, patH, patW] → [B, 32, latH, latW] ──
-        Tensor latent32 = Flux2LatentOps.Unpatchify(unBn, _config.VaeLatentChannels, _config.PatchSize);
-        unBn.Dispose();
 
         // ── 8. VAE decode: [B, 32, latH, latW] → [B, 3, imgH, imgW] ──
         // Tiled decode: caps im2col workspace at ~2.4 GB per tile.
@@ -630,12 +623,8 @@ _transformer.InvalidateStepGraph(Backend);
     /// VAE layout expected by the shared preview decoder.</summary>
     private Tensor CreatePreviewLatent(Tensor packed, int patchHeight, int patchWidth)
     {
-        Tensor unpackedPatched = Flux2LatentOps.Unpack(packed, patchHeight, patchWidth);
-        Tensor unnormalized = Flux2LatentOps.BnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
-        unpackedPatched.Dispose();
-        Tensor preview = Flux2LatentOps.Unpatchify(unnormalized, _config.VaeLatentChannels, _config.PatchSize);
-        unnormalized.Dispose();
-        return preview;
+        return Flux2LatentOps.FromPackedTokens(Backend, packed, patchHeight, patchWidth, _bnMean, _bnVar, _bnEps,
+            _config.VaeLatentChannels, _config.PatchSize);
     }
 
     /// <summary>Builds the initial packed latent for Flux.2 denoising. T2I: fresh noise scaled by initSigma. Img2img: source goes VAE-encode → 2×2 patchify → BN-normalize → pack → AddNoise at sigma[startStep].
@@ -650,7 +639,7 @@ _transformer.InvalidateStepGraph(Backend);
         bool keepSourceLatent)
     {
         Tensor unpackedNoise = TakeOrCreateNoise(request, noiseShape, seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(unpackedNoise);
+        Tensor packedNoise = Flux2LatentOps.PackHost(unpackedNoise);
         unpackedNoise.Dispose();
 
         if (request is ImageToImageRequest img2img)
@@ -661,17 +650,10 @@ _transformer.InvalidateStepGraph(Backend);
             vaeEncSw.Stop();
             Logs.Info($"VAE encode done in {vaeEncSw.ElapsedMilliseconds}ms");
 
-            // 2×2 patchify: [1, 32, latH, latW] → [1, 128, patH, patW]
-            Tensor sourcePatchified = Flux2LatentOps.Patchify(sourceLatent32, _config.InChannels, _config.PatchSize);
+            // 2×2 patchify, BN normalize ((latent - running_mean) / sqrt(running_var + eps)) and pack:
+            // [1, 32, latH, latW] → [1, S, 128]
+            Tensor sourcePacked = Flux2LatentOps.ToPackedTokensHost(sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
             sourceLatent32.Dispose();
-
-            // BN normalize: (latent - running_mean) / sqrt(running_var + eps)
-            Tensor sourceBn = Flux2LatentOps.BnNormalize(sourcePatchified, _bnMean, _bnVar, _bnEps);
-            sourcePatchified.Dispose();
-
-            // Pack: [1, 128, patH, patW] → [1, S, 128]
-            Tensor sourcePacked = Flux2LatentOps.Pack(sourceBn);
-            sourceBn.Dispose();
 
             // AddNoise at sigma[startStep]: noisy = (1 - sigma) * source + sigma * noise
             Tensor result = new Tensor(packedShape, DType.F32);
