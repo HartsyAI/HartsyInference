@@ -292,7 +292,16 @@ internal static class VideoRecipeUtils
     }
 
     /// <summary>Batched umT5 encode for the Wan family: every context in one encode, sliced back apart, pad rows zeroed, then the encoder's weights freed. The slice/zero passes are host loops, so the returned embeddings are host-materialized — that IS the cross-device boundary when <paramref name="backend"/> is a separate text-encoder backend, and must not be optimized away.</summary>
-    internal static Tensor[] EncodeWanPromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, params int[][] tokenSets)
+    internal static Tensor[] EncodeWanPromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, params int[][] tokenSets) =>
+        EncodeUmT5PromptBatch(backend, umt5, textDim, WanVideoRecipe.TokenLength, zeroPaddedRows: true, tokenSets);
+
+    /// <summary>The umT5 batch encode with the padded positions kept as the encoder produced them (LongCat attends them: its DiT zeroes and keeps
+    /// the rows itself). Each context is <paramref name="tokenLength"/> rows; the attention masks are passed to the encoder as usual.</summary>
+    internal static Tensor[] EncodeUmT5PromptBatchKeepingPadding(IBackend backend, T5TextEncoder umt5, int textDim, int tokenLength, params int[][] tokenSets) =>
+        EncodeUmT5PromptBatch(backend, umt5, textDim, tokenLength, zeroPaddedRows: false, tokenSets);
+
+    private static Tensor[] EncodeUmT5PromptBatch(IBackend backend, T5TextEncoder umt5, int textDim, int tokenLength, bool zeroPaddedRows,
+        int[][] tokenSets)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(umt5);
@@ -308,16 +317,19 @@ internal static class VideoRecipeUtils
         {
             for (int i = 0; i < tokenSets.Length; i++)
             {
-                embeds[i] = CfgHelper.SliceBatchElement(batch, i, WanVideoRecipe.TokenLength, textDim);
+                embeds[i] = CfgHelper.SliceBatchElement(batch, i, tokenLength, textDim);
             }
         }
         finally
         {
             batch.Dispose();
         }
-        for (int i = 0; i < tokenSets.Length; i++)
+        if (zeroPaddedRows)
         {
-            ZeroPaddedRows(embeds[i], tokenSets[i], textDim);
+            for (int i = 0; i < tokenSets.Length; i++)
+            {
+                ZeroPaddedRows(embeds[i], tokenSets[i], textDim);
+            }
         }
         backend.Sync();
         backend.FreeWeights(umt5.EnumerateWeights());
