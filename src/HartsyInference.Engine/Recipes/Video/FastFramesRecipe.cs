@@ -106,8 +106,9 @@ public sealed class FastFramesRecipe : IVideoRecipe
         try
         {
             // F32 on CPU, where the kernels do not cast a half-precision bias; F16 on a GPU backend.
-            DType pickleDType = context.Backend is CpuBackend ? DType.F32 : DType.F16;
-            Dictionary<string, Tensor> generator = ReadGenerator(context.CheckpointPath, pickleDType, loaders);
+            bool castForCpu = context.Backend is CpuBackend;
+            DType pickleDType = castForCpu ? DType.F32 : DType.F16;
+            Dictionary<string, Tensor> generator = ReadGenerator(context.CheckpointPath, pickleDType, castForCpu, loaders);
             WanVideoCheckpointConverter.ConvertedWeights converted = WanVideoCheckpointConverter.Convert(generator);
             if (converted.Transformer.Count == 0)
             {
@@ -171,18 +172,19 @@ public sealed class FastFramesRecipe : IVideoRecipe
     /// <summary>Reads the generator as the Wan converter's input: original Wan key names, no wrapper prefix. A PyTorch pickle
     /// (the Causal Forcing++ S file) is a training checkpoint whose <c>generator_ema</c> dict holds the generator; only that dict
     /// is read, and the FSDP wrapper prefix is stripped. The <c>generator</c> and <c>critic</c> dicts are never touched. A
-    /// safetensors file (L) is passed through as the file stores it on a GPU; on CPU, whose kernels read F32, each tensor is
-    /// cast once to <paramref name="dtype"/> and the copies are freed with the loaders.</summary>
-    private static Dictionary<string, Tensor> ReadGenerator(string path, DType dtype, List<IDisposable> loaders)
+    /// safetensors file (L) is passed through as the file stores it, unless <paramref name="castForCpu"/> is set: the CPU kernels
+    /// read F32, so each tensor is then cast once to <paramref name="dtype"/> and the copies are freed with the loaders. A CPU
+    /// run of L would cast about 28.6 GB of BF16 to about 57 GB of F32 in host RAM, so CPU is not a supported path for L.</summary>
+    internal static Dictionary<string, Tensor> ReadGenerator(string path, DType dtype, bool castForCpu, List<IDisposable> loaders)
     {
         if (!path.EndsWith(".pt", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".pth", StringComparison.OrdinalIgnoreCase))
         {
             CheckpointSource source = CheckpointSource.Open(path);
             loaders.Add(source);
             Dictionary<string, Tensor> passthrough = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
-            if (dtype == DType.F32)
+            if (castForCpu)
             {
-                CastOnCpu(passthrough, dtype, loaders);
+                CastCopies(passthrough, dtype, loaders);
             }
             return passthrough;
         }
@@ -196,7 +198,7 @@ public sealed class FastFramesRecipe : IVideoRecipe
 
     /// <summary>Replaces each tensor not already in <paramref name="dtype"/> with an owned copy in that dtype, and registers the
     /// copies so that they are freed with the loaders.</summary>
-    private static void CastOnCpu(Dictionary<string, Tensor> weights, DType dtype, List<IDisposable> loaders)
+    private static void CastCopies(Dictionary<string, Tensor> weights, DType dtype, List<IDisposable> loaders)
     {
         List<Tensor> copies = new List<Tensor>();
         try
