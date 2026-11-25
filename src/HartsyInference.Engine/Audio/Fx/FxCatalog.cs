@@ -2,6 +2,7 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Demucs;
 using HartsyInference.Audio.Models.ResembleEnhance;
 using HartsyInference.Audio.Models.Separation;
+using HartsyInference.Audio.Models.VoiceIsolator;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -30,6 +31,36 @@ internal static class FxCatalog
 
     /// <summary>sha256 of <see cref="KimVocal2File"/>, the repo's LFS oid.</summary>
     internal const string KimVocal2Sha256 = "ce74ef3b6a6024ce44211a07be9cf8bc6d87728cc852a68ab34eb8e58cde9c8b";
+
+    /// <summary>Catalog id of the offline Inworld Voice Isolator (<c>-m voice-isolator</c>).</summary>
+    internal const string VoiceIsolatorId = "voice-isolator";
+
+    /// <summary>Catalog id of the causal, streaming Inworld Voice Isolator (<c>-m voice-isolator-realtime</c>).</summary>
+    internal const string VoiceIsolatorRealtimeId = "voice-isolator-realtime";
+
+    /// <summary>Look-ahead positions the realtime checkpoint was trained at, in frames of 10 ms.</summary>
+    internal static readonly int[] VoiceIsolatorRealtimeLookaheads = [0, 2, 4];
+
+    /// <summary>Sample rate the voice isolator runs at.</summary>
+    internal const int VoiceIsolatorSampleRate = 48_000;
+
+    /// <summary>The weights repo of both voice isolators (Apache-2.0).</summary>
+    internal const string VoiceIsolatorRepo = "inworld/voice-isolator";
+
+    /// <summary>Repo revision the file sizes and hashes below were read from.</summary>
+    internal const string VoiceIsolatorRevision = "9b0285b3fe8403aa8e2f1dbb2165a80a4294c970";
+
+    /// <summary>Offline checkpoint: 256,260,128 bytes, 64.0M parameters.</summary>
+    internal const string VoiceIsolatorFile = "denoiser.safetensors";
+
+    /// <summary>sha256 of <see cref="VoiceIsolatorFile"/>.</summary>
+    internal const string VoiceIsolatorSha256 = "647335a6aeb4dc706b895532c209d51e0e84a4849d17b339f00d4392a050ae53";
+
+    /// <summary>Realtime checkpoint: 232,780,800 bytes, 58.2M parameters.</summary>
+    internal const string VoiceIsolatorRealtimeFile = "denoiser_realtime.safetensors";
+
+    /// <summary>sha256 of <see cref="VoiceIsolatorRealtimeFile"/>.</summary>
+    internal const string VoiceIsolatorRealtimeSha256 = "76598f05523c0669e76562a8b2f31c9d395fca316e80c907ee11775e7497ae0f";
 
     /// <summary>The Resemble-Enhance weights repo.</summary>
     internal const string EnhanceRepo = "ResembleAI/resemble-enhance";
@@ -145,6 +176,51 @@ internal static class FxCatalog
             }
             throw;
         }
+    }
+
+    /// <summary>Resolves a voice isolator checkpoint: an explicit local path, else the file already in the fx weights folder, else the
+    /// repo copy (downloaded once and checked against its pinned sha256).</summary>
+    internal static async Task<string> EnsureVoiceIsolatorPathAsync(bool realtime, string? localPath, CancellationToken cancel)
+    {
+        if (!string.IsNullOrEmpty(localPath) && File.Exists(localPath))
+        {
+            return localPath;
+        }
+        string file = realtime ? VoiceIsolatorRealtimeFile : VoiceIsolatorFile;
+        string sha = realtime ? VoiceIsolatorRealtimeSha256 : VoiceIsolatorSha256;
+        string placed = Path.Combine(AudioModelRoot.WeightsDirectory("fx", VoiceIsolatorId), file);
+        if (File.Exists(placed))
+        {
+            return placed;
+        }
+        string? cached = AudioModelCache.TryGetLocal(VoiceIsolatorRepo, file, "fx");
+        if (cached is not null)
+        {
+            return cached;
+        }
+        long megabytes = realtime ? 233 : 256;
+        Logs.Info($"[Audio][Voice-Isolator] Downloading {file} from {VoiceIsolatorRepo} ({megabytes} MB, one-time)...");
+        string path = await AudioModelCache.GetAsync(VoiceIsolatorRepo, file, "fx", VoiceIsolatorRevision, ct: cancel).ConfigureAwait(false);
+        AudioModelCache.VerifySha256(path, sha);
+        return path;
+    }
+
+    /// <summary>Reads a voice isolator checkpoint; its architecture comes from the file's own metadata.</summary>
+    internal static VoiceIsolatorRunner LoadVoiceIsolator(string path, bool realtime)
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Voice isolator weights not found: '{path}'.", path);
+        }
+        VoiceIsolatorNetwork network = VoiceIsolatorNetwork.Load(path);
+        if (network.Config.Causal != realtime)
+        {
+            network.Dispose();
+            throw new ArgumentException($"'{Path.GetFileName(path)}' is the {(network.Config.Causal ? "realtime" : "offline")} checkpoint; the requested model is the {(realtime ? "realtime" : "offline")} one.", nameof(path));
+        }
+        Logs.Info($"[Audio][Voice-Isolator] Loaded '{Path.GetFileName(path)}' ({(network.Config.Causal ? "realtime" : "offline")}, "
+            + $"{network.BandCount} bands, width {network.Config.Width}, F32).");
+        return new VoiceIsolatorRunner(network);
     }
 
     /// <summary>Path of the DeepSpeed generator checkpoint inside the HF repo — the repo ships no model.safetensors / pytorch_model.bin, only the raw <c>enhancer_stage2</c> run directory.</summary>

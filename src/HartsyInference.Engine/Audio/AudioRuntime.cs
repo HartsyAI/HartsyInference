@@ -59,6 +59,9 @@ internal sealed class AudioRuntime
     /// <summary>Resident MDX-Net vocal separators (Kim_Vocal_2), keyed by weights path or model id.</summary>
     internal AudioRunnerCache<MdxVocalRunner> Mdx { get; }
 
+    /// <summary>Resident Inworld Voice Isolators, keyed by weights path or model id.</summary>
+    internal AudioRunnerCache<VoiceIsolatorRunner> Isolator { get; }
+
     /// <summary>Resident Resemble-Enhance pipelines.</summary>
     internal AudioRunnerCache<EnhanceRunner> Enhance { get; }
 
@@ -71,7 +74,8 @@ internal sealed class AudioRuntime
         Demucs = new AudioRunnerCache<DemucsRunner>("fx:demucs");
         Enhance = new AudioRunnerCache<EnhanceRunner>("fx:enhance");
         Mdx = new AudioRunnerCache<MdxVocalRunner>("fx:mdx");
-        _caches = [Tts, Stt, Music, Vc, Demucs, Enhance, Mdx];
+        Isolator = new AudioRunnerCache<VoiceIsolatorRunner>("fx:isolator");
+        _caches = [Tts, Stt, Music, Vc, Demucs, Enhance, Mdx, Isolator];
     }
 
     /// <summary>Drops every resident audio pipeline of THIS engine, pinned ones included, and revokes every open lease. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one — a pin protects a runner from memory pressure, not from losing its device. Waits up to <paramref name="waitSeconds"/> in total for an in-flight generation and for lease calls in flight, so the release does not dispose a pipeline out from under either; on timeout it proceeds anyway — teardown must never hang.</summary>
