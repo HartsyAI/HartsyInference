@@ -21,7 +21,8 @@ public sealed record LongCatAvatarRun(
     int Steps, LongCatAvatarSchedule.Kind Kind, float Shift,
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
-    int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default);
+    int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default,
+    AdjunctGate? LoraGate = null);
 
 /// <summary>The sigmas (shifted, with the terminal zero), the timesteps (sigma·1000), and the final latents.</summary>
 public sealed record LongCatAvatarResult(float[] Latents, float[] Sigmas, float[] Timesteps);
@@ -51,7 +52,12 @@ public sealed class LongCatAvatarPipeline
     public LongCatAvatarResult Denoise(LongCatAvatarRun run)
     {
         ArgumentNullException.ThrowIfNull(run);
+        // The distilled schedule is valid only with its LoRA live: on bare weights the 8-step path is not the distilled model.
+        if (run.Kind == LongCatAvatarSchedule.Kind.Distill8 && run.LoraGate is null)
+            throw new InvalidOperationException("The 8-step distilled schedule needs its DMD LoRA gate; refusing to run the bare base at 8 steps.");
         Validate(run);
+        // The gate stays on for every step of this run; the stacked LoRA's strength (0.8) is its own, so the gate scale is 1.
+        using IDisposable? loraScope = run.LoraGate?.Enable(1f);
         int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
         int cond = run.Mode == LongCatAvatarMode.At2v ? 0 : run.NumCondLatents;
         int noisy = frames - cond;
