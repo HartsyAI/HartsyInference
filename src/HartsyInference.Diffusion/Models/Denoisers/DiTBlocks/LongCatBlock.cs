@@ -21,11 +21,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
     private Tensor? _w1, _w2, _w3;
     private AttentionLayer? _selfAttention, _crossAttention;
 
-    /// <summary>Rows per FFN tile. The SwiGLU intermediates are [rows, FFN] F32 each; untiled, a 37,440-token clip holds four of 1.57 GB apiece.
-    /// Tiling bounds them to <c>tile × FFN</c> while the output stays whole.</summary>
-    internal const int DefaultFfnTileRows = 4096;
+    /// <summary>Rows per tile for the FFN (the SwiGLU intermediates, [rows, FFN] F32 each) and for the self-attention QKV projection ([rows, 3·dim]).
+    /// Untiled at 37,440 tokens these are 1.57 GB and 1.84 GB apiece; tiling bounds them to one tile. One constant for both, so the headroom formula
+    /// reads the same value the blocks run with.</summary>
+    public const int DefaultTileRows = 4096;
 
-    private int _ffnTileRows = DefaultFfnTileRows;
+    private int _ffnTileRows = DefaultTileRows;
 
     /// <summary>Sets the FFN tile height. A value at or above the token count runs the FFN untiled; tests use small tiles to exercise the seams.</summary>
     internal void SetFfnTileRows(int rows)
@@ -180,10 +181,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
-    /// <summary>Rows per self-attention projection tile. The fused QKV output is [rows, 3·dim] F32; untiled at 37,440 tokens it is 1.84 GB.</summary>
-    internal const int DefaultQkvTileRows = 4096;
-
-    private int _qkvTileRows = DefaultQkvTileRows;
+    private int _qkvTileRows = DefaultTileRows;
 
     /// <summary>Sets the QKV projection tile height. A value at or above the token count projects untiled; tests use small tiles to exercise the seams.</summary>
     internal void SetQkvTileRows(int rows)
