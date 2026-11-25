@@ -928,6 +928,8 @@ public sealed partial class TextService : ITextService, IDisposable
         bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
         if (ernie)
             RequireRunnableErnie5Placement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
+        if (HfTextDirectoryLoader.IsGlm5Next(checkpoint))
+            RequireRunnableGlm5NextPlacement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -947,6 +949,11 @@ public sealed partial class TextService : ITextService, IDisposable
         if (ernie)
         {
             LoadErnie5Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
+        if (HfTextDirectoryLoader.IsGlm5Next(checkpoint))
+        {
+            LoadGlm5NextDirectory(slot, deviceKey, checkpoint, path);
             return;
         }
         // after the unload, so the memory of a model this load replaces counts as free
@@ -1047,6 +1054,27 @@ public sealed partial class TextService : ITextService, IDisposable
         long perLayer = Math.Max(1, (checkpointBytes - headBytes) / Math.Max(1, config.NumHiddenLayers));
         IReadOnlyList<float>? ratios = deviceKey.Contains('+') ? null : _engine.Placement.ShardRatios;
         return PlacementPlanner.LlmSplitPlan(shardDevices, ratios, config.NumHiddenLayers, perLayer, headBytes);
+    }
+
+    /// <summary>Loads a glm5_next directory (Sage S2.1 Flash) on the one device the request names. Weights are mapped and read per layer, so host memory
+    /// and VRAM are not checked before the load.</summary>
+    private void LoadGlm5NextDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        IBackend backend = CreateBackendFor(deviceKey);
+        LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning("[TextService] Sage S2.1 Flash has no memory guard yet: the host reference model reads each layer from the mapped checkpoint on every forward and keeps the dense weights as F32 host copies, so neither host RAM nor VRAM is checked before the load.");
+        Logs.Info($"[TextService] Loaded Sage S2.1 Flash '{name}' on {deviceKey}.");
+    }
+
+    /// <summary>The Sage S2.1 Flash Text path runs on one device, without tensor parallelism.</summary>
+    internal static void RequireRunnableGlm5NextPlacement(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
+    {
+        if (tensorParallelDegree > 1)
+            throw new NotSupportedException($"Sage S2.1 Flash has no tensor-parallel path; the engine's tensor-parallel degree is {tensorParallelDegree}.");
+        if (shardDevices.Count >= 2)
+            throw new NotSupportedException($"Sage S2.1 Flash runs on one device; {shardDevices.Count} were named ({string.Join(" + ", shardDevices)}).");
     }
 
     /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
