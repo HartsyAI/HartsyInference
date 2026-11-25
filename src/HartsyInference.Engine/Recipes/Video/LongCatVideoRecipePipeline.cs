@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Planning;
@@ -55,21 +57,19 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
             condLatents = 1;
         }
 
-        LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-            settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale, Mode: mode,
-            NumCondLatents: condLatents, CondLatents: firstFrame, OnProgress: RecipeProgressAdapter.Create(progress, cancel), Cancel: cancel);
-
-        float[] latents;
-        _backend.PreloadWeights(_parts.Dit.EnumerateWeights());
-        try
-        {
-            latents = _pipeline.Denoise(run).Latents;
-        }
-        finally
-        {
-            _backend.Sync();
-            _backend.FreeWeights(_parts.Dit.EnumerateWeights());
-        }
+        // The DiT is placed by the streaming scope: resident when it fits, block-streamed when it does not. Each finished step
+        // returns the stream's pool reservations (EndStep), which the scope requires.
+        Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
+        float[] latents = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+            () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-video"),
+            onStep =>
+            {
+                LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
+                    settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale,
+                    Mode: mode, NumCondLatents: condLatents, CondLatents: firstFrame, OnProgress: onStep, Cancel: cancel);
+                return _pipeline.Denoise(run).Latents;
+            },
+            bridge);
         cancel.ThrowIfCancellationRequested();
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
