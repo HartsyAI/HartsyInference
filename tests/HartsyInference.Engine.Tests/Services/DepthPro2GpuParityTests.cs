@@ -19,13 +19,14 @@ namespace HartsyInference.Engine.Tests.Services;
 /// and <c>HARTSY_DEPTHPRO2_REF</c> (the dump's <c>meta.json</c>) and the device; otherwise each test is reported as skipped.
 /// </summary>
 [Trait("Category", "GpuIntegration")]
+[Collection(DepthPro2GpuKnobsCollection.Name)]
 public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
 {
     private const string WeightsVariable = "HARTSY_DEPTHPRO2_WEIGHTS";
     private const string FocalVariable = "HARTSY_DEPTHPRO2_FOCAL_WEIGHTS";
     private const string ReferenceVariable = "HARTSY_DEPTHPRO2_REF";
     private const double Tolerance = 1e-4;
-    private const double Tf32Tolerance = 1e-2;
+    private const double Tf32Tolerance = 5e-3;
 
     private static readonly Lazy<string?> CudaFailure = new(() => Probe(Gpu.Cuda));
     private static readonly Lazy<string?> VulkanFailure = new(() => Probe(Gpu.Vulkan));
@@ -327,4 +328,11 @@ public sealed class DepthPro2GpuParityTests(ITestOutputHelper output)
         CudaFp32,
         Vulkan,
     }
+}
+
+/// <summary>Runs the Depth Pro 2 GPU tests alone: the CUDA FP32 lane sets process-wide numerics knobs while it builds its backend.</summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class DepthPro2GpuKnobsCollection
+{
+    public const string Name = "DepthPro2GpuKnobs";
 }
