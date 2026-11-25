@@ -7,7 +7,7 @@ namespace HartsyInference.Vision.Dinov3;
 /// <summary>One DINOv3 transformer block: pre-norm RoPE self-attention and an MLP (plain GELU, or SwiGLU when the checkpoint
 /// carries <c>mlp.gate_proj</c>, as the ViT-H+ does), each scaled by a learned per-channel LayerScale before its residual add.
 /// The key projection has no bias (the reference masks the k-bias).</summary>
-internal sealed unsafe class Dinov3Layer
+internal sealed class Dinov3Layer
 {
     private readonly int _hidden, _numHeads, _headDim, _inter;
     private readonly float _eps;
