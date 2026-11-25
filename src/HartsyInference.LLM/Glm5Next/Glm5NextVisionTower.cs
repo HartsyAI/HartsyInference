@@ -9,7 +9,7 @@ namespace HartsyInference.LLM.Glm5Next;
 
 /// <summary>The glm5_next vision tower (transformers <c>Glm5NextVisionModel</c> at 52bac5d0) on <see cref="IBackend"/> ops with host F32 rows: a 3D-conv patch
 /// embedding, blocks of per-head q/k RMSNorm, axial 2D RoPE, non-causal attention per frame and a clamped SiLU-GLU MLP with biases, a final RMSNorm, a
-/// strided-conv downsample over each merge block, and the patch merger. The merger's rows replace the image and video placeholders.</summary>
+/// strided-conv downsample over each merge block, and the patch merger. The merger's rows are meant to replace the image and video placeholders once spliced in.</summary>
 /// <remarks>Staged, with no caller in the Text path yet: splicing image rows into the Text path is the open item in
 /// <c>docs/Research/SAGE_S21_FLASH_ARCHITECTURE.md</c> ("Open"). The tower is parity-checked on the tiny config (<c>Glm5NextVisionTowerTests</c>,
 /// tiny_vision fixture); no real-weight run.</remarks>
