@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Ernie5;
@@ -72,6 +73,22 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
 
     [ErnieCudaFact]
     public Task Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    // vram.ernieExpertCache on: the single-device load attaches the device-only expert cache; first use of each expert is a per-call upload miss.
+    // A process-wide override, not a profile scope: GenerateThroughService pushes its own profile, which would hide a scoped value.
+    [ErnieCudaFact]
+    public async Task Cuda_TextService_ExpertCache_MatchesCpu()
+    {
+        KnobStore.Set(EngineKnobs.ErnieExpertCache, true);
+        try
+        {
+            await TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.ErnieExpertCache);
+        }
+    }
 
     [ErnieVulkanFact]
     public Task Vulkan_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.F32);

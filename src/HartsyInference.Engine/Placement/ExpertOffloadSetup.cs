@@ -57,6 +57,14 @@ public static class ExpertOffloadSetup
         }
     }
 
+    /// <summary>Device bytes an expert cache may take once the dense weights are preloaded: the free memory less the headroom a device keeps for
+    /// activations and each op's buffers, the larger of 3 GiB and 15% of the total. Zero when the device reports no memory or no room is left.</summary>
+    public static long DeviceCacheBudget(long freeBytes, long totalBytes)
+    {
+        if (freeBytes <= 0 || totalBytes <= 0) return 0;
+        return Math.Max(freeBytes - Math.Max(3L << 30, totalBytes * 15 / 100), 0);
+    }
+
     /// <summary>Attaches an expert offload with no CPU runner: a device cache of <paramref name="budgetBytes"/> holds the routed experts
     /// admission keeps, and every miss runs on the device from a copy uploaded for that call. For a model whose experts the packed CPU
     /// kernels cannot run (block-FP8 weights, a SiTU activation). The caller preloads the dense weights first; the cache starts empty

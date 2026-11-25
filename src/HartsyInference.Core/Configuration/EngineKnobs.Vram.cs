@@ -130,6 +130,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> ResidentCastCache =
         Bool("vram.residentCastCache", false, KnobScope.Construction, KnobDomain.Vram, "=1 lets a resident NVFP4 weight keep its unpacked dense copy in the weight-cast cache, trading VRAM for a few percent of step time; off by default.");
 
+    /// <summary>Keeps a single-device ERNIE-5.5 load's hottest routed experts in a device cache of the VRAM its dense weights left free; the rest
+    /// stream from the checkpoint per use. Off until measured.</summary>
+    public static readonly Knob<bool> ErnieExpertCache =
+        Bool("vram.ernieExpertCache", false, KnobScope.Construction, KnobDomain.Vram, "=1 keeps ERNIE-5.5's hottest routed experts in a device cache of the leftover VRAM on a single CUDA device; the rest stream from the checkpoint per use. Off by default.");
+
     /// <summary>Forces the query-tiled F32 SDPA path on CUDA and Vulkan (CUDA BF16 calls run it on their F32 casts)
     /// instead of materializing the full score matrix.</summary>
     public static readonly Knob<bool> SdpaForceTiled =
