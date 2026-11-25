@@ -18,7 +18,8 @@ namespace HartsyInference.Engine.Tests.Services;
 
 /// <summary>The real Maxwell-V1.0-Flash FP8 checkpoint on the CUDA backend: dense weights preloaded, routed experts behind a device expert cache
 /// (<see cref="ExpertOffloadSetup.AttachDeviceOnly"/>), a chat prompt answered greedily. Records the generated text, prefill and decode speed, and
-/// the device memory. Reported as skipped (never passed) without MAXWELL_MODEL_FILE pointing at model.safetensors, or without a CUDA device.</summary>
+/// the device memory. Reported as skipped (never passed) without MAXWELL_MODEL_FILE pointing at an existing file; it does not check for a CUDA device,
+/// so on a machine without one the test fails rather than skips.</summary>
 [Trait("Category", "GpuIntegration")]
 [Trait("Category", "Integration")]
 public sealed class MaxwellRealWeightsGpuTests(ITestOutputHelper output)
@@ -158,7 +159,7 @@ public sealed class MaxwellRealWeightsGpuTests(ITestOutputHelper output)
     private static string PtxDirectory() => Ernie5ModelGpuParityTests.PtxDirectory();
 }
 
-/// <summary>A fact that skips (never passes) unless MAXWELL_MODEL_FILE names an existing file and a CUDA device is present.</summary>
+/// <summary>A fact that skips (never passes) unless MAXWELL_MODEL_FILE names an existing file. It checks only that variable; it does not check for a CUDA device.</summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
 public sealed class MaxwellRealFactAttribute : FactAttribute
 {

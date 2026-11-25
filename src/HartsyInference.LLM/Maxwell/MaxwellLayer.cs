@@ -78,7 +78,13 @@ internal sealed class MaxwellLayer : IDisposable
         foreach (Tensor t in new[] { _attnNorm, _ffnNorm }) yield return [t];
         foreach (Tensor t in _attention.EnumerateWeights()) yield return [t];
         if (_moe is not null)
-            foreach (Tensor t in _moe.EnumerateDenseWeights()) yield return [t];
+        {
+            foreach (Tensor t in _moe.EnumerateDenseWeights())
+            {
+                yield return [t];
+                if (t.QuantInfo?.Fp8BlockScaleInv is { } scale) yield return [scale];
+            }
+        }
         foreach (Tensor? t in new[] { _denseGate, _denseUp, _denseDown })
         {
             if (t is null) continue;
