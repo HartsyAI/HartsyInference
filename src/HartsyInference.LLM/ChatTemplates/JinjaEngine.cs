@@ -113,7 +113,9 @@ public sealed class JinjaEngine
                 if (c != '{' && c != '%') { // not a tag; emit text up to and including this brace, continue
                     int next = t.IndexOf('{', open + 1);
                     if (next < 0) { segs.Add(new Seg(SegKind.Text, t[i..], false, false)); break; }
-                    segs.Add(new Seg(SegKind.Text, t[i..next], false, false));
+                    // lstrip_blocks applies to the text in front of a block tag even when a literal brace sits between them.
+                    bool blockAhead = hfWhitespace && next + 1 < t.Length && (t[next + 1] == '%' || t[next + 1] == '#');
+                    segs.Add(new Seg(SegKind.Text, blockAhead ? LstripBlock(t, i, next) : t[i..next], false, false));
                     i = next; continue;
                 }
                 if (open > i) segs.Add(new Seg(SegKind.Text, hfWhitespace && c == '%' ? LstripBlock(t, i, open) : t[i..open], false, false));

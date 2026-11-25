@@ -23,7 +23,7 @@ public sealed class Glm5NextGenerationModel : IGenerationModel
         _model = model;
         OutputBackend = outputBackend;
         MaxTokens = maxTokens;
-        Info = new GenerationModelInfo("GLM-5.3-Flash", model.Config.Vocab, model.Config.Hidden, model.Config.Layers, maxTokens);
+        Info = new GenerationModelInfo("Sage S2.1 Flash", model.Config.Vocab, model.Config.Hidden, model.Config.Layers, maxTokens);
     }
 
     /// <summary>The longest sequence the model was loaded for.</summary>
@@ -56,7 +56,7 @@ public sealed class Glm5NextGenerationModel : IGenerationModel
     {
         cancel.ThrowIfCancellationRequested();
         HostReplaySequenceState sequence = AsSequence(state);
-        if (chunk.Embeds is not null) throw new NotSupportedException("The GLM-5.3-Flash text path takes token ids only; image rows are not wired yet.");
+        if (chunk.Embeds is not null) throw new NotSupportedException("The Sage S2.1 Flash text path takes token ids only; image rows are not wired yet.");
         ReadOnlySpan<int> ids = chunk.TokenIds.Span;
         if (ids.IsEmpty) throw new ArgumentException("Prefill needs at least one token.", nameof(chunk));
         if (chunk.PosStart != sequence.Length)
@@ -134,5 +134,5 @@ public sealed class Glm5NextGenerationModel : IGenerationModel
     }
 
     private static HostReplaySequenceState AsSequence(ISequenceState state) =>
-        state as HostReplaySequenceState ?? throw new ArgumentException($"{state.GetType().Name} is not a GLM-5.3-Flash sequence state.", nameof(state));
+        state as HostReplaySequenceState ?? throw new ArgumentException($"{state.GetType().Name} is not a Sage S2.1 Flash sequence state.", nameof(state));
 }

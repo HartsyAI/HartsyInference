@@ -88,7 +88,13 @@ public sealed class Glm5NextTextPathTests : IDisposable
 
         // The tokenizer's </s> is a special token here; escaped, it must not become that id.
         Assert.DoesNotContain(model.Tokenizer.SpecialId("</s>")!.Value, spelled);
-        Assert.True(spelled.Length > plain.Length);
+        // The spelling itself must be encoded as its ordinary ids, in order, inside the content.
+        int[] ordinary = model.Tokenizer.EncodeOrdinary("</s>");
+        Assert.True(ordinary.Length > 0);
+        bool found = false;
+        for (int i = 0; i + ordinary.Length <= spelled.Length && !found; i++)
+            found = spelled.AsSpan(i, ordinary.Length).SequenceEqual(ordinary);
+        Assert.True(found, "The control-token spelling in content did not encode as its ordinary ids.");
     }
 
     [Theory]

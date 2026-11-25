@@ -1056,10 +1056,6 @@ public sealed partial class TextService : ITextService, IDisposable
         return PlacementPlanner.LlmSplitPlan(shardDevices, ratios, config.NumHiddenLayers, perLayer, headBytes);
     }
 
-    /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
-    /// weights are preloaded while the device has room; the routed experts stay mapped and are uploaded as tokens pick them. On the CPU each
-    /// layer is read and dequantized on every forward. Scheduler rounds take the device gate, so a GPU run does not share the card with
-    /// another generation.</summary>
     /// <summary>Loads a glm5_next directory (Sage S2.1 Flash) on the one device the request names. Weights are mapped and read per layer, so host memory
     /// and VRAM are not checked before the load.</summary>
     private void LoadGlm5NextDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
@@ -1081,6 +1077,10 @@ public sealed partial class TextService : ITextService, IDisposable
             throw new NotSupportedException($"Sage S2.1 Flash runs on one device; {shardDevices.Count} were named ({string.Join(" + ", shardDevices)}).");
     }
 
+    /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
+    /// weights are preloaded while the device has room; the routed experts stay mapped and are uploaded as tokens pick them. On the CPU each
+    /// layer is read and dequantized on every forward. Scheduler rounds take the device gate, so a GPU run does not share the card with
+    /// another generation.</summary>
     private void LoadErnie5Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         DisposeSlotBackends(slot);

@@ -63,13 +63,15 @@ public sealed class Glm5NextTextModel : IHostReferenceTextModel
         }
 
         Ernie5CheckpointWeights weights = Ernie5CheckpointWeights.Open(directory);
+        Glm5NextModel? model = null;
         try
         {
-            Glm5NextModel model = new(backend, config, weights);
+            model = new Glm5NextModel(backend, config, weights);
             return new Glm5NextTextModel(new Glm5NextGenerationModel(model, backend, maxSequenceTokens), tokenizer, template, weights);
         }
         catch
         {
+            model?.Dispose();
             weights.Dispose();
             throw;
         }
