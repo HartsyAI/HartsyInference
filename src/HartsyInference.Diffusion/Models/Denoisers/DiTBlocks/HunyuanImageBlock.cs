@@ -330,7 +330,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
     /// for the cache: the text stream is skipped and the window's own pre-RoPE K and V are returned. Otherwise the window attends
     /// over its text rows too. Inputs are not disposed; the result is owned by the caller.</summary>
     public MovieRollWindowOutput ForwardWindow(IBackend backend, Tensor image, Tensor? text, Tensor? txtTemb, Tensor frameTemb,
-        TokenSegmentLayout layout, HunyuanImageRope rope, float[] positions, Tensor? cacheKeys, Tensor? cacheValues, bool returnKv, Tensor? attentionBias = null)
+        TokenSegmentLayout layout, HunyuanImageRope rope, float[] positions, Tensor? cacheKeys, Tensor? cacheValues, bool returnKv)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(image);
@@ -428,7 +428,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
                 txtV = null;
             }
             TensorShape flatShape = new(1, total, _hiddenSize);
-            attended = _windowAttend.Attend(backend, attendQ!, attendK!, attendV!, flatShape, new AttentionCallContext { Bias = attentionBias });
+            attended = _windowAttend.Attend(backend, attendQ!, attendK!, attendV!, flatShape, default(AttentionCallContext));
             attendQ = attendK = attendV = null;   // Attend took the operands
 
             imgAttended = new Tensor(new TensorShape(1, sw, _hiddenSize), DType.F32);

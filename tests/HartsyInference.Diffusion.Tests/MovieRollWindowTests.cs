@@ -199,6 +199,46 @@ public sealed class MovieRollWindowTests
         Assert.Throws<ArgumentOutOfRangeException>(() => cache.Update("layer", overlap, overlap, 1, 2));
     }
 
+    [Fact]
+    public void RecomputeWithEveryBlockFullHistoryReturnsTheClipAndPacksEveryLayer()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [1, 2, 2], cache, fixture.Dit.BlockCount);
+
+        Assert.Equal(5, cached);
+        foreach (string layer in fixture.Dit.StreamLayerNames())
+            Assert.Equal(new[] { (0, 1), (1, 3), (3, 5) }, cache.FrameRanges(layer).ToArray());
+    }
+
+    [Fact]
+    public void RecomputeOfASingleChunkKeepsOneRangePerLayer()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+
+        int cached = fixture.Dit.StreamRecompute(fixture.Backend, fixture.Ref("rec.latent"), [5], cache, FullHistoryBlocks);
+
+        Assert.Equal(5, cached);
+        foreach (string layer in fixture.Dit.StreamLayerNames())
+            Assert.Equal(new[] { (0, 5) }, cache.FrameRanges(layer).ToArray());
+    }
+
+    [Fact]
+    public void RecomputeRefusesChunksThatDoNotCoverTheLatent()
+    {
+        using Fixture fixture = new();
+        using MovieRollKvCache cache = new(fixture.Backend);
+        cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
+        Tensor latent = fixture.Ref("rec.latent");
+
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [1, 2], cache, FullHistoryBlocks));
+        Assert.Throws<ArgumentException>(() => fixture.Dit.StreamRecompute(fixture.Backend, latent, [0, 5], cache, FullHistoryBlocks));
+    }
+
     /// <summary>Rows of rope-axis coordinates (frame, row, column) for the packed window of <paramref name="frames"/> frames from
     /// <paramref name="firstFrame"/>, in the token order the window uses.</summary>
     private static float[] Rows(int firstFrame, int frames)
