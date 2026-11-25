@@ -5,33 +5,43 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>The KV cache of one conditioning pass: one <see cref="LongCatBlockKv"/> per block (the reference's <c>kv_cache_dict</c>), over
-/// <see cref="Tokens"/> conditioning rows. The holder disposes it.</summary>
+/// <summary>The KV cache of one conditioning pass (the reference's <c>kv_cache_dict</c>): every block's rotated keys and values over
+/// <see cref="Tokens"/> conditioning rows, head-major and pinned on the backend that built it. The holder disposes it.</summary>
 public sealed class LongCatKvCache : IDisposable
 {
-    private bool _disposed;
+    private readonly KvSegmentStore _store;
 
-    internal LongCatKvCache(LongCatBlockKv[] blocks, int tokens)
+    internal LongCatKvCache(KvSegmentStore store, int tokens)
     {
-        Blocks = blocks;
+        _store = store;
         Tokens = tokens;
     }
 
-    /// <summary>The per-block keys and values, in block order.</summary>
-    public IReadOnlyList<LongCatBlockKv> Blocks { get; }
+    /// <summary>Blocks the cache spans.</summary>
+    public int Layers => _store.Layers;
 
     /// <summary>The cached rows per block: the conditioning frames times the tokens per frame.</summary>
     public int Tokens { get; }
 
-    /// <inheritdoc/>
-    public void Dispose()
+    /// <summary>Bytes the cache takes.</summary>
+    public long Bytes => _store.Bytes;
+
+    /// <summary>Bytes a cache over <paramref name="condFrames"/> latent frames of <paramref name="latentHeight"/> × <paramref name="latentWidth"/> will take.</summary>
+    public static long EstimateBytes(LongCatConfig config, int condFrames, int latentHeight, int latentWidth)
     {
-        if (_disposed)
-            return;
-        _disposed = true;
-        foreach (LongCatBlockKv block in Blocks)
-            block.Dispose();
+        ArgumentNullException.ThrowIfNull(config);
+        long tokens = checked((long)condFrames * (latentHeight / config.PatchSize.H) * (latentWidth / config.PatchSize.W));
+        return KvSegmentStore.EstimateBytes(config.Depth, tokens, config.HiddenSize, DType.F32);
     }
+
+    /// <summary>The keys of block <paramref name="layer"/>, <c>[1, heads, Tokens, headDim]</c>, borrowed.</summary>
+    public Tensor Keys(int layer) => _store.Keys(layer, 0);
+
+    /// <summary>The values of block <paramref name="layer"/>, <c>[1, heads, Tokens, headDim]</c>, borrowed.</summary>
+    public Tensor Values(int layer) => _store.Values(layer, 0);
+
+    /// <inheritdoc/>
+    public void Dispose() => _store.Dispose();
 }
 
 /// <summary>The KV-cache path of the LongCat DiT (the reference's <c>return_kv</c> pass and <c>kv_cache_dict</c> denoising). The cache pass takes
@@ -60,7 +70,7 @@ public sealed partial class LongCatTransformer
 
         using Tensor timeEmbed = TimestepEmbedding(backend, new float[] { 0f }, frames);
         Tensor? cur = null;
-        LongCatBlockKv?[] blocks = new LongCatBlockKv?[_blocks.Length];
+        KvSegmentStore store = new(backend, _blocks.Length, tokenAxis: 2);
         try
         {
             cur = WanDitOps.Patchify(backend, condLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
@@ -70,13 +80,7 @@ public sealed partial class LongCatTransformer
             for (int i = 0; i < _blocks.Length; i++)
             {
                 BeforeBlockForward?.Invoke(i);
-                Tensor next = _blocks[i].ForwardCacheBuild(backend, cur, timeEmbed, in inputs, out LongCatBlockKv? kv);
-                if (kv is null)
-                {
-                    next.Dispose();
-                    throw new InvalidOperationException($"Block {i} produced no cache.");
-                }
-                blocks[i] = kv;
+                Tensor next = _blocks[i].ForwardCacheBuild(backend, cur, timeEmbed, in inputs, store, i);
                 cur.Dispose();
                 cur = next;
             }
@@ -84,12 +88,11 @@ public sealed partial class LongCatTransformer
         catch
         {
             cur?.Dispose();
-            foreach (LongCatBlockKv? kv in blocks)
-                kv?.Dispose();
+            store.Dispose();
             throw;
         }
         cur.Dispose();
-        return new LongCatKvCache(blocks.Select(static b => b!).ToArray(), frames * hw);
+        return new LongCatKvCache(store, frames * hw);
     }
 
     /// <summary>The denoising pass over the noisy latents <c>[1, C, N, H, W]</c> with <paramref name="cache"/> in front of them. The conditioning
@@ -104,8 +107,8 @@ public sealed partial class LongCatTransformer
         ArgumentNullException.ThrowIfNull(cache);
         if (!_loaded)
             throw new InvalidOperationException("The transformer has no weights: LoadWeights was never called, or it failed.");
-        if (cache.Blocks.Count != _blocks.Length)
-            throw new ArgumentException($"The cache has {cache.Blocks.Count} blocks; the transformer has {_blocks.Length}.", nameof(cache));
+        if (cache.Layers != _blocks.Length)
+            throw new ArgumentException($"The cache has {cache.Layers} blocks; the transformer has {_blocks.Length}.", nameof(cache));
         if (noisyLatent.Shape.Rank != 5 || noisyLatent.Shape[0] != 1 || noisyLatent.Shape[1] != _config.InChannels)
             throw new ArgumentException($"The noisy latent must be [1, {_config.InChannels}, N, H, W], got {noisyLatent.Shape}.", nameof(noisyLatent));
 
@@ -149,8 +152,8 @@ public sealed partial class LongCatTransformer
             for (int i = 0; i < _blocks.Length; i++)
             {
                 BeforeBlockForward?.Invoke(i);
-                Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, Probe, Probe is null ? "" : $"block{i}", audioTokens,
-                    cache.Blocks[i]);
+                Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, new LongCatPastKv(cache.Keys(i), cache.Values(i)),
+                    Probe, Probe is null ? "" : $"block{i}", audioTokens);
                 cur.Dispose();
                 cur = next;
             }

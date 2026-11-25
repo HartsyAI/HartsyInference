@@ -58,13 +58,13 @@ public sealed class LongCatAvatarKvParityTests
             using LongCatKvCache cache = transformer.BuildKvCache(backend, cond, conditioning);
 
             float[] referenceK = LongCatReferenceDump.Read(dir, document, "kv.block0.k");
-            double kRelRms = RelRms(cache.Blocks[0].K.AsReadOnlySpan<float>(), referenceK);
+            double kRelRms = RelRms(TokenMajor(backend, cache.Keys(0)), referenceK);
             Assert.True(kRelRms <= KvTolerance, $"block 0 cached keys relRMS {kRelRms:E3} exceeds {KvTolerance:E0}.");
-            double block0V = RelRms(cache.Blocks[0].V.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "kv.block0.v"));
+            double block0V = RelRms(TokenMajor(backend, cache.Values(0)), LongCatReferenceDump.Read(dir, document, "kv.block0.v"));
             Assert.True(block0V <= KvTolerance, $"block 0 cached values relRMS {block0V:E3} exceeds {KvTolerance:E0}.");
-            double block1K = RelRms(cache.Blocks[1].K.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "kv.block1.k"));
+            double block1K = RelRms(TokenMajor(backend, cache.Keys(1)), LongCatReferenceDump.Read(dir, document, "kv.block1.k"));
             Assert.True(block1K <= KvTolerance, $"block 1 cached keys relRMS {block1K:E3} exceeds {KvTolerance:E0}.");
-            double block1V = RelRms(cache.Blocks[1].V.AsReadOnlySpan<float>(), LongCatReferenceDump.Read(dir, document, "kv.block1.v"));
+            double block1V = RelRms(TokenMajor(backend, cache.Values(1)), LongCatReferenceDump.Read(dir, document, "kv.block1.v"));
             Assert.True(block1V <= KvTolerance, $"block 1 cached values relRMS {block1V:E3} exceeds {KvTolerance:E0}.");
 
             using Tensor velocity = transformer.ForwardCached(backend, noisy, encoder, [500f], conditioning, cache, audioTokens: noisyAudio);
@@ -76,6 +76,15 @@ public sealed class LongCatAvatarKvParityTests
             foreach (Tensor tensor in weights.Values)
                 tensor.Dispose();
         }
+    }
+
+    /// <summary>The cache is head-major <c>[1, heads, S, headDim]</c>; the reference's is token-major <c>[S, heads, headDim]</c>.</summary>
+    private static float[] TokenMajor(CpuBackend backend, Tensor headMajor)
+    {
+        int heads = (int)headMajor.Shape[1], tokens = (int)headMajor.Shape[2], headDim = (int)headMajor.Shape[3];
+        using Tensor rows = new(new TensorShape(tokens, heads, headDim), DType.F32);
+        backend.Permute0213(rows, headMajor, heads, tokens, headDim);
+        return rows.AsReadOnlySpan<float>().ToArray();
     }
 
     /// <summary>Frames <paramref name="from"/>..<paramref name="from"/>+<paramref name="count"/> of a flat <c>[1, C, T, H, W]</c> latent, as a
