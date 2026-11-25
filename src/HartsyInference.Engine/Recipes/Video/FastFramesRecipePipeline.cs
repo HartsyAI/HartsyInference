@@ -54,6 +54,7 @@ public sealed class FastFramesRecipePipeline : IVideoRecipePipeline
         Tensor promptEmbeds = EncodePrompt(request.Prompt);
         try
         {
+            // Progress counts latent frames done out of latentFrames, not denoising steps.
             Action<int, int>? report = progress is null
                 ? null
                 : (done, total) => progress.Report(new StepPreview { Step = done, TotalSteps = total });

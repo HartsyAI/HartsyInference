@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -43,7 +44,7 @@ public sealed class FastFramesRecipe : IVideoRecipe
     /// <summary>The guidance scale at which classifier-free guidance changes nothing: FastFrames samples without guidance.</summary>
     internal const float NoGuidance = 1f;
 
-    /// <summary>File names of the two companions, looked up beside the generator.</summary>
+    /// <summary>File name of the KV refiner, looked up beside the generator.</summary>
     internal const string RefinerFile = "kv_refiner.safetensors";
 
     /// <summary>File name of the pixel decoder, looked up beside the generator.</summary>
@@ -104,7 +105,9 @@ public sealed class FastFramesRecipe : IVideoRecipe
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            Dictionary<string, Tensor> generator = ReadGenerator(context.CheckpointPath, loaders);
+            // F32 on CPU, where the kernels do not cast a half-precision bias; F16 on a GPU backend.
+            DType pickleDType = context.Backend is CpuBackend ? DType.F32 : DType.F16;
+            Dictionary<string, Tensor> generator = ReadGenerator(context.CheckpointPath, pickleDType, loaders);
             WanVideoCheckpointConverter.ConvertedWeights converted = WanVideoCheckpointConverter.Convert(generator);
             if (converted.Transformer.Count == 0)
             {
@@ -166,9 +169,10 @@ public sealed class FastFramesRecipe : IVideoRecipe
     }
 
     /// <summary>Reads the generator as the Wan converter's input: original Wan key names, no wrapper prefix. A PyTorch pickle
-    /// (the Causal Forcing++ S file) keeps its tensors under <c>generator_ema</c> with an FSDP wrapper prefix; those are read one
-    /// at a time, cast to F16 and unwrapped. A safetensors file (L) is passed through as the file stores it.</summary>
-    private static Dictionary<string, Tensor> ReadGenerator(string path, List<IDisposable> loaders)
+    /// (the Causal Forcing++ S file) is a training checkpoint whose <c>generator_ema</c> dict holds the generator; only that dict
+    /// is read, and the FSDP wrapper prefix is stripped. The <c>generator</c> and <c>critic</c> dicts are never touched. A
+    /// safetensors file (L) is passed through as the file stores it.</summary>
+    private static Dictionary<string, Tensor> ReadGenerator(string path, DType pickleDType, List<IDisposable> loaders)
     {
         if (!path.EndsWith(".pt", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".pth", StringComparison.OrdinalIgnoreCase))
         {
@@ -177,34 +181,10 @@ public sealed class FastFramesRecipe : IVideoRecipe
             return new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         }
 
-        using PytorchPickleLoader pickle = new PytorchPickleLoader();
-        pickle.OpenLazy(path);
-        const string wrapper = "model._fsdp_wrapped_module.";
-        List<PytorchTensorDescriptor> ordered = pickle.Descriptors.Values
-            .OrderBy(d => d.StorageKey, StringComparer.Ordinal)
-            .ThenBy(d => d.StorageByteOffset)
-            .ToList();
-        Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(ordered.Count, StringComparer.Ordinal);
-        try
-        {
-            foreach (PytorchTensorDescriptor descriptor in ordered)
-            {
-                if (!descriptor.Name.StartsWith(wrapper, StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        $"FastFrames generator '{path}' has a tensor '{descriptor.Name}' outside the expected '{wrapper}' wrapper.");
-                }
-                weights[descriptor.Name[wrapper.Length..]] = pickle.ReadTensor(descriptor.Name, DType.F16);
-            }
-        }
-        catch
-        {
-            foreach (Tensor tensor in weights.Values)
-            {
-                tensor.Dispose();
-            }
-            throw;
-        }
+        // The owner is registered before anything else touches the tensors, so every later failure frees them.
+        (Dictionary<string, Tensor> weights, IDisposable owner) = PytorchEnvelopeReader.Read(
+            path, "generator_ema", "model._fsdp_wrapped_module.", pickleDType);
+        loaders.Add(owner);
         return weights;
     }
 }
