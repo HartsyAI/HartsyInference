@@ -14,7 +14,7 @@ real-weight run also compares against the release's own pipeline outputs.
 
 Run in a CPU container with numpy, pillow and torch (for safetensors); the project's `hartsy-ref:cpu` image is local to the maintainers' machine, any equivalent works:
 
-    python tests/python-reference/dump_ovb_decoders.py --out /wt/tests/HartsyInference.Engine.Tests/Fixtures/ovb_decoders
+    python tests/python-reference/dump_ovb_decoders.py --out tests/HartsyInference.Engine.Tests/Fixtures/ovb_decoders
 
 Everything is saved as float32 (the values are small integers or exact floats), plus meta.json with the prompt strings.
 """
