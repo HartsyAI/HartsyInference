@@ -24,7 +24,7 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private readonly int _dim, _encoderDim, _heads, _headDim;
     private readonly AttentionLayerConfig _config;
     private AttentionLayer? _attention;
-    private Tensor? _qW, _qB, _kvW, _kvB, _projW, _projB;
+    private Tensor? _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB;
     private List<Tensor> _owned = [];
     private bool _loaded;
     private int _disposed;
@@ -58,19 +58,21 @@ public sealed class LongCatAudioCrossAttention : IDisposable
         List<Tensor> owned = [];
         try
         {
-            Tensor qW = Expect(LongCatOps.WidenF32(weights, prefix + "q_linear.weight", owned), [_dim, _dim], prefix + "q_linear.weight");
+            // Matrices stay as stored (a quantized or F16 checkpoint keeps its adjunct path); vectors are widened, and the copies are owned here.
+            Tensor qW = Expect(weights[prefix + "q_linear.weight"], [_dim, _dim], prefix + "q_linear.weight");
             Tensor qB = Expect(LongCatOps.WidenF32(weights, prefix + "q_linear.bias", owned), [_dim], prefix + "q_linear.bias");
             Tensor qN = Expect(LongCatOps.WidenF32(weights, prefix + "q_norm.weight", owned), [_headDim], prefix + "q_norm.weight");
-            Tensor kvW = Expect(LongCatOps.WidenF32(weights, prefix + "kv_linear.weight", owned), [2 * _dim, _encoderDim], prefix + "kv_linear.weight");
+            Tensor kvW = Expect(weights[prefix + "kv_linear.weight"], [2 * _dim, _encoderDim], prefix + "kv_linear.weight");
             Tensor kvB = Expect(LongCatOps.WidenF32(weights, prefix + "kv_linear.bias", owned), [2 * _dim], prefix + "kv_linear.bias");
             Tensor kN = Expect(LongCatOps.WidenF32(weights, prefix + "k_norm.weight", owned), [_headDim], prefix + "k_norm.weight");
-            Tensor pW = Expect(LongCatOps.WidenF32(weights, prefix + "proj.weight", owned), [_dim, _dim], prefix + "proj.weight");
+            Tensor pW = Expect(weights[prefix + "proj.weight"], [_dim, _dim], prefix + "proj.weight");
             Tensor pB = Expect(LongCatOps.WidenF32(weights, prefix + "proj.bias", owned), [_dim], prefix + "proj.bias");
 
+            AttentionLayer attention = new(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
             ReleaseOwned();
             _owned = owned;
-            _attention = new AttentionLayer(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
-            _qW = qW; _qB = qB; _kvW = kvW; _kvB = kvB; _projW = pW; _projB = pB;
+            _attention = attention;
+            _qW = qW; _qB = qB; _qNorm = qN; _kvW = kvW; _kvB = kvB; _kNorm = kN; _projW = pW; _projB = pB;
             _loaded = true;
         }
         catch
@@ -175,6 +177,14 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             backend.Linear(projected, attended, _projW!, _projB);
             return projected;
         }
+    }
+
+    /// <summary>The loaded weights (matrices as stored, vectors widened); empty before a load.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB })
+            if (t is not null)
+                yield return t;
     }
 
     /// <inheritdoc/>

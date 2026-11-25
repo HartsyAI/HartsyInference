@@ -30,34 +30,45 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         _attention = new LongCatAudioCrossAttention(dim, encoderDim, heads);
     }
 
-    /// <summary>Reads the step's tensors under <paramref name="prefix"/> (the block's <c>blocks.N</c>). Widened copies are added to
-    /// <paramref name="owned"/> so the block disposes them. All-or-nothing: a missing or wrong-shaped tensor throws before anything is kept.</summary>
+    /// <summary>Reads the step's tensors under <paramref name="prefix"/> (the block's <c>blocks.N</c>). Matrices are used as the checkpoint stores
+    /// them (quantized or not, a LoRA adjunct applies to them); only vectors are widened to F32, and those widened copies belong to this step.
+    /// All-or-nothing: a missing or wrong-shaped tensor throws, and nothing is kept.</summary>
     public static LongCatAvatarAudioStep Load(IReadOnlyDictionary<string, Tensor> w, string prefix, int dim, int adaLnWidth, int encoderDim,
-        int heads, List<Tensor> owned)
+        int heads)
     {
         if (w.ContainsKey(prefix + ".pre_audio_crs_attn_norm.weight"))
             throw new InvalidDataException($"{prefix}.pre_audio_crs_attn_norm is present; the avatar configs ship audio_prenorm false, and that norm is not implemented.");
         LongCatAvatarAudioStep step = new(dim, encoderDim, heads);
+        List<Tensor> local = [];
         try
         {
-            step._adaW = Expect(LongCatOps.WidenF32(w, prefix + ".audio_adaLN_modulation.1.weight", owned), [3 * dim, adaLnWidth],
-                prefix + ".audio_adaLN_modulation.1.weight");
-            step._adaB = Expect(LongCatOps.WidenF32(w, prefix + ".audio_adaLN_modulation.1.bias", owned), [3 * dim],
+            step._adaW = Expect(w[prefix + ".audio_adaLN_modulation.1.weight"], [3 * dim, adaLnWidth], prefix + ".audio_adaLN_modulation.1.weight");
+            step._adaB = Expect(LongCatOps.WidenF32(w, prefix + ".audio_adaLN_modulation.1.bias", local), [3 * dim],
                 prefix + ".audio_adaLN_modulation.1.bias");
-            step._preW = Expect(LongCatOps.WidenF32(w, prefix + ".pre_video_crs_attn_norm.weight", owned), [dim], prefix + ".pre_video_crs_attn_norm.weight");
-            step._preB = Expect(LongCatOps.WidenF32(w, prefix + ".pre_video_crs_attn_norm.bias", owned), [dim], prefix + ".pre_video_crs_attn_norm.bias");
+            step._preW = Expect(LongCatOps.WidenF32(w, prefix + ".pre_video_crs_attn_norm.weight", local), [dim], prefix + ".pre_video_crs_attn_norm.weight");
+            step._preB = Expect(LongCatOps.WidenF32(w, prefix + ".pre_video_crs_attn_norm.bias", local), [dim], prefix + ".pre_video_crs_attn_norm.bias");
             step._attention.LoadWeights(w, prefix + ".audio_cross_attn.");
-            step._owned.AddRange(owned);
-            owned.Clear();
+            step._owned.AddRange(local);
+            local.Clear();
             return step;
         }
         catch
         {
-            foreach (Tensor t in owned)
+            foreach (Tensor t in local)
                 t.Dispose();
             step.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The step's weights: the audio modulation and pre-norm, then the audio cross-attention's.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _adaW, _adaB, _preW, _preB })
+            if (t is not null)
+                yield return t;
+        foreach (Tensor t in _attention.EnumerateWeights())
+            yield return t;
     }
 
     /// <summary>The step's contribution to a block's stream.</summary>

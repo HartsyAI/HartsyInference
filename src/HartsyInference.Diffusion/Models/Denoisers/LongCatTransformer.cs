@@ -64,6 +64,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
     {
         List<Tensor> previous = _owned;
         List<Tensor> owned = [];
+        LongCatAudioProjection? nextAudio = null;
         _loaded = false;
         try
         {
@@ -86,21 +87,13 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             _finalB = LongCatOps.WidenF32(w, "final_layer.linear.bias", owned);
             for (int i = 0; i < _blocks.Length; i++)
                 _blocks[i].LoadWeights(w, $"blocks.{i}", owned);
+            // The avatar projection loads into a local and is swapped in only when the whole load has succeeded. A base checkpoint has no
+            // audio_proj keys: nextAudio stays null and the previous projection (if any) is released on the swap.
             if (w.ContainsKey("audio_proj.proj1.weight"))
             {
-                LongCatAudioProjection projection = new(_config.AudioWindow, _config.AudioWindow + _config.AudioVaeScale - 1,
+                nextAudio = new LongCatAudioProjection(_config.AudioWindow, _config.AudioWindow + _config.AudioVaeScale - 1,
                     _config.AudioBlock, _config.AudioChannel, _config.AudioIntermediateDim, _config.AudioOutputDim, _config.AudioContextTokens);
-                try
-                {
-                    projection.LoadWeights(w, "audio_proj.");
-                }
-                catch
-                {
-                    projection.Dispose();
-                    throw;
-                }
-                _audioProjection?.Dispose();
-                _audioProjection = projection;
+                nextAudio.LoadWeights(w, "audio_proj.");
             }
         }
         catch
@@ -109,6 +102,7 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
                 copy.Dispose();
             foreach (Tensor stale in previous)
                 stale.Dispose();
+            nextAudio?.Dispose();
             _owned = [];
             throw;
         }
@@ -116,6 +110,9 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
         _loaded = true;
         foreach (Tensor stale in previous)
             stale.Dispose();
+        LongCatAudioProjection? staleAudio = _audioProjection;
+        _audioProjection = nextAudio;
+        staleAudio?.Dispose();
     }
 
     /// <summary>Every weight: the shared ones, then each block's.</summary>
@@ -137,6 +134,9 @@ public sealed unsafe class LongCatTransformer : IDisposable, IStreamableDenoiser
             if (t is not null)
                 yield return t;
         }
+        if (_audioProjection is not null)
+            foreach (Tensor t in _audioProjection.EnumerateWeights())
+                yield return t;
     }
 
     /// <summary>Velocity prediction (the model output, before the sampler's sign flip). <paramref name="latent"/> is <c>[1, z, T, H, W]</c>;

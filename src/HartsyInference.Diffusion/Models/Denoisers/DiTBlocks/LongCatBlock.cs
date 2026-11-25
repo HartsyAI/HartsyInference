@@ -57,21 +57,26 @@ public sealed class LongCatBlock : IStreamingBlock
         _w1 = w[$"{prefix}.ffn.w1.weight"];
         _w2 = w[$"{prefix}.ffn.w2.weight"];
         _w3 = w[$"{prefix}.ffn.w3.weight"];
+        BuildAttention();
+        // Avatar blocks carry the audio step. It loads first, so the estimate below counts it. A base checkpoint has none of these keys: any step
+        // from an earlier avatar load is released, so the block is a base block again.
+        LongCatAvatarAudioStep? audio = w.ContainsKey($"{prefix}.audio_adaLN_modulation.1.weight")
+            ? LongCatAvatarAudioStep.Load(w, prefix, _config.HiddenSize, _config.AdalnTembedDim, _config.AudioOutputDim, _config.NumHeads)
+            : null;
+        _audio?.Dispose();
+        _audio = audio;
         long bytes = 0;
         foreach (Tensor t in EnumerateWeights())
             bytes += t.DType.ComputeByteCount(t.ElementCount);
         EstimatedWeightBytes = bytes;
-        BuildAttention();
-        // Avatar blocks carry the audio step; the base checkpoint has none of these keys, so the base path is unchanged.
-        if (w.ContainsKey($"{prefix}.audio_adaLN_modulation.1.weight"))
-        {
-            _audio?.Dispose();
-            _audio = LongCatAvatarAudioStep.Load(w, prefix, _config.HiddenSize, _config.AdalnTembedDim, _config.AudioOutputDim, _config.NumHeads, owned);
-        }
     }
 
-    /// <summary>Releases the avatar audio step's own tensors (the base block owns none).</summary>
-    public void Dispose() => _audio?.Dispose();
+    /// <summary>Releases the avatar audio step's own tensors (the base block owns none). The block is unusable for a forward afterwards.</summary>
+    public void Dispose()
+    {
+        _audio?.Dispose();
+        _audio = null;
+    }
 
     /// <inheritdoc/>
     public IEnumerable<Tensor> EnumerateWeights()
@@ -82,6 +87,9 @@ public sealed class LongCatBlock : IStreamingBlock
             if (t is not null)
                 yield return t;
         }
+        if (_audio is not null)
+            foreach (Tensor t in _audio.EnumerateWeights())
+                yield return t;
     }
 
     private void BuildAttention()
