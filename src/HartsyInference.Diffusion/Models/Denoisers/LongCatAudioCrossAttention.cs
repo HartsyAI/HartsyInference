@@ -85,6 +85,8 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     /// <returns>A new <c>[frames·S, dim]</c> tensor the caller owns.</returns>
     /// <exception cref="ObjectDisposedException">The layer was disposed.</exception>
     /// <exception cref="InvalidOperationException">No weights are loaded.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="frames"/> or <paramref name="numCond"/> is out of range.</exception>
+    /// <exception cref="ArgumentException"><paramref name="x"/> or <paramref name="audio"/> is not F32, has the wrong width, or has rows that do not split per frame.</exception>
     public Tensor Forward(IBackend backend, Tensor x, Tensor audio, int frames, int numCond)
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
@@ -112,12 +114,25 @@ public sealed class LongCatAudioCrossAttention : IDisposable
         int noisyTokens = noisy * tokens, noisyCtx = noisy * ctx;
 
         // The noisy frames, batched on the attention's batch axis: [noisy, tokens, heads, D] for q and [noisy, ctx, heads, D] for k and v.
-        using Tensor noisyX = new(new TensorShape(noisyTokens, _dim), DType.F32);
-        backend.SliceRows(noisyX, x, numCond * tokens);
-        using Tensor noisyAudio = new(new TensorShape(noisyCtx, _encoderDim), DType.F32);
-        backend.SliceRows(noisyAudio, audio, numCond * ctx);
-
-        Tensor projected = AttendBatched(backend, noisyX, noisyAudio, noisy, tokens, ctx);
+        // With no conditioning frames the noisy rows are all of x and audio, so they are used in place rather than copied.
+        Tensor? noisyX = null, noisyAudio = null;
+        Tensor projected;
+        try
+        {
+            if (numCond > 0)
+            {
+                noisyX = new(new TensorShape(noisyTokens, _dim), DType.F32);
+                backend.SliceRows(noisyX, x, numCond * tokens);
+                noisyAudio = new(new TensorShape(noisyCtx, _encoderDim), DType.F32);
+                backend.SliceRows(noisyAudio, audio, numCond * ctx);
+            }
+            projected = AttendBatched(backend, noisyX ?? x, noisyAudio ?? audio, noisy, tokens, ctx);
+        }
+        finally
+        {
+            noisyX?.Dispose();
+            noisyAudio?.Dispose();
+        }
         if (numCond == 0)
             return projected;
 
@@ -152,7 +167,7 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             v.Dispose();
             throw;
         }
-        // Attend takes ownership of q, k and v and disposes them, even when it throws, so it sits outside the catch above.
+        // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
         Tensor attended = _attention!.Attend(backend, q, k, v, new TensorShape(batch * tokens, _dim), default);
         using (attended)
         {

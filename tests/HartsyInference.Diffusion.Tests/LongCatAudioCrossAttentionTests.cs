@@ -118,7 +118,8 @@ public sealed class LongCatAudioCrossAttentionTests
             using Tensor ragged = Filled(7, Enc, seed: 38);
             using CpuBackend backend = new();
 
-            Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, narrowAudio, Frames, numCond: 0));
+            ArgumentException narrow = Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, narrowAudio, Frames, numCond: 0));
+            Assert.Equal("audio", narrow.ParamName);
             ArgumentException error = Assert.Throws<ArgumentException>(() => layer.Forward(backend, x, ragged, Frames, numCond: 0));
             Assert.Equal("audio", error.ParamName);
         }

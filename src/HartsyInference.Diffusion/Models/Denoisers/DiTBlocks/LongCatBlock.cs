@@ -211,7 +211,7 @@ public sealed class LongCatBlock : IStreamingBlock
             v.Dispose();
             throw;
         }
-        // Attend takes ownership of q, k and v and disposes them, even when it throws, so it sits outside the catch above.
+        // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
         Tensor flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
         using (flat)
         {
