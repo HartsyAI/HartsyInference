@@ -1,6 +1,8 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Variants;
 using HartsyInference.Diffusion.Pipelines.LongCat;
@@ -20,6 +22,15 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
     /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
     internal const int OutputFps = 25;
+
+    /// <summary>The audio front end: Whisper-large-v3 from its upstream repo, at the revision the catalog row pins (the 1.5 repo bundles the same file).</summary>
+    internal const string WhisperRepo = "openai/whisper-large-v3";
+
+    /// <summary>The Whisper revision (<c>openai/whisper-large-v3</c> @ 06f233fe, its model.safetensors sha256 a8e94b85…).</summary>
+    internal const string WhisperRevision = "06f233fe06e710322aca913c1bc4249a0d71fce1";
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => LongCatAvatarVariants.Catalog;
 
     /// <inheritdoc/>
     public string Name => "longcat-avatar";
@@ -63,9 +74,6 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     };
 
     /// <inheritdoc/>
-    public ModelVariantCatalog? Variants => LongCatAvatarVariants.Catalog;
-
-    /// <inheritdoc/>
     /// <remarks>Only a named build (a caller hint) imposes the 1.5 settings; a name-only or unnamed request keeps the 1.6 numbers.</remarks>
     public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) =>
         variant is not null && variant.Is(LongCatAvatarVariants.Avatar15) && variant.IsDefinitive ? DistilledDefaults : Defaults;
@@ -76,6 +84,16 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
+        // The catalog row holds the 1.5 weights, and the two builds differ in schedule and defaults, so the build must be named: an
+        // unnamed request would run the 1.5 weights with the 1.6 settings. Named 1.5 takes the distilled path; named 1.6 the undistilled one.
+        ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
+        if (!variant.IsDefinitive)
+        {
+            throw new NotSupportedException("longcat-avatar needs its build named: longcat-avatar:1.5 (distilled) or longcat-avatar:1.6. "
+                + "The catalog row holds the 1.5 weights, so an unnamed request is refused rather than run with the wrong settings.");
+        }
+        bool distilled = variant.Is(LongCatAvatarVariants.Avatar15);
+
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
@@ -86,20 +104,23 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
                     $"'{context.CheckpointPath}' has no audio_proj weights, so it is not a LongCat-Video-Avatar checkpoint. Point longcat-avatar at the avatar DiT.");
             }
 
-            string whisperPath = ModelDownloader.EnsureSideModelAsync(SideModels.WhisperLargeV3, onProgress: null, context.Cancel)
-                .GetAwaiter().GetResult();
+            // The Whisper-large-v3 copy the audio stack already caches (stt/openai--whisper-large-v3), at the pinned upstream revision.
+            IReadOnlyDictionary<string, string> fetched = AudioModelCache.FetchAllAsync(WhisperRepo, [new AudioModelFile("model.safetensors")],
+                category: "stt", revision: WhisperRevision, ct: context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader whisperLoader = new SafeTensorsLoader();
-            whisperLoader.Load(whisperPath);
+            whisperLoader.Load(fetched["model.safetensors"]);
             loaders.Add(whisperLoader);
+            // Only the encoder's tensors go to the encoder; the decoder's are never read.
+            Dictionary<string, Tensor> encoderWeights = whisperLoader.GetAllTensors()
+                .Where(pair => pair.Key.StartsWith("model.encoder.", StringComparison.Ordinal))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             WhisperEncoder whisper = new WhisperEncoder(WhisperConfig.LargeV3);
-            whisper.LoadWeights(whisperLoader.GetAllTensors());
+            whisper.LoadWeights(encoderWeights);
             loaders.Add(whisper);
             MelSpectrogramExtractor mel = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(WhisperConfig.LargeV3.NumMelBins));
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
-            bool distilled = variant.Is(LongCatAvatarVariants.Avatar15) && variant.IsDefinitive;
             return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled);
         }
         catch (Exception ex)

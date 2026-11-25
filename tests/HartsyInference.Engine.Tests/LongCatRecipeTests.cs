@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
@@ -77,6 +78,36 @@ public sealed class LongCatRecipeTests
         Assert.Equal(50, avatar.DefaultsFor(unnamed).Steps);
         Assert.Equal(50, avatar.DefaultsFor(null).Steps);
         Assert.Equal("1.6", unnamed.Id);
+    }
+
+    [Fact]
+    public void AnUnnamedAvatarRequestIsRefusedBeforeAnyWeightIsRead()
+    {
+        LongCatAvatarRecipe avatar = new();
+        using CpuBackend backend = new();
+        ResolvedModelVariant unnamed = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), []);
+
+        Assert.Throws<NotSupportedException>(() => avatar.Construct(new RecipeContext
+        {
+            CheckpointPath = "no-such-folder", Backend = backend, Variant = unnamed,
+        }));
+    }
+
+    [Fact]
+    public void ANamedBuildPassesTheRefusal()
+    {
+        using CpuBackend backend = new();
+        foreach (string hint in new[] { "1.5", "1.6" })
+        {
+            ResolvedModelVariant named = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), [hint]);
+
+            Exception error = Assert.ThrowsAny<Exception>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+            {
+                CheckpointPath = "no-such-folder", Backend = backend, Variant = named,
+            }));
+
+            Assert.IsNotType<NotSupportedException>(error);
+        }
     }
 
     private static CheckpointProbe EmptyProbe() =>
