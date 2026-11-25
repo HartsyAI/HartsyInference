@@ -201,6 +201,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             return _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
 
         List<Tensor> qs = new((s + tile - 1) / tile), ks = new(qs.Capacity), vs = new(qs.Capacity);
+        Tensor? joinedQ = null, joinedK = null;
         try
         {
             for (int start = 0; start < s; start += tile)
@@ -212,32 +213,35 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 ks.Add(k);
                 vs.Add(v);
             }
-            Tensor joinedQ = JoinRows(backend, qs, s);
-            try
-            {
-                Tensor joinedK = JoinRows(backend, ks, s);
-                try
-                {
-                    return (joinedQ, joinedK, JoinRows(backend, vs, s));
-                }
-                catch
-                {
-                    joinedK.Dispose();
-                    throw;
-                }
-            }
-            catch
-            {
-                joinedQ.Dispose();
-                throw;
-            }
+            // Each group's tiles are freed as soon as that group is joined, so at the last join the peak is two joined outputs plus the
+            // last group's tiles and its output, not every tile and every output at once.
+            joinedQ = JoinRows(backend, qs, s);
+            DisposeAll(qs);
+            joinedK = JoinRows(backend, ks, s);
+            DisposeAll(ks);
+            Tensor joinedV = JoinRows(backend, vs, s);
+            DisposeAll(vs);
+            return (joinedQ, joinedK, joinedV);
+        }
+        catch
+        {
+            joinedQ?.Dispose();
+            joinedK?.Dispose();
+            throw;
         }
         finally
         {
-            foreach (Tensor t in qs) t.Dispose();
-            foreach (Tensor t in ks) t.Dispose();
-            foreach (Tensor t in vs) t.Dispose();
+            DisposeAll(qs);
+            DisposeAll(ks);
+            DisposeAll(vs);
         }
+    }
+
+    private static void DisposeAll(List<Tensor> tensors)
+    {
+        foreach (Tensor tensor in tensors)
+            tensor.Dispose();
+        tensors.Clear();
     }
 
     /// <summary>Concatenates row tiles of one projection into a single [rows, ...] tensor of the tiles' dtype.</summary>
