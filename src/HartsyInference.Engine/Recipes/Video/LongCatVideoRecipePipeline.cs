@@ -36,7 +36,9 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
         int latentFrames = (frames - 1) / LongCatRecipeSupport.TemporalCompressionFactor + 1;
         int latentHeight = height / LongCatRecipeSupport.SpatialCompressionFactor;
         int latentWidth = width / LongCatRecipeSupport.SpatialCompressionFactor;
-        int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
+        if (width % LongCatRecipeSupport.PatchGrid != 0 || height % LongCatRecipeSupport.PatchGrid != 0)
+            throw new ArgumentException($"LongCat-Video needs width and height in multiples of {LongCatRecipeSupport.PatchGrid}, got {width}×{height}.");
+        int seed = RecipeRequestMapper.MapSeed(settings.Seed) ?? SeedGenerator.RandomSeed();
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
@@ -54,7 +56,7 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
         }
 
         LongCatRun run = new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative,
-            settings.Steps, Distill: false, Shift: LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale, Mode: mode,
+            settings.Steps, Distill: false, Shift: settings.FlowShift ?? LongCatRecipeSupport.BaseFlowShift, Guidance: settings.CfgScale, Mode: mode,
             NumCondLatents: condLatents, CondLatents: firstFrame);
 
         float[] latents;

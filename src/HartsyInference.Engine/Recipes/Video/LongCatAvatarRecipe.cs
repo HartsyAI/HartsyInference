@@ -16,6 +16,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <summary>Upper bound of one segment; the avatar DiT and its audio windows are built for it.</summary>
     internal const int SegmentFrames = 93;
 
+    /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
+    internal const int OutputFps = 25;
+
     /// <inheritdoc/>
     public string Name => "longcat-avatar";
 
@@ -37,7 +40,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// Whether the official default guidance differs is confirmed against the pinned reference at the real-weight run (B8).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
-        Steps = 50, CfgScale = 4.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = 25,
+        Steps = 50, CfgScale = 4.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
         FlowShift = LongCatAvatarPipelineSettings.Shift,
     };
 
@@ -55,6 +58,11 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         try
         {
             LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null);
+            if (!parts.HasAudio)
+            {
+                throw new InvalidOperationException(
+                    $"'{context.CheckpointPath}' has no audio_proj weights, so it is not a LongCat-Video-Avatar checkpoint. Point longcat-avatar at the avatar DiT.");
+            }
 
             string whisperPath = ModelDownloader.EnsureSideModelAsync(SideModels.WhisperLargeV3, onProgress: null, context.Cancel)
                 .GetAwaiter().GetResult();

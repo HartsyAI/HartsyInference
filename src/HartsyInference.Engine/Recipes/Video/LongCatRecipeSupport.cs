@@ -12,8 +12,8 @@ namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>What every LongCat recipe loads: the DiT from the checkpoint directory, the VAE, and umT5 with its tokenizer. The latent channel count
 /// is the DiT's own <see cref="LongCatConfig.InChannels"/>, so a tiny config and the release (16 channels) share one path.</summary>
-internal sealed record LongCatParts(LongCatTransformer Dit, int Channels, int CaptionChannels, IWanVaeDecoder Decoder, IWanVaeEncoder Encoder,
-    T5TextEncoder Umt5, T5Tokenizer Tokenizer);
+internal sealed record LongCatParts(LongCatTransformer Dit, int Channels, int CaptionChannels, bool HasAudio, IWanVaeDecoder Decoder,
+    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer);
 
 /// <summary>Where the umT5 and VAE come from. Null in production (the engine's side-model downloads); a test injects small stand-ins here, so the
 /// recipe path runs end to end without the multi-gigabyte files. Each factory returns objects the caller owns.</summary>
@@ -32,6 +32,9 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Flow shift of the base family's sampler (the research plan's base value). Avatar uses 7; see the avatar recipe.</summary>
     internal const float BaseFlowShift = 12f;
+
+    /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
+    internal const int PatchGrid = 16;
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
@@ -61,7 +64,9 @@ internal static class LongCatRecipeSupport
             : sides.LoadUmt5();
         loaders.Add(umt5);
         loaders.Add(tokenizer);
-        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, decoder, encoder, umt5, tokenizer);
+        // The avatar's audio modules are the audio_proj.* weights; a base checkpoint has none.
+        bool hasAudio = checkpoint.Weights.Keys.Any(key => key.StartsWith("audio_proj.", StringComparison.Ordinal));
+        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer);
     }
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>
