@@ -34,14 +34,15 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     {
         if (chainTotal is int requested && !ChainWithinBudget(requested, width, height))
             throw new VideoChainException("video.chain.budget",
-                $"A LongCat-Video-Avatar chain is at most {MaxChainFrames} frames at 832x480 (the same pixel count at other sizes).",
+                $"A LongCat-Video-Avatar chain of {requested} frames at {width}x{height} is over the budget of {MaxChainFrames} frames at 832x480 "
+                + "(the same pixel count at other sizes).",
                 nameof(chainTotal));
         if (frames > SegmentFrames)
             throw new VideoChainException("video.chain.segment_frames",
-                $"One LongCat-Video-Avatar segment is at most {SegmentFrames} frames.", nameof(frames));
+                $"One LongCat-Video-Avatar segment of {frames} frames is over the limit of {SegmentFrames}.", nameof(frames));
         if (fps != OutputFps)
             throw new VideoChainException("video.chain.fps",
-                $"LongCat-Video-Avatar's audio windows are built for {OutputFps} fps.", nameof(fps));
+                $"LongCat-Video-Avatar's audio windows are built for {OutputFps} fps; the request asked for {fps}.", nameof(fps));
     }
 
     /// <summary>True when the driving audio is shorter than the clip: the windows past its end repeat its last frame.</summary>

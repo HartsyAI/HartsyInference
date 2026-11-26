@@ -69,10 +69,11 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // A chain request longer than the segment runs the chain plan; its audio covers the whole clip, so the windows are cut once for all of it.
         int total = request.ChainTotalFrames is int chainTotal && chainTotal > frames ? chainTotal : frames;
         LongCatAvatarChainPlan? plan = total > frames ? LongCatAvatarChainPlan.For(latentFrames, total) : null;
-        int clipFrames = plan?.TotalPixelFrames ?? frames;
-        if (!drivingSpeech.IsEmpty && LongCatAvatarRecipe.DrivingAudioIsShort(drivingSpeech.Seconds, clipFrames, settings.Fps))
-            Logs.Warning($"[LongCatAvatarRecipePipeline] The driving audio lasts {drivingSpeech.Seconds:F2} s and the clip {clipFrames / (double)settings.Fps:F2} s; "
+        // The clip delivered is the requested length; the windows past the driving audio repeat its last frame.
+        if (!drivingSpeech.IsEmpty && LongCatAvatarRecipe.DrivingAudioIsShort(drivingSpeech.Seconds, total, settings.Fps))
+            Logs.Warning($"[LongCatAvatarRecipePipeline] The driving audio lasts {drivingSpeech.Seconds:F2} s and the clip {total / (double)settings.Fps:F2} s; "
                 + "the windows past the audio's end repeat its last frame.");
+        int clipFrames = plan?.TotalPixelFrames ?? frames;
         float[] rawAudio = DrivingWindows(waveform, settings.Fps, clipFrames);
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
