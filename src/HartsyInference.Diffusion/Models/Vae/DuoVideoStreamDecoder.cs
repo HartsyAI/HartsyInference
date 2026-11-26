@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Duo;
 using HartsyInference.ModelAssets.Duo;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -150,7 +150,7 @@ public sealed class DuoVideoStreamDecoder : IDisposable
         {
             throw new InvalidOperationException($"The window holds {latents} latents; the schedule needs {step.WindowLatents}.");
         }
-        Tensor window = BuildWindow(segments, _height, _width);
+        Tensor window = BuildWindow(segments);
         Tensor pixels;
         try
         {
@@ -170,28 +170,11 @@ public sealed class DuoVideoStreamDecoder : IDisposable
         }
     }
 
-    /// <summary>Concatenates the segments along the latent axis into a device <c>[1, 24, T, H, W]</c>: one fill of the whole output, then one
-    /// strided scatter per segment, so the device never uploads a partly written window.</summary>
-    private Tensor BuildWindow(List<Segment> segments, int height, int width)
+    /// <summary>The window <c>[1, 24, T, H, W]</c>: the segments concatenated along the latent axis on the device.</summary>
+    private Tensor BuildWindow(List<Segment> segments)
     {
-        int total = segments.Sum(s => s.Count);
-        Tensor window = new(new TensorShape(new long[] { 1, Channels, total, height, width }), DType.F32);
-        StridedCopies.FillFrom(_backend, window, At(segments[0].Chunk).Data);
-        int at = 0;
-        foreach (Segment segment in segments)
-        {
-            Tensor part = Slice(At(segment.Chunk).Data, segment.Start, segment.Count);
-            try
-            {
-                StridedCopies.ScatterAxis(_backend, window, part, LatentAxis, at);
-            }
-            finally
-            {
-                part.Dispose();
-            }
-            at += segment.Count;
-        }
-        return window;
+        DuoDeviceWindow.Part[] parts = segments.Select(s => new DuoDeviceWindow.Part(At(s.Chunk).Data, s.Start, s.Count)).ToArray();
+        return DuoDeviceWindow.Concat(_backend, LatentAxis, parts);
     }
 
     /// <summary>Copies the published frames of a decoded window on the device, then reads them once as RGB8.</summary>
@@ -212,7 +195,7 @@ public sealed class DuoVideoStreamDecoder : IDisposable
         }
         int published = step.CropEnd - step.CropStart;
         int plane = height * width;
-        Tensor cropped = Slice(pixels, step.CropStart, published);
+        Tensor cropped = DuoDeviceWindow.Slice(_backend, pixels, LatentAxis, step.CropStart, published);
         try
         {
             ReadOnlySpan<float> source = cropped.AsSpan<float>();
@@ -265,31 +248,7 @@ public sealed class DuoVideoStreamDecoder : IDisposable
         {
             throw new ArgumentException($"Every chunk must be {_height}x{_width} latent pixels, as the first; got {height}x{width}.", nameof(chunk));
         }
-        return new Chunk(Slice(chunk, 0, ChunkLatents), height, width);
-    }
-
-    /// <summary>Latent steps <c>[start, start + count)</c> of a chunk or window, as a new device tensor the caller owns.</summary>
-    private Tensor Slice(Tensor source, int start, int count)
-    {
-        Tensor part = new(WithLatents(source.Shape, count), DType.F32);
-        try
-        {
-            StridedCopies.SliceAxis(_backend, part, source, LatentAxis, start, count);
-        }
-        catch
-        {
-            part.Dispose();
-            throw;
-        }
-        return part;
-    }
-
-    private static TensorShape WithLatents(TensorShape shape, int count)
-    {
-        long[] dims = new long[shape.Rank];
-        shape.CopyDimsTo(dims);
-        dims[LatentAxis] = count;
-        return new TensorShape(dims);
+        return new Chunk(DuoDeviceWindow.Slice(_backend, chunk, LatentAxis, 0, ChunkLatents), height, width);
     }
 
     /// <summary>The retained chunk with absolute index <paramref name="chunk"/>.</summary>

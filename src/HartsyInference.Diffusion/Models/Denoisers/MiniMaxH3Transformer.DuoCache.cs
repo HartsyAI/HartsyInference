@@ -72,8 +72,8 @@ public sealed unsafe partial class MiniMaxH3Transformer
         using Tensor tEmb = BuildTimeEmbedding(backend, times);
         using Tensor modIndex = BuildDuoModulationIndex(layout);
         (float[] cosValues, float[] sinValues) = DuoRope.Tables(layout.Positions, hd);
-        using Tensor cos = HostTensor(new TensorShape(seq, hd), cosValues);
-        using Tensor sin = HostTensor(new TensorShape(seq, hd), sinValues);
+        using Tensor cos = DuoDeviceWindow.Upload(new TensorShape(seq, hd), cosValues);
+        using Tensor sin = DuoDeviceWindow.Upload(new TensorShape(seq, hd), sinValues);
 
         Tensor stream = BuildDuoStream(backend, layout, refinerGroups, DuoAttentionMode.Causal, textStates, videoRows, audioRows,
             hidden, layout.TextRows.Length, layout.VideoRows.Length, layout.AudioRows.Length);
