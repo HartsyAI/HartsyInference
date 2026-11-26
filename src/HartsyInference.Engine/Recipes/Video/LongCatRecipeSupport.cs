@@ -139,6 +139,24 @@ internal static class LongCatRecipeSupport
         return null;
     }
 
+    /// <summary>The later runs' figures for one build: the token count of a later step, its KV cache bytes, the measured peak it may use, and whether
+    /// its cache is offloaded. A mixed (1.6) run is uncached: its step runs every context and new frame, holds no cache, has no measurement, and
+    /// does not offload.</summary>
+    internal sealed record LongCatLaterRunFigures(long Tokens, long CacheBytes, long? MeasuredPeak, bool OffloadKv);
+
+    internal static LongCatLaterRunFigures LaterRunFigures(bool mixed, LongCatAvatarChainPlan plan, int latentHeight, int latentWidth,
+        LongCatConfig config, int pixelWidth, int pixelHeight, bool distilled)
+    {
+        if (mixed)
+        {
+            return new LongCatLaterRunFigures(TokenCount(plan.ContextLatents + 1 + plan.NewLatentsPerSegment, latentHeight, latentWidth), 0, null,
+                OffloadKv: false);
+        }
+        return new LongCatLaterRunFigures(TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
+            CachedStepBytes(config, plan.ContextLatents + 1, latentHeight, latentWidth),
+            MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, distilled), OffloadKv: true);
+    }
+
     /// <summary>The activation budget of a later run: the measured reserved peak plus its margin when the size was measured, else the per-token
     /// estimate (the fixed pool, the safety margin, and the activations of <paramref name="tokens"/> rows).</summary>
     internal static long ActivationBudget(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes) =>
@@ -202,6 +220,20 @@ internal static class LongCatRecipeSupport
     /// release lays them out (<c>loraA/lora.safetensors</c>, <c>loraB/lora.safetensors</c>).</summary>
     internal sealed record LongCatLoraFiles(string DmdPath, string OpsdPath);
 
+    /// <summary>Refuses a 1.6 build whose loraA or loraB is missing, before any weight is read, and names the row that holds them.</summary>
+    internal static void RequireAvatar16Loras(string checkpointPath)
+    {
+        LongCatLoraFiles files = Avatar16LoraFiles(checkpointPath);
+        foreach (string path in new[] { files.DmdPath, files.OpsdPath })
+        {
+            if (!File.Exists(path))
+            {
+                throw new NotSupportedException($"The 1.6 build needs its LoRA at '{path}', which is not there. Refusing to run without it. "
+                    + "The 1.6 build is the longcat-avatar-1.6 row (longcat-avatar:1.6 from the CLI), with loraA and loraB beside its base folder.");
+            }
+        }
+    }
+
     /// <summary>The 1.6 LoRA files for a checkpoint directory (the INT8 or bf16 base folder under the 1.6 row).</summary>
     internal static LongCatLoraFiles Avatar16LoraFiles(string checkpointPath)
     {
@@ -233,12 +265,7 @@ internal static class LongCatRecipeSupport
         if (mixedLoras is { } mixed)
         {
             // The 1.6 pair: the DMD and OPSD LoRAs, each at multiplier 1; the mixed schedule switches their gates per step.
-            foreach (string path in new[] { mixed.DmdPath, mixed.OpsdPath })
-            {
-                if (!File.Exists(path))
-                    throw new NotSupportedException($"The 1.6 build needs its LoRA at '{path}', which is not there. Refusing to run without it. "
-                        + "The 1.6 build is the longcat-avatar-1.6 row (longcat-avatar:1.6 from the CLI), with loraA and loraB beside its base folder.");
-            }
+            RequireAvatar16Loras(context.CheckpointPath);
             dmd = LoraFile.Load(mixed.DmdPath);
             opsd = LoraFile.Load(mixed.OpsdPath);
             loras = new LoraStack();

@@ -7,6 +7,10 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// 1.5 build (the default).</summary>
 public static class LongCatAvatarVariants
 {
+    /// <summary>True for a requested 1.6 build name (<c>1.6</c> or <c>avatar-1.6</c>).</summary>
+    public static bool IsSixPointOne(string variant) =>
+        variant.Equals("1.6", StringComparison.OrdinalIgnoreCase) || variant.Equals("avatar-1.6", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The catalog row id of the 1.6 INT8 release. A request names it as <c>longcat-avatar-1.6</c>, or <c>longcat-avatar:1.6</c>, which the CLI
     /// rewrites to it.</summary>
     public const string Avatar16FamilyId = "longcat-avatar-1.6";

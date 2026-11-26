@@ -157,17 +157,16 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The later run's own figures: its cached step runs the new latents through the blocks and holds the cache's two pairs.
         // A measured size budgets its later runs on the reserved peak it was measured at; any other size keeps the per-token estimate and its refusal.
         int pixelWidth = latentWidth * LongCatRecipeSupport.SpatialCompressionFactor, pixelHeight = latentHeight * LongCatRecipeSupport.SpatialCompressionFactor;
-        // A mixed (1.6) schedule runs without the KV cache, so its later steps run every context and new frame through the blocks and hold no
-        // cache. The measurements are for the cached 1.5 steps only, so a mixed run has none.
+        // The later runs' figures: a mixed (1.6) run is uncached and not measured; a cached 1.5 run is sized on its cache and its measurement.
         bool mixed = _loraMix is not null;
-        long? measuredPeak = mixed ? null
-            : LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, _distilled);
+        LongCatRecipeSupport.LongCatLaterRunFigures figures = LongCatRecipeSupport.LaterRunFigures(mixed, plan, latentHeight, latentWidth,
+            _parts.Dit.Config, pixelWidth, pixelHeight, _distilled);
+        long? measuredPeak = figures.MeasuredPeak;
         Logs.Info(measuredPeak is long m
             ? $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has a measured later-run peak of {m >> 20} MiB reserved, plus a {LongCatRecipeSupport.MeasuredMarginBytes >> 20} MiB margin."
             : $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has no measured later-run peak: the per-token estimate and its refusal apply.");
-        long laterTokens = LongCatRecipeSupport.TokenCount(mixed ? plan.ContextLatents + 1 + plan.NewLatentsPerSegment : plan.NewLatentsPerSegment,
-            latentHeight, latentWidth);
-        long laterCache = mixed ? 0 : LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth);
+        long laterTokens = figures.Tokens;
+        long laterCache = figures.CacheBytes;
         LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache, measuredPeak);
 
         // Segment 0: an ordinary generation in its own streaming scope.
@@ -212,7 +211,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, laterCache,
                     measuredPeakBytes: measuredPeak),
                 // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
-                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = !mixed }).Latents,
+                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = figures.OffloadKv }).Latents,
                 bridge);
         };
 

@@ -438,7 +438,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         }
 
         ModelSelector selector = ModelSelector.Parse(settings.Model);
-        ModelSpec spec = ModelResolver.Resolve(LongCatAvatarGate.ModelName(settings.Model), settings.ModelPath, Modality.Video);
+        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
         if (!string.IsNullOrWhiteSpace(settings.ModelProfile))
         {
             spec = spec with { ProfileId = settings.ModelProfile };
@@ -469,18 +469,6 @@ internal static class LongCatAvatarGate
     /// <summary>True when <paramref name="family"/> resolves to the avatar recipe.</summary>
     internal static bool IsAvatar(string? family) =>
         !string.IsNullOrEmpty(family) && VideoRecipeRegistry.Resolve(family)?.Name == Family;
-
-    /// <summary>The model name the request resolves through: a 1.6 build named as <c>longcat-avatar:1.6</c> (or <c>avatar-1.6</c>) is the 1.6 INT8
-    /// catalog row, so the row's weights are the ones fetched. Every other request is unchanged.</summary>
-    internal static string ModelName(string model)
-    {
-        ModelSelector selector = ModelSelector.Parse(model);
-        bool isOnePointSix = selector.Variant is not null && (selector.Variant.Equals("1.6", StringComparison.OrdinalIgnoreCase)
-            || selector.Variant.Equals("avatar-1.6", StringComparison.OrdinalIgnoreCase));
-        return isOnePointSix && selector.Id.Equals("longcat-avatar", StringComparison.OrdinalIgnoreCase)
-            ? LongCatAvatarVariants.Avatar16FamilyId
-            : model;
-    }
 
     /// <summary>The consent line for a non-quiet run of the avatar recipe, or null.</summary>
     internal static string? ConsentNotice(string? family, bool quiet) => !quiet && IsAvatar(family) ? ConsentText : null;
