@@ -8,81 +8,79 @@ using Xunit;
 
 namespace HartsyInference.Engine.Tests;
 
-/// <summary>The chain's budget refusals. The later run's refusal is the scope's own check (LongCatRecipeSupport.OpenDenoiseStream, which calls
-/// RequireRoom with the staged pair counted as cache). Before segment 0, RequireChainRoom is an upper bound that refuses only when even that bound is
-/// negative. Figures are MiB: a 832x480 later run needs 15894 MiB of activation headroom without the staged pair, and about 16138 with it.</summary>
+/// <summary>The later run's budget is sized on its cached step: the new latents' tokens, the activations, and the cache's two pairs
+/// (<see cref="LongCatRecipeSupport.CachedStepBytes"/>). The later run's own check (OpenDenoiseStream) and the pre-segment-0 bound
+/// (RequireChainRoom) use the same figures. Figures are MiB: at 832x480 the activation headroom is about 14189 without the cached step and about
+/// 14677 with it, so the 14639 MiB the log reports sits between the two.</summary>
 public sealed class LongCatRoomCheckTests
 {
     private const long Mb = 1L << 20;
 
-    private static long LaterTokens(int width, int height)
+    /// <summary>The later run's noisy tokens: the new latents of a segment, not the run's whole latent grid.</summary>
+    private static long NoisyTokens(int width, int height)
     {
         LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
-        return LongCatRecipeSupport.TokenCount(plan.RunLatents, height / 8, width / 8);
+        return LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, height / 8, width / 8);
     }
+
+    /// <summary>The cached step's device bytes for five conditioning latents at the given size.</summary>
+    private static long Cached(LongCatConfig config, int width, int height) =>
+        LongCatRecipeSupport.CachedStepBytes(config, 5, height / 8, width / 8);
+
+    private static long Activations(long tokens) => LongCatRecipeSupport.ActivationHeadroomBytes(tokens, 4096, 11008);
 
     private static LongCatConfig Config() => new() { HiddenSize = 4096, Depth = 48, PatchSize = (1, 2, 2) };
 
     [Fact]
-    public void ALaterRunAt832x480WithoutThePairIsRefusedWithItsFigures()
+    public void ALaterRunAt832x480IsRefusedOnlyWithItsCachedStep()
     {
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(832, 480), 4096, 11008);
+        LongCatConfig config = Config();
+        long tokens = NoisyTokens(832, 480);
+        long without = Activations(tokens);
+        long withCache = without + Cached(config, 832, 480);
+        long free = 14_639 * Mb;
+
+        // The free figure sits between the two headrooms: the activations fit alone, and the cached step does not.
+        Assert.True(without < free && free < withCache, $"free {free / Mb} MiB should sit between {without / Mb} and {withCache / Mb} MiB");
+
+        LongCatRecipeSupport.RequireRoom(free, sharedBytesToPlace: 0, headroomBytes: without, cacheBytes: 0, "The later run");
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, cacheBytes: 0, "The later run"));
-        Assert.Contains("MiB short", error.Message);
+            LongCatRecipeSupport.RequireRoom(free, sharedBytesToPlace: 0, headroomBytes: without, cacheBytes: Cached(config, 832, 480), "The later run"));
+        Assert.Contains("MiB of KV cache", error.Message);
         Assert.Contains("14639 MiB is free", error.Message);
+        Assert.Contains("MiB short", error.Message);
         Assert.DoesNotContain("shared weights", error.Message);
     }
 
     [Fact]
-    public void ALaterRunAt640x368FitsWithItsFreeMemory()
+    public void ALaterRunAt640x368FitsWithItsCachedStep()
     {
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(640, 368), 4096, 11008);
-        LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, cacheBytes: 0, "The later run");
+        LongCatConfig config = Config();
+        // 14761 MiB free, the #1230 segment-1 figure: about 3084 MiB spare once the cached step is counted.
+        long cached = Cached(config, 640, 368);
+        long spare = 14_761 * Mb - Activations(NoisyTokens(640, 368)) - cached;
+        Assert.InRange(spare / (double)Mb, 3_070.0, 3_100.0);
+        LongCatRecipeSupport.RequireRoom(14_761 * Mb, sharedBytesToPlace: 0, headroomBytes: Activations(NoisyTokens(640, 368)),
+            cacheBytes: cached, "The later run");
     }
 
     [Fact]
-    public void TheOffloadedStagedPairIsNamedAsCacheAt832x480()
+    public void TheCachedStepCountsTwoPairsOfTheConditioningTokens()
     {
-        long stage = LongCatRecipeSupport.KvCacheBytes(Config(), 5, 60, 104, offloaded: true);
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(832, 480), 4096, 11008);
-
-        // 14680 MiB free: refused about 1458 MiB short once the pair is counted, and the cache is named apart from the activations.
-        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireRoom(14_680 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, cacheBytes: stage, "The later run"));
-        Assert.Contains("MiB of KV cache", error.Message);
-        Assert.Contains("MiB short", error.Message);
-    }
-
-    [Fact]
-    public void A832x480RunPassesWithoutThePairButIsRefusedWithIt()
-    {
-        // 15900 MiB free sits between the two figures: about 15894 MiB without the staged pair (6 MiB spare), about 16138 MiB with it (short).
-        // A check that did not count the pair would accept this run, so this test fails if the pair is dropped.
-        long stage = LongCatRecipeSupport.KvCacheBytes(Config(), 5, 60, 104, offloaded: true);
-        long without = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(832, 480), 4096, 11008);
-
-        LongCatRecipeSupport.RequireRoom(15_900 * Mb, sharedBytesToPlace: 0, headroomBytes: without, cacheBytes: 0, "The later run");
-        Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireRoom(15_900 * Mb, sharedBytesToPlace: 0, headroomBytes: without, cacheBytes: stage, "The later run"));
-    }
-
-    [Fact]
-    public void TheOffloadedStagedPairStillFitsA640x368LaterRun()
-    {
-        long stage = LongCatRecipeSupport.KvCacheBytes(Config(), 5, 46, 80, offloaded: true);
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(640, 368), 4096, 11008);
-        LongCatRecipeSupport.RequireRoom(14_761 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, cacheBytes: stage, "The later run");
+        LongCatConfig config = Config();
+        long pair = LongCatRecipeSupport.KvCacheBytes(config, 5, 60, 104, offloaded: true);
+        Assert.Equal(2 * pair, LongCatRecipeSupport.CachedStepBytes(config, 5, 60, 104));
     }
 
     [Fact]
     public void TheSharedWeightsStillToPlaceCountAgainstTheRoom()
     {
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(640, 368), 4096, 11008);
-        // 14550 MiB free fits on its own; 3000 MiB of shared weights still to place does not.
+        long headroom = Activations(NoisyTokens(640, 368));
+        // 14550 MiB free leaves about 3160 MiB past the activations, so 2000 MiB of shared weights still to place fits and 3500 MiB does not.
+        LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 2_000 * Mb, headroomBytes: headroom, cacheBytes: 0, "The later run");
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 3_000 * Mb, headroomBytes: headroom, cacheBytes: 0, "The later run"));
-        Assert.Contains("3000 MiB of shared weights", error.Message);
+            LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 3_500 * Mb, headroomBytes: headroom, cacheBytes: 0, "The later run"));
+        Assert.Contains("3500 MiB of shared weights", error.Message);
     }
 
     [Fact]
@@ -92,26 +90,26 @@ public sealed class LongCatRoomCheckTests
     }
 
     [Fact]
-    public void TheBeforeSegmentZeroCheckCountsTheRealPairThroughProduction()
+    public void TheBeforeSegmentZeroCheckCountsTheCachedStepThroughProduction()
     {
-        // The production helper, through a recording backend: its headroom is the DiT's own activation headroom plus whatever pair it is given.
+        // The production helper, through a recording backend, with the later run's own figures: noisy tokens and the cached step.
         LongCatConfig config = Config();
         using LongCatTransformer dit = new(config);
         LongCatParts parts = new(dit, 4, 48, false, null!, null!, null!, null!);
-        long tokens = LaterTokens(832, 480);
-        long stage = LongCatRecipeSupport.KvCacheBytes(config, 5, 60, 104, offloaded: true);
+        long tokens = NoisyTokens(832, 480);
+        long cached = Cached(config, 832, 480);
         long without = LongCatRecipeSupport.BudgetHeadroomBytes(tokens, config.HiddenSize, config.FfnHiddenDim, measuredPeakBytes: null, cacheBytes: 0);
-        Assert.Equal(without + stage,
-            LongCatRecipeSupport.BudgetHeadroomBytes(tokens, config.HiddenSize, config.FfnHiddenDim, measuredPeakBytes: null, cacheBytes: stage));
+        Assert.Equal(without + cached,
+            LongCatRecipeSupport.BudgetHeadroomBytes(tokens, config.HiddenSize, config.FfnHiddenDim, measuredPeakBytes: null, cacheBytes: cached));
 
         OrderRecorder backend = Recorder();
         long shared = LongCatRecipeSupport.NonResidentSharedBytes(backend.Backend, dit);
-        backend.FreeBytes = without + shared + 6 * Mb;
+        // Free memory sits between the two bounds: half the cached step to spare without it passes, and with the whole step it refuses.
+        backend.FreeBytes = without + shared + cached / 2;
 
-        // Without the pair the bound passes with 6 MiB to spare; with the real pair it refuses.
         LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, tokens, 0);
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, tokens, stage));
+            LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, tokens, cached));
         Assert.Contains("MiB of KV cache", error.Message);
         Assert.Contains("MiB short", error.Message);
         Assert.Equal(new[] { "TrimMemoryPool", "FreeMemoryBytes", "TrimMemoryPool", "FreeMemoryBytes" }, backend.Calls.ToArray());
