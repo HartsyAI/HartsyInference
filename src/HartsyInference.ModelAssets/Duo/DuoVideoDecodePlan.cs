@@ -3,11 +3,13 @@ namespace HartsyInference.ModelAssets.Duo;
 /// <summary>One call of the native video decoder in the <c>duo_5_17</c> policy: the window it reads, its raw frame count, and the
 /// published crop <c>[CropStart, CropEnd)</c>. <c>EndOfStream</c> marks the EOF call, whose lookahead is the last chunk's last two latents.
 /// Pure bookkeeping; no VAE math happens here.</summary>
-public readonly record struct DuoDecodeStep(int Block, int FirstChunk, int LastChunk, int WindowLatents, int RawFrames, int CropStart, int CropEnd, bool EndOfStream);
+public readonly record struct DuoDecodeStep(int Block, int FirstChunk, int LastChunk, int WindowLatents, int RawFrames,
+    int CropStart, int CropEnd, bool EndOfStream);
 
 /// <summary>The <c>duo_5_17</c> decode schedule: each received chunk of five latent steps is decoded with a two-latent lookahead, so block
 /// <c>k</c> is published when chunk <c>k+1</c> arrives. The first chunk publishes nothing, and at EOF the last block is published from
-/// the last two latents. Mirrors <c>VideoVAE.decode_block</c> and <c>finish_decode</c> in <c>duo/models/realization/modules/video_vae.py</c> @068e357.</summary>
+/// the last two latents. Mirrors <c>VideoVAE.decode_block</c> and <c>finish_decode</c> in
+/// <c>duo/models/realization/modules/video_vae.py</c> @068e357.</summary>
 public static class DuoVideoDecodePlan
 {
     private const int ChunkLatents = 5;
