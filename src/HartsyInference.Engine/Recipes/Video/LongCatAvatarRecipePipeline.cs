@@ -182,8 +182,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
         Func<LongCatAvatarRun, float[]> denoiseSegment = run => LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
             () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
-            onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
+                LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth),
+                LongCatRecipeSupport.KvCacheBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth, offloaded: true)),
+            // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
+            onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
             bridge);
 
         _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise, contextFromSegment, denoiseSegment);

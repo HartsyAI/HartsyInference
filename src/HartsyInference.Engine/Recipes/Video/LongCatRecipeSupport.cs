@@ -78,13 +78,51 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
     /// memory when it does not. Disposing the scope evicts the streamed window; the resident prefix stays on the device until the pipeline's pin
-    /// releases it (the denoise loop's finally frees the whole DiT).</summary>
-    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens) =>
-        BlockStreamingScope.Open(new BlockStreamingOptions
+    /// releases it (the denoise loop's finally frees the whole DiT). <paramref name="cacheBytes"/> is the KV cache the run keeps for its blocks; it
+    /// counts against the same budget as the activations, and a run whose cache leaves no room is refused before its denoise starts.</summary>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens, long cacheBytes = 0,
+        long? measuredPeakBytes = null)
+    {
+        long headroom = BudgetHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes, cacheBytes);
+        if (cacheBytes > 0)
         {
-            Backend = backend, Denoiser = parts.Dit, ModelName = modelName,
-            HeadroomBytes = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim),
+            // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
+            backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
+            backend.TrimMemoryPool();
+            RequireCacheRoom(backend.FreeMemoryBytes(), headroom - cacheBytes, cacheBytes);
+        }
+        return BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = headroom,
         });
+    }
+
+    /// <summary>The bytes a run's KV cache takes on the device, in F32: every block's keys and values for the conditioning latents (12.3 GB at 832x480
+    /// with five of them, 7.25 GB at 640x368). Offloaded, the cache lives in host memory and the device holds one block's pair at a time.</summary>
+    internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth, bool offloaded) =>
+        LongCatKvCache.EstimateBytes(config, condLatents, latentHeight, latentWidth, offloaded);
+
+    /// <summary>The headroom a run reserves: the fixed pool and the safety margin, the activations, and the cache. The activations are the per-token
+    /// estimate, or <paramref name="measuredPeakBytes"/> when a measured peak of the run's activations is given in its place.</summary>
+    internal static long BudgetHeadroomBytes(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes, long cacheBytes) =>
+        measuredPeakBytes is long peak
+            ? FixedPoolBytes + SafetyBytes + peak + cacheBytes
+            : ActivationHeadroomBytes(tokens, hidden, ffnHidden) + cacheBytes;
+
+    /// <summary>Refuses a run whose budget is negative: the free memory after the shared weights, less the activation headroom and the cache, must be
+    /// at least zero, or the streamed blocks have nowhere to land and the first step dies out of memory.</summary>
+    internal static void RequireCacheRoom(long freeAfterShared, long headroomBeforeCache, long cacheBytes)
+    {
+        long spendable = freeAfterShared - headroomBeforeCache - cacheBytes;
+        if (spendable < 0)
+        {
+            throw new InvalidOperationException(
+                $"The chain's later run needs {Mb(headroomBeforeCache)} MB of activation headroom and {Mb(cacheBytes)} MB of KV cache, but only " +
+                $"{Mb(freeAfterShared)} MB is free after the shared weights: {Mb(-spendable)} MB short. Lower the resolution or the chain length.");
+        }
+    }
+
+    private static long Mb(long bytes) => bytes >> 20;
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
@@ -204,7 +242,7 @@ internal static class LongCatRecipeSupport
             using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
             using Tensor host = VideoRecipeUtils.HostCopy(latent);
             return host.AsReadOnlySpan<float>().ToArray();
-        });
+        }, backend.TrimMemoryPool);
     }
 
     /// <summary>Runs <paramref name="body"/> with <paramref name="weights"/> placed on the device, and releases them afterwards, also when the body
@@ -212,7 +250,7 @@ internal static class LongCatRecipeSupport
     /// someone frees it (<c>GpuTransferHelper.ShouldAutoPromote</c>), so a segment's decode or encode would leave the card short for the next segment's
     /// streaming plan. The seam takes the preload and free as delegates, so the order is testable without a device.</summary>
     internal static T WithWeightsPlaced<T>(IEnumerable<Tensor> weights, Action<IEnumerable<Tensor>> preload, Action<IEnumerable<Tensor>> free,
-        Func<T> body)
+        Func<T> body, Action? trim = null)
     {
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(preload);
@@ -227,6 +265,9 @@ internal static class LongCatRecipeSupport
         finally
         {
             free(placed);
+            // The decode or encode leaves its transients in the allocator pool, where FreeMemoryBytes counts them as used. Returning them here, before
+            // any streaming plan reads the card, keeps them out of the next run's budget.
+            trim?.Invoke();
         }
     }
 
@@ -265,7 +306,7 @@ internal static class LongCatRecipeSupport
         {
             using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
             return VideoRgbFrames.ExtractAllFrames(rgb);
-        });
+        }, backend.TrimMemoryPool);
     }
 
     /// <summary>The 1.5 chain's context (use_vcond False in meituan-longcat/LongCat-Video @ 58eb336, pipeline 1467-1490): the segment's last
@@ -294,7 +335,7 @@ internal static class LongCatRecipeSupport
             using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
             using Tensor host = VideoRecipeUtils.HostCopy(latent);
             return host.AsReadOnlySpan<float>().ToArray();
-        });
+        }, backend.TrimMemoryPool);
     }
 
     private static void CheckSegment(float[] segmentLatents, int channels, int segmentFrames, int latentHeight, int latentWidth)

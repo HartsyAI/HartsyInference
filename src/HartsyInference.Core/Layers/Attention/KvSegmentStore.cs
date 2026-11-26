@@ -5,7 +5,9 @@ namespace HartsyInference.Core.Layers.Attention;
 
 /// <summary>Keys and values a model keeps between attention calls, per layer and in segments along the token axis: a latent frame, a chunk, a group
 /// of rows. The store owns what it is given, pins it so the activation sweep between steps leaves it on the device, and unpins and frees it when
-/// it is replaced, removed or the store is disposed. Which segments an attention reads, and when one is dropped, stay with the model.</summary>
+/// it is replaced, removed or the store is disposed. A layer can also be moved to host memory (<see cref="MoveLayerToHost"/>): its segments are then
+/// host tensors, never pinned, and the caller stages them to the device for each read. Which segments an attention reads, and when one is dropped,
+/// stay with the model.</summary>
 /// <remarks>Segments may differ in length; every other extent, and the dtype, must agree. Nothing is copied on the way in. A read that needs one
 /// tensor is a <see cref="Join"/>, or a <see cref="Compact"/> once for a history many blocks read. Used from one thread at a time.</remarks>
 public sealed class KvSegmentStore : IDisposable
@@ -18,7 +20,7 @@ public sealed class KvSegmentStore : IDisposable
     private bool _shaped;
     private int _disposed;
 
-    private sealed record Segment(Tensor Keys, Tensor Values);
+    private sealed record Segment(Tensor Keys, Tensor Values, bool Host = false);
 
     /// <summary>A store of <paramref name="layers"/> layers whose tensors carry tokens on axis <paramref name="tokenAxis"/>.</summary>
     public KvSegmentStore(IBackend backend, int layers, int tokenAxis)
@@ -100,8 +102,8 @@ public sealed class KvSegmentStore : IDisposable
             segments[slot] = new Segment(keys, values);
             if (held is not null)
             {
-                if (!ReferenceEquals(held.Keys, keys) && !ReferenceEquals(held.Keys, values)) Free(held.Keys);
-                if (!ReferenceEquals(held.Values, keys) && !ReferenceEquals(held.Values, values)) Free(held.Values);
+                if (!ReferenceEquals(held.Keys, keys) && !ReferenceEquals(held.Keys, values)) Free(held.Keys, held.Host);
+                if (!ReferenceEquals(held.Values, keys) && !ReferenceEquals(held.Values, values)) Free(held.Values, held.Host);
             }
             _shape = keys.Shape;
             _dtype = keys.DType;
@@ -137,6 +139,32 @@ public sealed class KvSegmentStore : IDisposable
             _shaped = false;
     }
 
+    /// <summary>Moves a layer's segments to host memory: each device segment's keys and values are copied out, the device tensors are unpinned and freed,
+    /// and the segment holds host tensors from then on. A host segment is read again through <see cref="Keys"/> and <see cref="Values"/> like any
+    /// other, and the caller stages it to the device for the reads (the weight staging of the streaming code does this for the KV cache).</summary>
+    public void MoveLayerToHost(int layer)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        List<Segment?> segments = Layer(layer);
+        for (int slot = 0; slot < segments.Count; slot++)
+        {
+            Segment? segment = segments[slot];
+            if (segment is null || segment.Host)
+                continue;
+            Tensor hostKeys = CopyToHost(segment.Keys), hostValues = CopyToHost(segment.Values);
+            segments[slot] = new Segment(hostKeys, hostValues, Host: true);
+            Free(segment.Keys, host: false);
+            Free(segment.Values, host: false);
+        }
+    }
+
+    private static Tensor CopyToHost(Tensor device)
+    {
+        Tensor host = new(device.Shape, device.DType);
+        device.AsReadOnlySpan<float>().CopyTo(host.AsSpan<float>());
+        return host;
+    }
+
     /// <summary>Drops every segment of <paramref name="layer"/>.</summary>
     public void Clear(int layer) => RemoveRange(layer, 0, Count(layer));
 
@@ -148,7 +176,11 @@ public sealed class KvSegmentStore : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
         Tensor[] keys = new Tensor[count], values = new Tensor[count];
         for (int i = 0; i < count; i++)
-            (keys[i], values[i]) = At(layer, first + i);
+        {
+            Segment at = At(layer, first + i);
+            keys[i] = at.Keys;
+            values[i] = at.Values;
+        }
         Tensor joinedKeys = Join(keys);
         try
         {
@@ -241,13 +273,15 @@ public sealed class KvSegmentStore : IDisposable
     {
         if (segment is null)
             return;
-        Free(segment.Keys);
-        Free(segment.Values);
+        Free(segment.Keys, segment.Host);
+        Free(segment.Values, segment.Host);
     }
 
-    private void Free(Tensor stored)
+    // A host segment's tensors were never pinned: they are not on the device, so there is nothing to unpin.
+    private void Free(Tensor stored, bool host)
     {
-        _backend.UnpinActivation(stored);
+        if (!host)
+            _backend.UnpinActivation(stored);
         stored.Dispose();
     }
 
