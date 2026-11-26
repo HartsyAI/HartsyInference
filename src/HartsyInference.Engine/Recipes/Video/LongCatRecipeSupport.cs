@@ -97,6 +97,12 @@ internal static class LongCatRecipeSupport
         });
     }
 
+    /// <summary>The device bytes a cached step holds for one block beyond its activations: the staged pair of the cached keys and values, and the joined
+    /// copy the attention builds from them (past rows followed by the new rows). The new rows' own keys and values are activations and are counted in
+    /// the per-token term. Two pairs of the conditioning tokens: 487.5 MiB at 832x480 with five conditioning latents, 288 MiB at 640x368.</summary>
+    internal static long CachedStepBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth) =>
+        2 * KvCacheBytes(config, condLatents, latentHeight, latentWidth, offloaded: true);
+
     /// <summary>The bytes a run's KV cache takes on the device, in F32: every block's keys and values for the conditioning latents (12.3 GB at 832x480
     /// with five of them, 7.25 GB at 640x368). Offloaded, the cache lives in host memory and the device holds one block's pair at a time.</summary>
     internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth, bool offloaded) =>

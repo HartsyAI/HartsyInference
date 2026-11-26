@@ -354,4 +354,34 @@ public sealed class KvSegmentStoreTests : IDisposable
             return true;
         }
     }
+
+    [Fact]
+    public void MoveLayerToHost_KeepsBf16SegmentsBitExact()
+    {
+        using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 0);
+        Tensor keys = BFloat16(1, 2, 4), values = BFloat16(-3, 2, 4);
+        byte[] keyBytes = keys.AsReadOnlySpan<byte>().ToArray(), valueBytes = values.AsReadOnlySpan<byte>().ToArray();
+        store.Append(0, keys, values);
+
+        store.MoveLayerToHost(0);
+
+        Assert.Equal(new TensorShape(2, 4), store.Keys(0, 0).Shape);
+        Assert.Equal(DType.BF16, store.Keys(0, 0).DType);
+        Assert.Equal(keyBytes, store.Keys(0, 0).AsReadOnlySpan<byte>().ToArray());
+        Assert.Equal(valueBytes, store.Values(0, 0).AsReadOnlySpan<byte>().ToArray());
+    }
+
+    private static Tensor BFloat16(float start, int rows, int cols)
+    {
+        Tensor tensor = new(new TensorShape(rows, cols), DType.BF16);
+        Span<byte> bytes = tensor.AsSpan<byte>();
+        for (int i = 0; i < rows * cols; i++)
+        {
+            // The high 16 bits of the float: a valid BF16 value, distinct per element.
+            uint bits = BitConverter.SingleToUInt32Bits(start + i * 0.5f) >> 16;
+            bytes[2 * i] = (byte)bits;
+            bytes[2 * i + 1] = (byte)(bits >> 8);
+        }
+        return tensor;
+    }
 }

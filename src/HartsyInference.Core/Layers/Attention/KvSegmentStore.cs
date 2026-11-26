@@ -158,10 +158,11 @@ public sealed class KvSegmentStore : IDisposable
         }
     }
 
+    // Copied as bytes, so any dtype (F32, BF16, F16) moves unchanged: the span's length is the tensor's byte count.
     private static Tensor CopyToHost(Tensor device)
     {
         Tensor host = new(device.Shape, device.DType);
-        device.AsReadOnlySpan<float>().CopyTo(host.AsSpan<float>());
+        device.AsReadOnlySpan<byte>().CopyTo(host.AsSpan<byte>());
         return host;
     }
 
