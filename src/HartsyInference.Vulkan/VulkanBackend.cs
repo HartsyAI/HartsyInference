@@ -2722,6 +2722,64 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
+    public void ConvTranspose2d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (input.Shape.Rank != 4 || weight.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose2d: input {input.Shape}, weight {weight.Shape} and output {output.Shape} must be rank-4.");
+        int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int cOut = (int)output.Shape[1], oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2], kW = (int)weight.Shape[3];
+        if ((int)weight.Shape[0] != cIn || (int)weight.Shape[1] != cOut || (int)output.Shape[0] != batch || strideH < 1 || strideW < 1)
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose2d: input {input.Shape}, weight {weight.Shape}, output {output.Shape} do not match "
+                + $"(stride={strideH}x{strideW}); the weight is [C_in, C_out, kH, kW].");
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32 || (bias is not null && bias.DType != DType.F32))
+            throw new NotSupportedException(
+                $"Vulkan ConvTranspose2d supports F32 only: input {input.DType}, weight {weight.DType}, output {output.DType}, bias {bias?.DType}.");
+        if (bias is not null && bias.ElementCount != cOut)
+            throw new ArgumentException($"Vulkan ConvTranspose2d: bias has {bias.ElementCount} elements, expected {cOut}.");
+        // The shader indexes input, weight and output with 32-bit offsets.
+        if (input.ElementCount > uint.MaxValue || weight.ElementCount > uint.MaxValue || output.ElementCount > uint.MaxValue)
+            throw new NotSupportedException(
+                $"Vulkan ConvTranspose2d: input {input.Shape}, weight {weight.Shape} or output {output.Shape} exceeds the shader's 32-bit index range.");
+        using OpScope _op = EnterOp();
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer wBuf = GetBuffer(weight);
+        VulkanBuffer biasBuf = bias is null ? inBuf : GetBuffer(bias);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            SpecConstant[] spec = { _default1DSpec[0], _default1DSpec[1], _default1DSpec[2], SpecConstant.Bool(10, bias is not null) };
+            VulkanKernel k = GetKernel("conv_transpose2d", 4, spec);
+            Span<byte> pc = stackalloc byte[13 * 4];
+            BinaryWriteUInt(pc, 0, (uint)batch);
+            BinaryWriteUInt(pc, 4, (uint)cIn);
+            BinaryWriteUInt(pc, 8, (uint)cOut);
+            BinaryWriteUInt(pc, 12, (uint)iH);
+            BinaryWriteUInt(pc, 16, (uint)iW);
+            BinaryWriteUInt(pc, 20, (uint)oH);
+            BinaryWriteUInt(pc, 24, (uint)oW);
+            BinaryWriteUInt(pc, 28, (uint)kH);
+            BinaryWriteUInt(pc, 32, (uint)kW);
+            BinaryWriteUInt(pc, 36, (uint)strideH);
+            BinaryWriteUInt(pc, 40, (uint)strideW);
+            BinaryWriteUInt(pc, 44, unchecked((uint)padH));
+            BinaryWriteUInt(pc, 48, unchecked((uint)padW));
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ConvTranspose2d dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     #endregion
 
     #region Element-wise

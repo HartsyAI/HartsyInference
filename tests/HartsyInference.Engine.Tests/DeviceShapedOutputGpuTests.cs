@@ -25,8 +25,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
     public void Cuda_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenCuda);
 
     [VulkanDeviceFact]
-    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan,
-        hostConvTransposes: 2);
+    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan);
 
     [CudaDeviceFact]
     public void Cuda_LongCatAudioProjection_StaysOnTheDevice() => LongCatAudioProjectionForward(GpuDevices.OpenCuda);
@@ -175,8 +174,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
         return t;
     }
 
-    // On Vulkan ConvTranspose2d has no shader and runs on the host (VULKAN_STATUS.md). Levels 0 and 1 each have one, and each reads its input back.
-    private void DepthPro2Reassemble(Func<IBackend> open, int hostConvTransposes = 0)
+    private void DepthPro2Reassemble(Func<IBackend> open)
     {
         const int width = 5, prefix = 2, gridH = 2, gridW = 4, decoder = 4;
         int[] dims = [3, 4, 5, 6];
@@ -196,7 +194,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
                 long syncs = device.GetD2hSyncCount();
                 output.WriteLine($"D2H_SYNCS depthpro2 reassemble: {syncs}");
                 AssertClose(expected, Values(levels), 1e-4f);
-                Assert.Equal(hostConvTransposes, syncs);
+                Assert.Equal(0, syncs);
             }
             finally
             {

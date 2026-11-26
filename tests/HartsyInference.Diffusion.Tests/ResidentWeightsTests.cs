@@ -63,7 +63,7 @@ public sealed class ResidentWeightsTests
     }
 
     [Fact]
-    public void NothingIsFreed_BeforeAPreload_OrAfterOneThatThrew()
+    public void NothingIsFreed_BeforeAPreload_AndAFailedPreloadFreesWhatItUploaded()
     {
         using CpuBackend cpu = new();
         using Tensor weight = new(new TensorShape(4), DType.F32);
@@ -75,11 +75,15 @@ public sealed class ResidentWeightsTests
             resident.Release(force: true);
             Assert.Empty(recorder.Calls);
 
+            // A preload that throws may have uploaded part of the model: it frees all of it, and stays not resident.
             recorder.FailPreload = true;
             Assert.Throws<InvalidOperationException>(resident.Preload);
             Assert.False(resident.IsResident);
+            Assert.Equal(new[] { "PreloadWeights", "FreeWeights" }, recorder.Calls.Select(c => c.Kind));
+            Assert.All(recorder.Calls, c => Assert.Equal(new[] { weight }, c.Tensors));
+
             resident.Release(force: true);
-            Assert.Equal(new[] { "PreloadWeights" }, recorder.Calls.Select(c => c.Kind));
+            Assert.Equal(new[] { "PreloadWeights", "FreeWeights" }, recorder.Calls.Select(c => c.Kind));
         }
         finally
         {

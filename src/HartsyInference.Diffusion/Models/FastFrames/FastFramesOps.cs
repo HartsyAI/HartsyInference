@@ -116,6 +116,8 @@ internal static class FastFramesOps
     public static Tensor CopyF32(Tensor source, TensorShape shape)
     {
         ArgumentNullException.ThrowIfNull(source);
+        if (source.QuantInfo is not null)
+            throw new NotSupportedException($"A quantized weight ({source.QuantInfo.Format}) cannot be read as plain F32: a plain copy would drop its scales.");
         if (source.ElementCount != shape.ElementCount)
             throw new ArgumentException($"A weight of {source.Shape} cannot be read as {shape}: the element counts differ.", nameof(shape));
         Tensor target = new(shape, DType.F32);
