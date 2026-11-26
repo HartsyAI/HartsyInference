@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Guidance;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.FastFrames;
@@ -232,7 +234,7 @@ public sealed class FastFramesKvRefiner : IDisposable
 
         using Tensor dK = FastFramesOps.Linear(backend, h, head.DK, head.DKB);
         using Tensor kSum = FastFramesOps.Add(backend, noisyK, dK);
-        Tensor refinedK = RenormPerHead(kSum, noisyK);
+        Tensor refinedK = RenormPerHead(backend, kSum, noisyK);
 
         using Tensor dV = FastFramesOps.Linear(backend, h, head.DV, head.DVB);
         using Tensor vSum = FastFramesOps.Add(backend, noisyV, dV);
@@ -242,31 +244,33 @@ public sealed class FastFramesKvRefiner : IDisposable
     }
 
     /// <summary>Scales each head's <c>HeadDim</c> slice of <paramref name="x"/> to the norm of the same slice of
-    /// <paramref name="reference"/>: <c>x · (‖ref‖ / (‖x‖ + 1e-6))</c>. No backend operation covers this exact form, so it runs on
-    /// the host.</summary>
-    private Tensor RenormPerHead(Tensor x, Tensor reference)
+    /// <paramref name="reference"/>: <c>x · (‖ref‖ / (‖x‖ + 1e-6))</c>, on the device. The guided Euler step's per-row norm does this
+    /// with guidance 0: the guided prediction is then the unguided one (<c>x</c>), rescaled per row against <c>cond</c> (the
+    /// reference). Each head is one row, so both inputs are first copied into <c>[tokens·heads, HeadDim]</c> with strided copies of
+    /// equal element count (no reshape view, which an op cannot read on a device), and the result is copied back.</summary>
+    private Tensor RenormPerHead(IBackend backend, Tensor x, Tensor reference)
     {
         int tokens = (int)x.Shape[0], heads = _config.Heads, headDim = _config.HeadDim;
+        using Tensor xRows = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        using Tensor referenceRows = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        // z is the output: zero-filled, and not sharing storage with either prediction.
+        using Tensor zeros = new(new TensorShape(tokens * heads, headDim), DType.F32);
+        Retype(backend, xRows, x, tokens, heads, headDim);
+        Retype(backend, referenceRows, reference, tokens, heads, headDim);
+        backend.Fill(zeros, 0f);
+        backend.GuidedEulerStep(zeros, referenceRows, xRows, GuidedEulerSpec.RowNorm(guidance: 0f, delta: 1f, eps: RenormEps));
         Tensor output = new(x.Shape, DType.F32);
-        ReadOnlySpan<float> xs = x.AsReadOnlySpan<float>(), rs = reference.AsReadOnlySpan<float>();
-        Span<float> os = output.AsSpan<float>();
-        for (int t = 0; t < tokens; t++)
-        {
-            for (int h = 0; h < heads; h++)
-            {
-                int offset = (t * heads + h) * headDim;
-                double xNorm = 0, rNorm = 0;
-                for (int d = 0; d < headDim; d++)
-                {
-                    xNorm += (double)xs[offset + d] * xs[offset + d];
-                    rNorm += (double)rs[offset + d] * rs[offset + d];
-                }
-                float scale = (float)(Math.Sqrt(rNorm) / (Math.Sqrt(xNorm) + RenormEps));
-                for (int d = 0; d < headDim; d++)
-                    os[offset + d] = xs[offset + d] * scale;
-            }
-        }
+        Retype(backend, output, zeros, tokens, heads, headDim);
         return output;
+    }
+
+    /// <summary>Copies between <c>[tokens, heads·headDim]</c> and <c>[tokens·heads, headDim]</c>. Both shapes hold the elements in the
+    /// same order, so this is one strided copy with the same strides on both sides: a retype, not a permute.</summary>
+    private static void Retype(IBackend backend, Tensor destination, Tensor source, int tokens, int heads, int headDim)
+    {
+        ReadOnlySpan<long> dims = [tokens, heads, headDim];
+        ReadOnlySpan<long> strides = [(long)heads * headDim, headDim, 1];
+        backend.CopyStrided(destination, source, new StridedCopySpec(new StridedView(dims, strides), new StridedView(dims, strides)));
     }
 
     private Tensor RunStemBlock(IBackend backend, StemBlock block, Tensor x, Tensor embedding)
