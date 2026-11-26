@@ -35,7 +35,8 @@ public sealed class DepthPro2VideoStream : IDisposable
     /// <param name="window">Frames attended together: the clip length (buffered) or the cache size with the current frame (unbuffered); 1 to
     /// <see cref="DepthPro2Model.MaxJointFrames"/>.</param>
     /// <param name="overlap">Frames shared by consecutive buffered clips, 0 to <paramref name="window"/> - 1; must be 0 for unbuffered.</param>
-    /// <exception cref="ArgumentException">An unbuffered stream's cache and the weights are larger than the device's memory.</exception>
+    /// <exception cref="ArgumentException">The frame is over <see cref="DepthPro2Model.MaxPatchTokens"/>, or an unbuffered stream's cache and
+    /// the weights are larger than the device's memory.</exception>
     public DepthPro2VideoStream(DepthPro2Network network, IBackend backend, int width, int height, double focalLengthPx,
         int window = DefaultWindow, int overlap = DefaultOverlap, DepthPro2VideoMode mode = DepthPro2VideoMode.Buffered)
     {
@@ -43,6 +44,7 @@ public sealed class DepthPro2VideoStream : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
+        DepthPro2Model.CheckSize(width, height);
         ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(window, DepthPro2Model.MaxJointFrames);
         if (!double.IsFinite(focalLengthPx) || focalLengthPx <= 0)
@@ -102,21 +104,22 @@ public sealed class DepthPro2VideoStream : IDisposable
     public void Dispose() => _ring?.Dispose();
 
     /// <summary>The bytes an unbuffered stream's attention cache needs: each cross-frame block's full window of keys, values and prefix tokens,
-    /// and the one block's window of keys and values a frame reads into new tensors.</summary>
+    /// and the one block's window of keys and values a frame reads into new tensors. The frame must be within
+    /// <see cref="DepthPro2Model.MaxPatchTokens"/>.</summary>
     public static long UnbufferedCacheBytes(DepthPro2Preset preset, int width, int height, int window)
     {
         ArgumentNullException.ThrowIfNull(preset);
-        const int multiple = DepthPro2Preset.InputMultiple;
-        long paddedH = (height + multiple - 1L) / multiple * multiple, paddedW = (width + multiple - 1L) / multiple * multiple;
-        int patch = preset.Backbone.PatchSize, prefix = 1 + preset.Backbone.NumRegisterTokens, hidden = preset.Backbone.HiddenSize;
+        DepthPro2Model.CheckSize(width, height);
+        int prefix = 1 + preset.Backbone.NumRegisterTokens, hidden = preset.Backbone.HiddenSize;
         int blocks = preset.CrossFrameBlocks.Length;
-        long rows = prefix + window * (paddedH / patch) * (paddedW / patch);
+        long rows = prefix + window * DepthPro2Model.PatchTokens(width, height);
         long keysAndValues = KvSegmentStore.EstimateBytes(blocks + 1, rows, hidden, DType.F32);
         return checked(keysAndValues + DType.F32.ComputeByteCount((long)blocks * window * prefix * hidden));
     }
 
-    // The cache is pinned on the device, so one that cannot fit beside the weights would fail part-way through a video. A host backend reports no
-    // device memory and is not checked.
+    // The cache is pinned on the device, so one that cannot fit beside the weights would fail part-way through a video. Cache plus weights is a lower
+    // bound of what a frame needs (its activations are not counted), measured against all of the device's memory. A host backend reports no device
+    // memory and is not checked.
     internal static void CheckCacheFits(DepthPro2Preset preset, int width, int height, int window, long weightBytes, long deviceBytes)
     {
         if (deviceBytes <= 0) return;

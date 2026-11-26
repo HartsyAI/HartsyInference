@@ -63,15 +63,21 @@ public sealed class DepthPro2Model
     /// <summary>Throws when a <paramref name="width"/> × <paramref name="height"/> image is over <see cref="MaxPatchTokens"/> once padded to 32.</summary>
     public static void CheckSize(int width, int height)
     {
-        long padH = (height + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
-        long padW = (width + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
-        long tokens = padH / 16 * (padW / 16);
+        long tokens = PatchTokens(width, height);
         if (tokens > MaxPatchTokens)
         {
             throw new ArgumentException(
                 $"A {width}x{height} image is {tokens} patch tokens; Depth Pro 2 runs at the image's own size with global attention and this build takes at "
                 + $"most {MaxPatchTokens} (2048x2048 or an equal area). Downscale the image first.");
         }
+    }
+
+    // One frame's patch tokens (16 x 16 pixels each) once padded to the network's input multiple.
+    internal static long PatchTokens(int width, int height)
+    {
+        long padH = (height + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
+        long padW = (width + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
+        return padH / 16 * (padW / 16);
     }
 
     /// <summary>

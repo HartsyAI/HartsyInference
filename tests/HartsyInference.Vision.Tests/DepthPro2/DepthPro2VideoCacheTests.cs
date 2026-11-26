@@ -13,9 +13,20 @@ public sealed class DepthPro2VideoCacheTests
         Assert.Equal(12 * kv + 11L * 16 * 5 * 1280 * sizeof(float),
             DepthPro2VideoStream.UnbufferedCacheBytes(DepthPro2Preset.HugePlus, 1024, 576, 16));
 
-        // At the token cap the window alone is about 29.5 GB.
+        // At the token cap the eleven stored windows are about 29.5 GB, and the one a frame reads brings it to 32.2 GB.
         long capped = DepthPro2VideoStream.UnbufferedCacheBytes(DepthPro2Preset.HugePlus, 2048, 2048, 16);
         Assert.InRange(capped / 1e9, 32.2, 32.3);
+    }
+
+    [Theory]
+    [InlineData(4096, 4096)]
+    [InlineData(int.MaxValue, int.MaxValue)]
+    public void AFrameOverTheTokenCapIsRefusedAsTooLargeAFrame(int width, int height)
+    {
+        ArgumentException refused = Assert.Throws<ArgumentException>(
+            () => DepthPro2VideoStream.CheckCacheFits(DepthPro2Preset.HugePlus, width, height, 16, 0, 24_000_000_000));
+
+        Assert.Contains("patch tokens", refused.Message);
     }
 
     [Fact]

@@ -58,6 +58,9 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
             Dinov3VisionEncoder encoder = new(DinoPreset());
             encoder.LoadWeights(weights);
             float[][] expected = Values(encoder.EncodeFrameIntermediates(new CpuBackend(), views, DinoTaps, DinoCrossFrameBlocks));
+            float[][] apart = Values(encoder.EncodeIntermediates(new CpuBackend(), views, DinoTaps, DinoCrossFrameBlocks));
+            // The views must see each other, or a Join and Split that did nothing would still agree between the two backends.
+            Assert.True(expected[^1].Zip(apart[^1]).Max(pair => MathF.Abs(pair.First - pair.Second)) > 1e-2f);
             using IBackend device = open();
             using ExactGemmScope exact = new(device);
             using Tensor resident = OnDevice(device, views);
