@@ -60,9 +60,13 @@ def randomise_norms(module):
 
 
 def main():
+    global LATENT
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
+    # Latent channels: 2 is the VAE test fixture; 4 matches the MovieRoll pipeline's tiny DiT (--latent 4 writes a separate fixture).
+    parser.add_argument("--latent", type=int, default=2)
     args = parser.parse_args()
+    LATENT = args.latent
 
     torch.manual_seed(20261124)
     torch.set_num_threads(1)

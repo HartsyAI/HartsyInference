@@ -244,7 +244,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
         state.Previous2[index] = previous1;
         state.Previous1[index] = current;
 
-        Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
+        using Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
         backend.Transpose2D(tokenMajor, conv, dim, tokens);
         conv.Dispose();
         using Tensor normed = FastFramesOps.LayerNormAffine(backend, tokenMajor, block.NormW, block.NormB, _config.Eps);
@@ -328,10 +328,15 @@ public sealed class FastFramesPixelDecoder : IDisposable
 
     /// <summary>A 1×1 Conv3d weight <c>[out, in, 1, 1, 1]</c> as the <c>[out, in]</c> Linear weight (the same bytes).</summary>
     private static Tensor Matrix(IReadOnlyDictionary<string, Tensor> weights, string key, int outDim, int inDim) =>
-        FastFramesOps.CopyF32(weights[key], new TensorShape(outDim, inDim));
+        FastFramesOps.CopyF32(CheckpointTensors.Require(weights, "FastFrames decoder", key), new TensorShape(outDim, inDim));
 
-    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        FastFramesOps.CopyF32(weights[key], weights[key].Shape);
+    /// <summary>An owned F32 copy of a checkpoint tensor, read through <see cref="CheckpointTensors"/> so a missing key names the family.
+    /// Shapes were checked in <see cref="LoadWeights"/> before any copy.</summary>
+    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key)
+    {
+        Tensor source = CheckpointTensors.Require(weights, "FastFrames decoder", key);
+        return FastFramesOps.CopyF32(source, source.Shape);
+    }
 
     private static bool ShapeIs(TensorShape actual, long[] expected)
     {
