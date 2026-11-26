@@ -275,9 +275,7 @@ public sealed class FastFramesPipeline : IDisposable
     {
         if (streamed || _disposed)
         {
-            _backend.FreeWeights(_transformer.EnumerateWeights());
-            _backend.TrimMemoryPool();
-            _generatorPin.Resident = false;
+            FreeGenerator();
             return;
         }
         _generatorPin.Resident = true;
@@ -308,10 +306,16 @@ public sealed class FastFramesPipeline : IDisposable
         _disposed = true;
         if (_generatorPin.Resident)
         {
-            _backend.FreeWeights(_transformer.EnumerateWeights());
-            _backend.TrimMemoryPool();
-            _generatorPin.Resident = false;
+            FreeGenerator();
         }
+    }
+
+    /// <summary>Frees every generator weight on the device and marks the pin not resident.</summary>
+    private void FreeGenerator()
+    {
+        _backend.FreeWeights(_transformer.EnumerateWeights());
+        _backend.TrimMemoryPool();
+        _generatorPin.Resident = false;
     }
 
     /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
