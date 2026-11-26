@@ -256,8 +256,8 @@ internal static class LongCatRecipeSupport
         LongCatLoraFiles? mixedLoras = null)
     {
         // The placements the engine sets that LongCat cannot honour: CFG-parallel, DiT shards and context parallel are refused; a separate text-encoder
-        // or VAE backend is warned about and runs on the primary (the engine's placement policy, UnhonouredBackends).
-        UnhonouredBackends.Refuse(context, "LongCat");
+        // or VAE backend is warned about by the engine, which checks first (UnhonouredBackends); this second check does not warn again.
+        UnhonouredBackends.Refuse(context, "LongCat", warn: false);
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy

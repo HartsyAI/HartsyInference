@@ -46,7 +46,7 @@ public static class ModelResolver
         }
         // longcat-avatar:1.6 (or avatar-1.6) is the 1.6 INT8 row, for every caller: the family's 1.5 row carries the 1.5 weights.
         if (modality == Modality.Video && catalog?.Id == "longcat-avatar" && variant is not null
-            && LongCatAvatarVariants.IsSixPointOne(variant) && ModelCatalog.Find(LongCatAvatarVariants.Avatar16FamilyId) is CatalogEntry row)
+            && LongCatAvatarVariants.IsOnePointSix(variant) && ModelCatalog.Find(LongCatAvatarVariants.Avatar16FamilyId) is CatalogEntry row)
         {
             catalog = row;
             variant = null;

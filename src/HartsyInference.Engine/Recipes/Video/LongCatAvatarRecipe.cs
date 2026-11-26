@@ -17,6 +17,9 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <remarks>Likeness warning: the output is a generated talking person. Use it only with the consent of the person depicted.</remarks>
 public sealed class LongCatAvatarRecipe : IVideoRecipe
 {
+    /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
+    public bool RefusesUnhonouredPlacements => true;
+
     /// <summary>Upper bound of one segment; the avatar DiT and its audio windows are built for it.</summary>
     internal const int SegmentFrames = 93;
 

@@ -8,7 +8,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 public static class LongCatAvatarVariants
 {
     /// <summary>True for a requested 1.6 build name (<c>1.6</c> or <c>avatar-1.6</c>).</summary>
-    public static bool IsSixPointOne(string variant) =>
+    public static bool IsOnePointSix(string variant) =>
         variant.Equals("1.6", StringComparison.OrdinalIgnoreCase) || variant.Equals("avatar-1.6", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The catalog row id of the 1.6 INT8 release. A request names it as <c>longcat-avatar-1.6</c>, or <c>longcat-avatar:1.6</c>, which the CLI
