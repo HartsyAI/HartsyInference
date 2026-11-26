@@ -95,7 +95,8 @@ def randomize(module, torch, seed: int, scale: float = 0.5):
 def save(tensors: dict, path: Path):
     from safetensors.torch import save_file
 
-    save_file({k: v.detach().contiguous().cpu().float() for k, v in tensors.items()}, str(path))
+    # clone(): a view of a larger storage (noise[0], a strided slice) fails safetensors' offset check; a clone owns its bytes.
+    save_file({k: v.detach().contiguous().cpu().float().clone() for k, v in tensors.items()}, str(path))
 
 
 def run_rollout(torch, pipeline, causal_model, config, dit, refiner, decoder, prompt_embeds, noise, transition, frames):
