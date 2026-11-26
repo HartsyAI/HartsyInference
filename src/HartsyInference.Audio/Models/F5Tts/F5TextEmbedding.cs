@@ -10,7 +10,7 @@ namespace HartsyInference.Audio.Models.F5Tts;
 // tail is padded) are masked to zero before AND after every ConvNeXt block, so the depthwise conv never
 // leaks across the text→filler boundary. This masking is required for parity — text is essentially
 // always shorter than the audio.
-internal sealed unsafe class F5TextEmbedding
+internal sealed unsafe class F5TextEmbedding : IDisposable
 {
     private readonly F5TtsConfig _cfg;
 
@@ -26,14 +26,19 @@ internal sealed unsafe class F5TextEmbedding
             _blocks[i] = new F5ConvNeXtV2Block(cfg.TextDim, cfg.TextDim * cfg.TextConvMult);
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
-        _embedWeight = WhisperOps.EnsureF32(w[$"{prefix}.text_embed.weight"]);
+        string embedKey = $"{prefix}.text_embed.weight";
+        _embedWeight = F5Ops.Take(w, embedKey, owned);
+        // The row count follows the tokenizer's vocabulary; Forward checks the ids against it.
+        if (_embedWeight.Shape.Rank != 2 || _embedWeight.Shape[1] != _cfg.TextDim)
+            throw new InvalidDataException($"The F5-TTS checkpoint tensor '{embedKey}' is {_embedWeight.Shape}; expected [tokens, {_cfg.TextDim}].");
         for (int i = 0; i < _blocks.Length; i++)
-            _blocks[i].LoadWeights(w, $"{prefix}.text_blocks.{i}");
+            _blocks[i].LoadWeights(w, $"{prefix}.text_blocks.{i}", owned);
 
         // Precompute the sinusoidal freqs table (the persistent buffer is non-persistent
         // upstream, so it's not in the safetensors). Same formula as precompute_freqs_cis.
+        _freqsCis?.Dispose();
         _freqsCis = BuildFreqsCis(_cfg.TextDim, _cfg.TextMaxPos, theta: 10_000f);
     }
 
@@ -43,6 +48,14 @@ internal sealed unsafe class F5TextEmbedding
         if (_embedWeight is null || _freqsCis is null)
             throw new InvalidOperationException("Call LoadWeights first.");
 
+        int validLen = Math.Min(textIds.Length, seqLen);
+        long rows = _embedWeight.Shape[0];
+        for (int t = 0; t < validLen; t++)
+        {
+            if (textIds[t] < -1 || textIds[t] + 1L >= rows)
+                throw new ArgumentOutOfRangeException(nameof(textIds), textIds[t], $"The text embedding has tokens -1 (the filler) to {rows - 2}.");
+        }
+
         int textDim = _cfg.TextDim;
         Tensor textHidden = new(new TensorShape(1, seqLen, textDim), DType.F32);
         float* hp = (float*)textHidden.DataPointer;
@@ -51,7 +64,6 @@ internal sealed unsafe class F5TextEmbedding
         // 1. Token embed lookup. Upstream adds +1 to every token id (use 0 as filler), then looks up the row —
         //    row 0 is the (learned, generally non-zero) filler embedding, NOT a zero vector. drop_text (CFG
         //    uncond) sets every id to 0 so the whole valid region maps to that filler row.
-        int validLen = Math.Min(textIds.Length, seqLen);
         for (int t = 0; t < seqLen; t++)
         {
             int rowOff = t * textDim;
@@ -129,6 +141,13 @@ internal sealed unsafe class F5TextEmbedding
         foreach (F5ConvNeXtV2Block b in _blocks)
             foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
+
+    /// <summary>Frees the position table. The weights belong to the checkpoint or to the model's owned list.</summary>
+    public void Dispose()
+    {
+        _freqsCis?.Dispose();
+        _freqsCis = null;
+    }
 }
 
 /// <summary>F5-TTS ConvNeXt-V2 block: same shape as the original ConvNeXt block but with GRN in place of layer scale and no skip mod; all operations are channels-last <c>[B, T, dim]</c> except the depthwise conv, which transposes to channels-first.</summary>
@@ -136,6 +155,7 @@ internal sealed unsafe class F5ConvNeXtV2Block(int dim, int intermediate)
 {
     private readonly int _dim = dim;
     private readonly int _intermediate = intermediate;
+    private const int Kernel = 7;
 
     private Tensor? _dwConvW, _dwConvB;
     private Tensor? _normW, _normB;
@@ -143,25 +163,24 @@ internal sealed unsafe class F5ConvNeXtV2Block(int dim, int intermediate)
     private Tensor? _pwConv2W, _pwConv2B;
     private Tensor? _grnGamma, _grnBeta;
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
-        _dwConvW = WhisperOps.EnsureF32(w[$"{prefix}.dwconv.weight"]);
-        _dwConvB = WhisperOps.EnsureF32(w[$"{prefix}.dwconv.bias"]);
-        _normW = WhisperOps.EnsureF32(w[$"{prefix}.norm.weight"]);
-        _normB = WhisperOps.EnsureF32(w[$"{prefix}.norm.bias"]);
-        _pwConv1W = WhisperOps.EnsureF32(w[$"{prefix}.pwconv1.weight"]);
-        _pwConv1B = WhisperOps.EnsureF32(w[$"{prefix}.pwconv1.bias"]);
-        _pwConv2W = WhisperOps.EnsureF32(w[$"{prefix}.pwconv2.weight"]);
-        _pwConv2B = WhisperOps.EnsureF32(w[$"{prefix}.pwconv2.bias"]);
-        _grnGamma = WhisperOps.EnsureF32(w[$"{prefix}.grn.gamma"]);
-        _grnBeta = WhisperOps.EnsureF32(w[$"{prefix}.grn.beta"]);
+        _dwConvW = F5Ops.Take(w, $"{prefix}.dwconv.weight", owned, _dim, 1, Kernel);
+        _dwConvB = F5Ops.Take(w, $"{prefix}.dwconv.bias", owned, _dim);
+        _normW = F5Ops.Take(w, $"{prefix}.norm.weight", owned, _dim);
+        _normB = F5Ops.Take(w, $"{prefix}.norm.bias", owned, _dim);
+        _pwConv1W = F5Ops.Take(w, $"{prefix}.pwconv1.weight", owned, _intermediate, _dim);
+        _pwConv1B = F5Ops.Take(w, $"{prefix}.pwconv1.bias", owned, _intermediate);
+        _pwConv2W = F5Ops.Take(w, $"{prefix}.pwconv2.weight", owned, _dim, _intermediate);
+        _pwConv2B = F5Ops.Take(w, $"{prefix}.pwconv2.bias", owned, _dim);
+        _grnGamma = F5Ops.TakeVector(w, $"{prefix}.grn.gamma", owned, _intermediate);
+        _grnBeta = F5Ops.TakeVector(w, $"{prefix}.grn.beta", owned, _intermediate);
     }
 
     /// <summary>Forward: x in channels-last <c>[1, T, dim]</c>. Returns same shape.</summary>
     public Tensor Forward(IBackend backend, Tensor x, int t, int dim)
     {
-        const int kernel = 7;
-        int pad = kernel / 2;
+        int pad = Kernel / 2;
 
         // Transpose to channels-first [1, dim, T] for the depthwise Conv1D.
         Tensor xCF = new(new TensorShape(1, dim, t), DType.F32);
@@ -169,7 +188,7 @@ internal sealed unsafe class F5ConvNeXtV2Block(int dim, int intermediate)
 
         // Depthwise Conv1D (groups=dim, each channel has its own [1, kernel] filter).
         Tensor dwOut = new(xCF.Shape, DType.F32);
-        DepthwiseConv1D(dwOut, xCF, _dwConvW!, _dwConvB!, dim, t, kernel, pad);
+        DepthwiseConv1D(dwOut, xCF, _dwConvW!, _dwConvB!, dim, t, Kernel, pad);
         xCF.Dispose();
 
         // Back to channels-last [1, T, dim] for LayerNorm + MLP path.
