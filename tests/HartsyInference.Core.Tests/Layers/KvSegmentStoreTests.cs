@@ -35,6 +35,56 @@ public sealed class KvSegmentStoreTests : IDisposable
     }
 
     [Fact]
+    public void JoinOfManySegmentsKeepsEveryTokenInOrderOnAHeadMajorAxis()
+    {
+        // Five segments: more than two, so the join is the strided path. Two heads, dim 3; each segment has its own value and length.
+        int[] lengths = [1, 2, 3, 1, 2];
+        using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 2);
+        for (int s = 0; s < lengths.Length; s++)
+            store.Append(0, Filled(s + 1, 1, 2, lengths[s], 3), Filled(-(s + 1), 1, 2, lengths[s], 3));
+
+        (Tensor keys, Tensor values) = store.Join(0, 0, lengths.Length);
+        using (keys)
+        using (values)
+        {
+            int total = lengths.Sum();
+            Assert.Equal(new TensorShape(1, 2, total, 3), keys.Shape);
+            List<float> expectedKeys = [], expectedValues = [];
+            for (int head = 0; head < 2; head++)
+                for (int s = 0; s < lengths.Length; s++)
+                    for (int t = 0; t < lengths[s] * 3; t++)
+                    {
+                        expectedKeys.Add(s + 1);
+                        expectedValues.Add(-(s + 1));
+                    }
+            Assert.Equal(expectedKeys, keys.AsReadOnlySpan<float>().ToArray());
+            Assert.Equal(expectedValues, values.AsReadOnlySpan<float>().ToArray());
+        }
+    }
+
+    [Fact]
+    public void JoinOfManySegmentsKeepsEveryTokenInOrderOnTheLeadingAxis()
+    {
+        int[] lengths = [2, 1, 3, 1];
+        using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 0);
+        for (int s = 0; s < lengths.Length; s++)
+            store.Append(0, Filled(s + 1, lengths[s], 2), Filled(-(s + 1), lengths[s], 2));
+
+        (Tensor keys, Tensor values) = store.Join(0, 0, lengths.Length);
+        using (keys)
+        using (values)
+        {
+            Assert.Equal(new TensorShape(7, 2), keys.Shape);
+            List<float> expected = [];
+            for (int s = 0; s < lengths.Length; s++)
+                for (int i = 0; i < lengths[s] * 2; i++)
+                    expected.Add(s + 1);
+            Assert.Equal(expected, keys.AsReadOnlySpan<float>().ToArray());
+            Assert.Equal(-4f, values.AsReadOnlySpan<float>()[13]);
+        }
+    }
+
+    [Fact]
     public void Join_UsesTheTokenAxisOfAHeadMajorStore()
     {
         using KvSegmentStore store = new(_backend, layers: 1, tokenAxis: 2);

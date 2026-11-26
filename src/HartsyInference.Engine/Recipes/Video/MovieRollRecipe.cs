@@ -107,12 +107,14 @@ public sealed class MovieRollRecipe : IVideoRecipe
             dit.LoadWeights(ditWeights);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MovieRollVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
-            SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-            vaeLoader.Load(vaePath);
-            loaders.Add(vaeLoader);
             // The VAE stays fp32. Its layers make their own F32 copies of the weights, so an F16 cast would save nothing and only lose precision.
-            vae = new HunyuanVideo15Vae(HunyuanVideo15VaeConfig.Default);
-            vae.LoadWeights(vaeLoader.GetAllTensors());
+            // The container is released as soon as the layers have copied it: the VAE holds no reference into the mapped file after LoadWeights.
+            using (SafeTensorsLoader vaeLoader = new SafeTensorsLoader())
+            {
+                vaeLoader.Load(vaePath);
+                vae = new HunyuanVideo15Vae(HunyuanVideo15VaeConfig.Default);
+                vae.LoadWeights(vaeLoader.GetAllTensors());
+            }
 
             string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
