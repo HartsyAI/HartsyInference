@@ -199,7 +199,9 @@ def run_loop(model, qwen, byt5, neg_qwen, neg_byt5, spec, draws, seed):
                 decoded += 1
                 if decoded >= num_chunks:
                     break
-            frames = chunk if r < num_chunks else tail
+            # t2v's first chunk is 1 + chunk (movieroll_dmd_pipeline.py:740-765, movieroll_pipeline.py:991-992); spec "first" sets it.
+            first = spec.get("first") or chunk
+            frames = first if r == 0 else (chunk if r < num_chunks else tail)
             queue.append(draw(frames))
             for s in range(spw):
                 g = r * spw + s
@@ -233,6 +235,10 @@ CONFIGS = {
     # Distilled chain: the five-step ladder, one step per round, no CFG, context noise 0.15; recompute fires on several rounds.
     "distilled": dict(schedule=ladder_schedule([1000, 800, 600, 400, 200], 5.0), steps=5, window=5, full=1, context=0.15,
                       chunk=1, num_chunks=7, cfg=None, recompute=True, threshold=3, recent_k=1),
+    # Text-to-video layout: a first chunk of 1 + chunk frames (2 here), then one-frame chunks, with CFG and recompute as in "base".
+    # Listed last because each config's seed is its index in this dict, so the earlier fixtures keep their draws.
+    "base_t2v": dict(schedule=base_schedule(4, 5.0), steps=4, window=2, full=1, context=0.05, chunk=1, first=2, num_chunks=5,
+                     cfg=(1.0, 4.0), recompute=True, threshold=3, recent_k=1),
 }
 
 
