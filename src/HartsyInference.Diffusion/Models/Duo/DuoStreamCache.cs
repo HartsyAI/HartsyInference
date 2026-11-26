@@ -167,25 +167,33 @@ public sealed class DuoStreamCache : IDisposable
     public int EvictOldestClean()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        int index = _groups.FindIndex(g => g.Kind == DuoGroupKind.Clean);
-        if (index < 0)
+        int first = _groups.FindIndex(g => g.Kind == DuoGroupKind.Clean);
+        if (first < 0)
         {
-            return 0;
+            throw new InvalidOperationException("No clean block is held to evict.");
         }
-        DuoGroup group = _groups[index];
-        int rows = group.End - group.Start;
+        // A clean block is two groups, video and audio, adjacent in commit order: evict every clean group of the oldest block.
+        int block = _groups[first].Block;
+        int count = 0, rows = 0;
+        for (int i = first; i < _groups.Count && _groups[i].Kind == DuoGroupKind.Clean && _groups[i].Block == block; i++)
+        {
+            count++;
+            rows += _groups[i].End - _groups[i].Start;
+        }
+        if (rows == 0)
+        {
+            throw new InvalidOperationException($"The oldest clean block (block {block}) holds no rows, so evicting it would free nothing.");
+        }
+
         for (int b = 0; b < Blocks; b++)
         {
-            _store.RemoveRange(b, index, 1);
+            _store.RemoveRange(b, first, count);
         }
-        _groups.RemoveAt(index);
-        for (int g = 0; g < _groups.Count; g++)
+        _groups.RemoveRange(first, count);
+        for (int g = first; g < _groups.Count; g++)
         {
             DuoGroup later = _groups[g];
-            if (later.Start >= group.End)
-            {
-                _groups[g] = later with { Start = later.Start - rows, End = later.End - rows };
-            }
+            _groups[g] = later with { Start = later.Start - rows, End = later.End - rows };
         }
         _length -= rows;
         return rows;
