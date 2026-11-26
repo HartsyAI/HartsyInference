@@ -57,6 +57,19 @@ public sealed class MovieRollRollingParityTests
         fixture.AssertRun("distilled", options, MovieRollSchedule.Distilled(new[] { 1000, 800, 600, 400, 200 }, 5, 5.0), negative: false);
     }
 
+    [Fact]
+    public void BaseChainWithTextToVideoFirstChunkMatchesTheTranscription()
+    {
+        // The t2v layout: the first chunk is 1 + chunk frames (2 here), then one-frame chunks. Each noise draw's size is checked against the transcription.
+        using Fixture fixture = new();
+        MovieRollSamplerOptions options = new()
+        {
+            ChunkFrames = 1, FirstChunkFrames = 2, NumChunks = 5, FullHistoryBlocks = 1, ContextNoise = 0.05f,
+            KvRecomputeEnabled = true, KvRecomputeThreshold = 3, KvRecomputeRecentK = 1, Cfg = new MovieRollCfg(1f, 4f),
+        };
+        fixture.AssertRun("base_t2v", options, MovieRollSchedule.Base(4, 2, 5.0), negative: true);
+    }
+
     private static HunyuanVideo15Config TinyConfig() => new()
     {
         NumBlocks = Blocks, HiddenSize = Hidden, NumHeads = 2, LatentChannels = Channels, TextDim = 24, ByT5Dim = 16, RopeAxesDim = [4, 6, 6],
@@ -69,6 +82,15 @@ public sealed class MovieRollRollingParityTests
         ReadOnlySpan<float> a = actual.AsReadOnlySpan<float>();
         float max = 0f;
         for (int i = 0; i < e.Length; i++) max = Math.Max(max, Math.Abs(e[i] - a[i]));
+        Assert.True(max <= tolerance, $"{name}: max abs error {max:E3} exceeds {tolerance:E0}.");
+    }
+
+    private static void AssertFloats(Tensor expected, float[] actual, float tolerance, string name)
+    {
+        ReadOnlySpan<float> e = expected.AsReadOnlySpan<float>();
+        Assert.True(e.Length == actual.Length, $"{name}: {e.Length} values expected, {actual.Length} produced.");
+        float max = 0f;
+        for (int i = 0; i < e.Length; i++) max = Math.Max(max, Math.Abs(e[i] - actual[i]));
         Assert.True(max <= tolerance, $"{name}: max abs error {max:E3} exceeds {tolerance:E0}.");
     }
 
@@ -98,6 +120,10 @@ public sealed class MovieRollRollingParityTests
         /// <summary>Runs the sampler with the transcription's prompts and replays its noise draws; fails if the run draws a different sequence.</summary>
         public void AssertRun(string name, MovieRollSamplerOptions options, MovieRollSchedule schedule, bool negative)
         {
+            // The ladder is checked first, so a schedule drift fails here with a clear message rather than as an output mismatch.
+            AssertFloats(Reference.GetTensor($"{name}.sigmas"), schedule.Sigmas, 1e-6f, $"{name}.sigmas");
+            AssertFloats(Reference.GetTensor($"{name}.timesteps"), schedule.Timesteps, 1e-3f, $"{name}.timesteps");
+
             List<Tensor> draws = Draws(name);
             int next = 0;
             Func<int, Tensor> noise = frames =>

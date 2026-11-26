@@ -18,11 +18,12 @@ internal sealed unsafe class F5InputEmbed
         _convPos = new F5ConvPosEmbed(cfg);
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
-        _projW = WhisperOps.EnsureF32(w[$"{prefix}.proj.weight"]);
-        _projB = WhisperOps.EnsureF32(w[$"{prefix}.proj.bias"]);
-        _convPos.LoadWeights(w, $"{prefix}.conv_pos_embed");
+        int dim = _cfg.Dim;
+        _projW = F5Ops.Take(w, $"{prefix}.proj.weight", owned, dim, 2 * _cfg.MelDim + _cfg.TextDim);
+        _projB = F5Ops.Take(w, $"{prefix}.proj.bias", owned, dim);
+        _convPos.LoadWeights(w, $"{prefix}.conv_pos_embed", owned);
     }
 
     /// <summary><paramref name="noisyMel"/> and <paramref name="condMel"/> are both <c>[1, mel_dim, T]</c> channels-first, <paramref name="text"/> is <c>[1, T, text_dim]</c> channels-last; when <paramref name="dropAudioCond"/> is true (CFG uncond pass) the cond_mel is zero'd out.</summary>
@@ -91,13 +92,14 @@ internal sealed unsafe class F5ConvPosEmbed
 
     public F5ConvPosEmbed(F5TtsConfig cfg) { _cfg = cfg; }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
+        int dim = _cfg.Dim;
         // The Sequential indexes 0 and 2 are the two Conv1D layers; 1 and 3 are Mish (no params).
-        _conv0W = WhisperOps.EnsureF32(w[$"{prefix}.conv1d.0.weight"]);
-        _conv0B = WhisperOps.EnsureF32(w[$"{prefix}.conv1d.0.bias"]);
-        _conv2W = WhisperOps.EnsureF32(w[$"{prefix}.conv1d.2.weight"]);
-        _conv2B = WhisperOps.EnsureF32(w[$"{prefix}.conv1d.2.bias"]);
+        _conv0W = F5Ops.Take(w, $"{prefix}.conv1d.0.weight", owned, dim, dim / _cfg.ConvPosGroups, _cfg.ConvPosKernel);
+        _conv0B = F5Ops.Take(w, $"{prefix}.conv1d.0.bias", owned, dim);
+        _conv2W = F5Ops.Take(w, $"{prefix}.conv1d.2.weight", owned, dim, dim / _cfg.ConvPosGroups, _cfg.ConvPosKernel);
+        _conv2B = F5Ops.Take(w, $"{prefix}.conv1d.2.bias", owned, dim);
     }
 
     /// <summary>Input/output <c>[1, T, dim]</c>; internally transposes to channels-first, runs two grouped Conv1D layers with Mish between, then transposes back.</summary>

@@ -66,6 +66,39 @@ public sealed class Dinov3VisionEncoderTests
     }
 
     [Fact]
+    public void Embeddings_OfABatchAreEachImagesOwnBehindTheSamePrefix()
+    {
+        Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64);
+        Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(preset, seed: 41);
+        try
+        {
+            Dinov3VisionEncoder encoder = Load(preset, weights);
+            const int hidden = 128, images = 3, storage = 4, seq = 1 + storage + 16, pixels = 3 * 64 * 64;
+            using Tensor batch = Pixels(images, 64, 64, seed: 42);
+
+            using Tensor all = encoder.EncodeBlocks(Backend, batch, lastBlock: -1);
+
+            Assert.Equal(new TensorShape(images, seq, hidden), all.Shape);
+            ReadOnlySpan<float> cls = weights["embeddings.cls_token"].AsReadOnlySpan<float>();
+            ReadOnlySpan<float> reg = weights["embeddings.register_tokens"].AsReadOnlySpan<float>();
+            for (int b = 0; b < images; b++)
+            {
+                using Tensor single = new(new TensorShape(1, 3, 64, 64), DType.F32);
+                batch.AsReadOnlySpan<float>().Slice(b * pixels, pixels).CopyTo(single.AsSpan<float>());
+                using Tensor alone = encoder.EncodeBlocks(Backend, single, lastBlock: -1);
+                ReadOnlySpan<float> got = all.AsReadOnlySpan<float>().Slice(b * seq * hidden, seq * hidden);
+                Assert.True(got.SequenceEqual(alone.AsReadOnlySpan<float>()), $"item {b} differs from the image alone");
+                Assert.True(got[..hidden].SequenceEqual(cls), $"item {b} CLS");
+                Assert.True(got.Slice(hidden, storage * hidden).SequenceEqual(reg), $"item {b} storage tokens");
+            }
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
     public void Encode_NormalizesEveryTokenIncludingStorageAndCls()
     {
         Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64);
