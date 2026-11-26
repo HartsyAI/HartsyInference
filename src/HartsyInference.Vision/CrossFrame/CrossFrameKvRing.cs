@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
@@ -9,7 +10,7 @@ namespace HartsyInference.Vision.CrossFrame;
 /// The unbuffered form of <see cref="CrossFrameTokens"/> (upstream <c>KVCache</c>): per cross-frame block, a FIFO of the last <see cref="Window"/>
 /// frames, the current one included. Each block keeps a ring of the frames' prefix tokens and, in a <see cref="KvSegmentStore"/>, the keys and
 /// values as head-major <c>[1, heads, rows, D]</c> segments: segment 0 holds those of the pooled prefix (the mean of the visible frames' prefixes)
-/// and segment <c>1 + s</c> those of the frame in slot <c>s</c>. <see cref="Read"/> joins the live ones along the rows into what the current frame's
+/// and segment <c>1 + s</c> those of the frame in slot <c>s</c>. <see cref="Read"/> copies the live ones along the rows into what the current frame's
 /// patches attend to. Slots fill in arrival order and then wrap, so the oldest frame is replaced; attention has no temporal position, so slot order
 /// changes only rounding. Per frame and block, call <see cref="UpdatePrefix"/>, then <see cref="Update"/>, then <see cref="Read"/>. Every write and
 /// read is a backend op and every kept tensor is pinned, so on a GPU backend the caches stay on the device.
@@ -144,7 +145,47 @@ public sealed class CrossFrameKvRing : IDisposable
     {
         Entry entry = Get(block);
         if (entry.Seen == 0) throw new InvalidOperationException($"Block {block} has no keys and values yet.");
-        return entry.Store.Join(0, 0, 1 + Math.Min(entry.Seen, Window));
+        int rows = LiveRows(block), segments = 1 + Math.Min(entry.Seen, Window);
+        // Two segments (a first frame, or a window of one) concat in one CUDA kernel that writes the tensor once.
+        if (segments == 2) return entry.Store.Join(0, 0, segments);
+        Tensor keys = ReadRows(entry, rows, segments, values: false);
+        try
+        {
+            return (keys, ReadRows(entry, rows, segments, values: true));
+        }
+        catch
+        {
+            keys.Dispose();
+            throw;
+        }
+    }
+
+    // The live segments one after another along the rows, one strided copy each: CUDA's concat of more than two inputs on this axis runs one copy
+    // per head and segment (the cost is in CudaBackend.Concat). The first write must cover the new tensor, or a GPU backend uploads its host bytes
+    // before a partial one, so it is first filled from an element of the pooled segment, which is already on the device.
+    private static Tensor ReadRows(Entry entry, int rows, int segments, bool values)
+    {
+        Tensor Segment(int slot) => values ? entry.Store.Values(0, slot) : entry.Store.Keys(0, slot);
+        Tensor result = new(new TensorShape(1, entry.Heads, rows, entry.Dim), DType.F32);
+        try
+        {
+            StridedCopies.FillFrom(entry.Backend, result, Segment(PooledSlot));
+            long at = 0;
+            for (int slot = 0; slot < segments; slot++)
+            {
+                Tensor segment = Segment(slot);
+                StridedCopies.ScatterAxis(entry.Backend, result, segment, TokenAxis, at);
+                at += segment.Shape[TokenAxis];
+            }
+
+            Debug.Assert(at == rows, "the live segments must fill the rows the ring reports");
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The rows the frame last stored in block <paramref name="block"/> attends to.</summary>

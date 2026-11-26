@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Tests.Duo;
 /// history. The model has two layers and weights large enough that the history changes the output well beyond the tolerance, and the
 /// negative controls show the check fails when the history is wrong. These are not parity with upstream Duo (that is the L5/L6 step
 /// against the Python reference, not run).</summary>
-public sealed class DuoChunkRolloutTests
+public sealed class DuoChunkSessionTests
 {
     private const int Hidden = 8, Heads = 2, HeadDim = 96, Inner = Heads * HeadDim, Ffn = 16, TextDim = 5, Layers = 2;
     private const int VideoIn = 96, AudioIn = 32, TimeEmbedDim = 6, TimeEmbedHidden = 8;
@@ -24,7 +24,7 @@ public sealed class DuoChunkRolloutTests
     public void CachedBlocksMatchTheFullForwardOverTheSameHistory()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = Sample();
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, Cache());
         float[] reference = Values(30, RefRows * VideoIn);
@@ -49,7 +49,7 @@ public sealed class DuoChunkRolloutTests
     {
         // The same check against a wrong history: block 0 shifted by 0.5 in the full forward. The cached block 1 must NOT match it.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = Sample();
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, Cache());
         float[] reference = Values(30, RefRows * VideoIn);
@@ -70,7 +70,7 @@ public sealed class DuoChunkRolloutTests
     {
         // Block 1 against a forward with no committed block 0 at all (its clean media removed, text kept). It must NOT agree.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = Sample();
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, Cache());
         float[] reference = Values(30, RefRows * VideoIn);
@@ -91,7 +91,7 @@ public sealed class DuoChunkRolloutTests
     public void BlocksMustComeInOrderFromTheFirst()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, Cache());
 
         Assert.Throws<InvalidOperationException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn), 2, 1.0));
@@ -108,7 +108,7 @@ public sealed class DuoChunkRolloutTests
     public void WrongLengthsAreRefusedBeforeAnythingIsComputed()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, Cache());
 
         Assert.Throws<ArgumentException>(() => session.Prefill(Values(2, Shared * TextDim + 1), Values(30, RefRows * VideoIn)));
@@ -120,6 +120,17 @@ public sealed class DuoChunkRolloutTests
         Assert.Throws<ArgumentException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows + 1), Values(41, AudioRows * AudioIn), 2, 1.0));
         Assert.Throws<ArgumentException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn - 1), 2, 1.0));
         Assert.Equal(0, session.NextBlock);
+    }
+
+    [Fact]
+    public void ACacheOnAnotherBackendIsRefusedByTheForward()
+    {
+        // The cache's segments live on TestBackends.Cpu; a forward on a different CpuBackend instance is refused, not run.
+        using MiniMaxH3Transformer transformer = Transformer();
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
+        DuoChunkSession session = new(transformer, new CpuBackend(), ThreeBlockSample(), DuoRopePolicy.Old, cache);
+        Assert.Throws<ArgumentException>(() => session.Prefill(Shared0(), Values(30, RefRows * VideoIn)));
+        Assert.Equal(0, cache.Length);
     }
 
     private static DuoSampleInput Sample() => new()
@@ -137,7 +148,125 @@ public sealed class DuoChunkRolloutTests
         NoisyBlocks = [0],
     };
 
-    private static DuoStreamCache Cache() => new(blocks: Layers, width: Inner, capacityRows: 64);
+    private static DuoStreamCache Cache() => new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
+
+    /// <summary>Three blocks, so a rollout can outgrow a cache that holds the prefix and one block.</summary>
+    private static DuoSampleInput ThreeBlockSample() => Sample() with
+    {
+        Blocks =
+        [
+            .. Sample().Blocks,
+            new DuoBlockInput { StartMs = 1416.0, BodyTextRows = BodyRows, Video = new DuoGrid(2, 4, 4), AudioSteps = 3, FrameStartsMs = [1416.0, 1516.0] },
+        ],
+    };
+
+    /// <summary>Reference and shared rows (7) plus one clean block (8 video and 6 audio rows): a cache of this size holds exactly one.</summary>
+    private const int OneBlockCapacity = 7 + 14;
+
+    [Fact]
+    public void EveryBlockOfAThreeBlockRolloutMatchesTheDenseForwardOverItsHistory()
+    {
+        // No eviction here: the cache holds the whole history, so each block is compared with a dense forward over all of it.
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), reference);
+
+        float[][] video = new float[3][];
+        float[][] audio = new float[3][];
+        for (int b = 0; b < 3; b++)
+        {
+            (video[b], audio[b]) = session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            // Reference and shared rows, then one video and one audio span per committed block.
+            Assert.Equal(Shared + RefRows + (b + 1) * (VideoRows + AudioRows), cache.Length);
+        }
+
+        for (int b = 0; b < 3; b++)
+        {
+            float[] cleanVideo = video.Take(b).SelectMany(v => v).ToArray();
+            float[] cleanAudio = audio.Take(b).SelectMany(a => a).ToArray();
+            (float[] denseVideo, float[] denseAudio) = DuoChunkSession.FullBlock(transformer, backend, sample, b, DuoRopePolicy.Old,
+                Shared0(), [Body(0), Body(1), Body(2)], reference, cleanVideo, cleanAudio,
+                Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            AssertClose(denseVideo, video[b], Tolerance, $"block {b} video against the dense forward");
+            AssertClose(denseAudio, audio[b], Tolerance, $"block {b} audio against the dense forward");
+        }
+    }
+
+    [Fact]
+    public void LongRolloutSlidesTheWindowAndEachBlockMatchesTheWindowedForward()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: OneBlockCapacity);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), reference);
+        Assert.Equal(Shared + RefRows, cache.Length);
+
+        float[][] video = new float[3][];
+        float[][] audio = new float[3][];
+        for (int b = 0; b < 3; b++)
+        {
+            (video[b], audio[b]) = session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            Assert.True(cache.Length <= OneBlockCapacity, "The cache never exceeds its capacity.");
+        }
+        // Once block 1 is committed, block 0 has gone: the cache holds the prefix and block 2 is about to see block 1 only.
+        Assert.Equal(OneBlockCapacity, cache.Length);
+
+        // Block 2 is denoised against the windowed history: reference, shared rows and clean block 1 only.
+        DuoSampleInput window = sample with { Blocks = [sample.Blocks[1], sample.Blocks[2]] };
+        (float[] windowVideo, _) = DuoChunkSession.FullBlock(transformer, backend, window, 1, DuoRopePolicy.Old,
+            Shared0(), [Body(1), Body(2)], reference, video[1], audio[1], Noise(60, VideoRows), Values(61, AudioRows * AudioIn), 2, 1.0);
+        AssertClose(windowVideo, video[2], Tolerance, "block 2 video against the windowed forward");
+    }
+
+    [Fact]
+    public void EvictionTakesTheWholeOldestBlockIncludingItsAudio()
+    {
+        // The prefix, one block, and 8 spare rows: the second block forces eviction, and a video-only eviction would leave 6 audio rows.
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        const int capacity = OneBlockCapacity + 8;
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: capacity);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), reference);
+        for (int b = 0; b < 3; b++)
+        {
+            session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            // Only one block is ever held beside the prefix, and both of its groups go with it.
+            Assert.Equal(Shared + RefRows + VideoRows + AudioRows, cache.Length);
+            Assert.All(cache.Groups.Where(g => g.Kind == DuoGroupKind.Clean), g => Assert.Equal(b, g.Block));
+        }
+    }
+
+    [Fact]
+    public void EvictingWithNoCleanBlockIsRefused()
+    {
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
+        Assert.Throws<InvalidOperationException>(() => cache.EvictOldestClean());
+    }
+
+    [Fact]
+    public void BlockThatCannotFitIsRefusedBeforeAnyEviction()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        // One row short: the prefix and a clean block do not fit, and no clean block is held to drop.
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: OneBlockCapacity - 1);
+        DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), Values(30, RefRows * VideoIn));
+
+        Assert.Throws<InvalidOperationException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn), 2, 1.0));
+        Assert.Equal(Shared + RefRows, cache.Length);
+        Assert.Equal(0, session.NextBlock);
+    }
 
     private static float[] Shared0() => Values(2, Shared * TextDim);
 

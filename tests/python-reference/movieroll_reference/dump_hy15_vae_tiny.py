@@ -7,6 +7,12 @@ Run inside the CPU reference image, never the Windows venv:
       python -I /wt/tests/python-reference/movieroll_reference/dump_hy15_vae_tiny.py \
       --out /wt/tests/HartsyInference.Diffusion.Tests/Fixtures/hy15_vae_tiny.safetensors
 
+The 4-channel variant for the MovieRoll pipeline tests (same seed and config, latent 4) is written separately:
+
+  bash .claude/run-outputs/refenv/run.sh -v "<worktree>:/wt" -v "<MovieRoll checkout at 0b5f73e>:/src:ro" -- \
+      python -I /wt/tests/python-reference/movieroll_reference/dump_hy15_vae_tiny.py --latent 4 \
+      --out /wt/tests/HartsyInference.Diffusion.Tests/Fixtures/hy15_vae_tiny_z4.safetensors
+
 The real Encoder and Decoder modules are imported from the MovieRoll checkout; only diffusers and the loader are stubbed so the module imports.
 Weights are random (seeded) and stored under the reference's own state-dict names, prefixed encoder./decoder. as AutoencoderKLConv3D does.
 Besides the end-to-end tensors, the DCAE resamplers (input x, conv output h, output) and the mid attention (input, output) are dumped so the

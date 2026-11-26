@@ -21,6 +21,7 @@ public static class Dinov3TimmKeys
     /// <c>attn.v_bias</c>; a bias in the file with the flag off is refused), <see cref="Dinov2Preset.HasFinalNorm"/> whether <c>norm.*</c> is read (a final norm in the
     /// file with the flag off is ignored: it changes no output).</param>
     /// <exception cref="InvalidOperationException">A weight is missing or has the wrong shape.</exception>
+    /// <exception cref="NotSupportedException">A weight is quantized, or a q/k/v bias does not match the preset.</exception>
     public static Dictionary<string, Tensor> ToHuggingFace(IReadOnlyDictionary<string, Tensor> weights, string prefix, Dinov2Preset preset)
     {
         ArgumentNullException.ThrowIfNull(weights);
@@ -33,6 +34,10 @@ public static class Dinov3TimmKeys
                 throw new InvalidOperationException($"timm DINOv3 weight '{prefix + key}' is missing.");
             if (!tensor.Shape.Equals(new TensorShape(shape)))
                 throw new InvalidOperationException($"timm DINOv3 weight '{prefix + key}' has shape {tensor.Shape}, expected {new TensorShape(shape)}.");
+            // Refused here, before the fused q/k/v is sliced: a slice does not carry the scales, so the loader could not tell it was quantized.
+            if (tensor.DType != DType.F32 && tensor.QuantInfo is { } quant)
+                throw new NotSupportedException(
+                    $"timm DINOv3 weight '{prefix + key}' is {tensor.DType} in {quant.Format}; no quantized weight loads.");
             return tensor;
         }
 

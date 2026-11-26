@@ -4,6 +4,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using Xunit;
@@ -129,6 +130,14 @@ public sealed class VocalSeparationWiringTests
 
         Assert.InRange(left.Length, 4405, 4412);
         Assert.Equal(left.Length, right.Length);
+    }
+
+    [Fact]
+    public void KimVocal2IsTheOneEntryRoutedToTheMdxSeparator()
+    {
+        // The route is by this flag and the weights loader is Kim_Vocal_2's, so a second flagged entry would load the wrong file.
+        CatalogEntry flagged = Assert.Single(ModelCatalog.All, e => e.Features.HasFlag(CatalogFeatures.MdxNetSeparator));
+        Assert.Equal("kim-vocal-2", flagged.Id);
     }
 
     [Fact]

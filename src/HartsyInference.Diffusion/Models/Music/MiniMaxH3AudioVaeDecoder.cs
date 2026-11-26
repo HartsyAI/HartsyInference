@@ -49,6 +49,9 @@ public sealed unsafe class MiniMaxH3AudioVaeDecoder : IDisposable
     /// <summary>Waveform sample rate of <see cref="Decode"/>'s output.</summary>
     public int SampleRate => _config.SampleRate;
 
+    /// <summary>Latent channels the decoder takes; the width of each latent step in <see cref="Decode"/>'s input.</summary>
+    public int LatentChannels => _config.LatentChannels;
+
     /// <summary>Waveform samples produced per latent frame (800 for the shipped configuration).</summary>
     public int SamplesPerLatentFrame => _generator.TotalUpsample;
 

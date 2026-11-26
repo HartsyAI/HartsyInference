@@ -58,8 +58,7 @@ public sealed class MdxSeparator
     public float[] ToMono(float[][] stereo, int targetRate, int? targetSamplesAtSourceRate = null)
     {
         ArgumentNullException.ThrowIfNull(stereo);
-        float[] mono = new float[stereo[0].Length];
-        for (int i = 0; i < mono.Length; i++) mono[i] = 0.5f * (stereo[0][i] + stereo[1][i]);
+        float[] mono = new WavFile.DecodedAudio(stereo, _settings.SampleRate).ToMono();
         float[] resampled = SincResampler.ResampleSoxrHqStandIn(mono, _settings.SampleRate, targetRate);
         if (targetSamplesAtSourceRate is null) return resampled;
         int keep = (int)Math.Ceiling(targetSamplesAtSourceRate.Value * (double)targetRate / _settings.SampleRate);
@@ -184,7 +183,12 @@ public sealed class MdxSeparator
     }
 
     /// <summary>No blending window, as the reference uses when chunks do not overlap: a Hann window would zero the outermost sample of each chunk.</summary>
-    private static double[] Ones(int m) => Enumerable.Repeat(1d, m).ToArray();
+    private static double[] Ones(int m)
+    {
+        double[] w = new double[m];
+        Array.Fill(w, 1d);
+        return w;
+    }
 
     /// <summary><c>numpy.hanning(m)</c>: the symmetric window, <c>0.5 − 0.5·cos(2πn/(m−1))</c>.</summary>
     internal static double[] SymmetricHann(int m)

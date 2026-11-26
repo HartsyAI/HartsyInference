@@ -24,21 +24,24 @@ internal sealed class Dinov3Layer
         _hidden = hidden; _numHeads = numHeads; _headDim = hidden / numHeads; _inter = inter; _eps = eps; _gated = gated; _qvBias = qvBias;
     }
 
-    /// <summary>Loads one block from the HF DINOv3 layout under <paramref name="prefix"/> (e.g. <c>layer.3</c>).</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    /// <summary>Loads one block from the HF DINOv3 layout under <paramref name="prefix"/> (e.g. <c>layer.3</c>). Copies made to widen a 16-bit
+    /// tensor join <paramref name="owned"/>, which the caller disposes.</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
         // Every block tensor is checked against its exact shape before any kernel reads it: a short tensor would otherwise be
         // read through an unchecked pointer in LayerNorm, Linear or the affine broadcast.
         int h = _hidden, i = _inter;
-        _n1W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.weight", h));
-        _n1B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.bias", h));
-        _qW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.weight", h, h));
-        _kW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.k_proj.weight", h, h));
-        _vW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.weight", h, h));
+        Tensor Take(string key, params long[] shape) =>
+            CheckpointTensors.RequireF32(w, Dinov3VisionEncoder.Family, $"{prefix}.{key}", owned, shape);
+        _n1W = Take("norm1.weight", h);
+        _n1B = Take("norm1.bias", h);
+        _qW = Take("attention.q_proj.weight", h, h);
+        _kW = Take("attention.k_proj.weight", h, h);
+        _vW = Take("attention.v_proj.weight", h, h);
         if (_qvBias)
         {
-            _qB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.bias", h));
-            _vB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.bias", h));
+            _qB = Take("attention.q_proj.bias", h);
+            _vB = Take("attention.v_proj.bias", h);
         }
         else if (w.ContainsKey($"{prefix}.attention.q_proj.bias") || w.ContainsKey($"{prefix}.attention.v_proj.bias"))
         {
@@ -48,22 +51,22 @@ internal sealed class Dinov3Layer
         {
             _qB = _vB = null;
         }
-        _oW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.weight", h, h));
-        _oB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.bias", h));
-        _ls1 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale1.lambda1", h));
-        _n2W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm2.weight", h));
-        _n2B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm2.bias", h));
-        _fc1W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.up_proj.weight", i, h));
-        _fc1B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.up_proj.bias", i));
-        _fc2W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.down_proj.weight", h, i));
-        _fc2B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.down_proj.bias", h));
-        _ls2 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale2.lambda1", h));
+        _oW = Take("attention.o_proj.weight", h, h);
+        _oB = Take("attention.o_proj.bias", h);
+        _ls1 = Take("layer_scale1.lambda1", h);
+        _n2W = Take("norm2.weight", h);
+        _n2B = Take("norm2.bias", h);
+        _fc1W = Take("mlp.up_proj.weight", i, h);
+        _fc1B = Take("mlp.up_proj.bias", i);
+        _fc2W = Take("mlp.down_proj.weight", h, i);
+        _fc2B = Take("mlp.down_proj.bias", h);
+        _ls2 = Take("layer_scale2.lambda1", h);
         if (!_gated && w.ContainsKey($"{prefix}.mlp.gate_proj.weight"))
             throw new NotSupportedException($"'{prefix}.mlp.gate_proj.weight' is in the checkpoint but the preset's MLP is the plain GELU one; use a preset with GatedMlp (the ViT-H+).");
         if (_gated)
         {
-            _gateW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.gate_proj.weight", i, h));
-            _gateB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.gate_proj.bias", i));
+            _gateW = Take("mlp.gate_proj.weight", i, h);
+            _gateB = Take("mlp.gate_proj.bias", i);
         }
         _attn = new AttentionLayer(
             new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
@@ -71,6 +74,14 @@ internal sealed class Dinov3Layer
             {
                 Query = _qW, QueryBias = _qB, Key = _kW, KeyBias = null, Value = _vW, ValueBias = _vB, Output = _oW, OutputBias = _oB,
             });
+    }
+
+    /// <summary>Forgets the block's tensors; whoever holds the copies disposes them.</summary>
+    public void ReleaseWeights()
+    {
+        _n1W = _n1B = _ls1 = _n2W = _n2B = _fc1W = _fc1B = _fc2W = _fc2B = _ls2 = _gateW = _gateB = null;
+        _qW = _qB = _kW = _vW = _vB = _oW = _oB = null;
+        _attn = null;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

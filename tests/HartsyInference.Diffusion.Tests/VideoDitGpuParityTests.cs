@@ -150,7 +150,7 @@ public sealed class VideoDitGpuParityTests(ITestOutputHelper output)
             using Tensor video = new(new TensorShape(refRows + noisyRows, DuoVideoIn), DType.F32);
             reference.AsReadOnlySpan<float>().CopyTo(video.AsSpan<float>());
             noisy.AsReadOnlySpan<float>().CopyTo(video.AsSpan<float>()[(refRows * DuoVideoIn)..]);
-            DuoStreamCache cache = new(blocks: 2, width: inner, capacityRows: 16);
+            DuoStreamCache cache = new(backend, blocks: 2, width: inner, capacityRows: 16);
 
             DuoLayout prefix = DuoLayoutOf(
                 [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, textRows),

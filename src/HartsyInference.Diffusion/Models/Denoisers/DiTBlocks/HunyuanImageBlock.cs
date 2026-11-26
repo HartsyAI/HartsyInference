@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -425,10 +426,11 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
             (imgQ, imgK, imgV) = ProjectWindowStream(backend, _imgAttn, imgModulated);
             if (returnKv)
             {
+                // A device-side copy of the whole window: CopyTo reads its source back to the host, which an encode pass must not do.
                 keysOut = new Tensor(imgK.Shape, DType.F32);
                 valuesOut = new Tensor(imgV.Shape, DType.F32);
-                backend.CopyTo(keysOut, imgK);
-                backend.CopyTo(valuesOut, imgV);
+                StridedCopies.SliceAxis(backend, keysOut, imgK, 1, 0, imgK.Shape[1]);
+                StridedCopies.SliceAxis(backend, valuesOut, imgV, 1, 0, imgV.Shape[1]);
             }
             if (!returnKv)
             {

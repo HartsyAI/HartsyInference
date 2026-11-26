@@ -160,7 +160,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The later runs' figures: a mixed (1.6) run is uncached and not measured; a cached 1.5 run is sized on its cache and its measurement.
         bool mixed = _loraMix is not null;
         LongCatRecipeSupport.LongCatLaterRunFigures figures = LongCatRecipeSupport.LaterRunFigures(mixed, plan, latentHeight, latentWidth,
-            _parts.Dit.Config, pixelWidth, pixelHeight, _distilled);
+            _parts.Dit.Config, pixelWidth, pixelHeight, _distilled, _backend.Device.Type);
         long? measuredPeak = figures.MeasuredPeak;
         Logs.Info(measuredPeak is long m
             ? $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has a measured later-run peak of {m >> 20} MiB reserved, plus a {LongCatRecipeSupport.MeasuredMarginBytes >> 20} MiB margin."

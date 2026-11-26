@@ -2550,13 +2550,13 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = vp,
+                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = ok,
                 CliDrivable = true, // `hartsy fx separate <wav> -m kim-vocal-2`, and `hartsy video --driving-audio <wav> --separate-vocals`.
+                Features = CatalogFeatures.MdxNetSeparator,
                 // Weights: the vocal_separator/Kim_Vocal_2.onnx file of meituan-longcat/LongCat-Video-Avatar-1.6 (66,759,214 bytes, sha256 pinned in
                 // FxCatalog), read straight from the .onnx by ModelAssets/Onnx. Licence: not stated by the file, the repo or UVR's model repository
                 // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend.
-                // The network and stem match onnxruntime (docs/Checklists/PARITY_VERIFICATION.md); the audio-separator driver and the librosa
-                // resample are uncompared, hence ValidationPending.
+                // Matches audio-separator 0.30.2 and LongCat's separate_vocals on CPU F32 (docs/Checklists/PARITY_VERIFICATION.md).
             },
 
             new CatalogEntry
@@ -3077,6 +3077,18 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/transformer", Role = "transformer", Sha256 = "9bd1cb1e67d07de19458b9ad288b906815411c68dad7910d042ceb66f61f9f44" },
                     new() { Repo = "kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers", RepoPath = "vae/diffusion_pytorch_model.safetensors",
                         TargetSubdir = "Stable-Diffusion/Kandinsky5/Kandinsky-5.0-T2V-Lite-sft-5s-Diffusers/vae", Role = "vae", Sha256 = "7c68a6295f9034a88225fbafb1f3258291a08d57a1fdb938233fa57b1b8f4883" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Gated: yunyangge/MovieRoll asks for acceptance of its access conditions, and the LFS object id is masked in the public
+                // listing, so no sha256 is pinned. The entry stays ValidationPending until a validated download exists.
+                Id = "movieroll", Modality = vid, DisplayName = "MovieRoll (distilled T2V)", Architecture = "HunyuanVideo-1.5 DiT + rolling KV sampler",
+                Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "yunyangge/MovieRoll", RepoPath = "distilled/t2v/model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MovieRoll/distilled-t2v", Role = "transformer" },
                 },
             },
             new CatalogEntry

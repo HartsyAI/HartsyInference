@@ -73,18 +73,20 @@ public sealed class HairDeckModel : IDisposable
 
         HairDeckModelFiles files = ResolveFiles(modelRoot);
         SafeTensorsLoader dinoLoader = new();
+        Dinov3VisionEncoder? dino = null;
         try
         {
             dinoLoader.Load(dinoWeightsPath);
             Dictionary<string, Tensor> dinoWeights = dinoLoader.GetAllTensors();
             Dinov2Preset preset = Dinov2Preset.FromDinov3Weights(dinoWeights, Resolution);
-            Dinov3VisionEncoder dino = new(preset);
+            dino = new(preset);
             dino.LoadWeights(dinoWeights);
             HairDeckCore core = HairDeckCore.Load(files);
             return new HairDeckModel(backend, dinoLoader, dino, core);
         }
         catch
         {
+            dino?.Dispose();
             dinoLoader.Dispose();
             throw;
         }
@@ -202,6 +204,7 @@ public sealed class HairDeckModel : IDisposable
         }
 
         _core.Dispose();
+        _dino.Dispose();
         _dinoLoader.Dispose();
     }
 }
