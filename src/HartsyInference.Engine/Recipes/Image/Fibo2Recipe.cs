@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -91,7 +92,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         : variant.Is(Fibo2Variants.EditTurbo) ? EditTurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
-    /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id.</remarks>
+    /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id. The RMBG 3.0
+    /// ids are listed by name, not by the <see cref="CatalogFeatures.AlphaMatte"/> flag: a new matte entry must name its variant here
+    /// and in <see cref="Fibo2Variants"/>, otherwise it would run silently on the Dev defaults. <c>Rmbg3CatalogTests</c> pins this.</remarks>
     public bool Matches(string familyId) =>
         string.Equals(familyId, "fibo2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase)
