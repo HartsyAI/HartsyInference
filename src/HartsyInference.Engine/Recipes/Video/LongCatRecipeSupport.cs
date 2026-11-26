@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -78,13 +79,44 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
     /// memory when it does not. Disposing the scope evicts the streamed window; the resident prefix stays on the device until the pipeline's pin
-    /// releases it (the denoise loop's finally frees the whole DiT).</summary>
-    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens) =>
-        BlockStreamingScope.Open(new BlockStreamingOptions
+    /// releases it (the denoise loop's finally frees the whole DiT). <paramref name="cacheBytes"/> is the KV cache the run keeps for its blocks; it
+    /// counts against the same budget as the activations, and a run whose cache leaves no room is refused before its denoise starts.</summary>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens, long cacheBytes = 0)
+    {
+        long headroom = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim) + cacheBytes;
+        if (cacheBytes > 0)
         {
-            Backend = backend, Denoiser = parts.Dit, ModelName = modelName,
-            HeadroomBytes = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim),
+            // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
+            backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
+            backend.TrimMemoryPool();
+            RequireCacheRoom(backend.FreeMemoryBytes(), headroom - cacheBytes, cacheBytes);
+        }
+        return BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = headroom,
         });
+    }
+
+    /// <summary>The bytes a run's KV cache takes on the device: the keys and values of its <paramref name="condLatents"/> conditioning latent
+    /// frames, in every block, in F32 (the layout the cache is built in). At 832x480 with five conditioning latents that is 12.3 GB.</summary>
+    internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth) =>
+        KvSegmentStore.EstimateBytes(config.Depth, (long)condLatents * (latentHeight / config.PatchSize.H) * (latentWidth / config.PatchSize.W),
+            config.HiddenSize, DType.F32);
+
+    /// <summary>Refuses a run whose budget is negative: the free memory after the shared weights, less the activation headroom and the cache, must be
+    /// at least zero, or the streamed blocks have nowhere to land and the first step dies out of memory.</summary>
+    internal static void RequireCacheRoom(long freeAfterShared, long headroomBeforeCache, long cacheBytes)
+    {
+        long spendable = freeAfterShared - headroomBeforeCache - cacheBytes;
+        if (spendable < 0)
+        {
+            throw new InvalidOperationException(
+                $"The chain's later run needs {Mb(headroomBeforeCache)} MB of activation headroom and {Mb(cacheBytes)} MB of KV cache, but only " +
+                $"{Mb(freeAfterShared)} MB is free after the shared weights: {Mb(-spendable)} MB short. Lower the resolution or the chain length.");
+        }
+    }
+
+    private static long Mb(long bytes) => bytes >> 20;
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
