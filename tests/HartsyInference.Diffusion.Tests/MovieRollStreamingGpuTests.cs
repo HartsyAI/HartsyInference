@@ -13,7 +13,7 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>MovieRoll's streaming forwards on a device: the tiny DiT's <c>StreamEncode</c> and <c>StreamDenoise</c> on CUDA against the CPU run, with the
 /// device-to-host read count recorded for each. The expected counts are not measured yet: until a 4090 run sets them, the test asserts only what
-/// is certain (the encode returns nothing, so it reads nothing back). The denoise returns the velocity, so one read of it is expected.
+/// is certain: the encode returns nothing and the denoise's count is taken before its velocity is read back, so both forwards should read nothing.
 /// Runs only through the GPU session (Category=GpuIntegration); it is skipped where no CUDA device is present.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
@@ -60,11 +60,11 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         device.Backend.ResetD2hSyncCount();
         using Tensor actual = device.Dit.StreamDenoise(device.Backend, Latent(1, 5), new float[1], 0f, device.Qwen, device.ByT5, cache,
             fullHistoryBlocks: 1);
+        // Counted before the velocity is read back for the comparison below, so the count covers the forward alone.
         long reads = device.Backend.GetD2hSyncCount();
-        output.WriteLine($"D2H_SYNCS StreamDenoise (the velocity read included): {reads}");
+        output.WriteLine($"D2H_SYNCS StreamDenoise (forward only, before the comparison read): {reads}");
 
-        // The velocity is read once when compared; anything beyond that means a forward is reading back to the host.
-        Assert.True(reads <= 1, $"StreamDenoise read back {reads} times; expected at most the velocity read.");
+        Assert.Equal(0, reads);
         AssertClose(expected, actual);
     }
 

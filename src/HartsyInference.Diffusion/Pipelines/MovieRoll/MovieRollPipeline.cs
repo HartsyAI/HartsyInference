@@ -51,6 +51,8 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         }
         finally
         {
+            // Finish the device work that reads these weights before they are released.
+            Backend.Sync();
             Backend.FreeWeights(_dit.EnumerateWeights());
         }
     }
