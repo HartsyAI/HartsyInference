@@ -23,6 +23,9 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>Flux.2 recipe (BFL; Klein 4B / Klein 9B / Dev). Variant comes from <see cref="Flux2Variants"/>, which reads the transformer's hidden size (3072 → Klein 4B, 4096 → Klein 9B, 6144 → Dev). Lifted from the SwarmUI backend's <c>Flux2Loader</c>: the checkpoint is the transformer; the matching text encoder — Qwen3-4B (<see cref="SideModels.Qwen3_4B"/>), Qwen3-8B (<see cref="SideModels.Qwen3_8B_Fp4Mixed"/>), or Mistral-Small-3 (<see cref="SideModels.MistralSmallFlux2"/>) — and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>, 32-channel latent + BatchNorm stats) resolve as side models. Constructs and drives through <see cref="Flux2RecipePipeline"/>.</summary>
 public sealed class Flux2Recipe : IArchitectureRecipe
 {
+    /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
+    public bool RefusesUnhonouredPlacements => true;
+
     /// <summary>Flux.2 Dev system prompt — verbatim from ComfyUI <c>comfy/text_encoders/flux.py</c> (the newline mid-sentence is in the original).</summary>
     private const string MistralDevSystemPrompt =
         "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.";

@@ -35,6 +35,10 @@ public interface IArchitectureRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
+    /// <summary>True when the family refuses CFG-parallel, DiT-shard and context-parallel placements at construction (UnhonouredBackends.Refuse),
+    /// so the engine refuses them before it reports the memory settings: a family that refuses never reaches the CFG-parallel warning.</summary>
+    bool RefusesUnhonouredPlacements => false;
+
     /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies. Read off
     /// ComfyUI's tokenizer for the family and pinned by <c>PromptWeightingModeLedgerTests</c>; declared only once the
     /// pipeline consumes it, because <see cref="ImageFeatures.PromptWeighting"/> derives from this and a declaration
