@@ -93,7 +93,28 @@ public sealed partial class LongCatBlock : IStreamingBlock
     }
 
     /// <inheritdoc/>
-    public IEnumerable<Tensor> EnumerateWeights()
+    public IEnumerable<Tensor> EnumerateWeights() => OwnWeights();
+
+    /// <summary>The adapter operands of this block's gated LoRA terms (each term's Down and Up). They are shared-resident, not streamed with the block:
+    /// the transformer reports them with the shared weights, so they are preloaded once and held for the run. Row windows are left out: they are
+    /// memoized slices that the backend promotes on use, and listing them would count the same operand twice.</summary>
+    public IEnumerable<Tensor> EnumerateAdapterOperands()
+    {
+        foreach (Tensor weight in OwnWeights())
+        {
+            if (weight.LowRankAdjunct is null)
+                continue;
+            foreach (LowRankAdjunctTerm term in weight.LowRankAdjunct.Terms)
+            {
+                yield return term.Down;
+                if (term.Up is not null)
+                    yield return term.Up;
+            }
+        }
+    }
+
+    /// <summary>The block's own weights, without the adapter operands their LoRA terms carry.</summary>
+    private IEnumerable<Tensor> OwnWeights()
     {
         foreach (Tensor? t in new[] { _adaWeight, _adaBias, _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias, _crossNormWeight, _crossNormBias,
             _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias, _w1, _w2, _w3 })
@@ -106,23 +127,6 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 yield return t;
     }
 
-    /// <summary>The adapter operands of this block's gated LoRA terms (each term's Down and Up). They are shared-resident, not streamed with the block:
-    /// the transformer reports them with its shared weights, so they are preloaded once and held for the run. Row windows are left out: they are
-    /// memoized slices the backend promotes on use, and listing them would count the same operand twice.</summary>
-    public IEnumerable<Tensor> EnumerateAdapterOperands()
-    {
-        foreach (Tensor weight in EnumerateWeights())
-        {
-            if (weight.LowRankAdjunct is null)
-                continue;
-            foreach (LowRankAdjunctTerm term in weight.LowRankAdjunct.Terms)
-            {
-                yield return term.Down;
-                if (term.Up is not null)
-                    yield return term.Up;
-            }
-        }
-    }
 
     private void BuildAttention()
     {
@@ -145,7 +149,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
     /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
     /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
-        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null, LongCatBlockKv? cache = null)
+        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null) =>
+        Forward(backend, hidden, text, timeEmbed, in inputs, null, probe, stage, audio);
+
+    /// <summary>The forward with <paramref name="past"/>, the cached conditioning rows of the denoising pass, in front of the rows' own keys.</summary>
+    internal Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs, LongCatPastKv? past,
+        Action<string, Tensor>? probe, string stage, Tensor? audio)
     {
         int dim = _config.HiddenSize;
         int s = checked(inputs.Frames * inputs.TokensPerFrame);
@@ -162,9 +171,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         probe?.Invoke($"{stage}.attn_in", normed1);
         // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
-        using Tensor attn = cache is null
-            ? SelfAttention(backend, normed1, in inputs, probe, stage)
-            : CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, cache, keep: false, inputs.Segments, out _);
+        using Tensor attn = past is { } cached
+            ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached)
+            : SelfAttention(backend, normed1, in inputs, probe, stage);
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
         probe?.Invoke($"{stage}.after_self", afterSelf);

@@ -131,6 +131,16 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     /// <inheritdoc/>
     public IEnumerable<Tensor> EnumerateSharedWeights()
     {
+        // The gated LoRA adapter operands of every block stay resident for the run, so they are shared (not streamed with their block).
+        foreach (Tensor t in OwnSharedWeights())
+            yield return t;
+        foreach (LongCatBlock block in _blocks)
+            foreach (Tensor operand in block.EnumerateAdapterOperands())
+                yield return operand;
+    }
+
+    private IEnumerable<Tensor> OwnSharedWeights()
+    {
         foreach (Tensor? t in new[] { _patchW2d, _patchBias, _time1W, _time1B, _time2W, _time2B, _text1W, _text1B, _text2W, _text2B,
             _finalAdaW, _finalAdaB, _finalW, _finalB })
         {
@@ -140,10 +150,6 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         if (_audioProjection is not null)
             foreach (Tensor t in _audioProjection.EnumerateWeights())
                 yield return t;
-        // The gated LoRA adapter operands of every block stay resident for the run, so they are shared, not streamed with their block.
-        foreach (LongCatBlock block in _blocks)
-            foreach (Tensor operand in block.EnumerateAdapterOperands())
-                yield return operand;
     }
 
     /// <summary>Velocity prediction (the model output, before the sampler's sign flip). <paramref name="latent"/> is <c>[1, z, T, H, W]</c>;

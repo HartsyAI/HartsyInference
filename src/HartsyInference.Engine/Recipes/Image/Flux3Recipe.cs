@@ -83,6 +83,7 @@ public sealed class Flux3Recipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        UnhonouredBackends.Refuse(context, "FLUX.3");
         string fileName = Path.GetFileName(context.CheckpointPath);
         ResolvedModelVariant variant = context.ResolveVariant(Flux3Variants.Catalog);
         List<IDisposable> owned = new List<IDisposable>();
@@ -91,6 +92,7 @@ public sealed class Flux3Recipe : IArchitectureRecipe
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath, CheckpointOpenOptions.ForNvfp4Consumer(context.Backend));
             owned.Add(source);
             Dictionary<string, Tensor> converted = Flux3CheckpointConverter.ConvertTransformer(source.Weights);
+            // context.TransformerBackends is the primary alone: UnhonouredBackends.Refuse above rejected every other transformer placement.
             owned.Add(QuantizedWeightPolicy.PrepareForBackends(converted, context.TransformerBackends));
             Flux3Config config = Flux3Config.FromWeights(converted);
             Logs.Info($"[Flux3Recipe] {variant.Variant.DisplayName} ({variant.Source}): {fileName}, hidden={config.HiddenSize}, "

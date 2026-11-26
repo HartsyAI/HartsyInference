@@ -22,6 +22,9 @@ public sealed class VoiceIsolatorStream : IDisposable
     private readonly int _crossfadeFrames;
     private readonly int _lookahead;
     private readonly int _bins;
+    private readonly float[] _analysisRe;
+    private readonly float[] _analysisIm;
+    private readonly float[] _analysisWindow;
     private readonly List<float[]> _raw = [];
     private readonly List<(float[] Re, float[] Im)> _spectra = [];
     private readonly List<int> _boundaries = [];
@@ -70,6 +73,9 @@ public sealed class VoiceIsolatorStream : IDisposable
         _config = network.Config;
         _spectral = network.Spectral;
         _bins = _spectral.Bins;
+        _analysisRe = new float[(long)blockFrames * _bins];
+        _analysisIm = new float[(long)blockFrames * _bins];
+        _analysisWindow = new float[_config.NFft];
         _blockFrames = blockFrames;
         _windowFrames = windowFrames;
         _crossfadeFrames = crossfadeFrames ?? 0;
@@ -135,8 +141,8 @@ public sealed class VoiceIsolatorStream : IDisposable
         while (_frames < limit)
         {
             int count = (int)Math.Min(Math.Min(_blockFrames, limit - _frames), NextCut() - _frames);
-            float[] re = new float[(long)count * _bins];
-            float[] im = new float[(long)count * _bins];
+            float[] re = _analysisRe;
+            float[] im = _analysisIm;
             for (int f = 0; f < count; f++)
             {
                 AnalyzeFrame(_frames + f, re, im, f);
@@ -167,7 +173,7 @@ public sealed class VoiceIsolatorStream : IDisposable
     {
         int n = _config.NFft;
         long start = frame * _config.HopLength - n / 2;
-        float[] window = new float[n];
+        float[] window = _analysisWindow;
         long total = _audioBase + _audio.Length;
         for (int i = 0; i < n; i++)
         {

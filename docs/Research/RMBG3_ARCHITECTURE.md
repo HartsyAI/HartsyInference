@@ -34,6 +34,13 @@ edit of the source image, so the engine runs it as a variant of the Fibo 2.0 rec
   matte is stretched back to the source size, an off-ratio picture gets a slightly misregistered matte; the engine matches the card.
 - **Weights are not tiny.** Card: "32 GB or more" of GPU memory in bf16 (peak 28.5 GiB on an L40S), about 6 s per image (vendor figures). The int8 build is
   8.41 GB with a 4.86 GB encoder, so on 12 GB the encoder and transformer must not be resident together.
+- **Attention hints.** The int8 transformer carries 40 `layers.N.attention.comfy_attention.config` U8 blobs, each `{"attention": "comfy_kitchen_int8"}`
+  (all 40 read, 2026-11-25). The engine runs float attention by default; INT8 attention is an opt-in knob (`numerics.int8AttnV2`, CUDA), numerically
+  unverified against Comfy. The loader warns, names the backend, and refuses a malformed blob; any backend name is accepted. The bf16 builds carry no hints. The 35-byte blob is the same on every block.
+- **Encoder file.** The int8 encoder is the pinned Comfy-Org `qwen3vl_4b_int8_convrot.safetensors` (4,858,559,240 B, sha256 `32de113c…`). Its vision tower
+  is dense (315 BF16 tensors; I8 only in the text blocks, 253). A same-named file from another build (4,450,477,142 B, sha `5ebf6c30…`, an I8 vision tower)
+  satisfied the old target name and failed in `Qwen3VlVisionEncoder.LoadWeights`. The target now lives in its own folder, and a file at the pinned path
+  whose hash differs is refused.
 
 ## Licence
 

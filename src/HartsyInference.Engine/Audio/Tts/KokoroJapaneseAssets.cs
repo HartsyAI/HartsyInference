@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using HartsyInference.Audio.Frontends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
 
@@ -70,6 +71,7 @@ internal static class KokoroJapaneseAssets
 
     private static async Task InstallUniDicAsync(string target, CancellationToken cancel)
     {
+        DownloadPermission.Demand(UniDicUrl);
         // Staged under a name unique to this call, so engines sharing one cache never write into each other's files.
         string staging = $"{target}.{Guid.NewGuid():N}.tmp";
         try

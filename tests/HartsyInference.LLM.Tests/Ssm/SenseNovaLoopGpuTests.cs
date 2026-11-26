@@ -1,4 +1,6 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Ssm;
@@ -31,8 +33,20 @@ public sealed class SenseNovaLoopGpuTests
         return Math.Sqrt(num / den);
     }
 
+    /// <summary>The exact lane. <see cref="ExactGemmScope"/> already makes the cuBLAS GEMM and SDPA math FP32; the <c>numerics.noTf32</c> and
+    /// <c>numerics.sdpaNoTf32</c> construction knobs also make the attention row table and the backend log declare no TF32, so the lane is exact by
+    /// construction as well as at run time. Measured on a 4090 at 49af97e05: relRMS 3.234612595317881E-06 against a bound of 1e-5.</summary>
     [CudaFact]
-    public void TinyF32Gguf_OnCuda_MatchesTheCpuHuggingFaceRoute()
+    public void TinyF32Gguf_OnCuda_ExactGemms_MatchesTheCpuHuggingFaceRoute() =>
+        CompareF32OnCuda(exactGemm: true, tolerance: 1e-5);
+
+    /// <summary>The default lane a generation runs: the engine's TF32 GEMMs and SDPA. Measured on a 4090 at 49af97e05: relRMS 0.004428314738910656
+    /// against a bound of 1e-2 (provisional, about 2.3x headroom). The same value was measured on main aa0e60aba against the old 1e-4 bound.</summary>
+    [CudaFact]
+    public void TinyF32Gguf_OnCuda_DefaultGemms_MatchesTheCpuHuggingFaceRoute() =>
+        CompareF32OnCuda(exactGemm: false, tolerance: 1e-2);
+
+    private static void CompareF32OnCuda(bool exactGemm, double tolerance)
     {
         (Dictionary<string, float[]> raw, Dictionary<string, Tensor> hfWeights) = SenseNovaLoopTests.TinyWeights(11, Streams);
         string json = SenseNovaLoopTests.TinyConfig(Streams);
@@ -44,11 +58,15 @@ public sealed class SenseNovaLoopGpuTests
         try
         {
             SenseNovaLoopGgufTests.WriteTinyGguf(path, raw, quantize: false);
+            KnobProfile knobs = KnobProfile.Create(exactGemm ? "sensenova-f32-exact" : "sensenova-f32-default");
+            if (exactGemm) knobs = knobs.With(EngineKnobs.NoTf32, true).With(EngineKnobs.SdpaNoTf32, true);
+            using IDisposable _ = knobs.Push();   // construction knobs are read when the backend is built
             using CudaBackend cuda = new(0, CudaPtxDirectory.Resolve());
+            using IDisposable? exact = exactGemm ? new ExactGemmScope(cuda) : null;
             using Qwen35Model model = Qwen35Model.Load(path);
             cuda.PreloadWeights(model.EnumerateWeights());
             double rel = RelRms(want, model.ForwardHiddenStates(cuda, Ids));
-            Assert.True(rel < 1e-4, $"F32 GGUF on CUDA vs CPU HF route: relRMS {rel}");   // summation order only
+            Assert.True(rel < tolerance, $"F32 GGUF on CUDA ({(exactGemm ? "exact" : "default")} GEMMs) vs CPU HF route: relRMS {rel}, bound {tolerance:G1}");
         }
         finally
         {

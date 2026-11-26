@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines.LongCat;
@@ -40,14 +41,35 @@ internal static class LongCatRecipeSupport
     /// <summary>Width and height must be multiples of this: the VAE's 8 times the DiT's 2×2 patch.</summary>
     internal const int PatchGrid = 16;
 
-    /// <summary>The device headroom the streaming plan reserves for one denoise step's activations, sized from the token count. Per token, one
-    /// block holds in F32: q, k, v and their head-major copies, the attention output and the residual and norm copies (about 10 × hidden), and
-    /// the SwiGLU gate, up and product intermediates (3 × FFN). The result carries a 1.5× margin. The first 4090 runs showed the earlier 2 ×
-    /// (4 × hidden + 2 × FFN) estimate was short: at 37,440 tokens a [37,440, 11,008] F32 FFN intermediate (1.6 GB) was refused with 1.1 GB free.</summary>
+    /// <summary>One binary gibibyte, the unit of the streaming headroom terms.</summary>
+    private const long GiB = 1L << 30;
+
+    /// <summary>The allocator pool's transients for one denoise step, independent of the token count: 5.5 GiB. With the safety margin the fixed part
+    /// is 6.5 GiB. The 5 GiB fixed part was lowered from the 8.3 GiB estimate on the basis of spare VRAM at peak; the 4090 full-clip run gave
+    /// prefix 0 with 22,852 MB free before the shared preload, so the lower figure is not yet measured safe. 6.5 GiB stays until the
+    /// logged plan (free after shared, shared, headroom, block) settles it on a measured run.</summary>
+    internal const long FixedPoolBytes = GiB * 11 / 2;
+
+    /// <summary>The safety margin Auto leaves on top of the fixed terms (1 GiB): the conservative slack that keeps a near-full card from streaming
+    /// too late.</summary>
+    internal const long SafetyBytes = GiB;
+
+    /// <summary>Rows per projection and FFN tile: the block's shared tile height, which bounds the FFN and the self-attention QKV intermediates to one
+    /// tile rather than the whole clip.</summary>
+    internal const int ActivationTileRows = LongCatBlock.DefaultTileRows;
+
+    /// <summary>The device headroom the streaming plan reserves before it sizes the resident prefix: the fixed context, pool and safety terms, plus
+    /// the step's activations. Activations split by what the tiling bounds: the per-token block copies that stay whole (about 14 × hidden F32 elements
+    /// per token: the residual, norm, joined Q, K and V, attention output) scale with the tokens, and one tile's fused QKV and SwiGLU intermediates
+    /// (3 × hidden + 3 × FFN per row) scale with the tile. The first 4090 runs measured the untiled estimate; the split is derived from it, not
+    /// re-measured, and needs a GPU re-check against a tiled run.</summary>
     internal static long ActivationHeadroomBytes(long tokens, int hidden, int ffnHidden)
     {
-        const long marginNumerator = 3, marginDenominator = 2, bytesPerElement = 4;
-        return tokens * (10L * hidden + 3L * ffnHidden) * bytesPerElement * marginNumerator / marginDenominator;
+        const long bytesPerElement = 4;
+        long wholePerToken = 14L * hidden * bytesPerElement;
+        long tileRows = Math.Min(tokens, ActivationTileRows);
+        long tileBytes = tileRows * (3L * hidden + 3L * ffnHidden) * bytesPerElement;
+        return FixedPoolBytes + SafetyBytes + tokens * wholePerToken + tileBytes;
     }
 
     /// <summary>The attention tokens one denoise step sees at a latent grid: latent frames × (latent height / 2) × (latent width / 2), the DiT's 2×2 patch.</summary>
@@ -55,13 +77,121 @@ internal static class LongCatRecipeSupport
         (long)latentFrames * (latentHeight / 2) * (latentWidth / 2);
 
     /// <summary>Places the DiT for one denoise loop through the shared streaming scope: resident when it fits the device, block-streamed from host
-    /// memory when it does not. Disposing the scope evicts whatever it placed.</summary>
-    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens) =>
-        BlockStreamingScope.Open(new BlockStreamingOptions
+    /// memory when it does not. Disposing the scope evicts the streamed window; the resident prefix stays on the device until the pipeline's pin
+    /// releases it (the denoise loop's finally frees the whole DiT). <paramref name="cacheBytes"/> is the KV cache the run keeps for its blocks; it
+    /// counts against the same budget as the activations, and a run whose cache leaves no room is refused before its denoise starts.</summary>
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens, long cacheBytes = 0,
+        long? measuredPeakBytes = null)
+    {
+        long headroom = BudgetHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes, cacheBytes);
+        if (cacheBytes > 0)
         {
-            Backend = backend, Denoiser = parts.Dit, ModelName = modelName,
-            HeadroomBytes = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim),
+            // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
+            backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
+            backend.TrimMemoryPool();
+            RequireRoom(backend.FreeMemoryBytes(), 0, headroom - cacheBytes, cacheBytes, "The chain's later run");
+        }
+        return BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = backend, Denoiser = parts.Dit, ModelName = modelName, HeadroomBytes = headroom,
         });
+    }
+
+    /// <summary>The device bytes a cached step holds for one block beyond its activations: the staged pair of the cached keys and values, and the joined
+    /// copy the attention builds from them (past rows followed by the new rows). The new rows' own keys and values are activations and are counted in
+    /// the per-token term. Two pairs of the conditioning tokens: 487.5 MiB at 832x480 with five conditioning latents, 288 MiB at 640x368.</summary>
+    internal static long CachedStepBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth) =>
+        2 * KvCacheBytes(config, condLatents, latentHeight, latentWidth, offloaded: true);
+
+    /// <summary>The bytes a run's KV cache takes on the device, in F32: every block's keys and values for the conditioning latents (12.3 GB at 832x480
+    /// with five of them, 7.25 GB at 640x368). Offloaded, the cache lives in host memory and the device holds one block's pair at a time.</summary>
+    internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth, bool offloaded) =>
+        LongCatKvCache.EstimateBytes(config, condLatents, latentHeight, latentWidth, offloaded);
+
+    /// <summary>One measured later-run workload: the size, the new and context latents of its segment, whether it was the distilled pipeline, and the
+    /// allocator's reserved bytes at the worst step of the later segment.</summary>
+    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes);
+
+    /// <summary>The later runs measured on the GPU: main c5fec5d37 with the refusal bypassed in a scratch copy, all eight steps, no OOM. The key is
+    /// exactly what was measured. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
+    /// per-token estimate. The distilled flag is inferred from the eight steps (the Distill8 schedule); it is not in the measurement's log. Audio
+    /// attention was not sampled. Reserved bytes are the pool's RESERVED_MEM_CURRENT (CudaBackend.cs:146-152), which excludes the resident blocks,
+    /// since those are allocated outside the pool (GpuTransferHelper.cs:326, 482).</summary>
+    internal static readonly MeasuredLaterRun[] MeasuredLaterRuns =
+    {
+        new(640, 368, NewLatents: 20, ContextLatents: 4, Distilled: true, 7808L << 20),
+        new(832, 480, NewLatents: 20, ContextLatents: 4, Distilled: true, 11360L << 20),
+    };
+
+    /// <summary>The explicit margin on a measured peak: the safety margin the estimate also keeps. It covers what the measurement did not sample (audio
+    /// attention), the tile heights the attention sizes from free memory (a few tens of MiB of drift per call), and one run's sample against the
+    /// next. It is not scaled between the two sizes: the margin is set against the unsampled terms, which do not grow with the measured ones.</summary>
+    internal const long MeasuredMarginBytes = SafetyBytes;
+
+    /// <summary>The reserved peak measured for exactly this workload (size, new and context latents, distilled), or null when it was not measured. A null
+    /// keeps the per-token estimate and its refusal.</summary>
+    internal static long? MeasuredReservedPeak(int width, int height, int newLatents, int contextLatents, bool distilled)
+    {
+        foreach (MeasuredLaterRun run in MeasuredLaterRuns)
+            if (run.Width == width && run.Height == height && run.NewLatents == newLatents && run.ContextLatents == contextLatents
+                && run.Distilled == distilled)
+                return run.ReservedPeakBytes;
+        return null;
+    }
+
+    /// <summary>The activation budget of a later run: the measured reserved peak plus its margin when the size was measured, else the per-token
+    /// estimate (the fixed pool, the safety margin, and the activations of <paramref name="tokens"/> rows).</summary>
+    internal static long ActivationBudget(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes) =>
+        measuredPeakBytes is long peak ? peak + MeasuredMarginBytes : ActivationHeadroomBytes(tokens, hidden, ffnHidden);
+
+    /// <summary>The headroom a run reserves: the activation budget (see <see cref="ActivationBudget"/>) and the KV cache.</summary>
+    internal static long BudgetHeadroomBytes(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes, long cacheBytes) =>
+        ActivationBudget(tokens, hidden, ffnHidden, measuredPeakBytes) + cacheBytes;
+
+    /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed, the activation headroom and the KV
+    /// cache, must be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/>
+    /// names the run in the error; the cache is named separately from the activations.</summary>
+    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes, long cacheBytes, string who)
+    {
+        long spendable = freeBytes - sharedBytesToPlace - headroomBytes - cacheBytes;
+        if (spendable < 0)
+        {
+            throw new InvalidOperationException(
+                $"{who} needs {MiB(headroomBytes)} MiB of activation headroom" +
+                (cacheBytes > 0 ? $" and {MiB(cacheBytes)} MiB of KV cache" : "") +
+                (sharedBytesToPlace > 0 ? $" and {MiB(sharedBytesToPlace)} MiB of shared weights to place" : "") +
+                $", but only {MiB(freeBytes)} MiB is free: {MiB(-spendable)} MiB short. Lower the resolution or the chain length.");
+        }
+    }
+
+    /// <summary>The activation budget of a later run of <paramref name="tokens"/> rows, the figure its streaming scope reserves: measured when the size
+    /// has a measurement, else the per-token estimate.</summary>
+    internal static long LaterRunHeadroom(LongCatParts parts, long tokens, long? measuredPeakBytes = null) =>
+        ActivationBudget(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes);
+
+    /// <summary>Before any segment runs: an upper bound on a later run's budget. The free memory is read after a pool trim. Only the shared weights
+    /// not yet on the device are subtracted, so a shared weight that an earlier step already uploaded (the audio projection, once it is used twice)
+    /// is not counted twice. A later run's free memory cannot exceed this, so a refusal here is one the later run would also get.
+    /// <paramref name="stagedBytes"/> is the later run's cached-step bytes, which its scope has to cover as well; <paramref name="measuredPeakBytes"/>
+    /// is the size's measured reserved peak, or null when the size has none.</summary>
+    internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes, long? measuredPeakBytes = null)
+    {
+        backend.TrimMemoryPool();
+        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens, measuredPeakBytes),
+            stagedBytes, "The chain's later run");
+    }
+
+    /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>
+    internal static long NonResidentSharedBytes(IBackend backend, LongCatTransformer dit)
+    {
+        long total = 0;
+        foreach (Tensor tensor in dit.EnumerateSharedWeights())
+            if (!backend.IsWeightResident(tensor))
+                total += tensor.DType.ComputeByteCount(tensor.ElementCount);
+        return total;
+    }
+
+    private static long MiB(long bytes) => (bytes + (1L << 20) - 1) >> 20;
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
@@ -175,10 +305,39 @@ internal static class LongCatRecipeSupport
     /// <summary>The normalized latent of a single RGB24 frame, <c>[channels, 1, height / 8, width / 8]</c>, used as the conditioning frame.</summary>
     internal static float[] EncodeFirstFrame(IBackend backend, IWanVaeEncoder encoder, byte[] rgb24, int width, int height, int channels)
     {
-        using Tensor clip = VideoRecipeUtils.TileRgbToClip(rgb24, width, height, 1);
-        using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
-        using Tensor host = VideoRecipeUtils.HostCopy(latent);
-        return host.AsReadOnlySpan<float>().ToArray();
+        return WithWeightsPlaced(encoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
+        {
+            using Tensor clip = VideoRecipeUtils.TileRgbToClip(rgb24, width, height, 1);
+            using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+            using Tensor host = VideoRecipeUtils.HostCopy(latent);
+            return host.AsReadOnlySpan<float>().ToArray();
+        }, backend.TrimMemoryPool);
+    }
+
+    /// <summary>Runs <paramref name="body"/> with <paramref name="weights"/> placed on the device, and releases them afterwards, also when the body
+    /// throws. The VAE's weights need this: a weight used twice without a preload is promoted to a resident weight and then stays on the device until
+    /// someone frees it (<c>GpuTransferHelper.ShouldAutoPromote</c>), so a segment's decode or encode would leave the card short for the next segment's
+    /// streaming plan. The seam takes the preload and free as delegates, so the order is testable without a device.</summary>
+    internal static T WithWeightsPlaced<T>(IEnumerable<Tensor> weights, Action<IEnumerable<Tensor>> preload, Action<IEnumerable<Tensor>> free,
+        Func<T> body, Action? trim = null)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(preload);
+        ArgumentNullException.ThrowIfNull(free);
+        ArgumentNullException.ThrowIfNull(body);
+        Tensor[] placed = [.. weights];
+        preload(placed);
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            free(placed);
+            // The decode or encode leaves its transients in the allocator pool, where FreeMemoryBytes counts them as used. Returning them here, before
+            // any streaming plan reads the card, keeps them out of the next run's budget.
+            trim?.Invoke();
+        }
     }
 
     /// <summary>Runs one denoise loop with the DiT placed by a streaming scope, and frees the DiT on every path. The scope is disposed inside
@@ -212,7 +371,45 @@ internal static class LongCatRecipeSupport
     {
         using Tensor latent = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
         latents.AsSpan().CopyTo(latent.AsSpan<float>());
-        using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
-        return VideoRgbFrames.ExtractAllFrames(rgb);
+        return WithWeightsPlaced(decoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
+        {
+            using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
+            return VideoRgbFrames.ExtractAllFrames(rgb);
+        }, backend.TrimMemoryPool);
+    }
+
+    /// <summary>The 1.5 chain's context (use_vcond False in meituan-longcat/LongCat-Video @ 58eb336, pipeline 1467-1490): the segment's last
+    /// <c>1 + 4·(contextLatents − 1)</c> decoded pixel frames, as RGB24 like the reference's uint8 output, re-encoded by the VAE to the context's
+    /// latents <c>[channels, contextLatents, hw]</c>. The other decoded frames are released when this returns.</summary>
+    internal static float[] ReencodedContext(IBackend backend, IWanVaeDecoder decoder, IWanVaeEncoder encoder, float[] segmentLatents, int channels,
+        int segmentFrames, int contextLatents, int latentHeight, int latentWidth)
+    {
+        CheckSegment(segmentLatents, channels, segmentFrames, latentHeight, latentWidth);
+        byte[][] decoded = DecodeFrames(backend, decoder, segmentLatents, channels, segmentFrames, latentHeight, latentWidth);
+        return EncodeContext(backend, encoder, decoded, contextLatents, channels, latentHeight, latentWidth);
+    }
+
+    /// <summary>Re-encodes the last <c>1 + 4·(contextLatents − 1)</c> frames of an already decoded segment (see <see cref="ReencodedContext"/>), so the
+    /// caller can keep the segment's other frames for its output.</summary>
+    internal static float[] EncodeContext(IBackend backend, IWanVaeEncoder encoder, byte[][] decoded, int contextLatents, int channels,
+        int latentHeight, int latentWidth)
+    {
+        int contextPixels = 1 + LongCatVaeSeam.TemporalScale * (contextLatents - 1);
+        if (decoded.Length < contextPixels)
+            throw new InvalidOperationException($"The decoded segment has {decoded.Length} frames; the context needs {contextPixels}.");
+        int width = latentWidth * LongCatVaeSeam.SpatialScale, height = latentHeight * LongCatVaeSeam.SpatialScale;
+        return WithWeightsPlaced(encoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
+        {
+            using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(decoded[^contextPixels..], width, height);
+            using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+            using Tensor host = VideoRecipeUtils.HostCopy(latent);
+            return host.AsReadOnlySpan<float>().ToArray();
+        }, backend.TrimMemoryPool);
+    }
+
+    private static void CheckSegment(float[] segmentLatents, int channels, int segmentFrames, int latentHeight, int latentWidth)
+    {
+        if (segmentLatents.Length != channels * segmentFrames * latentHeight * latentWidth)
+            throw new ArgumentException($"The segment holds {segmentLatents.Length} values; expected {channels * segmentFrames * latentHeight * latentWidth}.", nameof(segmentLatents));
     }
 }

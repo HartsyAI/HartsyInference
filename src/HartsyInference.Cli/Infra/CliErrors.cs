@@ -1,3 +1,4 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using Spectre.Console;
 
@@ -21,5 +22,5 @@ public static class CliErrors
 
     /// <summary>True for exceptions that represent a user/config mistake rather than a bug (no stack dump needed).</summary>
     private static bool IsExpected(Exception ex) => ex is FileNotFoundException or DirectoryNotFoundException
-        or NotSupportedException or ArgumentException or InvalidOperationException;
+        or NotSupportedException or ArgumentException or InvalidOperationException or DownloadRefusedException;
 }

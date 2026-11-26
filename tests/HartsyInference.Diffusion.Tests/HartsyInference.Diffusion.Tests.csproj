@@ -26,6 +26,7 @@
     <None Include="Fixtures\sana_wm_s2_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\hy15_dit_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\hy15_vae_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\rolling_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -34,6 +35,10 @@
     <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\GpuDeviceFacts.cs" Link="Shared\GpuDeviceFacts.cs" />
   </ItemGroup>
 
 </Project>

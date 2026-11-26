@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -82,6 +84,7 @@ public sealed class FastFramesPipeline
     private readonly FastFramesConfig _config;
     private readonly FastFramesFlowSchedule _schedule;
     private readonly int _gridHeight, _gridWidth;
+    private readonly ResidentPrefixPin _generatorPin = new ResidentPrefixPin();
 
     /// <summary>Pairs a transformer, a refiner, a decoder and a recipe. Refuses a combination that cannot run, naming both sides, so
     /// the mismatch shows here rather than in the middle of a clip.</summary>
@@ -143,11 +146,59 @@ public sealed class FastFramesPipeline
         return GenerateCore(promptEmbeds, noise, latentFrames, progress, cancel);
     }
 
-    private static void ValidateRequest(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames)
+    private void ValidateRequest(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames)
     {
         ArgumentNullException.ThrowIfNull(promptEmbeds);
         ArgumentNullException.ThrowIfNull(noise);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
+        // A pinned prefix from an earlier clip is still on the device, so the free VRAM read here does not show what the placement
+        // will have free. The placement releases or keeps that prefix; the check after it decides, so skip this one.
+        if (!_generatorPin.Resident)
+            CheckKvFitsNow(latentFrames);
+    }
+
+    /// <summary>The frame-cache need of a clip of <paramref name="latentFrames"/> on this pipeline: the cache in the slot dtype, plus one
+    /// block's joined prefix. Used by both checks and by the block placement's headroom, so they agree.</summary>
+    private long ClipKvNeedBytes(int latentFrames) =>
+        KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
+            _transformer.BranchActivation(_backend, singleGroup: true));
+
+    /// <summary>Checks the clip's frame cache against the free VRAM the backend reports now. Called at admission and again once the
+    /// block placement has run, so the weights it uploaded are counted as used.</summary>
+    private void CheckKvFitsNow(int latentFrames)
+    {
+        (long freeBytes, long totalBytes) = _backend.GetVramInfo();
+        DType slot = _transformer.BranchActivation(_backend, singleGroup: true);
+        long need = KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim, slot);
+        CheckFits(_config.Name, need, latentFrames, slot, freeBytes, totalBytes);
+    }
+
+    /// <summary>Refuses a clip whose frame-wise cache cannot fit in the free VRAM, before any frame is denoised. The cache keeps every
+    /// frame's keys and values for every block until the clip ends, in the dtype the slots take (<paramref name="slot"/>: the attention
+    /// branch's activation, F32 when F16 branches are off or the backend lacks F16 activations). It also reserves one block's joined
+    /// prefix, the copy the rewrite makes per block. A backend that reports no VRAM (CPU) is not checked. This is a lower bound: the
+    /// attention scratch, the decoder and the refiner come on top.</summary>
+    /// <exception cref="InvalidOperationException">The cache for <paramref name="latentFrames"/> does not fit in <paramref name="freeBytes"/>.</exception>
+    public static void CheckKvFits(string name, int blocks, int latentFrames, int tokensPerFrame, int hidden, DType slot,
+        long freeBytes, long totalBytes) =>
+        CheckFits(name, KvNeedBytes(blocks, latentFrames, tokensPerFrame, hidden, slot), latentFrames, slot, freeBytes, totalBytes);
+
+    /// <summary>The frame cache of a clip in <paramref name="slot"/> plus one block's joined prefix (the copy the rewrite makes per
+    /// block): the bytes the clip needs before attention scratch, the decoder and the refiner.</summary>
+    public static long KvNeedBytes(int blocks, int latentFrames, int tokensPerFrame, int hidden, DType slot) =>
+        FrameKvCache.EstimateBytes(blocks, latentFrames, tokensPerFrame, hidden, slot)
+        + FrameKvCache.EstimateBytes(1, latentFrames, tokensPerFrame, hidden, slot);
+
+    private static void CheckFits(string name, long need, int latentFrames, DType slot, long freeBytes, long totalBytes)
+    {
+        if (totalBytes <= 0)
+            return;
+        if (need > freeBytes)
+        {
+            throw new InvalidOperationException(
+                $"{name} needs {need >> 20} MiB of frame KV cache ({slot}) for {latentFrames} latent frames; the device has {freeBytes >> 20} MiB free "
+                + $"of {totalBytes >> 20} MiB. Generate fewer frames, or free VRAM first.");
+        }
     }
 
     private IEnumerable<FastFramesFrame> RolloutCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
@@ -156,13 +207,31 @@ public sealed class FastFramesPipeline
         using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
+        // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
+        // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
+        long kvNeed = ClipKvNeedBytes(latentFrames);
+        // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
+        // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
+        using BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = _backend,
+            Denoiser = _transformer,
+            ModelName = _config.Name,
+            HeadroomBytes = StreamingHeadroomOverride ?? kvNeed + DefaultStreamingHeadroomBytes,
+            Mode = StreamingMode,
+            Pin = _generatorPin,
+            TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
+        });
+        LastStreamedBlocks = streaming.StreamedBlocks;
+        // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
+        CheckKvFitsNow(latentFrames);
         for (int frame = 0; frame < latentFrames; frame++)
         {
             cancel.ThrowIfCancellationRequested();
             (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
             FastFramesFrame output;
             using (pixels)
-                output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), (int)pixels.Shape[0],
+                output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
                     (int)pixels.Shape[2], (int)pixels.Shape[3]);
             yield return output;
 
@@ -172,9 +241,24 @@ public sealed class FastFramesPipeline
                 CleanPass(promptEmbeds, latent, frame, cache);
             else
                 Refine(latent, frame, cache, conditioning);
+            streaming.EndStep();
             progress?.Invoke(frame + 1, latentFrames);
         }
     }
+
+    /// <summary>Bytes the block placement keeps free beyond the clip's frame cache: activations, the refiner and the decoder. When
+    /// null, <see cref="DefaultStreamingHeadroomBytes"/> is used.</summary>
+    public long? StreamingHeadroomOverride { get; set; }
+
+    /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
+    /// (for tests); ForceOff keeps every block resident.</summary>
+    public LowVramMode? StreamingMode { get; set; }
+
+    /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
+    public int LastStreamedBlocks { get; private set; }
+
+    /// <summary>The activation, refiner and decoder allowance on top of the frame cache when the placement is planned.</summary>
+    public const long DefaultStreamingHeadroomBytes = 1L << 30;
 
     private IEnumerable<VideoFrame> GenerateCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)

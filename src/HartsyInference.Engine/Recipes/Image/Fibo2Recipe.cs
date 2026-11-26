@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -91,7 +92,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         : variant.Is(Fibo2Variants.EditTurbo) ? EditTurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
-    /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id.</remarks>
+    /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id. The RMBG 3.0
+    /// ids are listed by name, not by the <see cref="CatalogFeatures.AlphaMatte"/> flag: a new matte entry must name its variant here
+    /// and in <see cref="Fibo2Variants"/>, otherwise it would run silently on the Dev defaults. <c>Rmbg3CatalogTests</c> pins this.</remarks>
     public bool Matches(string familyId) =>
         string.Equals(familyId, "fibo2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase)
@@ -110,6 +113,9 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         {
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
             owned.Add(source);
+            // Hints are validated and their backends named here, before HalfPrecisionWeights drops them.
+            foreach (string backend in Fibo2AttentionHints.Requested(source.Weights))
+                Logs.Warning(Fibo2AttentionHints.Describe(backend));
             Dictionary<string, Tensor> dit = Fibo2WeightPreparation.HalfPrecisionWeights(source.Weights, owned);
             bool quantized = Fibo2WeightPreparation.HasPackedWeights(dit);
             // A packed int8 weight no executing device can read widens here, not inside the first GEMM.
@@ -147,7 +153,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Fibo2Recipe");
             owned.Add(vae);
 
-            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae);
+            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae, context.TextEncoderBackendOrDefault);
             owned.Add(editSupport);
             Fibo2Pipeline pipeline = new(context.Backend, encoder, transformer, vae.Decoder, vae.BnMean, vae.BnVar, config,
                 vaeEncoder: vae.Encoder);

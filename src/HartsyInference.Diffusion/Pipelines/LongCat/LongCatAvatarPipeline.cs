@@ -22,7 +22,7 @@ public sealed record LongCatAvatarRun(
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
     int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default,
-    AdjunctGate? LoraGate = null);
+    AdjunctGate? LoraGate = null, bool OffloadKv = false);
 
 /// <summary>The sigmas (shifted, with the terminal zero), the timesteps (sigma·1000), and the final latents.</summary>
 public sealed record LongCatAvatarResult(float[] Latents, float[] Sigmas, float[] Timesteps);
@@ -84,18 +84,19 @@ public sealed class LongCatAvatarPipeline
         float[] audioCond = AudioRows(run.AudioTokens, audioFrom, audioCount);
         float[]? audioUncond = guided ? AudioRows(run.UnconditionalAudioTokens!, audioFrom, audioCount) : null;
 
-        float[] latents = (float[])run.Noise.Clone();
-        if (cond > 0)
-            WriteFrames(latents, run.CondLatents!, channels, frames, hw, cond);
+        // The conditioning frames are fixed for the run; the noisy frames are the scheduler state. Both live on the device, per channel, so a step
+        // never round-trips the latents through the host. The noisy state has the velocity's own layout, [channels·noisy, hw].
+        using Tensor? condState = cond > 0 ? LongCatFrameOps.FromHost(run.CondLatents!, new TensorShape(channels * cond, hw)) : null;
+        Tensor state = LongCatFrameOps.FromHost(LongCatFrameOps.SteppedFrames(run.Noise, channels, frames, hw, cond), new TensorShape(channels * noisy, hw));
 
         LongCatKvCache? cache = null;
-        Tensor? condLatent = null;
+        Tensor? condClip = null;
         try
         {
             if (useCache)
             {
-                condLatent = Frames(latents, channels, frames, hw, 0, cond, run.Height, run.Width);
-                cache = _dit.BuildKvCache(_backend, condLatent, conditioning);
+                condClip = LongCatFrameOps.Reshape(_backend, condState!, new TensorShape([1, channels, cond, run.Height, run.Width]));
+                cache = _dit.BuildKvCache(_backend, condClip, conditioning, offload: run.OffloadKv);
             }
 
             long started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -103,79 +104,119 @@ public sealed class LongCatAvatarPipeline
             {
                 run.Cancel.ThrowIfCancellationRequested();
                 float t = timesteps[i], dt = sigmasWithZero[i + 1] - sigmasWithZero[i];
-                float[] velocity = Velocity(run, cache, latents, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond, tensors);
+                using Tensor velocity = Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond,
+                    tensors);
 
-                // The reference negates the model output for its scheduler and steps the noisy frames only.
-                for (int c = 0; c < channels; c++)
-                    for (int f = 0; f < noisy; f++)
-                        for (int e = 0; e < hw; e++)
-                        {
-                            int index = (c * frames + cond + f) * hw + e;
-                            int vIndex = (c * noisy + f) * hw + e;
-                            latents[index] += dt * -velocity[vIndex];
-                        }
+                // The reference negates the model output for its scheduler and steps the noisy frames only: state += dt · (−velocity).
+                using Tensor step = new(state.Shape, DType.F32);
+                _backend.Scale(step, velocity, -dt);
+                Tensor next = new(state.Shape, DType.F32);
+                try
+                {
+                    _backend.Add(next, state, step);
+                }
+                catch
+                {
+                    next.Dispose();
+                    throw;
+                }
+                state.Dispose();
+                state = next;
                 run.OnProgress?.Invoke(new GenerationProgress(i + 1, run.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
             }
+
+            float[] latents = LongCatFrameOps.JoinFrames(run.CondLatents, state.AsReadOnlySpan<float>().ToArray(), channels, frames, hw, cond);
+            return new LongCatAvatarResult(latents, sigmasWithZero, timesteps);
         }
         finally
         {
             cache?.Dispose();
-            condLatent?.Dispose();
+            condClip?.Dispose();
+            state.Dispose();
         }
-
-        return new LongCatAvatarResult(latents, sigmasWithZero, timesteps);
     }
 
-    /// <summary>The velocity of the noisy frames, <c>[channels, noisy, hw]</c>, with the cache (the noisy frames only) or without it (all frames, the
-    /// noisy rows taken from the result).</summary>
-    private float[] Velocity(LongCatAvatarRun run, LongCatKvCache? cache, float[] latents, int channels, int frames, int hw, int cond,
+    /// <summary>The velocity of the noisy frames, <c>[channels·noisy, hw]</c>, on the device: with the cache the noisy frames only, without it the
+    /// whole clip and the noisy rows taken from the result.</summary>
+    private Tensor Velocity(LongCatAvatarRun run, LongCatKvCache? cache, Tensor state, Tensor? condState, int channels, int frames, int hw, int cond,
         LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond, LongCatRunTensors tensors)
     {
         int noisy = frames - cond;
         bool cached = cache is not null;
-        float[] input = cached ? LastFrames(latents, channels, frames, hw, noisy) : latents;
         int inputFrames = cached ? noisy : frames;
         float[] timesteps = cached ? [t] : conditioning.FrameTimesteps(t, frames);
-        float[] full = Guided(run, guided, (promptIsPositive, audioOn) =>
-            Predict(input, channels, inputFrames, run.Height, run.Width, promptIsPositive ? run.Positive : run.Negative,
-                audioOn ? audioCond : audioUncond!, timesteps, conditioning, cache, tensors));
-        if (cached)
-            return full;
-
-        float[] result = new float[channels * noisy * hw];
-        int k = 0;
-        for (int c = 0; c < channels; c++)
-            for (int f = cond; f < frames; f++)
-                for (int e = 0; e < hw; e++, k++)
-                    result[k] = full[(c * frames + f) * hw + e];
-        return result;
+        using Tensor input = cached
+            ? LongCatFrameOps.Reshape(_backend, state, new TensorShape([1, channels, noisy, run.Height, run.Width]))
+            : LongCatFrameOps.ModelInput(_backend, state, condState, channels, cond, noisy, hw, new TensorShape([1, channels, frames, run.Height, run.Width]));
+        return Guided(run, guided, (promptIsPositive, audioOn) =>
+        {
+            using Tensor output = Predict(input, inputFrames, promptIsPositive ? run.Positive : run.Negative, audioOn ? audioCond : audioUncond!,
+                timesteps, conditioning, cache, tensors);
+            if (cached)
+                return LongCatFrameOps.Reshape(_backend, output, new TensorShape(channels * noisy, hw));
+            using Tensor flat = LongCatFrameOps.Reshape(_backend, output, new TensorShape(channels * frames, hw));
+            return LongCatFrameOps.Rows(_backend, flat, channels, frames, cond, noisy, hw);
+        });
     }
 
-    /// <summary>The three-pass guidance, or one pass when unguided. <paramref name="pass"/> takes (positive prompt, audio on).</summary>
-    private static float[] Guided(LongCatAvatarRun run, bool guided, Func<bool, bool, float[]> pass)
+    /// <summary>The three-pass guidance, or one pass when unguided, on the device: uncond + text·(cond − uncondText) + audio·(uncondText − uncond).
+    /// <paramref name="pass"/> takes (positive prompt, audio on) and returns an owned velocity.</summary>
+    private Tensor Guided(LongCatAvatarRun run, bool guided, Func<bool, bool, Tensor> pass)
     {
         if (!guided)
             return pass(true, true);
-        float[] cond = pass(true, true);
-        float[] uncondText = pass(false, true);
-        float[] uncond = pass(false, false);
-        float[] result = new float[cond.Length];
-        for (int i = 0; i < result.Length; i++)
-            result[i] = uncond[i] + run.TextGuidance * (cond[i] - uncondText[i]) + run.AudioGuidance * (uncondText[i] - uncond[i]);
-        return result;
+        Tensor? cond = null, uncondText = null, uncond = null;
+        try
+        {
+            cond = pass(true, true);
+            uncondText = pass(false, true);
+            uncond = pass(false, false);
+            using Tensor textDelta = Difference(cond, uncondText);
+            using Tensor audioDelta = Difference(uncondText, uncond);
+            using Tensor textTerm = new(textDelta.Shape, DType.F32);
+            using Tensor audioTerm = new(audioDelta.Shape, DType.F32);
+            _backend.Scale(textTerm, textDelta, run.TextGuidance);
+            _backend.Scale(audioTerm, audioDelta, run.AudioGuidance);
+            using Tensor withText = new(uncond.Shape, DType.F32);
+            _backend.Add(withText, uncond, textTerm);
+            Tensor result = new(uncond.Shape, DType.F32);
+            try
+            {
+                _backend.Add(result, withText, audioTerm);
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
+            return result;
+        }
+        finally
+        {
+            cond?.Dispose();
+            uncondText?.Dispose();
+            uncond?.Dispose();
+        }
     }
 
-    private float[] Predict(float[] latents, int channels, int frames, int height, int width, LongCatPrompt prompt, float[] audio,
-        float[] frameTimesteps, LongCatConditioning conditioning, LongCatKvCache? cache, LongCatRunTensors tensors)
+    /// <summary>a − b, computed as a + (−1)·b, which is the same float result.</summary>
+    private Tensor Difference(Tensor a, Tensor b)
     {
-        using Tensor input = new(new TensorShape([1, channels, frames, height, width]), DType.F32);
-        latents.AsSpan().CopyTo(input.AsSpan<float>());
+        using Tensor negated = new(b.Shape, DType.F32);
+        _backend.Scale(negated, b, -1f);
+        Tensor difference = new(a.Shape, DType.F32);
+        _backend.Add(difference, a, negated);
+        return difference;
+    }
+
+    private Tensor Predict(Tensor input, int frames, LongCatPrompt prompt, float[] audio, float[] frameTimesteps, LongCatConditioning conditioning,
+        LongCatKvCache? cache, LongCatRunTensors tensors)
+    {
         Tensor text = tensors.Text(prompt);
         Tensor audioTokens = tensors.Audio(audio, frames * _dit.Config.AudioContextTokens);
-        using Tensor output = cache is null
+        return cache is null
             ? _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens, audioTokens)
             : _dit.ForwardCached(_backend, input, text, frameTimesteps, in conditioning, cache, prompt.ValidTokens, audioTokens);
-        return output.AsReadOnlySpan<float>().ToArray();
     }
 
     /// <summary>The audio tokens of <paramref name="count"/> frames from <paramref name="from"/>, copied out of <paramref name="tokens"/>.</summary>
@@ -245,20 +286,16 @@ public sealed class LongCatAvatarPipeline
             throw new ArgumentException("The conditioning latents do not match the conditioning frame count.", nameof(run));
     }
 
-    private static void WriteFrames(float[] latents, float[] source, int channels, int frames, int hw, int count)
-    {
-        int k = 0;
-        for (int c = 0; c < channels; c++)
-            for (int f = 0; f < count; f++)
-                for (int e = 0; e < hw; e++, k++)
-                    latents[(c * frames + f) * hw + e] = source[k];
-    }
-
     /// <summary>The long-video chain in latent space (the reference's segment loop in <c>run_demo_avatar_*</c>). Segment 0 is
     /// <paramref name="firstLatents"/> (its frames, no reference). Each later segment conditions on the reference latent (the first frame of
     /// segment 0, fixed) and the last <paramref name="contextFrames"/> frames of the previous segment, runs <c>generate_avc</c> with the reference
-    /// index, drops the reference, and contributes its frames after the context. The reference re-encodes decoded pixel frames for the context;
-    /// that round trip is the VAE seam and is not in this chain. The chain is not compared with a reference chain run yet.</summary>
+    /// index, drops the reference, and contributes its frames after the context. By default the context is the carried latent frames. With
+    /// <paramref name="contextFromSegment"/> (the 1.5 path, use_vcond False in the reference) the context is whatever that function returns for the
+    /// segment's latents: the reference re-encodes the segment's last decoded pixel frames, and that round trip is the VAE seam, supplied by the
+    /// caller; it is called once per segment, in order, and its return for the last segment is unused. The chain is not compared with a reference
+    /// chain run yet.</summary>
+    /// <param name="denoiseSegment">Runs one segment's run and returns its latents. The caller can scope each run (for example its own streaming
+    /// scope, so work between segments runs outside it). Null runs <c>Denoise</c> directly.</param>
     /// <param name="template">The per-segment run. Its <see cref="LongCatAvatarRun.Frames"/> is one segment's latent frames plus one for the
     /// reference slot (so a segment of N frames after the context needs Frames = N + 1). Its <see cref="LongCatAvatarRun.UnconditionalAudioTokens"/>
     /// is used for every later segment, so it must be sized for the template's Frames. Mode, conditioning, audio and noise are set per segment.</param>
@@ -268,7 +305,7 @@ public sealed class LongCatAvatarPipeline
     /// <param name="noises">Each later segment's noise, <c>[channels, template.Frames, hw]</c>.</param>
     /// <returns>Segment 0 whole, then each later segment's new frames (context dropped), each <c>[channels, frames, hw]</c>.</returns>
     public IReadOnlyList<float[]> Chain(LongCatAvatarRun template, int contextFrames, float[] firstLatents, IReadOnlyList<float[]> audioTokens,
-        IReadOnlyList<float[]> noises)
+        IReadOnlyList<float[]> noises, Func<float[], bool, float[]>? contextFromSegment = null, Func<LongCatAvatarRun, float[]>? denoiseSegment = null)
     {
         ArgumentNullException.ThrowIfNull(template);
         ArgumentNullException.ThrowIfNull(firstLatents);
@@ -285,7 +322,19 @@ public sealed class LongCatAvatarPipeline
 
         // The reference latent is the first frame of segment 0 and stays fixed; the context is the last frames of the previous segment.
         float[] reference = FrameOf(firstLatents, channels, segmentFrames, hw, 0);
-        float[] context = LastFrames(firstLatents, channels, segmentFrames, hw, contextFrames);
+
+        // Each segment's latents go to contextFromSegment exactly once, in order, with last = true for the final segment (its return is unused).
+        float[] NextContext(float[] segment, bool last)
+        {
+            if (contextFromSegment is null)
+                return LastFrames(segment, channels, segmentFrames, hw, contextFrames);
+            float[] next = contextFromSegment(segment, last);
+            if (!last && next.Length != channels * contextFrames * hw)
+                throw new InvalidOperationException($"The re-encoded context holds {next.Length} values; expected {channels * contextFrames * hw}.");
+            return next;
+        }
+
+        float[] context = NextContext(firstLatents, last: noises.Count == 0);
         List<float[]> outputs = [firstLatents];
         for (int s = 0; s < noises.Count; s++)
         {
@@ -297,11 +346,11 @@ public sealed class LongCatAvatarPipeline
                 AudioTokens = audioTokens[s],
                 Noise = noises[s],
             };
-            float[] full = Denoise(run).Latents;
+            float[] full = denoiseSegment is null ? Denoise(run).Latents : denoiseSegment(run);
             // Drop the reference (frame 0 of the run): what remains is the context followed by this segment's frames.
             float[] withoutReference = RemoveFirstFrame(full, channels, frames, hw);
             outputs.Add(LastFrames(withoutReference, channels, segmentFrames, hw, noisy));
-            context = LastFrames(withoutReference, channels, segmentFrames, hw, contextFrames);
+            context = NextContext(withoutReference, last: s == noises.Count - 1);
         }
         return outputs;
     }

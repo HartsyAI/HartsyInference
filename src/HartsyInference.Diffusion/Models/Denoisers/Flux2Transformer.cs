@@ -1,13 +1,15 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Flux.2 Diffusion Transformer (Klein 4B / Klein 9B / Dev). Distinct from <see cref="FluxTransformer"/>: LayerNorm for stream norms, top-level shared modulation projections (one Linear per stream type, output reused across all blocks), 4-axis RoPE with theta=2000, parallel single-stream block (fused QKV+MLP), SwiGLU MLP in both block types. Reference: <c>diffusers.transformer_flux2.Flux2Transformer2DModel</c>.</summary>
-public sealed unsafe class Flux2Transformer : IDisposable
+public sealed unsafe class Flux2Transformer : IDisposable, IStreamableDenoiser
 {
     private readonly Flux2Config _config;
     private readonly Flux2DoubleBlock[] _doubleBlocks;
@@ -156,6 +158,17 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+        for (int i = 0; i < _doubleBlocks.Length; i++)
+            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
+        for (int i = 0; i < _singleBlocks.Length; i++)
+            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>Every weight outside the transformer blocks: the embedders, the output projections and the three shared
+    /// modulation projections. They stay resident for the whole denoise loop, so a block stream never evicts them.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         if (_xEmbedWeight is not null) yield return _xEmbedWeight;
         if (_contextEmbedWeight is not null) yield return _contextEmbedWeight;
         if (_timestepLinear1Weight is not null) yield return _timestepLinear1Weight;
@@ -168,10 +181,39 @@ public sealed unsafe class Flux2Transformer : IDisposable
         foreach (Tensor w in _doubleModImg.EnumerateWeights()) yield return w;
         foreach (Tensor w in _doubleModTxt.EnumerateWeights()) yield return w;
         foreach (Tensor w in _singleMod.EnumerateWeights()) yield return w;
-        for (int i = 0; i < _doubleBlocks.Length; i++)
-            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
-        for (int i = 0; i < _singleBlocks.Length; i++)
-            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>Hook invoked immediately before each block's forward pass, with the global index <see cref="GetBlock"/> uses
+    /// (double blocks first, then single). A <see cref="BlockStreamingController"/> sets it to bring each block in; null = all resident.</summary>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Streamable blocks: <see cref="GetBlock"/> indexes <c>[0, BlockCount)</c>, double blocks then single.</summary>
+    public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
+
+    /// <summary>The streamable block at <paramref name="idx"/>, double blocks first. Its tensors are the block's own references, so a
+    /// controller tracks residency by reference.</summary>
+    public IStreamingBlock GetBlock(int idx)
+    {
+        if (idx < 0 || idx >= BlockCount) throw new ArgumentOutOfRangeException(nameof(idx));
+        return idx < _doubleBlocks.Length
+            ? new BlockHandle(_doubleBlocks[idx].EnumerateWeights())
+            : new BlockHandle(_singleBlocks[idx - _doubleBlocks.Length].EnumerateWeights());
+    }
+
+    /// <summary>A transformer block seen as a streamable unit: its weights, and their on-device footprint measured once.</summary>
+    private sealed class BlockHandle : IStreamingBlock
+    {
+        private readonly Tensor[] _weights;
+
+        public BlockHandle(IEnumerable<Tensor> weights)
+        {
+            _weights = weights.ToArray();
+            EstimatedWeightBytes = WeightBytes.Sum(_weights);
+        }
+
+        public long EstimatedWeightBytes { get; }
+
+        public IEnumerable<Tensor> EnumerateWeights() => _weights;
     }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
@@ -320,6 +362,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         // own cacheActive gate, so a cache hit never reconstructs a residual computed under a different bias.
         if (stepCache is not null && attnBias is null && _config.Depth > 0)
         {
+            BeforeBlockForward?.Invoke(0);
             (Tensor img0, Tensor txt0) = _doubleBlocks[0].Forward(
                 backend, currentImg, currentTxt, imgMod, txtMod, _rope, attnBias);
             if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
@@ -343,6 +386,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         {
             for (int i = startDouble; i < _config.Depth; i++)
             {
+                BeforeBlockForward?.Invoke(i);
                 (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
                     backend, currentImg, currentTxt, imgMod, txtMod, _rope, attnBias);
                 if (!ReferenceEquals(currentImg, imgTokens) && !ReferenceEquals(currentImg, cacheAnchor)) currentImg.Dispose();
@@ -364,6 +408,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             // ── 7. Single-stream blocks (parallel attn+MLP on full concat sequence) ──
             for (int i = 0; i < _config.DepthSingleBlocks; i++)
             {
+                BeforeBlockForward?.Invoke(_config.Depth + i);
                 Tensor newX = _singleBlocks[i].Forward(backend, x, sgMod, _rope, attnBias);
                 x.Dispose();
                 x = newX;
@@ -491,6 +536,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
             for (int i = 0; i < _config.Depth; i++)
             {
+                BeforeBlockForward?.Invoke(i);
                 (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, [], txtMod, _rope, null, imgAttn, imgMlp);
                 img.Dispose();
                 txt.Dispose();
@@ -506,6 +552,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             txt = null;
             for (int i = 0; i < _config.DepthSingleBlocks; i++)
             {
+                BeforeBlockForward?.Invoke(_config.Depth + i);
                 Tensor next = _singleBlocks[i].Forward(backend, joint, [], _rope, null, single);
                 joint.Dispose();
                 joint = next;
@@ -695,7 +742,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
     {
         int batch = (int)packedLatent.Shape[0];
         bool graphMode = StepGraphEnabled && backend.StepGraphSupported && !_graphDead
-            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
+            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed) && BeforeBlockForward is null;
         if (!graphMode)
             return (Forward(backend, packedLatent, textEmbeddings, sigma, guidanceScale, hPacked, wPacked), true);
 

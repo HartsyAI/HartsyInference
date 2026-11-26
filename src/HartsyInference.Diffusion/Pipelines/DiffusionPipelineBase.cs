@@ -121,6 +121,20 @@ public abstract class DiffusionPipelineBase : IDisposable
         return noise;
     }
 
+    /// <summary>After a stage throws mid-op (an OOM, a cancellation, a device error), frees the temporaries it left in the activation cache, so a retry starts from the memory a fresh request would.
+    /// Best effort: a sticky device error is logged, not thrown, so it cannot mask the failure being reported.</summary>
+    protected void ReclaimAfterFailure(string family)
+    {
+        try
+        {
+            Backend.FreeActivations();
+        }
+        catch (Exception cleanup)
+        {
+            Logs.Warning($"{family}: reclaiming activations after a failed generation also failed: {cleanup.Message}");
+        }
+    }
+
     /// <summary>Switches every conv-running backend this pipeline owns to wrap (circular) padding for the duration of one generation, so the output tiles seamlessly. <paramref name="mode"/> takes SwarmUI's vocabulary: null/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis.
     /// <para>Backends are cached per architecture and persist across generations, so leaving a flag set would
     /// silently wrap-pad an unrelated request. Dispose restores each backend's PREVIOUS value rather than forcing

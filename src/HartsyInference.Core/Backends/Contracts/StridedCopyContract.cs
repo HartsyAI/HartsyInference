@@ -91,7 +91,7 @@ public static class StridedCopyContract
     }
 
     /// <summary>Drops axes of extent 1 and merges adjacent axes both views walk as one run.</summary>
-    private static StridedCopyGeometry Collapse(in StridedCopySpec spec, int elementSize, bool covers)
+    internal static StridedCopyGeometry Collapse(in StridedCopySpec spec, int elementSize, bool covers)
     {
         int rank = spec.Source.Rank;
         Span<long> d = stackalloc long[rank];

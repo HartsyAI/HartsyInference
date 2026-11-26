@@ -63,8 +63,8 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
         }
         Reserve(lane, lane.End + count, bands, heads, hd);
         int first = lane.End;
-        VoiceIsolatorOps.Rope(q, bands, heads, count, hd, first, _cos, _sin);
-        VoiceIsolatorOps.Rope(k, bands, heads, count, hd, first, _cos, _sin);
+        VoiceIsolatorOps.Rope(backend, q, count, hd, first, _cos, _sin);
+        VoiceIsolatorOps.Rope(backend, k, count, hd, first, _cos, _sin);
         int held = (int)lane.Keys!.Shape[2];
         float* kc = (float*)lane.Keys.DataPointer;
         float* vc = (float*)lane.Values!.DataPointer;

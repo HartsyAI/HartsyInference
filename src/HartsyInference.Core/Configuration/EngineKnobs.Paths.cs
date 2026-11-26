@@ -16,6 +16,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SideModelAutofetch =
         Bool("paths.sideModelAutofetch", true, KnobScope.Runtime, KnobDomain.Paths, "Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error.");
 
+    /// <summary>Whether any model file may be downloaded. Unset, a host may and the CLI asks first; a value is the answer for every run.</summary>
+    public static readonly Knob<bool> AllowDownloads =
+        Bool("paths.allowDownloads", true, KnobScope.Runtime, KnobDomain.Paths, "Whether model files may be downloaded. Off refuses every download with an error naming the file. Set to true, the command line downloads what a model needs without asking, also when it runs without a terminal; unset, it asks, and a run that cannot ask downloads nothing.");
+
     /// <summary>Base URL of a weights mirror (for example HartsyWeb) that hosts safetensors repacks of pickle-only checkpoints; empty (the default) disables it.</summary>
     public static readonly Knob<string?> WeightsMirrorUrl =
         Str("paths.weightsMirrorUrl", null, KnobScope.Runtime, KnobDomain.Paths, "Base https URL (or http on this machine, to try a local mirror) of a weights mirror that hosts safetensors repacks of pickle-only 3D checkpoints. A catalog file that lists a repack is asked for there first and falls back to its upstream file on any failure (a dropped connection is not resumed: the fallback starts the upstream download over). A base URL with a query is ignored. Empty disables the mirror.");
