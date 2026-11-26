@@ -30,6 +30,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     private readonly float _bnEps;
     private readonly Fibo2Config _config;
     private readonly VaeEncoder? _vaeEncoder;
+    private readonly ResidentWeights _textEncoderWeights;
+    private readonly ResidentWeights _denoiserWeights;
 
     /// <summary>Creates a Fibo 2.0 pipeline over borrowed components. <paramref name="bnMean"/> and <paramref name="bnVar"/> are the
     /// FLUX.2 VAE's F32 BatchNorm statistics over the patchified 128-channel latent.</summary>
@@ -54,6 +56,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         _bnEps = bnEps;
         _config = config;
         _vaeEncoder = vaeEncoder;
+        _textEncoderWeights = new ResidentWeights(backend, textEncoder.EnumerateWeights);
+        _denoiserWeights = new ResidentWeights(backend, transformer.EnumerateWeights);
     }
 
     /// <summary>Generates one image from the conditional caption tokens and the null-caption tokens (the CFG branch). Both sequences come
@@ -93,8 +97,17 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         Tensor? latentMask = null;
         try
         {
-            conditional = EncodeBundles(conditionalTokens);
-            unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
+            // The text encoder leaves the device before the denoiser loads: on a 12 GB card the two do not fit together.
+            _textEncoderWeights.Preload();
+            try
+            {
+                conditional = EncodeBundles(conditionalTokens);
+                unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
+            }
+            finally
+            {
+                _textEncoderWeights.Release(force: true);
+            }
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
             TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
@@ -108,8 +121,16 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
                 inpaint = new LatentInpaint(scheduler, sourceLatent!, latentMask, resolvedSeed);
             }
 
-            SampleFlow(scheduler, ref latent, plan.StartStep, steps,
-                (current, sigma) => Denoise(current, sigma, conditional!, unconditional, guidanceScale), inpaint, onProgress);
+            _denoiserWeights.Preload();
+            try
+            {
+                SampleFlow(scheduler, ref latent, plan.StartStep, steps,
+                    (current, sigma) => Denoise(current, sigma, conditional!, unconditional, guidanceScale), inpaint, onProgress);
+            }
+            finally
+            {
+                _denoiserWeights.Release();
+            }
 
             using Tensor decoded = DecodeLatent(latent!);
             // Suppresses the VAE round trip in the kept region; the host recomposites itself when it owns the mask.

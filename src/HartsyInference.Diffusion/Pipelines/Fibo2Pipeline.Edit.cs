@@ -41,13 +41,25 @@ public sealed unsafe partial class Fibo2Pipeline
         Tensor? latent = null;
         try
         {
-            // Encoder phases first: the vision-conditioned prompt, then the reference latents.
-            using (Tensor taps = edit.VisionEncoder.EncodeMultiLayer(Backend, edit.ConditionalTokens, edit.VisionImages, TapLayers))
-                conditional = Fibo2TextBundles.Build(taps, (int)(taps.Shape[2] / TapLayers.Length));
-            if (guided)
-                unconditional = EncodeBundles(unconditionalTokens);
-            foreach (Tensor pixels in edit.ReferencePixels)
-                references.Add(EncodeReference(edit, pixels));
+            // Encoder phases first: the vision-conditioned prompt, then the reference latents. The language and vision towers leave the
+            // device together once those phases are done, before the denoiser loads.
+            ResidentWeights editEncoder = new(Backend,
+                () => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
+                    .Distinct<Tensor>(ReferenceEqualityComparer.Instance));
+            editEncoder.Preload();
+            try
+            {
+                using (Tensor taps = edit.VisionEncoder.EncodeMultiLayer(Backend, edit.ConditionalTokens, edit.VisionImages, TapLayers))
+                    conditional = Fibo2TextBundles.Build(taps, (int)(taps.Shape[2] / TapLayers.Length));
+                if (guided)
+                    unconditional = EncodeBundles(unconditionalTokens);
+                foreach (Tensor pixels in edit.ReferencePixels)
+                    references.Add(EncodeReference(edit, pixels));
+            }
+            finally
+            {
+                editEncoder.Release(force: true);
+            }
 
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
@@ -56,6 +68,7 @@ public sealed unsafe partial class Fibo2Pipeline
             if (MathF.Abs(initialSigma - 1f) > 1e-6f)
                 ScaleInPlace(latent, initialSigma);
 
+            _denoiserWeights.Preload();
             for (int i = 0; i < steps; i++)
             {
                 Stopwatch stepWatch = Stopwatch.StartNew();
@@ -69,6 +82,7 @@ public sealed unsafe partial class Fibo2Pipeline
                 onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepWatch.Elapsed.TotalMilliseconds));
             }
 
+            _denoiserWeights.Release();
             using Tensor decoded = DecodeLatent(latent);
             return (ImagePostProcessor.TensorToRgbBytes(decoded), (int)decoded.Shape[3], (int)decoded.Shape[2], resolvedSeed);
         }
