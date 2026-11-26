@@ -4,9 +4,10 @@ A CLI folder holds one ``*-vision-NNN`` subfolder with ``depth.npy`` (one image)
 matching ``*.result.json`` (camera.fx is the focal length in pixels, camera.width the image width). A reference dump holds ``<name>_depth.npy``,
 ``<name>_f_px.npy`` for ``--name`` image, views, buffered or unbuffered. Metric depth is ``f_px / (W * inverse_depth)``, so the comparison is on
 inverse depth (infinite depth is 0), which is what the network predicts and what metres amplify near the sky; metric depth over the pixels that
-are finite in both runs and the focal length are reported next to it. That metre figure is dominated by the farthest pixels (a depth is a
-reciprocal, so a fixed inverse-depth difference grows with the square of the distance); ``--bins`` shows where it comes from: the error by the
-reference's depth, under distance cutoffs, and at the worst pixel. Pure numpy, host Python is fine.
+are finite and above zero in both runs, and the focal length, are reported next to it. A figure with nothing to compare is null. That metre
+figure is dominated by the farthest pixels (a depth is a reciprocal, so a fixed inverse-depth difference grows with the square of the distance);
+``--bins`` shows where it comes from: the error by the reference's depth, under distance cutoffs, and at the worst pixel. Pure numpy, host Python
+is fine.
 
   python depth_pro2_compare.py --a <cli run dir> --b <cli run dir or ref dump> [--name image] [--bins]
 """
@@ -50,13 +51,23 @@ def inverse(depth: np.ndarray, f: np.ndarray) -> np.ndarray:
     return np.where(far, 0.0, f.reshape(-1, 1, 1) / (width * np.where(far, 1.0, depth)))
 
 
-def rel_rms(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+def rel_rms(a: np.ndarray, b: np.ndarray) -> float | None:
+    """None when ``b`` is empty or all zero (a frame that is far everywhere)."""
+    norm = float(np.linalg.norm(b))
+    return float(np.linalg.norm(a - b)) / norm if norm else None
+
+
+def compared(da: np.ndarray, db: np.ndarray) -> np.ndarray:
+    """The pixels whose metric depth can be compared: finite in both runs and, as ``inverse`` has it, not far (above zero)."""
+    return np.isfinite(da) & np.isfinite(db) & (da > 0) & (db > 0)
 
 
 def by_depth(da: np.ndarray, db: np.ndarray, ia: np.ndarray, ib: np.ndarray) -> dict:
-    """Where the metric-depth difference sits, over the pixels finite in both runs, binned by the depth of ``db``."""
-    finite = np.isfinite(da) & np.isfinite(db)
+    """Where the metric-depth difference sits, binned by the depth of ``db``. Shares are of the compared pixels (see ``compared``)."""
+    finite = compared(da, db)
+    if not finite.any():
+        return {"depth_max_b_m": None, "depth_bins": [], "depth_under": [], "worst_pixel": None, "inverse_abs_diff_max": None,
+                "inverse_b_median": None}
     a, b = da[finite], db[finite]
     error = np.abs(a - b)
     relative = error / b
@@ -94,14 +105,14 @@ def main() -> None:
     if da.shape != db.shape:
         raise SystemExit(f"shape {da.shape} vs {db.shape}")
     ia, ib = inverse(da, fa), inverse(db, fb)
-    finite = np.isfinite(da) & np.isfinite(db)
-    per_frame = [rel_rms(ia[i], ib[i]) for i in range(ia.shape[0])]
+    finite = compared(da, db)
+    per_frame = [error for error in (rel_rms(ia[i], ib[i]) for i in range(ia.shape[0])) if error is not None]
     pixel = np.abs(ia - ib) / np.maximum(np.abs(ib), 1e-12)
     result = {
         "frames": int(ia.shape[0]),
         "inverse_depth_relrms": rel_rms(ia, ib),
-        "inverse_depth_relrms_worst_frame": max(per_frame),
-        "inverse_depth_per_pixel_median": float(np.median(pixel[ib > 0])),
+        "inverse_depth_relrms_worst_frame": max(per_frame, default=None),
+        "inverse_depth_per_pixel_median": float(np.median(pixel[ib > 0])) if (ib > 0).any() else None,
         "depth_relrms_finite": rel_rms(da[finite], db[finite]),
         "f_px_rel_max": float(np.max(np.abs(fa - fb) / fb)),
         "f_px_b": float(fb[0]),
