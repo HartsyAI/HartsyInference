@@ -198,10 +198,36 @@ internal static class LongCatRecipeSupport
     /// <summary>The normalized latent of a single RGB24 frame, <c>[channels, 1, height / 8, width / 8]</c>, used as the conditioning frame.</summary>
     internal static float[] EncodeFirstFrame(IBackend backend, IWanVaeEncoder encoder, byte[] rgb24, int width, int height, int channels)
     {
-        using Tensor clip = VideoRecipeUtils.TileRgbToClip(rgb24, width, height, 1);
-        using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
-        using Tensor host = VideoRecipeUtils.HostCopy(latent);
-        return host.AsReadOnlySpan<float>().ToArray();
+        return WithWeightsPlaced(encoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
+        {
+            using Tensor clip = VideoRecipeUtils.TileRgbToClip(rgb24, width, height, 1);
+            using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+            using Tensor host = VideoRecipeUtils.HostCopy(latent);
+            return host.AsReadOnlySpan<float>().ToArray();
+        });
+    }
+
+    /// <summary>Runs <paramref name="body"/> with <paramref name="weights"/> placed on the device, and releases them afterwards, also when the body
+    /// throws. The VAE's weights need this: a weight used twice without a preload is promoted to a resident weight and then stays on the device until
+    /// someone frees it (<c>GpuTransferHelper.ShouldAutoPromote</c>), so a segment's decode or encode would leave the card short for the next segment's
+    /// streaming plan. The seam takes the preload and free as delegates, so the order is testable without a device.</summary>
+    internal static T WithWeightsPlaced<T>(IEnumerable<Tensor> weights, Action<IEnumerable<Tensor>> preload, Action<IEnumerable<Tensor>> free,
+        Func<T> body)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(preload);
+        ArgumentNullException.ThrowIfNull(free);
+        ArgumentNullException.ThrowIfNull(body);
+        Tensor[] placed = [.. weights];
+        preload(placed);
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            free(placed);
+        }
     }
 
     /// <summary>Runs one denoise loop with the DiT placed by a streaming scope, and frees the DiT on every path. The scope is disposed inside
@@ -235,8 +261,11 @@ internal static class LongCatRecipeSupport
     {
         using Tensor latent = new(new TensorShape([1L, channels, frames, height, width]), DType.F32);
         latents.AsSpan().CopyTo(latent.AsSpan<float>());
-        using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
-        return VideoRgbFrames.ExtractAllFrames(rgb);
+        return WithWeightsPlaced(decoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
+        {
+            using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
+            return VideoRgbFrames.ExtractAllFrames(rgb);
+        });
     }
 
     /// <summary>The 1.5 chain's context (use_vcond False in meituan-longcat/LongCat-Video @ 58eb336, pipeline 1467-1490): the segment's last
@@ -259,10 +288,13 @@ internal static class LongCatRecipeSupport
         if (decoded.Length < contextPixels)
             throw new InvalidOperationException($"The decoded segment has {decoded.Length} frames; the context needs {contextPixels}.");
         int width = latentWidth * LongCatVaeSeam.SpatialScale, height = latentHeight * LongCatVaeSeam.SpatialScale;
-        using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(decoded[^contextPixels..], width, height);
-        using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
-        using Tensor host = VideoRecipeUtils.HostCopy(latent);
-        return host.AsReadOnlySpan<float>().ToArray();
+        return WithWeightsPlaced(encoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
+        {
+            using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(decoded[^contextPixels..], width, height);
+            using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+            using Tensor host = VideoRecipeUtils.HostCopy(latent);
+            return host.AsReadOnlySpan<float>().ToArray();
+        });
     }
 
     private static void CheckSegment(float[] segmentLatents, int channels, int segmentFrames, int latentHeight, int latentWidth)

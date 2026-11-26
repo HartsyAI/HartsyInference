@@ -171,14 +171,12 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // Each segment is decoded once. Segment 0 keeps all its frames; a later segment keeps the frames after its context. The last frames of a
         // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490; the 1.6 build would carry
         // the latents, and it is refused before this point). The last segment's context is not encoded.
-        List<byte[]> output = [];
-        int segmentsSeen = 0, contextPixels = 1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1);
+        LongCatChainFrames output = new(1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1));
         Func<float[], bool, float[]> contextFromSegment = (segment, last) =>
         {
             byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, segment, channels, plan.SegmentLatents, latentHeight, latentWidth);
-            output.AddRange(decoded[(segmentsSeen == 0 ? 0 : contextPixels)..]);
-            segmentsSeen++;
-            return last ? [] : LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, decoded, plan.ContextLatents, channels, latentHeight, latentWidth);
+            return output.Step(decoded, last, frames => LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, frames, plan.ContextLatents,
+                channels, latentHeight, latentWidth));
         };
 
         // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
@@ -189,7 +187,9 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             bridge);
 
         _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise, contextFromSegment, denoiseSegment);
-        return [.. output];
+        if (output.Segments != plan.Segments || output.Frames.Length != plan.TotalPixelFrames)
+            throw new InvalidOperationException($"The chain kept {output.Frames.Length} frames over {output.Segments} segments; the plan has {plan.TotalPixelFrames} over {plan.Segments}.");
+        return output.Frames;
     }
 
     /// <summary>One generation's run: the segment's latents, its audio and its conditioning.</summary>
