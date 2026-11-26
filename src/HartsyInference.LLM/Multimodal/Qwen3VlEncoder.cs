@@ -148,6 +148,16 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         return new MRopeImageGrid(1, H / block, Wd / block);
     }
 
+    /// <summary>The checkpoint's pixel bounds (<c>size.shortest_edge</c> and <c>size.longest_edge</c> in <c>preprocessor_config.json</c> of
+    /// <c>sensenova/SenseNova-Loop-9B</c>): an image is resized to its own aspect ratio inside them, not squashed to <c>clip.vision.image_size</c>.</summary>
+    public const int MinPixels = 65536, MaxPixels = 16777216;
+
+    /// <summary>Preprocesses an RGB image for this tower the way the checkpoint's processor does: an aspect-preserving resize to whole
+    /// <c>patch · merge</c> blocks inside <see cref="MinPixels"/>..<see cref="MaxPixels"/>, then normalization. The result's height and width set the
+    /// merged grid (<see cref="MergedGrid"/>) and the number of image tokens.</summary>
+    public Tensor PreprocessImage(ReadOnlySpan<byte> rgb, int width, int height) =>
+        VlmImagePreprocessor.PreprocessAspect(rgb, width, height, PatchSize * Merge, MinPixels, MaxPixels, ImageMean, ImageStd);
+
     /// <summary>Encodes a preprocessed image <c>[1, 3, H, W]</c> into <c>[1, tokens, textHidden]</c>.</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
