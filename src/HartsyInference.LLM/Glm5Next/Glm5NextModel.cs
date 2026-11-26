@@ -86,7 +86,7 @@ public sealed class Glm5NextModel : IDisposable
     {
         ArgumentNullException.ThrowIfNull(state);
         // Exact F32 GEMMs for the whole decoder. Under TF32 the tiny config's layer 1 stream is off by about 4e-3 on CUDA, from the GEMMs
-        // alone (see docs/Checklists/PARITY_VERIFICATION.md); the cost is that BF16 weights are upcast on every call.
+        // alone (see the Sage S2.1 Flash decoder on CUDA and Vulkan row in docs/Checklists/PARITY_VERIFICATION.md); the cost is that BF16 weights are upcast on every call.
         using ExactGemmScope exact = new(_backend);
         int d = _c.Hidden, hc = _c.HcMult;
         if (embeddings.Length == 0 || embeddings.Length % d != 0) throw new ArgumentException("embeddings must hold whole [hidden] rows.", nameof(embeddings));
