@@ -196,6 +196,23 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         Assert.Throws<ObjectDisposedException>(() => pipeline.Rollout(prompt, noise, Frames).ToList());
     }
 
+    /// <summary>A pipeline disposed after the first frame of a clip stops at the next frame: the enumerator refuses to continue.</summary>
+    [Fact]
+    public void DisposingMidClipStopsAtTheNextFrame()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        using IEnumerator<FastFramesFrame> clip = pipeline.Rollout(prompt, noise, Frames).GetEnumerator();
+        Assert.True(clip.MoveNext());
+
+        pipeline.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => clip.MoveNext());
+    }
+
     /// <summary>A rollout created before Dispose and enumerated after it is refused, not run on a released pipeline.</summary>
     [Fact]
     public void EnumeratingARolloutAfterDisposeRefuses()

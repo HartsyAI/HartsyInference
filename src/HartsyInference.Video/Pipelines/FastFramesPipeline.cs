@@ -239,6 +239,8 @@ public sealed class FastFramesPipeline : IDisposable
             for (int frame = 0; frame < latentFrames; frame++)
             {
                 cancel.ThrowIfCancellationRequested();
+                // A pipeline disposed mid-clip stops at this frame; the release in the finally has already freed the generator.
+                ObjectDisposedException.ThrowIf(_disposed, this);
                 (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
                 FastFramesFrame output;
                 using (pixels)
