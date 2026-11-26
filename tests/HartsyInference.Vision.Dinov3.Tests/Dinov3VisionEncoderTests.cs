@@ -24,7 +24,7 @@ public sealed class Dinov3VisionEncoderTests
             full.Dispose();
 
             Dinov3VisionEncoder encoder = new(preset);
-            ArgumentException error = Assert.Throws<ArgumentException>(() => encoder.LoadWeights(weights, ""));
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => encoder.LoadWeights(weights, ""));
             Assert.Contains("layer.0.norm1.bias", error.Message);
         }
         finally
@@ -174,7 +174,7 @@ public sealed class Dinov3VisionEncoderTests
         Dictionary<string, Tensor> gatedWeights = Dinov3Fixture.Tiny(gated, seed: 32, gated: true);
         try
         {
-            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(plainWeights));
+            Assert.Throws<KeyNotFoundException>(() => new Dinov3VisionEncoder(gated).LoadWeights(plainWeights));
             Assert.Throws<NotSupportedException>(() => new Dinov3VisionEncoder(plain).LoadWeights(gatedWeights));
         }
         finally
@@ -194,7 +194,7 @@ public sealed class Dinov3VisionEncoderTests
             weights.Remove("layer.1.mlp.gate_proj.weight", out Tensor? gone);
             gone?.Dispose();
 
-            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(weights));
+            Assert.Throws<KeyNotFoundException>(() => new Dinov3VisionEncoder(gated).LoadWeights(weights));
         }
         finally
         {
@@ -283,7 +283,7 @@ public sealed class Dinov3VisionEncoderTests
             weights["embeddings.register_tokens"].Dispose();
             weights["embeddings.register_tokens"] = new Tensor(new TensorShape(1, 3, 128), DType.F32);
             Dinov3VisionEncoder encoder = new(preset);
-            Assert.Throws<ArgumentException>(() => encoder.LoadWeights(weights));
+            Assert.Throws<InvalidDataException>(() => encoder.LoadWeights(weights));
         }
         finally
         {
