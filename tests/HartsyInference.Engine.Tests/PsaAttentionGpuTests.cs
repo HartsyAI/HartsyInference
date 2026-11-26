@@ -15,7 +15,9 @@ namespace HartsyInference.Engine.Tests;
 /// the same block on the CPU backend, with random weights. The CPU backend's attention is checked against the block's
 /// former host loop in <c>PsaAttentionTests</c>; this checks that a GPU serves the same call and agrees.
 /// <para>The tolerances were fixed before the first run: 1e-4 relative to the larger of 1 and the value on Vulkan, and on
-/// CUDA the contract bound for TF32, 2e-3, because CUDA multiplies F32 attention and its convolutions in TF32.</para></summary>
+/// CUDA the contract bound for TF32, 2e-3, because CUDA multiplies F32 attention and its convolutions in TF32.</para>
+/// <para>It counts attention evidence events, so it runs in the <c>AttentionEvidence</c> collection.</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class PsaAttentionGpuTests
 {
     private readonly ITestOutputHelper _output;
