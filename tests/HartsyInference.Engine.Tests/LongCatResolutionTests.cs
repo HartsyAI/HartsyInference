@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Engine.Recipes.Video;
@@ -35,7 +36,7 @@ public sealed class LongCatResolutionTests
     {
         LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
         LongCatRecipeSupport.LongCatLaterRunFigures figures = LongCatRecipeSupport.LaterRunFigures(mixed: true, plan, 46, 80, LongCatTestConfig(),
-            640, 368, distilled: true);
+            640, 368, distilled: true, DeviceType.Cuda);
         Assert.Equal(LongCatRecipeSupport.TokenCount(plan.ContextLatents + 1 + plan.NewLatentsPerSegment, 46, 80), figures.Tokens);
         Assert.Equal(0, figures.CacheBytes);
         Assert.Null(figures.MeasuredPeak);
@@ -47,7 +48,7 @@ public sealed class LongCatResolutionTests
     {
         LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
         LongCatRecipeSupport.LongCatLaterRunFigures figures = LongCatRecipeSupport.LaterRunFigures(mixed: false, plan, 46, 80, LongCatTestConfig(),
-            640, 368, distilled: true);
+            640, 368, distilled: true, DeviceType.Cuda);
         Assert.Equal(LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, 46, 80), figures.Tokens);
         Assert.True(figures.CacheBytes > 0);
         Assert.Equal(7808 * Mb, figures.MeasuredPeak);

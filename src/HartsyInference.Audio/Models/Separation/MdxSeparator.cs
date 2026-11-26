@@ -53,7 +53,7 @@ public sealed class MdxSeparator
         return stem;
     }
 
-    /// <summary>Not used by the engine path (the video pre-step keeps the stereo stem); LongCat's own 16 kHz mono input for the Avatar recipe and the parity harness use it. Averages the channels, resamples to <paramref name="targetRate"/> with the SoXR-HQ stand-in, and crops to
+    /// <summary>LongCat's 16 kHz mono input from the float stem, used by the video pre-step and the parity harness. Averages the channels, resamples to <paramref name="targetRate"/> with the SoXR-HQ stand-in, and crops to
     /// <c>ceil(samples × targetRate / sourceRate)</c> when <paramref name="targetSamplesAtSourceRate"/> is given.</summary>
     public float[] ToMono(float[][] stereo, int targetRate, int? targetSamplesAtSourceRate = null)
     {
