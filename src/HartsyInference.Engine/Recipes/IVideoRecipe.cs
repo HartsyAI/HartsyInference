@@ -24,8 +24,8 @@ public interface IVideoRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
-    /// <summary>True when the family refuses CFG-parallel, DiT-shard and context-parallel placements; the engine refuses them before the memory report (UnhonouredBackends.Refuse), and the recipe re-checks without a warning,
-    /// so the engine refuses them before it reports the memory settings: a family that refuses never reaches the CFG-parallel warning.</summary>
+    /// <summary>True when the family refuses the CFG-parallel, DiT-shard and context-parallel placements. The engine refuses them before the
+    /// memory report, so a refusing family never reaches the CFG-parallel warning; the recipe re-checks without a warning.</summary>
     bool RefusesUnhonouredPlacements => false;
 
     /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies — the
