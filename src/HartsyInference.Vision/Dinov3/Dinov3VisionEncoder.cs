@@ -233,7 +233,7 @@ public sealed class Dinov3VisionEncoder : IDisposable
         using Dinov3RopeCache? ownRope = rope is null ? new Dinov3RopeCache() : null;
         (Tensor cos, Tensor sin, Tensor? crossCos, Tensor? crossSin) = (rope ?? ownRope!).Get(new Dinov3RopeCache.Key(batch, prefix, gridH, gridW,
             HeadDim, _preset.RoundRopePeriodsToBf16, _preset.RopeNormalizesByLongSide,
-            crossFrameBlocks.IsEmpty ? null : ring is null ? batch : 0));
+            crossFrameBlocks.IsEmpty ? null : ring is null ? batch : 0), rope is null ? null : backend);
         Tensor h = seq;
         bool hIsTap = false;
         for (int i = 0; i <= lastBlock; i++)
