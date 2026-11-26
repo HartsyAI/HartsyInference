@@ -90,9 +90,7 @@ public sealed class Glm5NextModel : IDisposable
         int tokens = embeddings.Length / d, start = state.Length;
         if (start + tokens > state.Capacity) throw new InvalidOperationException("The state's cache is full; allocate one for a longer sequence.");
 
-        float[] stream = new float[tokens * hc * d];
-        for (int t = 0; t < tokens; t++)
-            for (int s = 0; s < hc; s++) embeddings.Slice(t * d, d).CopyTo(stream.AsSpan((t * hc + s) * d, d));
+        float[] stream = ExpandStream(embeddings, tokens);
         for (int i = 0; i < _layers.Length; i++)
         {
             _layers[i].Forward(stream, tokens, start, state);
@@ -101,12 +99,40 @@ public sealed class Glm5NextModel : IDisposable
         state.Length = start + tokens;
 
         // The stream read-out is the plain mean of the copies (no head projection), then the final RMS norm.
-        float[] hidden = new float[tokens * d];
-        for (int t = 0; t < tokens; t++)
-            for (int s = 0; s < hc; s++)
-                for (int j = 0; j < d; j++) hidden[t * d + j] += stream[(t * hc + s) * d + j] / hc;
+        float[] hidden = ReadOut(stream, tokens);
         HostOps.RmsNorm(_backend, hidden, d, _finalNorm, _c.RmsNormEps);
         return hidden;
+    }
+
+    // The embedding copied into every stream: the HcPostMix op with unit post weights, zero residual and zero comb, so out[t,s] = sub[t].
+    private float[] ExpandStream(ReadOnlySpan<float> embeddings, int tokens)
+    {
+        int hc = _c.HcMult, d = _c.Hidden;
+        using Tensor sub = HostMath.Tensor(embeddings, tokens, d);
+        using Tensor residual = HostMath.Tensor(new float[tokens * hc * d], tokens, hc, d);
+        using Tensor post = HostMath.Tensor(Filled(tokens * hc, 1f), tokens, hc);
+        using Tensor comb = HostMath.Tensor(new float[tokens * hc * hc], tokens, hc, hc);
+        using Tensor output = new(new TensorShape(tokens, hc, d), DType.F32);
+        _backend.HcPostMix(output, sub, residual, post, comb);
+        return output.AsReadOnlySpan<float>().ToArray();
+    }
+
+    // The unweighted mean over the streams: the HcPreMix op with every pre weight 1/hc.
+    private float[] ReadOut(ReadOnlySpan<float> stream, int tokens)
+    {
+        int hc = _c.HcMult, d = _c.Hidden;
+        using Tensor x = HostMath.Tensor(stream, tokens, hc, d);
+        using Tensor pre = HostMath.Tensor(Filled(tokens * hc, 1f / hc), tokens, hc);
+        using Tensor y = new(new TensorShape(tokens, d), DType.F32);
+        _backend.HcPreMix(y, x, pre);
+        return y.AsReadOnlySpan<float>().ToArray();
+    }
+
+    private static float[] Filled(int count, float value)
+    {
+        float[] values = new float[count];
+        Array.Fill(values, value);
+        return values;
     }
 
     /// <summary>Logits <c>[tokens, vocab]</c> for the rows <paramref name="hidden"/> <c>[tokens, hidden]</c>.</summary>
