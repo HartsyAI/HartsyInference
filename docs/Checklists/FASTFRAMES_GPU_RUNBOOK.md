@@ -10,6 +10,7 @@ work is already merged or in review; this file covers only the runs that need a 
 | S clip (81 frames, 832x480) | 24 GB (the 4090 peaked at 20.0 GB, all 30 blocks resident) | Weights 2.8 GB F16, cache about 6 GB F16 at 81 frames |
 | Decoder GPU parity, exact lane | any CUDA card | Synthetic decoder, small |
 | Streamed vs resident test | any CUDA card | Tiny model |
+| Renorm device-sync test (#1209) | any CUDA card | Tiny refiner; asserts zero device-to-host syncs |
 | L clip (81 frames) | 80 GB (A100 or H100 80 GB) | Generator 28.6 GB BF16, cache about 27 GB F16 at 81 frames; peak about 60 GB |
 
 L does not fit a 24 GB card at 81 frames. With block streaming on a 24 GB card, L runs only about 14 latent frames (about 53 pixel
@@ -37,17 +38,16 @@ engine's own reader: the generator is a pickle.
 
 ## Code
 
-Branch: the latest FastFrames work is in open PRs. Check out the newest merged `main`, then:
-- decoder/refiner view fix, unpatchify, renorm: merged or in #1209;
+Branch: check out the newest `main`. Every FastFrames change this runbook needs is merged:
+- decoder/refiner view fix, unpatchify, renorm on the device: #1161, #1173, #1209;
 - decoder GPU parity (exact and default lanes): #1214;
-- admission and post-placement VRAM check: merged (#1175, #1219);
-- block streaming: merged (#1178).
-
-Until #1209 and #1214 merge, use the branch `hartsy/fastframes-gpu-candidate` (main plus those changes; it passes the CPU tests).
+- admission and post-placement VRAM check: #1175, #1219;
+- block streaming: #1178;
+- this runbook and the run script: #1220.
 
 ## Runs
 
-Use `hartsy/fastframes-gpu-candidate` (or the newer `main` once #1209 and #1214 merge) so every step below is on the code under test.
+Run every step below on the newest `main`, so each step runs on the code under test.
 
 `tools/fastframes/run_pod.sh` runs the steps. It needs `MODELS` (the models root) and `REPO` (the checkout). It exports
 `HARTSYINFERENCE_MODELS` from `MODELS`, so the CLI reads the verified weights and does not download them again. Run it with `bash`:
@@ -60,14 +60,14 @@ Use `hartsy/fastframes-gpu-candidate` (or the newer `main` once #1209 and #1214 
 3. Decoder parity, both lanes: `run_pod.sh decoder`. The exact lane must be under 1e-5. Record its measured value; it goes into
    `FastFramesDecoderGpuParityTests.cs`'s doc comment.
 4. Streamed vs resident: `run_pod.sh streamed`.
-5. S clip: `run_pod.sh clip-s`. Reference from the 4090 run: 93 s total, steps 0.85 to 1.1 s, peak VRAM 20.0 GB, all 30 blocks resident.
-6. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog flag `CliDrivable=false` is metadata only; no
+5. Renorm device-sync test (#1209): `run_pod.sh renorm`. The log must show the test as passed, not skipped: it is a CUDA-only fact, so a
+   machine without a device skips it and `dotnet test` still exits 0. A skip is not a result; record it as a skip.
+6. S clip: `run_pod.sh clip-s`. Reference from the 4090 run: 93 s total, steps 0.85 to 1.1 s, peak VRAM 20.0 GB, all 30 blocks resident.
+7. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog flag `CliDrivable=false` is metadata only; no
    command reads it, so the CLI is expected to run `fastframes-l`. If it does refuse, that is a finding, not something to work around on a
    merged branch.
-7. Renorm D2H count (#1209): not runnable yet. It needs a harness that logs `GetD2hSyncCount` around the refiner's renorm; none is
-   merged. Do not run this step until one is.
 
-Each run writes its log and an `nvidia-smi` sample (every 2 s) under `OUT`. `run_pod.sh all` runs steps 1 to 6 in order and stops at the first
+Each run writes its log and an `nvidia-smi` sample (every 2 s) under `OUT`. `run_pod.sh all` runs steps 1 to 7 in order and stops at the first
 failure; on a card under 79 GB it skips L with a message.
 
 ## Return

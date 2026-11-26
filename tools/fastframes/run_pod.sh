@@ -5,9 +5,10 @@
 #   run_pod.sh verify                 check every weight's byte count and sha256 under $MODELS
 #   run_pod.sh decoder                decoder GPU parity, exact and default lanes
 #   run_pod.sh streamed               streamed-vs-resident CUDA test
+#   run_pod.sh renorm                 refiner renorm device-sync test (#1209); CUDA only, so check the log says passed, not skipped
 #   run_pod.sh clip-s                 S, 81 frames, 832x480, seed 1 (24 GB card is enough)
 #   run_pod.sh clip-l                 L, 81 frames; refuses unless the card reports at least 79 GB (see the runbook)
-#   run_pod.sh all                    build, verify, decoder, streamed, clip-s, clip-l, in order; stops at the first failure
+#   run_pod.sh all                    build, verify, decoder, streamed, renorm, clip-s, clip-l (L only on 79 GB+), in order; stops at the first failure
 #
 # Environment: REPO (checkout, default: the current directory), MODELS (models root, required), OUT (output folder).
 # The engine reads the models root from HARTSYINFERENCE_MODELS, so this script exports it from MODELS: without that the CLI looks in
@@ -89,6 +90,11 @@ streamed() {
     dotnet test tests/HartsyInference.Diffusion.Tests -c Release -f net10.0 --filter FullyQualifiedName~TheStreamedRolloutMatchesTheResidentOneOnCuda
 }
 
+renorm() {
+  run_logged renorm env FF_GPU_TESTS=1 \
+    dotnet test tests/HartsyInference.Engine.Tests -c Release -f net10.0 --filter FullyQualifiedName~FastFramesRefinerGpuSyncTests
+}
+
 clip() {
   local model="$1"
   if [ "$model" = "l" ]; then
@@ -112,9 +118,10 @@ case "${1:-}" in
   verify) verify ;;
   decoder) decoder ;;
   streamed) streamed ;;
+  renorm) renorm ;;
   clip-s) clip s ;;
   clip-l) clip l ;;
   all)
-    build && verify && decoder && streamed && clip s && all_l ;;
-  *) echo "usage: $0 {build|verify|decoder|streamed|clip-s|clip-l|all}"; exit 2 ;;
+    build && verify && decoder && streamed && renorm && clip s && all_l ;;
+  *) echo "usage: $0 {build|verify|decoder|streamed|renorm|clip-s|clip-l|all}"; exit 2 ;;
 esac

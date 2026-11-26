@@ -26,6 +26,7 @@
     <None Include="Fixtures\sana_wm_s2_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\hy15_dit_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\hy15_vae_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\rolling_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

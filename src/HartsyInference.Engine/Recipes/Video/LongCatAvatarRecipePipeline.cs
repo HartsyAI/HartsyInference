@@ -186,8 +186,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             Logs.Info($"[LongCatAvatarRecipePipeline] Later segment {laterRun} of {plan.Segments - 1} (overall segment {laterRun + 1} of {plan.Segments}).");
             return LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                    LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
-                onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
+                    LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth),
+                    LongCatRecipeSupport.KvCacheBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth, offloaded: true)),
+                // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
+                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
                 bridge);
         };
 

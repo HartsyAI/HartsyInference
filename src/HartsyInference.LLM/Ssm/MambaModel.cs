@@ -37,7 +37,6 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
         {
             _convHistory[i] = new float[(convK - 1) * dInner];
             _ssmState[i] = new Tensor(new TensorShape(1, dInner, dState), DType.F32);
-            ZeroFill(_ssmState[i]);
         }
     }
 
@@ -45,7 +44,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
     public void ResetState()
     {
         foreach (float[] h in _convHistory) Array.Clear(h);
-        foreach (Tensor s in _ssmState) ZeroFill(s);
+        foreach (Tensor s in _ssmState) s.AsSpan<float>().Clear();
     }
 
     public static MambaModel Load(string ggufPath)
@@ -83,8 +82,6 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
         fixed (float* src = values) Buffer.MemoryCopy(src, (void*)t.DataPointer, (long)values.Length * 4, (long)values.Length * 4);
         return t;
     }
-
-    private static void ZeroFill(Tensor t) => new Span<float>((void*)t.DataPointer, checked((int)t.ElementCount)).Clear();
 
     /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)

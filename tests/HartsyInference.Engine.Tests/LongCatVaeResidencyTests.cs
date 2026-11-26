@@ -29,6 +29,21 @@ public sealed class LongCatVaeResidencyTests
     }
 
     [Fact]
+    public void ThePoolIsTrimmedAfterTheWeightsAreFreed()
+    {
+        using Tensor a = new(new TensorShape([2]), DType.F32);
+        List<string> log = [];
+
+        LongCatRecipeSupport.WithWeightsPlaced(new[] { a },
+            _ => log.Add("preload"),
+            _ => log.Add("free"),
+            () => { log.Add("body"); return 0; },
+            trim: () => log.Add("trim"));
+
+        Assert.Equal(["preload", "body", "free", "trim"], log);
+    }
+
+    [Fact]
     public void TheWeightsAreFreedWhenTheBodyThrows()
     {
         using Tensor a = new(new TensorShape([2]), DType.F32);
