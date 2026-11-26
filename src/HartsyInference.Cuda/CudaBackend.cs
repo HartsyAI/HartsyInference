@@ -5513,8 +5513,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (query.DType == DType.BF16 && mask is null)
             {
                 ulong castScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-                (nuint castFree, _) = _context.GetMemoryInfo();
-                if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > (ulong)castFree / 2)
+                if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > GateBudget())
                 {
                     SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
@@ -5876,8 +5875,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
         ulong castBytes = 2UL * sizeof(ushort) * (ulong)d * ((ulong)hq * (ulong)tq + (ulong)hkv * (ulong)kvLen);
-        (nuint freeBytes, _) = _context.GetMemoryInfo();
-        return maskBytes + castBytes < (ulong)freeBytes / 2;
+        (nuint freeBytes, nuint deviceTotal) = _context.GetMemoryInfo();
+        ulong budget = EngineKnobs.TileFromDevice.Value == true ? (ulong)deviceTotal / 2 : (ulong)freeBytes / 2;
+        return maskBytes + castBytes < budget;
     }
 
     /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.
@@ -6307,6 +6307,24 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return raised >= MinTileScoreBytes ? new TileCap(0, 0, cap.ProbeAfter) : new TileCap(raised, 0, cap.ProbeAfter);
     }
 
+    /// <summary>The fixed score-tile rung of a device, for <c>numerics.tileFromDevice</c>: 1 GiB at 20 GB total or more, else 512 MiB.</summary>
+    internal static long TileRungBytes(ulong deviceTotalBytes) => deviceTotalBytes >= 20UL << 30 ? 1L << 30 : 512L << 20;
+
+    /// <summary>The query tile's height from the device total (<c>numerics.tileFromDevice</c>): the rung over the row bytes, never past the rows of
+    /// the call or the score elements the softmax addresses, or the height <c>numerics.sdpaTile</c> forces.</summary>
+    internal static long TileRowsFromDevice(ulong deviceTotalBytes, long totalHeads, long sq, long skv, int? forced)
+    {
+        long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
+        if (cap < 1)
+            throw new AttentionUnsupportedException(
+                $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
+        long perRow = totalHeads * skv * sizeof(float);
+        long rows = Math.Max(1, TileRungBytes(deviceTotalBytes) / Math.Max(1, perRow));
+        if (rows > sq) rows = sq;
+        if (forced is int f && f > 0) rows = Math.Min(f, sq);
+        return Math.Min(rows, cap);
+    }
+
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
     /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
     /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
@@ -6336,12 +6354,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ulong scoresBuf = 0, pOnes = 0;
         try
         {
-            (nuint freeBytes, _) = _context.GetMemoryInfo();
+            (nuint freeBytes, nuint deviceTotal) = _context.GetMemoryInfo();
+            bool fromDevice = EngineKnobs.TileFromDevice.Value == true;
             long perRow = totalHeads * skv * sizeof(float);
             TileCap remembered;
             lock (_sdpaTileCapGate)
                 remembered = _sdpaTileCap;
-            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
+            long Br = fromDevice
+                ? TileRowsFromDevice((ulong)deviceTotal, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value)
+                : TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
 
             // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
             // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full

@@ -98,6 +98,12 @@ public static partial class EngineKnobs
         IntOverride("numerics.sdpaTile", KnobScope.Runtime, KnobDomain.Numerics,
             "Overrides the flash-attention query tile (Br); the call site still floors it at the sequence length.");
 
+    /// <summary>Sizes the attention query tile and its path gates from the device's total VRAM (a fixed rung per device), not from free memory, so the
+    /// same shape makes the same tile on every run. Off unless set, until measured on the GPU.</summary>
+    public static readonly Knob<bool?> TileFromDevice =
+        BoolOverride("numerics.tileFromDevice", KnobScope.Runtime, KnobDomain.Numerics,
+            "Sizes the attention query tile and its path gates from the device total VRAM, not free memory; off unless set.");
+
     /// <summary>Overrides the INT8 GEMM column-chunk width; a non-positive value means no chunking at all.</summary>
     /// <remarks>Non-positive maps to <c>int.MaxValue</c> at the call site, so the mapping stays there rather than in a coercion.</remarks>
     public static readonly Knob<int?> Int8NChunk =
