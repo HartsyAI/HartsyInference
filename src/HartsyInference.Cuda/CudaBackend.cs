@@ -5513,8 +5513,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (query.DType == DType.BF16 && mask is null)
             {
                 ulong castScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-                bool castOver = castScoreBytes > GateBudget();
-                LogGate("cast.score", castOver);
+                GateReading castGate = ReadGate();
+                bool castOver = castScoreBytes > castGate.Budget;
+                // A forced tile is not a budget decision, so only the unforced path logs it.
+                if (!EngineKnobs.SdpaForceTiled.Value) LogGate("cast.score", castOver, castGate);
                 if (EngineKnobs.SdpaForceTiled.Value || castOver)
                 {
                     SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
@@ -5878,8 +5880,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
         ulong castBytes = 2UL * sizeof(ushort) * (ulong)d * ((ulong)hq * (ulong)tq + (ulong)hkv * (ulong)kvLen);
-        bool fits = maskBytes + castBytes < GateBudget();
-        LogGate("causal", !fits);
+        GateReading gate = ReadGate();
+        bool fits = maskBytes + castBytes < gate.Budget;
+        LogGate("causal", !fits, gate);
         return fits;
     }
 
@@ -6373,8 +6376,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 : TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
 
             // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
-            // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
-            // allocator recovery) are not paid on every call. The memory grows back, with backoff (see NextTileCap): a transient failure must not
+            // so the floor never turns a slow call into a failed one. Knob off, the height that fit is remembered so the failures (each one a full
+            // allocator recovery) are not paid on every call; under numerics.tileFromDevice the cap is recorded but not read. The memory grows back, with backoff (see NextTileCap): a transient failure must not
             // pin the tile small for the backend's lifetime, and a card that really is full must not be probed every other call.
             long plannedBr = Br;
             bool halved = false;

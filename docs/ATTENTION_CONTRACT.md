@@ -303,7 +303,8 @@ The planner reproduces these until the row that owns each is rewritten.
   `tileFromDevice gate=<tiles|bf16cast|cast.score|causal> decisions=… over=… freeLimited=…` line per budget gate. A gate's `decisions` includes
   planner probes (PlansBatch to PlanAttention, Cheaper, Explain) and rows that never ran, so it is not a call count. `over` counts decisions
   whose bytes exceeded the gate's budget (the tiled or fallback side); `freeLimited` counts decisions where free VRAM, not half the total, set
-  the budget. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted. A tile line at
+  the budget. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted; `cast.score` skips
+  forced calls for the same reason. A tile line at
   `halved>0` means an OOM halved that call's tile. Stderr also shows the summary, but `dotnet test` at default verbosity hides a test
   host's stderr, so read the file.
 - CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The

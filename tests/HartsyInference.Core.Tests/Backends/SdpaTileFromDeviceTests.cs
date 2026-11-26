@@ -60,20 +60,22 @@ public sealed class SdpaTileFromDeviceTests
     [Fact]
     public void TheFreeLogCountsAHalvedCallAndNamesItsHeights()
     {
-        TileFreeLog.Reset();
+        using IDisposable isolated = TileFreeLog.Isolate();
         TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 50);
         TileFreeLog.Record(10UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
 
         // Two calls: one halved from 100 to 50 rows, one at 100. Free ranged 6 to 10 GiB; total 24 GiB.
         Assert.Equal("tileFromDevice: calls=2 halved=1 totalMiB=24576 freeMiB min=6144 max=10240 tileRows=[50,100]", TileFreeLog.Summary());
-        TileFreeLog.Reset();
-        Assert.Equal("tileFromDevice: no tiled calls, gate decisions or executed rows this process.", TileFreeLog.Summary());
+        using (TileFreeLog.Isolate())
+        {
+            Assert.Equal("tileFromDevice: no tiled calls, gate decisions or executed rows this process.", TileFreeLog.Summary());
+        }
     }
 
     [Fact]
     public void TheFreeLogNamesTheGateAndWhetherFreeSetItsBudget()
     {
-        TileFreeLog.Reset();
+        using IDisposable isolated = TileFreeLog.Isolate();
         // 24 GiB total: half is 12 GiB. Free of 6 GiB is below half, so free set the budget; free of 20 GiB is not.
         TileFreeLog.RecordGate("bf16cast", 6UL << 30, 24UL << 30, over: true);
         TileFreeLog.RecordGate("bf16cast", 20UL << 30, 24UL << 30, over: false);
@@ -81,13 +83,12 @@ public sealed class SdpaTileFromDeviceTests
 
         Assert.Equal("tileFromDevice gate=bf16cast decisions=2 over=1 freeLimited=1\ntileFromDevice gate=causal decisions=1 over=1 freeLimited=0",
             TileFreeLog.Summary());
-        TileFreeLog.Reset();
     }
 
     [Fact]
     public void TheFreeLogAppendsOneBlockPerProcessToItsFile()
     {
-        TileFreeLog.Reset();
+        using IDisposable isolated = TileFreeLog.Isolate();
         TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
         string path = Path.Combine(Path.GetTempPath(), "tile-free-log-" + Guid.NewGuid().ToString("N") + ".log");
         try
@@ -100,7 +101,6 @@ public sealed class SdpaTileFromDeviceTests
         finally
         {
             File.Delete(path);
-            TileFreeLog.Reset();
         }
     }
 

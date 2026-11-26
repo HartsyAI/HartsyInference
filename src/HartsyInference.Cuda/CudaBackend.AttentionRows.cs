@@ -309,9 +309,9 @@ public sealed partial class CudaBackend
         if (!OneRowTiles(in c)) return false;
         if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
-        ulong budget = GateBudget();
-        bool over = scoreBytes > budget;
-        LogGate("tiles", over);
+        GateReading gate = ReadGate();
+        bool over = scoreBytes > gate.Budget;
+        LogGate("tiles", over, gate);
         return over;
     }
 
@@ -320,24 +320,33 @@ public sealed partial class CudaBackend
     {
         ulong castBytes = sizeof(ushort) * ((ulong)c.Query.Storage.ElementCount + (ulong)c.Key.Storage.ElementCount
             + (ulong)c.Value.Storage.ElementCount + (ulong)c.Output.Storage.ElementCount);
-        ulong budget = GateBudget();
-        bool over = castBytes > budget;
-        LogGate("bf16cast", over);
+        GateReading gate = ReadGate();
+        bool over = castBytes > gate.Budget;
+        LogGate("bf16cast", over, gate);
         return !over;
     }
 
-    /// <summary>The byte budget the attention path gates compare against: half of free VRAM, or under <c>numerics.tileFromDevice</c> the one
+    /// <summary>One gate's memory reading: the budget it compares against, and the free and total bytes that budget was made from. Read once per
+    /// decision, so the logged free is the one that decided.</summary>
+    internal readonly record struct GateReading(ulong Budget, ulong Free, ulong Total);
+
+    /// <summary>Reads free and total VRAM once and returns the gate budget: half of free VRAM, or under <c>numerics.tileFromDevice</c> the one
     /// device gate budget (<see cref="DeviceGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
-    private ulong GateBudget() => EngineKnobs.TileFromDevice.Value == true
-        ? DeviceGateBudget((ulong)_context.GetMemoryInfo().totalBytes, (ulong)FreeVram())
-        : FreeVram() / 2;
+    private GateReading ReadGate()
+    {
+        (nuint memFree, nuint memTotal) = _context.GetMemoryInfo();
+        ulong free = (ulong)(TestFreeVramOverride?.Invoke() ?? memFree);
+        ulong total = memTotal;
+        ulong budget = EngineKnobs.TileFromDevice.Value == true ? DeviceGateBudget(total, free) : free / 2;
+        return new GateReading(budget, free, total);
+    }
 
     /// <summary>Logs one budget gate's decision to <see cref="TileFreeLog"/> under <c>numerics.tileFromDevice</c>; knob off, nothing. A gate
     /// that decides with the knob off does not log, so an ordinary run's log is empty.</summary>
-    internal void LogGate(string gate, bool over)
+    internal void LogGate(string gate, bool over, GateReading reading)
     {
         if (EngineKnobs.TileFromDevice.Value != true) return;
-        TileFreeLog.RecordGate(gate, (ulong)FreeVram(), (ulong)_context.GetMemoryInfo().totalBytes, over);
+        TileFreeLog.RecordGate(gate, reading.Free, reading.Total, over);
     }
 
     /// <summary>The one gate budget under <c>numerics.tileFromDevice</c>: half of the device's total VRAM, or the free VRAM when that is less. The
@@ -346,8 +355,6 @@ public sealed partial class CudaBackend
     /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
     internal static ulong DeviceGateBudget(ulong deviceTotalBytes, ulong freeBytes) => Math.Min(deviceTotalBytes / 2, freeBytes);
 
-    /// <summary>Free device memory the attention rows budget against.</summary>
-    private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
 
     /// <summary>Whether the equal-head form of a grouped call runs on INT8 v2, Sage or the F16 flash kernel: the kernels the
     /// token-major grouped row yields to and <c>widen.preferred</c> widens for, so the two cannot disagree.</summary>
