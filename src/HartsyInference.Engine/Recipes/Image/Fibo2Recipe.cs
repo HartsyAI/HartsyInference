@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -97,8 +98,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev-int8", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-edit-turbo-int8", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "rmbg3", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "rmbg3-int8", StringComparison.OrdinalIgnoreCase);
+        || ModelCatalog.Find(familyId.ToLowerInvariant())?.Features.HasFlag(CatalogFeatures.AlphaMatte) == true;
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)

@@ -4,6 +4,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Registry;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Tests.Registry;
@@ -77,6 +78,32 @@ public sealed class Rmbg3CatalogTests
         Assert.True(Rmbg3Matte.Handles(Spec("rmbg3-int8")));
         Assert.False(Rmbg3Matte.Handles(Spec("rmbg")));
         Assert.False(Rmbg3Matte.Handles(Spec("birefnet-matting")));
+    }
+
+    [Theory]
+    [InlineData("rmbg3")]
+    [InlineData("rmbg3-int8")]
+    public void CatalogFeatures_FlagTheRmbg3EntriesAsMatteWithAGeneratorReleaseFirst(string id)
+    {
+        CatalogFeatures features = ModelCatalog.Find(id)!.Features;
+
+        Assert.True(features.HasFlag(CatalogFeatures.BackgroundRemoval));
+        Assert.True(features.HasFlag(CatalogFeatures.AlphaMatte));
+        Assert.True(features.HasFlag(CatalogFeatures.ReleasesGeneratorFirst));
+
+        ImageRequest request = new() { Prompt = "", RemoveBackground = true, RemoveBackgroundModel = id };
+        Assert.Equal(id, BackgroundRemovalStage.ModelIdFor(request));
+        Assert.True(BackgroundRemovalStage.NeedsGeneratorReleased(request));
+    }
+
+    [Fact]
+    public void CatalogFeatures_RmbgFourteenHasNoMatteOrReleaseFlag()
+    {
+        CatalogFeatures features = ModelCatalog.Find("rmbg")?.Features ?? CatalogFeatures.None;
+
+        Assert.False(features.HasFlag(CatalogFeatures.AlphaMatte));
+        Assert.False(features.HasFlag(CatalogFeatures.ReleasesGeneratorFirst));
+        Assert.False(BackgroundRemovalStage.NeedsGeneratorReleased(new ImageRequest { Prompt = "", RemoveBackground = true }));
     }
 
     [Fact]

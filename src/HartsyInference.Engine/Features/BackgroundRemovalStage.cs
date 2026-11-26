@@ -27,13 +27,17 @@ public static class BackgroundRemovalStage
             return named ? throw new NotSupportedException("RemoveBackgroundModel needs RemoveBackground to be on.") : null;
         }
         string id = named ? request.RemoveBackgroundModel!.Trim().ToLowerInvariant() : DefaultModelId;
-        return id is DefaultModelId or "rmbg3" or "rmbg3-int8"
+        return id == DefaultModelId || HasFeature(id, CatalogFeatures.BackgroundRemoval)
             ? id
-            : throw new NotSupportedException($"Background removal runs rmbg (RMBG-1.4), rmbg3 or rmbg3-int8; '{id}' is not one of them.");
+            : throw new NotSupportedException($"Background removal runs rmbg (RMBG-1.4) or a catalog model flagged BackgroundRemoval; '{id}' is not one of them.");
     }
 
-    /// <summary>Whether the cutout runs an 8 B model that needs the generating pipeline released first.</summary>
-    public static bool NeedsGeneratorReleased(ImageRequest request) => ModelIdFor(request) is "rmbg3" or "rmbg3-int8";
+    /// <summary>Whether the cutout runs a model that needs the generating pipeline released first (catalog flag).</summary>
+    public static bool NeedsGeneratorReleased(ImageRequest request) =>
+        ModelIdFor(request) is string id && HasFeature(id, CatalogFeatures.ReleasesGeneratorFirst);
+
+    private static bool HasFeature(string id, CatalogFeatures feature) =>
+        ModelCatalog.Find(id)?.Features.HasFlag(feature) == true;
 
     /// <summary>Returns <paramref name="result"/> carrying an alpha plane when the request asked for a cutout, else
     /// unchanged. The RGB bytes are never rewritten — a partial-coverage edge must be composited once by the consumer,

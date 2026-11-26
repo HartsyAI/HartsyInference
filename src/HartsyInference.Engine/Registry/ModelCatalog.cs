@@ -2809,6 +2809,7 @@ public static class ModelCatalog
                 Id = "rmbg3", Modality = vis, DisplayName = "Bria RMBG 3.0 (background removal)",
                 Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
                 CliDrivable = true,
+                Features = CatalogFeatures.BackgroundRemoval | CatalogFeatures.AlphaMatte | CatalogFeatures.ReleasesGeneratorFirst,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_bf16.safetensors",
@@ -2824,6 +2825,7 @@ public static class ModelCatalog
                 Id = "rmbg3-int8", Modality = vis, DisplayName = "Bria RMBG 3.0 (int8 ConvRot)",
                 Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
                 CliDrivable = true,
+                Features = CatalogFeatures.BackgroundRemoval | CatalogFeatures.AlphaMatte | CatalogFeatures.ReleasesGeneratorFirst,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_int8_convrot.safetensors",

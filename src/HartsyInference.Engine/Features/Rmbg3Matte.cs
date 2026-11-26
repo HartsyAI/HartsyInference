@@ -21,7 +21,7 @@ public static class Rmbg3Matte
     public static bool Handles(ModelSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
-        return spec.Catalog?.Id is "rmbg3" or "rmbg3-int8";
+        return spec.Catalog?.Features.HasFlag(CatalogFeatures.AlphaMatte) == true;
     }
 
     /// <summary>Generates the matte for <paramref name="image"/> and returns it as straight 8-bit alpha, <c>width × height</c>.</summary>
