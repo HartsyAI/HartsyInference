@@ -110,10 +110,9 @@ public sealed class FastFramesKvRefiner : IDisposable
         foreach ((string name, long[] shape) in ExpectedShapes(_config))
         {
             // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
-            if (!weights.TryGetValue(name, out Tensor? tensor))
+            if (!weights.ContainsKey(name))
                 throw new ArgumentException($"The refiner checkpoint has no '{name}'.", nameof(weights));
-            if (tensor.Shape.Rank != shape.Length || !Enumerable.Range(0, shape.Length).All(i => tensor.Shape[i] == shape[i]))
-                throw new ArgumentException($"'{name}' is {tensor.Shape}; the refiner expects [{string.Join(", ", shape)}].", nameof(weights));
+            CheckpointTensors.Require(weights, "FastFrames refiner", name, shape);
         }
         int dA = _config.AdapterDim, dim = _config.Dim, layers = _config.Layers;
         _tEmbed0W = Own(F32(weights, "t_embed.mlp.0.weight")); _tEmbed0B = Own(F32(weights, "t_embed.mlp.0.bias"));

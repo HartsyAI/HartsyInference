@@ -105,10 +105,9 @@ public sealed class FastFramesPixelDecoder : IDisposable
         foreach ((string name, long[] shape) in ExpectedShapes(_config, prefixed))
         {
             // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
-            if (!weights.TryGetValue(name, out Tensor? tensor))
+            if (!weights.ContainsKey(name))
                 throw new ArgumentException($"The decoder checkpoint has no '{name}'.", nameof(weights));
-            if (!ShapeIs(tensor.Shape, shape))
-                throw new ArgumentException($"'{name}' is {tensor.Shape}; the decoder expects [{string.Join(", ", shape)}].", nameof(weights));
+            CheckpointTensors.Require(weights, "FastFrames decoder", name, shape);
         }
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";
         int dim = _config.Dim;
@@ -336,18 +335,6 @@ public sealed class FastFramesPixelDecoder : IDisposable
     {
         Tensor source = CheckpointTensors.Require(weights, "FastFrames decoder", key);
         return FastFramesOps.CopyF32(source, source.Shape);
-    }
-
-    private static bool ShapeIs(TensorShape actual, long[] expected)
-    {
-        if (actual.Rank != expected.Length)
-            return false;
-        for (int i = 0; i < expected.Length; i++)
-        {
-            if (actual[i] != expected[i])
-                return false;
-        }
-        return true;
     }
 
     /// <summary>The decoder's owned device-uploadable weights, for a caller that places them before a clip.</summary>
