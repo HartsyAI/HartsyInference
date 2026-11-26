@@ -239,7 +239,7 @@ public sealed class FastFramesPipeline : IDisposable
             for (int frame = 0; frame < latentFrames; frame++)
             {
                 cancel.ThrowIfCancellationRequested();
-                // A pipeline disposed mid-clip stops at this frame; the release in the finally has already freed the generator.
+                // Refuses a frame started after Dispose. A Dispose while the consumer held the previous frame is caught after the yield below.
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
                 FastFramesFrame output;
@@ -248,6 +248,9 @@ public sealed class FastFramesPipeline : IDisposable
                         (int)pixels.Shape[2], (int)pixels.Shape[3]);
                 yield return output;
 
+                // Disposed while the consumer held the frame: stop before any cache or weight work runs on freed weights. The throw
+                // unwinds through the finally above, which frees the generator, so GeneratorResident is false afterwards.
+                ObjectDisposedException.ThrowIf(_disposed, this);
                 // The next frame reads this frame's cache slot, so the clean pass or the refinement runs before it. It runs after the
                 // consumer has the frame, so a frame is not held back by the cache work of the one after it.
                 if (frame == 0)
@@ -296,7 +299,9 @@ public sealed class FastFramesPipeline : IDisposable
     internal bool GeneratorResident => _generatorPin.Resident;
 
     /// <summary>Frees the generator's device weights when a resident clip left them there, so a dropped pipeline gives the VRAM back. The
-    /// pipeline does not own the backend, the refiner, the decoder or the transformer object; their owner disposes those.</summary>
+    /// pipeline does not own the backend, the refiner, the decoder or the transformer object; their owner disposes those. Not thread-safe:
+    /// call it on the thread that enumerates the clips, or after they finish. To abort a clip, cancel its token; a Dispose during a clip
+    /// stops it at the next frame boundary.</summary>
     public void Dispose()
     {
         if (_disposed)
