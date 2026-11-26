@@ -5513,7 +5513,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (query.DType == DType.BF16 && mask is null)
             {
                 ulong castScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-                if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > GateBudget())
+                bool castOver = castScoreBytes > GateBudget();
+                LogGate("cast.score", castOver);
+                if (EngineKnobs.SdpaForceTiled.Value || castOver)
                 {
                     SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
@@ -5870,14 +5872,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c),
             castTarget);
 
-    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit in half of free VRAM (cuMemGetInfo counts pool reservations as used).</summary>
+    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit the gate budget (logged as gate "causal"): half of free VRAM, or under
+    /// <c>numerics.tileFromDevice</c> the shared <see cref="DeviceGateBudget"/> (cuMemGetInfo counts pool reservations as used).</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
         ulong castBytes = 2UL * sizeof(ushort) * (ulong)d * ((ulong)hq * (ulong)tq + (ulong)hkv * (ulong)kvLen);
-        (nuint freeBytes, nuint deviceTotal) = _context.GetMemoryInfo();
-        ulong budget = EngineKnobs.TileFromDevice.Value == true ? (ulong)deviceTotal / 2 : (ulong)freeBytes / 2;
-        return maskBytes + castBytes < budget;
+        bool fits = maskBytes + castBytes < GateBudget();
+        LogGate("causal", !fits);
+        return fits;
     }
 
     /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.
@@ -6307,11 +6310,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return raised >= MinTileScoreBytes ? new TileCap(0, 0, cap.ProbeAfter) : new TileCap(raised, 0, cap.ProbeAfter);
     }
 
-    /// <summary>The fixed score-tile rung of a device, for <c>numerics.tileFromDevice</c>: 1 GiB at 20 GB total or more, else 512 MiB.</summary>
+    /// <summary>The fixed score-tile rung of a device, for <c>numerics.tileFromDevice</c>: 1 GiB at 20 GiB total or more, else 512 MiB. The 20 GiB
+    /// boundary is binary (<c>20 &lt;&lt; 30</c> bytes): a card marketed as 20 GB reports about 18.6 GiB and gets 512 MiB; a 24 GB card gets 1 GiB.
+    /// The rung sets the tile height only, not a gate (see <c>DeviceGateBudget</c>).</summary>
     internal static long TileRungBytes(ulong deviceTotalBytes) => deviceTotalBytes >= 20UL << 30 ? 1L << 30 : 512L << 20;
 
     /// <summary>The query tile's height from the device total (<c>numerics.tileFromDevice</c>): the rung over the row bytes, never past the rows of
-    /// the call or the score elements the softmax addresses, or the height <c>numerics.sdpaTile</c> forces.</summary>
+    /// the call or the score elements the softmax addresses, or the height <c>numerics.sdpaTile</c> forces. The height is a function of the device
+    /// only. A failed allocation in <c>SdpaTiledF32Core</c> still halves that call's tile (the OOM loop), so a run that hits one is not
+    /// bit-comparable with a run that did not. The remembered cap is recorded but not read under this knob, so later calls do not start from
+    /// a shrunken height.</summary>
     internal static long TileRowsFromDevice(ulong deviceTotalBytes, long totalHeads, long sq, long skv, int? forced)
     {
         long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
@@ -6368,6 +6376,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
             // allocator recovery) are not paid on every call. The memory grows back, with backoff (see NextTileCap): a transient failure must not
             // pin the tile small for the backend's lifetime, and a card that really is full must not be probed every other call.
+            long plannedBr = Br;
             bool halved = false;
             while (true)
             {
@@ -6383,6 +6392,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
             }
 
+            if (fromDevice) TileFreeLog.Record((ulong)freeBytes, (ulong)deviceTotal, plannedBr, Br);
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.tiled.scores", perRow * Br);
             lock (_sdpaTileCapGate)
                 _sdpaTileCap = NextTileCap(_sdpaTileCap, halved, perRow * Br, perRow, EngineKnobs.SdpaTile.Value is > 0);

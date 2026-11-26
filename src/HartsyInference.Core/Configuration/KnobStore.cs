@@ -15,6 +15,10 @@ public static class KnobStore
     /// <summary>Each override with the layer that set it, so "where did this value come from" is recorded rather than guessed.</summary>
     private static readonly ConcurrentDictionary<string, (object? Value, string Source)> _overrides = new(StringComparer.Ordinal);
 
+    /// <summary>The whole-run profile (<see cref="ApplyRunProfile"/>). Its own layer, not part of <c>_overrides</c>, so <see cref="ResetOverrides"/>
+    /// (and <see cref="KnobFile.Reload"/>) and <see cref="Clear{T}"/> do not remove it.</summary>
+    private static volatile KnobProfile? _runProfile;
+
     /// <summary>Sets an explicit value. Beats the settings file; beaten by a scoped profile.</summary>
     /// <remarks>Loads the settings file first if nothing has yet. Otherwise a Set made before the first read would be
     /// overwritten by that read's load of the file, and a host had to remember to read a knob before setting one.</remarks>
@@ -27,6 +31,14 @@ public static class KnobStore
     /// <summary>Sets by dotted id with an already-parsed value. Used by <see cref="KnobFile"/>, which owns the parsing.</summary>
     internal static void SetByIdRaw(string id, object? value, string source) => _overrides[id] = (value, source);
 
+    /// <summary>Applies every value of a profile as a process-wide host override, for a whole test run (the GpuIntegration lane switch, <c>HARTSY_GPU_TEST_KNOBS</c>).
+    /// It sits between a per-request scope and host overrides, and survives <see cref="KnobFile.Reload"/> and <see cref="Clear{T}"/>.</summary>
+    public static void ApplyRunProfile(KnobProfile profile)
+    {
+        KnobFile.EnsureLoaded();
+        _runProfile = profile;
+    }
+
     /// <summary>Which layer supplies <paramref name="id"/>'s current value: a per-request profile, the settings file or a host, else the declared default.</summary>
     /// <remarks>Recorded when the override is set. Inferring it instead cannot work: a host override and a file
     /// value land in the same dictionary, so after the file supplies a value a later host Set is invisible.</remarks>
@@ -35,6 +47,10 @@ public static class KnobStore
         if (KnobProfileScope.Current is { } profile && profile.Values.ContainsKey(id))
         {
             return "request profile";
+        }
+        if (_runProfile is { } run && run.Values.ContainsKey(id))
+        {
+            return "run profile";
         }
         KnobFile.EnsureLoaded();
         return _overrides.TryGetValue(id, out (object? Value, string Source) entry) ? entry.Source : "default";
@@ -70,6 +86,10 @@ public static class KnobStore
                 return default!;
             if (scoped is T scopedTyped)
                 return Coerce(knob, scopedTyped);
+        }
+        if (_runProfile is { } run && run.Values.TryGetValue(knob.Id, out object? whole) && whole is T wholeTyped)
+        {
+            return Coerce(knob, wholeTyped);
         }
         if (_overrides.TryGetValue(knob.Id, out (object? Value, string Source) entry) && entry.Value is T typed)
         {
