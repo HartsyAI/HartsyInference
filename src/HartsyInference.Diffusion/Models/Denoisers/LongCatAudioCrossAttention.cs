@@ -59,14 +59,14 @@ public sealed class LongCatAudioCrossAttention : IDisposable
         try
         {
             // Matrices stay as stored (a quantized or F16 checkpoint keeps its adjunct path); vectors are widened, and the copies are owned here.
-            Tensor qW = Expect(weights[prefix + "q_linear.weight"], [_dim, _dim], prefix + "q_linear.weight");
-            Tensor qB = Expect(LongCatOps.WidenF32(weights, prefix + "q_linear.bias", owned), [_dim], prefix + "q_linear.bias");
-            Tensor qN = Expect(LongCatOps.WidenF32(weights, prefix + "q_norm.weight", owned), [_headDim], prefix + "q_norm.weight");
-            Tensor kvW = Expect(weights[prefix + "kv_linear.weight"], [2 * _dim, _encoderDim], prefix + "kv_linear.weight");
-            Tensor kvB = Expect(LongCatOps.WidenF32(weights, prefix + "kv_linear.bias", owned), [2 * _dim], prefix + "kv_linear.bias");
-            Tensor kN = Expect(LongCatOps.WidenF32(weights, prefix + "k_norm.weight", owned), [_headDim], prefix + "k_norm.weight");
-            Tensor pW = Expect(weights[prefix + "proj.weight"], [_dim, _dim], prefix + "proj.weight");
-            Tensor pB = Expect(LongCatOps.WidenF32(weights, prefix + "proj.bias", owned), [_dim], prefix + "proj.bias");
+            Tensor qW = CheckpointTensors.Require(weights, "LongCat", prefix + "q_linear.weight", [_dim, _dim]);
+            Tensor qB = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "q_linear.bias", owned, [_dim]);
+            Tensor qN = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "q_norm.weight", owned, [_headDim]);
+            Tensor kvW = CheckpointTensors.Require(weights, "LongCat", prefix + "kv_linear.weight", [2 * _dim, _encoderDim]);
+            Tensor kvB = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "kv_linear.bias", owned, [2 * _dim]);
+            Tensor kN = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "k_norm.weight", owned, [_headDim]);
+            Tensor pW = CheckpointTensors.Require(weights, "LongCat", prefix + "proj.weight", [_dim, _dim]);
+            Tensor pB = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj.bias", owned, [_dim]);
 
             AttentionLayer attention = new(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
             ReleaseOwned();
@@ -205,13 +205,4 @@ public sealed class LongCatAudioCrossAttention : IDisposable
         _owned = [];
     }
 
-    private static Tensor Expect(Tensor tensor, long[] shape, string key)
-    {
-        if (tensor.Shape.Rank != shape.Length)
-            throw new InvalidDataException($"{key} must have {shape.Length} dimensions, got {tensor.Shape}.");
-        for (int i = 0; i < shape.Length; i++)
-            if (tensor.Shape[i] != shape[i])
-                throw new InvalidDataException($"{key} must be {string.Join('x', shape)}, got {tensor.Shape}.");
-        return tensor;
-    }
 }
