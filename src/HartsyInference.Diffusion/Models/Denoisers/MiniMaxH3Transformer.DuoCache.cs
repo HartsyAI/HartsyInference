@@ -42,6 +42,10 @@ public sealed unsafe partial class MiniMaxH3Transformer
             throw new ArgumentException(
                 $"The cache holds {cache.Blocks} blocks of width {cache.Width}; this model needs {_config.NumLayers} of width {inner}.", nameof(cache));
         }
+        if (!ReferenceEquals(cache.Backend, backend))
+        {
+            throw new ArgumentException("The cache's segments live on its own backend; the forward must run on that same instance.", nameof(cache));
+        }
         int seq = layout.Length, past = cache.Length;
         if (seq > MaxDuoDenseBiasRows || past + seq > MaxDuoDenseBiasRows)
         {
@@ -73,8 +77,9 @@ public sealed unsafe partial class MiniMaxH3Transformer
 
         Tensor stream = BuildDuoStream(backend, layout, refinerGroups, DuoAttentionMode.Causal, textStates, videoRows, audioRows,
             hidden, layout.TextRows.Length, layout.VideoRows.Length, layout.AudioRows.Length);
-        float[][] keptKeys = new float[_config.NumLayers][];
-        float[][] keptValues = new float[_config.NumLayers][];
+        // The rows this forward keeps for a commit, per block, as head-major device tensors the commit slices and then frees.
+        Tensor?[] keptKeys = new Tensor?[_config.NumLayers];
+        Tensor?[] keptValues = new Tensor?[_config.NumLayers];
         try
         {
             for (int i = 0; i < _config.NumLayers; i++)
@@ -86,10 +91,10 @@ public sealed unsafe partial class MiniMaxH3Transformer
                 ForwardNamedBlock(backend, ref stream, tEmb, modIndex, cos, sin, p, int.MaxValue,
                     BlockAttention.Override(x =>
                     {
-                        Tensor attn = CachedAttention(backend, x, $"{p}.attn", cos, sin, cache.Layer(block), segments, commit,
-                            out float[]? keys, out float[]? values);
-                        keptKeys[block] = keys!;
-                        keptValues[block] = values!;
+                        Tensor attn = CachedAttention(backend, x, $"{p}.attn", cos, sin, cache.Store, block, segments, commit,
+                            out Tensor? keys, out Tensor? values);
+                        keptKeys[block] = keys;
+                        keptValues[block] = values;
                         return attn;
                     }));
             }
@@ -99,7 +104,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
             {
                 try
                 {
-                    CommitDuoRows(layout, cache, keptKeys, keptValues, heads, hd, seq);
+                    cache.Commit(keptKeys!, keptValues!, layout.Groups.Where(g => IsRetained(g.Kind)).ToList());
                 }
                 catch
                 {
@@ -113,18 +118,27 @@ public sealed unsafe partial class MiniMaxH3Transformer
         finally
         {
             stream.Dispose();
+            foreach (Tensor? kept in keptKeys)
+            {
+                kept?.Dispose();
+            }
+            foreach (Tensor? kept in keptValues)
+            {
+                kept?.Dispose();
+            }
         }
     }
 
     /// <summary>Attention over <c>[cache | current]</c>, one shared-dispatcher call per segment. Returns the output projection for the current
-    /// rows. When <paramref name="keepRows"/> is true, also returns the current rows' keys and values as head-major <c>[heads, rows, hd]</c>
-    /// host arrays, keys already rotated, for a commit; otherwise both are null and nothing is copied.</summary>
-    private Tensor CachedAttention(IBackend backend, Tensor x, string prefix, Tensor cos, Tensor sin, DuoKvCache past,
-        KeyRangeSegment[] segments, bool keepRows, out float[]? keysNow, out float[]? valuesNow)
+    /// rows. When <paramref name="keepRows"/> is true, also returns the current rows' keys and values as head-major device tensors
+    /// <c>[1, heads, rows, head dim]</c>, keys already rotated; the caller owns them. Otherwise both are null and nothing is kept.</summary>
+    private Tensor CachedAttention(IBackend backend, Tensor x, string prefix, Tensor cos, Tensor sin, KvSegmentStore store, int block,
+        KeyRangeSegment[] segments, bool keepRows, out Tensor? keysNow, out Tensor? valuesNow)
     {
+        keysNow = null;
+        valuesNow = null;
         int seq = (int)x.Shape[0];
         int heads = _config.NumAttentionHeads, hd = _config.AttentionHeadDim, inner = heads * hd;
-        int rows = past.Rows;
 
         using Tensor qkv = new Tensor(new TensorShape(seq, inner * 3), DType.F32);
         backend.Linear(qkv, x, Require($"{prefix}.qkv_proj.weight"), Optional($"{prefix}.qkv_proj.bias"));
@@ -132,6 +146,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
         Tensor k = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         Tensor v = new Tensor(new TensorShape(1, heads, seq, hd), DType.F32);
         Tensor? kAll = null, vAll = null;
+        bool handedOff = false;
         try
         {
             backend.QkvSplitNormHeadMajor(q, k, v, qkv, Require($"{prefix}.q_norm.weight"), Require($"{prefix}.k_norm.weight"),
@@ -139,29 +154,40 @@ public sealed unsafe partial class MiniMaxH3Transformer
             int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
             backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
-            if (keepRows)
-            {
-                keysNow = k.AsSpan<float>().ToArray();
-                valuesNow = v.AsSpan<float>().ToArray();
-            }
-            else
-            {
-                keysNow = null;
-                valuesNow = null;
-            }
 
+            // The history is read from the store: its segments joined along the token axis, then the current rows after them.
             // ProbeV is a diagnostic logger for the dense path and is not run here.
-            kAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
-                HeadMajorWithPast(past.Keys, rows, k.AsSpan<float>(), seq, heads, hd));
-            vAll = HostTensor(new TensorShape(1, heads, rows + seq, hd),
-                HeadMajorWithPast(past.Values, rows, v.AsSpan<float>(), seq, heads, hd));
-            Tensor scores = SegmentedAttention.RunHeadMajor(backend, _attention, q, kAll, vAll, segments);
+            Tensor keysAll = k, valuesAll = v;
+            int count = store.Count(block);
+            if (count > 0)
+            {
+                (Tensor pastKeys, Tensor pastValues) = store.Join(block, 0, count);
+                try
+                {
+                    kAll = ConcatTokens(backend, pastKeys, k);
+                    vAll = ConcatTokens(backend, pastValues, v);
+                }
+                finally
+                {
+                    pastKeys.Dispose();
+                    pastValues.Dispose();
+                }
+                keysAll = kAll;
+                valuesAll = vAll;
+            }
+            Tensor scores = SegmentedAttention.RunHeadMajor(backend, _attention, q, keysAll, valuesAll, segments);
             try
             {
                 using Tensor merged = new Tensor(new TensorShape(seq, inner), DType.F32);
                 backend.Permute0213(merged, scores, heads, seq, hd);
                 Tensor outT = new Tensor(x.Shape, BodyDType);
                 backend.Linear(outT, merged, Require($"{prefix}.out_proj.weight"), Optional($"{prefix}.out_proj.bias"));
+                if (keepRows)
+                {
+                    keysNow = k;
+                    valuesNow = v;
+                    handedOff = true;
+                }
                 return outT;
             }
             finally
@@ -172,31 +198,14 @@ public sealed unsafe partial class MiniMaxH3Transformer
         finally
         {
             q.Dispose();
-            k.Dispose();
-            v.Dispose();
             kAll?.Dispose();
             vAll?.Dispose();
-        }
-    }
-
-    /// <summary>Head-major <c>[heads, pastRows + curRows, hd]</c> from the cache's row-major past and the current head-major rows.</summary>
-    private static float[] HeadMajorWithPast(ReadOnlySpan<float> pastRowMajor, int pastRows, ReadOnlySpan<float> curHeadMajor,
-        int curRows, int heads, int hd)
-    {
-        int inner = heads * hd, total = pastRows + curRows;
-        float[] all = new float[heads * total * hd];
-        for (int h = 0; h < heads; h++)
-        {
-            for (int t = 0; t < pastRows; t++)
+            if (!handedOff)
             {
-                pastRowMajor.Slice(t * inner + h * hd, hd).CopyTo(all.AsSpan((h * total + t) * hd, hd));
-            }
-            for (int t = 0; t < curRows; t++)
-            {
-                curHeadMajor.Slice((h * curRows + t) * hd, hd).CopyTo(all.AsSpan((h * total + pastRows + t) * hd, hd));
+                k.Dispose();
+                v.Dispose();
             }
         }
-        return all;
     }
 
     /// <summary>Rows of this forward that a commit keeps: the reference, shared and clean groups, as upstream's retain selects them.</summary>
@@ -215,51 +224,23 @@ public sealed unsafe partial class MiniMaxH3Transformer
 
     private static bool IsRetained(DuoGroupKind kind) => kind is DuoGroupKind.Reference or DuoGroupKind.Shared or DuoGroupKind.Clean;
 
-    /// <summary>Appends the retained rows of this forward to the cache, in group order. Builds every array before the cache is touched.</summary>
-    private static void CommitDuoRows(DuoLayout layout, DuoStreamCache cache, float[][] keysHeadMajor, float[][] valuesHeadMajor,
-        int heads, int hd, int seq)
+    /// <summary>Concatenates two head-major <c>[1, heads, rows, head dim]</c> tensors along the token axis into a new tensor the caller owns.</summary>
+    private static Tensor ConcatTokens(IBackend backend, Tensor first, Tensor second)
     {
-        int inner = heads * hd;
-        List<int> retained = [];
-        List<DuoGroup> newGroups = [];
-        int cursor = cache.Length;
-        foreach (DuoGroup g in layout.Groups)
+        Span<long> dims = stackalloc long[first.Shape.Rank];
+        first.Shape.CopyDimsTo(dims);
+        dims[2] += second.Shape[2];
+        Tensor joined = new(new TensorShape(dims), first.DType);
+        try
         {
-            if (!IsRetained(g.Kind))
-            {
-                continue;
-            }
-            int n = g.End - g.Start;
-            for (int r = g.Start; r < g.End; r++)
-            {
-                retained.Add(r);
-            }
-            newGroups.Add(g with { Start = cursor, End = cursor + n });
-            cursor += n;
+            backend.Concat(joined, [first, second], 2);
         }
-
-        float[][] keysRowMajor = new float[cache.Blocks][];
-        float[][] valuesRowMajor = new float[cache.Blocks][];
-        for (int b = 0; b < cache.Blocks; b++)
+        catch
         {
-            keysRowMajor[b] = ToRowMajor(keysHeadMajor[b], retained, seq, heads, hd, inner);
-            valuesRowMajor[b] = ToRowMajor(valuesHeadMajor[b], retained, seq, heads, hd, inner);
+            joined.Dispose();
+            throw;
         }
-        cache.Commit(keysRowMajor, valuesRowMajor, retained.Count, newGroups);
-    }
-
-    /// <summary>Picks rows from head-major <c>[heads, seq, hd]</c> and returns them row-major <c>[rows, heads * hd]</c>.</summary>
-    private static float[] ToRowMajor(float[] headMajor, IReadOnlyList<int> rows, int seq, int heads, int hd, int inner)
-    {
-        float[] outRows = new float[rows.Count * inner];
-        for (int j = 0; j < rows.Count; j++)
-        {
-            for (int h = 0; h < heads; h++)
-            {
-                headMajor.AsSpan((h * seq + rows[j]) * hd, hd).CopyTo(outRows.AsSpan(j * inner + h * hd, hd));
-            }
-        }
-        return outRows;
+        return joined;
     }
 
     /// <summary>norm_out and the two output heads over the packed stream. Shared by the cached and the uncached forward.</summary>

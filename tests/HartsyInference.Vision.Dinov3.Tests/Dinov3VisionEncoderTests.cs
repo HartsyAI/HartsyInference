@@ -24,7 +24,7 @@ public sealed class Dinov3VisionEncoderTests
             full.Dispose();
 
             Dinov3VisionEncoder encoder = new(preset);
-            ArgumentException error = Assert.Throws<ArgumentException>(() => encoder.LoadWeights(weights, ""));
+            InvalidDataException error = Assert.Throws<InvalidDataException>(() => encoder.LoadWeights(weights, ""));
             Assert.Contains("layer.0.norm1.bias", error.Message);
         }
         finally
@@ -57,6 +57,39 @@ public sealed class Dinov3VisionEncoderTests
                 Assert.Equal(cls[c], e[c]);
                 for (int r = 0; r < 4; r++) Assert.Equal(reg[r * 128 + c], e[(1 + r) * 128 + c]);
                 for (int t = 5; t < 21; t++) Assert.Equal(bias[c], e[t * 128 + c]);
+            }
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
+    public void Embeddings_OfABatchAreEachImagesOwnBehindTheSamePrefix()
+    {
+        Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64);
+        Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(preset, seed: 41);
+        try
+        {
+            Dinov3VisionEncoder encoder = Load(preset, weights);
+            const int hidden = 128, images = 3, storage = 4, seq = 1 + storage + 16, pixels = 3 * 64 * 64;
+            using Tensor batch = Pixels(images, 64, 64, seed: 42);
+
+            using Tensor all = encoder.EncodeBlocks(Backend, batch, lastBlock: -1);
+
+            Assert.Equal(new TensorShape(images, seq, hidden), all.Shape);
+            ReadOnlySpan<float> cls = weights["embeddings.cls_token"].AsReadOnlySpan<float>();
+            ReadOnlySpan<float> reg = weights["embeddings.register_tokens"].AsReadOnlySpan<float>();
+            for (int b = 0; b < images; b++)
+            {
+                using Tensor single = new(new TensorShape(1, 3, 64, 64), DType.F32);
+                batch.AsReadOnlySpan<float>().Slice(b * pixels, pixels).CopyTo(single.AsSpan<float>());
+                using Tensor alone = encoder.EncodeBlocks(Backend, single, lastBlock: -1);
+                ReadOnlySpan<float> got = all.AsReadOnlySpan<float>().Slice(b * seq * hidden, seq * hidden);
+                Assert.True(got.SequenceEqual(alone.AsReadOnlySpan<float>()), $"item {b} differs from the image alone");
+                Assert.True(got[..hidden].SequenceEqual(cls), $"item {b} CLS");
+                Assert.True(got.Slice(hidden, storage * hidden).SequenceEqual(reg), $"item {b} storage tokens");
             }
         }
         finally
@@ -141,7 +174,7 @@ public sealed class Dinov3VisionEncoderTests
         Dictionary<string, Tensor> gatedWeights = Dinov3Fixture.Tiny(gated, seed: 32, gated: true);
         try
         {
-            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(plainWeights));
+            Assert.Throws<KeyNotFoundException>(() => new Dinov3VisionEncoder(gated).LoadWeights(plainWeights));
             Assert.Throws<NotSupportedException>(() => new Dinov3VisionEncoder(plain).LoadWeights(gatedWeights));
         }
         finally
@@ -161,7 +194,7 @@ public sealed class Dinov3VisionEncoderTests
             weights.Remove("layer.1.mlp.gate_proj.weight", out Tensor? gone);
             gone?.Dispose();
 
-            Assert.Throws<ArgumentException>(() => new Dinov3VisionEncoder(gated).LoadWeights(weights));
+            Assert.Throws<KeyNotFoundException>(() => new Dinov3VisionEncoder(gated).LoadWeights(weights));
         }
         finally
         {
@@ -250,7 +283,7 @@ public sealed class Dinov3VisionEncoderTests
             weights["embeddings.register_tokens"].Dispose();
             weights["embeddings.register_tokens"] = new Tensor(new TensorShape(1, 3, 128), DType.F32);
             Dinov3VisionEncoder encoder = new(preset);
-            Assert.Throws<ArgumentException>(() => encoder.LoadWeights(weights));
+            Assert.Throws<InvalidDataException>(() => encoder.LoadWeights(weights));
         }
         finally
         {

@@ -75,9 +75,10 @@ public sealed record FastFramesFrame(int Index, float[] Latent, float[] Pixels, 
 /// <para>The pipeline does not own its components, and the constructor checks that they fit together. Numerics are the engine's
 /// (F32 residual stream, the Wan block's branch dtype); they differ from upstream's BF16 run by BF16 rounding, which is why parity
 /// is judged against an FP32 run of the upstream code.</para></summary>
-public sealed class FastFramesPipeline
+public sealed class FastFramesPipeline : IDisposable
 {
     private readonly IBackend _backend;
+    private bool _disposed;
     private readonly WanVideoTransformer _transformer;
     private readonly FastFramesKvRefiner _refiner;
     private readonly FastFramesPixelDecoder _decoder;
@@ -150,6 +151,7 @@ public sealed class FastFramesPipeline
     {
         ArgumentNullException.ThrowIfNull(promptEmbeds);
         ArgumentNullException.ThrowIfNull(noise);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
         // A pinned prefix from an earlier clip is still on the device, so the free VRAM read here does not show what the placement
         // will have free. The placement releases or keeps that prefix; the check after it decides, so skip this one.
@@ -204,15 +206,21 @@ public sealed class FastFramesPipeline
     private IEnumerable<FastFramesFrame> RolloutCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)
     {
+        // The body runs on the first MoveNext, so a rollout enumerated after Dispose is refused here.
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
         // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
         // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
         long kvNeed = ClipKvNeedBytes(latentFrames);
+        // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
+        // prefix beside them, so the headroom only has to cover activations.
+        _backend.PreloadWeights(_refiner.EnumerateWeights());
+        _backend.PreloadWeights(_decoder.EnumerateWeights());
         // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
         // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
-        using BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
+        BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
         {
             Backend = _backend,
             Denoiser = _transformer,
@@ -222,28 +230,58 @@ public sealed class FastFramesPipeline
             Pin = _generatorPin,
             TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
         });
-        LastStreamedBlocks = streaming.StreamedBlocks;
-        // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
-        CheckKvFitsNow(latentFrames);
-        for (int frame = 0; frame < latentFrames; frame++)
+        bool streamed = streaming.StreamedBlocks > 0;
+        try
         {
-            cancel.ThrowIfCancellationRequested();
-            (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
-            FastFramesFrame output;
-            using (pixels)
-                output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
-                    (int)pixels.Shape[2], (int)pixels.Shape[3]);
-            yield return output;
+            LastStreamedBlocks = streaming.StreamedBlocks;
+            // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
+            CheckKvFitsNow(latentFrames);
+            for (int frame = 0; frame < latentFrames; frame++)
+            {
+                cancel.ThrowIfCancellationRequested();
+                // Refuses a frame started after Dispose. A Dispose while the consumer held the previous frame is caught after the yield below.
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
+                FastFramesFrame output;
+                using (pixels)
+                    output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
+                        (int)pixels.Shape[2], (int)pixels.Shape[3]);
+                yield return output;
 
-            // The next frame reads this frame's cache slot, so the clean pass or the refinement runs before it. It runs after the
-            // consumer has the frame, so a frame is not held back by the cache work of the one after it.
-            if (frame == 0)
-                CleanPass(promptEmbeds, latent, frame, cache);
-            else
-                Refine(latent, frame, cache, conditioning);
-            streaming.EndStep();
-            progress?.Invoke(frame + 1, latentFrames);
+                // Disposed while the consumer held the frame: stop before any cache or weight work runs on freed weights. The throw
+                // unwinds through the finally above, which frees the generator, so GeneratorResident is false afterwards.
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                // The next frame reads this frame's cache slot, so the clean pass or the refinement runs before it. It runs after the
+                // consumer has the frame, so a frame is not held back by the cache work of the one after it.
+                if (frame == 0)
+                    CleanPass(promptEmbeds, latent, frame, cache);
+                else
+                    Refine(latent, frame, cache, conditioning);
+                streaming.EndStep();
+                progress?.Invoke(frame + 1, latentFrames);
+            }
         }
+        finally
+        {
+            // Disposing the scope evicts the streamed window; the release below then decides what the next clip finds on the device.
+            streaming.Dispose();
+            ReleaseOrKeepGenerator(streamed);
+        }
+    }
+
+    /// <summary>After a clip. A streamed clip frees the generator's device weights, the resident prefix included, so the next clip and the
+    /// decoder get the VRAM back. The pin keeps the count it was sized to, so the next placement uploads that prefix only as far as it
+    /// fits. A clip that stayed resident keeps the weights, and the pin says so, which lets the next clip skip the admission check the
+    /// weights already passed. A disposed pipeline frees instead of keeping, so nothing stays on the device after Dispose.
+    /// Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
+    private void ReleaseOrKeepGenerator(bool streamed)
+    {
+        if (streamed || _disposed)
+        {
+            FreeGenerator();
+            return;
+        }
+        _generatorPin.Resident = true;
     }
 
     /// <summary>Bytes the block placement keeps free beyond the clip's frame cache: activations, the refiner and the decoder. When
@@ -257,7 +295,36 @@ public sealed class FastFramesPipeline
     /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
     public int LastStreamedBlocks { get; private set; }
 
-    /// <summary>The activation, refiner and decoder allowance on top of the frame cache when the placement is planned.</summary>
+    /// <summary>True while the generator's weights stay on the device from the last clip, the resident path that <c>ReleaseOrKeepGenerator</c> keeps.</summary>
+    internal bool GeneratorResident => _generatorPin.Resident;
+
+    /// <summary>Frees the generator's device weights when a resident clip left them there, so a dropped pipeline gives the VRAM back. The
+    /// pipeline does not own the backend, the refiner, the decoder or the transformer object; their owner disposes those. Not thread-safe:
+    /// call it on the thread that enumerates the clips, or after they finish. To abort a clip, cancel its token; a Dispose during a clip
+    /// stops it at the next frame boundary.</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        if (_generatorPin.Resident)
+        {
+            FreeGenerator();
+        }
+    }
+
+    /// <summary>Frees every generator weight on the device and marks the pin not resident.</summary>
+    private void FreeGenerator()
+    {
+        _backend.FreeWeights(_transformer.EnumerateWeights());
+        _backend.TrimMemoryPool();
+        _generatorPin.Resident = false;
+    }
+
+    /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
+    /// they are uploaded before the placement, so the planner counts them as used.</summary>
     public const long DefaultStreamingHeadroomBytes = 1L << 30;
 
     private IEnumerable<VideoFrame> GenerateCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,

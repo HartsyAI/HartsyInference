@@ -51,15 +51,15 @@ public sealed class FastFramesPixelDecoder : IDisposable
     public static FastFramesPixelDecoderConfig DetectConfig(IReadOnlyDictionary<string, Tensor> weights)
     {
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";
-        int dim = (int)weights[prefix + "modulation"].Shape[2];
+        int dim = (int)CheckpointTensors.Require(weights, "FastFrames decoder", prefix + "modulation").Shape[2];
         int inputDim = weights.TryGetValue("bridge.weight", out Tensor? bridge) ? (int)bridge.Shape[1] : dim;
         int low = 0, high = 0;
         while (weights.ContainsKey($"{prefix}conv_low.{low}.dw.weight"))
             low++;
         while (weights.ContainsKey($"{prefix}conv_high.{high}.dw.weight"))
             high++;
-        int ffn = (int)(weights[$"{prefix}conv_low.0.pw1.weight"].Shape[0] / dim);
-        int patch = (int)(weights[prefix + "fc_out.weight"].Shape[0]);
+        int ffn = (int)(CheckpointTensors.Require(weights, "FastFrames decoder", $"{prefix}conv_low.0.pw1.weight").Shape[0] / dim);
+        int patch = (int)CheckpointTensors.Require(weights, "FastFrames decoder", prefix + "fc_out.weight").Shape[0];
         // fc_out emits PatchT·PatchH·PatchW·OutChannels = 3072 for (4, 16, 16, 3); the patch is the released one.
         FastFramesPixelDecoderConfig defaults = new();
         if (patch != defaults.PatchT * defaults.PatchH * defaults.PatchW * defaults.OutChannels)
@@ -348,6 +348,13 @@ public sealed class FastFramesPixelDecoder : IDisposable
                 return false;
         }
         return true;
+    }
+
+    /// <summary>The decoder's owned device-uploadable weights, for a caller that places them before a clip.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        RequireLoaded();
+        return _owned.AsReadOnly();
     }
 
     private void RequireLoaded()
