@@ -14,7 +14,7 @@ namespace HartsyInference.Vision.Dinov3;
 /// <c>norm.*</c>), using a preset from <see cref="Dinov2Preset.FromDinov3Weights"/>. F32 weights are borrowed (the loader owns them); a 16-bit
 /// tensor is widened into a copy the encoder owns and frees on the next load or <see cref="Dispose"/>. Input is ImageNet-normalized pixels from
 /// <see cref="Dinov2ImagePreprocessor"/>.</para></summary>
-public sealed unsafe class Dinov3VisionEncoder : IDisposable
+public sealed class Dinov3VisionEncoder : IDisposable
 {
     internal const string Family = "DINOv3";
     private const int HeadDim = 64;
@@ -283,34 +283,38 @@ public sealed unsafe class Dinov3VisionEncoder : IDisposable
         StridedCopies.SliceAxis(backend, prefixRows, frame, 1, 0, prefix);
         StridedCopies.SliceAxis(backend, patchRows, frame, 1, prefix, patches);
 
-        int live;
-        Tensor? qMh = null, keys = null, values = null;
+        Tensor? qMh = null;
+        Tensor keys, values;
         try
         {
             (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, rope.Cos, rope.Sin);
             using (q)
-            using (k)
-            using (v)
             {
-                using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
-                (Tensor pq, Tensor pk, Tensor pv) = layer.ProjectAttention(backend, pooled, null, null);
-                pq.Dispose();
-                using (pk)
-                using (pv)
-                    live = ring.Update(backend, block, k, v, pk, pv);
+                Tensor pk, pv;
+                try
+                {
+                    using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
+                    (Tensor pq, pk, pv) = layer.ProjectAttention(backend, pooled, null, null);
+                    pq.Dispose();
+                }
+                catch
+                {
+                    k.Dispose();
+                    v.Dispose();
+                    throw;
+                }
+
+                ring.Update(block, k, v, pk, pv);   // the ring owns all four from here
                 qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
                 backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
             }
 
-            // Exact-length copies of the live rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
-            keys = CrossFrameKvRing.LiveCopy(backend, ring.Keys(block), live);
-            values = CrossFrameKvRing.LiveCopy(backend, ring.Values(block), live);
+            // Exact-length rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
+            (keys, values) = ring.Read(block);
         }
         catch
         {
             qMh?.Dispose();
-            keys?.Dispose();
-            values?.Dispose();
             throw;
         }
 
@@ -359,33 +363,40 @@ public sealed unsafe class Dinov3VisionEncoder : IDisposable
         }
     }
 
-    // Patch projection, then [CLS, storage, patches] per batch item. No position embedding is added: RoPE does that in attention.
+    // Patch projection, then [CLS, storage, patches] per batch item. No position embedding is added: RoPE does that in attention. Every step is a
+    // backend op or a reshape that keeps the storage, so on a GPU backend the tokens never pass through the host.
     private Tensor EmbedTokens(IBackend backend, Tensor pixelValues, int batch, int hidden, int gridH, int gridW, int prefix, int seqLen)
     {
-        int p = _preset.PatchSize, numPatches = gridH * gridW, storage = _preset.NumRegisterTokens;
+        int p = _preset.PatchSize, numPatches = gridH * gridW;
+        using Tensor patches = new(new TensorShape(batch, numPatches, hidden), DType.F32);
         Tensor patch = new(new TensorShape(batch, hidden, gridH, gridW), DType.F32);
-        backend.Conv2D(patch, pixelValues, _patchW!, _patchB!, p, p, 0, 0);
-        Tensor flat = patch.Reshape(new TensorShape(batch, hidden, numPatches));
-        Tensor patches = new(new TensorShape(batch, numPatches, hidden), DType.F32);
-        backend.Transpose2D(patches, flat, hidden, numPatches);
-        patch.Dispose();
+        try
+        {
+            backend.Conv2D(patch, pixelValues, _patchW!, _patchB!, p, p, 0, 0);
+            patch = patch.IntoShape(new TensorShape(batch, hidden, numPatches));
+            backend.Transpose2D(patches, patch, hidden, numPatches);
+        }
+        finally
+        {
+            patch.Dispose();
+        }
+
+        // The prefix rows of one image, [CLS, storage], repeated for every batch item.
+        using Tensor one = new(new TensorShape(1, prefix, hidden), DType.F32);
+        backend.Concat(one, [_clsToken!, _storageTokens!], 1);
+        using Tensor prefixRows = new(new TensorShape(batch, prefix, hidden), DType.F32);
+        StridedCopies.RepeatInterleave(backend, prefixRows, one, 0, batch);
 
         Tensor seq = new(new TensorShape(batch, seqLen, hidden), DType.F32);
-        float* dp = (float*)seq.DataPointer;
-        float* cls = (float*)_clsToken!.DataPointer;
-        float* reg = (float*)_storageTokens!.DataPointer;
-        float* pat = (float*)patches.DataPointer;
-        for (int b = 0; b < batch; b++)
+        try
         {
-            long rowBase = (long)b * seqLen * hidden;
-            for (int c = 0; c < hidden; c++) dp[rowBase + c] = cls[c];
-            for (int r = 0; r < storage; r++)
-                for (int c = 0; c < hidden; c++) dp[rowBase + (long)(1 + r) * hidden + c] = reg[r * hidden + c];
-            long patchBase = (long)b * numPatches * hidden;
-            for (long i = 0; i < (long)numPatches * hidden; i++)
-                dp[rowBase + (long)prefix * hidden + i] = pat[patchBase + i];
+            backend.Concat(seq, [prefixRows, patches], 1);
+            return seq;
         }
-        patches.Dispose();
-        return seq;
+        catch
+        {
+            seq.Dispose();
+            throw;
+        }
     }
 }
