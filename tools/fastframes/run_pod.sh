@@ -23,6 +23,9 @@ FF="$MODELS/FastFrames"
 export HARTSYINFERENCE_MODELS="$MODELS"
 
 mkdir -p "$OUT"
+# Absolute paths from here on: the script changes into $REPO once, so the output and log paths must not depend on the working directory.
+OUT=$(cd "$OUT" && pwd)
+cd "$REPO" || exit 5
 # Stop any nvidia-smi sampler left running when the script exits or is interrupted.
 trap 'kill $(jobs -p) 2>/dev/null' EXIT INT TERM
 
@@ -51,8 +54,11 @@ verify() {
   return $failed
 }
 
-# The card's total memory in MiB (the first GPU).
-card_mib() { nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | tr -d ' '; }
+# The card's total memory in MiB (the first GPU), or nothing if the value is not a number.
+card_mib() {
+  local v; v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+  [[ "$v" =~ ^[0-9]+$ ]] && echo "$v"
+}
 
 run_logged() {
   local name="$1"; shift
@@ -72,14 +78,15 @@ build() {
   return $status
 }
 
+# net10.0 only: the test projects also target net8.0, which a pod without the .NET 8 runtime cannot run.
 decoder() {
-  (cd "$REPO" && run_logged decoder env FF_GPU_TESTS=1 \
-    dotnet test tests/HartsyInference.Engine.Tests -c Release --filter FullyQualifiedName~FastFramesDecoderGpuParityTests)
+  run_logged decoder env FF_GPU_TESTS=1 \
+    dotnet test tests/HartsyInference.Engine.Tests -c Release -f net10.0 --filter FullyQualifiedName~FastFramesDecoderGpuParityTests
 }
 
 streamed() {
-  (cd "$REPO" && run_logged streamed env FF_GPU_TESTS=1 \
-    dotnet test tests/HartsyInference.Diffusion.Tests -c Release --filter FullyQualifiedName~TheStreamedRolloutMatchesTheResidentOneOnCuda)
+  run_logged streamed env FF_GPU_TESTS=1 \
+    dotnet test tests/HartsyInference.Diffusion.Tests -c Release -f net10.0 --filter FullyQualifiedName~TheStreamedRolloutMatchesTheResidentOneOnCuda
 }
 
 clip() {

@@ -15,7 +15,7 @@ work is already merged or in review; this file covers only the runs that need a 
 L does not fit a 24 GB card at 81 frames. With block streaming on a 24 GB card, L runs only about 14 latent frames (about 53 pixel
 frames), because the cache is not streamed. That is a fallback, not the target.
 
-Disk: about 40 GB for L plus S. Host RAM: 64 GB is enough for the loaders.
+Disk: about 50 GB for the seven files, the build and the clips. Host RAM: 64 GB is enough for the loaders.
 
 ## Weights
 
@@ -30,7 +30,7 @@ Place every file under the models root, in the folders the catalog expects (`Fas
 | `FastFrames/fastframes-l/dit.safetensors` | `apple/FastFrames-L` (revision `d18ec5f054bb03f6b8e561a63d52af3142b5b81d`), `fastframes-l/dit.safetensors` | 28,577,096,680 | `cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de` |
 | `FastFrames/fastframes-l/kv_refiner.safetensors` | same repo, `fastframes-l/kv_refiner.safetensors` | 1,780,342,784 | `841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74` |
 | `FastFrames/fastframes-l/pixel_decoder.safetensors` | same repo, `fastframes-l/pixel_decoder.safetensors` | 286,952,688 | `75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55` |
-| `text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `Comfy-Org/Wan_2.1_ComfyUI_repackaged`, `split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors` | about 6.7 GB | `c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68` |
+| `text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `Comfy-Org/Wan_2.1_ComfyUI_repackaged`, `split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors` | 6,735,906,897 | `c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68` |
 
 Check each file's sha256 before the run (`tools/fastframes/run_pod.sh verify` does this). Do not load a `.pt` file any way except the
 engine's own reader: the generator is a pickle.
@@ -61,8 +61,9 @@ Use `hartsy/fastframes-gpu-candidate` (or the newer `main` once #1209 and #1214 
    `FastFramesDecoderGpuParityTests.cs`'s doc comment.
 4. Streamed vs resident: `run_pod.sh streamed`.
 5. S clip: `run_pod.sh clip-s`. Reference from the 4090 run: 93 s total, steps 0.85 to 1.1 s, peak VRAM 20.0 GB, all 30 blocks resident.
-6. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog marks `fastframes-l` as not CLI-drivable, so the
-   CLI may refuse it; if so, do not flip the flag on a merged branch. That is a decision for the parent.
+6. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog flag `CliDrivable=false` is metadata only; no
+   command reads it, so the CLI is expected to run `fastframes-l`. If it does refuse, that is a finding, not something to work around on a
+   merged branch.
 7. Renorm D2H count (#1209): not runnable yet. It needs a harness that logs `GetD2hSyncCount` around the refiner's renorm; none is
    merged. Do not run this step until one is.
 
