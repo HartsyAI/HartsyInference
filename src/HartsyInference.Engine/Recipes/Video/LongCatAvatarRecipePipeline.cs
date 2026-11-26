@@ -31,6 +31,9 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly AdjunctGate? _loraGate;
     private readonly LongCatAvatarLoraSchedule? _loraMix;
 
+    /// <summary>Whether a segment's context is carried as latents instead of re-encoded from decoded pixels. Off until the 1.6 chain is verified.</summary>
+    internal const bool CarryLatentContext = false;
+
     /// <summary>Wraps the constructed pipeline, taking ownership of every disposable in <paramref name="loaders"/>.</summary>
     internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, WhisperEncoder whisper,
         MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate, LongCatAvatarLoraSchedule? loraMix = null)
@@ -186,11 +189,15 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // context until its own reference path is verified; the upstream 1.6 demo passes the chain flags but its context mode is not checked here.
         // The last segment's context is not encoded.
         LongCatChainFrames output = new(1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1));
+        // Latent carry (the reference's use_vcond True path): the segment's last latent frames become the next context, with no decode-encode round trip.
+        // It is off: the 1.6 chain's context mode is not verified against the reference, so CarryLatentContext stays false until blocker C's parity test.
+        // Frames are still decoded once for the output either way.
         Func<float[], bool, float[]> contextFromSegment = (segment, last) =>
         {
             byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, segment, channels, plan.SegmentLatents, latentHeight, latentWidth);
-            return output.Step(decoded, last, frames => LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, frames, plan.ContextLatents,
-                channels, latentHeight, latentWidth));
+            return output.Step(decoded, last, frames => !CarryLatentContext
+                ? LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, frames, plan.ContextLatents, channels, latentHeight, latentWidth)
+                : LongCatRecipeSupport.CarriedContext(segment, channels, plan.SegmentLatents, plan.ContextLatents, latentHeight * latentWidth));
         };
 
         // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
