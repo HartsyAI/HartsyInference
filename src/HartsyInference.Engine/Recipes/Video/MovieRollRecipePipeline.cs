@@ -1,3 +1,4 @@
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -72,9 +73,7 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
             Func<int, Tensor> noise = SeededNoise(seed, HunyuanVideo15Config.Full.LatentChannels, latentHeight, latentWidth);
             using Tensor rgb = pipeline.Generate(options, text, glyphFeatures, null, null, latentHeight, latentWidth, noise);
 
-            int f = (int)rgb.Shape[2];
-            byte[][] decoded = new byte[f][];
-            for (int i = 0; i < f; i++) decoded[i] = VideoRgbFrames.ExtractFrame(rgb, i);
+            byte[][] decoded = VideoRgbFrames.ExtractAllFrames(rgb);
             int w = (int)rgb.Shape[4], h = (int)rgb.Shape[3];
             Logs.Info($"[MovieRollRecipePipeline] Generated {decoded.Length} frames {w}x{h} (seed {seed}).");
             return VideoRecipeUtils.ToResult(decoded, w, h, request);
@@ -128,13 +127,7 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
     /// <inheritdoc/>
     public void Dispose()
     {
-        pipeline.Dispose();
-        vae.Dispose();
-        dit.Dispose();
-        llama.Dispose();
-        _glyph?.Dispose();
-        _glyphLoader?.Dispose();
-        foreach (IDisposable loader in loaders)
-            loader.Dispose();
+        // The pipeline and the DiT go before the containers and the DiT's F16 copies, which the DiT's weights may still reference until it is gone.
+        new CompositeDisposable([pipeline, vae, dit, llama, _glyph, _glyphLoader, .. loaders]).Dispose();
     }
 }
