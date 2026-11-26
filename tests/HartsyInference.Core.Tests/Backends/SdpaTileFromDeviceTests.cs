@@ -67,7 +67,7 @@ public sealed class SdpaTileFromDeviceTests
         // Two calls: one halved from 100 to 50 rows, one at 100. Free ranged 6 to 10 GiB; total 24 GiB.
         Assert.Equal("tileFromDevice: calls=2 halved=1 totalMiB=24576 freeMiB min=6144 max=10240 tileRows=[50,100]", TileFreeLog.Summary());
         TileFreeLog.Reset();
-        Assert.Equal("tileFromDevice: no tiled calls or gate decisions this process.", TileFreeLog.Summary());
+        Assert.Equal("tileFromDevice: no tiled calls, gate decisions or executed rows this process.", TileFreeLog.Summary());
     }
 
     [Fact]

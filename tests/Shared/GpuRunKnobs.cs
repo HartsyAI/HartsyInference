@@ -123,8 +123,16 @@ public sealed class GpuRunKnobsTests
         }
         // Order: request profile, run profile, host overrides. A host Set to off must not turn the lane's knob back off.
         KnobStore.Set(EngineKnobs.TileFromDevice, false);
-        Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
-        Assert.True(EngineKnobs.TileFromDevice.Value == true);
+        try
+        {
+            Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+            Assert.True(EngineKnobs.TileFromDevice.Value == true);
+        }
+        finally
+        {
+            // The host override is this test's alone: clear it so later tests in the run read the run profile, not a stale host value.
+            KnobStore.Clear(EngineKnobs.TileFromDevice);
+        }
     }
 
     [Fact]

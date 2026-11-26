@@ -37,6 +37,7 @@ public sealed partial class CudaBackend
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
         AttentionEvidence.Executed("cuda", row.Capability.Id, t_attentionRoute, in call, row.Capability.Lowering);
         AttentionPlanLog.Ran("cuda", row, in call);
+        if (EngineKnobs.TileFromDevice.Value == true) TileFreeLog.RecordRow(row.Capability.Id);
     }
 
     /// <summary>The rows a call pinned to <paramref name="route"/> is planned over.</summary>
