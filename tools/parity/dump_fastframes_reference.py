@@ -11,7 +11,14 @@ venv), with the upstream code at the pinned commit mounted or cloned:
 
     # released weights (an FP32 CPU run of S is slow; pass --frames to keep it short):
     python dump_fastframes_reference.py checkpoint --upstream <dir> --model ff-s --checkpoints <dir-with-weights> \\
-        --prompt-embeds <safetensors holding "prompt_embeds" [L, 4096]> --out <out-dir> --frames 4 --precision fp32
+        --prompt-embeds <safetensors holding "prompt_embeds" [L, 4096] | random> --out <out-dir> --frames 4 --precision fp32
+    # The Causal Forcing++ generator is a torch pickle, and upstream loads it with torch.load(weights_only=True), which the reference
+    # image's torch cannot read. Convert it first, through the engine's safe-subset pickle reader (no pickle is executed):
+    #   dotnet run --project tools/fastframes/ConvertGenerator -- <checkpoints>/causal-forcing++/framewise-2step.pt <out>/framewise-2step.safetensors
+    # The output holds all 825 generator tensors (the pickle has 825 storages; an earlier note saying 830 was wrong), as F32 under the
+    # names upstream expects after its prefix strip. The original pickle is left in place. Then pass --dit-file <out>/framewise-2step.safetensors.
+    # "random" (seeded) replaces the umT5 output with fixed embeddings; both sides then see the same input, which is all a numeric
+    # parity check needs. The C# harness reads io.safetensors from --out (FF_REAL_PARITY_DIR).
 
 Upstream hard-codes BF16 in several places (the cuDNN attention casts q/k/v to BF16, the KV cache defaults to BF16, the refiner
 input is cast to BF16). ``--precision fp32`` replaces ``torch.bfloat16`` with ``torch.float32`` before the upstream modules are
@@ -25,16 +32,21 @@ initial and transition noise it used, and the rollout is run on exactly those ar
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import types
 from pathlib import Path
 
 
+REAL_BF16 = None
+
+
 def configure(upstream: Path, precision: str):
     import torch
-    # A --precision fp32 run replaces torch.bfloat16 process-wide. safetensors must be imported first, so that its dtype table is
-    # bound to the real dtype before the alias exists; a BF16 checkpoint then still loads as BF16.
-    import safetensors.torch  # noqa: F401
+    # A --precision fp32 run replaces torch.bfloat16 process-wide, and safetensors resolves its dtype names at call time, so a BF16
+    # file read under the alias comes back at the wrong size. The real dtype is kept for reads of BF16 files (see real_bf16).
+    global REAL_BF16
+    REAL_BF16 = torch.bfloat16
 
     if precision == "fp32":
         torch.bfloat16 = torch.float32  # before any upstream module binds a dtype default or builds a tensor
@@ -143,6 +155,18 @@ def tiny(args):
     print(f"tiny reference ({args.precision}): latents {tuple(latents.shape)} pixels {tuple(pixels.shape)} -> {out}")
 
 
+@contextlib.contextmanager
+def real_bf16():
+    """Restores torch.bfloat16 for the duration of a read of a BF16 file, then re-applies the fp32 alias."""
+    import torch
+    alias = torch.bfloat16
+    torch.bfloat16 = REAL_BF16
+    try:
+        yield
+    finally:
+        torch.bfloat16 = alias
+
+
 def checkpoint(args):
     torch, pipeline, causal_model, model = configure(Path(args.upstream), args.precision)
     from safetensors.torch import load_file
@@ -154,13 +178,18 @@ def checkpoint(args):
     from fastframes.models.kv_refinement import KVRefinementNetwork
     from fastframes.models.pixel_decoder import BridgedPixelDecoder, PixelDecoder
 
-    dit = build_wan(spec.config.wan_model, load_state_dict(root / spec.dit, "generator_ema"), dtype=dtype, device="cpu")
+    # --dit-file replaces the pickle with a converted safetensors (see the conversion note above); its keys hold the same names
+    # under generator_ema with that envelope removed, and _strip removes the FSDP prefix either way.
+    dit_source = Path(args.dit_file) if args.dit_file else root / spec.dit
+    dit = build_wan(spec.config.wan_model, load_state_dict(dit_source, "generator_ema"), dtype=dtype, device="cpu")
     wan = model.WAN_CONFIGS[spec.config.wan_model]
-    refiner_state = load_state_dict(root / spec.refiner, "adapter")
+    with real_bf16():  # the released refiner file is BF16
+        refiner_state = load_state_dict(root / spec.refiner, "adapter")
     refiner = KVRefinementNetwork(dim=wan.dim, num_heads=wan.num_heads, head_dim=wan.dim // wan.num_heads,
                                   num_blocks=wan.num_layers, d_a=refiner_state["stem_in.weight"].shape[0]).to(dtype)
     refiner.load_state_dict(refiner_state, strict=True)
-    decoder_state = load_state_dict(root / spec.decoder)
+    with real_bf16():
+        decoder_state = load_state_dict(root / spec.decoder)
     if any(k.startswith("bridge.") for k in decoder_state):
         decoder = BridgedPixelDecoder(in_dim=wan.dim)
     else:
@@ -173,7 +202,15 @@ def checkpoint(args):
     frames = args.frames
     config = spec.config.__class__(**{**spec.config.__dict__, "num_frames": frames, "num_pixel_frames": 4 * frames - 3,
                                       "decoder_dtype": dtype, "autocast": False, "fast_ops": False, "allow_tf32": False})
-    prompt_embeds = load_file(args.prompt_embeds)["prompt_embeds"].to(dtype)
+    if args.prompt_embeds == "random":
+        # Seeded stand-in for the umT5 output: parity needs the same embeddings on both sides, not a real prompt. Rows past the
+        # first 64 are zero, as a short prompt's padding is.
+        rng = torch.Generator().manual_seed(args.seed + 1)
+        prompt_embeds = torch.zeros(wan.text_len, 4096, dtype=torch.float32)
+        prompt_embeds[:64] = torch.randn(64, 4096, generator=rng)
+        prompt_embeds = prompt_embeds.to(dtype)
+    else:
+        prompt_embeds = load_file(args.prompt_embeds)["prompt_embeds"].to(dtype)
     if prompt_embeds.shape[0] < wan.text_len:
         # The C# side takes the umT5 output already zero-padded to the generator's text length, as upstream does.
         pad = prompt_embeds.new_zeros(wan.text_len - prompt_embeds.shape[0], prompt_embeds.shape[1])
@@ -208,6 +245,7 @@ def main():
     c.add_argument("--upstream", required=True)
     c.add_argument("--model", choices=["ff-s", "ff-l"], required=True)
     c.add_argument("--checkpoints", required=True)
+    c.add_argument("--dit-file", default=None, help="a converted generator .safetensors; default: the pickle under --checkpoints")
     c.add_argument("--prompt-embeds", required=True)
     c.add_argument("--out", required=True)
     c.add_argument("--frames", type=int, default=4)
