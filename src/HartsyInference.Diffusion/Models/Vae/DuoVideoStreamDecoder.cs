@@ -51,24 +51,41 @@ public sealed class DuoVideoStreamDecoder
             throw new InvalidOperationException("The stream has ended; no chunk can follow End.");
         }
         Chunk z = Read(chunk);
-        int index = _received++;
+        int index = _received;
+        bool first = index == 0;
         _recent.Add(z);
-        DuoDecodeStep? step = DuoVideoDecodePlan.OnChunk(index);
-        if (step is null)
+        _received++;
+        try
         {
+            DuoDecodeStep? step = DuoVideoDecodePlan.OnChunk(index);
+            if (step is null)
+            {
+                Trim();
+                return [];
+            }
+            // Whole chunks from the window's first chunk up to the newest previous one, then the newest chunk's first two latents.
+            List<Segment> segments = [];
+            for (int c = step.Value.FirstChunk; c < index; c++)
+            {
+                segments.Add(new Segment(c, 0, ChunkLatents));
+            }
+            segments.Add(new Segment(index, 0, 2));
+            DuoDecodedBlock block = Publish(step.Value, segments);
             Trim();
-            return [];
+            return [block];
         }
-        // Whole chunks from the window's first chunk up to the newest previous one, then the newest chunk's first two latents.
-        List<Segment> segments = [];
-        for (int c = step.Value.FirstChunk; c < index; c++)
+        catch
         {
-            segments.Add(new Segment(c, 0, ChunkLatents));
+            // Undo this chunk, so a decode that throws leaves the stream exactly as it was before the call.
+            _recent.RemoveAt(_recent.Count - 1);
+            _received--;
+            if (first)
+            {
+                _height = 0;
+                _width = 0;
+            }
+            throw;
         }
-        segments.Add(new Segment(index, 0, 2));
-        DuoDecodedBlock block = Publish(step.Value, segments);
-        Trim();
-        return [block];
     }
 
     /// <summary>Ends the stream and publishes the last block from its own last two latents. Empty when no chunk arrived.</summary>
@@ -78,10 +95,10 @@ public sealed class DuoVideoStreamDecoder
         {
             throw new InvalidOperationException("The stream has already ended.");
         }
-        _ended = true;
         DuoDecodeStep? step = DuoVideoDecodePlan.AtEnd(_received);
         if (step is null)
         {
+            _ended = true;
             return [];
         }
         int last = step.Value.LastChunk;
@@ -91,7 +108,10 @@ public sealed class DuoVideoStreamDecoder
             segments.Add(new Segment(c, 0, ChunkLatents));
         }
         segments.Add(new Segment(last, ChunkLatents - 2, 2));
-        return [Publish(step.Value, segments)];
+        // Only a published End closes the stream: if the decode throws, End can be called again.
+        DuoDecodedBlock block = Publish(step.Value, segments);
+        _ended = true;
+        return [block];
     }
 
     private DuoDecodedBlock Publish(DuoDecodeStep step, List<Segment> segments)

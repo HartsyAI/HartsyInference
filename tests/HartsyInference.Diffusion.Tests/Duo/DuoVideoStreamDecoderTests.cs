@@ -153,6 +153,45 @@ public sealed class DuoVideoStreamDecoderTests
         Assert.Throws<InvalidOperationException>(() => decoder.End());
     }
 
+    [Fact]
+    public void AFailedDecodeLeavesTheStreamAsItWasAndTheRetryPublishesTheRightBlock()
+    {
+        List<float[]> windows = [];
+        bool fail = false;
+        Func<Tensor, Tensor> inner = FakeDecoder(windows);
+        DuoVideoStreamDecoder decoder = new(window => fail ? throw new InvalidOperationException("decoder down") : inner(window));
+        decoder.OnChunk(Chunk(0));
+        int retained = decoder.RetainedChunks;
+
+        fail = true;
+        Assert.Throws<InvalidOperationException>(() => decoder.OnChunk(Chunk(1)));
+        Assert.Equal(retained, decoder.RetainedChunks);
+        Assert.Empty(windows);
+
+        fail = false;
+        DuoDecodedBlock block = decoder.OnChunk(Chunk(1)).Single();
+        Assert.Equal(0, block.Block);
+        Assert.Equal(Expected((0, 0, 5), (1, 0, 2)), windows[0]);
+    }
+
+    [Fact]
+    public void AFailedEndCanBeRetried()
+    {
+        List<float[]> windows = [];
+        bool fail = false;
+        Func<Tensor, Tensor> inner = FakeDecoder(windows);
+        DuoVideoStreamDecoder decoder = new(window => fail ? throw new InvalidOperationException("decoder down") : inner(window));
+        decoder.OnChunk(Chunk(0));
+        decoder.OnChunk(Chunk(1));
+
+        fail = true;
+        Assert.Throws<InvalidOperationException>(() => decoder.End());
+        fail = false;
+        DuoDecodedBlock last = decoder.End().Single();
+        Assert.Equal(1, last.Block);
+        Assert.Throws<InvalidOperationException>(() => decoder.End());
+    }
+
     private static Func<Tensor, Tensor> FakeDecoder(List<float[]> windows) => window =>
     {
         windows.Add(window.AsSpan<float>().ToArray());
