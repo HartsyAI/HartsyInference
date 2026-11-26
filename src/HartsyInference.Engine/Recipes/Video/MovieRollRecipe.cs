@@ -72,10 +72,13 @@ public sealed class MovieRollRecipe : IVideoRecipe
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
 
     /// <inheritdoc/>
+    public bool RefusesUnhonouredPlacements => true;
+
+    /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // A text-encoder or VAE placement on another device is reported and run on the primary backend, as every recipe that does not honour it does.
-        UnhonouredBackends.Refuse(context, "MovieRoll");
+        UnhonouredBackends.Refuse(context, "MovieRoll", warn: false);
 
         List<IDisposable> loaders = new List<IDisposable>();
         HunyuanVideo15Dit? dit = null;
