@@ -1111,6 +1111,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadNormModulateKernels();
         LoadGatingKernels();
         LoadGuidanceKernels();
+        LoadReductionKernels();
         LoadRowIndexKernels();
         LoadNeighborhoodAttentionKernels();
         LoadInt8AttentionV2Kernels();

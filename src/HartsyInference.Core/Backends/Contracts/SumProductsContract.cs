@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Reduction;
 using HartsyInference.Core.Tensors;
 
@@ -33,6 +34,7 @@ public static class SumProductsContract
             throw new ArgumentException($"SumProducts writes {groups} groups of {terms} sums; the output {output.Shape} has {output.ElementCount} elements.", nameof(output));
         if (output.HasOverlappingHostStorageWithoutSync(a) || output.HasOverlappingHostStorageWithoutSync(b))
             throw new ArgumentException("SumProducts output storage must not overlap an operand.", nameof(output));
-        return new SumProductsGeometry(groups, perGroup, terms);
+        return new SumProductsGeometry(groups, perGroup, terms,
+            StridedCopyContract.Collapse(new StridedCopySpec(spec.B, spec.A), DType.F32.SizeInBytes, covers: false));
     }
 }
