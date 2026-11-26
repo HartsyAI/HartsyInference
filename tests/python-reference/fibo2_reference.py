@@ -1,6 +1,6 @@
 """
 Fibo 2.0 denoiser, pure-torch reference of the ComfyUI forward (comfy/ldm/fibo2/model.py, upstream snapshot
-2026-10-21; see docs/Research/FIBO2_ARCHITECTURE.md). Writes a seeded tiny-config fixture with ComfyUI-native key
+2026-10-21; see the architecture note deleted in e9474bb06: `git show e9474bb06^:docs/Research/FIBO2_ARCHITECTURE.md`). Writes a seeded tiny-config fixture with ComfyUI-native key
 names and fused F32 shapes, plus the expected intermediates and velocity, for the C# parity test:
 
     tests/HartsyInference.Diffusion.Tests/Fixtures/Fibo2/fibo2_tiny.safetensors
