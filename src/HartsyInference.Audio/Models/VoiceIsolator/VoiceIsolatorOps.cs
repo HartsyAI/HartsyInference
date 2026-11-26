@@ -56,6 +56,32 @@ internal static unsafe class VoiceIsolatorOps
         sinRows.Dispose();
     }
 
+    /// <summary>Rotates every row of <paramref name="x"/> (<c>[..., seq, hd]</c>) by the one table position <paramref name="position"/>.
+    /// Used by the cache compaction, where every kept slot moves by the same distance.</summary>
+    public static void RopeFixed(IBackend backend, Tensor x, int seq, int hd, int position, float[] cos, float[] sin)
+    {
+        int h = hd / 2;
+        Tensor cosRows = new(new TensorShape(seq, hd), DType.F32);
+        Tensor sinRows = new(new TensorShape(seq, hd), DType.F32);
+        float* cp = (float*)cosRows.DataPointer;
+        float* sp = (float*)sinRows.DataPointer;
+        for (int s = 0; s < seq; s++)
+        {
+            for (int i = 0; i < h; i++)
+            {
+                float c = cos[(long)position * h + i];
+                float sn = sin[(long)position * h + i];
+                cp[(long)s * hd + i] = c;
+                cp[(long)s * hd + h + i] = c;
+                sp[(long)s * hd + i] = sn;
+                sp[(long)s * hd + h + i] = sn;
+            }
+        }
+        backend.Rotary(RotaryCall.HeadMajor(x, cosRows, sinRows, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        cosRows.Dispose();
+        sinRows.Dispose();
+    }
+
     /// <summary>The cos and sin tables <c>[positions, hd / 2]</c> of the reference's <c>rope_tables</c> (base 10000).</summary>
     public static (float[] Cos, float[] Sin) RopeTables(int positions, int hd)
     {
