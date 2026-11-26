@@ -26,19 +26,55 @@ public sealed class LongCatMeasuredLaterRunTests
 
     private static long Cached(int width, int height) => LongCatRecipeSupport.CachedStepBytes(Config(), 5, height / 8, width / 8);
 
+    /// <summary>The measured workload's key: the plan the measurement ran (24-latent segments, 4 context latents, 20 new, distilled).</summary>
+    private static long? Peak(int width, int height, int newLatents = 20, int contextLatents = 4, bool distilled = true) =>
+        LongCatRecipeSupport.MeasuredReservedPeak(width, height, newLatents, contextLatents, distilled);
+
     private static long Measured(int width, int height, long cache) =>
-        LongCatRecipeSupport.BudgetHeadroomBytes(NoisyTokens(width, height), 4096, 11008, LongCatRecipeSupport.MeasuredReservedPeak(width, height), cache);
+        LongCatRecipeSupport.BudgetHeadroomBytes(NoisyTokens(width, height), 4096, 11008, Peak(width, height), cache);
 
     private static long Estimate(int width, int height, long cache) =>
         LongCatRecipeSupport.BudgetHeadroomBytes(NoisyTokens(width, height), 4096, 11008, measuredPeakBytes: null, cacheBytes: cache);
 
     [Fact]
-    public void OnlyTheTwoMeasuredSizesHaveAPeak()
+    public void OnlyTheMeasuredWorkloadsHaveAPeak()
     {
-        Assert.Equal(7808 * Mb, LongCatRecipeSupport.MeasuredReservedPeak(640, 368));
-        Assert.Equal(11360 * Mb, LongCatRecipeSupport.MeasuredReservedPeak(832, 480));
-        Assert.Null(LongCatRecipeSupport.MeasuredReservedPeak(1024, 576));
-        Assert.Null(LongCatRecipeSupport.MeasuredReservedPeak(832, 464));
+        Assert.Equal(7808 * Mb, Peak(640, 368));
+        Assert.Equal(11360 * Mb, Peak(832, 480));
+        Assert.Null(Peak(1024, 576));
+        Assert.Null(Peak(832, 464));
+        Assert.Null(Peak(832, 480, distilled: false));
+    }
+
+    [Fact]
+    public void TheMeasuredKeyIsThePlanThatWasMeasured()
+    {
+        // The key's latents are the plan's own: a 24-latent segment with 4 context latents has 20 new latents.
+        LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
+        Assert.Equal(20, plan.NewLatentsPerSegment);
+        Assert.Equal(4, plan.ContextLatents);
+        Assert.Equal(11360 * Mb, Peak(832, 480, plan.NewLatentsPerSegment, plan.ContextLatents, distilled: true));
+    }
+
+    [Fact]
+    public void A832x480LongerSegmentFallsBackToTheEstimateAndItsRefusal()
+    {
+        // A segment of 24 new latents (more than the measured 20) has no measurement: its tokens and the estimate apply, and at 14639 MiB it is refused.
+        Assert.Null(Peak(832, 480, newLatents: 24));
+        long tokens = LongCatRecipeSupport.TokenCount(24, 480 / 8, 832 / 8);
+        long cache = Cached(832, 480);
+        long headroom = LongCatRecipeSupport.BudgetHeadroomBytes(tokens, 4096, 11008, Peak(832, 480, newLatents: 24), cache);
+        Assert.Equal(LongCatRecipeSupport.ActivationHeadroomBytes(tokens, 4096, 11008) + cache, headroom);
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom - cache, cacheBytes: cache, "The later run"));
+        Assert.Contains("MiB short", error.Message);
+    }
+
+    [Fact]
+    public void A832x480LongerContextFallsBackToTheEstimate()
+    {
+        Assert.Null(Peak(832, 480, contextLatents: 8));
+        Assert.Null(Peak(640, 368, newLatents: 24));
     }
 
     [Fact]
@@ -89,7 +125,7 @@ public sealed class LongCatMeasuredLaterRunTests
     public void AnUnmeasuredSizeKeepsTheEstimateAndItsRefusal()
     {
         long cache = Cached(1024, 576);
-        Assert.Null(LongCatRecipeSupport.MeasuredReservedPeak(1024, 576));
+        Assert.Null(Peak(1024, 576));
         long headroom = Estimate(1024, 576, cache);
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
             LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom - cache, cacheBytes: cache, "The later run"));

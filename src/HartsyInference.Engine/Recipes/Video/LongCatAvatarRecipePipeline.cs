@@ -155,7 +155,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The later run's own figures: its cached step runs the new latents through the blocks and holds the cache's two pairs.
         // A measured size budgets its later runs on the reserved peak it was measured at; any other size keeps the per-token estimate and its refusal.
         int pixelWidth = latentWidth * LongCatRecipeSupport.SpatialCompressionFactor, pixelHeight = latentHeight * LongCatRecipeSupport.SpatialCompressionFactor;
-        long? measuredPeak = LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight);
+        long? measuredPeak = LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, _distilled);
         Logs.Info(measuredPeak is long m
             ? $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has a measured later-run peak of {m >> 20} MiB reserved, plus a {LongCatRecipeSupport.MeasuredMarginBytes >> 20} MiB margin."
             : $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has no measured later-run peak: the per-token estimate and its refusal apply.");
