@@ -16,6 +16,14 @@ internal static class LongCatFrameOps
         return tensor;
     }
 
+    /// <summary>The model input of an uncached step: the conditioning and the stepped frames as one clip, reshaped. The clip is a temporary and is
+    /// freed here; before this, the Reshape callers left it undisposed, one [channels·frames, hw] tensor per step.</summary>
+    public static Tensor ModelInput(IBackend backend, Tensor stepped, Tensor? condState, int channels, int cond, int steppedFrames, int hw, TensorShape shape)
+    {
+        using Tensor clip = Clip(backend, stepped, condState, channels, cond, steppedFrames, hw);
+        return Reshape(backend, clip, shape);
+    }
+
     /// <summary>The same elements under another shape: a scale by one, so the copy stays on the device.</summary>
     public static Tensor Reshape(IBackend backend, Tensor source, TensorShape shape)
     {

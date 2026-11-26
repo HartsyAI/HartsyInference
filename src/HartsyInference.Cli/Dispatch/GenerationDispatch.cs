@@ -1583,7 +1583,7 @@ public static class GenerationDispatch
         }
         // Seconds convert at the family's native rate: LongCat-Video-Avatar generates at 25 fps, MiniMax-H3 at its own rate.
         bool longCatAvatar = spec.Catalog?.Id == "longcat-avatar" || spec.Requested.StartsWith("longcat-avatar", StringComparison.OrdinalIgnoreCase);
-        int nativeFps = longCatAvatar ? 25 : MiniMaxH3Geometry.Fps;
+        int nativeFps = longCatAvatar ? LongCatAvatarRecipe.OutputFps : MiniMaxH3Geometry.Fps;
         return parameters.GetDoubleOrNull("chain-seconds") is double seconds
             ? (int)Math.Round(seconds * nativeFps)
             : null;
