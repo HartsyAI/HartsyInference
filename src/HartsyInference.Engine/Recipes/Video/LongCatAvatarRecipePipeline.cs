@@ -29,16 +29,18 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly List<IDisposable> _loaders;
     private readonly bool _distilled;
     private readonly AdjunctGate? _loraGate;
+    private readonly LongCatAvatarLoraSchedule? _loraMix;
 
     /// <summary>Wraps the constructed pipeline, taking ownership of every disposable in <paramref name="loaders"/>.</summary>
     internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, WhisperEncoder whisper,
-        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate)
+        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate, LongCatAvatarLoraSchedule? loraMix = null)
     {
         // A distilled pipeline is only valid with its LoRA gate: the gate is what makes it the distilled model.
-        if (distilled && loraGate is null)
+        if (distilled && loraGate is null && loraMix is null)
             throw new InvalidOperationException("The distilled avatar pipeline needs its DMD LoRA gate; refusing to run the bare base.");
         _distilled = distilled;
         _loraGate = loraGate;
+        _loraMix = loraMix;
         _backend = backend;
         _pipeline = pipeline;
         _parts = parts;
@@ -159,12 +161,16 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The later run's own figures: its cached step runs the new latents through the blocks and holds the cache's two pairs.
         // A measured size budgets its later runs on the reserved peak it was measured at; any other size keeps the per-token estimate and its refusal.
         int pixelWidth = latentWidth * LongCatRecipeSupport.SpatialCompressionFactor, pixelHeight = latentHeight * LongCatRecipeSupport.SpatialCompressionFactor;
-        long? measuredPeak = LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, _distilled);
+        // The later runs' figures: a mixed (1.6) run is uncached and not measured; a cached 1.5 run is sized on its cache and its measurement.
+        bool mixed = _loraMix is not null;
+        LongCatRecipeSupport.LongCatLaterRunFigures figures = LongCatRecipeSupport.LaterRunFigures(mixed, plan, latentHeight, latentWidth,
+            _parts.Dit.Config, pixelWidth, pixelHeight, _distilled);
+        long? measuredPeak = figures.MeasuredPeak;
         Logs.Info(measuredPeak is long m
             ? $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has a measured later-run peak of {m >> 20} MiB reserved, plus a {LongCatRecipeSupport.MeasuredMarginBytes >> 20} MiB margin."
             : $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has no measured later-run peak: the per-token estimate and its refusal apply.");
-        long laterTokens = LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth);
-        long laterCache = LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth);
+        long laterTokens = figures.Tokens;
+        long laterCache = figures.CacheBytes;
         LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache, measuredPeak);
 
         // Segment 0: an ordinary generation in its own streaming scope.
@@ -181,11 +187,12 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
             settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
             _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, LongCatAvatarMode.Avc, plan.ContextLatents + 1, null,
-            Cancel: cancel, LoraGate: _loraGate);
+            Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix);
 
         // Each segment is decoded once. Segment 0 keeps all its frames; a later segment keeps the frames after its context. The last frames of a
-        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490; the 1.6 build would carry
-        // the latents, and it is refused before this point). The last segment's context is not encoded.
+        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490). The 1.6 chain uses the same
+        // context until its own reference path is verified; the upstream 1.6 demo passes the chain flags but its context mode is not checked here.
+        // The last segment's context is not encoded.
         LongCatChainFrames output = new(1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1));
         Func<float[], bool, float[]> contextFromSegment = (segment, last) =>
         {
@@ -205,12 +212,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                 // A cached later step runs only its noisy frames through the blocks. The conditioning frames' keys and values come from the offloaded
                 // cache: a staged pair and the joined copy of it stay on the device for the block, and are counted with the activations, while the
                 // noisy rows' own keys and values are activations. So the headroom counts the new latents, and the cache's two pairs.
-                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                    LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
-                    LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth),
+                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, laterCache,
                     measuredPeakBytes: measuredPeak),
                 // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
-                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
+                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = figures.OffloadKv }).Latents,
                 bridge);
         };
 
@@ -228,7 +233,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
             settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
             _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame,
-            OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate);
+            OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix);
 
     /// <summary>Whisper features of the driving speech, cut into one 5-frame window per video frame: <c>[frames, 5 · 5 · 1280]</c>.</summary>
     private float[] DrivingWindows(float[] waveform, int fps, int frames)

@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -79,20 +80,27 @@ public sealed class LongCatRecipeTests
             Assert.Equal(7f, settings.FlowShift);
         }
         Assert.Equal(8, avatar.Defaults.Steps);
-        Assert.Equal(50, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
+        Assert.Equal(8, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
     }
 
     [Fact]
-    public void A16RequestIsRefusedBeforeAnyWeightIsRead()
+    public void The16Int8RowIsServedByTheAvatarRecipeAndResolvesTo16()
     {
-        using CpuBackend backend = new();
-        ResolvedModelVariant named16 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"]);
+        LongCatAvatarRecipe avatar = new();
+        Assert.True(avatar.Matches(LongCatAvatarVariants.Avatar16FamilyId));
+        Assert.True(avatar.Matches("longcat-avatar"));
+        ResolvedModelVariant byRow = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), [LongCatAvatarVariants.Avatar16FamilyId]);
+        Assert.True(byRow.Is(LongCatAvatarVariants.Avatar16));
+        Assert.Equal(8, avatar.DefaultsFor(byRow).Steps);
+    }
 
-        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
-        {
-            CheckpointPath = "no-such-folder", Backend = backend, Variant = named16,
-        }));
-        Assert.Contains("1.6 INT8 catalog row", refused.Message, StringComparison.Ordinal);
+    [Fact]
+    public void The16Int8RowIsInTheCatalogWithItsPinnedShardsAndLoras()
+    {
+        CatalogEntry row = ModelCatalog.Find(LongCatAvatarVariants.Avatar16FamilyId) ?? throw new InvalidOperationException("no 1.6 row");
+        Assert.Equal(4, row.Assets.Count(asset => asset.Role == "transformer" && asset.Sha256 is not null));
+        Assert.Equal(2, row.Assets.Count(asset => asset.Role == "lora"));
+        Assert.All(row.Assets.Where(asset => asset.Role == "transformer"), asset => Assert.StartsWith("base_model_int8/", asset.RepoPath, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -165,6 +173,30 @@ public sealed class LongCatRecipeTests
         int prefix = ResidentPrefixSizing.Size((long)freeAfterSharedMib << 20, headroom, blockBytes, blockCount: 48);
 
         Assert.Equal(expectedPrefix, prefix);
+    }
+
+    [Fact]
+    public void TheOneFifteenBuildRefusesTheOneSixLayout()
+    {
+        // A checkpoint folder with the 1.6 layout (loraA beside its base folder) is refused by the 1.5 build before any weight is read.
+        string root = Path.Combine(Path.GetTempPath(), "longcat-16-layout-" + Guid.NewGuid().ToString("N"));
+        string baseFolder = Path.Combine(root, "base_model_int8");
+        Directory.CreateDirectory(baseFolder);
+        Directory.CreateDirectory(Path.Combine(root, "loraA"));
+        File.WriteAllText(Path.Combine(root, "loraA", "lora.safetensors"), "x");
+        try
+        {
+            ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
+            NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+            {
+                CheckpointPath = baseFolder, Backend = new CpuBackend(), Variant = named15,
+            }));
+            Assert.Contains("1.6 layout", refused.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static CheckpointProbe EmptyProbe() =>

@@ -3,6 +3,7 @@ using System.Globalization;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -436,15 +437,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             parameters.PutIfSet("restore-height", settings.RestoreHeight);
         }
 
-        // Refused before ModelResolver and ModelAcquisition.EnsurePresent, so a refused request downloads nothing.
         ModelSelector selector = ModelSelector.Parse(settings.Model);
-        string? refusal = LongCatAvatarGate.Refusal(selector.Id, selector.Variant);
-        if (refusal is not null)
-        {
-            AnsiConsole.MarkupLine($"[red]{Markup.Escape(refusal)}[/]");
-            return 1;
-        }
-
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
         if (!string.IsNullOrWhiteSpace(settings.ModelProfile))
         {
@@ -476,15 +469,6 @@ internal static class LongCatAvatarGate
     /// <summary>True when <paramref name="family"/> resolves to the avatar recipe.</summary>
     internal static bool IsAvatar(string? family) =>
         !string.IsNullOrEmpty(family) && VideoRecipeRegistry.Resolve(family)?.Name == Family;
-
-    /// <summary>The refusal for a 1.6 build request, or null. The 1.6 settings apply only with a 1.6 INT8 catalog row, which does not exist,
-    /// and the catalog row carries the 1.5 weights; so the request is refused before any download.</summary>
-    internal static string? Refusal(string? family, string? variant) =>
-        IsAvatar(family) && variant is not null && (variant.Equals("1.6", StringComparison.OrdinalIgnoreCase)
-            || variant.Equals("avatar-1.6", StringComparison.OrdinalIgnoreCase))
-            ? "longcat-avatar:1.6 is refused: its 1.6 settings apply only once a 1.6 INT8 catalog row exists, and none does yet. "
-              + "The default build is 1.5 (use longcat-avatar or longcat-avatar:1.5)."
-            : null;
 
     /// <summary>The consent line for a non-quiet run of the avatar recipe, or null.</summary>
     internal static string? ConsentNotice(string? family, bool quiet) => !quiet && IsAvatar(family) ? ConsentText : null;
