@@ -54,15 +54,8 @@ internal static class LongCatOps
     }
 
     /// <summary>An F32 view of a checkpoint vector. A widened copy is added to <paramref name="owned"/> so the owner disposes it.</summary>
-    public static Tensor WidenF32(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned)
-    {
-        Tensor source = weights[key];
-        if (source.DType == DType.F32)
-            return source;
-        Tensor widened = source.CastTo(DType.F32);
-        owned.Add(widened);
-        return widened;
-    }
+    public static Tensor WidenF32(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned) =>
+        CheckpointTensors.RequireF32(weights, "LongCat", key, owned);
 
     /// <summary>A device-friendly copy of <paramref name="source"/>.</summary>
     public static Tensor Copy(IBackend backend, Tensor source)
