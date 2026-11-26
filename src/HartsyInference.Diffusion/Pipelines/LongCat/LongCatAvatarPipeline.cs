@@ -147,7 +147,7 @@ public sealed class LongCatAvatarPipeline
         float[] timesteps = cached ? [t] : conditioning.FrameTimesteps(t, frames);
         using Tensor input = cached
             ? LongCatFrameOps.Reshape(_backend, state, new TensorShape([1, channels, noisy, run.Height, run.Width]))
-            : LongCatFrameOps.Reshape(_backend, LongCatFrameOps.Clip(_backend, state, condState, channels, cond, noisy, hw), new TensorShape([1, channels, frames, run.Height, run.Width]));
+            : LongCatFrameOps.ModelInput(_backend, state, condState, channels, cond, noisy, hw, new TensorShape([1, channels, frames, run.Height, run.Width]));
         return Guided(run, guided, (promptIsPositive, audioOn) =>
         {
             using Tensor output = Predict(input, inputFrames, promptIsPositive ? run.Positive : run.Negative, audioOn ? audioCond : audioUncond!,
