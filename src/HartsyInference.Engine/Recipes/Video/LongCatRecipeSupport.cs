@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -263,45 +264,43 @@ internal static class LongCatRecipeSupport
         // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
         loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
+        // The DiT is registered before any LoRA or weight is read, so a failure at any later step disposes it, and the LoRA files and their
+        // stack join the loaders the moment each is built, in the order that disposes the stack after the files it was built from.
+        LongCatTransformer dit = new(checkpoint.Config);
+        loaders.Add(dit);
         AdjunctGate? dmdGate = null;
         AdjunctGate? opsdGate = null;
-        LoraStack? loras = null;
-        LoraFile? dmd = null;
-        LoraFile? opsd = null;
+        List<GatedLora> gatedLoras = [];
         if (mixedLoras is { } mixed)
         {
             // The 1.6 pair: the DMD and OPSD LoRAs, each at multiplier 1; the mixed schedule switches their gates per step.
             RequireAvatar16Loras(context.CheckpointPath);
-            dmd = LoraFile.Load(mixed.DmdPath);
-            opsd = LoraFile.Load(mixed.OpsdPath);
-            loras = new LoraStack();
+            LoraFile dmd = LoraFile.Load(mixed.DmdPath);
+            loaders.Add(dmd);
+            LoraFile opsd = LoraFile.Load(mixed.OpsdPath);
+            loaders.Add(opsd);
             dmdGate = new AdjunctGate();
             opsdGate = new AdjunctGate();
-            loras.AddGated(dmd, dmdGate, 1f);
-            loras.AddGated(opsd, opsdGate, 1f);
-            loras.ApplyTo(weights, LoraTarget.Transformer, context.Backend);
+            gatedLoras.Add(new GatedLora(dmd, dmdGate, 1f));
+            gatedLoras.Add(new GatedLora(opsd, opsdGate, 1f));
         }
         else if (attachDmd)
         {
             string dmdPath = DmdLoraPath(context.CheckpointPath);
             if (!File.Exists(dmdPath))
                 throw new NotSupportedException($"The distilled build needs its distillation LoRA at '{dmdPath}', which is not there. Refusing to run the bare base as the distilled model.");
-            dmd = LoraFile.Load(dmdPath);
-            loras = new LoraStack();
-            dmdGate = new AdjunctGate();
-            loras.AddGated(dmd, dmdGate, DmdMultiplier);
-            loras.ApplyTo(weights, LoraTarget.Transformer, context.Backend);
-        }
-        LongCatTransformer dit = new(checkpoint.Config);
-        loaders.Add(dit);
-        dit.LoadWeights(weights);
-        if (opsd is not null)
-            loaders.Add(opsd);
-        if (dmd is not null)
-        {
+            LoraFile dmd = LoraFile.Load(dmdPath);
             loaders.Add(dmd);
-            loaders.Add(loras!);
+            dmdGate = new AdjunctGate();
+            gatedLoras.Add(new GatedLora(dmd, dmdGate, DmdMultiplier));
         }
+        if (gatedLoras.Count > 0)
+        {
+            // The one LoRA path: RecipeLoraMerge merges the gated adapters into the transformer weights before the DiT captures them.
+            loaders.Add(RecipeLoraMerge.Apply((IReadOnlyList<LoraResolver.LoraSpec>?)null, context.Backend,
+                new LoraMergeTargets { Transformer = weights }, "LongCat", gatedLoras)!);
+        }
+        dit.LoadWeights(weights);
 
         (IWanVaeDecoder decoder, IWanVaeEncoder encoder) = sides is null
             ? LoadProductionVae(loaders, context.Cancel)
