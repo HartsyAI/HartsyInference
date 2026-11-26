@@ -29,7 +29,7 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 | Video | Wan 2.2 5B | incomplete | text-encoder weights not present locally |
 | Video | LTX-2 | untested | no weights in the local model tree |
 | Vision | RT-DETR | runs | detect over a real photo |
-| Vision | Depth Pro 2 S | runs | image, three joint views and 24-frame video (buffered and unbuffered) match the CPU backend within 3e-5; `ConvTranspose2d` has no Vulkan shader and runs on the host, which makes the head about 1.8 s of a 256x384 image; rechecked on the RTX 4090 (2026-11-26) at `5c2568ec5` and `ef7d4eadb` at 1e-4; B, L and H+ have not run on Vulkan |
+| Vision | Depth Pro 2 S, B, L, H+ | runs | image, three joint views and 24-frame video (buffered and unbuffered) match the CPU backend within 3e-5; `ConvTranspose2d` has no Vulkan shader and runs on the host, which makes the head about 1.8 s of a 256x384 image; rechecked on the RTX 4090 (2026-11-26) at `5c2568ec5` and `ef7d4eadb` at 1e-4; B, L and H+ match the CPU backend (inverse depth within 2.9e-6, RTX 3060, `15e1c2e20`, 2026-11-26) |
 | Audio | Whisper | runs | transcribed a real clip |
 
 Four modalities have a working Vulkan path today: image, LLM, vision and audio. Video is the one with no
