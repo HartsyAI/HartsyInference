@@ -171,7 +171,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             TensorShape sh = new(b, L, _hidden);
             Tensor attn = _attention!.Forward(backend, norm1, norm1, new AttentionCallContext { ReleaseInputs = true });
 
-            Tensor x1 = GatedResidual(backend, x, attn, gateMsa, b, L);
+            Tensor x1 = GatedResidual(backend, x, attn, gateMsa);
             attn.Dispose(); gateMsa.Dispose();
 
             // MLP.
@@ -180,7 +180,7 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             Tensor m0a = new(m0.Shape, DType.F32); backend.Silu(m0a, m0); m0.Dispose();
             Tensor m2 = new(sh, DType.F32); backend.Linear(m2, m0a, _mlp2W!, _mlp2B!); m0a.Dispose();
 
-            Tensor x2 = GatedResidual(backend, x1, m2, gateMlp, b, L);
+            Tensor x2 = GatedResidual(backend, x1, m2, gateMlp);
             m2.Dispose(); gateMlp.Dispose(); x1.Dispose();
             return x2;
         }
@@ -193,15 +193,11 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             return outT;
         }
 
-        /// <summary><c>residual + gate·value</c> with the gate broadcast over the L tokens of each batch row, on the backend: the gate is
-        /// <c>[B, hidden]</c> and token <c>r</c> reads gate row <c>r / L</c>.</summary>
-        private static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor gate, int b, int L)
+        /// <summary><c>residual + gate·value</c> on the backend, with the gate <c>[B, hidden]</c> broadcast over the L tokens of each batch row.</summary>
+        private static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor gate)
         {
             Tensor outT = new(residual.Shape, DType.F32);
-            using Tensor rowIndex = new(new TensorShape(b * L), DType.I32);
-            Span<int> index = rowIndex.AsSpan<int>();
-            for (int r = 0; r < b * L; r++) index[r] = r / L;
-            backend.GatedResidualRowIndexed(outT, residual, value, gate, rowIndex);
+            backend.GatedResidualLastDim(outT, residual, value, gate);
             return outT;
         }
 
