@@ -298,10 +298,13 @@ The planner reproduces these until the row that owns each is rewritten.
   `HARTSY_GPU_TEST_KNOBS=numerics.tileFromDevice=true` turns the knob on for a GpuIntegration test run (test projects only), and
   `HARTSY_TILE_FREE_LOG=<file>` names the file each process appends its summary to (any run: the CLI generation or a test host). The
   variable is read only when the knob is on, so an ordinary run writes nothing. The file gets one block per process: a `# pid=… utc=…` line,
-  then a `tileFromDevice: calls=… halved=… totalMiB=… freeMiB min/max=… tileRows=[…]` line (every tiled score-tile call) and one
-  `tileFromDevice gate=<tiles|bf16cast|cast.score|causal> decisions=… over=… freeLimited=…` line per budget gate. `over` counts calls whose
-  bytes exceeded the gate's budget (the tiled or fallback side); `freeLimited` counts decisions where free VRAM, not half the total, set
-  the budget. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted. A tile line at
+  then one `tileFromDevice row=<id> executed=…` line per executed attention row, which is the count to read as calls; then the
+  `tileFromDevice: calls=… halved=… totalMiB=… freeMiB min/max=… tileRows=[…]` line (every tiled score-tile call); then one
+  `tileFromDevice gate=<tiles|bf16cast|cast.score|causal> decisions=… over=… freeLimited=…` line per budget gate. A gate's `decisions` includes
+  planner probes (PlansBatch to PlanAttention, Cheaper, Explain) and rows that never ran, so it is not a call count. `over` counts decisions
+  whose bytes exceeded the gate's budget (the tiled or fallback side); `freeLimited` counts decisions where free VRAM, not half the total, set
+  the budget. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted; `cast.score` skips
+  forced calls for the same reason. A tile line at
   `halved>0` means an OOM halved that call's tile. Stderr also shows the summary, but `dotnet test` at default verbosity hides a test
   host's stderr, so read the file.
 - CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
