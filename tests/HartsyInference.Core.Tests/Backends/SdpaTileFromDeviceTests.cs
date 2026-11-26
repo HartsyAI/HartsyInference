@@ -1,5 +1,6 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Cuda;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Core.Tests.Backends;
@@ -14,6 +15,12 @@ public sealed class SdpaTileFromDeviceTests
     [Fact]
     public void TheKnobIsOffUnlessSet()
     {
+        // A whole-run lane that names the knob (HARTSY_GPU_TEST_KNOBS) turns it on for every test in the run, so then the knob is on by design.
+        if (Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar) is { } run && run.Contains("numerics.tileFromDevice", StringComparison.Ordinal))
+        {
+            Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+            return;
+        }
         Assert.Null(EngineKnobs.TileFromDevice.Value);
     }
 
@@ -47,6 +54,18 @@ public sealed class SdpaTileFromDeviceTests
         // A 1 GiB rung on a 24 GB card: a 2 GiB score matrix is under the gate, so it stays materialized.
         Assert.Equal(1L << 30, CudaBackend.TileRungBytes(Card24Gb));
         Assert.True(2UL << 30 <= CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 20UL << 30));
+    }
+
+    [Fact]
+    public void TheFreeLogCountsAHalvedCallAndNamesItsHeights()
+    {
+        TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 50);
+        string line = TileFreeLog.Summary();
+
+        Assert.StartsWith("tileFromDevice: calls=", line, StringComparison.Ordinal);
+        Assert.Contains("halved=", line, StringComparison.Ordinal);
+        Assert.Contains("tileRows=[", line, StringComparison.Ordinal);
+        Assert.Contains("50", line, StringComparison.Ordinal);
     }
 
     [Theory]

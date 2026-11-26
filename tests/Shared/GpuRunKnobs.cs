@@ -61,4 +61,21 @@ public sealed class GpuRunKnobsTests
             Assert.True(EngineKnobs.TileFromDevice.Value == true);
         }
     }
+
+    [Fact]
+    public void TheRunProfileSurvivesAReloadAndAClear()
+    {
+        string? raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar);
+        if (string.IsNullOrWhiteSpace(raw) || !raw.Contains("numerics.tileFromDevice=true", StringComparison.Ordinal))
+        {
+            return;
+        }
+        // Paint21 and other suites call KnobFile.Reload and KnobStore.Clear mid-run; neither may drop the whole-run profile.
+        KnobFile.Reload();
+        Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+        Assert.True(EngineKnobs.TileFromDevice.Value == true);
+        KnobStore.Clear(EngineKnobs.TileFromDevice);
+        Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+        Assert.True(EngineKnobs.TileFromDevice.Value == true);
+    }
 }
