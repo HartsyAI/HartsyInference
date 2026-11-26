@@ -150,6 +150,13 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
         }
 
+        // Before segment 0: an upper bound on the later runs' budget. It refuses only when even that bound is negative. The later run's own check,
+        // before its denoise, is the one that sees segment 0's residue.
+        // The later run's own figures: its cached step runs the new latents through the blocks and holds the cache's two pairs.
+        long laterTokens = LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth);
+        long laterCache = LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth);
+        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache);
+
         // Segment 0: an ordinary generation in its own streaming scope.
         float[] first = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
             () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
