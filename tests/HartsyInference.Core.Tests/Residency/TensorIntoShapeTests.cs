@@ -230,6 +230,21 @@ public sealed class TensorIntoShapeTests
 
         Assert.Equal(4, owner.AsReadOnlySpan<float>().Length);
     }
+
+    [Fact]
+    public void MovingADeviceOwnerBehindALaterViewWrite_IsReported_AndLeavesTheOwner()
+    {
+        // The owner's own device copy is bound first, so the mark the view write sets is not cleared by a bind before the move.
+        using ArrayResidency device = new();
+        using Tensor owner = new(new TensorShape(2, 2), DType.F32);
+        using Tensor view = owner.Reshape(new TensorShape(4));
+        device.Produce(owner, [1, 2, 3, 4]);
+        device.Produce(view, [5, 6, 7, 8]);
+
+        Assert.Contains("wrote a view of it", Assert.Throws<InvalidOperationException>(() => owner.IntoShape(new TensorShape(4))).Message);
+
+        Assert.Equal(4, owner.AsReadOnlySpan<float>().Length);
+    }
 #endif
 
     private static unsafe nint Pointer(Tensor tensor) => (nint)tensor.DataPointer;

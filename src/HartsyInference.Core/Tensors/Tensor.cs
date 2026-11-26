@@ -549,10 +549,11 @@ public sealed unsafe class Tensor : IDisposable
         Action<Tensor, Action>? move;
         lock (this)
         {
-            move = _gpuSyncCallback is not null && _extraGpuBindings is not { Count: > 0 } ? _gpuMoveCallback : null;
+            move = _gpuSyncCallback is not null && _extraGpuBindings is not { Count: > 0 } && _staleBehindWrite == 0 ? _gpuMoveCallback : null;
         }
         // Without a move the host bytes are what moves, so they are read first, and a read behind a view's device write is reported here.
-        // A tensor that moves has its own device copy bound, and that bind cleared any such mark (see MarkViewedOwnersStale).
+        // A view written on the device after this tensor's own device copy was bound leaves a mark the move would drop, so such a tensor is read
+        // back too (see MarkViewedOwnersStale).
         if (move is null)
             EnsureCpuData();
 
