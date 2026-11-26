@@ -337,12 +337,15 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             throw Corrupted(ex);
         }
 
-        tensor.SetGpuBinding(
-            BindingKey,
-            sync: () => SyncActivationToHost(tensor),
-            dispose: () => ReleaseActivation(tensor));
+        BindActivation(tensor);
         tensor.MarkViewedOwnersStale();
     }
+
+    private void BindActivation(Tensor tensor) => tensor.SetGpuBinding(
+        BindingKey,
+        sync: () => SyncActivationToHost(tensor),
+        dispose: () => ReleaseActivation(tensor),
+        move: (to, handOver) => MoveActivation(tensor, to, handOver));
 
     private void CacheActivationCore(Tensor tensor, TBuffer buffer, long bytes)
     {
@@ -388,6 +391,70 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
 
     /// <summary>Host code touched a tensor this cache promoted on its own initiative: give up the device copy.</summary>
     private void DemotePromotedWeight(Tensor tensor) => RunCallback(tensor, Callback.Demote);
+
+    /// <summary>The tensor handed its storage to <paramref name="to"/> (<see cref="Tensor.IntoShape"/>): the device buffer and its pin
+    /// follow, with no transfer. Waits for the op in flight, as a host read does, because the caller uses the result at once.
+    /// <paramref name="handOver"/> moves the host side and runs inside the exclusive section, so nothing on this cache sees the old tensor spent
+    /// while it is still an entry.</summary>
+    private void MoveActivation(Tensor from, Tensor to, Action handOver)
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            handOver();
+            return;
+        }
+        nint previous = CaptureCurrent();
+        try
+        {
+            _exclusive.Enter();
+            try
+            {
+                if (Volatile.Read(ref _disposed) != 0 || !TryEnterCallback())
+                {
+                    handOver();
+                    return;
+                }
+                try
+                {
+                    handOver();
+                    MoveActivationCore(from, to);
+                }
+                catch (InvalidOperationException ex) when (IsCorruption(ex))
+                {
+                    throw Corrupted(ex);
+                }
+                finally
+                {
+                    ExitCallback();
+                }
+            }
+            finally
+            {
+                ExitExclusive();
+            }
+        }
+        finally
+        {
+            RestoreCurrent(previous);
+        }
+    }
+
+    private void MoveActivationCore(Tensor from, Tensor to)
+    {
+        if (!Activations.Remove(from, out (TBuffer Buffer, long Bytes) entry))
+        {
+            return;
+        }
+        MakeCurrent();
+        // Anything hung off the old tensor is keyed by it, and nothing can look it up any more.
+        OnActivationEvicted(from, entry.Buffer);
+        Activations[to] = entry;
+        if (Pinned.Remove(from))
+        {
+            Pinned.Add(to);
+        }
+        BindActivation(to);
+    }
 
     /// <summary>Runs a tensor callback under the exclusive lock, so it never interleaves with another thread's op on
     /// this cache.</summary>
