@@ -154,7 +154,7 @@ internal static class FxCatalog
 
     /// <summary>Reads Kim_Vocal_2's graph and weights from <paramref name="path"/> (a repack to safetensors is a later step: the file is 66.8 MB and binds in
     /// about a tenth of a second) and builds the runner on <paramref name="backend"/>.</summary>
-    internal static MdxVocalRunner LoadKimVocal2(string path, IBackend backend)
+    internal static MdxVocalRunner LoadKimVocal2(string path)
     {
         if (!File.Exists(path))
         {
@@ -165,8 +165,8 @@ internal static class FxCatalog
         {
             KimVocal2Network network = new(weights);
             Logs.Info($"[Audio][Kim-Vocal-2] Loaded '{Path.GetFileName(path)}' ({geometry.Levels} levels, widths {string.Join('/', geometry.Widths)}, "
-                + $"{geometry.DimF} bins, F32 on {backend.GetType().Name}).");
-            return new MdxVocalRunner(network, weights, backend);
+                + $"{geometry.DimF} bins, F32).");
+            return new MdxVocalRunner(network, weights);
         }
         catch
         {
