@@ -205,8 +205,20 @@ internal static class LongCatRecipeSupport
     /// <summary>Loads the parts. With <paramref name="attachDmd"/>, the DMD LoRA is attached as a runtime gated term on the DiT's weights (the
     /// INT8 base included), so it is live only while its <see cref="AdjunctGate"/> is enabled. A missing LoRA file is refused here, before any
     /// weight is read, so a distilled request never runs on the bare base.</summary>
+    /// <summary>The LongCat recipes encode their prompts on the denoiser's backend, so a request for a separate text-encoder backend
+    /// (<see cref="RecipeContext.TextEncoderBackend"/>) is refused here, before any weight is read, rather than silently ignored.</summary>
+    internal static void RefuseSeparateTextEncoder(RecipeContext context)
+    {
+        if (context.TextEncoderBackend is not null && !ReferenceEquals(context.TextEncoderBackend, context.Backend))
+        {
+            throw new NotSupportedException("LongCat runs its text encoder on the denoiser's backend; a separate TextEncoderBackend is not "
+                + "supported yet. Drop the text-encoder placement, or run LongCat on one backend.");
+        }
+    }
+
     internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false)
     {
+        RefuseSeparateTextEncoder(context);
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
