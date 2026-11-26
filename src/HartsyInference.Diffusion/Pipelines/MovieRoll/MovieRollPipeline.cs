@@ -83,7 +83,7 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         // The decoder takes the latent already divided by the scaling factor (movieroll_pipeline.py:decode_latents, latents / scaling_factor).
         using Tensor unscaled = new(latents.Shape, DType.F32);
         Backend.Scale(unscaled, latents, 1f / _vae.Config.ScalingFactor);
-        // The VAE's weights are resident only for the decode, so the sampling run's memory is released before it.
+        // The VAE's weights are placed for the decode and released after it, as the VRAM profile allows: a profile that keeps models resident keeps them.
         _vaeResidency.Preload();
         try
         {
