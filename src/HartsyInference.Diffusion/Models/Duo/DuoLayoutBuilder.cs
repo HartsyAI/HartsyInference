@@ -26,51 +26,67 @@ public static class DuoLayoutBuilder
         {
             DuoSampleInput sample = samples[s];
             Validate(sample);
-            int descriptionRows = sample.SharedDescriptionRows, cueRows = sample.SharedCueRows;
-            int sharedTotal = descriptionRows + cueRows;
+            AddReference(writer, s, sample);
+            AddSharedSpans(writer, s, sample, sourceBase, rope);
 
-            writer.AddMedia(s, -1, DuoGroupKind.Reference, sample.Reference, [0.0], audioSteps: 0, startMs: 0.0, timeId: 0);
-
-            if (descriptionRows > 0)
-            {
-                writer.AddText(s, -1, DuoGroupKind.Shared, SharedPositions(rope, -sharedTotal, descriptionRows), sourceBase);
-            }
-            if (cueRows > 0)
-            {
-                writer.AddText(s, -1, DuoGroupKind.Shared, SharedPositions(rope, -cueRows, cueRows), sourceBase + descriptionRows);
-            }
-
+            int sharedTotal = sample.SharedDescriptionRows + sample.SharedCueRows;
             int bodySource = sourceBase + sharedTotal;
             for (int b = 0; b < sample.CleanBlocks; b++)
             {
-                DuoBlockInput block = sample.Blocks[b];
-                writer.AddMedia(s, b, DuoGroupKind.Clean, block.Video, block.FrameStartsMs, block.AudioSteps, block.StartMs, timeId: 0);
+                AddCleanBlock(writer, s, b, sample.Blocks[b]);
             }
-
             for (int b = 0; b < sample.Blocks.Count; b++)
             {
                 DuoBlockInput block = sample.Blocks[b];
-                if (block.BodyTextRows > 0)
-                {
-                    writer.AddText(s, b, DuoGroupKind.Text, BodyPositions(rope, block), bodySource);
-                }
+                AddBlockBody(writer, s, b, block, bodySource, rope);
                 bodySource += block.BodyTextRows;
                 if (sample.NoisyBlocks.Contains(b))
                 {
-                    writer.AddMedia(s, b, DuoGroupKind.Noisy, block.Video, block.FrameStartsMs, block.AudioSteps, block.StartMs,
-                        timeId: writer.NextNoisyTimeId());
+                    AddNoisyBlock(writer, s, b, block);
                 }
             }
 
-            sourceBase += sharedTotal;
-            foreach (DuoBlockInput block in sample.Blocks)
-            {
-                sourceBase += block.BodyTextRows;
-            }
+            sourceBase = bodySource;
         }
 
         return writer.Finish();
     }
+
+    /// <summary>The portrait reference: one video frame, timeline 0.</summary>
+    private static void AddReference(Writer writer, int sample, DuoSampleInput input) =>
+        writer.AddMedia(sample, -1, DuoGroupKind.Reference, input.Reference, [0.0], audioSteps: 0, startMs: 0.0, timeId: 0);
+
+    /// <summary>The two shared Intent spans (description, then cue), read from the text source starting at <paramref name="sourceBase"/>.</summary>
+    private static void AddSharedSpans(Writer writer, int sample, DuoSampleInput input, int sourceBase, DuoRopePolicy rope)
+    {
+        int descriptionRows = input.SharedDescriptionRows, cueRows = input.SharedCueRows, sharedTotal = descriptionRows + cueRows;
+        if (descriptionRows > 0)
+        {
+            writer.AddText(sample, -1, DuoGroupKind.Shared, SharedPositions(rope, -sharedTotal, descriptionRows), sourceBase);
+        }
+        if (cueRows > 0)
+        {
+            writer.AddText(sample, -1, DuoGroupKind.Shared, SharedPositions(rope, -cueRows, cueRows), sourceBase + descriptionRows);
+        }
+    }
+
+    /// <summary>A committed clean block: its media only, timeline 0.</summary>
+    private static void AddCleanBlock(Writer writer, int sample, int block, DuoBlockInput input) =>
+        writer.AddMedia(sample, block, DuoGroupKind.Clean, input.Video, input.FrameStartsMs, input.AudioSteps, input.StartMs, timeId: 0);
+
+    /// <summary>A block's body Intent rows, read from the text source starting at <paramref name="source"/>, when it has any.</summary>
+    private static void AddBlockBody(Writer writer, int sample, int block, DuoBlockInput input, int source, DuoRopePolicy rope)
+    {
+        if (input.BodyTextRows > 0)
+        {
+            writer.AddText(sample, block, DuoGroupKind.Text, BodyPositions(rope, input), source);
+        }
+    }
+
+    /// <summary>A noisy block to denoise: its media with the next noisy timeline id.</summary>
+    private static void AddNoisyBlock(Writer writer, int sample, int block, DuoBlockInput input) =>
+        writer.AddMedia(sample, block, DuoGroupKind.Noisy, input.Video, input.FrameStartsMs, input.AudioSteps, input.StartMs,
+            timeId: writer.NextNoisyTimeId());
 
     /// <summary>Intent positions of the shared spans. Under <see cref="DuoRopePolicy.Old"/> every shared row is -1; under <see cref="DuoRopePolicy.New"/> the two spans end at -1 with no gap.</summary>
     private static double[] SharedPositions(DuoRopePolicy rope, int start, int rows)
@@ -101,16 +117,8 @@ public static class DuoLayoutBuilder
     {
         Validate(sample);
         Writer writer = new();
-        int descriptionRows = sample.SharedDescriptionRows, cueRows = sample.SharedCueRows, sharedTotal = descriptionRows + cueRows;
-        writer.AddMedia(0, -1, DuoGroupKind.Reference, sample.Reference, [0.0], audioSteps: 0, startMs: 0.0, timeId: 0);
-        if (descriptionRows > 0)
-        {
-            writer.AddText(0, -1, DuoGroupKind.Shared, SharedPositions(rope, -sharedTotal, descriptionRows), 0);
-        }
-        if (cueRows > 0)
-        {
-            writer.AddText(0, -1, DuoGroupKind.Shared, SharedPositions(rope, -cueRows, cueRows), descriptionRows);
-        }
+        AddReference(writer, 0, sample);
+        AddSharedSpans(writer, 0, sample, 0, rope);
         return writer.Finish();
     }
 
@@ -124,19 +132,16 @@ public static class DuoLayoutBuilder
         {
             throw new ArgumentOutOfRangeException(nameof(block), block, "The block is not in the sample.");
         }
-        DuoBlockInput b = sample.Blocks[block];
+        DuoBlockInput input = sample.Blocks[block];
         Writer writer = new();
-        if (b.BodyTextRows > 0)
-        {
-            writer.AddText(0, block, DuoGroupKind.Text, BodyPositions(rope, b), sample.SharedDescriptionRows + sample.SharedCueRows);
-        }
+        AddBlockBody(writer, 0, block, input, sample.SharedDescriptionRows + sample.SharedCueRows, rope);
         if (clean)
         {
-            writer.AddMedia(0, block, DuoGroupKind.Clean, b.Video, b.FrameStartsMs, b.AudioSteps, b.StartMs, timeId: 0);
+            AddCleanBlock(writer, 0, block, input);
         }
         else
         {
-            writer.AddMedia(0, block, DuoGroupKind.Noisy, b.Video, b.FrameStartsMs, b.AudioSteps, b.StartMs, timeId: writer.NextNoisyTimeId());
+            AddNoisyBlock(writer, 0, block, input);
         }
         return writer.Finish();
     }
