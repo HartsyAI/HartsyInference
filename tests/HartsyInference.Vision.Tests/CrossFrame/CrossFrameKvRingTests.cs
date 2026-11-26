@@ -7,7 +7,8 @@ namespace HartsyInference.Vision.Tests.CrossFrame;
 
 /// <summary>The unbuffered ring against a plain host model of itself: the pooled prefix is the mean of the visible frames' prefixes, and
 /// <c>Read</c> gives the pooled rows first and then one slot per frame (oldest replaced once the ring wraps), head-major. The ring takes what
-/// <c>Update</c> is given, whether it stores or refuses it.</summary>
+/// <c>Update</c> is given, whether it stores or refuses it. CPU only: that the caches stay on a GPU and survive an activation sweep is checked by
+/// <c>DeviceShapedOutputGpuTests</c> in the Engine tests.</summary>
 public sealed class CrossFrameKvRingTests : IDisposable
 {
     private const int Window = 3, Frames = 7, PrefixRows = 2, Width = 5, Patches = 3, Heads = 2, Dim = 4;
