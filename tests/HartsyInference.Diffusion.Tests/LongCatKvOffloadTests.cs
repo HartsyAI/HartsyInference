@@ -77,6 +77,33 @@ public sealed class LongCatKvOffloadTests : IDisposable
     }
 
     [Fact]
+    public void AStagedPairThatIsNotResidentAfterItsPreloadIsReleasedAndRefused()
+    {
+        (IBackend backend, StagingRecorder recorder) = Wrap(_cpu);
+        recorder.ReportResident = false;
+        using Tensor keys = new(new TensorShape([4]), DType.F32);
+        using Tensor values = new(new TensorShape([4]), DType.F32);
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            LongCatKvCache.RequireResident(backend, [keys, values]));
+        Assert.Contains("vram.preloadHeadroomMb", error.Message);
+        Assert.Single(recorder.Frees);
+        Assert.Equal([keys, values], recorder.Frees[0]);
+    }
+
+    [Fact]
+    public void AStagedPairThatIsResidentPassesTheCheck()
+    {
+        (IBackend backend, StagingRecorder recorder) = Wrap(_cpu);
+        recorder.ReportResident = true;
+        using Tensor keys = new(new TensorShape([4]), DType.F32);
+        using Tensor values = new(new TensorShape([4]), DType.F32);
+
+        LongCatKvCache.RequireResident(backend, [keys, values]);
+        Assert.Empty(recorder.Frees);
+    }
+
+    [Fact]
     public void ADeviceCacheIsNeverStaged()
     {
         using Tensor cond = LongCatTestData.Latent(_config, Cond, Height, Width, 88);
@@ -112,6 +139,9 @@ public sealed class LongCatKvOffloadTests : IDisposable
     public class StagingRecorder : DispatchProxy
     {
         public IBackend? Inner { get; set; }
+
+        /// <summary>When set, the proxy reports every tensor as resident or not resident, instead of the CPU backend's answer.</summary>
+        public bool? ReportResident { get; set; }
         public List<List<Tensor>> Preloads { get; } = [];
         public List<List<Tensor>> Frees { get; } = [];
         public List<string> Log { get; } = [];
@@ -119,6 +149,8 @@ public sealed class LongCatKvOffloadTests : IDisposable
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
             ArgumentNullException.ThrowIfNull(targetMethod);
+            if (targetMethod.Name == nameof(IBackend.IsWeightResident) && ReportResident is bool resident)
+                return resident;
             if (targetMethod.Name is nameof(IBackend.PreloadWeights) or nameof(IBackend.FreeWeights))
             {
                 List<Tensor> tensors = [.. (IEnumerable<Tensor>)args![0]!];

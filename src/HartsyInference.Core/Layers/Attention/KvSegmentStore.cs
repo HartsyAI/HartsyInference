@@ -5,7 +5,9 @@ namespace HartsyInference.Core.Layers.Attention;
 
 /// <summary>Keys and values a model keeps between attention calls, per layer and in segments along the token axis: a latent frame, a chunk, a group
 /// of rows. The store owns what it is given, pins it so the activation sweep between steps leaves it on the device, and unpins and frees it when
-/// it is replaced, removed or the store is disposed. Which segments an attention reads, and when one is dropped, stay with the model.</summary>
+/// it is replaced, removed or the store is disposed. A layer can also be moved to host memory (<see cref="MoveLayerToHost"/>): its segments are then
+/// host tensors, never pinned, and the caller stages them to the device for each read. Which segments an attention reads, and when one is dropped,
+/// stay with the model.</summary>
 /// <remarks>Segments may differ in length; every other extent, and the dtype, must agree. Nothing is copied on the way in. A read that needs one
 /// tensor is a <see cref="Join"/>, or a <see cref="Compact"/> once for a history many blocks read. Used from one thread at a time.</remarks>
 public sealed class KvSegmentStore : IDisposable
@@ -174,11 +176,11 @@ public sealed class KvSegmentStore : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
         Tensor[] keys = new Tensor[count], values = new Tensor[count];
         for (int i = 0; i < count; i++)
-            {
-                Segment at = At(layer, first + i);
-                keys[i] = at.Keys;
-                values[i] = at.Values;
-            }
+        {
+            Segment at = At(layer, first + i);
+            keys[i] = at.Keys;
+            values[i] = at.Values;
+        }
         Tensor joinedKeys = Join(keys);
         try
         {

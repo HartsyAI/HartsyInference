@@ -33,7 +33,24 @@ public sealed class LongCatKvCache : IDisposable
             return null;
         Tensor[] pair = [_store.Keys(layer, 0), _store.Values(layer, 0)];
         Backend.PreloadWeights(pair);
+        if (Backend.StreamingCache is not null)
+            RequireResident(Backend, pair);
         return new StagedPair(Backend, pair);
+    }
+
+    /// <summary>On a backend with a weight cache, a staged pair must be resident after its preload. A preload the Windows headroom guard skipped
+    /// (<c>vram.preloadHeadroomMb</c>) leaves the pair on the host, and the attention would upload it as an activation that
+    /// <see cref="IBackend.FreeWeights"/> does not release. Refuses the staged forward and releases what the attempt placed.</summary>
+    internal static void RequireResident(IBackend backend, Tensor[] pair)
+    {
+        foreach (Tensor tensor in pair)
+        {
+            if (backend.IsWeightResident(tensor))
+                continue;
+            backend.FreeWeights(pair);
+            throw new InvalidOperationException("The staged KV cache did not stay on the device: the preload was skipped to keep "
+                + "vram.preloadHeadroomMb free. Lower vram.preloadHeadroomMb, or set vram.overcommitReliefMb to 0.");
+        }
     }
 
     private sealed class StagedPair(IBackend backend, Tensor[] tensors) : IDisposable
