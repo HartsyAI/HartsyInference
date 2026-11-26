@@ -25,12 +25,13 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
     private const int Blocks = 2;
     private const int Hidden = 32;
 
-    /// <summary>Bound for the exact lane (full-F32 GEMMs). Measured on a 4090 at d0452dff4: the largest error over every encode tensor and the velocity
-    /// was 1.93e-4 (block 2 keys); block 1 was 4.8e-7 and 3.6e-7. The bound is about 2.6 times that.</summary>
+    /// <summary>Bound for the exact lane (full-F32 GEMMs). Measured on a 4090 at 800f8a182 and again at 5a22be77c (identical): the largest error over
+    /// every tensor of the eight facts is 3.7e-4, in recompute with one chunk at block 2 keys. Block 1 is at most 8.3e-7. The margin to the bound is 26%.</summary>
     private const float ExactTolerance = 5e-4f;
 
-    /// <summary>Bound for the default lane (TF32 GEMMs). Provisional: measured at d0452dff4 as 1.068e-3 (block 1 keys) and 6.1e-4 (velocity). Block 2's
-    /// TF32 encode error and every recompute error are not measured yet, so this is set from the two numbers that exist and must be rechecked against the full run.</summary>
+    /// <summary>Bound for the default lane (TF32 GEMMs). Measured on a 4090 at 800f8a182 and again at 5a22be77c (identical): the largest error is
+    /// 1.479e-3, in recompute with one chunk at block 2 keys. The encode values are block 2 keys 1.274e-3, block 1 keys 1.068e-3 and velocity 6.1e-4.
+    /// The margin to the bound is 26%.</summary>
     private const float Tf32Tolerance = 2e-3f;
 
     [CudaDeviceFact]
