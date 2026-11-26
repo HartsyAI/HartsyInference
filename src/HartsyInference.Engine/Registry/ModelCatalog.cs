@@ -3084,7 +3084,7 @@ public static class ModelCatalog
                 // Gated: yunyangge/MovieRoll asks for acceptance of its access conditions, and the LFS object id is masked in the public
                 // listing, so no sha256 is pinned. The entry stays ValidationPending until a validated download exists.
                 Id = "movieroll", Modality = vid, DisplayName = "MovieRoll (distilled T2V)", Architecture = "HunyuanVideo-1.5 DiT + rolling KV sampler",
-                Status = vp, CliDrivable = false,
+                Status = vp, CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "yunyangge/MovieRoll", RepoPath = "distilled/t2v/model.safetensors",
