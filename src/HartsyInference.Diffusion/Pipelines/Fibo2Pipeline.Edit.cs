@@ -47,6 +47,7 @@ public sealed unsafe partial class Fibo2Pipeline
             ResidentWeights editEncoder = new(Backend,
                 () => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
                     .Distinct<Tensor>(ReferenceEqualityComparer.Instance));
+            _denoiserWeights.Release(force: true);
             editEncoder.Preload();
             try
             {

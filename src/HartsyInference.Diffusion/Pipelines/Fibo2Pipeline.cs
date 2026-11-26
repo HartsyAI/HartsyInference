@@ -99,7 +99,9 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         Tensor? latentMask = null;
         try
         {
-            // The text encoder leaves the device before the denoiser loads: on a 12 GB card the two do not fit together.
+            // The text encoder leaves the device before the denoiser loads: on a 12 GB card the two do not fit together. A denoiser kept
+            // resident by the VRAM policy from an earlier generation is freed here (forced), or the encoder would load on top of it.
+            _denoiserWeights.Release(force: true);
             _textEncoderWeights.Preload();
             try
             {
@@ -160,8 +162,15 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     {
         Backend.TrimMemoryPool();
         DeviceMemoryTrace.Record(Backend, $"fibo2: {label} released");
-        int resident = released().Count(Backend.IsWeightResident);
-        Logs.Info($"[Fibo2][Residency] {label}: {resident} tensors still resident after release");
+        int total = 0, resident = 0;
+        foreach (Tensor tensor in released())
+        {
+            total++;
+            if (Backend.IsWeightResident(tensor))
+                resident++;
+        }
+        string outcome = resident == 0 ? "freed" : "kept resident (the VRAM policy kept them, or the free did not reach the device)";
+        Logs.Info($"[Fibo2][Residency] {label}: {resident} of {total} tensors resident; {outcome}");
     }
 
     /// <summary>One guided velocity: <c>uncond + g · (cond − uncond)</c> when CFG is active, otherwise the conditional velocity alone.

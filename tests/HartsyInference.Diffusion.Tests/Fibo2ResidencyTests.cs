@@ -1,5 +1,7 @@
+using System.Reflection;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -25,6 +27,43 @@ public sealed class Fibo2ResidencyTests
         Assert.ThrowsAny<Exception>(() => pipeline.GenerateFromTokens([1], [1], 64, 64, 1, 1f, 1.15f, 7));
 
         Assert.Equal(new[] { "PreloadWeights", "FreeWeights" }, recorder.Calls.Select(c => c.Kind));
+    }
+
+    [Fact]
+    public void TwoGenerations_WithModelsKept_FreeTheDenoiserBeforeEachEncoderLoad()
+    {
+        using CpuBackend cpu = new();
+        IBackend backend = ResidentWeightsTests.Recorder.Create(cpu, out ResidentWeightsTests.Recorder recorder);
+        VramPolicyRegistry.Set(backend, new VramPolicy { Tier = VramTier.Balanced, KeepResident = LeverState.On });
+        try
+        {
+            using Fibo2Pipeline pipeline = UnloadedPipeline(backend);
+
+            // Each generation ends with the denoiser kept resident under the keep policy. Stand that state in before each generation,
+            // then run the encode, which fails on the unloaded components after its preload and free.
+            PreloadDenoiser(pipeline);
+            Assert.ThrowsAny<Exception>(() => pipeline.GenerateFromTokens([1], [1], 64, 64, 1, 1f, 1.15f, 7));
+            PreloadDenoiser(pipeline);
+            Assert.ThrowsAny<Exception>(() => pipeline.GenerateFromTokens([1], [1], 64, 64, 1, 1f, 1.15f, 7));
+
+            // Each generation frees the kept denoiser (forced) before the encoder preloads, so the encoder never loads on top of it.
+            Assert.Equal(new[]
+            {
+                "PreloadWeights", "FreeWeights", "PreloadWeights", "FreeWeights",
+                "PreloadWeights", "FreeWeights", "PreloadWeights", "FreeWeights",
+            }, recorder.Calls.Select(c => c.Kind));
+        }
+        finally
+        {
+            VramPolicyRegistry.Clear(backend);
+        }
+    }
+
+    private static void PreloadDenoiser(Fibo2Pipeline pipeline)
+    {
+        object denoiser = typeof(Fibo2Pipeline).GetField("_denoiserWeights", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(pipeline)!;
+        denoiser.GetType().GetMethod("Preload")!.Invoke(denoiser, null);
     }
 
     [Fact]
