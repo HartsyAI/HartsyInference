@@ -10,11 +10,12 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para>The scale is not applied here: MovieRoll divides a latent by <see cref="HunyuanVideo15VaeConfig.ScalingFactor"/> before decoding, and
 /// the caller does the same. Batch 1 only. The chunked, cache-carrying streaming decode is a separate increment: this class is the full-clip path.</para>
 /// </summary>
-public sealed class HunyuanVideo15Vae
+public sealed class HunyuanVideo15Vae : IDisposable
 {
     private readonly HunyuanVideo15VaeConfig _config;
     private bool _loaded;
-    private List<Tensor> _loadedTensors = [];
+    private bool _disposed;
+    private List<(string Name, IVaeModule Module)> _modules = [];
 
     private CausalConv3d? _encConvIn, _encConvOut;
     private WanRmsNorm? _encNormOut;
@@ -50,8 +51,31 @@ public sealed class HunyuanVideo15Vae
     /// <summary>The configuration this VAE was built with.</summary>
     public HunyuanVideo15VaeConfig Config => _config;
 
-    /// <summary>Every weight tensor the VAE was loaded with, for device placement around a decode.</summary>
-    public IEnumerable<Tensor> EnumerateWeights() => _loadedTensors;
+    /// <summary>The weights <see cref="Decode"/> reads, live from the decoder's layers: a conv's weight form can change after its first call, so
+    /// enumerate again rather than keeping the list. For device placement around a decode.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() => EnumerateWith("decoder.");
+
+    /// <summary>The weights the encoder reads, live from the encoder's layers. <see cref="Decode"/> does not read them.</summary>
+    public IEnumerable<Tensor> EnumerateEncodeWeights() => EnumerateWith("encoder.");
+
+    private IEnumerable<Tensor> EnumerateWith(string prefix)
+    {
+        foreach ((string name, IVaeModule module) in _modules)
+        {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            foreach (Tensor weight in module.EnumerateWeights()) yield return weight;
+        }
+    }
+
+    /// <summary>Releases every layer's owned weight tensors. The VAE holds no other device memory after this.</summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        foreach ((_, IVaeModule module) in _modules) module.Dispose();
+        _modules.Clear();
+        _loaded = false;
+    }
 
     /// <summary>Loads the checkpoint under MovieRoll's state-dict names (<c>encoder.*</c>, <c>decoder.*</c>). Strict: a missing key throws, and so
     /// does any checkpoint tensor the layers do not read. Call once.</summary>
@@ -59,7 +83,6 @@ public sealed class HunyuanVideo15Vae
     {
         ArgumentNullException.ThrowIfNull(weights);
         if (_loaded) throw new InvalidOperationException("HunyuanVideo-1.5 VAE weights are already loaded.");
-        _loadedTensors = [.. weights.Values];
         HunyuanVideo15VaeWeights w = new(weights);
         float eps = _config.NormEps;
         int[] enc = _config.BlockOutChannels;
@@ -126,6 +149,7 @@ public sealed class HunyuanVideo15Vae
         _decConvOut = w.Conv("decoder.conv_out.conv");
 
         w.ThrowOnUnconsumed();
+        _modules = w.Modules.ToList();
         _loaded = true;
     }
 

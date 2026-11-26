@@ -80,6 +80,7 @@ public sealed class MovieRollRecipe : IVideoRecipe
 
         List<IDisposable> loaders = new List<IDisposable>();
         HunyuanVideo15Dit? dit = null;
+        HunyuanVideo15Vae? vae = null;
         LlamaStyleEncoder? llama = null;
         try
         {
@@ -92,7 +93,8 @@ public sealed class MovieRollRecipe : IVideoRecipe
                 new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal), config.NumBlocks, config.HiddenSize);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
-            // The DiT streams its blocks, so weight casts are not cached: a cached cast would hold a second copy of every block on the device.
+            // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
+            // block the DiT streams. The BF16 to F16 cast below is made once on the host, and that copy is what the DiT keeps.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
             // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does.
             foreach (string k in ditWeights.Keys.ToList())
@@ -108,10 +110,9 @@ public sealed class MovieRollRecipe : IVideoRecipe
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);
-            HunyuanVideo15Vae vae = new HunyuanVideo15Vae(HunyuanVideo15VaeConfig.Default);
-            // The VAE's fp32 weights are cast to F16 (about 5 GB to 2.5 GB), as the HunyuanVideo recipe casts its VAE. Decode precision is F16
-            // weights with the same activations; that has not been validated against the reference yet.
-            vae.LoadWeights(VaePrecisionHelper.CastWeights(vaeLoader.GetAllTensors(), [DType.F32], DType.F16));
+            // The VAE stays fp32. Its layers make their own F32 copies of the weights, so an F16 cast would save nothing and only lose precision.
+            vae = new HunyuanVideo15Vae(HunyuanVideo15VaeConfig.Default);
+            vae.LoadWeights(vaeLoader.GetAllTensors());
 
             string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
@@ -126,24 +127,34 @@ public sealed class MovieRollRecipe : IVideoRecipe
             {
                 string byt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.ByT5SmallGlyphXl, onProgress: null, cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader byt5Loader = new SafeTensorsLoader();
-                byt5Loader.Load(byt5Path);
-                T5TextEncoder byt5 = new T5TextEncoder(T5TextEncoderConfig.ByT5SmallGlyph);
-                byt5.LoadWeights(byt5Loader.GetAllTensors());
-                Logs.Info("[MovieRollRecipe] Glyph-ByT5-small loaded for quoted prompt text.");
-                return (byt5, byt5Loader);
+                try
+                {
+                    byt5Loader.Load(byt5Path);
+                    T5TextEncoder byt5 = new T5TextEncoder(T5TextEncoderConfig.ByT5SmallGlyph);
+                    byt5.LoadWeights(byt5Loader.GetAllTensors());
+                    Logs.Info("[MovieRollRecipe] Glyph-ByT5-small loaded for quoted prompt text.");
+                    return (byt5, byt5Loader);
+                }
+                catch
+                {
+                    // A failed load must not leave the container mapped: the pipeline never receives it to dispose.
+                    byt5Loader.Dispose();
+                    throw;
+                }
             };
 
             // The window is one chunk per denoising step (the DMD rollout requires window == len(denoising_step_list)).
-            MovieRollPipeline pipeline = new MovieRollPipeline(context.Backend, dit, vae,
+            MovieRollPipeline pipeline = new MovieRollPipeline(context.Backend, dit!, vae!,
                 MovieRollSchedule.Distilled(DenoisingSteps, windowSize: DenoisingSteps.Length, TimestepShift));
             Logs.Info("[MovieRollRecipe] MovieRoll ready (distilled text-to-video).");
-            return new MovieRollRecipePipeline(context.Backend, pipeline, dit!, llama!, qwen, new Qwen2Tokenizer(), glyphFactory, loaders);
+            return new MovieRollRecipePipeline(context.Backend, pipeline, dit!, vae!, llama!, qwen, new Qwen2Tokenizer(), glyphFactory, loaders);
         }
         catch (Exception ex)
         {
             Logs.Error("[MovieRollRecipe] Construction failed.", ex);
             // Everything built so far, in the order it was built, so a failed construction leaves no weights resident.
             llama?.Dispose();
+            vae?.Dispose();
             dit?.Dispose();
             foreach (IDisposable loader in loaders)
                 loader.Dispose();

@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines.MovieRoll;
 using HartsyInference.Diffusion.Prompting;
@@ -17,7 +18,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <summary>A constructed MovieRoll pipeline driven against the native <see cref="VideoRequest"/>. The prompt's Qwen features are the reference's chat
 /// template with the crop measured from the tokenised prompt; its glyph text, if any, goes through Glyph-ByT5-small (loaded on the first quoted prompt).
 /// Each request runs the rolling sampler over the latent grid and decodes the result. Takes ownership of every disposable it is given.</summary>
-public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline pipeline, HunyuanVideo15Dit dit, LlamaStyleEncoder llama,
+public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline pipeline, HunyuanVideo15Dit dit, HunyuanVideo15Vae vae, LlamaStyleEncoder llama,
     HunyuanImageQwenTextEncoder qwen, Qwen2Tokenizer tokenizer,
     Func<CancellationToken, (T5TextEncoder Encoder, IDisposable Loader)> glyphFactory, List<IDisposable> loaders) : IVideoRecipePipeline
 {
@@ -128,6 +129,7 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
     public void Dispose()
     {
         pipeline.Dispose();
+        vae.Dispose();
         dit.Dispose();
         llama.Dispose();
         _glyph?.Dispose();
