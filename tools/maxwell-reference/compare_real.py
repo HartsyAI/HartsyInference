@@ -1,29 +1,44 @@
-"""Compares the engine's --scores-out TSV with the BF16 reference TSV from dump_real.py.
+"""Compares the engine's --scores-out TSVs with the BF16 reference TSV from dump_real.py.
 
     python -I tools/maxwell-reference/compare_real.py --ref /runs/maxwell-ref/reference.tsv \
         --engine-greedy /runs/engine/greedy.tsv --engine-forced /runs/engine/forced.tsv --tol-logprob 0.10
 
 Pass (exit 0) only when all of these hold:
-  1. The engine's greedy token ids equal the reference's, position for position (all rows).
+  1. The engine's greedy token ids equal the reference's, position for position, and both have the same length.
   2. With the reference tokens teacher-forced, the engine's argmax equals the reference argmax at every position.
   3. With the reference tokens teacher-forced, |engine logprob - reference logprob| of the reference token is at most --tol-logprob
      at every position.
-Exit 1 names the first failing position, both logprobs and the reference top-2 gap there.
+
+On a failure the script names the first failing position and prints the reference's top-1 minus top-2 logprob margin there
+(from the reference's second_id / second_logprob columns), so a near-tie reads differently from a real divergence.
 """
 
 import argparse
 import csv
 import sys
 
+REQUIRED = ["index", "token_id", "logprob", "top_id", "top_logprob", "second_id", "second_logprob"]
 
-def read_tsv(path):
+
+def read_tsv(path, required):
     with open(path, newline="") as f:
-        rows = list(csv.DictReader(f, delimiter="\t"))
+        reader = csv.DictReader(f, delimiter="\t")
+        missing = [c for c in required if c not in (reader.fieldnames or [])]
+        if missing:
+            raise SystemExit(f"{path}: missing columns {missing}")
+        rows = list(reader)
     return [
-        {"index": int(r["index"]), "token_id": int(r["token_id"]), "logprob": float(r["logprob"]),
-         "top_id": int(r["top_id"]), "top_logprob": float(r["top_logprob"])}
+        {
+            "index": int(r["index"]), "token_id": int(r["token_id"]), "logprob": float(r["logprob"]),
+            "top_id": int(r["top_id"]), "top_logprob": float(r["top_logprob"]),
+            **({"second_id": int(r["second_id"]), "second_logprob": float(r["second_logprob"])} if "second_id" in r else {}),
+        }
         for r in rows
     ]
+
+
+def margin(ref_row):
+    return ref_row["top_logprob"] - ref_row["second_logprob"]
 
 
 def main():
@@ -34,31 +49,40 @@ def main():
     p.add_argument("--tol-logprob", type=float, default=0.10)
     a = p.parse_args()
 
-    ref = read_tsv(a.ref)
-    greedy = read_tsv(a.engine_greedy)
-    forced = read_tsv(a.engine_forced)
+    ref = read_tsv(a.ref, REQUIRED)
+    greedy = read_tsv(a.engine_greedy, ["index", "token_id", "logprob", "top_id", "top_logprob"])
+    forced = read_tsv(a.engine_forced, ["index", "token_id", "logprob", "top_id", "top_logprob"])
 
-    if len(greedy) != len(ref) or len(forced) != len(ref):
-        print(f"FAIL length: reference {len(ref)}, greedy {len(greedy)}, forced {len(forced)}")
+    for r in ref:
+        if r["second_id"] == r["top_id"] or margin(r) < 0:
+            raise SystemExit(f"reference row {r['index']} is malformed: top {r['top_id']} second {r['second_id']} margin {margin(r):.6f}")
+
+    if len(greedy) != len(ref):
+        print(f"FAIL length: reference {len(ref)} tokens, engine greedy {len(greedy)} tokens; the reference never stops early, so check the engine's stop handling")
         return 1
     for r, g in zip(ref, greedy):
         if r["token_id"] != g["token_id"]:
-            print(f"FAIL greedy token at position {r['index']}: reference {r['token_id']}, engine {g['token_id']}")
+            print(f"FAIL greedy token at position {r['index']}: reference {r['token_id']}, engine {g['token_id']}; "
+                  f"reference margin top-1 minus top-2 there {margin(r):.6f} nats (top {r['top_id']}, second {r['second_id']})")
             return 1
 
+    if len(forced) != len(ref):
+        print(f"FAIL length: reference {len(ref)} rows, engine forced {len(forced)} rows")
+        return 1
     worst = 0.0
     for r, f in zip(ref, forced):
         if r["token_id"] != f["token_id"]:
-            print(f"FAIL forced token at position {r['index']}: the teacher-forced ids differ from the reference")
+            print(f"FAIL forced token at position {r['index']}: the forced ids differ from the reference file; check the --teacher-force input")
             return 1
         if f["top_id"] != r["top_id"]:
-            gap = r["top_logprob"] - r["logprob"]
-            print(f"FAIL argmax at position {r['index']}: reference {r['top_id']} (gap to token {gap:.4f}), engine {f['top_id']}")
+            print(f"FAIL argmax at position {r['index']}: reference top {r['top_id']} (margin {margin(r):.6f} nats over second {r['second_id']}), "
+                  f"engine top {f['top_id']}")
             return 1
         diff = abs(f["logprob"] - r["logprob"])
         worst = max(worst, diff)
         if diff > a.tol_logprob:
-            print(f"FAIL logprob at position {r['index']}: reference {r['logprob']:.6f}, engine {f['logprob']:.6f}, |diff| {diff:.4f}")
+            print(f"FAIL logprob at position {r['index']}: reference {r['logprob']:.6f}, engine {f['logprob']:.6f}, |diff| {diff:.4f}; "
+                  f"reference margin {margin(r):.6f} nats")
             return 1
 
     print(f"PASS: {len(ref)} positions, greedy tokens identical, argmax identical, max |logprob diff| {worst:.5f} (tolerance {a.tol_logprob})")

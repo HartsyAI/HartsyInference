@@ -60,8 +60,10 @@ python -I tools/maxwell-reference/compare_real.py --ref /runs/maxwell-ref/refere
     --engine-greedy /runs/engine/greedy.tsv --engine-forced /runs/engine/forced.tsv --tol-logprob 0.10
 ```
 
+Reference decode (dump_real.py): an explicit greedy loop over the release's forward, not `model.generate()`. `generation_config.json` (eos ids 2 and 200001, no sampling) therefore never affects the tokens. The release computes lm_head in F32 (`modeling_maxwell_moe.py`: `F.linear(lm_input.float(), lm_head.weight.float())`), so the reference logits are F32; the script refuses to run otherwise. A stop id in the continuation is an error: choose a prompt that runs the full 40 tokens, because the engine stops there.
+
 Checks before trusting the result:
-- `prompt_ids.json` length (reference) equals the engine's prompt token count in its log. A mismatch means the chat rendering differs; stop there.
+- `prompt_ids.json` length (reference) equals the engine's prompt token count in its log. This is a length check only: the engine does not dump its prompt ids, so equal lengths do not prove equal ids. A rendering difference with the same length would pass this check.
 - The engine run must not use the thinking toggle unless the reference also does. `dump_real.py` renders without `enable_thinking`.
 - `--teacher-force` needs `--scores-out` (the CLI enforces it). Greedy means `--temperature 0`.
 
@@ -73,7 +75,7 @@ Unverified: `--teacher-force` and `--scores-out` reach the Maxwell path through 
 - Argmax: with the reference tokens teacher-forced, argmax equals the reference argmax at every position.
 - Logprob: `|engine − reference|` of the reference token is at most 0.10 nats at every position.
 
-`compare_real.py` exits 0 only when all three hold; on failure it names the first position and the reference's top-2 gap there.
+`compare_real.py` exits 0 only when all three hold. On failure it names the first failing position and prints the reference's top-1 minus top-2 logprob margin there (from the `second_id` / `second_logprob` columns that dump_real.py writes after the five engine columns). A margin near 0 means a near-tie; a large margin with a flip means a real divergence.
 
 The 0.10-nat tolerance and the argmax rule are proposals. The FP8-vs-BF16 noise floor for this model has not been measured. If a run fails by a small margin, bisect before changing the tolerance: compare per-layer hidden states (not in this package; the engine has no Maxwell layer dump yet).
 
