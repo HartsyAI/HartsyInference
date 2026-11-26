@@ -44,4 +44,7 @@ public sealed record CatalogEntry
     /// <summary>Derivatives of this model (different quantizations or conversions), each with its own pinned download and
     /// the components it ships. Empty for a model with a single form; such a model's files are <see cref="Assets"/>.</summary>
     public IReadOnlyList<CatalogVariant> Variants { get; init; } = Array.Empty<CatalogVariant>();
+
+    /// <summary>What the model is for beyond generation (background removal, alpha matte). Consumers test these flags rather than the id.</summary>
+    public CatalogFeatures Features { get; init; }
 }
