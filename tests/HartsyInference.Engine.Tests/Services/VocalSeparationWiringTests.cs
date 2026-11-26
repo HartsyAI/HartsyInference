@@ -1,6 +1,9 @@
+using HartsyInference.Audio.Io;
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using Xunit;
@@ -54,6 +57,78 @@ public sealed class VocalSeparationWiringTests
             Prompt = "p", Frames = frames, Fps = fps, ChainTotalFrames = chain, AnimateTotalFrames = animate,
         });
         Assert.Equal(expected, seconds is null ? null : Math.Round(seconds.Value, 2));
+    }
+
+    [Fact]
+    public void ASpeechEncoderGetsTheSeparatedWaveformNotTheClip()
+    {
+        float[] separated = [0.25f, -0.5f, 0.125f];
+        VideoRequest withStem = new() { Prompt = "p", VideoAudioReference = Clip, SeparatedSpeech16k = separated };
+
+        // The clip here is not a decodable WAV, so returning at all proves it was never read.
+        Assert.Same(separated, VideoRecipeUtils.DrivingSpeech16k(withStem, Clip));
+    }
+
+    [Fact]
+    public void WithoutASeparatedWaveformTheClipIsDecoded()
+    {
+        float[] samples = [0f, 0.5f, -0.5f, 0.25f];
+        AudioClip wav = new() { Data = AudioClipCodec.EncodeWav(samples, null, 16_000), Format = "wav" };
+
+        float[] decoded = VideoRecipeUtils.DrivingSpeech16k(new VideoRequest { Prompt = "p", VideoAudioReference = wav }, wav);
+
+        Assert.Equal(samples.Length, decoded.Length);
+        Assert.InRange(decoded[1], 0.499f, 0.501f);
+    }
+
+    [Theory]
+    [InlineData(93, 25, 75_521)]      // Python gives the same: (93/25 + 1.0) * 44100 is 208152.00000000003, so ceil takes 208153
+    [InlineData(253, 25, 177_920)]    // a three-segment chain's 253 frames, not the requested total; the reference sums its terms and lands one sample higher
+    public void SeparatedSpeechIsCutToTheClipPlusOneSecond(int clipFrames, int fps, int expected)
+    {
+        float[] speech = new float[200_000];
+        VideoRequest separated = new() { Prompt = "p", VideoAudioReference = Clip, SeparatedSpeech16k = speech };
+
+        Assert.Equal(expected, VideoRecipeUtils.CropSeparatedSpeech(separated, speech, clipFrames, fps).Length);
+    }
+
+    [Fact]
+    public void ShortOrUnseparatedSpeechIsLeftAlone()
+    {
+        float[] speech = new float[1000];
+        VideoRequest separated = new() { Prompt = "p", VideoAudioReference = Clip, SeparatedSpeech16k = speech };
+        float[] longer = new float[200_000];
+
+        Assert.Same(speech, VideoRecipeUtils.CropSeparatedSpeech(separated, speech, 93, 25));
+        Assert.Same(longer, VideoRecipeUtils.CropSeparatedSpeech(new VideoRequest { Prompt = "p", VideoAudioReference = Clip }, longer, 93, 25));
+    }
+
+    [Fact]
+    public void SeparatorInputIsResampledWithTheSoxrHqStandIn()
+    {
+        float[] tone = new float[2400];
+        for (int i = 0; i < tone.Length; i++) tone[i] = 0.4f * MathF.Sin(2f * MathF.PI * 1000f * i / 24_000f);
+        AudioClip clip = new() { Data = AudioClipCodec.EncodeWav(tone, null, 24_000), Format = "wav" };
+        float[] decoded = AudioClipCodec.DecodeNative(clip).ToStereo().Left;
+
+        (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(clip, 44_100);
+
+        Assert.Equal(SincResampler.ResampleSoxrHqStandIn(decoded, 24_000, 44_100), left);
+        Assert.Equal(left, right);
+    }
+
+    [Fact]
+    public void AnOddSourceRateStillDecodes()
+    {
+        // 44101 Hz shares no factor with 44100, so the stand-in's kernel table would be about 2e9 entries.
+        Assert.False(SincResampler.SupportsSoxrHqStandIn(44_101, 44_100));
+        Assert.True(SincResampler.SupportsSoxrHqStandIn(48_000, 44_100));
+        AudioClip clip = new() { Data = AudioClipCodec.EncodeWav(new float[4410], null, 44_101), Format = "wav" };
+
+        (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(clip, 44_100);
+
+        Assert.InRange(left.Length, 4405, 4412);
+        Assert.Equal(left.Length, right.Length);
     }
 
     [Fact]
