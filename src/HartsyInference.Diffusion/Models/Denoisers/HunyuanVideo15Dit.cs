@@ -319,7 +319,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             throw new ArgumentException($"The cache holds {cache.Height}×{cache.Width} latent tokens per frame; this latent is {height}×{width}.", nameof(latent));
         int perFrame = height * width;
 
-        cache.RequireFits(MovieRollKvCache.BytesPerFrame(_blocks.Length, height, width, _config.HiddenSize) * frames);
+        // Checked before the cache is cleared, and against what this pass keeps, so a refusal leaves the cache as it was and no later layer
+        // write can exceed the budget.
+        cache.RequireFits(RecomputeBytes(chunkFrames, frames, fullHistoryBlocks, height, width));
         cache.SoftClear();
         using Tensor image = EmbedImage(backend, latent, null, frames * perFrame);
         Tensor[]? chunks = null;
@@ -437,6 +439,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             foreach (IDisposable owned in _owned) owned.Dispose();
             _owned.Clear();
         }
+    }
+
+    /// <summary>The K and V bytes a recompute keeps: full-history blocks keep every frame, sink-recent blocks keep the sink chunk and the most recent chunk.</summary>
+    private long RecomputeBytes(int[] chunkFrames, int frames, int fullHistoryBlocks, int height, int width)
+    {
+        long perLayerFrame = MovieRollKvCache.BytesPerFrame(1, height, width, _config.HiddenSize);
+        int sinkRecentFrames = chunkFrames[0] + (chunkFrames.Length > 1 ? chunkFrames[^1] : 0);
+        return (fullHistoryBlocks * (long)frames + (long)(_blocks.Length - fullHistoryBlocks) * sinkRecentFrames) * perLayerFrame;
     }
 
     /// <summary>One block over the chunks of a clip, with block-causal attention done chunk by chunk. Chunk <c>c</c> runs as a window whose cache is
