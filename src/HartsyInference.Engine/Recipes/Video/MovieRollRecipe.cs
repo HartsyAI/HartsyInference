@@ -1,3 +1,4 @@
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -73,10 +74,8 @@ public sealed class MovieRollRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // MovieRollPipeline decodes on the DiT's backend. A separate VAE backend would need a host hop the pipeline does not do yet, so it is
-        // refused here by name rather than failing on the first generation.
-        if (!ReferenceEquals(context.VaeBackendOrDefault, context.Backend))
-            throw new NotSupportedException("MovieRoll decodes on the DiT backend only; a separate VAE backend is not wired.");
+        // A text-encoder or VAE placement on another device is reported and run on the primary backend, as every recipe that does not honour it does.
+        UnhonouredBackends.Refuse(context, "MovieRoll");
 
         List<IDisposable> loaders = new List<IDisposable>();
         HunyuanVideo15Dit? dit = null;
@@ -94,17 +93,18 @@ public sealed class MovieRollRecipe : IVideoRecipe
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
             // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
-            // block the DiT streams. The BF16 to F16 cast below is made once on the host, and that copy is what the DiT keeps.
+            // block the DiT streams. The BF16 to F16 copies below are made once on the host, and they are what the DiT keeps.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
-            // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does.
-            foreach (string k in ditWeights.Keys.ToList())
+            // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does. Only the cast copies are owned here; the rest are the container's.
+            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, [DType.BF16], DType.F16);
+            HashSet<Tensor> converted = new(ditWeights.Values, ReferenceEqualityComparer.Instance);
+            foreach (Tensor copy in ditF16.Values)
             {
-                if (ditWeights[k].DType == DType.BF16)
-                    ditWeights[k] = ditWeights[k].CastTo(DType.F16);
+                if (!converted.Contains(copy)) loaders.Add(copy);
             }
 
             dit = new HunyuanVideo15Dit(config);
-            dit.LoadWeights(ditWeights);
+            dit.LoadWeights(ditF16);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MovieRollVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             // The VAE stays fp32. Its layers make their own F32 copies of the weights, so an F16 cast would save nothing and only lose precision.
@@ -116,34 +116,11 @@ public sealed class MovieRollRecipe : IVideoRecipe
                 vae.LoadWeights(vaeLoader.GetAllTensors());
             }
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
-            SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
-            qwenLoader.Load(qwenPath);
-            loaders.Add(qwenLoader);
-            llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
-            llama.LoadWeights(qwenLoader.GetAllTensors());
-            HunyuanImageQwenTextEncoder qwen = new HunyuanImageQwenTextEncoder(llama);
+            HunyuanImageQwenTextEncoder qwen;
+            (llama, qwen) = HunyuanTextEncoders.LoadQwen25Vl(context, loaders);
 
             // The glyph encoder loads on the first prompt that quotes text, as the HunyuanImage recipe does.
-            Func<CancellationToken, (T5TextEncoder, IDisposable)> glyphFactory = cancel =>
-            {
-                string byt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.ByT5SmallGlyphXl, onProgress: null, cancel).GetAwaiter().GetResult();
-                SafeTensorsLoader byt5Loader = new SafeTensorsLoader();
-                try
-                {
-                    byt5Loader.Load(byt5Path);
-                    T5TextEncoder byt5 = new T5TextEncoder(T5TextEncoderConfig.ByT5SmallGlyph);
-                    byt5.LoadWeights(byt5Loader.GetAllTensors());
-                    Logs.Info("[MovieRollRecipe] Glyph-ByT5-small loaded for quoted prompt text.");
-                    return (byt5, byt5Loader);
-                }
-                catch
-                {
-                    // A failed load must not leave the container mapped: the pipeline never receives it to dispose.
-                    byt5Loader.Dispose();
-                    throw;
-                }
-            };
+            Func<CancellationToken, (T5TextEncoder, IDisposable)> glyphFactory = HunyuanTextEncoders.LoadGlyphByt5;
 
             // The window is one chunk per denoising step (the DMD rollout requires window == len(denoising_step_list)).
             MovieRollPipeline pipeline = new MovieRollPipeline(context.Backend, dit!, vae!,
@@ -155,11 +132,7 @@ public sealed class MovieRollRecipe : IVideoRecipe
         {
             Logs.Error("[MovieRollRecipe] Construction failed.", ex);
             // Everything built so far, in the order it was built, so a failed construction leaves no weights resident.
-            llama?.Dispose();
-            vae?.Dispose();
-            dit?.Dispose();
-            foreach (IDisposable loader in loaders)
-                loader.Dispose();
+            new CompositeDisposable([llama, vae, dit, .. loaders]).Dispose();
             throw;
         }
     }
