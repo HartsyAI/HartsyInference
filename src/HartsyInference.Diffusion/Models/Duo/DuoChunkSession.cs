@@ -108,11 +108,11 @@ internal sealed class DuoChunkSession
         // The denoise stays on the backend: text and noise are uploaded once, each step's velocity comes back as device tensors, and the
         // Euler update is two device ops. The host reads the clean block once, at the end.
         int textRows = refiner.Count == 0 ? 0 : refiner[^1].End;
-        using Tensor textTensor = HostTensor(textRows, RowWidth(text, textRows, "text"), text);
-        Tensor video = HostTensor(noisy.VideoRows.Length, RowWidth(noiseVideo, noisy.VideoRows.Length, "noise video"), noiseVideo);
+        using Tensor textTensor = DuoDeviceWindow.Upload(new TensorShape(textRows, RowWidth(text, textRows, "text")), text);
+        Tensor video = DuoDeviceWindow.Upload(new TensorShape(noisy.VideoRows.Length, RowWidth(noiseVideo, noisy.VideoRows.Length, "noise video")), noiseVideo);
         Tensor? audio = noisy.AudioRows.Length == 0 || noiseAudio.Length == 0
             ? null
-            : HostTensor(noisy.AudioRows.Length, RowWidth(noiseAudio, noisy.AudioRows.Length, "noise audio"), noiseAudio);
+            : DuoDeviceWindow.Upload(new TensorShape(noisy.AudioRows.Length, RowWidth(noiseAudio, noisy.AudioRows.Length, "noise audio")), noiseAudio);
         float[] schedule = DuoSchedule.Grid(steps, shift);
         try
         {
@@ -247,11 +247,11 @@ internal sealed class DuoChunkSession
         {
             throw new ArgumentException("A Duo forward needs text rows: the shared Intent rows are always present.", nameof(refiner));
         }
-        Tensor textTensor = HostTensor(textRows, RowWidth(text, textRows, "text"), text);
-        Tensor videoTensor = HostTensor(layout.VideoRows.Length, RowWidth(video, layout.VideoRows.Length, "video"), video);
+        Tensor textTensor = DuoDeviceWindow.Upload(new TensorShape(textRows, RowWidth(text, textRows, "text")), text);
+        Tensor videoTensor = DuoDeviceWindow.Upload(new TensorShape(layout.VideoRows.Length, RowWidth(video, layout.VideoRows.Length, "video")), video);
         Tensor? audioTensor = audio is null || layout.AudioRows.Length == 0
             ? null
-            : HostTensor(layout.AudioRows.Length, RowWidth(audio, layout.AudioRows.Length, "audio"), audio);
+            : DuoDeviceWindow.Upload(new TensorShape(layout.AudioRows.Length, RowWidth(audio, layout.AudioRows.Length, "audio")), audio);
         try
         {
             return ForwardTensors(transformer, backend, layout, refiner, textTensor, videoTensor, audioTensor, times, cache, commit);
@@ -311,12 +311,6 @@ internal sealed class DuoChunkSession
         }
     }
 
-    private static Tensor HostTensor(int rows, int width, float[] values)
-    {
-        Tensor tensor = new(new TensorShape(rows, width), DType.F32);
-        values.AsSpan().CopyTo(tensor.AsSpan<float>());
-        return tensor;
-    }
 
     private static DuoSampleInput Truncate(DuoSampleInput sample, int block) => sample with
     {
