@@ -25,10 +25,12 @@ public sealed class MovieRollSamplerGpuTests(ITestOutputHelper output)
     private const int Blocks = 2;
     private const int Hidden = 32;
 
-    /// <summary>Exact-lane bound, the same as the streaming facts (measured there at 800f8a182 and 5a22be77c).</summary>
+    /// <summary>Exact-lane bound, the same as the streaming facts. The full sampler measured 3.196e-4 on a 4090 (#1295, 10/10 passing, zero device reads):
+    /// a 36% margin. The streaming facts' measured maximum is 3.7e-4 (recompute, one chunk, block 2 keys), at 800f8a182 and 5a22be77c.</summary>
     private const float ExactTolerance = 5e-4f;
 
-    /// <summary>TF32-lane bound, the same as the streaming facts (measured there at 800f8a182 and 5a22be77c).</summary>
+    /// <summary>TF32-lane bound, the same as the streaming facts. The full sampler measured 1.381e-3 on the same 4090 run: a 31% margin. The streaming
+    /// facts' measured maximum is 1.479e-3 (recompute, one chunk, block 2 keys), at 800f8a182 and 5a22be77c.</summary>
     private const float Tf32Tolerance = 2e-3f;
 
     private static readonly MovieRollSamplerOptions Options = new()
