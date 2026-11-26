@@ -199,13 +199,26 @@ internal static class LongCatRecipeSupport
     /// <summary>The DMD distillation LoRA's static multiplier: the reference's <c>--lora_multiplier</c> default, applied when the LoRA is gated on.</summary>
     internal const float DmdMultiplier = 0.8f;
 
-    /// <summary>The attention query-tile height pinned for one generation (<c>numerics.sdpaTile</c>): <c>512 MiB</c> of F32 scores over every head and
-    /// key token of the run, so a given request always makes the same tile. Pushed as a per-request knob profile and popped on dispose.</summary>
+    /// <summary>The attention query-tile height pinned for one generation (<c>numerics.sdpaTile</c>): a row count from <c>512 MiB</c> of F32 scores over
+    /// the heads and key tokens of the generation's own self-attention shape, so a given request always uses the same rows. A call whose batch or
+    /// key length differs (the cond/uncond pair, later-run contexts) gets a proportionally larger or smaller score tile. Pushed on the request's
+    /// profile and popped on dispose.</summary>
+    private sealed class NoPin : IDisposable
+    {
+        public void Dispose()
+        {
+        }
+    }
+
     internal static IDisposable PinAttentionTile(int heads, long keyTokens)
     {
         long perRow = Math.Max(1L, heads * keyTokens * sizeof(float));
         int rows = (int)Math.Clamp((512L << 20) / perRow, 1L, int.MaxValue);
-        return KnobProfile.Create("longcat-tile").With(EngineKnobs.SdpaTile, rows).Push();
+        // Built on the request's own profile (the CLI, the request settings), so the other knobs it set survive the pin. A caller that set
+        // numerics.sdpaTile itself keeps its value: the pin does not override it.
+        if (EngineKnobs.SdpaTile.Value is int)
+            return new NoPin();
+        return (KnobProfileScope.Current ?? KnobProfile.Create("longcat-tile")).With(EngineKnobs.SdpaTile, rows).Push();
     }
 
     /// <summary>Where the 1.5 distillation LoRA sits: <c>lora/dmd_lora.safetensors</c> beside the checkpoint's own folder (the reference layout).</summary>
