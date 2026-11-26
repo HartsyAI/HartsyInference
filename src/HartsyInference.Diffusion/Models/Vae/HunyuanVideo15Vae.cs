@@ -14,6 +14,7 @@ public sealed class HunyuanVideo15Vae
 {
     private readonly HunyuanVideo15VaeConfig _config;
     private bool _loaded;
+    private List<Tensor> _loadedTensors = [];
 
     private CausalConv3d? _encConvIn, _encConvOut;
     private WanRmsNorm? _encNormOut;
@@ -49,12 +50,16 @@ public sealed class HunyuanVideo15Vae
     /// <summary>The configuration this VAE was built with.</summary>
     public HunyuanVideo15VaeConfig Config => _config;
 
+    /// <summary>Every weight tensor the VAE was loaded with, for device placement around a decode.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() => _loadedTensors;
+
     /// <summary>Loads the checkpoint under MovieRoll's state-dict names (<c>encoder.*</c>, <c>decoder.*</c>). Strict: a missing key throws, and so
     /// does any checkpoint tensor the layers do not read. Call once.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
         if (_loaded) throw new InvalidOperationException("HunyuanVideo-1.5 VAE weights are already loaded.");
+        _loadedTensors = [.. weights.Values];
         HunyuanVideo15VaeWeights w = new(weights);
         float eps = _config.NormEps;
         int[] enc = _config.BlockOutChannels;

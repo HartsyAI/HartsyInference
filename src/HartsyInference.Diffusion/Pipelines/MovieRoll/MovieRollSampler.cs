@@ -55,6 +55,9 @@ public sealed class MovieRollSampler
     private readonly HunyuanVideo15Dit _dit;
     private readonly MovieRollSchedule _schedule;
 
+    /// <summary>Called after each denoise step of the queue; the block streamer's per-step trim hooks here.</summary>
+    public Action? StepCompleted { get; init; }
+
     public MovieRollSampler(IBackend backend, HunyuanVideo15Dit dit, MovieRollSchedule schedule)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -118,7 +121,10 @@ public sealed class MovieRollSampler
                     : round < options.NumChunks ? options.ChunkFrames : tail;
                 queue.Add(noise(frames));
                 for (int step = 0; step < stepsPerWindow; step++)
+                {
                     StepQueue(cache, options, queue, round * stepsPerWindow + step, qwen, byt5, negativeQwen, negativeByt5);
+                    StepCompleted?.Invoke();
+                }
             }
             return Concat(outputs);
         }

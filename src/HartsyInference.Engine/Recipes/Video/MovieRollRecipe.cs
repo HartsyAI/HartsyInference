@@ -57,7 +57,8 @@ public sealed class MovieRollRecipe : IVideoRecipe
 
     /// <summary>Frames are 16n+1: four pixel frames per latent frame after the first, and a first chunk of five latent frames, so n emitted chunks give
     /// <c>4·(4n+1−1)+1 = 16n+1</c> pixel frames.</summary>
-    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(4 * ChunkFrames, FrameNormalization.SnapNearest) };
+    /// <remarks>The grid starts at 17 (the smallest count with a chunk), so a request below it snaps up instead of failing in the pipeline.</remarks>
+    public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = new FrameGrid(4 * ChunkFrames, 4 * ChunkFrames + 1, FrameNormalization.SnapNearest) };
 
     /// <inheritdoc/>
     public VideoFeatures Supports => VideoFeatures.None;
@@ -78,6 +79,8 @@ public sealed class MovieRollRecipe : IVideoRecipe
             throw new NotSupportedException("MovieRoll decodes on the DiT backend only; a separate VAE backend is not wired.");
 
         List<IDisposable> loaders = new List<IDisposable>();
+        HunyuanVideo15Dit? dit = null;
+        LlamaStyleEncoder? llama = null;
         try
         {
             Logs.Info($"[MovieRollRecipe] Loading + converting DiT: {Path.GetFileName(context.CheckpointPath)}.");
@@ -89,15 +92,16 @@ public sealed class MovieRollRecipe : IVideoRecipe
                 new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal), config.NumBlocks, config.HiddenSize);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
-            // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does; a bf16 block-streamed DiT is not cached as F16 copies.
+            // The DiT streams its blocks, so weight casts are not cached: a cached cast would hold a second copy of every block on the device.
+            RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
+            // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does.
             foreach (string k in ditWeights.Keys.ToList())
             {
                 if (ditWeights[k].DType == DType.BF16)
                     ditWeights[k] = ditWeights[k].CastTo(DType.F16);
             }
-            RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
 
-            HunyuanVideo15Dit dit = new HunyuanVideo15Dit(config);
+            dit = new HunyuanVideo15Dit(config);
             dit.LoadWeights(ditWeights);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MovieRollVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
@@ -105,13 +109,15 @@ public sealed class MovieRollRecipe : IVideoRecipe
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);
             HunyuanVideo15Vae vae = new HunyuanVideo15Vae(HunyuanVideo15VaeConfig.Default);
-            vae.LoadWeights(vaeLoader.GetAllTensors());
+            // The VAE's fp32 weights are cast to F16 (about 5 GB to 2.5 GB), as the HunyuanVideo recipe casts its VAE. Decode precision is F16
+            // weights with the same activations; that has not been validated against the reference yet.
+            vae.LoadWeights(VaePrecisionHelper.CastWeights(vaeLoader.GetAllTensors(), [DType.F32], DType.F16));
 
             string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
             qwenLoader.Load(qwenPath);
             loaders.Add(qwenLoader);
-            LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
+            llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
             llama.LoadWeights(qwenLoader.GetAllTensors());
             HunyuanImageQwenTextEncoder qwen = new HunyuanImageQwenTextEncoder(llama);
 
@@ -131,11 +137,14 @@ public sealed class MovieRollRecipe : IVideoRecipe
             MovieRollPipeline pipeline = new MovieRollPipeline(context.Backend, dit, vae,
                 MovieRollSchedule.Distilled(DenoisingSteps, windowSize: DenoisingSteps.Length, TimestepShift));
             Logs.Info("[MovieRollRecipe] MovieRoll ready (distilled text-to-video).");
-            return new MovieRollRecipePipeline(context.Backend, pipeline, dit, llama, qwen, new Qwen2Tokenizer(), glyphFactory, loaders);
+            return new MovieRollRecipePipeline(context.Backend, pipeline, dit!, llama!, qwen, new Qwen2Tokenizer(), glyphFactory, loaders);
         }
         catch (Exception ex)
         {
             Logs.Error("[MovieRollRecipe] Construction failed.", ex);
+            // Everything built so far, in the order it was built, so a failed construction leaves no weights resident.
+            llama?.Dispose();
+            dit?.Dispose();
             foreach (IDisposable loader in loaders)
                 loader.Dispose();
             throw;

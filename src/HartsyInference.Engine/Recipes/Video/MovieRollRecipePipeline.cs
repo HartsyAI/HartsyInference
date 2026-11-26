@@ -106,7 +106,10 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
         }
         int[] tokens = ByT5Tokenizer.Encode(glyphText);
         if (tokens.Length > HunyuanVideo15Prompt.ByT5MaxTokens)
-            tokens = tokens[..HunyuanVideo15Prompt.ByT5MaxTokens];
+        {
+            // Truncate the glyph text, then end on the end-of-sequence token as ByT5Tokenizer.Encode does, so the window keeps its EOS.
+            tokens = [.. tokens[..(HunyuanVideo15Prompt.ByT5MaxTokens - 1)], ByT5Tokenizer.EosId];
+        }
         backend.PreloadWeights(_glyph!.EnumerateWeights());
         Tensor features = _glyph.Encode(backend, [tokens]);
         backend.Sync();
