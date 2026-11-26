@@ -6,8 +6,8 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests.Duo;
 
 /// <summary>The Duo audio stream decoder on a tiny MiniMax-H3 audio VAE decoder with random weights. With a left context and a lookahead
-/// at least the decoder's receptive field, the blocks concatenate to one full decode of the sequence. Without the left context they do not.
-/// These are self-consistency checks: parity against upstream is not run.</summary>
+/// at least the decoder's receptive field, the blocks concatenate to one full decode of the sequence. Dropping either the left context or
+/// the lookahead changes the output. These are self-consistency checks: parity against upstream is not run.</summary>
 public sealed class DuoAudioStreamDecoderTests
 {
     private const int Width = 32;            // LatentChannels, the shipped default
@@ -15,7 +15,14 @@ public sealed class DuoAudioStreamDecoderTests
     private const int Blocks = 10;
     private const int SamplesPerStep = 4;    // the tiny decoder's upsample rates 2 × 2
     private const int Total = Blocks * BlockSteps;
-    private const float Tolerance = 1e-4f;
+    private const int Lookahead = BlockSteps;
+    private const int Context = 32;
+    /// <summary>Scale of the random conv weights. Large enough that the output peaks well above zero, so relative checks are meaningful.</summary>
+    private const float WeightScale = 0.4f;
+    /// <summary>Exactness is judged against the output's own peak, not an absolute bound that a small signal can pass trivially.</summary>
+    private const float RelativeTolerance = 1e-4f;
+    /// <summary>A dropped context or lookahead must move the output by at least this fraction of its peak, or the check would pass it.</summary>
+    private const float Sensitivity = 1e-2f;
 
     [Fact]
     public void BlocksWithFullContextConcatenateToOneFullDecode()
@@ -23,14 +30,14 @@ public sealed class DuoAudioStreamDecoderTests
         using Tiny tiny = Tiny.Create();
         float[] full = Values(7, 2 * Total * Width, 0.5f);
         float[] expected = FullDecode(tiny, full);
+        float peak = Peak(expected);
+        Assert.True(peak > 0.05f, $"The reference output peaks at {peak}; the comparison below would be too weak to mean anything.");
 
-        float[] actual = Stream(tiny, full, contextSteps: 32);
+        float[] actual = Stream(tiny, full, Lookahead, Context);
 
         Assert.Equal(expected.Length, actual.Length);
-        for (int i = 0; i < expected.Length; i++)
-        {
-            Assert.InRange(actual[i], expected[i] - Tolerance, expected[i] + Tolerance);
-        }
+        float worst = MaxDiff(expected, actual);
+        Assert.True(worst <= RelativeTolerance * peak, $"Largest difference {worst} exceeds {RelativeTolerance} of the peak {peak}.");
     }
 
     [Fact]
@@ -39,22 +46,31 @@ public sealed class DuoAudioStreamDecoderTests
         using Tiny tiny = Tiny.Create();
         float[] full = Values(7, 2 * Total * Width, 0.5f);
         float[] expected = FullDecode(tiny, full);
+        float peak = Peak(expected);
 
-        float[] actual = Stream(tiny, full, contextSteps: 0);
+        float[] actual = Stream(tiny, full, Lookahead, contextSteps: 0);
 
-        float worst = 0f;
-        for (int i = 0; i < expected.Length; i++)
-        {
-            worst = MathF.Max(worst, MathF.Abs(actual[i] - expected[i]));
-        }
-        Assert.True(worst > 1e-3f, $"Expected the left context to matter; the largest difference was {worst}.");
+        Assert.True(MaxDiff(expected, actual) > Sensitivity * peak, "Expected the left context to matter.");
+    }
+
+    [Fact]
+    public void WithoutLookaheadTheBlocksDisagreeWithTheFullDecode()
+    {
+        using Tiny tiny = Tiny.Create();
+        float[] full = Values(7, 2 * Total * Width, 0.5f);
+        float[] expected = FullDecode(tiny, full);
+        float peak = Peak(expected);
+
+        float[] actual = Stream(tiny, full, lookaheadSteps: 0, Context);
+
+        Assert.True(MaxDiff(expected, actual) > Sensitivity * peak, "Expected the lookahead to matter.");
     }
 
     [Fact]
     public void ANoBlockStreamPublishesNothing()
     {
         using Tiny tiny = Tiny.Create();
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, 32);
+        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, Lookahead, Context);
 
         Assert.Empty(stream.End());
     }
@@ -63,16 +79,25 @@ public sealed class DuoAudioStreamDecoderTests
     public void ABlockOfTheWrongLengthIsRefused()
     {
         using Tiny tiny = Tiny.Create();
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, 32);
+        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, Lookahead, Context);
 
         Assert.Throws<ArgumentException>(() => stream.OnBlock(new float[2 * BlockSteps * Width - 1]));
+    }
+
+    [Fact]
+    public void ALookaheadLongerThanABlockIsRefused()
+    {
+        using Tiny tiny = Tiny.Create();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, BlockSteps + 1, Context));
     }
 
     [Fact]
     public void NothingCanFollowEnd()
     {
         using Tiny tiny = Tiny.Create();
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, 32);
+        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, Lookahead, Context);
         stream.OnBlock(new float[2 * BlockSteps * Width]);
         stream.End();
 
@@ -80,10 +105,27 @@ public sealed class DuoAudioStreamDecoderTests
         Assert.Throws<InvalidOperationException>(() => stream.End());
     }
 
-    /// <summary>Feeds every block to the stream and gathers what it publishes, [channel][sample] over the whole sequence.</summary>
-    private static float[] Stream(Tiny tiny, float[] full, int contextSteps)
+    [Fact]
+    public void ADecodeThatReturnsItsWindowIsDisposedOnce()
     {
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, contextSteps);
+        // The delegate hands back the window it was given. That is an invalid shape for the crop, so publishing throws; the window must be
+        // disposed once on the way out, not twice. The throw is the observable outcome here, the dispose count is not visible to the test.
+        int calls = 0;
+        DuoAudioStreamDecoder stream = new(window =>
+        {
+            calls++;
+            return window;
+        }, Width, SamplesPerStep, BlockSteps, Lookahead, Context);
+        stream.OnBlock(new float[2 * BlockSteps * Width]);
+
+        Assert.Throws<InvalidOperationException>(() => stream.OnBlock(new float[2 * BlockSteps * Width]));
+        Assert.Equal(1, calls);
+    }
+
+    /// <summary>Feeds every block to the stream and gathers what it publishes, [channel][sample] over the whole sequence.</summary>
+    private static float[] Stream(Tiny tiny, float[] full, int lookaheadSteps, int contextSteps)
+    {
+        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, lookaheadSteps, contextSteps);
         int keep = BlockSteps * SamplesPerStep;
         float[] gathered = new float[2 * Blocks * keep];
         int published = 0;
@@ -145,6 +187,26 @@ public sealed class DuoAudioStreamDecoderTests
         return rows;
     }
 
+    private static float Peak(float[] values)
+    {
+        float peak = 0f;
+        foreach (float v in values)
+        {
+            peak = MathF.Max(peak, MathF.Abs(v));
+        }
+        return peak;
+    }
+
+    private static float MaxDiff(float[] a, float[] b)
+    {
+        float worst = 0f;
+        for (int i = 0; i < a.Length; i++)
+        {
+            worst = MathF.Max(worst, MathF.Abs(a[i] - b[i]));
+        }
+        return worst;
+    }
+
     private static float[] Values(int seed, int count, float scale)
     {
         float[] v = new float[count];
@@ -162,7 +224,7 @@ public sealed class DuoAudioStreamDecoderTests
         return t;
     }
 
-    /// <summary>A miniature H3 audio decoder with random weights, and the tensors it borrows.</summary>
+    /// <summary>A miniature H3 audio decoder with random weights, and the tensors it borrows. Only this test class uses it.</summary>
     private sealed class Tiny : IDisposable
     {
         private readonly Dictionary<string, Tensor> _weights;
@@ -182,7 +244,7 @@ public sealed class DuoAudioStreamDecoderTests
             void Add(string name, params int[] dims)
             {
                 int count = dims.Aggregate(1, (a, d) => a * d);
-                w[name] = Make(Values(seed++, count, 0.1f), dims);
+                w[name] = Make(Values(seed++, count, WeightScale), dims);
             }
             Add("dec_in_proj.weight", 8, 32, 1);
             Add("dec_in_proj.bias", 8);
