@@ -11,7 +11,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.Audio.Tests.Separation.Parity;
 
 /// <summary>Skips unless <c>HARTSY_KIM_VOCAL2_ONNX</c> names Kim_Vocal_2.onnx and <c>HARTSY_KIM_VOCAL2_REF</c> names a folder written by
-/// <c>tests/python-reference/kim_vocal2_reference/dump_kim_vocal2_reference.py</c>.</summary>
+/// <c>tests/python-reference/kim_vocal2_reference/dump_kim_vocal2_reference.py</c> or, without audio-separator, <c>standin_kim_vocal2_reference.py</c>.</summary>
 public sealed class KimVocal2RealFactAttribute : FactAttribute
 {
     internal const string OnnxVariable = "HARTSY_KIM_VOCAL2_ONNX";
@@ -32,7 +32,8 @@ public sealed class KimVocal2RealFactAttribute : FactAttribute
     }
 }
 
-/// <summary>Per-stage and end-to-end match of the C# separator against onnxruntime (audio-separator 0.30.2, LongCat-Video <c>separate_vocals</c>) on a saved clip.</summary>
+/// <summary>Per-stage and end-to-end match of the C# separator against onnxruntime on a saved clip, through whichever driver wrote the reference (its <c>meta.json</c> is printed):
+/// audio-separator 0.30.2 with LongCat-Video <c>separate_vocals</c>, or the stand-in.</summary>
 public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
 {
     private sealed class Recorder(IMdxSpectrogramModel inner) : IMdxSpectrogramModel
@@ -55,6 +56,7 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
         string onnx = Environment.GetEnvironmentVariable(KimVocal2RealFactAttribute.OnnxVariable)!;
         string reference = Environment.GetEnvironmentVariable(KimVocal2RealFactAttribute.RefVariable)!;
         MdxSettings settings = MdxSettings.KimVocal2;
+        output.WriteLine("reference: " + File.ReadAllText(Path.Combine(reference, "meta.json")).ReplaceLineEndings(" "));
 
         (long[] mixShape, float[] mixData) = Npy.Read(Path.Combine(reference, "mix_normalized.npy"));
         int n = (int)mixShape[^1];
