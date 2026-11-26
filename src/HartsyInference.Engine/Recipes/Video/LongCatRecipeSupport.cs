@@ -86,6 +86,51 @@ internal static class LongCatRecipeSupport
             HeadroomBytes = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim),
         });
 
+    /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed and the activation headroom, must
+    /// be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory.</summary>
+    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes)
+    {
+        long spendable = freeBytes - sharedBytesToPlace - headroomBytes;
+        if (spendable < 0)
+        {
+            throw new InvalidOperationException(
+                $"The chain's later run needs {Mb(headroomBytes)} MB of activation headroom and {Mb(sharedBytesToPlace)} MB of shared weights, " +
+                $"but only {Mb(freeBytes)} MB is free: {Mb(-spendable)} MB short. Lower the resolution or the chain length.");
+        }
+    }
+
+    /// <summary>The activation headroom of a later run of <paramref name="tokens"/> rows, the figure its streaming scope reserves.</summary>
+    internal static long LaterRunHeadroom(LongCatParts parts, long tokens) =>
+        ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim);
+
+    /// <summary>Before any segment runs: an upper bound on a later run's budget. The free memory is read after a pool trim, before the shared weights
+    /// are placed, so the shared weights still to place are subtracted. A later run's free memory cannot exceed this, so a refusal here is one the
+    /// later run would also get.</summary>
+    internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens)
+    {
+        backend.TrimMemoryPool();
+        RequireRoom(backend.FreeMemoryBytes(), SharedBytes(parts.Dit), LaterRunHeadroom(parts, laterTokens));
+    }
+
+    /// <summary>A later run's own budget, read once its shared weights are placed, as its streaming scope will read it.</summary>
+    internal static void RequireLaterRunRoom(IBackend backend, LongCatParts parts, long laterTokens)
+    {
+        backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
+        backend.TrimMemoryPool();
+        RequireRoom(backend.FreeMemoryBytes(), 0, LaterRunHeadroom(parts, laterTokens));
+    }
+
+    /// <summary>The bytes of the DiT's shared weights (the adapter operands, the projections and the audio step), at their stored dtype.</summary>
+    internal static long SharedBytes(LongCatTransformer dit)
+    {
+        long total = 0;
+        foreach (Tensor tensor in dit.EnumerateSharedWeights())
+            total += tensor.DType.ComputeByteCount(tensor.ElementCount);
+        return total;
+    }
+
+    private static long Mb(long bytes) => bytes >> 20;
+
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
     /// <summary>The DMD distillation LoRA's static multiplier: the reference's <c>--lora_multiplier</c> default, applied when the LoRA is gated on.</summary>

@@ -152,6 +152,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
         }
 
+        // The later runs' budget is knowable before segment 0 as an upper bound; refuse now rather than after the first segment's denoise.
+        long laterTokens = LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth);
+        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens);
+
         // Segment 0: an ordinary generation in its own streaming scope.
         float[] first = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
             () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
@@ -181,8 +185,11 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
         Func<LongCatAvatarRun, float[]> denoiseSegment = run => LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
-            () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
+            () =>
+            {
+                LongCatRecipeSupport.RequireLaterRunRoom(_backend, _parts, laterTokens);
+                return LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens);
+            },
             onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
             bridge);
 
