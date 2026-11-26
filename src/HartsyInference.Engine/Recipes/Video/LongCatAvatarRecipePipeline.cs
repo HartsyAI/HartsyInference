@@ -180,14 +180,17 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             Cancel: cancel, LoraGate: _loraGate);
 
         // Each segment is decoded once. Segment 0 keeps all its frames; a later segment keeps the frames after its context. The last frames of a
-        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490; the 1.6 build would carry
-        // the latents, and it is refused before this point). The last segment's context is not encoded.
+        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490). The 1.6 build carries
+        // the latents instead (see below). The last segment's context is not encoded.
         LongCatChainFrames output = new(1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1));
+        // The 1.6 build carries the segment's last latent frames straight into the next segment (no decode-encode round trip), as the reference's
+        // use_vcond True path does. Its frames are still decoded once for the output, so only the context changes.
         Func<float[], bool, float[]> contextFromSegment = (segment, last) =>
         {
             byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, segment, channels, plan.SegmentLatents, latentHeight, latentWidth);
-            return output.Step(decoded, last, frames => LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, frames, plan.ContextLatents,
-                channels, latentHeight, latentWidth));
+            return output.Step(decoded, last, frames => _distilled
+                ? LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, frames, plan.ContextLatents, channels, latentHeight, latentWidth)
+                : LongCatRecipeSupport.CarriedContext(segment, channels, plan.SegmentLatents, plan.ContextLatents, latentHeight * latentWidth));
         };
 
         // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
