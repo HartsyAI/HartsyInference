@@ -73,20 +73,25 @@ public sealed unsafe partial class Fibo2Pipeline
                 ScaleInPlace(latent, initialSigma);
 
             _denoiserWeights.Preload();
-            for (int i = 0; i < steps; i++)
+            try
             {
-                Stopwatch stepWatch = Stopwatch.StartNew();
-                Tensor velocity = Denoise(latent, scheduler.SigmaAt(i), conditional, unconditional, guidanceScale, references);
-                Tensor next = new(latent.Shape, DType.F32);
-                scheduler.Step(next, velocity, latent, i);
-                velocity.Dispose();
-                latent.Dispose();
-                latent = next;
-                stepWatch.Stop();
-                onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepWatch.Elapsed.TotalMilliseconds));
+                for (int i = 0; i < steps; i++)
+                {
+                    Stopwatch stepWatch = Stopwatch.StartNew();
+                    Tensor velocity = Denoise(latent, scheduler.SigmaAt(i), conditional, unconditional, guidanceScale, references);
+                    Tensor next = new(latent.Shape, DType.F32);
+                    scheduler.Step(next, velocity, latent, i);
+                    velocity.Dispose();
+                    latent.Dispose();
+                    latent = next;
+                    stepWatch.Stop();
+                    onProgress?.Invoke(new GenerationProgress(i + 1, steps, stepWatch.Elapsed.TotalMilliseconds));
+                }
             }
-
-            _denoiserWeights.Release();
+            finally
+            {
+                _denoiserWeights.Release();
+            }
             AfterWeightRelease(() => _transformer.EnumerateWeights(), "denoiser");
             DeviceMemoryTrace.Record(Backend, "fibo2: before VAE decode");
             using Tensor decoded = DecodeLatent(latent);

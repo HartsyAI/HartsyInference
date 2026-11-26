@@ -194,7 +194,6 @@ public sealed unsafe class Fibo2Transformer : IDisposable
             cast.Dispose();
     }
 
-    /// <summary>F32 form of a borrowed weight. A half-precision source is copied, and the copy is kept until <see cref="Dispose"/>.</summary>
     /// <summary>Every weight the denoiser holds, once each, for a residency owner to preload or free before and after a generation.</summary>
     public IEnumerable<Tensor> EnumerateWeights() => AllWeights().Distinct<Tensor>(ReferenceEqualityComparer.Instance);
 
@@ -220,6 +219,7 @@ public sealed unsafe class Fibo2Transformer : IDisposable
             yield return t;
     }
 
+    /// <summary>F32 form of a borrowed weight. A half-precision source is copied, and the copy is kept until <see cref="Dispose"/>.</summary>
     private Tensor EnsureOwnedF32(Tensor stored)
     {
         Tensor f32 = TensorCasts.EnsureF32(stored);
