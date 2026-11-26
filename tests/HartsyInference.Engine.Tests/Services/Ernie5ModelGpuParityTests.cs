@@ -73,7 +73,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     public void Cuda_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new CudaBackend(0, PtxDirectory()) { HighPrecisionGemm = true }, "CUDA",
         resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides, RealDimensionDecodeTolerance);
 
-    // F16 GEMM off, the Vulkan counterpart of HighPrecisionGemm above: it rounds GEMM inputs to F16, about 1e-3 off by itself.
+    // F16 GEMM off, the Vulkan counterpart of HighPrecisionGemm above: F16 GEMM would round the inputs to F16, about 1e-3 off by itself.
     [ErnieVulkanFact]
     public void Vulkan_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new VulkanBackend { EnableF16Gemm = false }, "Vulkan", resident: false,
         Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides, RealDimensionDecodeTolerance);
