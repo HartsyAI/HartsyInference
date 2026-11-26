@@ -89,7 +89,7 @@ internal static class LongCatRecipeSupport
             // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
             backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
             backend.TrimMemoryPool();
-            RequireCacheRoom(backend.FreeMemoryBytes(), headroom - cacheBytes, cacheBytes);
+            RequireRoom(backend.FreeMemoryBytes(), 0, headroom - cacheBytes, cacheBytes, "The chain's later run");
         }
         return BlockStreamingScope.Open(new BlockStreamingOptions
         {
@@ -109,20 +109,48 @@ internal static class LongCatRecipeSupport
             ? FixedPoolBytes + SafetyBytes + peak + cacheBytes
             : ActivationHeadroomBytes(tokens, hidden, ffnHidden) + cacheBytes;
 
-    /// <summary>Refuses a run whose budget is negative: the free memory after the shared weights, less the activation headroom and the cache, must be
-    /// at least zero, or the streamed blocks have nowhere to land and the first step dies out of memory.</summary>
-    internal static void RequireCacheRoom(long freeAfterShared, long headroomBeforeCache, long cacheBytes)
+    /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed, the activation headroom and the KV
+    /// cache, must be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/>
+    /// names the run in the error; the cache is named separately from the activations.</summary>
+    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes, long cacheBytes, string who)
     {
-        long spendable = freeAfterShared - headroomBeforeCache - cacheBytes;
+        long spendable = freeBytes - sharedBytesToPlace - headroomBytes - cacheBytes;
         if (spendable < 0)
         {
             throw new InvalidOperationException(
-                $"The chain's later run needs {Mb(headroomBeforeCache)} MB of activation headroom and {Mb(cacheBytes)} MB of KV cache, but only " +
-                $"{Mb(freeAfterShared)} MB is free after the shared weights: {Mb(-spendable)} MB short. Lower the resolution or the chain length.");
+                $"{who} needs {MiB(headroomBytes)} MiB of activation headroom" +
+                (cacheBytes > 0 ? $" and {MiB(cacheBytes)} MiB of KV cache" : "") +
+                (sharedBytesToPlace > 0 ? $" and {MiB(sharedBytesToPlace)} MiB of shared weights to place" : "") +
+                $", but only {MiB(freeBytes)} MiB is free: {MiB(-spendable)} MiB short. Lower the resolution or the chain length.");
         }
     }
 
-    private static long Mb(long bytes) => bytes >> 20;
+    /// <summary>The activation headroom of a later run of <paramref name="tokens"/> rows, the figure its streaming scope reserves.</summary>
+    internal static long LaterRunHeadroom(LongCatParts parts, long tokens) =>
+        ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim);
+
+    /// <summary>Before any segment runs: an upper bound on a later run's budget. The free memory is read after a pool trim. Only the shared weights
+    /// not yet on the device are subtracted, so a shared weight that an earlier step already uploaded (the audio projection, once it is used twice)
+    /// is not counted twice. A later run's free memory cannot exceed this, so a refusal here is one the later run would also get.
+    /// <paramref name="stagedBytes"/> is the later run's offloaded KV pair, which its scope has to cover as well.</summary>
+    internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes)
+    {
+        backend.TrimMemoryPool();
+        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens), stagedBytes,
+            "The chain's later run");
+    }
+
+    /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>
+    internal static long NonResidentSharedBytes(IBackend backend, LongCatTransformer dit)
+    {
+        long total = 0;
+        foreach (Tensor tensor in dit.EnumerateSharedWeights())
+            if (!backend.IsWeightResident(tensor))
+                total += tensor.DType.ComputeByteCount(tensor.ElementCount);
+        return total;
+    }
+
+    private static long MiB(long bytes) => (bytes + (1L << 20) - 1) >> 20;
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>

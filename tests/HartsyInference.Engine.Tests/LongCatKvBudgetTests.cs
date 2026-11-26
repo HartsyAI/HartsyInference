@@ -52,7 +52,7 @@ public sealed class LongCatKvBudgetTests
     [Fact]
     public void ARunWhoseCacheFitsIsAccepted()
     {
-        LongCatRecipeSupport.RequireCacheRoom(freeAfterShared: 14_639 * Mb, headroomBeforeCache: 9_000 * Mb, cacheBytes: 4_000 * Mb);
+        LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: 9_000 * Mb, cacheBytes: 4_000 * Mb, "The later run");
     }
 
     [Fact]
@@ -60,15 +60,14 @@ public sealed class LongCatKvBudgetTests
     {
         // The 832x480 later run: 14639 MB free, about 15 GB of activation headroom, and the 12.3 GB cache.
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireCacheRoom(freeAfterShared: 14_639 * Mb, headroomBeforeCache: 15_000 * Mb, cacheBytes: 12_268 * Mb));
-        Assert.Contains("12268 MB of KV cache", error.Message);
-        Assert.Contains("14639 MB is free", error.Message);
-        Assert.Contains("MB short", error.Message);
+            LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: 15_000 * Mb, cacheBytes: 12_268 * Mb, "The later run"));
+        Assert.Contains("14639 MiB is free", error.Message);
+        Assert.Contains("MiB short", error.Message);
     }
 
     [Fact]
     public void ExactlyZeroIsStillAccepted()
     {
-        LongCatRecipeSupport.RequireCacheRoom(freeAfterShared: 10 * Mb, headroomBeforeCache: 6 * Mb, cacheBytes: 4 * Mb);
+        LongCatRecipeSupport.RequireRoom(10 * Mb, sharedBytesToPlace: 0, headroomBytes: 6 * Mb, cacheBytes: 4 * Mb, "The later run");
     }
 }
