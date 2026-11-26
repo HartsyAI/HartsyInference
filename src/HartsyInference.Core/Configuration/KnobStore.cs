@@ -27,6 +27,17 @@ public static class KnobStore
     /// <summary>Sets by dotted id with an already-parsed value. Used by <see cref="KnobFile"/>, which owns the parsing.</summary>
     internal static void SetByIdRaw(string id, object? value, string source) => _overrides[id] = (value, source);
 
+    /// <summary>Applies every value of a profile as a process-wide host override, for a whole test run (the GpuIntegration lane switch, <c>HARTSY_GPU_TEST_KNOBS</c>).
+    /// A per-request scope is <see cref="KnobProfileScope"/>; this override stays until <see cref="ResetOverrides"/>.</summary>
+    public static void ApplyRunProfile(KnobProfile profile)
+    {
+        KnobFile.EnsureLoaded();
+        foreach (KeyValuePair<string, object?> pair in profile.Values)
+        {
+            _overrides[pair.Key] = (pair.Value, "run profile");
+        }
+    }
+
     /// <summary>Which layer supplies <paramref name="id"/>'s current value: a per-request profile, the settings file or a host, else the declared default.</summary>
     /// <remarks>Recorded when the override is set. Inferring it instead cannot work: a host override and a file
     /// value land in the same dictionary, so after the file supplies a value a later host Set is invisible.</remarks>
