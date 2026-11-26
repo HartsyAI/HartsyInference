@@ -113,11 +113,12 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             Assert.True(first[f].Latent.AsSpan().SequenceEqual(second[f].Latent), $"latent frame {f} changed between clips.");
     }
 
-    /// <summary>Two streamed clips in a row on one CUDA pipeline: each clip streams every block, the second reproduces the first, and the
-    /// generator's device weights are released between them, so neither clip starts from a resident prefix.</summary>
+    /// <summary>A resident clip, then a streamed clip, on one CUDA pipeline. The residency query is the check. After the resident clip the
+    /// generator's weights are on the device and the pin is marked resident. After the streamed clip no generator weight is still on the
+    /// device. Without the release in ReleaseOrKeepGenerator the resident clip's weights stay bound, and this test fails.</summary>
     [CudaDeviceFact]
     [Trait("Category", "GpuIntegration")]
-    public void TwoStreamedClipsInARowOnCudaMatch()
+    public void ResidentThenStreamedClipsOnCudaReleaseTheGenerator()
     {
         using TinyModel model = new();
         using Tensor prompt = PaddedPrompt(model);
@@ -126,19 +127,24 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
         FastFramesPipeline pipeline = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
         {
-            StreamingMode = LowVramMode.ForceOn,
-            StreamingHeadroomOverride = long.MaxValue / 4,
+            StreamingMode = LowVramMode.ForceOff,
         };
-        List<FastFramesFrame> first = pipeline.Rollout(prompt, noise, Frames).ToList();
-        int firstStreamed = pipeline.LastStreamedBlocks;
-        List<FastFramesFrame> second = pipeline.Rollout(prompt, noise, Frames).ToList();
+        List<FastFramesFrame> resident = pipeline.Rollout(prompt, noise, Frames).ToList();
 
-        Assert.Equal(model.Transformer.BlockCount, firstStreamed);
+        Assert.True(pipeline.GeneratorResident, "a resident clip must leave the pin resident");
+        Assert.True(model.Transformer.EnumerateWeights().Any(cuda.IsWeightResident),
+            "a resident clip must leave generator weights on the device");
+
+        pipeline.StreamingMode = LowVramMode.ForceOn;
+        pipeline.StreamingHeadroomOverride = long.MaxValue / 4;
+        List<FastFramesFrame> streamed = pipeline.Rollout(prompt, noise, Frames).ToList();
+
         Assert.Equal(model.Transformer.BlockCount, pipeline.LastStreamedBlocks);
-        // A streamed clip releases the generator, so it is not marked resident for the next clip.
         Assert.False(pipeline.GeneratorResident, "a streamed clip must release the generator");
+        Assert.False(model.Transformer.EnumerateWeights().Any(cuda.IsWeightResident),
+            "no generator weight may stay on the device after a streamed clip");
         for (int f = 0; f < Frames; f++)
-            AssertClose(first[f].Latent, second[f].Latent, $"second clip, latent frame {f}", 1e-5);
+            AssertClose(resident[f].Latent, streamed[f].Latent, $"streamed latent frame {f}", 1e-5);
     }
 
     /// <summary>The CUDA rollout (resident, TF32 default GEMMs) against the CPU rollout on the same tiny model and inputs. The tolerance
