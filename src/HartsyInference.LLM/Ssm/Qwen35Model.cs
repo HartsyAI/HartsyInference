@@ -661,14 +661,15 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Tensor xn = new(flat, DType.F32);
         backend.RmsNorm(xn, x, W($"{p}.attn_norm.weight"), Eps);
 
-        // wq outputs [query | gate] fused, each hq*hd wide (double width); each head's row is
-        // [query_0..query_{hd-1}, gate_0..gate_{hd-1}] — a strided de-interleave, not a flat slice — done
-        // host-side since it's a one-time small reshuffle per call, not a hot loop.
+        // wq outputs [query | gate] fused per head: each head's hd*2 row is [query_0..query_{hd-1}, gate_0..gate_{hd-1}]. Viewed as
+        // [seq*hq, 2*hd] that is one row per (token, head), so each half is a device last-dim slice (no host read).
         Tensor qgFull = new(new TensorShape(1, seq, hq * hd * 2), DType.F32);
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
+        Tensor qgRows = qgFull.Reshape(new TensorShape(seq * hq, hd * 2));
         Tensor q = new(new TensorShape(1, seq, hq, hd), DType.F32);
         Tensor gate = new(new TensorShape(1, seq, hq, hd), DType.F32);
-        SplitInterleavedQueryGate(qgFull, q, gate, seq, hq, hd);
+        backend.SliceLastDim(q, qgRows, 0);
+        backend.SliceLastDim(gate, qgRows, hd);
         qgFull.Dispose();
 
         Tensor qN = new(q.Shape, DType.F32);
@@ -726,26 +727,6 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Linear(attnOut, gated, W($"{p}.attn_output.weight"), null);
         gated.Dispose();
         return attnOut;
-    }
-
-    /// <summary>Splits the fused <c>[query | gate]</c> projection into two <c>[1,seq,hq,hd]</c> tensors — each head's output row is <c>[query_0..query_{hd-1}, gate_0..gate_{hd-1}]</c>, a per-head strided de-interleave, not a contiguous slice.</summary>
-    private static void SplitInterleavedQueryGate(Tensor qgFull, Tensor q, Tensor gate, int seq, int hq, int hd)
-    {
-        float* src = (float*)qgFull.DataPointer;
-        float* qp = (float*)q.DataPointer;
-        float* gp = (float*)gate.DataPointer;
-        int headStride = hd * 2;
-        for (int s = 0; s < seq; s++)
-        {
-            long rowBase = (long)s * hq * headStride;
-            long outBase = (long)s * hq * hd;
-            for (int hh = 0; hh < hq; hh++)
-            {
-                float* srcHead = src + rowBase + hh * headStride;
-                Buffer.MemoryCopy(srcHead, qp + outBase + (long)hh * hd, hd * 4, hd * 4);
-                Buffer.MemoryCopy(srcHead + hd, gp + outBase + (long)hh * hd, hd * 4, hd * 4);
-            }
-        }
     }
 
     private void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta)
