@@ -9,9 +9,10 @@ namespace HartsyInference.Vision.DepthPro2;
 /// <summary>
 /// The Depth Pro 2 depth network for one image: the timm DINOv3 backbone of <c>encoder.*</c> (prefix tokens restored after each cross-frame block, as a lone
 /// frame does upstream) and <see cref="DepthPro2Head"/>. Input is ImageNet-normalised pixels at their native size; the network replicate-pads the bottom and
-/// right edges to a multiple of 32 and crops the inverse depth back. Weights are borrowed from the caller, F32.
+/// right edges to a multiple of 32 and crops the inverse depth back. F32 weights are borrowed from the caller; disposing frees the
+/// copies the backbone made of 16-bit ones.
 /// </summary>
-public sealed class DepthPro2Network
+public sealed class DepthPro2Network : IDisposable
 {
     private readonly DepthPro2Preset _preset;
     private readonly Dinov3VisionEncoder _encoder;
@@ -26,8 +27,18 @@ public sealed class DepthPro2Network
         _preset = preset;
         _encoder = new Dinov3VisionEncoder(preset.Backbone);
         _encoder.LoadWeights(Dinov3TimmKeys.ToHuggingFace(weights, "encoder.", preset.Backbone));
-        _head = new DepthPro2Head(preset.DimsReassemble, preset.DimDecoder, preset.Backbone.HiddenSize, weights);
+        try
+        {
+            _head = new DepthPro2Head(preset.DimsReassemble, preset.DimDecoder, preset.Backbone.HiddenSize, weights);
+        }
+        catch
+        {
+            _encoder.Dispose();
+            throw;
+        }
     }
+
+    public void Dispose() => _encoder.Dispose();
 
     public DepthPro2Preset Preset => _preset;
 

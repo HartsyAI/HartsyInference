@@ -24,6 +24,7 @@ public sealed class Dinov3ImageConditioner : IDisposable
 
     private readonly Dinov3VisionEncoder _encoder;
     private readonly IDisposable? _loader;
+    private bool _ownsEncoder;   // set by Load, which made the encoder
     private int _disposed;
 
     /// <param name="encoder">A DINOv3 encoder with weights loaded; borrowed.</param>
@@ -46,7 +47,7 @@ public sealed class Dinov3ImageConditioner : IDisposable
             Dinov2Preset preset = Dinov2Preset.FromDinov3Weights(weights, resolution);
             Dinov3VisionEncoder encoder = new(preset);
             encoder.LoadWeights(weights);
-            return new Dinov3ImageConditioner(encoder, loader);
+            return new Dinov3ImageConditioner(encoder, loader) { _ownsEncoder = true };
         }
         catch
         {
@@ -103,6 +104,7 @@ public sealed class Dinov3ImageConditioner : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        if (_ownsEncoder) _encoder.Dispose();
         _loader?.Dispose();
     }
 }
