@@ -196,6 +196,31 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         Assert.Throws<ObjectDisposedException>(() => pipeline.Rollout(prompt, noise, Frames).ToList());
     }
 
+    /// <summary>A pipeline disposed after the first frame of a clip stops at the next frame: the enumerator refuses to continue.</summary>
+    [Fact]
+    public void DisposingMidClipStopsAtTheNextFrame()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        // A finished clip leaves the generator resident, so the clip disposed mid-way starts from a resident generator.
+        pipeline.Rollout(prompt, noise, Frames).ToList();
+        Assert.True(pipeline.GeneratorResident);
+
+        int progressCalls = 0;
+        using IEnumerator<FastFramesFrame> clip = pipeline.Rollout(prompt, noise, Frames, (_, _) => progressCalls++).GetEnumerator();
+        Assert.True(clip.MoveNext());
+
+        pipeline.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => clip.MoveNext());
+        // The refusal comes before the frame's cache work and its progress report, and the finally has freed the generator.
+        Assert.Equal(0, progressCalls);
+        Assert.False(pipeline.GeneratorResident, "a clip disposed mid-way must leave the generator released");
+    }
+
     /// <summary>A rollout created before Dispose and enumerated after it is refused, not run on a released pipeline.</summary>
     [Fact]
     public void EnumeratingARolloutAfterDisposeRefuses()
