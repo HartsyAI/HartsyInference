@@ -33,15 +33,15 @@ public sealed class SenseNovaLoopGpuTests
         return Math.Sqrt(num / den);
     }
 
-    /// <summary>The exact lane: the CUDA backend is built with TF32 off for the GEMMs and the SDPA GEMMs (construction knobs; the attention
-    /// row table lists TF32 as its multiply format, so <see cref="ExactGemmScope"/> alone does not reach it), and the pass runs under
-    /// <see cref="ExactGemmScope"/>. Only summation order should differ from the CPU route, so the bound is tight.</summary>
+    /// <summary>The exact lane. <see cref="ExactGemmScope"/> already makes the cuBLAS GEMM and SDPA math FP32; the <c>numerics.noTf32</c> and
+    /// <c>numerics.sdpaNoTf32</c> construction knobs also make the attention row table and the backend log declare no TF32, so the lane is exact by
+    /// construction as well as at run time. Measured on a 4090 at 49af97e05: relRMS 3.234612595317881E-06 against a bound of 1e-5.</summary>
     [CudaFact]
     public void TinyF32Gguf_OnCuda_ExactGemms_MatchesTheCpuHuggingFaceRoute() =>
         CompareF32OnCuda(exactGemm: true, tolerance: 1e-5);
 
-    /// <summary>The default lane a generation runs: the engine's TF32 GEMMs and SDPA. Measured on the 4090 at 4.4e-3 (relRMS 0.004428314738910656)
-    /// on main aa0e60aba; the bound is provisional until the GPU run reports this lane's value on the head that adds it.</summary>
+    /// <summary>The default lane a generation runs: the engine's TF32 GEMMs and SDPA. Measured on a 4090 at 49af97e05: relRMS 0.004428314738910656
+    /// against a bound of 1e-2 (provisional, about 2.3x headroom). The same value was measured on main aa0e60aba against the old 1e-4 bound.</summary>
     [CudaFact]
     public void TinyF32Gguf_OnCuda_DefaultGemms_MatchesTheCpuHuggingFaceRoute() =>
         CompareF32OnCuda(exactGemm: false, tolerance: 1e-2);
