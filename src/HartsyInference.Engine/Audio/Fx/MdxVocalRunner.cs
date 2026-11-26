@@ -5,7 +5,8 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Engine.Audio;
 
 /// <summary>A loaded Kim_Vocal_2 vocal separator: the network plus the F32 weights read from its <c>.onnx</c>. The weights are host tensors, so one
-/// cached runner serves whichever backend each call names; each backend holds its own device copies.</summary>
+/// cached runner serves whichever backend each call names; each backend holds its own device copies. The audio runtime's cache key is the same for every
+/// backend, so the video memory it learns for that key is only a hint.</summary>
 internal sealed class MdxVocalRunner(KimVocal2Network network, Dictionary<string, Tensor> weights) : IDisposable
 {
     /// <summary>Sample rate the network was trained at; input must be decoded to it.</summary>

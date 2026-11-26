@@ -153,7 +153,7 @@ internal static class FxCatalog
     }
 
     /// <summary>Reads Kim_Vocal_2's graph and weights from <paramref name="path"/> (a repack to safetensors is a later step: the file is 66.8 MB and binds in
-    /// about a tenth of a second) and builds the runner on <paramref name="backend"/>.</summary>
+    /// about a tenth of a second) and builds the runner.</summary>
     internal static MdxVocalRunner LoadKimVocal2(string path)
     {
         if (!File.Exists(path))

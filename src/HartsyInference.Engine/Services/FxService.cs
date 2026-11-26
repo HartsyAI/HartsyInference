@@ -138,23 +138,29 @@ public sealed class FxService : IFxService
     }
 
     /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The network runs on
-    /// the engine's backend when that is a GPU, and falls back to the CPU when the card has no room for it (a resident image or video model).</summary>
-    private async Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
+    /// the engine's backend when that is CUDA or Vulkan, and falls back to the CPU when the card has no room for it (a resident image or video model).</summary>
+    private Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
     {
         RejectDemucsOnlyKnobs(request);
-        IBackend engineBackend = _engine.Backend;
-        if (!engineBackend.Device.IsGpu)
+        return WithCpuFallbackAsync(_engine.Backend, _cpuBackend.Value, backend => SeparateVocalsOnAsync(backend, selector, request, cancel), cancel);
+    }
+
+    /// <summary>Runs <paramref name="run"/> on <paramref name="engine"/> when that is CUDA or Vulkan, and on <paramref name="cpu"/> otherwise. A GPU run that still ends
+    /// out of video memory after the audio runtime's own retry, wrapped or not, runs again on the CPU.</summary>
+    internal static async Task<T> WithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
+    {
+        if (engine.Device.Type is not (DeviceType.Cuda or DeviceType.Vulkan))
         {
-            return await SeparateVocalsOnAsync(_cpuBackend.Value, selector, request, cancel).ConfigureAwait(false);
+            return await run(cpu).ConfigureAwait(false);
         }
         try
         {
-            return await SeparateVocalsOnAsync(engineBackend, selector, request, cancel).ConfigureAwait(false);
+            return await run(engine).ConfigureAwait(false);
         }
-        catch (Exception ex) when (InferenceEngine.IsOutOfVram(ex) && !cancel.IsCancellationRequested)
+        catch (Exception ex) when (AudioRuntime.FindOutOfVram(ex) is not null && !cancel.IsCancellationRequested)
         {
-            Logs.Warning($"[Audio][Kim-Vocal-2] Not enough video memory on {engineBackend.Device}; separating on the CPU instead, which takes far longer.");
-            return await SeparateVocalsOnAsync(_cpuBackend.Value, selector, request, cancel).ConfigureAwait(false);
+            Logs.Warning($"[Audio][Kim-Vocal-2] Not enough video memory on {engine.Device}; separating on the CPU instead, which takes far longer.");
+            return await run(cpu).ConfigureAwait(false);
         }
     }
 
