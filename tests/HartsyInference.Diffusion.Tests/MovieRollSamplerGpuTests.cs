@@ -14,7 +14,8 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The whole MovieRoll sampler on a device: the tiny DiT's rolling loop over six latent frames (two windows of recompute and CFG), on CUDA
 /// against the CPU run, in two GEMM lanes. The sampler must read nothing back from the device before its latents are compared (asserted zero).
-/// Every tensor is compared and reported as <c>MAX_ERR</c>. The bounds are the streaming facts' bounds; the full-sampler error is not measured yet.
+/// Every tensor is compared and reported as <c>MAX_ERR</c>. Measured on a 4090 (#1295, 10/10, zero device reads): exact 3.196e-4 against the 5e-4 bound,
+/// TF32 1.381e-3 against the 2e-3 bound; the KV recompute fired on both sides (cpu=1, device=1).
 /// Runs only through the GPU session (Category=GpuIntegration); it is skipped where no CUDA device is present.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollSamplerGpuTests(ITestOutputHelper output)
