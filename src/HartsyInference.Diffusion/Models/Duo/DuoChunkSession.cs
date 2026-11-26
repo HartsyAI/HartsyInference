@@ -7,10 +7,10 @@ namespace HartsyInference.Diffusion.Models.Duo;
 
 /// <summary>Chunk-by-chunk Duo generation on the H3 stack for one conversation. <see cref="Prefill"/> commits the reference and the shared
 /// Intent rows once; <see cref="GenerateBlock"/> then denoises the next block against the committed history and commits its clean result.
-/// Blocks must come in order from 0, and every input is length-checked against the layout before anything is computed. The denoise is the
-/// shared Euler loop, so the cached path and a full forward over the same history take the same schedule and noise.
-/// The denoise runs on the backend: the state stays device-resident across the Euler steps, and the clean block is read back once, after the
-/// commit check. <see cref="FullBlock"/> is the dense host reference that the tests compare against.</summary>
+/// Blocks must come in order from 0, and every input is length-checked against the layout before anything is computed. The denoise runs on
+/// the backend with the Euler schedule, so the cached path and a full forward over the same history take the same schedule and noise.
+/// The state stays device-resident across the Euler steps, and the clean block is read back once, before the eviction and the commit.
+/// <see cref="FullBlock"/> is the dense host reference that the tests compare against.</summary>
 internal sealed class DuoChunkSession
 {
     private readonly MiniMaxH3Transformer _transformer;
