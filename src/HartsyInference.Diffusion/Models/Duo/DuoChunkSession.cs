@@ -49,7 +49,7 @@ internal sealed class DuoChunkSession
 
         DuoLayout prefix = DuoLayoutBuilder.BuildPrefix(_sample, _rope);
         Forward(prefix, [SharedGroup(sharedRows)], sharedText, referenceVideo, null, [1f, 1f], commit: true).Dispose();
-        _sharedText = sharedText;
+        _sharedText = (float[])sharedText.Clone();
         _textWidth = textWidth;
         _videoWidth = videoWidth;
         _nextBlock = 0;
@@ -90,6 +90,15 @@ internal sealed class DuoChunkSession
             throw new ArgumentException($"Block {block} noise audio has {noiseAudio.Length} values; expected {audioRows} rows.", nameof(noiseAudio));
         }
 
+        // Refuse a block that cannot fit even after every clean block is dropped, before any work is done or anything is evicted.
+        int committedRows = input.Video.VideoRows + audioRows;
+        int evictable = _cache.Groups.Where(g => g.Kind == DuoGroupKind.Clean).Sum(g => g.End - g.Start);
+        if (_cache.Length - evictable + committedRows > _cache.CapacityRows)
+        {
+            throw new InvalidOperationException(
+                $"Block {block} commits {committedRows} rows; the reference and shared rows leave room for {_cache.CapacityRows - (_cache.Length - evictable)}.");
+        }
+
         float[] text = Concat(_sharedText, bodyText);
         IReadOnlyList<DuoGroup> refiner = ChunkRefiner(block, shared, bodyRows);
         DuoLayout noisy = DuoLayoutBuilder.BuildChunk(_sample, block, _rope, clean: false);
@@ -97,6 +106,11 @@ internal sealed class DuoChunkSession
             (v, a, time) => Velocity(noisy, refiner, text, v, a, time), renoise: null);
 
         DuoLayout clean = DuoLayoutBuilder.BuildChunk(_sample, block, _rope, clean: true);
+        // The window slides: the oldest clean blocks go, reference and shared rows stay, so this block's rows fit.
+        while (_cache.Length + committedRows > _cache.CapacityRows)
+        {
+            _cache.EvictOldestClean();
+        }
         Forward(clean, refiner, text, video, audio, [1f, 1f], commit: true).Dispose();
         _nextBlock++;
         return (video, audio);
