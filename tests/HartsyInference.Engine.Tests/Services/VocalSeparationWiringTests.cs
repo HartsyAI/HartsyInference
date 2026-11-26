@@ -118,6 +118,20 @@ public sealed class VocalSeparationWiringTests
     }
 
     [Fact]
+    public void AnOddSourceRateStillDecodes()
+    {
+        // 44101 Hz shares no factor with 44100, so the stand-in's kernel table would be about 2e9 entries.
+        Assert.False(SincResampler.SupportsSoxrHqStandIn(44_101, 44_100));
+        Assert.True(SincResampler.SupportsSoxrHqStandIn(48_000, 44_100));
+        AudioClip clip = new() { Data = AudioClipCodec.EncodeWav(new float[4410], null, 44_101), Format = "wav" };
+
+        (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(clip, 44_100);
+
+        Assert.InRange(left.Length, 4405, 4412);
+        Assert.Equal(left.Length, right.Length);
+    }
+
+    [Fact]
     public async Task DemucsOnlyOptionsAreRefusedForKimVocal2()
     {
         using InferenceEngine engine = new("cpu");

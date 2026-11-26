@@ -3,7 +3,6 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
-using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
@@ -181,7 +180,7 @@ public sealed class FxService : IFxService
             float[][] vocals = runner.Separate(left, right, null, maxSeconds, LogProgress, ct);
             AudioClip stem = new() { Data = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate), Format = "wav" };
             // Uncropped: the recipe cuts it to the length of the clip it actually generates, which a chain rounds up.
-            return new SeparatedVocals(stem, runner.ToMono(vocals, VideoRecipeUtils.SpeechSampleRate, null));
+            return new SeparatedVocals(stem, runner.ToMono(vocals, SeparatedVocals.SpeechSampleRate, null));
         }, cancel);
     }
 

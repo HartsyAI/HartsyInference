@@ -51,6 +51,12 @@ public static class AudioClipCodec
         WavFile.DecodedAudio decoded = Decode(clip);
         float[] left = decoded.Channels.Length > 0 ? decoded.Channels[0] : [];
         float[] right = decoded.Channels.Length > 1 ? decoded.Channels[1] : left;
+        if (!SincResampler.SupportsSoxrHqStandIn(decoded.SampleRate, targetSampleRate))
+        {
+            Logs.Warning($"[Audio] {decoded.SampleRate} Hz to {targetSampleRate} Hz is too large a ratio for the SoXR-HQ stand-in; "
+                + "using the polyphase resampler, which is off the reference route.");
+            return DecodeStereo(clip, targetSampleRate);
+        }
         float[] outLeft = SincResampler.ResampleSoxrHqStandIn(left, decoded.SampleRate, targetSampleRate);
         float[] outRight = ReferenceEquals(left, right) ? outLeft : SincResampler.ResampleSoxrHqStandIn(right, decoded.SampleRate, targetSampleRate);
         return (outLeft, outRight);
