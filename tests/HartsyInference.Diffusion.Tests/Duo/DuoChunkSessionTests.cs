@@ -153,6 +153,39 @@ public sealed class DuoChunkSessionTests
     private const int OneBlockCapacity = 7 + 14;
 
     [Fact]
+    public void EveryBlockOfAThreeBlockRolloutMatchesTheDenseForwardOverItsHistory()
+    {
+        // No eviction here: the cache holds the whole history, so each block is compared with a dense forward over all of it.
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: 64);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), reference);
+
+        float[][] video = new float[3][];
+        float[][] audio = new float[3][];
+        for (int b = 0; b < 3; b++)
+        {
+            (video[b], audio[b]) = session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            // Reference and shared rows, then one video and one audio span per committed block.
+            Assert.Equal(Shared + RefRows + (b + 1) * (VideoRows + AudioRows), cache.Length);
+        }
+
+        for (int b = 0; b < 3; b++)
+        {
+            float[] cleanVideo = video.Take(b).SelectMany(v => v).ToArray();
+            float[] cleanAudio = audio.Take(b).SelectMany(a => a).ToArray();
+            (float[] denseVideo, float[] denseAudio) = DuoChunkSession.FullBlock(transformer, backend, sample, b, DuoRopePolicy.Old,
+                Shared0(), [Body(0), Body(1), Body(2)], reference, cleanVideo, cleanAudio,
+                Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            AssertClose(denseVideo, video[b], Tolerance, $"block {b} video against the dense forward");
+            AssertClose(denseAudio, audio[b], Tolerance, $"block {b} audio against the dense forward");
+        }
+    }
+
+    [Fact]
     public void LongRolloutSlidesTheWindowAndEachBlockMatchesTheWindowedForward()
     {
         using MiniMaxH3Transformer transformer = Transformer();
