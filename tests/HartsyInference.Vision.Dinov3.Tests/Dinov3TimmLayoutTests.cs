@@ -51,6 +51,28 @@ public sealed unsafe class Dinov3TimmLayoutTests
         }
     }
 
+    [Theory]
+    [InlineData("blocks.0.attn.qkv.weight", 384, 128)]
+    [InlineData("blocks.1.mlp.fc1.weight", 256, 128)]
+    public void TimmAdapter_RefusesAQuantizedWeight_BeforeASliceCouldDropItsScales(string key, long rows, long columns)
+    {
+        Dinov2Preset preset = TimmPreset(gated: false);
+        Dictionary<string, Tensor> timm = TimmWeights(preset, seed: 14, prefix: "");
+        try
+        {
+            timm[key].Dispose();
+            timm[key] = new Tensor(new TensorShape(rows, columns), DType.F8E4M3) { QuantInfo = new QuantWeightInfo { Format = "fp8_block" } };
+
+            NotSupportedException error = Assert.Throws<NotSupportedException>(() => Dinov3TimmKeys.ToHuggingFace(timm, "", preset));
+
+            Assert.Contains($"'{key}'", error.Message);
+        }
+        finally
+        {
+            Dispose(timm);
+        }
+    }
+
     [Fact]
     public void TimmQkvBias_KeepsTheQueryAndValueSlicesAndDropsTheKeyBias()
     {
