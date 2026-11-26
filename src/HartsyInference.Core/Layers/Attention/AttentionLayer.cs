@@ -69,6 +69,22 @@ public sealed partial class AttentionLayer
     /// <summary>The layer's configuration.</summary>
     public AttentionLayerConfig Config => _config;
 
+    /// <summary>The projection, bias and norm tensors the layer was built with. They are borrowed, so this lists them for a residency
+    /// owner to preload or free; nothing is copied or disposed.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_weights is null)
+            yield break;
+        foreach (Tensor? t in new[]
+                 {
+                     _weights.Query, _weights.Key, _weights.Value, _weights.Qkv, _weights.QkvBias, _weights.Output,
+                     _weights.QueryBias, _weights.KeyBias, _weights.ValueBias, _weights.OutputBias, _weights.Gate, _weights.GateBias,
+                     _weights.QueryNorm, _weights.KeyNorm,
+                 })
+            if (t is not null)
+                yield return t;
+    }
+
     /// <summary>Attention of <paramref name="qInput"/> <c>[B, S, C]</c> or <c>[S, C]</c> over <paramref name="kvInput"/> (the same
     /// tensor for self-attention). Returns the output projection, shaped like the query input with the output width; the caller
     /// owns it.</summary>

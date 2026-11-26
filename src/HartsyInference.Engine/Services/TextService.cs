@@ -887,11 +887,24 @@ public sealed partial class TextService : ITextService, IDisposable
         SamplingOptions sampling = BuildVisionSampling(request);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
         string answer;
+        StopReason reason = StopReason.Stop;
         if (slot.MllamaVision is not null)
         {
             using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
                 slot.MllamaVision.ImageSize, MllamaMean, MllamaStd);
             answer = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+        }
+        else if (slot.SsmModel is not null)
+        {
+            // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
+            // GenericTransformer) can't drive — use the dedicated SSM VLM generator. Its tower is Qwen3-VL, and it takes the
+            // aspect-preserving resize (the grid is read from the resized pixels), not the square squash below.
+            Qwen3VlEncoder vision = slot.SpliceVision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector.");
+            using Tensor px = vision.PreprocessImage(image.Rgb, image.Width, image.Height);
+            Qwen35VlGenerator.VlGeneration gen = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!)
+                .Generate(px, question, maxTokens, sampling, request.EnableThinking);
+            answer = gen.Text;
+            reason = gen.StoppedOnToken ? StopReason.Stop : StopReason.Length;
         }
         else
         {
@@ -902,15 +915,11 @@ public sealed partial class TextService : ITextService, IDisposable
             using Tensor px = vision is LlavaNextEncoder
                 ? LlavaNextImagePreprocessor.RawToNativeTensor(image.Rgb, image.Width, image.Height)
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
-            // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
-            // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
-            answer = slot.SsmModel is not null
-                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector."), slot.Backend!).Generate(px, question, maxTokens, sampling)
-                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            answer = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
         int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
-        return new GenOutcome(answer, StopReason.Stop, 0, completion);
+        return new GenOutcome(answer, reason, 0, completion);
     }
 
     /// <summary>Loads a Hugging Face text directory: a host reference model (DeepSeek-V4.1, ERNIE-5.5, Kimi K3.1), a stateful family, or
@@ -1757,7 +1766,7 @@ public sealed partial class TextService : ITextService, IDisposable
 
     /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.</summary>
     /// <param name="ssmBackbone">The SSM backbone (Qwen3.5-VL) accepts only a Qwen3-VL tower; any other projector is refused here with a warning and the model stays text-only.</param>
-    private static void LoadVisionInto(TextDeviceSlot slot, string textPath, bool ssmBackbone = false)
+    internal static void LoadVisionInto(TextDeviceSlot slot, string textPath, bool ssmBackbone = false)
     {
         string? mmproj = FindMmproj(textPath);
         if (mmproj is null)

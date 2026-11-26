@@ -86,6 +86,8 @@ public static class SamplingCapabilities
     private static readonly Dictionary<string, SamplingSupport> Video = new(StringComparer.OrdinalIgnoreCase)
     {
         ["hunyuan-video"] = FullSeam,
+        // MovieRoll's rolling sampler owns its update rule (the distilled DMD rollout); no sampler or sigma schedule plugs in.
+        ["movieroll"] = SolverOwned,
         ["kandinsky5-video"] = FullSeam,
         ["lance-video"] = FullSeam,
         // Upstream's own solver names, not the seam's: these two pick between ported solvers rather than driving one.

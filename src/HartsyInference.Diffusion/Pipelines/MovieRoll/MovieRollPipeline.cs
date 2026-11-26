@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -15,6 +16,9 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
     private readonly HunyuanVideo15Vae _vae;
     private readonly MovieRollSchedule _schedule;
     private readonly long _kvByteBudget;
+
+    /// <summary>Activation headroom the block streamer keeps free, as the HunyuanVideo pipeline's: the sampler's windows and the decode's tiles.</summary>
+    private const long ActivationHeadroomBytes = 6L << 30;
 
     /// <param name="kvByteBudget">The most K and V bytes a run may hold in its cache; <see cref="long.MaxValue"/> means unbounded.
     /// A run that would exceed it is refused before any write.</param>
@@ -41,17 +45,25 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
 
         using MovieRollKvCache cache = new(Backend, _kvByteBudget);
         cache.Init(_dit.StreamLayerNames(), latentHeight, latentWidth);
-        // The DiT's weights are resident for the sampling run and released before the VAE decode, as the pipelines do at a stage change.
-        // The VAE has no weight enumerator yet, so its own placement is not managed here.
-        Backend.PreloadWeights(_dit.EnumerateWeights());
+        // The DiT's blocks stream through BlockStreamingScope on a backend with a streaming cache, as the HunyuanVideo pipeline does: the shared
+        // weights and a resident prefix are preloaded, and the rest of the blocks are staged one at a time as the forward reaches them. A backend
+        // without a streaming cache preloads the whole DiT here.
+        BlockStreamingScope stream = BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = Backend,
+            Denoiser = _dit,
+            ModelName = "MovieRoll",
+            HeadroomBytes = ActivationHeadroomBytes,
+        });
         try
         {
-            MovieRollSampler sampler = new(Backend, _dit, _schedule);
+            MovieRollSampler sampler = new(Backend, _dit, _schedule) { StepCompleted = stream.EndStep };
             return sampler.Sample(cache, options, qwen, byt5, negativeQwen, negativeByt5, noise);
         }
         finally
         {
-            // Finish the device work that reads these weights before they are released.
+            // Unhooks the streamer and evicts its window, then finishes the device work that reads the DiT before its weights are released.
+            stream.Dispose();
             Backend.Sync();
             Backend.FreeWeights(_dit.EnumerateWeights());
         }
@@ -69,7 +81,17 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         // The decoder takes the latent already divided by the scaling factor (movieroll_pipeline.py:decode_latents, latents / scaling_factor).
         using Tensor unscaled = new(latents.Shape, DType.F32);
         Backend.Scale(unscaled, latents, 1f / _vae.Config.ScalingFactor);
-        return _vae.Decode(Backend, unscaled);
+        // The VAE's weights are resident only for the decode, so the sampling run's memory is released before it.
+        Backend.PreloadWeights(_vae.EnumerateWeights());
+        try
+        {
+            return _vae.Decode(Backend, unscaled);
+        }
+        finally
+        {
+            Backend.Sync();
+            Backend.FreeWeights(_vae.EnumerateWeights());
+        }
     }
 
     /// <inheritdoc/>

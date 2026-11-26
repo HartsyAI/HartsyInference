@@ -1,0 +1,109 @@
+using System.Reflection;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Engine.Recipes.Image;
+using Xunit;
+
+namespace HartsyInference.Diffusion.Tests;
+
+/// <summary>Fibo 2.0 weight residency: the text encoder is preloaded for its encode and freed before the denoiser loads, and the free
+/// happens on the failure path too. The recorder backend shows the order of the preload and free calls on the CPU lane.</summary>
+public sealed class Fibo2ResidencyTests
+{
+    [Fact]
+    public void GenerateFromTokens_FreesTheTextEncoder_EvenWhenItsEncodeFails()
+    {
+        using CpuBackend cpu = new();
+        IBackend backend = ResidentWeightsTests.Recorder.Create(cpu, out ResidentWeightsTests.Recorder recorder);
+        using Fibo2Pipeline pipeline = UnloadedPipeline(backend);
+
+        // The components hold no weights, so the encode throws. The text encoder must still be freed, and the denoiser must not load.
+        Assert.ThrowsAny<Exception>(() => pipeline.GenerateFromTokens([1], [1], 64, 64, 1, 1f, 1.15f, 7));
+
+        Assert.Equal(new[] { "PreloadWeights", "FreeWeights" }, recorder.Calls.Select(c => c.Kind));
+    }
+
+    [Fact]
+    public void TwoGenerations_WithModelsKept_FreeTheDenoiserBeforeEachEncoderLoad()
+    {
+        using CpuBackend cpu = new();
+        IBackend backend = ResidentWeightsTests.Recorder.Create(cpu, out ResidentWeightsTests.Recorder recorder);
+        VramPolicyRegistry.Set(backend, new VramPolicy { Tier = VramTier.Balanced, KeepResident = LeverState.On });
+        try
+        {
+            using Fibo2Pipeline pipeline = UnloadedPipeline(backend);
+
+            // Each generation ends with the denoiser kept resident under the keep policy. Stand that state in before each generation,
+            // then run the encode, which fails on the unloaded components after its preload and free.
+            PreloadDenoiser(pipeline);
+            Assert.ThrowsAny<Exception>(() => pipeline.GenerateFromTokens([1], [1], 64, 64, 1, 1f, 1.15f, 7));
+            PreloadDenoiser(pipeline);
+            Assert.ThrowsAny<Exception>(() => pipeline.GenerateFromTokens([1], [1], 64, 64, 1, 1f, 1.15f, 7));
+
+            // Each generation frees the kept denoiser (forced) before the encoder preloads, so the encoder never loads on top of it.
+            Assert.Equal(new[]
+            {
+                "PreloadWeights", "FreeWeights", "PreloadWeights", "FreeWeights",
+                "PreloadWeights", "FreeWeights", "PreloadWeights", "FreeWeights",
+            }, recorder.Calls.Select(c => c.Kind));
+        }
+        finally
+        {
+            VramPolicyRegistry.Clear(backend);
+        }
+    }
+
+    private static void PreloadDenoiser(Fibo2Pipeline pipeline)
+    {
+        object denoiser = typeof(Fibo2Pipeline).GetField("_denoiserWeights", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(pipeline)!;
+        denoiser.GetType().GetMethod("Preload")!.Invoke(denoiser, null);
+    }
+
+    [Fact]
+    public void Fits_KeepsTheDenoiserOnlyWhenTheEncoderFitsWithHeadroom()
+    {
+        const long gib = 1L << 30;
+
+        Assert.True(Fibo2Pipeline.Fits(freeBytes: 4 * gib, needBytes: 2 * gib, headroomBytes: gib));
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 5 * gib / 2, needBytes: 2 * gib, headroomBytes: gib), "headroom is not spare");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 5 * gib / 2, needBytes: gib, headroomBytes: 2 * gib),
+            "a larger headroom (vram.preloadHeadroomMb) is the one that counts");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 0, needBytes: 0, headroomBytes: gib),
+            "a backend with no device memory reports 0 and takes the release path");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: -1, needBytes: 1, headroomBytes: gib), "an unknown figure is never a fit");
+    }
+
+    [Fact]
+    public void TransformerEnumeratesNoWeightsBeforeItsWeightsLoad()
+    {
+        using Fibo2Transformer transformer = new(TinyConfig());
+
+        Assert.Empty(transformer.EnumerateWeights());
+    }
+
+    private static Fibo2Pipeline UnloadedPipeline(IBackend backend)
+    {
+        Fibo2Config config = TinyConfig();
+        LlamaStyleEncoderConfig encoderConfig = LlamaStyleEncoderConfig.Qwen3_VL_4B with
+        {
+            HiddenSize = 32, NumLayers = 36, NumQueryHeads = 2, NumKvHeads = 1, HeadDim = 16, IntermediateSize = 64, VocabSize = 64,
+        };
+        return new Fibo2Pipeline(backend, new LlamaStyleEncoder(encoderConfig), new Fibo2Transformer(config),
+            new VaeDecoder(VaeConfig.Flux2), new Tensor(new TensorShape(128), DType.F32), new Tensor(new TensorShape(128), DType.F32),
+            config);
+    }
+
+    private static Fibo2Config TinyConfig() => Fibo2Config.Checkpoint with
+    {
+        Dim = 64, NumHeads = 2, HeadDim = 32, NumLayers = 2, NumRefinerLayers = 1, InjectionLayers = [1], CapFeatDim = 96,
+        PerceiverQueries = 8, PerceiverLayers = 1, FfnDim = 96, AxesDims = [8, 12, 12], MaxGist = 8, MinGist = 4, GistStep = 2,
+        GistMinTextLen = 16, GistMaxTextLen = 64,
+    };
+}
