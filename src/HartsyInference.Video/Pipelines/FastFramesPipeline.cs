@@ -75,9 +75,10 @@ public sealed record FastFramesFrame(int Index, float[] Latent, float[] Pixels, 
 /// <para>The pipeline does not own its components, and the constructor checks that they fit together. Numerics are the engine's
 /// (F32 residual stream, the Wan block's branch dtype); they differ from upstream's BF16 run by BF16 rounding, which is why parity
 /// is judged against an FP32 run of the upstream code.</para></summary>
-public sealed class FastFramesPipeline
+public sealed class FastFramesPipeline : IDisposable
 {
     private readonly IBackend _backend;
+    private bool _disposed;
     private readonly WanVideoTransformer _transformer;
     private readonly FastFramesKvRefiner _refiner;
     private readonly FastFramesPixelDecoder _decoder;
@@ -150,6 +151,7 @@ public sealed class FastFramesPipeline
     {
         ArgumentNullException.ThrowIfNull(promptEmbeds);
         ArgumentNullException.ThrowIfNull(noise);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
         // A pinned prefix from an earlier clip is still on the device, so the free VRAM read here does not show what the placement
         // will have free. The placement releases or keeps that prefix; the check after it decides, so skip this one.
@@ -204,6 +206,8 @@ public sealed class FastFramesPipeline
     private IEnumerable<FastFramesFrame> RolloutCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)
     {
+        // The body runs on the first MoveNext, so a rollout enumerated after Dispose is refused here.
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
@@ -263,10 +267,11 @@ public sealed class FastFramesPipeline
     /// <summary>After a clip. A streamed clip frees the generator's device weights, the resident prefix included, so the next clip and the
     /// decoder get the VRAM back. The pin keeps the count it was sized to, so the next placement uploads that prefix only as far as it
     /// fits. A clip that stayed resident keeps the weights, and the pin says so, which lets the next clip skip the admission check the
-    /// weights already passed. Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
+    /// weights already passed. A disposed pipeline frees instead of keeping, so nothing stays on the device after Dispose.
+    /// Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
     private void ReleaseOrKeepGenerator(bool streamed)
     {
-        if (streamed)
+        if (streamed || _disposed)
         {
             _backend.FreeWeights(_transformer.EnumerateWeights());
             _backend.TrimMemoryPool();
@@ -288,7 +293,24 @@ public sealed class FastFramesPipeline
     public int LastStreamedBlocks { get; private set; }
 
     /// <summary>True while the generator's weights stay on the device from the last clip, the resident path that <c>ReleaseOrKeepGenerator</c> keeps.</summary>
-    public bool GeneratorResident => _generatorPin.Resident;
+    internal bool GeneratorResident => _generatorPin.Resident;
+
+    /// <summary>Frees the generator's device weights when a resident clip left them there, so a dropped pipeline gives the VRAM back. The
+    /// pipeline does not own the backend, the refiner, the decoder or the transformer object; their owner disposes those.</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        if (_generatorPin.Resident)
+        {
+            _backend.FreeWeights(_transformer.EnumerateWeights());
+            _backend.TrimMemoryPool();
+            _generatorPin.Resident = false;
+        }
+    }
 
     /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
     /// they are uploaded before the placement, so the planner counts them as used.</summary>

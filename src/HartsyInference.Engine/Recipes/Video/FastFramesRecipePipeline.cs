@@ -117,6 +117,8 @@ public sealed class FastFramesRecipePipeline : IVideoRecipePipeline
             return;
         }
         _disposed = true;
+        // The pipeline first: it frees the generator's device weights, and the loaders then release the host objects.
+        _pipeline.Dispose();
         foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
