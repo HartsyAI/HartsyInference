@@ -166,12 +166,24 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
     public Tensor PreprocessImage(ReadOnlySpan<byte> rgb, int width, int height, int maxPixels = DefaultMaxPixels) =>
         VlmImagePreprocessor.PreprocessAspect(rgb, width, height, PatchSize * Merge, MinPixels, maxPixels, ImageMean, ImageStd);
 
+    /// <summary>Largest patch count <see cref="Encode"/> accepts. Full attention allocates an <c>[np, np]</c> F32 mask, so 8192 patches is a 256 MiB
+    /// mask; the default 768×768 budget is 2304 patches.</summary>
+    internal const int MaxFullAttentionPatches = 8192;
+
+    /// <summary>Refuses a patch count whose full-attention mask would overflow <c>int</c> or exceed <see cref="MaxFullAttentionPatches"/>.</summary>
+    internal static void CheckPatchBudget(int np)
+    {
+        if (np <= 0 || np > MaxFullAttentionPatches)
+            throw new ArgumentException($"The image has {np} patches; full attention over that needs a {np}×{np} mask. The limit is {MaxFullAttentionPatches} patches (a smaller maxPixels).", "pixelValues");
+    }
+
     /// <summary>Encodes a preprocessed image <c>[1, 3, H, W]</c> into <c>[1, tokens, textHidden]</c>.</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
         int hidden = Hidden, patch = PatchSize, m = Merge, heads = NumHeads, hd = HeadDim;
         int H = (int)pixelValues.Shape[2], Wd = (int)pixelValues.Shape[3];
         int gh = H / patch, gw = Wd / patch, np = gh * gw;
+        CheckPatchBudget(np);
         TokensPerImage = np / (m * m);
 
         Tensor patches = VisionPatchOps.Patchify(backend, pixelValues, gh, gw, m, patch);

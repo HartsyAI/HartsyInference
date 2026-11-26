@@ -63,9 +63,26 @@ public sealed class Qwen35VlAspectResizeTests
     [Theory]
     [InlineData(1024, 65536)]   // a maximum below one 32×32 block
     [InlineData(40000, 65536)]  // a maximum below the minimum
-    public void SmartResize_RefusesBoundsThatCannotHoldABlock(int maxPixels, int minPixels)
+    public void SmartResize_RefusesInvalidPixelBounds(int maxPixels, int minPixels)
     {
         Assert.Throws<ArgumentException>(() => VlmImagePreprocessor.SmartResize(768, 1024, Factor, minPixels, maxPixels));
+    }
+
+    [Theory]
+    [InlineData(8192)]
+    [InlineData(1)]
+    public void CheckPatchBudget_AcceptsTheLimitAndRefusesAboveIt(int np)
+    {
+        Qwen3VlEncoder.CheckPatchBudget(np);
+    }
+
+    [Theory]
+    [InlineData(8193)]
+    [InlineData(46341)]   // past int range for np*np
+    [InlineData(0)]
+    public void CheckPatchBudget_RefusesOverTheLimitOrNonPositive(int np)
+    {
+        Assert.Throws<ArgumentException>(() => Qwen3VlEncoder.CheckPatchBudget(np));
     }
 
     [Fact]
