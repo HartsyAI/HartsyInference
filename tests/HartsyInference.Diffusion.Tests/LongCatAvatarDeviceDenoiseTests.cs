@@ -37,12 +37,12 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
     {
         int cond = mode switch { LongCatAvatarMode.At2v => 0, LongCatAvatarMode.Avc => 2, _ => 1 };
         Random rng = new(5);
-        float[] noise = RandomArray(rng, _config.InChannels * Frames * Hw);
-        float[]? condLatents = cond == 0 ? null : RandomArray(rng, _config.InChannels * cond * Hw);
-        float[] audio = RandomArray(rng, Frames * _config.AudioContextTokens * _config.AudioOutputDim);
-        float[] unconditionalAudio = RandomArray(rng, audio.Length);
-        LongCatPrompt positive = new(RandomArray(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
-        LongCatPrompt negative = new(RandomArray(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        float[] noise = LongCatTestData.RandomValues(rng, _config.InChannels * Frames * Hw);
+        float[]? condLatents = cond == 0 ? null : LongCatTestData.RandomValues(rng, _config.InChannels * cond * Hw);
+        float[] audio = LongCatTestData.RandomValues(rng, Frames * _config.AudioContextTokens * _config.AudioOutputDim);
+        float[] unconditionalAudio = LongCatTestData.RandomValues(rng, audio.Length);
+        LongCatPrompt positive = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt negative = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
 
         using LongCatTransformer transformer = new(_config);
         transformer.LoadWeights(_weights);
@@ -162,14 +162,5 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
         for (int i = 0; i < sigmas.Length; i++)
             result[i] = shift * sigmas[i] / (1f + (shift - 1f) * sigmas[i]);
         return result;
-    }
-
-    /// <summary>The tiny config's base weights plus the avatar's audio projection and each block's audio step, with seeded values.</summary>
-    private static float[] RandomArray(Random rng, int count)
-    {
-        float[] values = new float[count];
-        for (int i = 0; i < count; i++)
-            values[i] = (float)(rng.NextDouble() * 2 - 1);
-        return values;
     }
 }
