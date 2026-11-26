@@ -11,18 +11,28 @@ public static class JpegDecoder
         35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
     ];
 
+    /// <summary>The largest frame decoded: each plane is allocated up front, so a header cannot ask for more than this.</summary>
+    public const long MaxPixels = 64L * 1024 * 1024;
+
     /// <summary>Cosine basis for the 8-point IDCT: <c>Basis[x * 8 + u] = C(u) / 2 · cos((2x + 1) u π / 16)</c>.</summary>
     private static readonly float[] Basis = BuildBasis();
 
     /// <summary>True when the bytes start with the JPEG SOI marker and the next marker byte, which is what a JPEG file begins with.</summary>
     public static bool IsJpeg(ReadOnlySpan<byte> data) => data.Length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
 
-    /// <summary>Decodes a baseline JPEG to RGB24 (row-major, 3 bytes per pixel). Grayscale is replicated to RGB.</summary>
+    /// <summary>Decodes a baseline JPEG to RGB24 (row-major, 3 bytes per pixel). Grayscale is replicated to RGB. Applies the EXIF orientation of an APP1 block, and reads an Adobe APP14 transform flag.</summary>
     public static (byte[] Rgb, int Width, int Height) Decode(ReadOnlySpan<byte> encoded)
     {
         if (!IsJpeg(encoded))
             throw new ArgumentException("Not a JPEG file: the SOI marker is missing.", nameof(encoded));
-        return new Decoder(encoded.ToArray()).Run();
+        try
+        {
+            return new Decoder(encoded.ToArray()).Run();
+        }
+        catch (IndexOutOfRangeException ex)
+        {
+            throw new ArgumentException("Not a decodable JPEG: the file is truncated or its headers are malformed.", nameof(encoded), ex);
+        }
     }
 
     private static float[] BuildBasis()
@@ -90,9 +100,12 @@ public static class JpegDecoder
         private Component[] _comps = [];
         private int _hMax, _vMax, _mcusX, _mcusY;
         private bool _frame;
+        private byte[]? _exif;
+        private int _adobeTransform = -1;
 
         // Bit reader state.
         private int _bitBuf, _bitCnt;
+        private bool _hitMarker;   // the bit reader met a marker where it needed data
 
         public Decoder(byte[] d) => _d = d;
 
@@ -105,6 +118,14 @@ public static class JpegDecoder
                 {
                     case 0xD9:
                         throw Bad("the file ends before any scan");
+                    case 0xE1:
+                        if (SegmentLength(out int exifEnd) >= 8 && IsExif(_pos + 2, exifEnd)) _exif = _d[(_pos + 8)..exifEnd];
+                        Skip();
+                        break;
+                    case 0xEE:
+                        if (SegmentLength(out _) >= 14 && IsAdobe(_pos + 2)) _adobeTransform = _d[_pos + 2 + 11];
+                        Skip();
+                        break;
                     case 0xDB:
                         ReadQuant();
                         break;
@@ -122,7 +143,7 @@ public static class JpegDecoder
                     case 0xDA:
                         if (!_frame) throw Bad("a scan appears before the frame header");
                         DecodeScan();
-                        return ToRgb();
+                        return ApplyExif(ToRgb());
                     case 0xC2:
                     case 0xC3:
                     case 0xC5:
@@ -159,8 +180,32 @@ public static class JpegDecoder
 
         private void Skip()
         {
+            _pos += SegmentLength(out _);
+        }
+
+        /// <summary>The declared length of the segment at <see cref="_pos"/>, checked to lie inside the file.</summary>
+        private int SegmentLength(out int end)
+        {
+            if (_pos + 2 > _d.Length) throw Bad("a segment header runs past the end of the file");
             int len = U16(_pos);
-            _pos += len;
+            end = _pos + len;
+            if (len < 2 || end > _d.Length) throw Bad("a segment runs past the end of the file");
+            return len;
+        }
+
+        private bool IsExif(int at, int end) =>
+            end - at >= 6 && _d[at] == 'E' && _d[at + 1] == 'x' && _d[at + 2] == 'i' && _d[at + 3] == 'f' && _d[at + 4] == 0 && _d[at + 5] == 0;
+
+        private bool IsAdobe(int at) =>
+            _d[at] == 'A' && _d[at + 1] == 'd' && _d[at + 2] == 'o' && _d[at + 3] == 'b' && _d[at + 4] == 'e';
+
+        /// <summary>Applies the EXIF orientation of an APP1 block (a TIFF block after the <c>Exif  </c> header), as the PNG path does.</summary>
+        private (byte[] Rgb, int Width, int Height) ApplyExif((byte[] Rgb, int Width, int Height) img)
+        {
+            int orientation = ExifOrientation.ReadTiff(_exif);
+            if (orientation == ExifOrientation.Upright) return img;
+            (byte[] rgb, _, int w, int h) = ExifOrientation.Apply(img.Rgb, null, img.Width, img.Height, orientation);
+            return (rgb, w, h);
         }
 
         private int U16(int at) => (_d[at] << 8) | _d[at + 1];
@@ -217,6 +262,9 @@ public static class JpegDecoder
             int n = _d[p + 5];
             if (n != 1 && n != 3) throw new NotSupportedException($"JPEG has {n} components; only grayscale and YCbCr (1 or 3) are decoded, not CMYK.");
             if (_width <= 0 || _height <= 0) throw Bad("the frame has no size");
+            // The PNG rule (the RGB bytes must fit an int), and a pixel ceiling because every plane is allocated up front.
+            if ((long)_width * _height * 3 > int.MaxValue || (long)_width * _height > MaxPixels)
+                throw Bad($"the frame {_width}x{_height} is larger than the decoder's {MaxPixels}-pixel limit");
             _comps = new Component[n];
             _hMax = 1;
             _vMax = 1;
@@ -254,6 +302,7 @@ public static class JpegDecoder
                 Component c = _comps.FirstOrDefault(x => x.Id == id) ?? throw Bad($"the scan names component {id}, which the frame does not have");
                 c.DcTable = tables >> 4;
                 c.AcTable = tables & 15;
+                if (c.DcTable > 3 || c.AcTable > 3) throw Bad("a scan names a Huffman table above 3");
             }
             int ss = _d[p + 1 + ns * 2], se = _d[p + 2 + ns * 2];
             if (ss != 0 || se != 63) throw new NotSupportedException("A spectral-selection scan is progressive; only baseline is decoded.");
@@ -283,6 +332,7 @@ public static class JpegDecoder
                     }
                 }
             }
+            if (_hitMarker) throw Bad("the scan ends before all its MCUs are decoded");
         }
 
         private void DecodeBlock(Component c, int[] block)
@@ -375,14 +425,22 @@ public static class JpegDecoder
             byte next = _pos + 1 < _d.Length ? _d[_pos + 1] : (byte)0xD9;
             if (next == 0x00) { _pos += 2; return 0xFF; }
             // A marker inside the scan (a restart or the end of the scan): feed zeros and leave the marker for SyncRestart.
+            _hitMarker = true;
             return 0;
         }
 
         private void SyncRestart()
         {
             _bitCnt = 0;
-            while (_pos + 1 < _d.Length && !(_d[_pos] == 0xFF && _d[_pos + 1] >= 0xD0 && _d[_pos + 1] <= 0xD7)) _pos++;
-            if (_pos + 1 >= _d.Length) throw Bad("a restart marker is missing");
+            _hitMarker = false;   // the marker met here is the restart, which is expected
+            while (true)
+            {
+                if (_pos + 1 >= _d.Length) throw Bad("a restart marker is missing");
+                if (_d[_pos] == 0xFF && _d[_pos + 1] != 0x00 && _d[_pos + 1] != 0xFF) break;
+                _pos++;
+            }
+            int m = _d[_pos + 1];
+            if (m < 0xD0 || m > 0xD7) throw Bad("the scan ends before all its MCUs are decoded");
             _pos += 2;
         }
 
@@ -402,6 +460,19 @@ public static class JpegDecoder
                 return (rgb, _width, _height);
             }
             Component yc = _comps[0], cb = _comps[1], cr = _comps[2];
+            if (_adobeTransform == 0)
+            {
+                // Adobe transform 0: the three planes are RGB already, so no YCbCr conversion.
+                for (int y = 0; y < _height; y++)
+                for (int x = 0; x < _width; x++)
+                {
+                    int o = (y * _width + x) * 3;
+                    rgb[o] = yc.Plane[(y * yc.V / _vMax) * yc.PlaneWidth + x * yc.H / _hMax];
+                    rgb[o + 1] = cb.Plane[(y * cb.V / _vMax) * cb.PlaneWidth + x * cb.H / _hMax];
+                    rgb[o + 2] = cr.Plane[(y * cr.V / _vMax) * cr.PlaneWidth + x * cr.H / _hMax];
+                }
+                return (rgb, _width, _height);
+            }
             for (int y = 0; y < _height; y++)
             for (int x = 0; x < _width; x++)
             {

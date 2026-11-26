@@ -887,6 +887,7 @@ public sealed partial class TextService : ITextService, IDisposable
         SamplingOptions sampling = BuildVisionSampling(request);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
         VisionGeneration gen;
+        bool reasoningOpen = false;   // only the SSM template path can open a reasoning block the answer is split on
         if (slot.MllamaVision is not null)
         {
             using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
@@ -900,8 +901,13 @@ public sealed partial class TextService : ITextService, IDisposable
             // aspect-preserving resize (the grid is read from the resized pixels), not the square squash below.
             Qwen3VlEncoder vision = slot.SpliceVision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector.");
             using Tensor px = vision.PreprocessImage(image.Rgb, image.Width, image.Height);
+            // The turn tail comes from the loaded model's own template, so its switch decides the think prefix (no constant here).
+            string turnTail = slot.SsmModel.Template is JinjaChatTemplate jinja
+                ? jinja.TurnTailAfterUser(slot.SsmModel.Tokenizer, request.EnableThinking)
+                : "<|im_end|>\n<|im_start|>assistant\n";
+            reasoningOpen = Qwen35VlGenerator.ReasoningOpen(turnTail);
             gen = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!)
-                .Generate(px, question, maxTokens, sampling, request.EnableThinking);
+                .Generate(px, question, maxTokens, sampling, turnTail);
         }
         else
         {
@@ -914,23 +920,25 @@ public sealed partial class TextService : ITextService, IDisposable
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
             gen = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
-        (string reasoning, string answer) = SplitVisionReasoning(gen.Text, request.EnableThinking, gen.StoppedOnToken);
+        (string reasoning, string answer) = SplitVisionReasoning(gen.Text, reasoningOpen, gen.StoppedOnToken);
         if (reasoning.Length > 0) sink?.Invoke(new TextChunk { Kind = TextChunkKind.Reasoning, Text = reasoning });
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
-        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
+        // Completion tokens are everything generated, reasoning included (counted from the text the model produced, not the answer).
+        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(gen.Text).Length;
         return new GenOutcome(answer, VisionStopReason(gen.StoppedOnToken), 0, completion);
     }
 
     /// <summary>Maps a vision generator's stop flag to the turn's stop reason: a stop token is a natural stop, a spent token budget is a length stop.</summary>
     internal static StopReason VisionStopReason(bool stoppedOnToken) => stoppedOnToken ? StopReason.Stop : StopReason.Length;
 
-    /// <summary>Splits a vision answer into reasoning and content, as the text path does. With thinking off the text is all content. With thinking on
-    /// (default), the text before the first closing think marker is reasoning, with its opening marker removed, and the rest is content. With no
-    /// marker, the text is content if decoding stopped on a token, and reasoning if the budget ran out inside the reasoning block.</summary>
-    internal static (string Reasoning, string Content) SplitVisionReasoning(string raw, bool? enableThinking, bool stoppedOnToken)
+    /// <summary>Splits a vision answer into reasoning and content, as the text path does, for a prompt that opened a reasoning block
+    /// (<paramref name="reasoningOpen"/>). Without one, the whole text is content: a non-reasoning model that spends its budget keeps its answer.
+    /// With one, the text before the first closing think marker is reasoning and the rest is content; with no marker, it is content when
+    /// decoding stopped on a token, and reasoning when the budget ran out inside the reasoning block.</summary>
+    internal static (string Reasoning, string Content) SplitVisionReasoning(string raw, bool reasoningOpen, bool stoppedOnToken)
     {
         const string close = "</think>";
-        if (enableThinking == false) return ("", raw);
+        if (!reasoningOpen) return ("", raw);
         int at = raw.IndexOf(close, StringComparison.Ordinal);
         if (at < 0) return stoppedOnToken ? ("", raw) : (raw.Replace("<think>", "", StringComparison.Ordinal).Trim(), "");
         string reasoning = raw[..at].Replace("<think>", "", StringComparison.Ordinal).Trim();

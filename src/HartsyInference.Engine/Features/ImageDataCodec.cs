@@ -6,7 +6,7 @@ namespace HartsyInference.Engine.Features;
 /// <summary>Decodes an encoded image (PNG today) into the raw RGB24 <see cref="ImageData"/> the request contract carries. Every transport needs this: the contract is deliberately raster-only so the Engine has no host image dependency, but a CLI has a file path and an HTTP client has base64 — neither has loose RGB bytes.</summary>
 public static class ImageDataCodec
 {
-    /// <summary>Decodes PNG bytes. Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
+    /// <summary>Decodes PNG or baseline JPEG bytes (the format is read from the leading bytes). Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
     public static ImageData Decode(ReadOnlySpan<byte> encoded)
     {
         if (JpegDecoder.IsJpeg(encoded))

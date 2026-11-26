@@ -1,35 +1,53 @@
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Multimodal;
+using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests.Ssm;
 
-/// <summary>The turn the Qwen3.5-VL prompt ends with, pinned to the shipped chat template: the hand-built string must equal what the template renders
-/// after the user's content, for thinking unset, on, and off.</summary>
+/// <summary>The turn tail the Qwen3.5-VL prompt ends with is rendered by the loaded model's own template, so each template decides its think prefix.
+/// Two templates are pinned: the SenseNova-Loop-9B template, and the Qwen3.5-9B template (unsloth, HF tokenizer_config, which opens <c>&lt;think&gt;\n</c>
+/// when enable_thinking is unset and prefills an empty block only when it is false).</summary>
 public sealed class Qwen35VlAssistantTurnTests
 {
-    private static readonly string Source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "SenseNovaLoop", "chat_template.jinja"));
+    private const string Header = "<|im_end|>\n<|im_start|>assistant\n";
 
-    private static string RenderAfterUser(bool? thinking)
+    public static IEnumerable<object?[]> Cases()
     {
-        Dictionary<string, object?> user = new() { ["role"] = "user", ["content"] = "Q" };
-        Dictionary<string, object?> context = new()
+        foreach (string template in new[] { "SenseNovaLoop", "Qwen35Vl9B" })
         {
-            ["messages"] = new List<object?> { user }, ["add_generation_prompt"] = true, ["bos_token"] = "", ["eos_token"] = "<|im_end|>",
-            ["tools"] = null, ["documents"] = null,
-        };
-        if (thinking.HasValue) context["enable_thinking"] = thinking.Value;
-        string text = new JinjaEngine(Source).Render(context);
-        Assert.EndsWith("Q" + Qwen35VlGenerator.AssistantTurn(thinking), text);
-        return text;
+            yield return [template, "unset", Header + "<think>\n", true];
+            yield return [template, "on", Header + "<think>\n", true];
+            yield return [template, "off", Header + "<think>\n\n</think>\n\n", false];
+        }
     }
 
-    [Fact]
-    public void ThinkingUnsetOpensAReasoningBlockLikeTheTemplate() => RenderAfterUser(null);
+    private static bool? Thinking(string mode) => mode switch { "on" => true, "off" => false, _ => null };
 
-    [Fact]
-    public void ThinkingOnOpensAReasoningBlockLikeTheTemplate() => RenderAfterUser(true);
+    [Theory]
+    [MemberData(nameof(Cases))]
+    public void TheLoadedTemplateRendersTheTailAndItsReasoningState(string template, string mode, string wantTail, bool wantOpen)
+    {
+        string source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", template, "chat_template.jinja"));
+        JinjaChatTemplate jinja = new(source);
+        string tail = jinja.TurnTailAfterUser(new FakeTokenizer(), Thinking(mode));
+        Assert.Equal(wantTail, tail);
+        Assert.Equal(wantOpen, Qwen35VlGenerator.ReasoningOpen(tail));
+    }
 
-    [Fact]
-    public void ThinkingOffPrefillsAnEmptyThinkBlockLikeTheTemplate() => RenderAfterUser(false);
+    /// <summary>Only the tokens the template chooses matter here; the tests exercise the turn tail, not encoding.</summary>
+    private sealed class FakeTokenizer : ILlmTokenizer
+    {
+        private static readonly string[] Specials = ["<|im_start|>", "<|im_end|>", "<think>", "</think>", "<|vision_start|>", "<|vision_end|>"];
+
+        public int[] Encode(string text, bool addSpecial) => EncodeOrdinary(text);
+        public int[] EncodeOrdinary(string text) => text.Select(c => (int)c).ToArray();
+        public string Decode(IReadOnlyList<int> ids) => string.Concat(ids.Select(i => (char)i));
+        public int? SpecialId(string token) => Array.IndexOf(Specials, token) is var at and >= 0 ? 1000 + at : null;
+        public int? BosId => null;
+        public int? EosId => null;
+        public IReadOnlyList<int> StopIds => Array.Empty<int>();
+        public string? BosToken => null;
+        public string? EosToken => null;
+    }
 }

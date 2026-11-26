@@ -4,7 +4,7 @@ using Xunit;
 
 namespace HartsyInference.Engine.Tests.Services;
 
-/// <summary>How a vision answer's stop reason and reasoning are read, shared by the Qwen3.5-VL, Mllama and generic vision paths.</summary>
+/// <summary>How a vision answer's stop reason and reasoning are read. The split only applies when the prompt opened a reasoning block.</summary>
 public sealed class VisionAnswerTests
 {
     [Fact]
@@ -15,34 +15,42 @@ public sealed class VisionAnswerTests
     }
 
     [Fact]
-    public void ThinkingOffKeepsTheWholeAnswerAsContent()
+    public void WithoutAnOpenReasoningBlockTheWholeAnswerIsContent()
     {
-        (string reasoning, string content) = TextService.SplitVisionReasoning("<think>\nplan\n</think>\n\nAnswer.", enableThinking: false, stoppedOnToken: true);
+        (string reasoning, string content) = TextService.SplitVisionReasoning("<think>\nplan\n</think>\n\nAnswer.", reasoningOpen: false, stoppedOnToken: true);
         Assert.Equal("", reasoning);
         Assert.Equal("<think>\nplan\n</think>\n\nAnswer.", content);
     }
 
     [Fact]
-    public void ThinkingOnSplitsTheReasoningFromTheContent()
+    public void ANonReasoningModelThatSpendsItsBudgetKeepsItsAnswerAsContent()
     {
-        (string reasoning, string content) = TextService.SplitVisionReasoning("<think>\nThe bus is blue.\n</think>\n\nA blue bus on a street.", enableThinking: null, stoppedOnToken: true);
+        // The regression: the generic and Mllama paths never open a reasoning block, so a cut-off answer must not be sent as reasoning.
+        (string reasoning, string content) = TextService.SplitVisionReasoning("A blue bus on a stre", reasoningOpen: false, stoppedOnToken: false);
+        Assert.Equal("", reasoning);
+        Assert.Equal("A blue bus on a stre", content);
+    }
+
+    [Fact]
+    public void AnOpenReasoningBlockIsSplitAtItsClosingMarker()
+    {
+        (string reasoning, string content) = TextService.SplitVisionReasoning("The bus is blue.\n</think>\n\nA blue bus on a street.", reasoningOpen: true, stoppedOnToken: true);
         Assert.Equal("The bus is blue.", reasoning);
         Assert.Equal("A blue bus on a street.", content);
     }
 
     [Fact]
-    public void ThinkingOnWithNoMarkerAndANaturalStopIsAllContent()
+    public void AnOpenBlockWithNoMarkerAndANaturalStopIsAllContent()
     {
-        (string reasoning, string content) = TextService.SplitVisionReasoning("A blue bus.", enableThinking: null, stoppedOnToken: true);
+        (string reasoning, string content) = TextService.SplitVisionReasoning("A blue bus.", reasoningOpen: true, stoppedOnToken: true);
         Assert.Equal("", reasoning);
         Assert.Equal("A blue bus.", content);
     }
 
     [Fact]
-    public void ThinkingOnThatRunsOutInsideTheReasoningBlockIsAllReasoning()
+    public void AnOpenBlockThatRunsOutBeforeItsMarkerIsAllReasoning()
     {
-        // The budget ran out before </think>: no answer was given, so nothing is passed off as content.
-        (string reasoning, string content) = TextService.SplitVisionReasoning("<think>\nLet me describe the bus", enableThinking: null, stoppedOnToken: false);
+        (string reasoning, string content) = TextService.SplitVisionReasoning("Let me describe the bus", reasoningOpen: true, stoppedOnToken: false);
         Assert.Equal("Let me describe the bus", reasoning);
         Assert.Equal("", content);
     }

@@ -78,4 +78,53 @@ public sealed class JpegDecoderTests
     {
         Assert.Throws<ArgumentException>(() => JpegDecoder.Decode(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0 }));
     }
+
+    private static int Marker(byte[] d, byte m)
+    {
+        for (int i = 0; i + 1 < d.Length; i++) if (d[i] == 0xFF && d[i + 1] == m) return i;
+        throw new InvalidOperationException($"marker FF{m:X2} not in the fixture");
+    }
+
+    [Fact]
+    public void AFrameLargerThanTheDecoderLimitIsRefusedBeforeAnyAllocation()
+    {
+        byte[] d = Bytes(Grey);
+        int sof = Marker(d, 0xC0);
+        d[sof + 5] = 0xFF; d[sof + 6] = 0xFF;   // height 65535
+        d[sof + 7] = 0xFF; d[sof + 8] = 0xFF;   // width 65535
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => JpegDecoder.Decode(d));
+        Assert.Contains("limit", ex.Message);
+    }
+
+    [Fact]
+    public void ATableSelectorAboveThreeIsRefusedNotIndexed()
+    {
+        byte[] d = Bytes(Grey);
+        int sos = Marker(d, 0xDA);
+        d[sos + 6] = 0x40;   // DC table 4, one past the four-entry table set
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => JpegDecoder.Decode(d));
+        Assert.Contains("Huffman table", ex.Message);
+    }
+
+    [Fact]
+    public void ATruncatedFileIsRefusedAsAnArgumentNotAnIndexFault()
+    {
+        byte[] d = Bytes(ColourRestart)[..120];
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => JpegDecoder.Decode(d));
+        Assert.Contains("Not a decodable JPEG", ex.Message);
+    }
+
+    [Fact]
+    public void AScanThatEndsBeforeItsLastMcuIsRefusedNotFilledWithZeros()
+    {
+        // Cut the scan short inside its entropy data, then append EOI: the bit reader meets the marker before the last MCU.
+        byte[] full = Bytes(Grey);
+        int sos = Marker(full, 0xDA);
+        int eoi = Marker(full, 0xD9);
+        byte[] cut = new byte[sos + 12 + 4];
+        Array.Copy(full, cut, sos + 12);
+        cut[^4] = 0xFF; cut[^3] = 0xD9;
+        Assert.Throws<ArgumentException>(() => JpegDecoder.Decode(cut));
+        Assert.True(eoi > sos);
+    }
 }
