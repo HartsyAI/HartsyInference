@@ -152,9 +152,11 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
         }
 
-        // The later runs' budget is knowable before segment 0 as an upper bound; refuse now rather than after the first segment's denoise.
+        // Before segment 0: an upper bound on the later runs' budget. It refuses only when even that bound is negative. The later run's own check,
+        // before its denoise, is the one that sees segment 0's residue.
         long laterTokens = LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth);
-        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens);
+        long laterStage = LongCatRecipeSupport.KvCacheBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth, offloaded: true);
+        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterStage);
 
         // Segment 0: an ordinary generation in its own streaming scope.
         float[] first = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
@@ -187,10 +189,13 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         Func<LongCatAvatarRun, float[]> denoiseSegment = run => LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
             () =>
             {
-                LongCatRecipeSupport.RequireLaterRunRoom(_backend, _parts, laterTokens);
-                return LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens);
+                // The later run's staged KV pair counts against its budget with the activations, as the planner reads it.
+                long stage = LongCatRecipeSupport.KvCacheBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth, offloaded: true);
+                LongCatRecipeSupport.RequireLaterRunRoom(_backend, _parts, laterTokens, stage);
+                return LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, stage);
             },
-            onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
+            // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
+            onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
             bridge);
 
         _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise, contextFromSegment, denoiseSegment);

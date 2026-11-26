@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Recipes.Video;
 using Xunit;
 
@@ -49,9 +50,30 @@ public sealed class LongCatRoomCheckTests
         OrderRecorder backend = Recorder();
         backend.FreeBytes = 40L << 30;
 
-        LongCatRecipeSupport.RequireLaterRunRoom(backend.Backend, parts, LaterTokens(640, 368));
+        LongCatRecipeSupport.RequireLaterRunRoom(backend.Backend, parts, LaterTokens(640, 368), 0);
 
         Assert.Equal(["PreloadWeights", "TrimMemoryPool", "FreeMemoryBytes"], backend.Calls.ToArray());
+    }
+
+    [Fact]
+    public void TheOffloadedStagedPairCountsAgainstThe832x480LaterRun()
+    {
+        LongCatConfig config = new() { HiddenSize = 4096, Depth = 48, PatchSize = (1, 2, 2) };
+        long stage = LongCatRecipeSupport.KvCacheBytes(config, 5, 60, 104, offloaded: true);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(832, 480), 4096, 11008) + stage;
+        // 14680 MiB free: the earlier check refused with 1215 MiB short, and the staged pair adds about 244 MiB more.
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            LongCatRecipeSupport.RequireRoom(14_680 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, "The later run"));
+        Assert.Contains("MiB short", error.Message);
+    }
+
+    [Fact]
+    public void TheOffloadedStagedPairStillFitsA640x368LaterRun()
+    {
+        LongCatConfig config = new() { HiddenSize = 4096, Depth = 48, PatchSize = (1, 2, 2) };
+        long stage = LongCatRecipeSupport.KvCacheBytes(config, 5, 46, 80, offloaded: true);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(640, 368), 4096, 11008) + stage;
+        LongCatRecipeSupport.RequireRoom(14_761 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, "The later run");
     }
 
     [Fact]
@@ -69,12 +91,12 @@ public sealed class LongCatRoomCheckTests
         OrderRecorder backend = Recorder();
 
         // Too little for even the fixed pool: refused, and the trim came first.
-        Assert.Throws<InvalidOperationException>(() => LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, 1_000));
+        Assert.Throws<InvalidOperationException>(() => LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, 1_000, 0));
         Assert.Equal(["TrimMemoryPool", "FreeMemoryBytes"], backend.Calls.Take(2).ToArray());
 
         // A roomy card passes.
         backend.FreeBytes = 40L << 30;
-        LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, 1_000);
+        LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, 1_000, 0);
     }
 
     /// <summary>The later run's token rows at a size, from a real chain plan: its run latents times the latent grid's tokens per frame.</summary>

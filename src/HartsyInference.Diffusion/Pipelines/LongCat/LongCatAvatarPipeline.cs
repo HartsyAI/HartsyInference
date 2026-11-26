@@ -22,7 +22,7 @@ public sealed record LongCatAvatarRun(
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
     int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default,
-    AdjunctGate? LoraGate = null);
+    AdjunctGate? LoraGate = null, bool OffloadKv = false);
 
 /// <summary>The sigmas (shifted, with the terminal zero), the timesteps (sigma·1000), and the final latents.</summary>
 public sealed record LongCatAvatarResult(float[] Latents, float[] Sigmas, float[] Timesteps);
@@ -96,7 +96,7 @@ public sealed class LongCatAvatarPipeline
             if (useCache)
             {
                 condClip = LongCatFrameOps.Reshape(_backend, condState!, new TensorShape([1, channels, cond, run.Height, run.Width]));
-                cache = _dit.BuildKvCache(_backend, condClip, conditioning);
+                cache = _dit.BuildKvCache(_backend, condClip, conditioning, offload: run.OffloadKv);
             }
 
             long started = System.Diagnostics.Stopwatch.GetTimestamp();
