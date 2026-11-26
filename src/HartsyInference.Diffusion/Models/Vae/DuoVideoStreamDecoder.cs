@@ -44,6 +44,8 @@ public sealed class DuoVideoStreamDecoder : IDisposable
     }
 
     /// <summary>The H3 decoder, run on one window at a time. Refuses a decoder whose frame counts differ from the schedule's, at build time.</summary>
+    /// <remarks>The stream does not preload the decoder's weights. <c>MiniMaxH3Pipeline</c> preloads the video VAE before the decode and frees it
+    /// after, so the caller keeps the decoder resident for the stream's life.</remarks>
     public static DuoVideoStreamDecoder ForH3(MiniMaxH3VideoVaeDecoder decoder, IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(decoder);
