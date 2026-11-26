@@ -31,7 +31,7 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         /// <summary>Compute backend selector. Only an MDX-Net separator (kim-vocal-2) honours it; Demucs and the voice isolator run on the CPU.</summary>
         /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet.</remarks>
         [CommandOption("-b|--backend")]
-        [Description("Backend selector for kim-vocal-2 (auto, cpu, cuda, vulkan). auto, the default, now uses the GPU when there is one; pass cpu to keep the work off it. Demucs and the voice isolator always run on the CPU.")]
+        [Description("Backend selector for kim-vocal-2 (auto, cpu, cuda, vulkan). auto, the default, uses the GPU when there is one; pass cpu to keep the work off it. Demucs and the voice isolator always run on the CPU.")]
         public string Backend { get; init; } = "auto";
 
         /// <summary>Directory to write the stems into.</summary>
