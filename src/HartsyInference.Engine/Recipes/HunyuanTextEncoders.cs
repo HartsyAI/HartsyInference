@@ -16,7 +16,16 @@ public static class HunyuanTextEncoders
         qwenLoader.Load(qwenPath);
         loaders.Add(qwenLoader);
         LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
-        llama.LoadWeights(qwenLoader.GetAllTensors());
+        try
+        {
+            llama.LoadWeights(qwenLoader.GetAllTensors());
+        }
+        catch
+        {
+            // A failed load leaves the encoder's device-side state half-built; nothing else holds it yet, so release it here.
+            llama.Dispose();
+            throw;
+        }
         return (llama, new HunyuanImageQwenTextEncoder(llama));
     }
 
