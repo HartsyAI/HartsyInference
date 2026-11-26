@@ -83,23 +83,33 @@ public sealed class F5TtsPipeline : IAudioPipeline, IDisposable
         await Task.WhenAll(ditPath, vocabPath, vocosPath).ConfigureAwait(false);
 
         SafeTensorsLoader ditLoader = new();
-        ditLoader.Load(ditPath.Result);
-        F5Dit dit = new(resolved);
-        dit.LoadWeights(ditLoader.GetAllTensors());
-
         SafeTensorsLoader vocosLoader = new();
-        vocosLoader.Load(vocosPath.Result);
+        F5Dit dit = new(resolved);
         Vocos vocos = new(VocosConfig.Mel24k);
-        vocos.LoadWeights(vocosLoader.GetAllTensors());
+        try
+        {
+            ditLoader.Load(ditPath.Result);
+            dit.LoadWeights(ditLoader.GetAllTensors());
+            vocosLoader.Load(vocosPath.Result);
+            vocos.LoadWeights(vocosLoader.GetAllTensors());
 
-        // The tokenizer expects vocab.txt in a known directory — copy it into the F5-TTS
-        // base of the cache so the tokenizer can find it without bypassing the cache layer.
-        string baseCacheDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
-        string vocabDest = Path.Combine(baseCacheDir, "vocab.txt");
-        if (!File.Exists(vocabDest)) File.Copy(vocabPath.Result, vocabDest, overwrite: true);
-        F5Tokenizer tok = new(baseCacheDir);
+            // The tokenizer expects vocab.txt in a known directory — copy it into the F5-TTS
+            // base of the cache so the tokenizer can find it without bypassing the cache layer.
+            string baseCacheDir = AudioModelCache.GetRepoDirectory("SWivid/F5-TTS", "tts");
+            string vocabDest = Path.Combine(baseCacheDir, "vocab.txt");
+            if (!File.Exists(vocabDest)) File.Copy(vocabPath.Result, vocabDest, overwrite: true);
+            F5Tokenizer tok = new(baseCacheDir);
 
-        return new F5TtsPipeline("SWivid/F5-TTS", resolved, dit, vocos, tok, ditLoader, vocosLoader);
+            return new F5TtsPipeline("SWivid/F5-TTS", resolved, dit, vocos, tok, ditLoader, vocosLoader);
+        }
+        catch
+        {
+            dit.Dispose();
+            vocos.Dispose();
+            ditLoader.Dispose();
+            vocosLoader.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Generates audio for <paramref name="targetText"/> in the voice of
