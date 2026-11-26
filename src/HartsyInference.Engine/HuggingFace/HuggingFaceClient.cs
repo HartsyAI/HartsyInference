@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 
@@ -145,6 +146,7 @@ public sealed class HuggingFaceClient : IDisposable
         ThrowIfDisposed();
         if (string.IsNullOrEmpty(revision) || revision.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('-' or '_' or '.')))
             throw new ArgumentException("Invalid repository revision.", nameof(revision));
+        DownloadPermission.Demand($"{repoId}/{fileName}");
         string url = $"{BaseUrl}/{repoId}/resolve/{revision}/{fileName}";
         Logs.Info($"HuggingFace: downloading \"{repoId}/{fileName}\" -> \"{destinationPath}\"");
 

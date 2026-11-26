@@ -317,7 +317,8 @@ public sealed class ReplSession : IDisposable
 
         try
         {
-            ModelSpec spec = ModelAcquisition.EnsurePresent(ModelResolver.Resolve(_model, null, _modality));
+            using AcquiredModel acquired = ModelAcquisition.EnsurePresent(ModelResolver.Resolve(_model, null, _modality));
+            ModelSpec spec = acquired.Spec;
             if (_modality == Modality.Text)
                 AnsiConsole.Write(new Rule($"[{CliTheme.Accent}]response[/]").LeftJustified().RuleStyle("grey"));
 

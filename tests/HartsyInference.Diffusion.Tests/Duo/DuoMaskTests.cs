@@ -1,3 +1,4 @@
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Diffusion.Models.Duo;
 using Xunit;
 
@@ -37,6 +38,56 @@ public sealed class DuoMaskTests
         Assert.False(DuoMask.Visible(noisy0, clean0, DuoAttentionMode.Causal, refiner: false));
         Assert.True(DuoMask.Visible(clean0, clean0, DuoAttentionMode.Causal, refiner: false));
         Assert.False(DuoMask.Visible(clean0, noisy1, DuoAttentionMode.Causal, refiner: false));
+    }
+
+    [Fact]
+    public void Segments_ReadExactlyTheKeysTheRectanglesAllow()
+    {
+        // A committed history of six groups, then a block whose groups arrive out of row order.
+        List<DuoGroup> keys =
+            [Group(0, -1, DuoGroupKind.Reference, 0, 4), Group(0, -1, DuoGroupKind.Shared, 4, 6), Group(0, 0, DuoGroupKind.Text, 6, 8),
+             Group(0, 0, DuoGroupKind.Clean, 8, 12), Group(1, -1, DuoGroupKind.Reference, 12, 13), Group(0, 1, DuoGroupKind.Clean, 13, 15)];
+        DuoGroup[] queries =
+            [Group(0, 2, DuoGroupKind.Noisy, 3, 7), Group(0, 2, DuoGroupKind.Text, 0, 2), Group(1, -1, DuoGroupKind.Reference, 2, 3),
+             Group(0, 2, DuoGroupKind.Clean, 7, 9), new(-1, -1, DuoGroupKind.Padding, DuoModality.None, 9, 11)];
+        const int past = 15, rows = 11;
+        keys.AddRange(queries.Select(q => q with { Start = q.Start + past, End = q.End + past }));
+        IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(queries, keys, DuoAttentionMode.Causal);
+        bool[,] dense = DuoMask.Dense(rects, rows, past + rows);
+
+        KeyRangeSegment[] segments = DuoMask.Segments(rects, rows, past + rows);
+
+        Assert.Equal(queries.Length, segments.Length);
+        foreach (KeyRangeSegment segment in segments)
+        {
+            for (int q = segment.QueryStart; q < segment.QueryStart + segment.QueryCount; q++)
+            {
+                for (int k = 0; k < past + rows; k++)
+                {
+                    Assert.Equal(dense[q, k], segment.Keys.Any(range => k >= range.Start && k < range.End));
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void Segments_RefuseGapsOverlapsAndKeysPastTheEnd()
+    {
+        DuoMaskRect[] gap = [new(0, 2, 0, 4), new(3, 5, 0, 4)];
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments(gap, 5, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 2, 0, 4)], 3, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 2, 0, 5)], 2, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([], 2, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 3, 0, 4), new DuoMaskRect(2, 5, 0, 4)], 5, 4));
+        Assert.Throws<ArgumentException>(() => DuoMask.Segments([new DuoMaskRect(0, 2, 0, 4), new DuoMaskRect(0, 2, 0, 4)], 2, 4));
+    }
+
+    [Fact]
+    public void Segments_MergeTouchingKeySpans()
+    {
+        // Keys listed out of row order leave two rectangles that touch; the segment names one range.
+        KeyRangeSegment segment = Assert.Single(DuoMask.Segments([new DuoMaskRect(0, 2, 3, 6), new DuoMaskRect(0, 2, 0, 3)], 2, 6));
+        Assert.Equal(new AttentionKeyRange(0, 6), Assert.Single(segment.Keys));
     }
 
     [Fact]

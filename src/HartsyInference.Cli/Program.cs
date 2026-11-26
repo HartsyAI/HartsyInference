@@ -58,6 +58,8 @@ public static class Program
         }
         using IDisposable? scopedSettings = knobScope;
 
+        using IDisposable? refused = ModelAcquisition.RefuseAtStart(InteractivePrompt.CanAsk);
+
         if (args.Length == 0)
         {
             using ReplSession repl = new ReplSession();

@@ -86,6 +86,11 @@ public sealed class FastFramesRecipe : IVideoRecipe
     };
 
     /// <inheritdoc/>
+    /// <remarks>The generator's blocks are placed per clip by <see cref="HartsyInference.Core.Memory.Vram.Streaming.BlockStreamingScope"/>
+    /// in the rollout, with the frame cache reserved first. On a card that holds the whole generator the placement is resident-only.</remarks>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
+    /// <inheritdoc/>
     public SamplingCapabilities.SamplingSupport SamplingSupportFor(string familyId, ResolvedModelVariant? variant) =>
         SamplingCapabilities.ForVideo(FamilyId);
 

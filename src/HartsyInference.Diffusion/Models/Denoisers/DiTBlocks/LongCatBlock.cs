@@ -20,6 +20,20 @@ public sealed partial class LongCatBlock : IStreamingBlock
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
     private Tensor? _w1, _w2, _w3;
     private AttentionLayer? _selfAttention, _crossAttention;
+
+    /// <summary>Rows per tile for the FFN (the SwiGLU intermediates, [rows, FFN] F32 each) and for the self-attention QKV projection ([rows, 3·dim]).
+    /// Untiled at 37,440 tokens these are 1.57 GB and 1.84 GB apiece; tiling bounds them to one tile. One constant for both, so the headroom formula
+    /// reads the same value the blocks run with.</summary>
+    public const int DefaultTileRows = 4096;
+
+    private int _ffnTileRows = DefaultTileRows;
+
+    /// <summary>Sets the FFN tile height. A value at or above the token count runs the FFN untiled; tests use small tiles to exercise the seams.</summary>
+    internal void SetFfnTileRows(int rows)
+    {
+        if (rows < 1) throw new ArgumentOutOfRangeException(nameof(rows));
+        _ffnTileRows = rows;
+    }
     private LongCatAvatarAudioStep? _audio;
 
     /// <summary>Creates a block of the given geometry; <see cref="LoadWeights"/> fills it.</summary>
@@ -79,7 +93,28 @@ public sealed partial class LongCatBlock : IStreamingBlock
     }
 
     /// <inheritdoc/>
-    public IEnumerable<Tensor> EnumerateWeights()
+    public IEnumerable<Tensor> EnumerateWeights() => OwnWeights();
+
+    /// <summary>The adapter operands of this block's gated LoRA terms (each term's Down and Up). They are shared-resident, not streamed with the block:
+    /// the transformer reports them with the shared weights, so they are preloaded once and held for the run. Row windows are left out: they are
+    /// memoized slices that the backend promotes on use, and listing them would count the same operand twice.</summary>
+    public IEnumerable<Tensor> EnumerateAdapterOperands()
+    {
+        foreach (Tensor weight in OwnWeights())
+        {
+            if (weight.LowRankAdjunct is null)
+                continue;
+            foreach (LowRankAdjunctTerm term in weight.LowRankAdjunct.Terms)
+            {
+                yield return term.Down;
+                if (term.Up is not null)
+                    yield return term.Up;
+            }
+        }
+    }
+
+    /// <summary>The block's own weights, without the adapter operands their LoRA terms carry.</summary>
+    private IEnumerable<Tensor> OwnWeights()
     {
         foreach (Tensor? t in new[] { _adaWeight, _adaBias, _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias, _crossNormWeight, _crossNormBias,
             _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias, _w1, _w2, _w3 })
@@ -91,6 +126,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             foreach (Tensor t in _audio.EnumerateWeights())
                 yield return t;
     }
+
 
     private void BuildAttention()
     {
@@ -113,7 +149,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
     /// projected caption <c>[L, dim]</c>; <paramref name="timeEmbed"/> is the per-frame timestep embedding <c>[frames, adaln]</c>.
     /// <paramref name="probe"/> receives named intermediate stages when set. Returns a new <c>[S, dim]</c> stream.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs,
-        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null, LongCatBlockKv? cache = null)
+        Action<string, Tensor>? probe = null, string stage = "", Tensor? audio = null) =>
+        Forward(backend, hidden, text, timeEmbed, in inputs, null, probe, stage, audio);
+
+    /// <summary>The forward with <paramref name="past"/>, the cached conditioning rows of the denoising pass, in front of the rows' own keys.</summary>
+    internal Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs, LongCatPastKv? past,
+        Action<string, Tensor>? probe, string stage, Tensor? audio)
     {
         int dim = _config.HiddenSize;
         int s = checked(inputs.Frames * inputs.TokensPerFrame);
@@ -130,9 +171,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         probe?.Invoke($"{stage}.attn_in", normed1);
         // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
-        using Tensor attn = cache is null
-            ? SelfAttention(backend, normed1, in inputs, probe, stage)
-            : CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, cache, keep: false, inputs.Segments, out _);
+        using Tensor attn = past is { } cached
+            ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached)
+            : SelfAttention(backend, normed1, in inputs, probe, stage);
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
         probe?.Invoke($"{stage}.after_self", afterSelf);
@@ -167,6 +208,92 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
+    private int _qkvTileRows = DefaultTileRows;
+
+    /// <summary>Sets the QKV projection tile height. A value at or above the token count projects untiled; tests use small tiles to exercise the seams.</summary>
+    internal void SetQkvTileRows(int rows)
+    {
+        if (rows < 1) throw new ArgumentOutOfRangeException(nameof(rows));
+        _qkvTileRows = rows;
+    }
+
+    /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
+    /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
+    private (Tensor Q, Tensor K, Tensor V) ProjectSelfTiled(IBackend backend, Tensor input)
+    {
+        int s = (int)input.Shape[0];
+        int dim = (int)input.Shape[1];
+        int tile = Math.Min(_qkvTileRows, s);
+        if (tile >= s)
+            return _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+
+        List<Tensor> qs = new((s + tile - 1) / tile), ks = new(qs.Capacity), vs = new(qs.Capacity);
+        Tensor? joinedQ = null, joinedK = null;
+        try
+        {
+            for (int start = 0; start < s; start += tile)
+            {
+                int rows = Math.Min(tile, s - start);
+                using Tensor chunk = SliceRows(backend, input, start, rows, dim);
+                (Tensor q, Tensor k, Tensor v) = _selfAttention!.ProjectSelf(backend, chunk, releaseInput: false);
+                qs.Add(q);
+                ks.Add(k);
+                vs.Add(v);
+            }
+            // Each group's tiles are freed as soon as that group is joined, so at the last join the peak is two joined outputs plus the
+            // last group's tiles and its output, not every tile and every output at once.
+            joinedQ = JoinRows(backend, qs, s);
+            DisposeAll(qs);
+            joinedK = JoinRows(backend, ks, s);
+            DisposeAll(ks);
+            Tensor joinedV = JoinRows(backend, vs, s);
+            DisposeAll(vs);
+            return (joinedQ, joinedK, joinedV);
+        }
+        catch
+        {
+            joinedQ?.Dispose();
+            joinedK?.Dispose();
+            throw;
+        }
+        finally
+        {
+            DisposeAll(qs);
+            DisposeAll(ks);
+            DisposeAll(vs);
+        }
+    }
+
+    private static void DisposeAll(List<Tensor> tensors)
+    {
+        foreach (Tensor tensor in tensors)
+            tensor.Dispose();
+        tensors.Clear();
+    }
+
+    /// <summary>Concatenates row tiles of one projection into a single [rows, ...] tensor of the tiles' dtype.</summary>
+    private static Tensor JoinRows(IBackend backend, List<Tensor> parts, int rows)
+    {
+        Tensor first = parts[0];
+        TensorShape shape = first.Shape.Rank switch
+        {
+            2 => new TensorShape(rows, first.Shape[1]),
+            3 => new TensorShape(rows, first.Shape[1], first.Shape[2]),
+            _ => throw new NotSupportedException($"A tiled LongCat projection joins rank-2 or rank-3 tiles; got rank {first.Shape.Rank}."),
+        };
+        Tensor joined = new(shape, first.DType);
+        try
+        {
+            backend.Concat(joined, parts.ToArray(), 0);
+            return joined;
+        }
+        catch
+        {
+            joined.Dispose();
+            throw;
+        }
+    }
+
     private Tensor SelfAttention(IBackend backend, Tensor input, in LongCatBlockInputs inputs, Action<string, Tensor>? probe, string stage)
     {
         int s = (int)input.Shape[0];
@@ -175,14 +302,15 @@ public sealed partial class LongCatBlock : IStreamingBlock
         if (inputs.Segments.Length == 1)
         {
             AttentionSegment.Validate(inputs.Segments, s);
-            if (inputs.Segments[0].KeyCount == s)
+            // The fused path projects every row at once, so it runs only when the rows fit one projection tile.
+            if (inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
                 return _selfAttention!.Forward(backend, input, input, in context);
         }
 
-        (Tensor q, Tensor k, Tensor v) = _selfAttention!.ProjectSelf(backend, input, releaseInput: false);
+        (Tensor q, Tensor k, Tensor v) = ProjectSelfTiled(backend, input);
         try
         {
-            _selfAttention.RotateQk(backend, q, k, in context);
+            _selfAttention!.RotateQk(backend, q, k, in context);
             if (probe is not null)
             {
                 probe($"{stage}.q", q);
@@ -259,7 +387,44 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
+    /// <summary>The SwiGLU FFN over row tiles: each tile's intermediates are freed before the next, so the peak is one tile's FFN plus the output.</summary>
     private Tensor FeedForward(IBackend backend, Tensor x)
+    {
+        int s = (int)x.Shape[0];
+        int dim = _config.HiddenSize;
+        int tile = Math.Min(_ffnTileRows, s);
+        if (tile >= s)
+            return FeedForwardRows(backend, x);
+
+        List<Tensor> parts = new((s + tile - 1) / tile);
+        try
+        {
+            for (int start = 0; start < s; start += tile)
+            {
+                int rows = Math.Min(tile, s - start);
+                using Tensor chunk = SliceRows(backend, x, start, rows, dim);
+                parts.Add(FeedForwardRows(backend, chunk));
+            }
+            Tensor output = new(new TensorShape(s, dim), DType.F32);
+            try
+            {
+                backend.Concat(output, parts.ToArray(), 0);
+            }
+            catch
+            {
+                output.Dispose();
+                throw;
+            }
+            return output;
+        }
+        finally
+        {
+            foreach (Tensor part in parts)
+                part.Dispose();
+        }
+    }
+
+    private Tensor FeedForwardRows(IBackend backend, Tensor x)
     {
         int s = (int)x.Shape[0];
         int hidden = _config.FfnHiddenDim;

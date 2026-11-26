@@ -338,6 +338,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
 
         BindActivation(tensor);
+        tensor.MarkViewedOwnersStale();
     }
 
     private void BindActivation(Tensor tensor) => tensor.SetGpuBinding(
@@ -554,6 +555,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             DownloadSynced((nint)tensor.EnsureHostBuffer(), entry.Buffer, entry.Bytes);
         }
+        tensor.ClearViewedOwnersStale();
         OnActivationEvicted(tensor, entry.Buffer);
         Pinned.Remove(tensor);
         CachedBuffers.Remove(entry.Buffer);

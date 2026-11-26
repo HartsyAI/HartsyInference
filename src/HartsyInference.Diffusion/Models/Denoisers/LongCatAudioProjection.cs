@@ -132,10 +132,10 @@ public sealed class LongCatAudioProjection : IDisposable
         using Tensor secondAct = new(second.Shape, DType.F32);
         backend.LeakyRelu(secondAct, second, 0f);
 
-        // proj3 expands each frame to context_tokens · output_dim, read as one row per token, then LayerNorm over output_dim.
-        using Tensor expanded = new(new TensorShape(frames, _contextTokens * _outputDim), DType.F32);
-        backend.Linear(expanded, secondAct, _proj3W!, _proj3B);
-        using Tensor tokens = expanded.Reshape(new TensorShape(frames * _contextTokens, _outputDim));
+        // proj3 expands each frame to context_tokens · output_dim, read as one row per token, then LayerNorm over output_dim. Linear sizes
+        // itself from the weight and the input, so the output takes the per-token shape directly; a Reshape would read it on the host.
+        using Tensor tokens = new(new TensorShape(frames * _contextTokens, _outputDim), DType.F32);
+        backend.Linear(tokens, secondAct, _proj3W!, _proj3B);
         Tensor output = new(tokens.Shape, DType.F32);
         backend.LayerNorm(output, tokens, _normW!, _normB!, NormEps);
         return output;

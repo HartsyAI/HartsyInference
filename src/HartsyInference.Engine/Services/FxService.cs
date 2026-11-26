@@ -82,7 +82,7 @@ public sealed class FxService : IFxService
     }
 
     /// <summary>Voice-isolator route of <see cref="SeparateAsync"/>: a <c>voice</c> and a <c>background</c> stem (mono, 48 kHz; the
-    /// background is the input minus the voice). Runs on the engine's backend with the STFT on the host.</summary>
+    /// background is the input minus the voice). Always runs on the CPU backend with the STFT on the host.</summary>
     private Task<StemsResult> IsolateVoiceAsync(AudioModelSelector selector, FxSeparateRequest request, bool realtime, CancellationToken cancel)
     {
         if (request.Shifts != 0 || request.Segment is not null || request.Overlap is not null)

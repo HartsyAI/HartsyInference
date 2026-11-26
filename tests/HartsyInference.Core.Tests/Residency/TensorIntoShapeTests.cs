@@ -12,7 +12,7 @@ public sealed class TensorIntoShapeTests
     [Fact]
     public void DeviceResult_MovesWithoutATransfer_AndReadsBackOnceUnderTheNewShape()
     {
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         Tensor source = new(new TensorShape(2, 3), DType.F32);
         float[] buffer = device.Produce(source, [1, 2, 3, 4, 5, 6]);
 
@@ -31,7 +31,7 @@ public sealed class TensorIntoShapeTests
     public void Reshape_StillReadsTheDeviceResultBack()
     {
         // The contrast IntoShape exists for; if this stops holding, the remark on IntoShape is out of date.
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         using Tensor source = new(new TensorShape(2, 3), DType.F32);
         device.Produce(source, [1, 2, 3, 4, 5, 6]);
 
@@ -45,7 +45,7 @@ public sealed class TensorIntoShapeTests
     [Fact]
     public void DisposingTheMovedTensor_FreesTheBufferOnce_AndTheSourceIsSpent()
     {
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         Tensor source = new(new TensorShape(4), DType.F32);
         device.Produce(source, [1, 2, 3, 4]);
 
@@ -62,7 +62,7 @@ public sealed class TensorIntoShapeTests
     [Fact]
     public void APinMovesWithTheBuffer()
     {
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         Tensor source = new(new TensorShape(4), DType.F32);
         device.Produce(source, [1, 2, 3, 4]);
         device.PinActivation(source);
@@ -77,7 +77,7 @@ public sealed class TensorIntoShapeTests
     [Fact]
     public void AnUnpinnedMovedTensor_IsFreedByTheActivationSweep()
     {
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         Tensor source = new(new TensorShape(4), DType.F32);
         device.Produce(source, [1, 2, 3, 4]);
         using Tensor moved = source.IntoShape(new TensorShape(2, 2));
@@ -107,7 +107,7 @@ public sealed class TensorIntoShapeTests
     public void APromotedWeight_KeepsItsHostBytes()
     {
         // A promoted weight's binding drops the device copy and cannot move: the host is authoritative.
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         Tensor source = new(new TensorShape(2, 2), DType.F32);
         float[] values = [1, 2, 3, 4];
         values.CopyTo(source.AsSpan<float>());
@@ -137,7 +137,7 @@ public sealed class TensorIntoShapeTests
     [Fact]
     public void AWrongElementCount_IsRefusedAndLeavesTheTensorUsable()
     {
-        using FakeResidency device = new();
+        using ArrayResidency device = new();
         using Tensor source = new(new TensorShape(4), DType.F32);
         device.Produce(source, [1, 2, 3, 4]);
 
@@ -161,8 +161,8 @@ public sealed class TensorIntoShapeTests
     [Fact]
     public void ATensorHeldOnTwoDevices_IsReadBackFirst()
     {
-        using FakeResidency first = new();
-        using FakeResidency second = new();
+        using ArrayResidency first = new();
+        using ArrayResidency second = new();
         Tensor source = new(new TensorShape(4), DType.F32);
         float[] values = [1, 2, 3, 4];
         // The first binding is the movable kind, so only the second one stops the move.
@@ -189,38 +189,50 @@ public sealed class TensorIntoShapeTests
         Assert.Same(moved, source.KeepAliveOwner);
     }
 
+    [Fact]
+    public void ReadingAViewWrittenAfterTheMove_MakesTheResultCurrent()
+    {
+        using ArrayResidency device = new();
+        Tensor source = new(new TensorShape(4), DType.F32);
+        using Tensor view = source.Reshape(new TensorShape(2, 2));
+        using Tensor moved = source.IntoShape(new TensorShape(1, 4));
+
+        device.Produce(view, [1, 2, 3, 4]);
+
+        Assert.Equal(new float[] { 1, 2, 3, 4 }, view.AsReadOnlySpan<float>().ToArray());
+        Assert.Equal(new float[] { 1, 2, 3, 4 }, moved.AsReadOnlySpan<float>().ToArray());
+    }
+
+#if DEBUG
+    [Fact]
+    public void AViewWrittenAfterTheMove_MarksTheResult()
+    {
+        // The view roots the spent tensor, which roots the result: the device write reaches the tensor that now holds the bytes.
+        using ArrayResidency device = new();
+        Tensor source = new(new TensorShape(4), DType.F32);
+        using Tensor view = source.Reshape(new TensorShape(2, 2));
+        using Tensor moved = source.IntoShape(new TensorShape(1, 4));
+
+        device.Produce(view, [1, 2, 3, 4]);
+
+        Assert.Contains("wrote a view of it", Assert.Throws<InvalidOperationException>(() => moved.AsReadOnlySpan<float>().Length).Message);
+    }
+
+    [Fact]
+    public void MovingAnOwnerBehindAViewWrite_IsReported_AndLeavesTheOwner()
+    {
+        using ArrayResidency device = new();
+        using Tensor owner = new(new TensorShape(2, 2), DType.F32);
+        using (Tensor view = owner.Reshape(new TensorShape(4)))
+            device.Produce(view, [1, 2, 3, 4]);
+
+        Assert.Throws<InvalidOperationException>(() => owner.IntoShape(new TensorShape(4)));
+
+        Assert.Equal(4, owner.AsReadOnlySpan<float>().Length);
+    }
+#endif
+
     private static unsafe nint Pointer(Tensor tensor) => (nint)tensor.DataPointer;
 
     private static unsafe Tensor Borrow(Tensor owner) => new(owner.DataPointer, owner.Shape, owner.DType);
-
-    /// <summary>A residency cache over managed arrays.</summary>
-    private sealed class FakeResidency : GpuResidencyCache<float[]>
-    {
-        /// <summary>Device buffers handed back so far.</summary>
-        public int Freed { get; private set; }
-
-        /// <summary>Leaves <paramref name="values"/> as an op's output would: on the device only.</summary>
-        public float[] Produce(Tensor output, float[] values)
-        {
-            CacheActivation(output, values, ByteSize(output));
-            return values;
-        }
-
-        /// <summary>Makes a host tensor a weight the cache promoted on its own.</summary>
-        public void Promote(Tensor tensor) => Promote(tensor, tensor.AsReadOnlySpan<float>().ToArray());
-
-        /// <summary>As <see cref="Promote(Tensor)"/> with the device copy given, so nothing reads the host.</summary>
-        public void Promote(Tensor tensor, float[] buffer) => PromoteToWeight(tensor, buffer);
-
-        protected override float[] AllocateDevice(long bytes) => new float[bytes / sizeof(float)];
-
-        protected override void FreeDevice(float[] buffer, long bytes) => Freed++;
-
-        protected override void Upload(float[] destination, Tensor source, long bytes) => source.AsReadOnlySpan<float>().CopyTo(destination);
-
-        protected override unsafe void DownloadSynced(nint hostDestination, float[] source, long bytes) =>
-            source.AsSpan().CopyTo(new Span<float>((void*)hostDestination, source.Length));
-
-        protected override void MakeCurrent() { }
-    }
 }
