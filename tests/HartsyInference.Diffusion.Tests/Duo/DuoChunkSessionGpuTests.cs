@@ -4,30 +4,34 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Duo;
+using HartsyInference.Tests.Shared;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests.Duo;
 
 /// <summary>The Duo chunk session on CUDA against the CPU, on the same tiny synthetic model: two blocks of a prefilled session, same inputs,
-/// same weights. Synthetic weights only; no released weights and no upstream code are run. Returns without asserting when CUDA is not
-/// available, so the suite stays green on a CPU-only machine.</summary>
+/// same weights. Synthetic weights only; no released weights and no upstream code are run. Reported as skipped, never passed, when no CUDA
+/// device opens. Prints the largest per-block error on each run.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class DuoChunkSessionGpuTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public DuoChunkSessionGpuTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
     private const int Hidden = 8, Heads = 2, HeadDim = 96, Inner = Heads * HeadDim, Ffn = 16, TextDim = 5, Layers = 2;
     private const int VideoIn = 96, AudioIn = 32, TimeEmbedDim = 6, TimeEmbedHidden = 8;
     private const int Shared = 3, BodyRows = 2, RefRows = 4, VideoRows = 8, AudioRows = 6;
     /// <summary>F32 on the device against F32 on the CPU, for a model this small. A wider gap points at a kernel, not rounding.</summary>
     private const float Tolerance = 1e-3f;
 
-    [Fact]
+    [CudaDeviceFact]
     public void CudaBlocksMatchTheCpuBlocks()
     {
-        if (!CudaContext.IsAvailable())
-        {
-            return;
-        }
-
         float[] cpuVideo0, cpuAudio0, cpuVideo1, cpuAudio1;
         using (MiniMaxH3Transformer transformer = Transformer())
         {
@@ -58,7 +62,7 @@ public sealed class DuoChunkSessionGpuTests
         return (v0, a0, v1, a1);
     }
 
-    private static void AssertClose(float[] expected, float[] actual, string what)
+    private void AssertClose(float[] expected, float[] actual, string what)
     {
         Assert.Equal(expected.Length, actual.Length);
         float worst = 0f;
@@ -66,6 +70,7 @@ public sealed class DuoChunkSessionGpuTests
         {
             worst = MathF.Max(worst, MathF.Abs(expected[i] - actual[i]));
         }
+        _output.WriteLine($"{what}: max |CPU - CUDA| = {worst:E3} (tolerance {Tolerance:E0})");
         Assert.True(worst <= Tolerance, $"{what}: CUDA differs from the CPU by {worst}, above {Tolerance}.");
     }
 
