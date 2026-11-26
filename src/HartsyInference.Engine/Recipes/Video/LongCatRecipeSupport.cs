@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -110,17 +111,18 @@ internal static class LongCatRecipeSupport
 
     /// <summary>One measured later-run workload: the size, the new and context latents of its segment, whether it was the distilled pipeline, and the
     /// allocator's reserved bytes at the worst step of the later segment.</summary>
-    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes);
+    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes,
+        DeviceType Device);
 
     /// <summary>The later runs measured on the GPU: main c5fec5d37 with the refusal bypassed in a scratch copy, all eight steps, no OOM. The key is
-    /// exactly what was measured. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
+    /// exactly what was measured: the device type (CUDA), size, latents and the distilled flag. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
     /// per-token estimate. The distilled flag is inferred from the eight steps (the Distill8 schedule); it is not in the measurement's log. Audio
     /// attention was not sampled. Reserved bytes are the pool's RESERVED_MEM_CURRENT (CudaBackend.cs:146-152), which excludes the resident blocks,
     /// since those are allocated outside the pool (GpuTransferHelper.cs:326, 482).</summary>
     internal static readonly MeasuredLaterRun[] MeasuredLaterRuns =
     {
-        new(640, 368, NewLatents: 20, ContextLatents: 4, Distilled: true, 7808L << 20),
-        new(832, 480, NewLatents: 20, ContextLatents: 4, Distilled: true, 11360L << 20),
+        new(640, 368, NewLatents: 20, ContextLatents: 4, Distilled: true, 7808L << 20, DeviceType.Cuda),
+        new(832, 480, NewLatents: 20, ContextLatents: 4, Distilled: true, 11360L << 20, DeviceType.Cuda),
     };
 
     /// <summary>The explicit margin on a measured peak: the safety margin the estimate also keeps. It covers what the measurement did not sample (audio
@@ -128,13 +130,14 @@ internal static class LongCatRecipeSupport
     /// next. It is not scaled between the two sizes: the margin is set against the unsampled terms, which do not grow with the measured ones.</summary>
     internal const long MeasuredMarginBytes = SafetyBytes;
 
-    /// <summary>The reserved peak measured for exactly this workload (size, new and context latents, distilled), or null when it was not measured. A null
+    /// <summary>The reserved peak measured for exactly this workload (device type, size, new and context latents, distilled), or null when it was not measured. A null
     /// keeps the per-token estimate and its refusal.</summary>
-    internal static long? MeasuredReservedPeak(int width, int height, int newLatents, int contextLatents, bool distilled)
+    internal static long? MeasuredReservedPeak(DeviceType device, int width, int height, int newLatents, int contextLatents, bool distilled)
     {
+        // The pool's reserved bytes are the CUDA allocator's. A Vulkan (or any other) run has no measurement, so it keeps the estimate.
         foreach (MeasuredLaterRun run in MeasuredLaterRuns)
-            if (run.Width == width && run.Height == height && run.NewLatents == newLatents && run.ContextLatents == contextLatents
-                && run.Distilled == distilled)
+            if (run.Device == device && run.Width == width && run.Height == height && run.NewLatents == newLatents
+                && run.ContextLatents == contextLatents && run.Distilled == distilled)
                 return run.ReservedPeakBytes;
         return null;
     }
@@ -145,7 +148,7 @@ internal static class LongCatRecipeSupport
     internal sealed record LongCatLaterRunFigures(long Tokens, long CacheBytes, long? MeasuredPeak, bool OffloadKv);
 
     internal static LongCatLaterRunFigures LaterRunFigures(bool mixed, LongCatAvatarChainPlan plan, int latentHeight, int latentWidth,
-        LongCatConfig config, int pixelWidth, int pixelHeight, bool distilled)
+        LongCatConfig config, int pixelWidth, int pixelHeight, bool distilled, DeviceType device)
     {
         if (mixed)
         {
@@ -154,7 +157,7 @@ internal static class LongCatRecipeSupport
         }
         return new LongCatLaterRunFigures(TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
             CachedStepBytes(config, plan.ContextLatents + 1, latentHeight, latentWidth),
-            MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, distilled), OffloadKv: true);
+            MeasuredReservedPeak(device, pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, distilled), OffloadKv: true);
     }
 
     /// <summary>The activation budget of a later run: the measured reserved peak plus its margin when the size was measured, else the per-token
@@ -251,6 +254,9 @@ internal static class LongCatRecipeSupport
     internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false,
         LongCatLoraFiles? mixedLoras = null)
     {
+        // The placements the engine sets that LongCat cannot honour: CFG-parallel, DiT shards and context parallel are refused; a separate text-encoder
+        // or VAE backend is warned about and runs on the primary (the engine's placement policy, UnhonouredBackends).
+        UnhonouredBackends.Refuse(context, "LongCat");
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
