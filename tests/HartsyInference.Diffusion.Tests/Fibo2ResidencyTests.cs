@@ -71,10 +71,13 @@ public sealed class Fibo2ResidencyTests
     {
         const long gib = 1L << 30;
 
-        Assert.True(Fibo2Pipeline.Fits(freeBytes: 4 * gib, needBytes: 2 * gib));
-        Assert.False(Fibo2Pipeline.Fits(freeBytes: 5 * gib / 2, needBytes: 2 * gib), "headroom is not spare");
-        Assert.False(Fibo2Pipeline.Fits(freeBytes: 0, needBytes: 0), "a backend with no device memory reports 0 and takes the release path");
-        Assert.False(Fibo2Pipeline.Fits(freeBytes: -1, needBytes: 1), "an unknown figure is never a fit");
+        Assert.True(Fibo2Pipeline.Fits(freeBytes: 4 * gib, needBytes: 2 * gib, headroomBytes: gib));
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 5 * gib / 2, needBytes: 2 * gib, headroomBytes: gib), "headroom is not spare");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 5 * gib / 2, needBytes: gib, headroomBytes: 2 * gib),
+            "a larger headroom (vram.preloadHeadroomMb) is the one that counts");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 0, needBytes: 0, headroomBytes: gib),
+            "a backend with no device memory reports 0 and takes the release path");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: -1, needBytes: 1, headroomBytes: gib), "an unknown figure is never a fit");
     }
 
     [Fact]

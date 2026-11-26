@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
@@ -100,7 +101,7 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         try
         {
             // The text encoder leaves the device before the denoiser loads: on a 12 GB card the two do not fit together. A denoiser kept
-            // resident by the VRAM policy from an earlier generation is freed here (forced), or the encoder would load on top of it.
+            // resident from an earlier generation is freed here unless the encoder fits beside it (FreeDenoiserForEncoder).
             FreeDenoiserForEncoder(() => _textEncoder.EnumerateWeights());
             _textEncoderWeights.Preload();
             try
@@ -175,20 +176,25 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
 
     /// <summary>Whether <paramref name="needBytes"/> fit in the device memory free now, with <see cref="HeadroomBytes"/> to spare. A backend
     /// that reports no free memory (0) is never a fit, so the caller takes the release path.</summary>
-    internal static bool Fits(long freeBytes, long needBytes) =>
-        freeBytes > 0 && needBytes >= 0 && freeBytes >= needBytes + HeadroomBytes;
+    internal static bool Fits(long freeBytes, long needBytes, long headroomBytes) =>
+        freeBytes > 0 && needBytes >= 0 && freeBytes >= needBytes + headroomBytes;
 
-    /// <summary>Device headroom kept above a fit, for the allocator and the activations of the next stage.</summary>
-    internal const long HeadroomBytes = 1L << 30;
+    /// <summary>The smallest headroom a fit keeps. The fit uses the larger of this and <c>vram.preloadHeadroomMb</c>, the room
+    /// <c>PreloadWeights</c> itself keeps, so a fit cannot make the encoder preload skip tensors.</summary>
+    internal const long HeadroomFloorBytes = 1L << 30;
 
-    /// <summary>Frees the denoiser before an encoder preloads, unless the encoder fits next to it. The denoiser is already on the device when
-    /// it is kept, so its bytes are not in the free figure; a fit therefore keeps both, and the next generation skips the re-upload.</summary>
+    /// <summary>Frees the denoiser before an encoder preloads, unless the encoder fits next to it. The pool is trimmed first, so the free figure
+    /// counts memory the allocator is holding for nothing. The denoiser is already on the device when it is kept, so its bytes are not in the
+    /// free figure; a fit therefore keeps both, and the next generation skips the re-upload. Whether the keep path is cheaper on a large card
+    /// is not measured.</summary>
     private void FreeDenoiserForEncoder(Func<IEnumerable<Tensor>> encoderWeights)
     {
         long encoderBytes = 0;
         foreach (Tensor tensor in encoderWeights())
             encoderBytes += tensor.DType.ComputeByteCount(tensor.ElementCount);
-        if (Fits(Backend.FreeMemoryBytes(), encoderBytes))
+        Backend.TrimMemoryPool();
+        long headroom = Math.Max(HeadroomFloorBytes, EngineKnobs.PreloadHeadroomMb.Value << 20);
+        if (Fits(Backend.FreeMemoryBytes(), encoderBytes, headroom))
             return;
         _denoiserWeights.Release(force: true);
     }
