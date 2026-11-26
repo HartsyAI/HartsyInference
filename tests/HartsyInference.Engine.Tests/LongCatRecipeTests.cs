@@ -175,6 +175,30 @@ public sealed class LongCatRecipeTests
         Assert.Equal(expectedPrefix, prefix);
     }
 
+    [Fact]
+    public void TheOneFifteenBuildRefusesTheOneSixLayout()
+    {
+        // A checkpoint folder with the 1.6 layout (loraA beside its base folder) is refused by the 1.5 build before any weight is read.
+        string root = Path.Combine(Path.GetTempPath(), "longcat-16-layout-" + Guid.NewGuid().ToString("N"));
+        string baseFolder = Path.Combine(root, "base_model_int8");
+        Directory.CreateDirectory(baseFolder);
+        Directory.CreateDirectory(Path.Combine(root, "loraA"));
+        File.WriteAllText(Path.Combine(root, "loraA", "lora.safetensors"), "x");
+        try
+        {
+            ResolvedModelVariant named15 = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.5"]);
+            NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatAvatarRecipe().Construct(new RecipeContext
+            {
+                CheckpointPath = baseFolder, Backend = new CpuBackend(), Variant = named15,
+            }));
+            Assert.Contains("1.6 layout", refused.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static CheckpointProbe EmptyProbe() =>
         new(new HashSet<string>(StringComparer.Ordinal), new Dictionary<string, TensorShape>(StringComparer.Ordinal),
             new Dictionary<string, string>(StringComparer.Ordinal), []);

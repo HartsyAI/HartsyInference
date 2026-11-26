@@ -475,9 +475,9 @@ internal static class LongCatAvatarGate
     internal static string ModelName(string model)
     {
         ModelSelector selector = ModelSelector.Parse(model);
-        bool sixPointOne = selector.Variant is not null && (selector.Variant.Equals("1.6", StringComparison.OrdinalIgnoreCase)
+        bool isOnePointSix = selector.Variant is not null && (selector.Variant.Equals("1.6", StringComparison.OrdinalIgnoreCase)
             || selector.Variant.Equals("avatar-1.6", StringComparison.OrdinalIgnoreCase));
-        return sixPointOne && selector.Id.Equals("longcat-avatar", StringComparison.OrdinalIgnoreCase)
+        return isOnePointSix && selector.Id.Equals("longcat-avatar", StringComparison.OrdinalIgnoreCase)
             ? LongCatAvatarVariants.Avatar16FamilyId
             : model;
     }

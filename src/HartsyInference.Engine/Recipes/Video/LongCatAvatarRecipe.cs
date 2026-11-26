@@ -110,10 +110,15 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         // Both builds run the 8-step distilled path. The 1.6 build mixes its DMD (loraA) and OPSD (loraB) LoRAs per step (upstream enable_lora_mix).
         ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
         bool is16 = variant.Is(LongCatAvatarVariants.Avatar16);
-        bool distilled = true;
         // The distilled build is the base plus the DMD LoRA gated on. Without that file the request would run the bare base at 8 steps, so it
         // is refused here, before the checkpoint is opened.
-        if (!is16 && distilled && !File.Exists(LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)))
+        // A checkpoint with the 1.6 layout (loraA/loraB) is refused by the 1.5 build: it would run 1.6's weights with 1.5's settings.
+        if (!is16 && File.Exists(LongCatRecipeSupport.Avatar16LoraFiles(context.CheckpointPath).DmdPath))
+        {
+            throw new NotSupportedException($"'{context.CheckpointPath}' has the 1.6 layout (loraA and loraB). Run it as longcat-avatar-1.6 "
+                + "(longcat-avatar:1.6 from the CLI), not as the 1.5 build.");
+        }
+        if (!is16 && !File.Exists(LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)))
         {
             throw new NotSupportedException($"longcat-avatar's distilled build needs its distillation LoRA at "
                 + $"'{LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)}'. Refusing to run the bare base at 8 steps.");
@@ -123,7 +128,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         try
         {
             LongCatRecipeSupport.LongCatLoraFiles? mixed = is16 ? LongCatRecipeSupport.Avatar16LoraFiles(context.CheckpointPath) : null;
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null, attachDmd: distilled && !is16, mixedLoras: mixed);
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null, attachDmd: !is16, mixedLoras: mixed);
             LongCatAvatarLoraSchedule? loraMix = is16
                 ? new LongCatAvatarLoraSchedule(parts.DmdGate!, parts.OpsdGate!, LongCatAvatarVariants.Avatar16MixAlpha, LongCatAvatarVariants.Avatar16MixSteps)
                 : null;
@@ -150,7 +155,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled, parts.DmdGate, loraMix);
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled: true, is16 ? null : parts.DmdGate, loraMix);
         }
         catch (Exception ex)
         {

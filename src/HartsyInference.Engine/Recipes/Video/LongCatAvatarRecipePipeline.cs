@@ -36,7 +36,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate, LongCatAvatarLoraSchedule? loraMix = null)
     {
         // A distilled pipeline is only valid with its LoRA gate: the gate is what makes it the distilled model.
-        if (distilled && loraGate is null)
+        if (distilled && loraGate is null && loraMix is null)
             throw new InvalidOperationException("The distilled avatar pipeline needs its DMD LoRA gate; refusing to run the bare base.");
         _distilled = distilled;
         _loraGate = loraGate;
@@ -157,12 +157,17 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // The later run's own figures: its cached step runs the new latents through the blocks and holds the cache's two pairs.
         // A measured size budgets its later runs on the reserved peak it was measured at; any other size keeps the per-token estimate and its refusal.
         int pixelWidth = latentWidth * LongCatRecipeSupport.SpatialCompressionFactor, pixelHeight = latentHeight * LongCatRecipeSupport.SpatialCompressionFactor;
-        long? measuredPeak = LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, _distilled);
+        // A mixed (1.6) schedule runs without the KV cache, so its later steps run every context and new frame through the blocks and hold no
+        // cache. The measurements are for the cached 1.5 steps only, so a mixed run has none.
+        bool mixed = _loraMix is not null;
+        long? measuredPeak = mixed ? null
+            : LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, _distilled);
         Logs.Info(measuredPeak is long m
             ? $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has a measured later-run peak of {m >> 20} MiB reserved, plus a {LongCatRecipeSupport.MeasuredMarginBytes >> 20} MiB margin."
             : $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has no measured later-run peak: the per-token estimate and its refusal apply.");
-        long laterTokens = LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth);
-        long laterCache = LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth);
+        long laterTokens = LongCatRecipeSupport.TokenCount(mixed ? plan.ContextLatents + 1 + plan.NewLatentsPerSegment : plan.NewLatentsPerSegment,
+            latentHeight, latentWidth);
+        long laterCache = mixed ? 0 : LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth);
         LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache, measuredPeak);
 
         // Segment 0: an ordinary generation in its own streaming scope.
@@ -204,12 +209,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                 // A cached later step runs only its noisy frames through the blocks. The conditioning frames' keys and values come from the offloaded
                 // cache: a staged pair and the joined copy of it stay on the device for the block, and are counted with the activations, while the
                 // noisy rows' own keys and values are activations. So the headroom counts the new latents, and the cache's two pairs.
-                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                    LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
-                    LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth),
+                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, laterCache,
                     measuredPeakBytes: measuredPeak),
                 // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
-                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
+                onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = !mixed }).Latents,
                 bridge);
         };
 

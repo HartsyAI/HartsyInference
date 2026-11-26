@@ -3169,7 +3169,7 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 // LongCat-Video-Avatar 1.6, the per-row INT8 release (base_model_int8) from meituan-longcat/LongCat-Video-Avatar-1.6. The 1.6 build
-                // is undistilled (50 steps, text guidance 4), so it takes the 1.6 settings, not the 1.5 row's distilled ones. The INT8 files share the
+                // runs the 8-step distilled path with its loraA (DMD) and loraB (OPSD) mixed per step (upstream --use_distill, mix_steps 4). The INT8 files share the
                 // layout the 1.5 INT8 release uses (15,880,145,024 B across four shards); the loader reads the INT8 index and converts the weights.
                 // Shards, index and configs are pinned by the HF tree (lfs oids; the index and config are git blobs and carry no hash here). Sizes in bytes.
                 // The LoRAs are the DMD (loraA) and OPSD (loraB) adapters of the 1.6 card, laid out as the release does (loraA/lora.safetensors, loraB/lora.safetensors).

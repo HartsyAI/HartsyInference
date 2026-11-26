@@ -236,7 +236,8 @@ internal static class LongCatRecipeSupport
             foreach (string path in new[] { mixed.DmdPath, mixed.OpsdPath })
             {
                 if (!File.Exists(path))
-                    throw new NotSupportedException($"The 1.6 build needs its LoRA at '{path}', which is not there. Refusing to run without it.");
+                    throw new NotSupportedException($"The 1.6 build needs its LoRA at '{path}', which is not there. Refusing to run without it. "
+                        + "The 1.6 build is the longcat-avatar-1.6 row (longcat-avatar:1.6 from the CLI), with loraA and loraB beside its base folder.");
             }
             dmd = LoraFile.Load(mixed.DmdPath);
             opsd = LoraFile.Load(mixed.OpsdPath);

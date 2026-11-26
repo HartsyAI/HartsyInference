@@ -3,8 +3,8 @@ using HartsyInference.Engine.Variants;
 namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>The two LongCat-Video-Avatar builds the recipe knows. The 1.5 and 1.6 checkpoints have the same tensors and config, so nothing in the
-/// weights tells them apart: the caller names the build (<c>longcat-avatar:1.6</c>). An unnamed request is refused by the recipe, since the catalog
-/// row carries the 1.5 weights.</summary>
+/// weights tells them apart by their files, so the caller names the build: <c>longcat-avatar:1.6</c> routes to the 1.6 row. An unnamed request is the
+/// 1.5 build (the default).</summary>
 public static class LongCatAvatarVariants
 {
     /// <summary>The catalog row id of the 1.6 INT8 release. A request names it as <c>longcat-avatar-1.6</c>, or <c>longcat-avatar:1.6</c>, which the CLI

@@ -81,6 +81,31 @@ public sealed class LongCatLoraMixTests : IDisposable
         Assert.False(mix.Opsd.Enabled);
     }
 
+    [Fact]
+    public void AMixedConditionedRunCompletesWithItsGatesOff()
+    {
+        // The Avc branch (conditioned chain step) with a mix: the schedule runs without a cache, completes, and leaves both gates off.
+        LongCatAvatarLoraSchedule mix = new(new AdjunctGate(), new AdjunctGate(), Alpha: 1f, MixSteps: 4);
+        Random rng = new(31);
+        int cond = 2;
+        float[] noise = LongCatTestData.RandomValues(rng, _config.InChannels * Frames * Hw);
+        float[] condLatents = LongCatTestData.RandomValues(rng, _config.InChannels * cond * Hw);
+        float[] audio = LongCatTestData.RandomValues(rng, Frames * _config.AudioContextTokens * _config.AudioOutputDim);
+        LongCatPrompt positive = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt negative = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        using LongCatTransformer transformer = new(_config);
+        transformer.LoadWeights(_weights);
+        LongCatAvatarRun run = new(_config.InChannels, Frames, Height, Width, noise, positive, negative, audio, null, Steps,
+            LongCatAvatarSchedule.Kind.Distill8, 7f, 1f, 1f, LongCatAvatarMode.Avc, cond, condLatents, UseKvCache: true, LoraMix: mix);
+
+        float[] latents = new LongCatAvatarPipeline(_backend, transformer).Denoise(run).Latents;
+
+        Assert.Equal(_config.InChannels * Frames * Hw, latents.Length);
+        Assert.All(latents, v => Assert.True(float.IsFinite(v)));
+        Assert.False(mix.Dmd.Enabled);
+        Assert.False(mix.Opsd.Enabled);
+    }
+
     private void RunDenoise(LongCatAvatarLoraSchedule mix, Action progress)
     {
         Random rng = new(9);
