@@ -89,7 +89,7 @@ internal static class LongCatRecipeSupport
             // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
             backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
             backend.TrimMemoryPool();
-            RequireCacheRoom(backend.FreeMemoryBytes(), headroom - cacheBytes, cacheBytes);
+            RequireRoom(backend.FreeMemoryBytes(), 0, headroom, "The chain's later run");
         }
         return BlockStreamingScope.Open(new BlockStreamingOptions
         {
@@ -108,21 +108,6 @@ internal static class LongCatRecipeSupport
         measuredPeakBytes is long peak
             ? FixedPoolBytes + SafetyBytes + peak + cacheBytes
             : ActivationHeadroomBytes(tokens, hidden, ffnHidden) + cacheBytes;
-
-    /// <summary>Refuses a run whose budget is negative: the free memory after the shared weights, less the activation headroom and the cache, must be
-    /// at least zero, or the streamed blocks have nowhere to land and the first step dies out of memory.</summary>
-    internal static void RequireCacheRoom(long freeAfterShared, long headroomBeforeCache, long cacheBytes)
-    {
-        long spendable = freeAfterShared - headroomBeforeCache - cacheBytes;
-        if (spendable < 0)
-        {
-            throw new InvalidOperationException(
-                $"The chain's later run needs {Mb(headroomBeforeCache)} MB of activation headroom and {Mb(cacheBytes)} MB of KV cache, but only " +
-                $"{Mb(freeAfterShared)} MB is free after the shared weights: {Mb(-spendable)} MB short. Lower the resolution or the chain length.");
-        }
-    }
-
-    private static long Mb(long bytes) => bytes >> 20;
 
     /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed and the activation headroom, must
     /// be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/> names the run
@@ -151,15 +136,6 @@ internal static class LongCatRecipeSupport
         backend.TrimMemoryPool();
         RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens) + stagedBytes,
             "The chain's later run");
-    }
-
-    /// <summary>A later run's own budget, read once its shared weights are placed, as its streaming scope will read it. The offloaded KV pair
-    /// (<paramref name="stagedBytes"/>) is part of the headroom the scope reserves, so it is counted here too.</summary>
-    internal static void RequireLaterRunRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes)
-    {
-        backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
-        backend.TrimMemoryPool();
-        RequireRoom(backend.FreeMemoryBytes(), 0, LaterRunHeadroom(parts, laterTokens) + stagedBytes, "The chain's later run");
     }
 
     /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>

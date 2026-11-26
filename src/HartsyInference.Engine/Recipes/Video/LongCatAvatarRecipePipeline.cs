@@ -194,8 +194,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                 () =>
                 {
                     // The later run's staged KV pair counts against its budget with the activations, as the planner reads it.
+                    // The scope refuses the run before its denoise when the budget is negative, with the staged pair counted.
                     long stage = LongCatRecipeSupport.KvCacheBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth, offloaded: true);
-                    LongCatRecipeSupport.RequireLaterRunRoom(_backend, _parts, laterTokens, stage);
                     return LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, stage);
                 },
                 // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
