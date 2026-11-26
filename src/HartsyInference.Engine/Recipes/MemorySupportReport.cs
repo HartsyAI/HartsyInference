@@ -67,7 +67,8 @@ public static class MemorySupportReport
         }
         if (context.CfgParallelBackend is not null && !declared.HasFlag(MemoryCapabilities.CfgParallel))
         {
-            Warn(recipeName, "CFG-parallel", "the unconditional branch runs sequentially on the primary backend");
+            Warn(recipeName, "CFG-parallel", "this family does not declare it: a family that refuses the placement fails at construction, "
+                + "and any other runs the unconditional branch on the primary backend");
         }
         if ((context.DitShardBackend is not null || context.DitShardBackends is { Count: > 0 })
             && !declared.HasFlag(MemoryCapabilities.DitSharding))

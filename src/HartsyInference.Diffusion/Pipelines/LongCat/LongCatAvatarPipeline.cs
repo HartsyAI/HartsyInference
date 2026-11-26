@@ -26,14 +26,60 @@ public sealed record LongCatAvatarRun(
 
 /// <summary>The 1.6 two-LoRA schedule (the upstream <c>enable_lora_mix</c>): for steps below <see cref="MixSteps"/> the DMD LoRA runs at
 /// <see cref="Alpha"/> and the OPSD LoRA at <c>1 − Alpha</c>; from then on the OPSD LoRA runs alone at 1. The gates are switched per step.</summary>
-public sealed record LongCatAvatarLoraSchedule(AdjunctGate Dmd, AdjunctGate Opsd, float Alpha, int MixSteps)
+public sealed class LongCatAvatarLoraSchedule
 {
-    /// <summary>The multipliers of the two LoRAs at a step: DMD, then OPSD.</summary>
+    /// <summary>Checks the inputs the way <see cref="LongCatLoraMix"/> does: two distinct gates, a finite Alpha in [0, 1] and a non-negative MixSteps.</summary>
+    public LongCatAvatarLoraSchedule(AdjunctGate Dmd, AdjunctGate Opsd, float Alpha, int MixSteps)
+    {
+        ArgumentNullException.ThrowIfNull(Dmd);
+        ArgumentNullException.ThrowIfNull(Opsd);
+        if (ReferenceEquals(Dmd, Opsd))
+            throw new ArgumentException("The DMD and OPSD gates must be distinct.", nameof(Opsd));
+        if (!float.IsFinite(Alpha) || Alpha < 0f || Alpha > 1f)
+            throw new ArgumentOutOfRangeException(nameof(Alpha), Alpha, "The mix alpha must be finite and in [0, 1].");
+        ArgumentOutOfRangeException.ThrowIfNegative(MixSteps);
+        this.Dmd = Dmd;
+        this.Opsd = Opsd;
+        this.Alpha = Alpha;
+        this.MixSteps = MixSteps;
+    }
+
+    /// <summary>The DMD gate (loraA).</summary>
+    public AdjunctGate Dmd { get; }
+
+    /// <summary>The OPSD gate (loraB).</summary>
+    public AdjunctGate Opsd { get; }
+
+    /// <summary>The DMD weight during the mixed steps; the OPSD weight is 1 − Alpha.</summary>
+    public float Alpha { get; }
+
+    /// <summary>Steps (0-based) that run the mixed pair; later steps run OPSD alone.</summary>
+    public int MixSteps { get; }
+
+    /// <summary>The multipliers of the two LoRAs at a step: DMD, then OPSD. Before <see cref="MixSteps"/> both run (DMD at Alpha, OPSD at
+    /// 1 − Alpha), so unlike <see cref="LongCatLoraMix"/> the two gates are live together on those steps.</summary>
     public (float Dmd, float Opsd) ScalesAt(int step)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(step);
         if (step < MixSteps)
             return (Alpha, 1f - Alpha);
         return (0f, 1f);
+    }
+
+    /// <summary>Enables the DMD gate at this step's scale until the scope is disposed; null when its scale is zero.</summary>
+    public IDisposable? EnterDmd(int step) => Enter(Dmd, ScalesAt(step).Dmd, "DMD");
+
+    /// <summary>Enables the OPSD gate at this step's scale until the scope is disposed; null when its scale is zero.</summary>
+    public IDisposable? EnterOpsd(int step) => Enter(Opsd, ScalesAt(step).Opsd, "OPSD");
+
+    /// <summary>Refuses to enable a gate that is still on from an earlier step, which means that step's scope was never disposed.</summary>
+    private static IDisposable? Enter(AdjunctGate gate, float scale, string name)
+    {
+        if (scale <= 0f)
+            return null;
+        if (gate.Enabled)
+            throw new InvalidOperationException($"The {name} LoRA gate is already enabled; a scope from an earlier step was not disposed.");
+        return gate.Enable(scale);
     }
 }
 
@@ -120,9 +166,8 @@ public sealed class LongCatAvatarPipeline
                 run.Cancel.ThrowIfCancellationRequested();
                 float t = timesteps[i], dt = sigmasWithZero[i + 1] - sigmasWithZero[i];
                 // The mixed schedule: the step's DMD and OPSD multipliers; a zero multiplier leaves its gate off (no scope), as upstream does.
-                (float dmdScale, float opsdScale) = run.LoraMix?.ScalesAt(i) ?? (0f, 0f);
-                using IDisposable? dmdScope = run.LoraMix is { } mix && dmdScale > 0f ? mix.Dmd.Enable(dmdScale) : null;
-                using IDisposable? opsdScope = run.LoraMix is { } mixB && opsdScale > 0f ? mixB.Opsd.Enable(opsdScale) : null;
+                using IDisposable? dmdScope = run.LoraMix?.EnterDmd(i);
+                using IDisposable? opsdScope = run.LoraMix?.EnterOpsd(i);
                 using Tensor velocity = Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond,
                     tensors);
 
