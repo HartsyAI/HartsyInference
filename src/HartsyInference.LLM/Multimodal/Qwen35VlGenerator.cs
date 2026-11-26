@@ -90,10 +90,12 @@ public sealed class Qwen35VlGenerator
         return new VisionGeneration(sb.ToString(), StoppedOnToken: stops.Contains(token));
     }
 
-    /// <summary>The turn after the question: the assistant header, then an empty think block when thinking is off (the shipped template's
-    /// no-think form). With thinking unset or on, the model opens its own reasoning block.</summary>
+    /// <summary>The turn after the question, exactly as the shipped chat template renders it: thinking unset or on opens a reasoning block
+    /// (<c>&lt;think&gt;\n</c>), and thinking off prefills an empty one. The template test pins both strings to the rendered template.</summary>
     internal static string AssistantTurn(bool? enableThinking) =>
-        "<|im_end|>\n<|im_start|>assistant\n" + (enableThinking == false ? "<think>\n\n</think>\n\n" : "");
+        enableThinking == false
+            ? "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            : "<|im_end|>\n<|im_start|>assistant\n<think>\n";
 
     /// <summary>Axis-major M-RoPE positions <c>[3 · seqLen]</c> for <c>[pre][image][post]</c>: the image's placeholder run at
     /// <paramref name="imageStart"/> takes <c>(start + t, start + row, start + col)</c> over <paramref name="grid"/>, and the text after it
