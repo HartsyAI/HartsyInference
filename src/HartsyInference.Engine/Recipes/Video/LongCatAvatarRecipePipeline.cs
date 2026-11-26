@@ -165,7 +165,11 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                     settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
                     _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, LongCatAvatarMode.Avc, plan.ContextLatents + 1, null,
                     OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate);
-                IReadOnlyList<float[]> segments = _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise);
+                // The 1.5 build (use_vcond False in the reference, and the only one this recipe runs) re-encodes each segment's last decoded frames as
+                // the next context; the 1.6 build would carry the latents instead, and it is refused before this point.
+                IReadOnlyList<float[]> segments = _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise,
+                    segment => LongCatRecipeSupport.ReencodedContext(_backend, _parts.Decoder, _parts.Encoder, segment, channels,
+                        plan.SegmentLatents, plan.ContextLatents, latentHeight, latentWidth));
                 return plan.Join(segments, channels, hw);
             },
             bridge);

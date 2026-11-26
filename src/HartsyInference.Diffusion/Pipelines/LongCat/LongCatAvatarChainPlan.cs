@@ -1,7 +1,7 @@
 namespace HartsyInference.Diffusion.Pipelines.LongCat;
 
 /// <summary>The segment plan of a long-form LongCat-Video-Avatar chain. Segment 0 is a whole generation of <see cref="SegmentLatents"/> latent frames.
-/// Each later segment runs one reference slot (latent 0, fixed), the last <see cref="ContextLatents"/> latents of the chain so far, and
+/// Each later segment runs one reference slot (latent 0, fixed), the context of <see cref="ContextLatents"/> latents (on the 1.5 path, the VAE re-encoding of the previous segment's last decoded pixel frames; see LongCatRecipeSupport.ReencodedContext), and
 /// <see cref="NewLatentsPerSegment"/> new latents. Latent <c>g</c> covers pixel frames <c>4g−3…4g</c> (latent 0 covers pixel 0): the VAE's temporal
 /// compression of 4, with the first frame on its own.</summary>
 public sealed record LongCatAvatarChainPlan

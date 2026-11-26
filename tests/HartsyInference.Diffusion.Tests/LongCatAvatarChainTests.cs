@@ -76,6 +76,48 @@ public sealed class LongCatAvatarChainTests : IDisposable
         Assert.Equal([1, 2, 1, 2, 3, 4, 5, 6], LongCatAvatarChainPlan.ReferenceSlotTokens(frames, 2));
     }
 
+    /// <summary>On the 1.5 path the context comes from the re-encoding callback: it is asked once for segment 0 and once per later segment, each
+    /// time with that segment's latents (the run's frames without the reference), and its result is the next run's conditioning.</summary>
+    [Fact]
+    public void TheReencodedContextIsAskedForEachSegment()
+    {
+        LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(SegmentLatents, 45);
+        Random rng = new(9);
+        using LongCatTransformer transformer = new(_config);
+        transformer.LoadWeights(_weights);
+        LongCatAvatarPipeline pipeline = new(_backend, transformer);
+        LongCatPrompt positive = new(Values(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt negative = new(Values(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        int ctx = _config.AudioContextTokens, width = _config.AudioOutputDim, channels = _config.InChannels;
+        LongCatAvatarRun first = new(channels, SegmentLatents, Height, Width, Values(rng, channels * SegmentLatents * Hw), positive, negative,
+            Values(rng, SegmentLatents * ctx * width), Values(rng, SegmentLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f,
+            2f, 1.5f, LongCatAvatarMode.At2v);
+        float[] firstLatents = pipeline.Denoise(first).Latents;
+        int runLatents = plan.RunLatents;
+        List<float[]> audio = [];
+        List<float[]> noises = [];
+        for (int s = 1; s < plan.Segments; s++)
+        {
+            audio.Add(Values(rng, runLatents * ctx * width));
+            noises.Add(Values(rng, channels * runLatents * Hw));
+        }
+        LongCatAvatarRun template = new(channels, runLatents, Height, Width, noises[0], positive, negative, audio[0],
+            Values(rng, runLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f, 2f, 1.5f, LongCatAvatarMode.Avc, Context + 1);
+
+        List<float[]> asked = [];
+        float[] zeroContext = new float[channels * Context * Hw];
+        pipeline.Chain(template, plan.ContextLatents, firstLatents, audio, noises, segment =>
+        {
+            asked.Add(segment);
+            return zeroContext;
+        });
+
+        Assert.Equal(plan.Segments, asked.Count);
+        Assert.Equal(firstLatents, asked[0]);
+        foreach (float[] segment in asked)
+            Assert.Equal(channels * SegmentLatents * Hw, segment.Length);
+    }
+
     [Fact]
     public void AChainRunsEachSegmentAndDecodesToTheRequestedFrames()
     {

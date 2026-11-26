@@ -238,4 +238,27 @@ internal static class LongCatRecipeSupport
         using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
         return VideoRgbFrames.ExtractAllFrames(rgb);
     }
+
+    /// <summary>The 1.5 chain's context (use_vcond False in meituan-longcat/LongCat-Video @ 58eb336, pipeline 1467-1490): the segment's last
+    /// <c>1 + 4·(contextLatents − 1)</c> decoded pixel frames, as RGB24 like the reference's uint8 output, re-encoded by the VAE to the context's
+    /// latents <c>[channels, contextLatents, hw]</c>. The other decoded frames are released when this returns.</summary>
+    internal static float[] ReencodedContext(IBackend backend, IWanVaeDecoder decoder, IWanVaeEncoder encoder, float[] segmentLatents, int channels,
+        int segmentFrames, int contextLatents, int latentHeight, int latentWidth)
+    {
+        if (segmentLatents.Length != channels * segmentFrames * latentHeight * latentWidth)
+            throw new ArgumentException($"The segment holds {segmentLatents.Length} values; expected {channels * segmentFrames * latentHeight * latentWidth}.", nameof(segmentLatents));
+        int contextPixels = 1 + LongCatVaeSeam.TemporalScale * (contextLatents - 1);
+        int width = latentWidth * LongCatVaeSeam.SpatialScale, height = latentHeight * LongCatVaeSeam.SpatialScale;
+        byte[][] tail;
+        {
+            byte[][] decoded = DecodeFrames(backend, decoder, segmentLatents, channels, segmentFrames, latentHeight, latentWidth);
+            if (decoded.Length < contextPixels)
+                throw new InvalidOperationException($"The decoded segment has {decoded.Length} frames; the context needs {contextPixels}.");
+            tail = decoded[^contextPixels..];
+        }
+        using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(tail, width, height);
+        using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+        using Tensor host = VideoRecipeUtils.HostCopy(latent);
+        return host.AsReadOnlySpan<float>().ToArray();
+    }
 }
