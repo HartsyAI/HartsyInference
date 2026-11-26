@@ -69,8 +69,21 @@ public sealed class WhenRunKnobsFactAttribute : FactAttribute
         string? raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar);
         if (string.IsNullOrWhiteSpace(raw))
             Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} is unset; the whole-run knob check did not run.";
-        else if (requiredId is not null && !raw.Contains(requiredId, StringComparison.Ordinal))
-            Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} does not name {requiredId}.";
+        else if (requiredId is not null && !IsTrueFor(raw, requiredId))
+            Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} does not set {requiredId} to true.";
+    }
+
+    /// <summary>True when the switch parses <paramref name="id"/> to true (true, 1, or any casing of true). A value of false, 0 or anything else is not on.</summary>
+    private static bool IsTrueFor(string raw, string id)
+    {
+        foreach (string pair in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0 || !string.Equals(pair[..eq], id, StringComparison.Ordinal)) continue;
+            string value = pair[(eq + 1)..];
+            return value == "1" || bool.TryParse(value, out bool parsed) && parsed;
+        }
+        return false;
     }
 }
 
@@ -82,7 +95,7 @@ public static class GlobalKnobStore
 }
 
 /// <summary>Proves the whole-run switch reached the knob store: every id in <c>HARTSY_GPU_TEST_KNOBS</c> resolves with source "run profile",
-/// and <c>numerics.tileFromDevice</c>, when it is named, reads the value it was given. Does nothing when the variable is unset.</summary>
+/// and <c>numerics.tileFromDevice</c>, when it is set to true, reads true. Each test is skipped, not passed, when the switch does not set what it needs.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection(GlobalKnobStore.Name)]
 public sealed class GpuRunKnobsTests
