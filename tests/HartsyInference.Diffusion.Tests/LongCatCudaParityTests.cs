@@ -21,7 +21,7 @@ public sealed class LongCatCudaParityTests(ITestOutputHelper output)
     private const string EnvName = "HARTSY_LONGCAT_CUDA_PARITY";
     private const int Frames = 3, Height = 4, Width = 4, TextLength = 6;
 
-    /// <summary>The exact lane's bound: plain F32 on both sides, so only the kernels' reduction order differs. Measured on a 4090 at 7dd3c077c
+    /// <summary>The exact lane's bound: plain F32 on both sides, so only the kernels' reduction order differs. Measured on a 4090 at d7cda1f25
     /// (ExactGemmScope on, the gate on): the video worst absolute difference was 2.384e-6 and the avatar's 1.188e-6, both well inside 1e-5.</summary>
     private const float ExactBound = 1e-5f;
 
