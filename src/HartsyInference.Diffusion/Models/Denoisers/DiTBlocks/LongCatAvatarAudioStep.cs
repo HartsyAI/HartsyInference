@@ -42,11 +42,10 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         List<Tensor> local = [];
         try
         {
-            step._adaW = Expect(w[prefix + ".audio_adaLN_modulation.1.weight"], [3 * dim, adaLnWidth], prefix + ".audio_adaLN_modulation.1.weight");
-            step._adaB = Expect(LongCatOps.WidenF32(w, prefix + ".audio_adaLN_modulation.1.bias", local), [3 * dim],
-                prefix + ".audio_adaLN_modulation.1.bias");
-            step._preW = Expect(LongCatOps.WidenF32(w, prefix + ".pre_video_crs_attn_norm.weight", local), [dim], prefix + ".pre_video_crs_attn_norm.weight");
-            step._preB = Expect(LongCatOps.WidenF32(w, prefix + ".pre_video_crs_attn_norm.bias", local), [dim], prefix + ".pre_video_crs_attn_norm.bias");
+            step._adaW = CheckpointTensors.Require(w, "LongCat", prefix + ".audio_adaLN_modulation.1.weight", [3 * dim, adaLnWidth]);
+            step._adaB = CheckpointTensors.RequireF32(w, "LongCat", prefix + ".audio_adaLN_modulation.1.bias", local, [3 * dim]);
+            step._preW = CheckpointTensors.RequireF32(w, "LongCat", prefix + ".pre_video_crs_attn_norm.weight", local, [dim]);
+            step._preB = CheckpointTensors.RequireF32(w, "LongCat", prefix + ".pre_video_crs_attn_norm.bias", local, [dim]);
             step._attention.LoadWeights(w, prefix + ".audio_cross_attn.");
             step._owned.AddRange(local);
             local.Clear();
@@ -131,13 +130,4 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         _owned.Clear();
     }
 
-    private static Tensor Expect(Tensor tensor, long[] shape, string key)
-    {
-        if (tensor.Shape.Rank != shape.Length)
-            throw new InvalidDataException($"{key} must have {shape.Length} dimensions, got {tensor.Shape}.");
-        for (int i = 0; i < shape.Length; i++)
-            if (tensor.Shape[i] != shape[i])
-                throw new InvalidDataException($"{key} must be {string.Join('x', shape)}, got {tensor.Shape}.");
-        return tensor;
-    }
 }
