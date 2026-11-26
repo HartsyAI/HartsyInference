@@ -301,29 +301,49 @@ public sealed partial class CudaBackend
     /// <summary>A one-row tile, B·H·Skv scores, is within what the softmax addresses; every tiled row needs it.</summary>
     internal static bool OneRowTiles(in AttentionCall c) => (long)c.Batch * c.Heads * c.KeyTokens <= MaterializedMaxScores;
 
-    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than half of free
-    /// VRAM, or one the materialized row does not address.</summary>
+    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than the gate budget,
+    /// or one the materialized row does not address. The forced and past-materialized returns are not gate decisions and are not logged.</summary>
     private bool TilesScores(in AttentionCall c)
     {
         if (!OneRowTiles(in c)) return false;
         if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
-        return scoreBytes > GateBudget();
+        ulong budget = GateBudget();
+        bool over = scoreBytes > budget;
+        LogGate("tiles", over);
+        return over;
     }
 
-    /// <summary>The BF16 copies of Q, K, V and the output fit in half of free VRAM.</summary>
+    /// <summary>The BF16 copies of Q, K, V and the output fit the gate budget (the BF16 cuDNN path); otherwise the F32 path runs.</summary>
     private bool Bf16CastFits(in AttentionCall c)
     {
         ulong castBytes = sizeof(ushort) * ((ulong)c.Query.Storage.ElementCount + (ulong)c.Key.Storage.ElementCount
             + (ulong)c.Value.Storage.ElementCount + (ulong)c.Output.Storage.ElementCount);
-        return castBytes <= GateBudget();
+        ulong budget = GateBudget();
+        bool over = castBytes > budget;
+        LogGate("bf16cast", over);
+        return !over;
     }
 
-    /// <summary>The byte budget the attention path gates compare against: half of free VRAM, or the device's tile rung under
-    /// <c>numerics.tileFromDevice</c> (a constant per device).</summary>
+    /// <summary>The byte budget the attention path gates compare against: half of free VRAM, or under <c>numerics.tileFromDevice</c> the one
+    /// device gate budget (<see cref="DeviceGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
     private ulong GateBudget() => EngineKnobs.TileFromDevice.Value == true
-        ? (ulong)TileRungBytes((ulong)_context.GetMemoryInfo().totalBytes)
+        ? DeviceGateBudget((ulong)_context.GetMemoryInfo().totalBytes, (ulong)FreeVram())
         : FreeVram() / 2;
+
+    /// <summary>Logs one budget gate's decision to <see cref="TileFreeLog"/> under <c>numerics.tileFromDevice</c>; knob off, nothing. A gate
+    /// that decides with the knob off does not log, so an ordinary run's log is empty.</summary>
+    internal void LogGate(string gate, bool over)
+    {
+        if (EngineKnobs.TileFromDevice.Value != true) return;
+        TileFreeLog.RecordGate(gate, (ulong)FreeVram(), (ulong)_context.GetMemoryInfo().totalBytes, over);
+    }
+
+    /// <summary>The one gate budget under <c>numerics.tileFromDevice</c>: half of the device's total VRAM, or the free VRAM when that is less. The
+    /// total half makes a gate's path the same on every run of one device while free VRAM is ample; the free clamp stops a gate choosing a buffer
+    /// the card does not have free now. So the path can still move when free falls below half the total: the A/B rows name the free reading of
+    /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
+    internal static ulong DeviceGateBudget(ulong deviceTotalBytes, ulong freeBytes) => Math.Min(deviceTotalBytes / 2, freeBytes);
 
     /// <summary>Free device memory the attention rows budget against.</summary>
     private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
