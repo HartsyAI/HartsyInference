@@ -8,21 +8,22 @@ namespace HartsyInference.Vision.CrossFrame;
 /// <summary>
 /// The unbuffered form of <see cref="CrossFrameTokens"/> (upstream <c>KVCache</c>): per cross-frame block, a FIFO of the last <see cref="Window"/>
 /// frames, the current one included. Each block keeps a ring of the frames' prefix tokens and, in a <see cref="KvSegmentStore"/>, the keys and
-/// values as token-major <c>[1, rows, heads, D]</c> segments: segment 0 holds those of the pooled prefix (the mean of the visible frames' prefixes)
-/// and segment <c>1 + s</c> those of the frame in slot <c>s</c>. <see cref="Read"/> joins the live ones into the head-major rows the current frame's
+/// values as head-major <c>[1, heads, rows, D]</c> segments: segment 0 holds those of the pooled prefix (the mean of the visible frames' prefixes)
+/// and segment <c>1 + s</c> those of the frame in slot <c>s</c>. <see cref="Read"/> joins the live ones along the rows into what the current frame's
 /// patches attend to. Slots fill in arrival order and then wrap, so the oldest frame is replaced; attention has no temporal position, so slot order
 /// changes only rounding. Per frame and block, call <see cref="UpdatePrefix"/>, then <see cref="Update"/>, then <see cref="Read"/>. Every write and
 /// read is a backend op and every kept tensor is pinned, so on a GPU backend the caches stay on the device.
 /// </summary>
 /// <remarks>
-/// A frame that fails part-way leaves some blocks one frame ahead of the others; the ring is then unusable and must be replaced
-/// (<c>DepthPro2VideoStream</c> refuses further frames after such a failure). MatrixGame2's sliding window is not reused here: it re-encodes its
+/// A frame that fails part-way leaves some blocks one frame ahead of the others, and an <see cref="Update"/> that fails while it stores can leave
+/// its block's pooled rows ahead of its slots; the ring is then unusable and must be replaced (<c>DepthPro2VideoStream</c> refuses further frames
+/// after such a failure). MatrixGame2's sliding window is not reused here: it re-encodes its
 /// context frames each step under a block-causal mask with temporal RoPE positions and keeps no key/value rows, while this ring keeps
 /// position-free frame slots behind a pooled-prefix block that is rewritten every frame.
 /// </remarks>
 public sealed class CrossFrameKvRing : IDisposable
 {
-    private const int TokenAxis = 1;
+    private const int TokenAxis = 2;
     private const int PooledSlot = 0;
 
     private readonly Dictionary<int, Entry> _blocks = [];
@@ -94,19 +95,23 @@ public sealed class CrossFrameKvRing : IDisposable
 
     /// <summary>
     /// Stores the current frame's patch keys and values (token-major <c>[1, N, heads, D]</c>) in its slot and the pooled prefix's (<c>[1, P, heads,
-    /// D]</c>) ahead of the slots, then counts the frame as seen. The ring takes ownership of all four tensors, also when it throws, and frees
-    /// those it replaces. Returns how many rows <see cref="Read"/> now gives.
+    /// D]</c>) ahead of the slots, then counts the frame as seen. The ring takes ownership of all four tensors, also when it throws: it keeps
+    /// head-major copies, disposes the four, and frees the segments the copies replace. Returns how many rows <see cref="Read"/> now gives.
     /// </summary>
     public int Update(int block, Tensor key, Tensor value, Tensor pooledKey, Tensor pooledValue)
     {
-        bool pooledGiven = false, frameGiven = false;
-        try
+        using (key)
+        using (value)
+        using (pooledKey)
+        using (pooledValue)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (!_blocks.TryGetValue(block, out Entry? entry))
                 throw new InvalidOperationException($"Call UpdatePrefix for block {block} before Update.");
             CheckRows(key, nameof(key));
             CheckRows(pooledKey, nameof(pooledKey));
+            ArgumentNullException.ThrowIfNull(value);
+            ArgumentNullException.ThrowIfNull(pooledValue);
             if (!value.Shape.Equals(key.Shape) || value.DType != DType.F32)
                 throw new ArgumentException($"The values must match the keys {key.Shape}; got {value.DType} {value.Shape}.", nameof(value));
             if (!pooledValue.Shape.Equals(pooledKey.Shape) || pooledValue.DType != DType.F32)
@@ -116,32 +121,19 @@ public sealed class CrossFrameKvRing : IDisposable
             int patches = (int)key.Shape[1], heads = (int)key.Shape[2], dim = (int)key.Shape[3], prefix = (int)pooledKey.Shape[1];
             if (pooledKey.Shape[2] != heads || pooledKey.Shape[3] != dim)
                 throw new ArgumentException($"The pooled keys must have {heads} heads of {dim}; got {pooledKey.Shape}.", nameof(pooledKey));
-            if (entry.Seen > 0 && (entry.Patches != patches || entry.Prefix != prefix || entry.Heads != heads || entry.Dim != dim))
+            if (prefix != entry.Prefixes.Shape[1])
+                throw new ArgumentException($"Block {block} pools {entry.Prefixes.Shape[1]} prefix rows; got {pooledKey.Shape}.",
+                    nameof(pooledKey));
+            if (entry.Seen > 0 && (entry.Patches != patches || entry.Heads != heads || entry.Dim != dim))
                 throw new ArgumentException(
                     $"Block {block} caches {entry.Prefix} + {Window} x {entry.Patches} rows of {entry.Heads} heads; got {key.Shape}.", nameof(key));
 
             // The pooled rows first: the store then never has an empty slot before a frame's.
-            pooledGiven = true;
-            entry.Store.Set(0, PooledSlot, pooledKey, pooledValue);
-            frameGiven = true;
-            entry.Store.Set(0, 1 + entry.Seen % Window, key, value);
+            Store(entry, PooledSlot, pooledKey, pooledValue);
+            Store(entry, 1 + entry.Seen % Window, key, value);
             (entry.Patches, entry.Prefix, entry.Heads, entry.Dim) = (patches, prefix, heads, dim);
             entry.Seen++;
             return LiveRows(block);
-        }
-        finally
-        {
-            if (!pooledGiven)
-            {
-                pooledKey?.Dispose();
-                pooledValue?.Dispose();
-            }
-
-            if (!frameGiven)
-            {
-                key?.Dispose();
-                value?.Dispose();
-            }
         }
     }
 
@@ -152,24 +144,7 @@ public sealed class CrossFrameKvRing : IDisposable
     {
         Entry entry = Get(block);
         if (entry.Seen == 0) throw new InvalidOperationException($"Block {block} has no keys and values yet.");
-        (Tensor joinedKeys, Tensor joinedValues) = entry.Store.Join(0, 0, 1 + Math.Min(entry.Seen, Window));
-        Tensor? keys = null;
-        try
-        {
-            keys = HeadMajor(entry.Backend, joinedKeys);
-            joinedKeys.Dispose();   // before the values are permuted, so at most three of the four joined sizes are alive
-            return (keys, HeadMajor(entry.Backend, joinedValues));
-        }
-        catch
-        {
-            keys?.Dispose();
-            throw;
-        }
-        finally
-        {
-            joinedKeys.Dispose();
-            joinedValues.Dispose();
-        }
+        return entry.Store.Join(0, 0, 1 + Math.Min(entry.Seen, Window));
     }
 
     /// <summary>The rows the frame last stored in block <paramref name="block"/> attends to.</summary>
@@ -204,6 +179,24 @@ public sealed class CrossFrameKvRing : IDisposable
         ArgumentNullException.ThrowIfNull(rows, name);
         if (rows.DType != DType.F32 || rows.Shape.Rank != 4 || rows.Shape[0] != 1)
             throw new ArgumentException($"{name} must be F32 token-major [1, S, heads, D]; got {rows.DType} {rows.Shape}.", name);
+    }
+
+    // Head-major copies of token-major keys and values into a slot.
+    private static void Store(Entry entry, int slot, Tensor keys, Tensor values)
+    {
+        Tensor headKeys = HeadMajor(entry.Backend, keys);
+        Tensor headValues;
+        try
+        {
+            headValues = HeadMajor(entry.Backend, values);
+        }
+        catch
+        {
+            headKeys.Dispose();
+            throw;
+        }
+
+        entry.Store.Set(0, slot, headKeys, headValues);   // the store takes both, also when it throws
     }
 
     // [1, S, heads, D] to [1, heads, S, D].

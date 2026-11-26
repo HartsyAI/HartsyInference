@@ -6,8 +6,8 @@ using Xunit;
 namespace HartsyInference.Vision.Tests.CrossFrame;
 
 /// <summary>The unbuffered ring against a plain host model of itself: the pooled prefix is the mean of the visible frames' prefixes, and
-/// <c>Read</c> gives the pooled rows first and then one slot per frame (oldest replaced once the ring wraps), head-major. The ring owns what
-/// <c>Update</c> is given and frees what it replaces or refuses.</summary>
+/// <c>Read</c> gives the pooled rows first and then one slot per frame (oldest replaced once the ring wraps), head-major. The ring takes what
+/// <c>Update</c> is given, whether it stores or refuses it.</summary>
 public sealed class CrossFrameKvRingTests : IDisposable
 {
     private const int Window = 3, Frames = 7, PrefixRows = 2, Width = 5, Patches = 3, Heads = 2, Dim = 4;
@@ -62,22 +62,24 @@ public sealed class CrossFrameKvRingTests : IDisposable
     }
 
     [Fact]
-    public void TheRingFreesWhatItReplacesAndEverythingWhenItIsDisposed()
+    public void TheRingTakesWhatUpdateIsGivenAndRefusesUseOnceDisposed()
     {
         CrossFrameKvRing ring = new(Window);
-        List<Tensor[]> given = [];
-        for (int t = 0; t < Window + 1; t++) given.Add(Step(ring, Patches));
+        List<Tensor> given = [];
+        for (int t = 0; t < Window + 1; t++) given.AddRange(Step(ring, Patches));
 
-        // Frame 3 replaced frame 0's slot, and every frame replaced the pooled rows of the frame before it.
-        Assert.False(Alive(given[0][0]) || Alive(given[0][1]));
-        for (int t = 1; t <= Window; t++) Assert.True(Alive(given[t][0]) && Alive(given[t][1]));
-        for (int t = 0; t < Window; t++) Assert.False(Alive(given[t][2]) || Alive(given[t][3]));
-        Assert.True(Alive(given[Window][2]) && Alive(given[Window][3]));
+        Assert.All(given, t => Assert.False(Alive(t)));
+        (Tensor keys, Tensor values) = ring.Read(0);
+        using (keys)
+        using (values)
+        {
+            ring.Dispose();
+            ring.Dispose();
 
-        ring.Dispose();
-        ring.Dispose();
+            // What Read gave stays the caller's.
+            Assert.True(Alive(keys) && Alive(values));
+        }
 
-        Assert.All(given.SelectMany(tensors => tensors), t => Assert.False(Alive(t)));
         Assert.Throws<ObjectDisposedException>(() => ring.Read(0));
     }
 
@@ -94,8 +96,18 @@ public sealed class CrossFrameKvRingTests : IDisposable
             Assert.Throws<ArgumentException>(() => ring.Update(0, other[0], other[1], other[2], other[3]));
             Tensor[] unseen = Four(Patches);
             Assert.Throws<InvalidOperationException>(() => ring.Update(1, unseen[0], unseen[1], unseen[2], unseen[3]));
+            Tensor[] heads = Four(Patches);
+            Tensor oneHeadMore = Make(new float[PrefixRows * (Heads + 1) * Dim], 1, PrefixRows, Heads + 1, Dim);
+            Assert.Throws<ArgumentException>(() => ring.Update(0, heads[0], heads[1], oneHeadMore, heads[3]));
+            Tensor[] rows = Four(Patches);
+            Tensor oneRowMore = Make(new float[(PrefixRows + 1) * Heads * Dim], 1, PrefixRows + 1, Heads, Dim);
+            Assert.Throws<ArgumentException>(() => ring.Update(0, rows[0], rows[1], oneRowMore, rows[3]));
+            Tensor[] missing = Four(Patches);
+            Assert.Throws<ArgumentNullException>(() => ring.Update(0, missing[0], null!, missing[2], missing[3]));
 
-            Assert.All(other.Concat(unseen), t => Assert.False(Alive(t)));
+            Tensor[] refused = [.. other, .. unseen, heads[0], heads[1], heads[3], oneHeadMore, rows[0], rows[1], rows[3], oneRowMore,
+                missing[0], missing[2], missing[3]];
+            Assert.All(refused, t => Assert.False(Alive(t)));
             Assert.Equal(1, ring.Seen(0));
             (Tensor after, Tensor afterValues) = ring.Read(0);
             using (after)
