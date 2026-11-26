@@ -17,6 +17,11 @@ public sealed record MovieRollSamplerOptions
     /// <summary>Latent frames in the chunks that drain the queue after the last real chunk is enqueued; 0 means <see cref="ChunkFrames"/>.</summary>
     public int TailChunkFrames { get; init; }
 
+    /// <summary>Latent frames in the first chunk only; 0 means <see cref="ChunkFrames"/>. Text-to-video uses <c>1 + ChunkFrames</c>
+    /// (upstream <c>check_and_get_chunk_sizes</c>, mode <c>default</c>, as <c>movieroll_dmd_pipeline.py:740-765</c> and
+    /// <c>movieroll_pipeline.py:991-992</c> call it); image-to-video keeps the first chunk at one frame and needs a conditioning path this sampler does not have.</summary>
+    public int FirstChunkFrames { get; init; }
+
     /// <summary>Real output chunks. The queue runs <c>NumChunks + window</c> rounds, so the drain chunks are denoised but never emitted.</summary>
     public required int NumChunks { get; init; }
 
@@ -67,7 +72,7 @@ public sealed class MovieRollSampler
         if (!cache.IsInit) throw new InvalidOperationException("Init the cache with the DiT's stream layer names before sampling.");
         if (options.Cfg is not null && negativeQwen is null)
             throw new ArgumentException("Classifier-free guidance needs the negative prompt's text.", nameof(negativeQwen));
-        if (options.ChunkFrames <= 0 || options.NumChunks <= 0 || options.TailChunkFrames < 0)
+        if (options.ChunkFrames <= 0 || options.NumChunks <= 0 || options.TailChunkFrames < 0 || options.FirstChunkFrames < 0)
             throw new ArgumentException("Chunk and chunk count must be positive.", nameof(options));
         if (options.ContextNoise < 0f || options.ContextNoise > 1f)
             throw new ArgumentOutOfRangeException(nameof(options), options.ContextNoise, "The context-noise sigma lies in [0, 1].");
@@ -106,7 +111,8 @@ public sealed class MovieRollSampler
                     if (decoded >= options.NumChunks) break;
                 }
 
-                int frames = round < options.NumChunks ? options.ChunkFrames : tail;
+                int frames = round == 0 && options.FirstChunkFrames > 0 ? options.FirstChunkFrames
+                    : round < options.NumChunks ? options.ChunkFrames : tail;
                 queue.Add(noise(frames));
                 for (int step = 0; step < stepsPerWindow; step++)
                     StepQueue(cache, options, queue, round * stepsPerWindow + step, qwen, byt5, negativeQwen, negativeByt5);
