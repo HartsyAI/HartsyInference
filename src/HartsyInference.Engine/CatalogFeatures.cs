@@ -1,7 +1,7 @@
 namespace HartsyInference.Engine;
 
 /// <summary>What a catalog entry is for beyond generation. Code asks <see cref="CatalogEntry.Features"/> instead of comparing model ids,
-/// so a new matte model is one catalog line rather than an edit in every consumer.</summary>
+/// so a consumer routes on the role a model plays rather than on its name.</summary>
 [Flags]
 public enum CatalogFeatures
 {
@@ -16,4 +16,7 @@ public enum CatalogFeatures
 
     /// <summary>Large enough that the generating pipeline must be released before the matter loads.</summary>
     ReleasesGeneratorFirst = 4,
+
+    /// <summary>A vocal separator <c>fx separate</c> runs through the MDX-Net loop. Only Kim_Vocal_2's weights loader exists, so a second entry needs its own.</summary>
+    MdxNetSeparator = 8,
 }
