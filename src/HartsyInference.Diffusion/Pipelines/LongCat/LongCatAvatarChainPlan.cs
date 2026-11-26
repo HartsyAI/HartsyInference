@@ -83,6 +83,10 @@ public sealed record LongCatAvatarChainPlan
 
     /// <summary>The pixel frames of a later segment's run, in run order: pixel 0, then four per latent of <see cref="RunLatentIds"/> after the reference.
     /// Its length is <c>4·(RunLatents − 1) + 1</c>.</summary>
+    /// <remarks>Open question, not settled against a reference: the reference's per-segment audio is 93 contiguous windows starting at
+    /// <c>LongCatAudioFeatures.SegmentStartFrame(k)</c>, whose first 13 are the context. This layout instead gives the context four full latent
+    /// groups (16 windows) before the new frames, so the context's audio can differ from the reference's. The new frames' windows agree. Settle it
+    /// with the reference's later-segment windows before relying on chains with real weights.</remarks>
     public int[] RunPixelIds(int segment)
     {
         List<int> pixels = [];

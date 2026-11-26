@@ -58,6 +58,9 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
 
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
+        if (request.ChainTotalFrames is int requested && requested > LongCatAvatarRecipe.MaxChainFrames)
+            throw new ArgumentOutOfRangeException(nameof(request), requested,
+                $"A LongCat-Video-Avatar chain is at most {LongCatAvatarRecipe.MaxChainFrames} frames; the whole chain is decoded in one pass.");
         if (frames > LongCatAvatarRecipe.SegmentFrames)
             throw new ArgumentOutOfRangeException(nameof(settings), frames, $"One LongCat-Video-Avatar segment is at most {LongCatAvatarRecipe.SegmentFrames} frames.");
         if (settings.Fps != LongCatAvatarRecipe.OutputFps)
@@ -91,7 +94,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         // The DiT is placed by the streaming scope (see the base recipe); each finished step returns the stream's reservations.
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
-        (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(rawAudio[..(frames * RowWidth)], frames, latentFrames);
+        float[] firstWindows = rawAudio.Length == frames * RowWidth ? rawAudio : rawAudio[..(frames * RowWidth)];
+        (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(firstWindows, frames, latentFrames);
         float[] latents;
         int decodedLatents = latentFrames;
         if (plan is null)
@@ -139,7 +143,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         {
             int[] pixels = plan.RunPixelIds(s);
             float[] raw = GatherWindows(rawAudio, pixels);
-            (float[] tokens, _) = ProjectAudio(raw, pixels.Length, runLatents);
+            float[] tokens = ProjectConditional(raw, pixels.Length, runLatents);
             laterAudio.Add(tokens);
             laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
         }
@@ -198,6 +202,15 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>The audio tokens of the clip and the same clip with zeroed raw audio (the unconditional pass of the three-pass CFG).</summary>
+    private float[] ProjectConditional(float[] rawWindows, int frames, int latentFrames)
+    {
+        using Tensor raw = new(new TensorShape([frames, RowWidth]), DType.F32);
+        rawWindows.AsSpan().CopyTo(raw.AsSpan<float>());
+        using Tensor cond = _parts.Dit.ProjectAudio(_backend, raw, latentFrames);
+        using Tensor condHost = VideoRecipeUtils.HostCopy(cond);
+        return condHost.AsReadOnlySpan<float>().ToArray();
+    }
+
     private (float[] Conditional, float[] Unconditional) ProjectAudio(float[] rawWindows, int frames, int latentFrames)
     {
         using Tensor raw = new(new TensorShape([frames, RowWidth]), DType.F32);
