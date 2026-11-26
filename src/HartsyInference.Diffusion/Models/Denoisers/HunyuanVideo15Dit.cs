@@ -657,6 +657,26 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         return (frames, height, width);
     }
 
+    /// <summary>The same elements as <paramref name="x"/> in <paramref name="shape"/> (row-major, contiguous), copied on the backend. <c>Tensor.Reshape</c>
+    /// takes the data pointer, which reads a device-resident tensor back to the host, so a window built on the device must not use it.</summary>
+    private static Tensor FlatView(IBackend backend, Tensor x, TensorShape shape)
+    {
+        if (x.ElementCount != shape.ElementCount)
+            throw new ArgumentException($"Cannot view {x.Shape} as {shape}: the element counts differ.", nameof(x));
+        Tensor output = new(shape, x.DType);
+        Span<long> dims = stackalloc long[shape.Rank];
+        shape.CopyDimsTo(dims);
+        Span<long> strides = stackalloc long[shape.Rank];
+        long stride = 1;
+        for (int d = shape.Rank - 1; d >= 0; d--)
+        {
+            strides[d] = stride;
+            stride *= dims[d];
+        }
+        backend.CopyStrided(output, x, StridedCopySpec.Gather(new StridedView(dims, strides)));
+        return output;
+    }
+
     /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project. Everything runs on the
     /// backend: the latent and conditioning are read as <c>[1, channels, tokens]</c> views and concatenated on channels, the conditioning is not
     /// copied first, and only a null conditioning allocates the zero block.</summary>
@@ -665,7 +685,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         int latentChannels = _config.LatentChannels;
         int extraChannels = _config.ImgInChannels - latentChannels;
         long extraCount = (long)extraChannels * tokens;
-        using Tensor latentRows = latent.Reshape(new TensorShape(1, latentChannels, tokens));
+        using Tensor latentRows = FlatView(backend, latent, new TensorShape(1, latentChannels, tokens));
         Tensor? zeros = null, conditioningRows = null;
         try
         {
@@ -680,7 +700,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             {
                 if (conditioning.Shape.ElementCount != extraCount)
                     throw new ArgumentException($"conditioning must hold {extraChannels} channels over {tokens} tokens, got {conditioning.Shape}.", nameof(conditioning));
-                conditioningRows = conditioning.Reshape(new TensorShape(1, extraChannels, tokens));
+                conditioningRows = FlatView(backend, conditioning, new TensorShape(1, extraChannels, tokens));
             }
             Tensor extraRows = conditioningRows ?? zeros!;
 

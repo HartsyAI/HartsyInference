@@ -56,12 +56,25 @@ public sealed class MovieRollSamplerGpuTests(ITestOutputHelper output)
         device.Backend.ResetD2hSyncCount();
         using Tensor actual = device.Sample(SeededNoise(7));
         long reads = device.Backend.GetD2hSyncCount();
-        output.WriteLine($"D2H_SYNCS FullSampler: {reads}");
-        Assert.Equal(0, reads);
 
+        // Everything is measured and printed before the first assertion, so a run that fails a check still reports its errors and counts.
+        output.WriteLine($"D2H_SYNCS FullSampler: {reads}");
+        output.WriteLine($"RECOMPUTES cpu={cpuFixture.LastRecomputeCount} device={device.LastRecomputeCount}");
+        ReportSwitches(device.Backend, "FullSampler");
         List<string> failures = [];
         Compare("FullSampler latents", expected, actual, tolerance, failures);
+
+        Assert.True(cpuFixture.LastRecomputeCount > 0, "The KV recompute did not fire on the CPU run, so the run does not cover it.");
+        Assert.Equal(cpuFixture.LastRecomputeCount, device.LastRecomputeCount);
+        Assert.Equal(0, reads);
         Assert.True(failures.Count == 0, $"Bound {tolerance:E0}: {string.Join("; ", failures)}");
+    }
+
+    /// <summary>Prints the attention and GEMM switches a run used, so its numbers can be read with the path that produced them.</summary>
+    private void ReportSwitches(IBackend backend, string run)
+    {
+        if (backend is HartsyInference.Cuda.CudaBackend cuda)
+            output.WriteLine($"SWITCHES {run}: HighPrecisionGemm={backend.HighPrecisionGemm} CudnnSdpaEngaged={cuda.CudnnSdpaEngaged}");
     }
 
     /// <summary>Compares two tensors, prints the largest absolute error with its flat index and the two values there, and records the tensor in
@@ -131,13 +144,18 @@ public sealed class MovieRollSamplerGpuTests(ITestOutputHelper output)
         public Tensor NegativeQwen { get; }
         public Tensor NegativeByt5 { get; }
 
+        /// <summary>KV recomputes the last <see cref="Sample"/> call made.</summary>
+        public int LastRecomputeCount { get; private set; }
+
         /// <summary>The sampler on its own: one cache for the run, the schedule the pipeline tests use. The caller owns the returned latents.</summary>
         public Tensor Sample(Func<int, Tensor> noise)
         {
             using MovieRollKvCache cache = new(Backend);
             cache.Init(Dit.StreamLayerNames(), Height, Width);
             MovieRollSampler sampler = new(Backend, Dit, MovieRollSchedule.Base(4, 2, 5.0));
-            return sampler.Sample(cache, Options, Qwen, ByT5, NegativeQwen, NegativeByt5, noise);
+            Tensor latents = sampler.Sample(cache, Options, Qwen, ByT5, NegativeQwen, NegativeByt5, noise);
+            LastRecomputeCount = sampler.RecomputeCount;
+            return latents;
         }
 
         private static Tensor RandomTensor(Random random, Tensor like)
@@ -150,6 +168,8 @@ public sealed class MovieRollSamplerGpuTests(ITestOutputHelper output)
 
         public void Dispose()
         {
+            NegativeQwen.Dispose();
+            NegativeByt5.Dispose();
             Dit.Dispose();
             Backend.Dispose();
             Weights.Dispose();
