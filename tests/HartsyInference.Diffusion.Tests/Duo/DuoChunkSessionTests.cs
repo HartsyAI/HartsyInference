@@ -137,7 +137,7 @@ public sealed class DuoChunkSessionTests
         NoisyBlocks = [0],
     };
 
-    private static DuoStreamCache Cache() => new(blocks: Layers, width: Inner, capacityRows: 64);
+    private static DuoStreamCache Cache() => new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: 64);
 
     /// <summary>Three blocks, so a rollout can outgrow a cache that holds the prefix and one block.</summary>
     private static DuoSampleInput ThreeBlockSample() => Sample() with
@@ -160,7 +160,7 @@ public sealed class DuoChunkSessionTests
         using IBackend backend = new CpuBackend();
         DuoSampleInput sample = ThreeBlockSample();
         float[] reference = Values(30, RefRows * VideoIn);
-        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: 64);
+        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: 64);
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), reference);
 
@@ -192,7 +192,7 @@ public sealed class DuoChunkSessionTests
         using IBackend backend = new CpuBackend();
         DuoSampleInput sample = ThreeBlockSample();
         float[] reference = Values(30, RefRows * VideoIn);
-        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: OneBlockCapacity);
+        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: OneBlockCapacity);
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), reference);
         Assert.Equal(Shared + RefRows, cache.Length);
@@ -220,7 +220,7 @@ public sealed class DuoChunkSessionTests
         using MiniMaxH3Transformer transformer = Transformer();
         using IBackend backend = new CpuBackend();
         // One row short: the prefix and a clean block do not fit, and no clean block is held to drop.
-        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: OneBlockCapacity - 1);
+        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: OneBlockCapacity - 1);
         DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), Values(30, RefRows * VideoIn));
 
