@@ -95,8 +95,10 @@ def randomize(module, torch, seed: int, scale: float = 0.5):
 def save(tensors: dict, path: Path):
     from safetensors.torch import save_file
 
-    # clone(): a view of a larger storage (noise[0], a strided slice) fails safetensors' offset check; a clone owns its bytes.
-    save_file({k: v.detach().contiguous().cpu().float().clone() for k, v in tensors.items()}, str(path))
+    # The fp32 alias makes torch.bfloat16 == torch.float32, and safetensors resolves dtype names at call time: with the alias in place a
+    # float32 tensor is written with the wrong width ("invalid shape, data type, or offset"). Save under the real bfloat16.
+    with real_bf16():
+        save_file({k: v.detach().contiguous().cpu().float().clone() for k, v in tensors.items()}, str(path))
 
 
 def run_rollout(torch, pipeline, causal_model, config, dit, refiner, decoder, prompt_embeds, noise, transition, frames):
