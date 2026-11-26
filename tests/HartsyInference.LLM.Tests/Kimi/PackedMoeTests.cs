@@ -13,21 +13,19 @@ using Xunit.Abstractions;
 namespace HartsyInference.LLM.Tests.Kimi;
 
 /// <summary>A latent SiTU MoE with MXFP4-packed routed experts must match the same MoE with those experts dequantized to F32 on the
-/// CPU backend. The bound is per element, on the difference over the larger of 1 and the reference value.</summary>
+/// CPU backend. The F32 lanes bound each element's difference over the larger of 1 and the reference value; CUDA's TF32 lane is
+/// bounded as the attention contract bounds TF32.</summary>
 public sealed class PackedMoeTests(ITestOutputHelper output)
 {
-    /// <summary>Every product in F32: a backend differs from the reference by rounding order only. The CPU backend, whose packed
-    /// kernel sums in another order than its F32 GEMM, measures 3.6e-7 here.</summary>
+    /// <summary>The bound where every product is F32 and a backend differs from the reference by rounding order only. Largest
+    /// differences measured at <c>7679bde01</c> on an RTX 4090 host: CUDA with exact GEMMs 5.4e-7, Vulkan 5.0e-7, CPU 2.4e-7.</summary>
     private const float ExactTolerance = 1e-5f;
 
-    /// <summary>CUDA's default runs the router, latent and shared-expert GEMMs in TF32: the TF32 figure of
-    /// <c>docs/ATTENTION_CONTRACT.md</c> §8, held per element here (the contract states it as a relative L2). The packed projections are an
-    /// F32 kernel in both CUDA lanes. At <c>aa0e60aba</c> a 4090 differed by 6.0e-4 on the element where an earlier three-decimal
-    /// comparison stopped; the largest difference of this lane is not recorded yet.</summary>
+    /// <summary>CUDA's default runs the router, latent and shared-expert GEMMs in TF32; the packed projections are an F32 kernel
+    /// there too. This is the TF32 figure of <c>docs/ATTENTION_CONTRACT.md</c> §8: a bound on the relative L2, paired with an absolute
+    /// one of this figure times the largest |reference|, which the test holds for each element. Measured on an RTX 4090 at
+    /// <c>7679bde01</c>: relative L2 6.9e-4; the largest difference over max(1, |reference|) 2.7e-3, at element 33.</summary>
     private const float Tf32Tolerance = 2e-3f;
-
-    /// <summary>The Vulkan lane's bound, until a device run records the difference it measures.</summary>
-    private const float VulkanTolerance = 1e-3f;
 
     private static readonly float[] E2M1 = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 
@@ -35,7 +33,7 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     public void PackedExperts_MatchTheF32Dequantization()
     {
         using CpuBackend cpu = new();
-        Compare(cpu, ExactTolerance);
+        AssertWithinRounding(Measure(cpu));
     }
 
     // The same MoE on a device backend: the packed projections run through IBackend.Mxfp4LinearF32 there.
@@ -46,7 +44,7 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
         using HartsyInference.Cuda.CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         PackedMxfp4CudaTests.RequireDeviceKernel(backend);
         using ExactGemmScope exact = new(backend);
-        Compare(backend, ExactTolerance);
+        AssertWithinRounding(Measure(backend));
     }
 
     [CudaFact]
@@ -55,7 +53,10 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     {
         using HartsyInference.Cuda.CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
         PackedMxfp4CudaTests.RequireDeviceKernel(backend);
-        Compare(backend, Tf32Tolerance);
+        Difference found = Measure(backend);
+        Assert.True(found.RelativeL2 <= Tf32Tolerance, $"{found.Summary}; the relative L2 bound is {Tf32Tolerance:G2}.");
+        float absolute = Tf32Tolerance * found.LargestReference;
+        Assert.True(found.LargestAbsolute <= absolute, $"{found.Summary}; the absolute bound is {absolute:G3}.");
     }
 
     [VulkanFact]
@@ -63,10 +64,19 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     public void Vulkan_PackedExperts_MatchTheF32Dequantization()
     {
         using HartsyInference.Vulkan.VulkanBackend backend = new();
-        Compare(backend, VulkanTolerance);
+        AssertWithinRounding(Measure(backend));
     }
 
-    private void Compare(IBackend device, float tolerance)
+    private static void AssertWithinRounding(Difference found) =>
+        Assert.True(found.LargestRelative <= ExactTolerance, $"{found.Summary}; the bound is {ExactTolerance:G2}.");
+
+    /// <summary>How far a device's output is from the reference. A NaN on either side makes each figure it reaches NaN, which is
+    /// within no bound.</summary>
+    private readonly record struct Difference(float LargestRelative, float LargestAbsolute, float LargestReference, double RelativeL2,
+        string Summary);
+
+    // The MoE with F32 experts on the CPU against the one with packed experts on the device.
+    private Difference Measure(IBackend device)
     {
         KimiK31Config c = new()
         {
@@ -111,21 +121,26 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
         float[] want = expected.AsReadOnlySpan<float>().ToArray();
         float[] got = actual.AsReadOnlySpan<float>().ToArray();
         Assert.Equal(want.Length, got.Length);
-        float worst = 0f;
+        float worst = 0f, absolute = 0f;
         int at = 0;
         double squaredDifference = 0, squaredReference = 0;
         for (int i = 0; i < want.Length; i++)
         {
             squaredDifference += ((double)want[i] - got[i]) * ((double)want[i] - got[i]);
             squaredReference += (double)want[i] * want[i];
-            float difference = MathF.Abs(want[i] - got[i]) / MathF.Max(1f, MathF.Abs(want[i]));
-            // A NaN compares false with everything, so it is taken as the worst on its own.
+            float apart = MathF.Abs(want[i] - got[i]);
+            float difference = apart / MathF.Max(1f, MathF.Abs(want[i]));
+            // MathF.Max keeps a NaN; the index needs the explicit test, because a NaN compares false with everything.
+            absolute = MathF.Max(absolute, apart);
             if (!float.IsNaN(worst) && (float.IsNaN(difference) || difference > worst)) (worst, at) = (difference, i);
         }
-        string found = $"largest relative difference {worst:G6} at element {at}: reference {want[at]}, device {got[at]}, "
-            + $"largest |reference| {want.Max(MathF.Abs):G4}, relative L2 {Math.Sqrt(squaredDifference / squaredReference):G6}";
-        output.WriteLine($"{device.GetType().Name}: {found}");
-        Assert.True(worst <= tolerance, $"{found}; the bound is {tolerance:G2}.");
+        float largestReference = want.Max(MathF.Abs);
+        double relativeL2 = Math.Sqrt(squaredDifference / squaredReference);
+        string summary = $"largest relative difference {worst:G6} at element {at}: reference {want[at]}, device {got[at]}, "
+            + $"largest absolute difference {absolute:G6}, largest |reference| {largestReference:G4}, "
+            + $"reference L2 norm {Math.Sqrt(squaredReference):G6}, relative L2 {relativeL2:G6}";
+        output.WriteLine($"{device.GetType().Name}: {summary}");
+        return new Difference(worst, absolute, largestReference, relativeL2, summary);
     }
 
     // Random E2M1 nibbles and E8M0 scales for a [rows, cols] projection; returns the packed view and its exact F32 values.
