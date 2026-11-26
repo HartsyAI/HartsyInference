@@ -84,7 +84,8 @@ public sealed class FxService : IFxService
     }
 
     /// <summary>Voice-isolator route of <see cref="SeparateAsync"/>: a <c>voice</c> and a <c>background</c> stem (mono, 48 kHz; the
-    /// background is the input minus the voice). Always runs on the CPU backend with the STFT on the host.</summary>
+    /// background is the input minus the voice). Runs on the engine's backend; the STFT stays on the host (IBackend.Stft has no
+    /// GPU path), and the network's scan, convolution and attention ops take the device.</summary>
     private Task<StemsResult> IsolateVoiceAsync(AudioModelSelector selector, FxSeparateRequest request, bool realtime, CancellationToken cancel)
     {
         if (request.Shifts != 0 || request.Segment is not null || request.Overlap is not null)
@@ -101,8 +102,8 @@ public sealed class FxService : IFxService
                 $"LookaheadFrames must be one of {string.Join(", ", FxCatalog.VoiceIsolatorRealtimeLookaheads)}.");
         }
         string cacheKey = selector.LocalPath ?? (realtime ? FxCatalog.VoiceIsolatorRealtimeId : FxCatalog.VoiceIsolatorId);
-        // CPU for now: the STFT, the per-band layers and the scan reference run on the host, and the GPU route has not been run.
-        IBackend backend = _cpuBackend.Value;
+        // The requested backend. The STFT (VoiceIsolatorSpectral) stays on the host whichever backend runs the network.
+        IBackend backend = _engine.Backend;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Isolator, cacheKey), async ct =>
         {
             float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.VoiceIsolatorSampleRate);
