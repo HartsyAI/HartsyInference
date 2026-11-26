@@ -185,7 +185,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             // headroom therefore counts the new latents, not the whole run.
             () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
                 LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
-                LongCatRecipeSupport.KvCacheBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth, offloaded: true)),
+                LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth)),
             // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
             onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
             bridge);
