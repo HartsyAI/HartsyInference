@@ -343,7 +343,7 @@ public sealed class FastFramesKvRefiner : IDisposable
     public IEnumerable<Tensor> EnumerateWeights()
     {
         RequireLoaded();
-        return _owned;
+        return _owned.AsReadOnly();
     }
 
     private void RequireLoaded()

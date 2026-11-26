@@ -6,8 +6,8 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.FastFrames;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
-using HartsyInference.Video;
 using HartsyInference.Tests.Shared;
+using HartsyInference.Video;
 using HartsyInference.Video.Pipelines;
 using Xunit;
 
@@ -55,13 +55,12 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
     }
 
     /// <summary>Block streaming must not change the clip: the tiny model on CUDA with every block resident, then with every block
-    /// streamed (ForceOn and a headroom larger than the device, so the planner keeps no prefix resident). Runs only with
-    /// A CUDA fact: without a device it is reported as skipped.</summary>
+    /// streamed (ForceOn and a headroom larger than the device, so the planner keeps no prefix resident). A CUDA fact: without a
+    /// device it is reported as skipped.</summary>
     [CudaDeviceFact]
     [Trait("Category", "GpuIntegration")]
     public void TheStreamedRolloutMatchesTheResidentOneOnCuda()
     {
-
         using TinyModel model = new();
         using Tensor prompt = PaddedPrompt(model);
         SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);

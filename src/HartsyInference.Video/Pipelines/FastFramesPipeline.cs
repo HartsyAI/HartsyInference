@@ -210,12 +210,12 @@ public sealed class FastFramesPipeline
         // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
         // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
         long kvNeed = ClipKvNeedBytes(latentFrames);
-        // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
-        // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
         // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
         // prefix beside them, so the headroom only has to cover activations.
         _backend.PreloadWeights(_refiner.EnumerateWeights());
         _backend.PreloadWeights(_decoder.EnumerateWeights());
+        // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
+        // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
         BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
         {
             Backend = _backend,
