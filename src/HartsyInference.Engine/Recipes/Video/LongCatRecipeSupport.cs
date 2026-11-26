@@ -238,4 +238,36 @@ internal static class LongCatRecipeSupport
         using Tensor rgb = LongCatVaeSeam.DecodeLatents(backend, decoder, latent, channels);
         return VideoRgbFrames.ExtractAllFrames(rgb);
     }
+
+    /// <summary>The 1.5 chain's context (use_vcond False in meituan-longcat/LongCat-Video @ 58eb336, pipeline 1467-1490): the segment's last
+    /// <c>1 + 4·(contextLatents − 1)</c> decoded pixel frames, as RGB24 like the reference's uint8 output, re-encoded by the VAE to the context's
+    /// latents <c>[channels, contextLatents, hw]</c>. The other decoded frames are released when this returns.</summary>
+    internal static float[] ReencodedContext(IBackend backend, IWanVaeDecoder decoder, IWanVaeEncoder encoder, float[] segmentLatents, int channels,
+        int segmentFrames, int contextLatents, int latentHeight, int latentWidth)
+    {
+        CheckSegment(segmentLatents, channels, segmentFrames, latentHeight, latentWidth);
+        byte[][] decoded = DecodeFrames(backend, decoder, segmentLatents, channels, segmentFrames, latentHeight, latentWidth);
+        return EncodeContext(backend, encoder, decoded, contextLatents, channels, latentHeight, latentWidth);
+    }
+
+    /// <summary>Re-encodes the last <c>1 + 4·(contextLatents − 1)</c> frames of an already decoded segment (see <see cref="ReencodedContext"/>), so the
+    /// caller can keep the segment's other frames for its output.</summary>
+    internal static float[] EncodeContext(IBackend backend, IWanVaeEncoder encoder, byte[][] decoded, int contextLatents, int channels,
+        int latentHeight, int latentWidth)
+    {
+        int contextPixels = 1 + LongCatVaeSeam.TemporalScale * (contextLatents - 1);
+        if (decoded.Length < contextPixels)
+            throw new InvalidOperationException($"The decoded segment has {decoded.Length} frames; the context needs {contextPixels}.");
+        int width = latentWidth * LongCatVaeSeam.SpatialScale, height = latentHeight * LongCatVaeSeam.SpatialScale;
+        using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(decoded[^contextPixels..], width, height);
+        using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+        using Tensor host = VideoRecipeUtils.HostCopy(latent);
+        return host.AsReadOnlySpan<float>().ToArray();
+    }
+
+    private static void CheckSegment(float[] segmentLatents, int channels, int segmentFrames, int latentHeight, int latentWidth)
+    {
+        if (segmentLatents.Length != channels * segmentFrames * latentHeight * latentWidth)
+            throw new ArgumentException($"The segment holds {segmentLatents.Length} values; expected {channels * segmentFrames * latentHeight * latentWidth}.", nameof(segmentLatents));
+    }
 }

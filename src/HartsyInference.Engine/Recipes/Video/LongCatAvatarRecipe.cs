@@ -23,6 +23,16 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
     internal const int OutputFps = 25;
 
+    /// <summary>The longest chain the recipe accepts at 832x480, in frames. Each segment is decoded once, on its own, and its output frames are kept as
+    /// bytes until the clip is written: at this size the kept frames are about 288 MB, and one segment's decode peaks near 445 MB of F32 RGB. The budget
+    /// is in pixels, so other sizes get proportionally fewer frames. The decoded segments cover whole segments, so the clip can run a little past the
+    /// request before it is trimmed. Kept at 241 for now: no measurement says a larger kept-frame set is safe on the target machines.</summary>
+    internal const int MaxChainFrames = 241;
+
+    /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>
+    internal static bool ChainWithinBudget(int totalFrames, int width, int height) =>
+        (long)totalFrames * width * height <= (long)MaxChainFrames * 832 * 480;
+
     /// <summary>The audio front end: Whisper-large-v3 from its upstream repo, at the revision the catalog row pins (the 1.5 repo bundles the same file).</summary>
     internal const string WhisperRepo = "openai/whisper-large-v3";
 
@@ -44,7 +54,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     /// <remarks>The init image is the identity reference (the first latent frame). The driving speech is <c>VideoRequest.VideoAudioReference</c>.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio;
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase);

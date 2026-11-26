@@ -60,8 +60,7 @@ public sealed class LongCatRecipeTests
     {
         LongCatAvatarRecipe avatar = new();
 
-        Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio, avatar.Supports);
-        Assert.False(avatar.Supports.HasFlag(VideoFeatures.LongFormChain));
+        Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain, avatar.Supports);
     }
 
     [Fact]
@@ -111,6 +110,17 @@ public sealed class LongCatRecipeTests
             }));
             Assert.Contains("dmd_lora.safetensors", refused.Message, StringComparison.Ordinal);
         }
+    }
+
+    [Theory]
+    [InlineData(241, 832, 480, true)]
+    [InlineData(242, 832, 480, false)]
+    [InlineData(241, 1280, 720, false)]
+    [InlineData(100, 1280, 720, true)]
+    [InlineData(150, 1280, 720, false)]
+    public void TheChainBudgetCountsPixelsAtTheDefaultSize(int frames, int width, int height, bool expected)
+    {
+        Assert.Equal(expected, LongCatAvatarRecipe.ChainWithinBudget(frames, width, height));
     }
 
     [Fact]
