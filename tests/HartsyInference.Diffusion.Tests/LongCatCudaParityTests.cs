@@ -1,10 +1,10 @@
-using HartsyInference.Cuda;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Tests.Shared;
+using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -37,7 +37,7 @@ public sealed class LongCatCudaParityTests
             using CudaBackend cuda = GpuDevices.OpenCuda();
             float[] gpu = RunVideo(cuda, config, weights, noise, positive, negative);
 
-            AssertMoved(cpu, noise, "video");
+            AssertMovedFrom(cpu, noise, Frames, fromFrame: 0, config.InChannels, Hw, "video");
             AssertClose(cpu, gpu, "video");
         }
         finally
@@ -67,7 +67,8 @@ public sealed class LongCatCudaParityTests
             using CudaBackend cuda = GpuDevices.OpenCuda();
             float[] gpu = RunAvatar(cuda, config, weights, noise, condLatents, audio, unconditionalAudio, positive, negative);
 
-            AssertMoved(cpu, noise, "avatar");
+            AssertMovedFrom(cpu, noise, Frames, fromFrame: 2, config.InChannels, Hw, "avatar");
+            AssertConditioningExact(cpu, condLatents, 2, config.InChannels, Hw, "avatar");
             AssertClose(cpu, gpu, "avatar");
         }
         finally
@@ -104,12 +105,27 @@ public sealed class LongCatCudaParityTests
         Assert.True(worst <= Tolerance, $"{label}: CUDA drifted from the CPU by {worst}");
     }
 
-    private static void AssertMoved(float[] result, float[] noise, string label)
+    /// <summary>The frames from <paramref name="fromFrame"/> on must have moved away from the noise, so the parity compares real work.</summary>
+    private static void AssertMovedFrom(float[] result, float[] noise, int frames, int fromFrame, int channels, int hw, string label)
     {
         float moved = 0;
-        for (int i = 0; i < result.Length; i++)
-            moved = MathF.Max(moved, MathF.Abs(result[i] - noise[i]));
-        Assert.True(moved > 1e-3f, $"{label}: the loop left the latents where they started (moved {moved})");
+        for (int c = 0; c < channels; c++)
+            for (int f = fromFrame; f < frames; f++)
+                for (int e = 0; e < hw; e++)
+                {
+                    int index = (c * frames + f) * hw + e;
+                    moved = MathF.Max(moved, MathF.Abs(result[index] - noise[index]));
+                }
+        Assert.True(moved > 1e-3f, $"{label}: the loop left the noisy frames where they started (moved {moved})");
+    }
+
+    /// <summary>The conditioning frames come back exactly as given.</summary>
+    private static void AssertConditioningExact(float[] result, float[] condLatents, int cond, int channels, int hw, string label)
+    {
+        for (int c = 0; c < channels; c++)
+            for (int f = 0; f < cond; f++)
+                for (int e = 0; e < hw; e++)
+                    Assert.Equal(condLatents[(c * cond + f) * hw + e], result[(c * Frames + f) * hw + e]);
     }
 
     /// <summary>Runs only when the env var is 1 and a CUDA device opens. Otherwise the test is reported as skipped, never passed.</summary>
