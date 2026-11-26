@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -197,6 +198,15 @@ internal static class LongCatRecipeSupport
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
     /// <summary>The DMD distillation LoRA's static multiplier: the reference's <c>--lora_multiplier</c> default, applied when the LoRA is gated on.</summary>
     internal const float DmdMultiplier = 0.8f;
+
+    /// <summary>The attention query-tile height pinned for one generation (<c>numerics.sdpaTile</c>): <c>512 MiB</c> of F32 scores over every head and
+    /// key token of the run, so a given request always makes the same tile. Pushed as a per-request knob profile and popped on dispose.</summary>
+    internal static IDisposable PinAttentionTile(int heads, long keyTokens)
+    {
+        long perRow = Math.Max(1L, heads * keyTokens * sizeof(float));
+        int rows = (int)Math.Clamp((512L << 20) / perRow, 1L, int.MaxValue);
+        return KnobProfile.Create("longcat-tile").With(EngineKnobs.SdpaTile, rows).Push();
+    }
 
     /// <summary>Where the 1.5 distillation LoRA sits: <c>lora/dmd_lora.safetensors</c> beside the checkpoint's own folder (the reference layout).</summary>
     internal static string DmdLoraPath(string checkpointPath) =>

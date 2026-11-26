@@ -38,6 +38,10 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
         int latentFrames = (frames - 1) / LongCatRecipeSupport.TemporalCompressionFactor + 1;
         int latentHeight = height / LongCatRecipeSupport.SpatialCompressionFactor;
         int latentWidth = width / LongCatRecipeSupport.SpatialCompressionFactor;
+        // The attention tile of this generation is pinned to a shape-derived height (numerics.sdpaTile), so the same request makes the same tile
+        // on every run; the pin is scoped to this generation and no other model sees it.
+        using IDisposable attentionTile = LongCatRecipeSupport.PinAttentionTile(_parts.Dit.Config.NumHeads,
+            LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth));
         if (width % LongCatRecipeSupport.PatchGrid != 0 || height % LongCatRecipeSupport.PatchGrid != 0)
             throw new ArgumentException($"LongCat-Video needs width and height in multiples of {LongCatRecipeSupport.PatchGrid}, got {width}×{height}.");
         int seed = RecipeRequestMapper.MapSeed(settings.Seed) ?? SeedGenerator.RandomSeed();
