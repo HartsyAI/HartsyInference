@@ -35,7 +35,7 @@ public interface IArchitectureRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
-    /// <summary>True when the family refuses CFG-parallel, DiT-shard and context-parallel placements at construction (UnhonouredBackends.Refuse),
+    /// <summary>True when the family refuses CFG-parallel, DiT-shard and context-parallel placements; the engine refuses them before the memory report (UnhonouredBackends.Refuse), and the recipe re-checks without a warning,
     /// so the engine refuses them before it reports the memory settings: a family that refuses never reaches the CFG-parallel warning.</summary>
     bool RefusesUnhonouredPlacements => false;
 

@@ -143,7 +143,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
-        UnhonouredBackends.Refuse(context, "FLUX.2");
+        UnhonouredBackends.Refuse(context, "FLUX.2", warn: false);
         // TODO(E-IMG-4/5): split-file / user overrides from ImageRequest.Components, and img2img are deferred —
         // this ports the text-to-image core.
         // IDisposable, not SafeTensorsLoader: the text encoder now opens through CheckpointSource. Same widening
