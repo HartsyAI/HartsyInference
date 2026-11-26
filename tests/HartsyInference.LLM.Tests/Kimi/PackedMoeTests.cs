@@ -21,8 +21,9 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     private const float ExactTolerance = 1e-5f;
 
     /// <summary>CUDA's default runs the router, latent and shared-expert GEMMs in TF32: the TF32 figure of
-    /// <c>docs/ATTENTION_CONTRACT.md</c> §8. The packed projections are an F32 kernel in both CUDA lanes. A 4090 measured a 6.0e-4
-    /// difference in this lane at <c>aa0e60aba</c>.</summary>
+    /// <c>docs/ATTENTION_CONTRACT.md</c> §8, held per element here (the contract states it as a relative L2). The packed projections are an
+    /// F32 kernel in both CUDA lanes. At <c>aa0e60aba</c> a 4090 differed by 6.0e-4 on the element where an earlier three-decimal
+    /// comparison stopped; the largest difference of this lane is not recorded yet.</summary>
     private const float Tf32Tolerance = 2e-3f;
 
     /// <summary>The Vulkan lane's bound, until a device run records the difference it measures.</summary>
@@ -112,15 +113,17 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
         Assert.Equal(want.Length, got.Length);
         float worst = 0f;
         int at = 0;
+        double squaredDifference = 0, squaredReference = 0;
         for (int i = 0; i < want.Length; i++)
         {
+            squaredDifference += ((double)want[i] - got[i]) * ((double)want[i] - got[i]);
+            squaredReference += (double)want[i] * want[i];
             float difference = MathF.Abs(want[i] - got[i]) / MathF.Max(1f, MathF.Abs(want[i]));
             // A NaN compares false with everything, so it is taken as the worst on its own.
-            if (float.IsNaN(difference) || difference > worst) (worst, at) = (difference, i);
-            if (float.IsNaN(worst)) break;
+            if (!float.IsNaN(worst) && (float.IsNaN(difference) || difference > worst)) (worst, at) = (difference, i);
         }
         string found = $"largest relative difference {worst:G6} at element {at}: reference {want[at]}, device {got[at]}, "
-            + $"largest |reference| {want.Max(MathF.Abs):G4}";
+            + $"largest |reference| {want.Max(MathF.Abs):G4}, relative L2 {Math.Sqrt(squaredDifference / squaredReference):G6}";
         output.WriteLine($"{device.GetType().Name}: {found}");
         Assert.True(worst <= tolerance, $"{found}; the bound is {tolerance:G2}.");
     }
