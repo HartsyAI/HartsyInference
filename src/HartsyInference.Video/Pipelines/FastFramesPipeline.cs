@@ -206,6 +206,8 @@ public sealed class FastFramesPipeline : IDisposable
     private IEnumerable<FastFramesFrame> RolloutCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)
     {
+        // The body runs on the first MoveNext, so a rollout enumerated after Dispose is refused here.
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
@@ -265,10 +267,11 @@ public sealed class FastFramesPipeline : IDisposable
     /// <summary>After a clip. A streamed clip frees the generator's device weights, the resident prefix included, so the next clip and the
     /// decoder get the VRAM back. The pin keeps the count it was sized to, so the next placement uploads that prefix only as far as it
     /// fits. A clip that stayed resident keeps the weights, and the pin says so, which lets the next clip skip the admission check the
-    /// weights already passed. Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
+    /// weights already passed. A disposed pipeline frees instead of keeping, so nothing stays on the device after Dispose.
+    /// Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
     private void ReleaseOrKeepGenerator(bool streamed)
     {
-        if (streamed)
+        if (streamed || _disposed)
         {
             _backend.FreeWeights(_transformer.EnumerateWeights());
             _backend.TrimMemoryPool();

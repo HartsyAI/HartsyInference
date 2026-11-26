@@ -196,6 +196,22 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         Assert.Throws<ObjectDisposedException>(() => pipeline.Rollout(prompt, noise, Frames).ToList());
     }
 
+    /// <summary>A rollout created before Dispose and enumerated after it is refused, not run on a released pipeline.</summary>
+    [Fact]
+    public void EnumeratingARolloutAfterDisposeRefuses()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        IEnumerable<FastFramesFrame> clip = pipeline.Rollout(prompt, noise, Frames);
+        pipeline.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => clip.ToList());
+    }
+
     /// <summary>The CUDA form of the dispose test: after a resident clip some generator weight is on the device, and disposing the pipeline
     /// frees it. Without the release in Dispose this test fails.</summary>
     [CudaDeviceFact]
