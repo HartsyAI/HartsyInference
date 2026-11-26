@@ -11,9 +11,9 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>MovieRoll's streaming forwards on a device: the tiny DiT's <c>StreamEncode</c> and <c>StreamDenoise</c> on CUDA against the CPU run, with the
-/// device-to-host read count recorded for each. The expected counts are not measured yet: until a 4090 run sets them, the test asserts only what
-/// is certain: the encode returns nothing and the denoise's count is taken before its velocity is read back, so both forwards should read nothing.
+/// <summary>MovieRoll's streaming forwards on a device: the tiny DiT's <c>StreamEncode</c> and <c>StreamDenoise</c> on CUDA against the CPU run, in two
+/// GEMM lanes. Each forward must read nothing back from the device before its result is compared (the count is asserted to be zero). Every tensor is
+/// compared and reported (<c>MAX_ERR</c> lines), not just the first to fail.
 /// Runs only through the GPU session (Category=GpuIntegration); it is skipped where no CUDA device is present.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
@@ -23,10 +23,32 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
     private const int Width = 3;
     private const int Blocks = 2;
     private const int Hidden = 32;
-    private const float Tolerance = 1e-3f;
+
+    /// <summary>Bound for the exact lane (full-F32 GEMMs). Measured on a 4090 at d0452dff4: the largest error over every encode tensor and the velocity
+    /// was 1.93e-4 (block 2 keys); block 1 was 4.8e-7 and 3.6e-7. The bound is about 2.6 times that.</summary>
+    private const float ExactTolerance = 5e-4f;
+
+    /// <summary>Bound for the default lane (TF32 GEMMs). Provisional: measured at d0452dff4 as 1.068e-3 (block 1 keys) and 6.1e-4 (velocity). Block 2's
+    /// TF32 encode error has not been measured yet, so this is set from the two numbers that exist and must be rechecked against the full run.</summary>
+    private const float Tf32Tolerance = 2e-3f;
 
     [CudaDeviceFact]
-    public void Cuda_StreamEncode_ReadsNothingBackAndMatchesTheCpuCache()
+    public void Cuda_StreamEncode_ExactGemms_ReadsNothingBackAndMatchesTheCpuCache() =>
+        RunEncode(exactGemm: true, ExactTolerance);
+
+    [CudaDeviceFact]
+    public void Cuda_StreamEncode_Tf32Gemms_ReadsNothingBackAndMatchesTheCpuCache() =>
+        RunEncode(exactGemm: false, Tf32Tolerance);
+
+    [CudaDeviceFact]
+    public void Cuda_StreamDenoise_ExactGemms_ReadsNothingBackAndMatchesTheCpuRun() =>
+        RunDenoise(exactGemm: true, ExactTolerance);
+
+    [CudaDeviceFact]
+    public void Cuda_StreamDenoise_Tf32Gemms_ReadsNothingBackAndMatchesTheCpuRun() =>
+        RunDenoise(exactGemm: false, Tf32Tolerance);
+
+    private void RunEncode(bool exactGemm, float tolerance)
     {
         using Fixture cpuFixture = new();
         using MovieRollKvCache cpuCache = new(cpuFixture.Backend);
@@ -34,20 +56,28 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         cpuFixture.Dit.StreamEncode(cpuFixture.Backend, Latent(2), new float[2], cpuCache, fullHistoryBlocks: 1, startFrame: 0);
 
         using Fixture device = new(GpuDevices.OpenCuda());
-        ApplyGemmLane(device.Backend);
+        ApplyLane(device.Backend, exactGemm);
         using MovieRollKvCache cache = new(device.Backend);
         cache.Init(device.Dit.StreamLayerNames(), Height, Width);
         device.Backend.ResetD2hSyncCount();
         device.Dit.StreamEncode(device.Backend, Latent(2), new float[2], cache, fullHistoryBlocks: 1, startFrame: 0);
         long reads = device.Backend.GetD2hSyncCount();
         output.WriteLine($"D2H_SYNCS StreamEncode: {reads}");
-
         Assert.Equal(0, reads);
-        AssertCacheClose(cpuCache, cache, cpuFixture.Dit.StreamLayerNames());
+
+        List<string> failures = [];
+        foreach (string layer in cpuFixture.Dit.StreamLayerNames())
+        {
+            (Tensor ek, Tensor ev)? e = cpuCache.Get(layer);
+            (Tensor ak, Tensor av)? a = cache.Get(layer);
+            Assert.True(e is not null && a is not null, $"{layer}: a cache entry is missing.");
+            Compare($"{layer} keys", e!.Value.ek, a!.Value.ak, tolerance, failures);
+            Compare($"{layer} values", e.Value.ev, a.Value.av, tolerance, failures);
+        }
+        Assert.True(failures.Count == 0, $"Bound {tolerance:E0}: {string.Join("; ", failures)}");
     }
 
-    [CudaDeviceFact]
-    public void Cuda_StreamDenoise_ReadsNothingBackAndMatchesTheCpuRun()
+    private void RunDenoise(bool exactGemm, float tolerance)
     {
         using Fixture cpuFixture = new();
         using MovieRollKvCache cpuCache = new(cpuFixture.Backend);
@@ -56,7 +86,7 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
             cpuCache, fullHistoryBlocks: 1);
 
         using Fixture device = new(GpuDevices.OpenCuda());
-        ApplyGemmLane(device.Backend);
+        ApplyLane(device.Backend, exactGemm);
         using MovieRollKvCache cache = new(device.Backend);
         cache.Init(device.Dit.StreamLayerNames(), Height, Width);
         device.Backend.ResetD2hSyncCount();
@@ -65,39 +95,24 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         // Counted before the velocity is read back for the comparison below, so the count covers the forward alone.
         long reads = device.Backend.GetD2hSyncCount();
         output.WriteLine($"D2H_SYNCS StreamDenoise (forward only, before the comparison read): {reads}");
-
         Assert.Equal(0, reads);
-        AssertClose("StreamDenoise velocity", expected, actual);
+
+        List<string> failures = [];
+        Compare("StreamDenoise velocity", expected, actual, tolerance, failures);
+        Assert.True(failures.Count == 0, $"Bound {tolerance:E0}: {string.Join("; ", failures)}");
     }
 
-    /// <summary>The GEMM lane. <c>exact</c> forces full-F32 GEMMs (<see cref="IBackend.HighPrecisionGemm"/>), so any remaining error is not TF32
-    /// rounding; <c>tf32</c> (the default, and the device's own setting) leaves TF32 on. Set by <c>MOVIEROLL_GEMM_LANE</c>.</summary>
-    private void ApplyGemmLane(IBackend backend)
+    /// <summary>Sets the GEMM lane on the device. <c>exactGemm</c> forces full-F32 GEMMs (<see cref="IBackend.HighPrecisionGemm"/>), so the error that
+    /// remains is not TF32 rounding; otherwise the device's default (TF32) stays on.</summary>
+    private void ApplyLane(IBackend backend, bool exactGemm)
     {
-        string lane = Environment.GetEnvironmentVariable("MOVIEROLL_GEMM_LANE") ?? "tf32";
-        if (lane == "exact") backend.HighPrecisionGemm = true;
-        else if (lane != "tf32") throw new InvalidOperationException($"MOVIEROLL_GEMM_LANE must be exact or tf32; got {lane}.");
-        output.WriteLine($"GEMM_LANE {lane} HighPrecisionGemm={backend.HighPrecisionGemm}");
+        backend.HighPrecisionGemm = exactGemm;
+        output.WriteLine($"GEMM_LANE {(exactGemm ? "exact" : "tf32")} HighPrecisionGemm={backend.HighPrecisionGemm}");
     }
 
-    private static Tensor Latent(int frames, long seed = 3) =>
-        TorchCompatibleNoise.Randn(new TensorShape([1L, Channels, frames, Height, Width]), seed);
-
-    private void AssertCacheClose(MovieRollKvCache expected, MovieRollKvCache actual, IEnumerable<string> layers)
-    {
-        foreach (string layer in layers)
-        {
-            (Tensor ek, Tensor ev)? e = expected.Get(layer);
-            (Tensor ak, Tensor av)? a = actual.Get(layer);
-            Assert.True(e is not null && a is not null, $"{layer}: a cache entry is missing.");
-            AssertClose($"{layer} keys", e!.Value.ek, a!.Value.ak);
-            AssertClose($"{layer} values", e.Value.ev, a.Value.av);
-        }
-    }
-
-    /// <summary>Compares two tensors and reports the largest absolute error with its flat index and the CPU and device values there, so a failure
-    /// names the element. The bound is <see cref="Tolerance"/> in every lane.</summary>
-    private void AssertClose(string label, Tensor expected, Tensor actual)
+    /// <summary>Compares two tensors, prints the largest absolute error with its flat index and the two values there, and records the tensor in
+    /// <paramref name="failures"/> when that error exceeds <paramref name="tolerance"/>. Every tensor is compared; nothing stops at the first failure.</summary>
+    private void Compare(string label, Tensor expected, Tensor actual, float tolerance, List<string> failures)
     {
         Assert.Equal(expected.Shape, actual.Shape);
         ReadOnlySpan<float> e = expected.AsReadOnlySpan<float>();
@@ -109,9 +124,12 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
             float d = Math.Abs(e[i] - a[i]);
             if (d > max) { max = d; at = i; }
         }
-        output.WriteLine($"MAX_ERR {label}: {max:E3} at flat index {at} of {e.Length} (cpu {(e.Length > 0 ? e[at] : 0f):G9}, device {(a.Length > 0 ? a[at] : 0f):G9})");
-        Assert.True(max <= Tolerance, $"{label}: max abs error {max:E3} at flat index {at} exceeds {Tolerance:E0}.");
+        output.WriteLine($"MAX_ERR {label}: {max:E3} at flat index {at} of {e.Length} (cpu {e[at]:G9}, device {a[at]:G9})");
+        if (max > tolerance) failures.Add($"{label} max abs error {max:E3} at index {at} exceeds {tolerance:E0}");
     }
+
+    private static Tensor Latent(int frames, long seed = 3) =>
+        TorchCompatibleNoise.Randn(new TensorShape([1L, Channels, frames, Height, Width]), seed);
 
     private static HunyuanVideo15Config TinyConfig() => new()
     {
