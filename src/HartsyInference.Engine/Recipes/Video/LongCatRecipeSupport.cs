@@ -89,7 +89,7 @@ internal static class LongCatRecipeSupport
             // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
             backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
             backend.TrimMemoryPool();
-            RequireRoom(backend.FreeMemoryBytes(), 0, headroom, "The chain's later run");
+            RequireRoom(backend.FreeMemoryBytes(), 0, headroom - cacheBytes, cacheBytes, "The chain's later run");
         }
         return BlockStreamingScope.Open(new BlockStreamingOptions
         {
@@ -109,17 +109,19 @@ internal static class LongCatRecipeSupport
             ? FixedPoolBytes + SafetyBytes + peak + cacheBytes
             : ActivationHeadroomBytes(tokens, hidden, ffnHidden) + cacheBytes;
 
-    /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed and the activation headroom, must
-    /// be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/> names the run
-    /// in the error.</summary>
-    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes, string who)
+    /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed, the activation headroom and the KV
+    /// cache, must be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/>
+    /// names the run in the error; the cache is named separately from the activations.</summary>
+    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes, long cacheBytes, string who)
     {
-        long spendable = freeBytes - sharedBytesToPlace - headroomBytes;
+        long spendable = freeBytes - sharedBytesToPlace - headroomBytes - cacheBytes;
         if (spendable < 0)
         {
             throw new InvalidOperationException(
-                $"{who} needs {MiB(headroomBytes)} MiB of activation headroom and {MiB(sharedBytesToPlace)} MiB of shared weights to place, " +
-                $"but only {MiB(freeBytes)} MiB is free: {MiB(-spendable)} MiB short. Lower the resolution or the chain length.");
+                $"{who} needs {MiB(headroomBytes)} MiB of activation headroom" +
+                (cacheBytes > 0 ? $" and {MiB(cacheBytes)} MiB of KV cache" : "") +
+                (sharedBytesToPlace > 0 ? $" and {MiB(sharedBytesToPlace)} MiB of shared weights to place" : "") +
+                $", but only {MiB(freeBytes)} MiB is free: {MiB(-spendable)} MiB short. Lower the resolution or the chain length.");
         }
     }
 
@@ -134,7 +136,7 @@ internal static class LongCatRecipeSupport
     internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes)
     {
         backend.TrimMemoryPool();
-        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens) + stagedBytes,
+        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens), stagedBytes,
             "The chain's later run");
     }
 
