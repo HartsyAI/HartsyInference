@@ -29,8 +29,9 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 | Video | Wan 2.2 5B | incomplete | text-encoder weights not present locally |
 | Video | LTX-2 | untested | no weights in the local model tree |
 | Vision | RT-DETR | runs | detect over a real photo |
-| Vision | Depth Pro 2 S | runs | image, three joint views and 24-frame video (buffered and unbuffered) match the CPU backend within 3e-5; `ConvTranspose2d` has no Vulkan shader and runs on the host, which makes the head about 1.8 s of a 256x384 image |
+| Vision | Depth Pro 2 S | runs | image, three joint views and 24-frame video (buffered and unbuffered) match the CPU backend within 3e-5; `ConvTranspose2d` ran on the host in that measurement, which made the head about 1.8 s of a 256x384 image. It has a Vulkan shader since 2026-11-26 (the head runs without a readback; its time was not re-measured) |
 | Audio | Whisper | runs | transcribed a real clip |
+| Audio | Kim_Vocal_2 | runs | the separator's parity test on the real weights (RTX 3060, 2026-11-26): network 5.5e-6, stems 6.2e-7 relRMS from the reference; chunks done at 1.8 / 2.6 / 3.4 s against 31.5 / 66.9 / 108.2 s before the `ConvTranspose2d` shader |
 
 Four modalities have a working Vulkan path today: image, LLM, vision and audio. Video is the one with no
 confirmed run, and the two attempts failed on absent weights rather than on the backend.
