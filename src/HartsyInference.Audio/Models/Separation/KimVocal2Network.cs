@@ -209,7 +209,7 @@ public sealed class KimVocal2Network : IDisposable
     {
         long c = x.Shape[1], a = x.Shape[2], b = x.Shape[3];
         Tensor y = new(new TensorShape(1, c, b, a), DType.F32);
-        backend.Transpose2D(y.Reshape(new TensorShape(c, b, a)), x.Reshape(new TensorShape(c, a, b)), (int)a, (int)b);
+        backend.Transpose2D(y, x, (int)a, (int)b);
         return y;
     }
 

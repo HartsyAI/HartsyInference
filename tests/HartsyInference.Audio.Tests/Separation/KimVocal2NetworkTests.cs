@@ -2,15 +2,16 @@ using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests.Separation;
 
 public sealed unsafe class KimVocal2NetworkTests
 {
-    private static float[] Run(KimVocal2Reference reference, float[] spec)
+    private static float[] Run(KimVocal2Reference reference, float[] spec, string backendName = "cpu")
     {
-        using IBackend backend = new CpuBackend();
+        using IBackend backend = BackendFactory.Create(backendName);
         using KimVocal2Network network = new(reference.Weights);
         using Tensor input = new(new TensorShape(1, KimVocal2Reference.Channels, KimVocal2Reference.DimF, KimVocal2Reference.Frames), DType.F32);
         spec.AsSpan().CopyTo(new Span<float>((void*)input.DataPointer, spec.Length));
@@ -20,7 +21,19 @@ public sealed unsafe class KimVocal2NetworkTests
     }
 
     [Fact]
-    public void ForwardMatchesThePlainLoopReference()
+    public void ForwardMatchesThePlainLoopReference() => AssertMatchesReference("cpu");
+
+    [GpuBackendTheory("cuda")]
+    [Trait("Category", "GpuIntegration")]
+    [InlineData("cuda")]
+    public void ForwardOnCudaMatchesThePlainLoopReference(string backendName) => AssertMatchesReference(backendName);
+
+    [GpuBackendTheory("vulkan")]
+    [Trait("Category", "GpuIntegration")]
+    [InlineData("vulkan")]
+    public void ForwardOnVulkanMatchesThePlainLoopReference(string backendName) => AssertMatchesReference(backendName);
+
+    private static void AssertMatchesReference(string backendName)
     {
         using KimVocal2Reference reference = new(11);
         Random rng = new(12);
@@ -28,7 +41,7 @@ public sealed unsafe class KimVocal2NetworkTests
         for (int i = 0; i < spec.Length; i++) spec[i] = (float)(rng.NextDouble() - 0.5);
 
         float[] expected = reference.Forward(spec, KimVocal2Reference.Frames);
-        float[] actual = Run(reference, spec);
+        float[] actual = Run(reference, spec, backendName);
 
         double num = 0, den = 0;
         for (int i = 0; i < expected.Length; i++)
