@@ -13,7 +13,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>LongCat-Video-Avatar, the 1.5 and 1.6 layout: speech-driven video from one portrait (<see cref="LongCatAvatarMode.Ai2v"/>) or from
 /// speech alone (<see cref="LongCatAvatarMode.At2v"/>). The driving speech goes through Whisper-large-v3 and the avatar audio projection in
-/// every block. One 93-frame segment at 25 fps; the segment loop, the 8-step distilled path and multi-speaker are not wired here yet.</summary>
+/// every block. One 93-frame segment at 25 fps; the multi-segment chain is wired in the pipeline; multi-speaker is not.</summary>
 /// <remarks>Likeness warning: the output is a generated talking person. Use it only with the consent of the person depicted.</remarks>
 public sealed class LongCatAvatarRecipe : IVideoRecipe
 {
@@ -89,18 +89,10 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         LockedFields = VideoLockedFields.Steps | VideoLockedFields.CfgScale,
     };
 
-    /// <summary>The 1.6 undistilled settings: 50 steps, shift 7, text guidance 4 (research plan). They apply only once a 1.6 INT8 catalog row
-    /// exists; the recipe refuses the 1.6 build until then.</summary>
-    public static VideoDefaults Undistilled16Defaults { get; } = new VideoDefaults
-    {
-        Steps = 50, CfgScale = 4.0f, Width = 832, Height = 480, Frames = SegmentFrames, Fps = OutputFps,
-        FlowShift = LongCatAvatarPipelineSettings.Shift,
-    };
-
     /// <inheritdoc/>
-    /// <remarks>Only a named 1.6 build takes the 1.6 settings; the default and a named 1.5 build take the distilled ones.</remarks>
-    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is not null && variant.Is(LongCatAvatarVariants.Avatar16) ? Undistilled16Defaults : Defaults;
+    /// <remarks>The 1.6 build is the same 8-step distilled path as 1.5 (upstream <c>--use_distill</c>: 8 steps, guidance 1.0), with its two LoRAs
+    /// mixed per step. It has no undistilled settings: the upstream documents none for 1.6.</remarks>
+    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) => Defaults;
 
     /// <inheritdoc/>
     /// <remarks>One segment: 1 + 4k frames up to <see cref="SegmentFrames"/>.</remarks>
@@ -115,12 +107,13 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // The 1.6 build runs undistilled on its INT8 row's weights (the 1.6 settings). The default and a named 1.5 build run the distilled path.
+        // Both builds run the 8-step distilled path. The 1.6 build mixes its DMD (loraA) and OPSD (loraB) LoRAs per step (upstream enable_lora_mix).
         ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
-        bool distilled = variant.Is(LongCatAvatarVariants.Avatar15);
+        bool is16 = variant.Is(LongCatAvatarVariants.Avatar16);
+        bool distilled = true;
         // The distilled build is the base plus the DMD LoRA gated on. Without that file the request would run the bare base at 8 steps, so it
         // is refused here, before the checkpoint is opened.
-        if (distilled && !File.Exists(LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)))
+        if (!is16 && distilled && !File.Exists(LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)))
         {
             throw new NotSupportedException($"longcat-avatar's distilled build needs its distillation LoRA at "
                 + $"'{LongCatRecipeSupport.DmdLoraPath(context.CheckpointPath)}'. Refusing to run the bare base at 8 steps.");
@@ -129,7 +122,11 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null, attachDmd: distilled);
+            LongCatRecipeSupport.LongCatLoraFiles? mixed = is16 ? LongCatRecipeSupport.Avatar16LoraFiles(context.CheckpointPath) : null;
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null, attachDmd: distilled && !is16, mixedLoras: mixed);
+            LongCatAvatarLoraSchedule? loraMix = is16
+                ? new LongCatAvatarLoraSchedule(parts.DmdGate!, parts.OpsdGate!, LongCatAvatarVariants.Avatar16MixAlpha, LongCatAvatarVariants.Avatar16MixSteps)
+                : null;
             if (!parts.HasAudio)
             {
                 throw new InvalidOperationException(
@@ -153,7 +150,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled, parts.DmdGate);
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled, parts.DmdGate, loraMix);
         }
         catch (Exception ex)
         {

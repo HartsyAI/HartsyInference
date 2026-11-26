@@ -11,7 +11,14 @@ public static class LongCatAvatarVariants
     /// rewrites to it.</summary>
     public const string Avatar16FamilyId = "longcat-avatar-1.6";
 
-    /// <summary>The 1.6 build: undistilled, 50 steps, guided with text and audio guidance. Its weights are the INT8 row's.</summary>
+    /// <summary>The 1.6 card's example mix: the first four steps run DMD only (alpha 1.0), the last four OPSD only.</summary>
+    public const int Avatar16MixSteps = 4;
+
+    /// <summary>The DMD weight during the mixed steps (see <see cref="Avatar16MixSteps"/>).</summary>
+    public const float Avatar16MixAlpha = 1f;
+
+    /// <summary>The 1.6 build: the 8-step distilled path with its DMD (loraA) and OPSD (loraB) LoRAs mixed per step, as the 1.6 model card runs it
+    /// (<c>--use_distill --mix_steps=4 --mix_alpha=1.0</c>). Its weights are the INT8 row's.</summary>
     public static ModelVariant Avatar16 { get; } = new ModelVariant
     {
         Id = "1.6", DisplayName = "LongCat-Video-Avatar 1.6", HintAliases = ["avatar-1.6", Avatar16FamilyId],

@@ -29,16 +29,18 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly List<IDisposable> _loaders;
     private readonly bool _distilled;
     private readonly AdjunctGate? _loraGate;
+    private readonly LongCatAvatarLoraSchedule? _loraMix;
 
     /// <summary>Wraps the constructed pipeline, taking ownership of every disposable in <paramref name="loaders"/>.</summary>
     internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, WhisperEncoder whisper,
-        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate)
+        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate, LongCatAvatarLoraSchedule? loraMix = null)
     {
         // A distilled pipeline is only valid with its LoRA gate: the gate is what makes it the distilled model.
         if (distilled && loraGate is null)
             throw new InvalidOperationException("The distilled avatar pipeline needs its DMD LoRA gate; refusing to run the bare base.");
         _distilled = distilled;
         _loraGate = loraGate;
+        _loraMix = loraMix;
         _backend = backend;
         _pipeline = pipeline;
         _parts = parts;
@@ -177,11 +179,12 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
             settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
             _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, LongCatAvatarMode.Avc, plan.ContextLatents + 1, null,
-            Cancel: cancel, LoraGate: _loraGate);
+            Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix);
 
         // Each segment is decoded once. Segment 0 keeps all its frames; a later segment keeps the frames after its context. The last frames of a
-        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490; the 1.6 build would carry
-        // the latents, and it is refused before this point). The last segment's context is not encoded.
+        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490). The 1.6 chain uses the same
+        // context until its own reference path is verified; the upstream 1.6 demo passes the chain flags but its context mode is not checked here.
+        // The last segment's context is not encoded.
         LongCatChainFrames output = new(1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1));
         Func<float[], bool, float[]> contextFromSegment = (segment, last) =>
         {
@@ -224,7 +227,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
             settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
             _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame,
-            OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate);
+            OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix);
 
     /// <summary>Whisper features of the driving speech, cut into one 5-frame window per video frame: <c>[frames, 5 · 5 · 1280]</c>.</summary>
     private float[] DrivingWindows(float[] waveform, int fps, int frames)

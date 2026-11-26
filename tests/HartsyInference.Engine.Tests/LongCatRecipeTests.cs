@@ -80,7 +80,7 @@ public sealed class LongCatRecipeTests
             Assert.Equal(7f, settings.FlowShift);
         }
         Assert.Equal(8, avatar.Defaults.Steps);
-        Assert.Equal(50, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
+        Assert.Equal(8, avatar.DefaultsFor(ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), ["1.6"])).Steps);
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public sealed class LongCatRecipeTests
         Assert.True(avatar.Matches("longcat-avatar"));
         ResolvedModelVariant byRow = ModelVariantResolver.Classify(LongCatAvatarVariants.Catalog, EmptyProbe(), [LongCatAvatarVariants.Avatar16FamilyId]);
         Assert.True(byRow.Is(LongCatAvatarVariants.Avatar16));
-        Assert.Equal(50, avatar.DefaultsFor(byRow).Steps);
+        Assert.Equal(8, avatar.DefaultsFor(byRow).Steps);
     }
 
     [Fact]
