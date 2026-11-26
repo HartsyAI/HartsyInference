@@ -234,7 +234,17 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     /// <summary>Whisper features of the driving speech, cut into one 5-frame window per video frame: <c>[frames, 5 · 5 · 1280]</c>.</summary>
     private float[] DrivingWindows(float[] waveform, int fps, int frames)
     {
-        float[] features = LongCatWhisperFeatures.Extract(_backend, _whisper, _mel, waveform, fps);
+        // Whisper is only needed for these features. Its device copies are released as soon as they are read, so they do not sit in VRAM
+        // through the denoise (the pipeline is cached, and the next request uploads them again on demand).
+        float[] features;
+        try
+        {
+            features = LongCatWhisperFeatures.Extract(_backend, _whisper, _mel, waveform, fps);
+        }
+        finally
+        {
+            _backend.FreeWeights(_whisper.EnumerateWeights());
+        }
         int featureFrames = features.Length / (LongCatAudioLayout.Whisper.Blocks * LongCatAudioLayout.Whisper.Channels);
         if (featureFrames < 1)
             throw new InvalidOperationException("The driving speech is shorter than one video frame.");
