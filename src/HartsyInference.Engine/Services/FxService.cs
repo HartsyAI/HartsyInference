@@ -1,3 +1,5 @@
+using HartsyInference.Audio.Models.Separation;
+using HartsyInference.Engine.Registry;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
@@ -26,7 +28,7 @@ public sealed class FxService : IFxService
     {
         ArgumentNullException.ThrowIfNull(request);
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
-        if (IsKimVocal2(selector, request))
+        if (IsMdxSeparator(selector, request))
         {
             return SeparateVocalsAsync(selector, request, cancel);
         }
@@ -129,9 +131,11 @@ public sealed class FxService : IFxService
         }, cancel);
     }
 
-    private static bool IsKimVocal2(AudioModelSelector selector, FxSeparateRequest request) =>
-        string.Equals(request.Model, FxCatalog.KimVocal2Id, StringComparison.OrdinalIgnoreCase)
-        || (string.IsNullOrWhiteSpace(request.Model) && string.Equals(selector.Id, FxCatalog.KimVocal2Id, StringComparison.OrdinalIgnoreCase));
+    private static bool IsMdxSeparator(AudioModelSelector selector, FxSeparateRequest request)
+    {
+        string id = string.IsNullOrWhiteSpace(request.Model) ? selector.Id : request.Model;
+        return ModelCatalog.Find(id)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
+    }
 
     /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The network runs on the CPU backend like Demucs; no GPU run is claimed.</summary>
     private Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
@@ -141,7 +145,7 @@ public sealed class FxService : IFxService
         IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, cacheKey), async ct =>
         {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(request.Audio, MdxSampleRate);
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(request.Audio, MdxSettings.KimVocal2.SampleRate);
             if (left.Length == 0)
             {
                 throw new ArgumentException("The audio to separate decoded to no samples.", nameof(request));
@@ -150,7 +154,7 @@ public sealed class FxService : IFxService
             MdxVocalRunner runner = await LoadKimVocal2Async(selector, cacheKey, backend, ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
             float[][] vocals = runner.Separate(left, right, request.Overlap, progress: LogProgress, cancel: ct);
-            Logs.Verbose($"[Audio][Kim-Vocal-2] Separated {AudioClipCodec.Seconds(left.Length, MdxSampleRate):0.0}s in {Environment.TickCount64 - started}ms.");
+            Logs.Verbose($"[Audio][Kim-Vocal-2] Separated {AudioClipCodec.Seconds(left.Length, MdxSettings.KimVocal2.SampleRate):0.0}s in {Environment.TickCount64 - started}ms.");
             return new StemsResult
             {
                 Stems = new Dictionary<string, byte[]>(StringComparer.Ordinal)
@@ -171,7 +175,7 @@ public sealed class FxService : IFxService
         IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, FxCatalog.KimVocal2Id), async ct =>
         {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(audio, MdxSampleRate);
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(audio, MdxSettings.KimVocal2.SampleRate);
             if (left.Length == 0)
             {
                 throw new ArgumentException("The driving audio decoded to no samples.", nameof(audio));
@@ -183,8 +187,6 @@ public sealed class FxService : IFxService
             return new SeparatedVocals(stem, runner.ToMono(vocals, SeparatedVocals.SpeechSampleRate, null));
         }, cancel);
     }
-
-    private const int MdxSampleRate = 44_100;
 
     private Task<MdxVocalRunner> LoadKimVocal2Async(AudioModelSelector selector, string cacheKey, IBackend backend, CancellationToken cancel) =>
         _engine.AudioRuntime.Mdx.GetOrLoadAsync(cacheKey, async ct =>

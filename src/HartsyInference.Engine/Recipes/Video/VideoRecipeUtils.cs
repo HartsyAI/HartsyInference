@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Io;
+using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Core.Backends;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Core.Logging;
@@ -515,8 +516,7 @@ internal static class VideoRecipeUtils
     /// <summary>The driving speech as mono 16 kHz: the vocal pre-step's own waveform when the request carries one, else <paramref name="speech"/> decoded.</summary>
     internal static float[] DrivingSpeech16k(VideoRequest request, AudioClip speech) => request.SeparatedSpeech16k ?? DecodeMono16k(speech);
 
-    // LongCat's separator input rate, and the margin its demo adds to the clip length (generate_duration + 1.0).
-    private const int SeparatorSampleRate = 44_100;
+    // The margin LongCat's demo adds to the clip length (generate_duration + 1.0).
     private const double SpeechMarginSeconds = 1d;
 
     /// <summary>Cuts separated speech to what LongCat's <c>separate_vocals(duration: clip + 1 s)</c> returns:
@@ -527,8 +527,8 @@ internal static class VideoRecipeUtils
         {
             return speech16k;
         }
-        double sourceSamples = Math.Ceiling((clipFrames / (double)fps + SpeechMarginSeconds) * SeparatorSampleRate);
-        int keep = (int)Math.Ceiling(sourceSamples * SeparatedVocals.SpeechSampleRate / SeparatorSampleRate);
+        double sourceSamples = Math.Ceiling((clipFrames / (double)fps + SpeechMarginSeconds) * MdxSettings.KimVocal2.SampleRate);
+        int keep = (int)Math.Ceiling(sourceSamples * SeparatedVocals.SpeechSampleRate / MdxSettings.KimVocal2.SampleRate);
         return keep < speech16k.Length ? speech16k[..keep] : speech16k;
     }
 
