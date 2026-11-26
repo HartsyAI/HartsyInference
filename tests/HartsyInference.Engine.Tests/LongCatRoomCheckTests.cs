@@ -2,6 +2,7 @@ using System.Reflection;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Engine.Recipes.Video;
 using Xunit;
 
@@ -17,33 +18,46 @@ public sealed class LongCatRoomCheckTests
     [Fact]
     public void ALaterRunAt832x480IsRefusedWithItsFigures()
     {
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(39_000, 4096, 11008);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(832, 480), 4096, 11008);
         InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom));
-        Assert.Contains("MB short", error.Message);
-        Assert.Contains("14639 MB is free", error.Message);
+            LongCatRecipeSupport.RequireRoom(14_639 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, "The later run"));
+        Assert.Contains("MiB short", error.Message);
+        Assert.Contains("14639 MiB is free", error.Message);
     }
 
     [Fact]
     public void ALaterRunAt640x368FitsWithItsFreeMemory()
     {
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(23_000, 4096, 11008);
-        LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(640, 368), 4096, 11008);
+        LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 0, headroomBytes: headroom, "The later run");
     }
 
     [Fact]
     public void TheSharedWeightsStillToPlaceCountAgainstTheRoom()
     {
-        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(23_000, 4096, 11008);
+        long headroom = LongCatRecipeSupport.ActivationHeadroomBytes(LaterTokens(640, 368), 4096, 11008);
         // 14550 MiB free fits on its own; 3000 MiB of shared weights still to place does not.
         Assert.Throws<InvalidOperationException>(() =>
-            LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 3_000 * Mb, headroomBytes: headroom));
+            LongCatRecipeSupport.RequireRoom(14_550 * Mb, sharedBytesToPlace: 3_000 * Mb, headroomBytes: headroom, "The later run"));
+    }
+
+    [Fact]
+    public void TheLaterRunPlacesItsSharedWeightsThenTrimsThenReads()
+    {
+        using LongCatTransformer dit = new(new LongCatConfig());
+        LongCatParts parts = new(dit, 4, 48, false, null!, null!, null!, null!);
+        OrderRecorder backend = Recorder();
+        backend.FreeBytes = 40L << 30;
+
+        LongCatRecipeSupport.RequireLaterRunRoom(backend.Backend, parts, LaterTokens(640, 368));
+
+        Assert.Equal(["PreloadWeights", "TrimMemoryPool", "FreeMemoryBytes"], backend.Calls.ToArray());
     }
 
     [Fact]
     public void ZeroSpendableIsAccepted()
     {
-        LongCatRecipeSupport.RequireRoom(10 * Mb, sharedBytesToPlace: 4 * Mb, headroomBytes: 6 * Mb);
+        LongCatRecipeSupport.RequireRoom(10 * Mb, sharedBytesToPlace: 4 * Mb, headroomBytes: 6 * Mb, "The later run");
     }
 
     [Fact]
@@ -61,6 +75,13 @@ public sealed class LongCatRoomCheckTests
         // A roomy card passes.
         backend.FreeBytes = 40L << 30;
         LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, 1_000);
+    }
+
+    /// <summary>The later run's token rows at a size, from a real chain plan: its run latents times the latent grid's tokens per frame.</summary>
+    private static long LaterTokens(int width, int height)
+    {
+        LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
+        return LongCatRecipeSupport.TokenCount(plan.RunLatents, height / 8, width / 8);
     }
 
     private static OrderRecorder Recorder() => OrderRecorder.Create();
@@ -87,6 +108,9 @@ public sealed class LongCatRoomCheckTests
             ArgumentNullException.ThrowIfNull(targetMethod);
             switch (targetMethod.Name)
             {
+                case nameof(IBackend.PreloadWeights):
+                    Calls.Add(nameof(IBackend.PreloadWeights));
+                    return targetMethod.Invoke(_cpu, args);
                 case nameof(IBackend.TrimMemoryPool):
                     Calls.Add(nameof(IBackend.TrimMemoryPool));
                     return null;

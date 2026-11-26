@@ -87,15 +87,16 @@ internal static class LongCatRecipeSupport
         });
 
     /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed and the activation headroom, must
-    /// be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory.</summary>
-    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes)
+    /// be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/> names the run
+    /// in the error.</summary>
+    internal static void RequireRoom(long freeBytes, long sharedBytesToPlace, long headroomBytes, string who)
     {
         long spendable = freeBytes - sharedBytesToPlace - headroomBytes;
         if (spendable < 0)
         {
             throw new InvalidOperationException(
-                $"The chain's later run needs {Mb(headroomBytes)} MB of activation headroom and {Mb(sharedBytesToPlace)} MB of shared weights, " +
-                $"but only {Mb(freeBytes)} MB is free: {Mb(-spendable)} MB short. Lower the resolution or the chain length.");
+                $"{who} needs {MiB(headroomBytes)} MiB of activation headroom and {MiB(sharedBytesToPlace)} MiB of shared weights to place, " +
+                $"but only {MiB(freeBytes)} MiB is free: {MiB(-spendable)} MiB short. Lower the resolution or the chain length.");
         }
     }
 
@@ -103,13 +104,14 @@ internal static class LongCatRecipeSupport
     internal static long LaterRunHeadroom(LongCatParts parts, long tokens) =>
         ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim);
 
-    /// <summary>Before any segment runs: an upper bound on a later run's budget. The free memory is read after a pool trim, before the shared weights
-    /// are placed, so the shared weights still to place are subtracted. A later run's free memory cannot exceed this, so a refusal here is one the
-    /// later run would also get.</summary>
+    /// <summary>Before any segment runs: an upper bound on a later run's budget. The free memory is read after a pool trim. Only the shared weights
+    /// not yet on the device are subtracted, so a shared weight that an earlier step already uploaded (the audio projection, once it is used twice)
+    /// is not counted twice. A later run's free memory cannot exceed this, so a refusal here is one the later run would also get.</summary>
     internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens)
     {
         backend.TrimMemoryPool();
-        RequireRoom(backend.FreeMemoryBytes(), SharedBytes(parts.Dit), LaterRunHeadroom(parts, laterTokens));
+        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens),
+            "The chain's later run");
     }
 
     /// <summary>A later run's own budget, read once its shared weights are placed, as its streaming scope will read it.</summary>
@@ -117,19 +119,20 @@ internal static class LongCatRecipeSupport
     {
         backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
         backend.TrimMemoryPool();
-        RequireRoom(backend.FreeMemoryBytes(), 0, LaterRunHeadroom(parts, laterTokens));
+        RequireRoom(backend.FreeMemoryBytes(), 0, LaterRunHeadroom(parts, laterTokens), "The chain's later run");
     }
 
-    /// <summary>The bytes of the DiT's shared weights (the adapter operands, the projections and the audio step), at their stored dtype.</summary>
-    internal static long SharedBytes(LongCatTransformer dit)
+    /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>
+    internal static long NonResidentSharedBytes(IBackend backend, LongCatTransformer dit)
     {
         long total = 0;
         foreach (Tensor tensor in dit.EnumerateSharedWeights())
-            total += tensor.DType.ComputeByteCount(tensor.ElementCount);
+            if (!backend.IsWeightResident(tensor))
+                total += tensor.DType.ComputeByteCount(tensor.ElementCount);
         return total;
     }
 
-    private static long Mb(long bytes) => bytes >> 20;
+    private static long MiB(long bytes) => (bytes + (1L << 20) - 1) >> 20;
 
     /// <summary>Loads the shared parts. Everything disposable goes into <paramref name="loaders"/>, which the caller owns from here on.
     /// <paramref name="sides"/> replaces the umT5 and VAE downloads when it is not null.</summary>
