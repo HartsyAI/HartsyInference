@@ -55,6 +55,12 @@ public sealed class MovieRollSampler
     private readonly HunyuanVideo15Dit _dit;
     private readonly MovieRollSchedule _schedule;
 
+    /// <summary>Called after each denoise step of the queue; the block streamer's per-step trim hooks here.</summary>
+    public Action? StepCompleted { get; init; }
+
+    /// <summary>KV recomputes that fired in the most recent <see cref="Sample"/> call (reset at its start).</summary>
+    public int RecomputeCount { get; private set; }
+
     public MovieRollSampler(IBackend backend, HunyuanVideo15Dit dit, MovieRollSchedule schedule)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -84,6 +90,7 @@ public sealed class MovieRollSampler
         if (options.KvRecomputeEnabled && options.KvRecomputeThreshold <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), options.KvRecomputeThreshold, "The recompute threshold is positive when recompute is enabled.");
 
+        RecomputeCount = 0;
         int window = _schedule.WindowSize;
         int tail = options.TailChunkFrames == 0 ? options.ChunkFrames : options.TailChunkFrames;
         int stepsPerWindow = _schedule.StepsPerWindow;
@@ -118,7 +125,10 @@ public sealed class MovieRollSampler
                     : round < options.NumChunks ? options.ChunkFrames : tail;
                 queue.Add(noise(frames));
                 for (int step = 0; step < stepsPerWindow; step++)
+                {
                     StepQueue(cache, options, queue, round * stepsPerWindow + step, qwen, byt5, negativeQwen, negativeByt5);
+                    StepCompleted?.Invoke();
+                }
             }
             return Concat(outputs);
         }
@@ -141,7 +151,9 @@ public sealed class MovieRollSampler
             int[] sizes = picked.Select(part => (int)part.Shape[2]).ToArray();
             using Tensor joined = Concat(picked);
             using Tensor noisy = ContextNoise(joined, options.ContextNoise, noise);
-            return _dit.StreamRecompute(_backend, noisy, sizes, cache, options.FullHistoryBlocks);
+            int recomputed = _dit.StreamRecompute(_backend, noisy, sizes, cache, options.FullHistoryBlocks);
+            RecomputeCount++;
+            return recomputed;
         }
 
         int frames = (int)clean.Shape[2];

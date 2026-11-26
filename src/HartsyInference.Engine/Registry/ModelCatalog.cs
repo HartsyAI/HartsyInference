@@ -3081,6 +3081,18 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Gated: yunyangge/MovieRoll asks for acceptance of its access conditions, and the LFS object id is masked in the public
+                // listing, so no sha256 is pinned. The entry stays ValidationPending until a validated download exists.
+                Id = "movieroll", Modality = vid, DisplayName = "MovieRoll (distilled T2V)", Architecture = "HunyuanVideo-1.5 DiT + rolling KV sampler",
+                Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "yunyangge/MovieRoll", RepoPath = "distilled/t2v/model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MovieRoll/distilled-t2v", Role = "transformer" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "hunyuan-video", Modality = vid, DisplayName = "HunyuanVideo 13B (T2V)", Architecture = "MMDiT + 3D causal VAE", Status = vp,
                 CliDrivable = true,
                 Assets = new ModelAsset[]
