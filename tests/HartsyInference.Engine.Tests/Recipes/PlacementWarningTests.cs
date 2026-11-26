@@ -6,8 +6,17 @@ using Xunit;
 
 namespace HartsyInference.Engine.Tests.PlacementChecks;
 
+/// <summary>The one collection for every test that swaps the process-wide logger (<see cref="Logs.SetLogger"/>). It runs without parallelization, so
+/// one class's sink never takes over another's while it asserts.</summary>
+[CollectionDefinition(GlobalLogSink.Name, DisableParallelization = true)]
+public static class GlobalLogSink
+{
+    public const string Name = "GlobalLogSink";
+}
+
 /// <summary>The placement checks that the engine and the recipes both run: the warning is logged once, the refusal is still enforced by
 /// <see cref="UnhonouredBackends.Refuse"/>, and the memory report leaves out the component-placement warning that the refusal already logged.</summary>
+[Collection(GlobalLogSink.Name)]
 public sealed class PlacementWarningTests : IDisposable
 {
     private readonly ConcurrentQueue<string> _warnings = new();
