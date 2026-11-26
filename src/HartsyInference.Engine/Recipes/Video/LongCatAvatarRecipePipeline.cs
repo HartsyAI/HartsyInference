@@ -153,9 +153,15 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // Before segment 0: an upper bound on the later runs' budget. It refuses only when even that bound is negative. The later run's own check,
         // before its denoise, is the one that sees segment 0's residue.
         // The later run's own figures: its cached step runs the new latents through the blocks and holds the cache's two pairs.
+        // A measured size budgets its later runs on the reserved peak it was measured at; any other size keeps the per-token estimate and its refusal.
+        int pixelWidth = latentWidth * LongCatRecipeSupport.SpatialCompressionFactor, pixelHeight = latentHeight * LongCatRecipeSupport.SpatialCompressionFactor;
+        long? measuredPeak = LongCatRecipeSupport.MeasuredReservedPeak(pixelWidth, pixelHeight);
+        Logs.Info(measuredPeak is long m
+            ? $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has a measured later-run peak of {m >> 20} MiB reserved, plus a {LongCatRecipeSupport.MeasuredMarginBytes >> 20} MiB margin."
+            : $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has no measured later-run peak: the per-token estimate and its refusal apply.");
         long laterTokens = LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth);
         long laterCache = LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth);
-        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache);
+        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache, measuredPeak);
 
         // Segment 0: an ordinary generation in its own streaming scope.
         float[] first = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
@@ -197,7 +203,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                 // noisy rows' own keys and values are activations. So the headroom counts the new latents, and the cache's two pairs.
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
                     LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
-                    LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth)),
+                    LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth),
+                    measuredPeakBytes: measuredPeak),
                 // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
                 onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = true }).Latents,
                 bridge);
