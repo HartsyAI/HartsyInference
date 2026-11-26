@@ -39,6 +39,7 @@ public sealed class DuoVideoStreamDecoderTests
         blocks.AddRange(decoder.End());
 
         Assert.Equal(Enumerable.Range(0, chunks), blocks.Select(b => b.Block));
+        Assert.Equal(chunks, windows.Count);
         Assert.All(blocks, b => Assert.Equal(17, b.Frames));
         Assert.All(blocks, b => Assert.Equal(Height, b.Height));
     }
@@ -189,6 +190,7 @@ public sealed class DuoVideoStreamDecoderTests
         fail = false;
         DuoDecodedBlock last = decoder.End().Single();
         Assert.Equal(1, last.Block);
+        Assert.Equal(Expected((0, 0, 5), (1, 0, 5), (1, 3, 2)), windows[^1]);
         Assert.Throws<InvalidOperationException>(() => decoder.End());
     }
 

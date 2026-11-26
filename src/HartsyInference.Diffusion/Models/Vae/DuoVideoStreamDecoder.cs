@@ -26,7 +26,7 @@ public sealed class DuoVideoStreamDecoder
     private int _width;
     private bool _ended;
 
-    /// <summary>Chunks still held. The schedule reads at most the last two, so this stays at two or three.</summary>
+    /// <summary>Chunks held between calls: at most two. A call briefly holds the new chunk as well, and removes it if the decode throws.</summary>
     internal int RetainedChunks => _recent.Count;
 
     public DuoVideoStreamDecoder(Func<Tensor, Tensor> decodeWindow)
@@ -34,11 +34,16 @@ public sealed class DuoVideoStreamDecoder
         _decodeWindow = decodeWindow ?? throw new ArgumentNullException(nameof(decodeWindow));
     }
 
-    /// <summary>The H3 decoder, run on one window at a time.</summary>
+    /// <summary>The H3 decoder, run on one window at a time. Refuses a decoder whose frame counts differ from the schedule's, at build time.</summary>
     public static DuoVideoStreamDecoder ForH3(MiniMaxH3VideoVaeDecoder decoder, IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(decoder);
         ArgumentNullException.ThrowIfNull(backend);
+        if (decoder.OutputFrames(7) != 22 || decoder.OutputFrames(12) != 39)
+        {
+            throw new InvalidOperationException(
+                $"The decoder returns {decoder.OutputFrames(7)} and {decoder.OutputFrames(12)} frames for 7 and 12 latents; the duo_5_17 schedule needs 22 and 39.");
+        }
         return new DuoVideoStreamDecoder(window => decoder.Decode(backend, window));
     }
 
@@ -52,7 +57,6 @@ public sealed class DuoVideoStreamDecoder
         }
         Chunk z = Read(chunk);
         int index = _received;
-        bool first = index == 0;
         _recent.Add(z);
         _received++;
         try
@@ -77,13 +81,9 @@ public sealed class DuoVideoStreamDecoder
         catch
         {
             // Undo this chunk, so a decode that throws leaves the stream exactly as it was before the call.
+            // The first chunk's size is reset by the next first chunk's Read, so the size needs no undo here.
             _recent.RemoveAt(_recent.Count - 1);
             _received--;
-            if (first)
-            {
-                _height = 0;
-                _width = 0;
-            }
             throw;
         }
     }
