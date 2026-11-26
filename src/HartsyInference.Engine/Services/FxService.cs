@@ -137,7 +137,7 @@ public sealed class FxService : IFxService
         return ModelCatalog.Find(id)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
     }
 
-    /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The network runs on the CPU backend like Demucs; no GPU run is claimed.</summary>
+    /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The service runs the network on the CPU backend like Demucs until real-weight GPU runs pass.</summary>
     private Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
     {
         RejectDemucsOnlyKnobs(request);
