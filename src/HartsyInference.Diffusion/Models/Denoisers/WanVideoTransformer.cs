@@ -348,7 +348,8 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         (Tensor temb, Tensor timestepProj) = WanDitOps.ConditionTimeGroups(backend, [timestep], _config.FreqDim, dim,
             _timeEmb1W!, _timeEmb1B, _timeEmb2W!, _timeEmb2B, _timeProjW!, _timeProjB);
         (Tensor encoderProj, _) = GetOrBuildContext(backend, encoder, null, dim);
-        // On a GPU backend this runs the F16 attention and FFN branches; the F32 oracle (ForwardFrameCausal) does not cover that path.
+        // On a GPU backend this runs the F16 attention and FFN branches when BranchActivation picks F16 (L; S is F32 at inner width 1536);
+        // the F32 oracle (ForwardFrameCausal) does not cover that path.
         DType act = BranchActivation(backend, singleGroup: true);
         ConstantKvCache[]? textKv = _textKv is { } scope && scope.Activation == act ? scope.Caches : null;
 

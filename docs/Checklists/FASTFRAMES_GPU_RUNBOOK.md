@@ -7,7 +7,7 @@ work is already merged or in review; this file covers only the runs that need a 
 
 | Run | Minimum | Why |
 |---|---|---|
-| S clip (81 frames, 832x480) | 24 GB (the 4090 peaked at 20.0 GB, all 30 blocks resident) | Weights 2.8 GB F16, cache about 6 GB F16 at 81 frames |
+| S clip (81 frames, 832x480) | 24 GB (the 4090 peaked at 20.0 GB, all 30 blocks resident) | Weights 2.8 GB F16, cache about 11.6 GiB F32 at 81 frames (S runs F32 slots: its inner width is 1536) |
 | Decoder GPU parity, exact lane | any CUDA card | Synthetic decoder, small |
 | Streamed vs resident test | any CUDA card | Tiny model |
 | Renorm device-sync test (#1209) | any CUDA card | Tiny refiner; asserts zero device-to-host syncs |

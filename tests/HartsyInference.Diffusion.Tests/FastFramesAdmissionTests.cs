@@ -14,13 +14,24 @@ public sealed class FastFramesAdmissionTests
     [Fact]
     public void AnF16ClipThatFitsPassesAndOneThatDoesNotIsRefusedBeforeItRuns()
     {
-        // S at 81 frames: 2 · 30 blocks · 21 latent frames · 1560 tokens · 1536 channels · F16 bytes, about 5.6 GiB, plus one block's
-        // joined prefix (about 0.2 GiB).
+        // The F16 arithmetic on S's shape (L's slot dtype): 2 · 30 blocks · 21 latent frames · 1560 tokens · 1536 channels · 2 bytes,
+        // about 5.6 GiB, plus one block's joined prefix (about 0.2 GiB).
         Assert.Throws<InvalidOperationException>(() =>
             FastFramesPipeline.CheckKvFits("FF-S", blocks: 30, latentFrames: 21, tokensPerFrame: 1560, hidden: 1536, DType.F16,
                 freeBytes: 5 * Gib, totalBytes: 12 * Gib));
         FastFramesPipeline.CheckKvFits("FF-S", blocks: 30, latentFrames: 21, tokensPerFrame: 1560, hidden: 1536, DType.F16,
             freeBytes: 6 * Gib, totalBytes: 12 * Gib);
+    }
+
+    /// <summary>S runs F32 slots (its inner width is 1536, so no F16 branches): the same clip is about 11.6 GiB with the joined prefix.</summary>
+    [Fact]
+    public void AnF32SClipOf81FramesNeedsAboutElevenPointSixGiB()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            FastFramesPipeline.CheckKvFits("FF-S", blocks: 30, latentFrames: 21, tokensPerFrame: 1560, hidden: 1536, DType.F32,
+                freeBytes: 11 * Gib, totalBytes: 12 * Gib));
+        FastFramesPipeline.CheckKvFits("FF-S", blocks: 30, latentFrames: 21, tokensPerFrame: 1560, hidden: 1536, DType.F32,
+            freeBytes: 12 * Gib, totalBytes: 12 * Gib);
     }
 
     [Fact]
