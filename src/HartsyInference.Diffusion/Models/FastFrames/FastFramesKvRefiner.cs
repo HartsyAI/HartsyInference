@@ -54,8 +54,8 @@ public sealed class FastFramesKvRefiner : IDisposable
     /// layer count from the stacked head weights, <c>dim</c>-dependent head count from <paramref name="heads"/>.</summary>
     public static FastFramesKvRefinerConfig DetectConfig(IReadOnlyDictionary<string, Tensor> weights, int heads)
     {
-        Tensor stemIn = weights["stem_in.weight"];
-        Tensor dK = weights["heads_grouped.gemms.0.dK_w"];
+        Tensor stemIn = CheckpointTensors.Require(weights, "FastFrames refiner", "stem_in.weight");
+        Tensor dK = CheckpointTensors.Require(weights, "FastFrames refiner", "heads_grouped.gemms.0.dK_w");
         int stemBlocks = 0;
         while (weights.ContainsKey($"stem_blocks.{stemBlocks}.qkv.weight"))
             stemBlocks++;
@@ -331,8 +331,13 @@ public sealed class FastFramesKvRefiner : IDisposable
         return output;
     }
 
-    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        FastFramesOps.CopyF32(weights[key], weights[key].Shape);
+    /// <summary>An owned F32 copy of a checkpoint tensor, read through <see cref="CheckpointTensors"/> so a missing key names the family.
+    /// Shapes were checked in <see cref="LoadWeights"/> before any copy.</summary>
+    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key)
+    {
+        Tensor source = CheckpointTensors.Require(weights, "FastFrames refiner", key);
+        return FastFramesOps.CopyF32(source, source.Shape);
+    }
 
     private void RequireLoaded()
     {

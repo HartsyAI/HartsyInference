@@ -22,7 +22,20 @@ public sealed record LongCatAvatarRun(
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
     int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default,
-    AdjunctGate? LoraGate = null, bool OffloadKv = false);
+    AdjunctGate? LoraGate = null, bool OffloadKv = false, LongCatAvatarLoraSchedule? LoraMix = null);
+
+/// <summary>The 1.6 two-LoRA schedule (the upstream <c>enable_lora_mix</c>): for steps below <see cref="MixSteps"/> the DMD LoRA runs at
+/// <see cref="Alpha"/> and the OPSD LoRA at <c>1 − Alpha</c>; from then on the OPSD LoRA runs alone at 1. The gates are switched per step.</summary>
+public sealed record LongCatAvatarLoraSchedule(AdjunctGate Dmd, AdjunctGate Opsd, float Alpha, int MixSteps)
+{
+    /// <summary>The multipliers of the two LoRAs at a step: DMD, then OPSD.</summary>
+    public (float Dmd, float Opsd) ScalesAt(int step)
+    {
+        if (step < MixSteps)
+            return (Alpha, 1f - Alpha);
+        return (0f, 1f);
+    }
+}
 
 /// <summary>The sigmas (shifted, with the terminal zero), the timesteps (sigma·1000), and the final latents.</summary>
 public sealed record LongCatAvatarResult(float[] Latents, float[] Sigmas, float[] Timesteps);
@@ -53,16 +66,18 @@ public sealed class LongCatAvatarPipeline
     {
         ArgumentNullException.ThrowIfNull(run);
         // The distilled schedule is valid only with its LoRA live: on bare weights the 8-step path is not the distilled model.
-        if (run.Kind == LongCatAvatarSchedule.Kind.Distill8 && run.LoraGate is null)
+        if (run.Kind == LongCatAvatarSchedule.Kind.Distill8 && run.LoraGate is null && run.LoraMix is null)
             throw new InvalidOperationException("The 8-step distilled schedule needs its DMD LoRA gate; refusing to run the bare base at 8 steps.");
         Validate(run);
         // The gate stays on for every step of this run; the stacked LoRA's strength (0.8) is its own, so the gate scale is 1.
-        using IDisposable? loraScope = run.LoraGate?.Enable(1f);
+        // A mixed schedule switches its two gates per step below; a single gate stays on for the whole run.
+        using IDisposable? loraScope = run.LoraMix is null ? run.LoraGate?.Enable(1f) : null;
         using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
         int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
         int cond = run.Mode == LongCatAvatarMode.At2v ? 0 : run.NumCondLatents;
         int noisy = frames - cond;
-        bool useCache = run.Mode == LongCatAvatarMode.Avc && run.UseKvCache && cond > 0;
+        // The KV cache is built once, before the loop: a mixed LoRA schedule changes the cond keys and values between steps, so it runs without one (upstream).
+        bool useCache = run.Mode == LongCatAvatarMode.Avc && run.UseKvCache && cond > 0 && run.LoraMix is null;
         bool guided = run.TextGuidance > 1f || run.AudioGuidance > 1f;
 
         // The reference's sigma path, then the scheduler's static shift, then the terminal zero.
@@ -104,6 +119,10 @@ public sealed class LongCatAvatarPipeline
             {
                 run.Cancel.ThrowIfCancellationRequested();
                 float t = timesteps[i], dt = sigmasWithZero[i + 1] - sigmasWithZero[i];
+                // The mixed schedule: the step's DMD and OPSD multipliers; a zero multiplier leaves its gate off (no scope), as upstream does.
+                (float dmdScale, float opsdScale) = run.LoraMix?.ScalesAt(i) ?? (0f, 0f);
+                using IDisposable? dmdScope = run.LoraMix is { } mix && dmdScale > 0f ? mix.Dmd.Enable(dmdScale) : null;
+                using IDisposable? opsdScope = run.LoraMix is { } mixB && opsdScale > 0f ? mixB.Opsd.Enable(opsdScale) : null;
                 using Tensor velocity = Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond,
                     tensors);
 
