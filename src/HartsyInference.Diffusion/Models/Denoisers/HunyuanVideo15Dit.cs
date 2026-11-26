@@ -558,8 +558,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <summary>A copy of a flat <c>[1, S, hidden]</c> tensor.</summary>
     private static Tensor CopyOf(IBackend backend, Tensor source)
     {
+        // A device-side copy of the whole flat tensor. CopyTo would read a device source back to the host.
         Tensor copy = new(source.Shape, DType.F32);
-        backend.CopyTo(copy, source);
+        StridedCopies.SliceAxis(backend, copy, source, 1, 0, source.Shape[1]);
         return copy;
     }
 
@@ -569,7 +570,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         int total = 0;
         foreach (Tensor part in parts) total += (int)part.Shape[1];
         Tensor joined = new(new TensorShape(1, total, _config.NumHeads, _config.HeadDim), DType.F32);
-        if (parts.Length == 1) backend.CopyTo(joined, parts[0]);
+        if (parts.Length == 1) StridedCopies.SliceAxis(backend, joined, parts[0], 1, 0, parts[0].Shape[1]);
         else backend.Concat(joined, parts, 1);
         return joined;
     }

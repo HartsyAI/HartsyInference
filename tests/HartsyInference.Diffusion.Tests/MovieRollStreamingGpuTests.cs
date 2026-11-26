@@ -62,7 +62,7 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         device.Backend.ResetD2hSyncCount();
         device.Dit.StreamEncode(device.Backend, Latent(2), new float[2], cache, fullHistoryBlocks: 1, startFrame: 0);
         long reads = device.Backend.GetD2hSyncCount();
-        output.WriteLine($"D2H_SYNCS StreamEncode: {reads}");
+        ReportRun(device.Backend, "StreamEncode", reads);
         Assert.Equal(0, reads);
 
         List<string> failures = [];
@@ -94,12 +94,68 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
             fullHistoryBlocks: 1);
         // Counted before the velocity is read back for the comparison below, so the count covers the forward alone.
         long reads = device.Backend.GetD2hSyncCount();
-        output.WriteLine($"D2H_SYNCS StreamDenoise (forward only, before the comparison read): {reads}");
+        ReportRun(device.Backend, "StreamDenoise (forward only, before the comparison read)", reads);
         Assert.Equal(0, reads);
 
         List<string> failures = [];
         Compare("StreamDenoise velocity", expected, actual, tolerance, failures);
         Assert.True(failures.Count == 0, $"Bound {tolerance:E0}: {string.Join("; ", failures)}");
+    }
+
+    private void RunRecompute(bool exactGemm, int[] chunkFrames, float tolerance)
+    {
+        int frames = chunkFrames.Sum();
+        using Fixture cpuFixture = new();
+        using MovieRollKvCache cpuCache = new(cpuFixture.Backend);
+        cpuCache.Init(cpuFixture.Dit.StreamLayerNames(), Height, Width);
+        int cpuFrames = cpuFixture.Dit.StreamRecompute(cpuFixture.Backend, Latent(frames, 7), chunkFrames, cpuCache, fullHistoryBlocks: 1);
+
+        using Fixture device = new(GpuDevices.OpenCuda());
+        ApplyLane(device.Backend, exactGemm);
+        using MovieRollKvCache cache = new(device.Backend);
+        cache.Init(device.Dit.StreamLayerNames(), Height, Width);
+        device.Backend.ResetD2hSyncCount();
+        int deviceFrames = device.Dit.StreamRecompute(device.Backend, Latent(frames, 7), chunkFrames, cache, fullHistoryBlocks: 1);
+        long reads = device.Backend.GetD2hSyncCount();
+        ReportRun(device.Backend, $"StreamRecompute chunks [{string.Join(", ", chunkFrames)}]", reads);
+        Assert.Equal(0, reads);
+        Assert.Equal(cpuFrames, deviceFrames);
+
+        List<string> failures = [];
+        foreach (string layer in cpuFixture.Dit.StreamLayerNames())
+        {
+            (Tensor ek, Tensor ev)? e = cpuCache.Get(layer);
+            (Tensor ak, Tensor av)? a = cache.Get(layer);
+            Assert.True(e is not null && a is not null, $"{layer}: a cache entry is missing.");
+            Compare($"recompute {layer} keys", e!.Value.ek, a!.Value.ak, tolerance, failures);
+            Compare($"recompute {layer} values", e.Value.ev, a.Value.av, tolerance, failures);
+        }
+        Assert.True(failures.Count == 0, $"Bound {tolerance:E0}: {string.Join("; ", failures)}");
+    }
+
+    [CudaDeviceFact]
+    public void Cuda_StreamRecomputeFiveChunks_ExactGemms_ReadsNothingBackAndMatchesTheCpuCache() =>
+        RunRecompute(exactGemm: true, [1, 1, 1, 1, 1], ExactTolerance);
+
+    [CudaDeviceFact]
+    public void Cuda_StreamRecomputeFiveChunks_Tf32Gemms_ReadsNothingBackAndMatchesTheCpuCache() =>
+        RunRecompute(exactGemm: false, [1, 1, 1, 1, 1], Tf32Tolerance);
+
+    [CudaDeviceFact]
+    public void Cuda_StreamRecomputeOneChunk_ExactGemms_ReadsNothingBackAndMatchesTheCpuCache() =>
+        RunRecompute(exactGemm: true, [5], ExactTolerance);
+
+    [CudaDeviceFact]
+    public void Cuda_StreamRecomputeOneChunk_Tf32Gemms_ReadsNothingBackAndMatchesTheCpuCache() =>
+        RunRecompute(exactGemm: false, [5], Tf32Tolerance);
+
+    /// <summary>Prints the device-to-host read count of a forward and the attention path it took, so a lane's numbers can be read with the switches
+    /// that produced them. <c>CudnnSdpaEngaged</c> is whether the cuDNN scaled-dot-product path ran at all on this backend.</summary>
+    private void ReportRun(IBackend backend, string run, long reads)
+    {
+        output.WriteLine($"D2H_SYNCS {run}: {reads}");
+        if (backend is HartsyInference.Cuda.CudaBackend cuda)
+            output.WriteLine($"SWITCHES {run}: HighPrecisionGemm={backend.HighPrecisionGemm} CudnnSdpaEngaged={cuda.CudnnSdpaEngaged}");
     }
 
     /// <summary>Sets the GEMM lane on the device. <c>exactGemm</c> forces full-F32 GEMMs (<see cref="IBackend.HighPrecisionGemm"/>), so the error that
@@ -122,10 +178,17 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         for (int i = 0; i < e.Length; i++)
         {
             float d = Math.Abs(e[i] - a[i]);
+            if (float.IsNaN(d))
+            {
+                max = float.NaN;
+                at = i;
+                break;
+            }
             if (d > max) { max = d; at = i; }
         }
         output.WriteLine($"MAX_ERR {label}: {max:E3} at flat index {at} of {e.Length} (cpu {e[at]:G9}, device {a[at]:G9})");
-        if (max > tolerance) failures.Add($"{label} max abs error {max:E3} at index {at} exceeds {tolerance:E0}");
+        // NaN never compares below a bound, so a NaN in either tensor fails here rather than passing as a zero error.
+        if (!(max <= tolerance)) failures.Add($"{label} max abs error {max:E3} at index {at} exceeds {tolerance:E0} (NaN counts as a failure)");
     }
 
     private static Tensor Latent(int frames, long seed = 3) =>
