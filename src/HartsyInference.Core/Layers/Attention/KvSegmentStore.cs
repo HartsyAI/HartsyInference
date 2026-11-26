@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
@@ -295,7 +296,12 @@ public sealed class KvSegmentStore : IDisposable
         Tensor joined = new(new TensorShape(dims), parts[0].DType);
         try
         {
-            _backend.Concat(joined, parts, _tokenAxis);
+            // Two parts are one concat. More than two: the backend's concat copies each slice of each part, so a device runs outer × parts
+            // copies; one strided copy per part does the same join in a fixed number of copies.
+            if (parts.Length <= 2)
+                _backend.Concat(joined, parts, _tokenAxis);
+            else
+                ScatterParts(joined, parts);
         }
         catch
         {
@@ -303,5 +309,18 @@ public sealed class KvSegmentStore : IDisposable
             throw;
         }
         return joined;
+    }
+
+    // The first write covers the whole output, so a device backend never uploads host bytes before a partial write; the scatters then
+    // overwrite everything it filled.
+    private void ScatterParts(Tensor joined, Tensor[] parts)
+    {
+        StridedCopies.FillFrom(_backend, joined, parts[0]);
+        long at = 0;
+        foreach (Tensor part in parts)
+        {
+            StridedCopies.ScatterAxis(_backend, joined, part, _tokenAxis, at);
+            at += part.Shape[_tokenAxis];
+        }
     }
 }
