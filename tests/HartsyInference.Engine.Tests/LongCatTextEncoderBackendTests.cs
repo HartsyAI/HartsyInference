@@ -5,26 +5,28 @@ using Xunit;
 
 namespace HartsyInference.Engine.Tests;
 
-/// <summary>The LongCat recipes encode prompts on the denoiser's backend, so a separate text-encoder backend is refused clearly, not ignored.</summary>
+/// <summary>LongCat's placement policy, through the recipe entry: a CFG-parallel placement is refused by name before any weight is read, and a separate
+/// text-encoder backend is accepted (the engine warns and runs it on the primary).</summary>
 public sealed class LongCatTextEncoderBackendTests
 {
     [Fact]
-    public void ASeparateTextEncoderBackendIsRefusedBeforeAnyWeightIsRead()
+    public void ACfgParallelPlacementIsRefusedByNameBeforeAnyWeightIsRead()
     {
         using CpuBackend denoiser = new();
-        using CpuBackend textEncoder = new();
-        RecipeContext context = new() { CheckpointPath = "no-such-folder", Backend = denoiser, TextEncoderBackend = textEncoder };
+        using CpuBackend other = new();
+        RecipeContext context = new() { CheckpointPath = "no-such-folder", Backend = denoiser, CfgParallelBackend = other };
 
-        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
-            LongCatRecipeSupport.RefuseSeparateTextEncoder(context));
-        Assert.Contains("TextEncoderBackend", refused.Message, StringComparison.Ordinal);
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatVideoRecipe().Construct(context));
+        Assert.Contains("LongCat", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("CfgParallelBackend", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheDenoisersOwnBackendOrNoneIsAccepted()
+    public void ASeparateTextEncoderBackendIsNotRefusedHere()
     {
         using CpuBackend denoiser = new();
-        LongCatRecipeSupport.RefuseSeparateTextEncoder(new RecipeContext { CheckpointPath = "x", Backend = denoiser });
-        LongCatRecipeSupport.RefuseSeparateTextEncoder(new RecipeContext { CheckpointPath = "x", Backend = denoiser, TextEncoderBackend = denoiser });
+        using CpuBackend textEncoder = new();
+        RecipeContext context = new() { CheckpointPath = "x", Backend = denoiser, TextEncoderBackend = textEncoder };
+        UnhonouredBackends.Refuse(context, "LongCat");
     }
 }
