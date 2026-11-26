@@ -1,8 +1,8 @@
 namespace HartsyInference.ModelAssets.Duo;
 
-/// <summary>The CPU geometry of a Duo video codec mode: how many frames and latent steps a block holds, and how many audio latent steps
-/// its duration needs. Mirrors <c>duo/models/realization/modules/codec_spec.py</c> @068e357. Only <c>duo_5_17</c> is the released
-/// Duo v1 mode; the others are listed so a checkpoint or request that names them fails with a clear message, not silently.</summary>
+/// <summary>The CPU geometry of the released Duo v1 video codec mode <c>duo_5_17</c>: how many frames and latent steps a block holds, and how
+/// many audio latent steps its duration needs. Mirrors <c>duo/models/realization/modules/codec_spec.py</c> @068e357. Any other mode,
+/// including the unreleased <c>old</c>, <c>sana_1_4</c> and <c>duo_2_5</c>, is refused.</summary>
 public sealed record DuoCodecSpec
 {
     public const int Fps = 24;
@@ -34,13 +34,14 @@ public sealed record DuoCodecSpec
         }
     }
 
-    /// <summary>The spec for a mode name. An unknown name is an error, never a guess.</summary>
-    public static DuoCodecSpec Get(string mode) => mode switch
+    /// <summary>The spec of the released mode. Only <c>duo_5_17</c> is accepted; unreleased or unknown names are refused.</summary>
+    public static DuoCodecSpec Get(string mode)
     {
-        "old" => new DuoCodecSpec { Mode = mode, FrameSpans = [4], Delayed = false },
-        "sana_1_4" => new DuoCodecSpec { Mode = mode, FrameSpans = [4], Delayed = false },
-        "duo_2_5" => new DuoCodecSpec { Mode = mode, FrameSpans = [1, 4], Delayed = false },
-        "duo_5_17" => new DuoCodecSpec { Mode = mode, FrameSpans = [1, 4, 4, 4, 4], Delayed = true },
-        _ => throw new ArgumentException($"Unknown video codec '{mode}'; choose old, sana_1_4, duo_2_5 or duo_5_17.", nameof(mode)),
-    };
+        if (mode != "duo_5_17")
+        {
+            throw new NotSupportedException(
+                $"Video codec '{mode}' is not released for Duo v1; only 'duo_5_17' is supported.");
+        }
+        return new DuoCodecSpec { Mode = mode, FrameSpans = [1, 4, 4, 4, 4], Delayed = true };
+    }
 }
