@@ -62,16 +62,16 @@ public sealed class LongCatAudioProjection : IDisposable
         try
         {
             int inFirst = _seqLen * _blocks * _channels, inLatter = _seqLenVf * _blocks * _channels;
-            Tensor p1w = Expect(weights[prefix + "proj1.weight"], [_intermediate, inFirst], prefix + "proj1.weight");
-            Tensor p1b = Expect(LongCatOps.WidenF32(weights, prefix + "proj1.bias", owned), [_intermediate], prefix + "proj1.bias");
-            Tensor pvw = Expect(weights[prefix + "proj1_vf.weight"], [_intermediate, inLatter], prefix + "proj1_vf.weight");
-            Tensor pvb = Expect(LongCatOps.WidenF32(weights, prefix + "proj1_vf.bias", owned), [_intermediate], prefix + "proj1_vf.bias");
-            Tensor p2w = Expect(weights[prefix + "proj2.weight"], [_intermediate, _intermediate], prefix + "proj2.weight");
-            Tensor p2b = Expect(LongCatOps.WidenF32(weights, prefix + "proj2.bias", owned), [_intermediate], prefix + "proj2.bias");
-            Tensor p3w = Expect(weights[prefix + "proj3.weight"], [_contextTokens * _outputDim, _intermediate], prefix + "proj3.weight");
-            Tensor p3b = Expect(LongCatOps.WidenF32(weights, prefix + "proj3.bias", owned), [_contextTokens * _outputDim], prefix + "proj3.bias");
-            Tensor nw = Expect(LongCatOps.WidenF32(weights, prefix + "norm.weight", owned), [_outputDim], prefix + "norm.weight");
-            Tensor nb = Expect(LongCatOps.WidenF32(weights, prefix + "norm.bias", owned), [_outputDim], prefix + "norm.bias");
+            Tensor p1w = CheckpointTensors.Require(weights, "LongCat", prefix + "proj1.weight", [_intermediate, inFirst]);
+            Tensor p1b = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj1.bias", owned, [_intermediate]);
+            Tensor pvw = CheckpointTensors.Require(weights, "LongCat", prefix + "proj1_vf.weight", [_intermediate, inLatter]);
+            Tensor pvb = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj1_vf.bias", owned, [_intermediate]);
+            Tensor p2w = CheckpointTensors.Require(weights, "LongCat", prefix + "proj2.weight", [_intermediate, _intermediate]);
+            Tensor p2b = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj2.bias", owned, [_intermediate]);
+            Tensor p3w = CheckpointTensors.Require(weights, "LongCat", prefix + "proj3.weight", [_contextTokens * _outputDim, _intermediate]);
+            Tensor p3b = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj3.bias", owned, [_contextTokens * _outputDim]);
+            Tensor nw = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "norm.weight", owned, [_outputDim]);
+            Tensor nb = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "norm.bias", owned, [_outputDim]);
 
             // Every tensor loaded: release the previous set and take the new one.
             ReleaseOwned();
@@ -171,13 +171,4 @@ public sealed class LongCatAudioProjection : IDisposable
             throw new ArgumentOutOfRangeException(name, value, $"{name} must be at least 1.");
     }
 
-    private static Tensor Expect(Tensor tensor, long[] shape, string key)
-    {
-        if (tensor.Shape.Rank != shape.Length)
-            throw new InvalidDataException($"{key} must have {shape.Length} dimensions, got {tensor.Shape}.");
-        for (int i = 0; i < shape.Length; i++)
-            if (tensor.Shape[i] != shape[i])
-                throw new InvalidDataException($"{key} must be {string.Join('x', shape)}, got {tensor.Shape}.");
-        return tensor;
-    }
 }
