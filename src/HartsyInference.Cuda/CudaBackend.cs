@@ -6313,8 +6313,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>The query tile's height from the device total (<c>numerics.tileFromDevice</c>): the rung over the row bytes, never past the rows of
     /// the call or the score elements the softmax addresses, or the height <c>numerics.sdpaTile</c> forces. The height is a function of the device
-    /// only; the OOM halving and the remembered cap in <c>SdpaTiledF32Core</c> still shorten it after a failed allocation, so a run that hits one
-    /// is not bit-comparable with a run that did not.</summary>
+    /// only. A failed allocation in <c>SdpaTiledF32Core</c> still halves that call's tile (the OOM loop), so a run that hits one is not
+    /// bit-comparable with a run that did not. The remembered cap is recorded but not read under this knob, so later calls do not start from
+    /// a shrunken height.</summary>
     internal static long TileRowsFromDevice(ulong deviceTotalBytes, long totalHeads, long sq, long skv, int? forced)
     {
         long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
@@ -6371,6 +6372,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
             // allocator recovery) are not paid on every call. The memory grows back, with backoff (see NextTileCap): a transient failure must not
             // pin the tile small for the backend's lifetime, and a card that really is full must not be probed every other call.
+            long plannedBr = Br;
             bool halved = false;
             while (true)
             {
@@ -6386,6 +6388,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
             }
 
+            if (fromDevice) TileFreeLog.Record((ulong)freeBytes, (ulong)deviceTotal, plannedBr, Br);
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.tiled.scores", perRow * Br);
             lock (_sdpaTileCapGate)
                 _sdpaTileCap = NextTileCap(_sdpaTileCap, halved, perRow * Br, perRow, EngineKnobs.SdpaTile.Value is > 0);

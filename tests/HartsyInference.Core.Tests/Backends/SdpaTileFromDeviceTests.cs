@@ -7,6 +7,7 @@ namespace HartsyInference.Core.Tests.Backends;
 
 /// <summary>The device-sized query tile (<c>numerics.tileFromDevice</c>): the same shape and device give the same tile whatever the free memory was,
 /// and the knob is off unless set.</summary>
+[Collection(GlobalKnobStore.Name)]
 public sealed class SdpaTileFromDeviceTests
 {
     private const long Heads = 12, Tokens = 32528;
@@ -59,13 +60,14 @@ public sealed class SdpaTileFromDeviceTests
     [Fact]
     public void TheFreeLogCountsAHalvedCallAndNamesItsHeights()
     {
+        TileFreeLog.Reset();
         TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 50);
-        string line = TileFreeLog.Summary();
+        TileFreeLog.Record(10UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
 
-        Assert.StartsWith("tileFromDevice: calls=", line, StringComparison.Ordinal);
-        Assert.Contains("halved=", line, StringComparison.Ordinal);
-        Assert.Contains("tileRows=[", line, StringComparison.Ordinal);
-        Assert.Contains("50", line, StringComparison.Ordinal);
+        // Two calls: one halved from 100 to 50 rows, one at 100. Free ranged 6 to 10 GiB; total 24 GiB.
+        Assert.Equal("tileFromDevice: calls=2 halved=1 totalMiB=24576 freeMiB min=6144 max=10240 tileRows=[50,100]", TileFreeLog.Summary());
+        TileFreeLog.Reset();
+        Assert.Equal("tileFromDevice: no tiled calls this process.", TileFreeLog.Summary());
     }
 
     [Theory]
