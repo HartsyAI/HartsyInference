@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Core.Backends;
@@ -32,8 +33,8 @@ public sealed class KimVocal2RealFactAttribute : FactAttribute
     }
 }
 
-/// <summary>Per-stage and end-to-end match of the C# separator against onnxruntime on a saved clip, through whichever driver wrote the reference (its <c>meta.json</c> is printed):
-/// audio-separator 0.30.2 with LongCat-Video <c>separate_vocals</c>, or the stand-in.</summary>
+/// <summary>Per-stage and end-to-end match of the C# separator against audio-separator 0.30.2 driving LongCat-Video <c>separate_vocals</c> on a saved clip.
+/// A stand-in reference is refused unless <c>HARTSY_KIM_VOCAL2_ALLOW_STANDIN=1</c>, and then covers the network and stem only.</summary>
 public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
 {
     private sealed class Recorder(IMdxSpectrogramModel inner) : IMdxSpectrogramModel
@@ -51,12 +52,17 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
 
     [KimVocal2RealFact]
     [Trait("Category", "Integration")]
-    public void SeparatorMatchesOnnxRuntime()
+    public void SeparatorMatchesTheReference()
     {
         string onnx = Environment.GetEnvironmentVariable(KimVocal2RealFactAttribute.OnnxVariable)!;
         string reference = Environment.GetEnvironmentVariable(KimVocal2RealFactAttribute.RefVariable)!;
         MdxSettings settings = MdxSettings.KimVocal2;
-        output.WriteLine("reference: " + File.ReadAllText(Path.Combine(reference, "meta.json")).ReplaceLineEndings(" "));
+        string meta = File.ReadAllText(Path.Combine(reference, "meta.json"));
+        output.WriteLine("reference: " + meta.ReplaceLineEndings(" "));
+        bool official = WrittenByTheRealDriver(meta);
+        Assert.True(official || Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_ALLOW_STANDIN") == "1",
+            "This reference was not written by dump_kim_vocal2_reference.py, so it says nothing about audio-separator or soxr_hq. "
+            + "Set HARTSY_KIM_VOCAL2_ALLOW_STANDIN=1 to compare the network and stem against a stand-in.");
 
         (long[] mixShape, float[] mixData) = Npy.Read(Path.Combine(reference, "mix_normalized.npy"));
         int n = (int)mixShape[^1];
@@ -95,12 +101,29 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
             Assert.True(worstStage < 1e-4, $"worst block relRMS {worstStage:E2}");
             Assert.True(pred < 1e-4, $"network output relRMS {pred:E2}");
             Assert.True(stem0 < 1e-3 && stem1 < 1e-3, $"stem relRMS {stem0:E2} / {stem1:E2}");
-            Assert.True(mono < 1e-2, $"16 kHz vocals relRMS {mono:E2}");
+            if (official)
+            {
+                // The polyphase resampler is about 3.4e-3 from soxr_hq, so this limit also catches a return to it.
+                Assert.True(mono < 1e-3, $"16 kHz vocals relRMS {mono:E2}");
+            }
+            else
+            {
+                output.WriteLine("stand-in reference: the 16 kHz figure is against scipy resample_poly and is not asserted");
+            }
         }
         finally
         {
             foreach (Tensor t in weights.Values) t.Dispose();
         }
+    }
+
+    /// <summary>Only the real dumper records the replay check and the audio-separator version.</summary>
+    private static bool WrittenByTheRealDriver(string meta)
+    {
+        using JsonDocument document = JsonDocument.Parse(meta);
+        JsonElement root = document.RootElement;
+        return root.TryGetProperty("official_matches_replay", out JsonElement replay) && replay.ValueKind == JsonValueKind.True
+            && root.TryGetProperty("versions", out JsonElement versions) && versions.TryGetProperty("audio_separator", out _);
     }
 
     private double Compare(string label, string reference, string file, float[] actual, int? row = null)

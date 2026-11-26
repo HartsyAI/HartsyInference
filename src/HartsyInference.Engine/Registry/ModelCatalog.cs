@@ -2550,13 +2550,12 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = vp,
+                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = ok,
                 CliDrivable = true, // `hartsy fx separate <wav> -m kim-vocal-2`, and `hartsy video --driving-audio <wav> --separate-vocals`.
                 // Weights: the vocal_separator/Kim_Vocal_2.onnx file of meituan-longcat/LongCat-Video-Avatar-1.6 (66,759,214 bytes, sha256 pinned in
                 // FxCatalog), read straight from the .onnx by ModelAssets/Onnx. Licence: not stated by the file, the repo or UVR's model repository
                 // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend.
-                // The network and stem match onnxruntime (docs/Checklists/PARITY_VERIFICATION.md); the audio-separator driver and the librosa
-                // resample are uncompared, hence ValidationPending.
+                // Matches audio-separator 0.30.2 and LongCat's separate_vocals on CPU F32 (docs/Checklists/PARITY_VERIFICATION.md).
             },
 
             new CatalogEntry
