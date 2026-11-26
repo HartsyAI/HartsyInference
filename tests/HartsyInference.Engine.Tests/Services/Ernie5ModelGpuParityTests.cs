@@ -16,7 +16,20 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
 {
     private static readonly int[] Tokens = [1, 2, 3, 4, 5];
 
+    /// <summary>The bound on a logit's difference over max(1, |CPU logit|).</summary>
+    private const float Tolerance = 1e-3f;
+
+    /// <summary>The bound on the decode step of the real-dimension checkpoint on Vulkan, which is sensitive to rounding. On the CPU alone, a
+    /// run with AVX2 disabled differs from the AVX2 run by up to 6.5e-4 in the decode step (1.1e-4 in the prefill rows), and moving every F32
+    /// weight of the dequantized twin by one ulp moves it by up to 4.2e-4 (prefill 8.0e-5); both peak at logit 22962. A 4090's Vulkan run at
+    /// <c>aa0e60aba</c> held <see cref="Tolerance"/> on every prefill logit and first crossed it at that logit, with 1.005e-3.</summary>
+    private const float VulkanRealDimensionDecodeTolerance = 3e-3f;
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), "hartsy-ernie5-gpu-" + Guid.NewGuid().ToString("N"));
+
+    private readonly Xunit.Abstractions.ITestOutputHelper _output;
+
+    public Ernie5ModelGpuParityTests(Xunit.Abstractions.ITestOutputHelper output) => _output = output;
 
     public void Dispose()
     {
@@ -62,7 +75,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     // F16 GEMM off, the Vulkan counterpart of HighPrecisionGemm above: it rounds GEMM inputs to F16, which is the ~1e-3 this compares.
     [ErnieVulkanFact]
     public void Vulkan_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new VulkanBackend { EnableF16Gemm = false }, "Vulkan", resident: false,
-        Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides);
+        Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides, VulkanRealDimensionDecodeTolerance);
 
     // The engine's Text service end to end on the device: the slot's backend is the requested GPU (resident layers), and a request generates on the
     // pipeline and, with continuous batching on, on the scheduler under the device gate. The tokens must match the CPU run of the same request.
@@ -155,14 +168,16 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
 
     // Compares the device's logits with the CPU's for the same checkpoint, weights and tokens.
     private void ParityOn(Func<IBackend> open, string device, bool resident, Ernie5SyntheticCheckpoint.Storage storage = Ernie5SyntheticCheckpoint.Storage.F32,
-        IReadOnlyDictionary<string, string>? overrides = null)
+        IReadOnlyDictionary<string, string>? overrides = null, float decodeTolerance = Tolerance)
     {
         string dir = Path.Combine(_root, Guid.NewGuid().ToString("N"));
         Ernie5SyntheticCheckpoint.Write(dir, storage: storage, configOverrides: overrides);
         using CpuBackend cpu = new();
         float[] want = Logits(dir, cpu, resident);
         using IBackend gpu = open();
-        AssertClose(want, Logits(dir, gpu, resident), device);
+        // One row of logits per prompt token, then the decode step's row.
+        int decodeStart = want.Length / (Tokens.Length + 1) * Tokens.Length;
+        _output.WriteLine(AssertClose(want, Logits(dir, gpu, resident), device, decodeStart, decodeTolerance));
     }
 
     private string WriteCheckpoint(Ernie5SyntheticCheckpoint.Storage storage)
@@ -185,16 +200,32 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
         return [.. prefill, .. decode];
     }
 
-    // Tolerance for both the F32 and the FP8 checkpoints: each side runs the same weights, so only accumulation order differs.
-    internal static void AssertClose(float[] want, float[] got, string device)
+    // Each side runs the same weights, so the sides differ by rounding. A logit before decodeStart is bounded by Tolerance, one from
+    // there on by decodeTolerance. The returned summary, also the failure message, covers every logit, not only the first one past its bound.
+    internal static string AssertClose(float[] want, float[] got, string device, int decodeStart = int.MaxValue,
+        float decodeTolerance = Tolerance)
     {
         Assert.Equal(want.Length, got.Length);
+        int split = Math.Min(decodeStart, want.Length), over = 0, first = -1, prefillAt = 0, decodeAt = split;
+        float prefillWorst = 0f, decodeWorst = 0f;
         for (int i = 0; i < want.Length; i++)
         {
             Assert.True(float.IsFinite(got[i]), $"{device} logit {i} is {got[i]}");
-            float tol = 1e-3f * MathF.Max(1f, MathF.Abs(want[i]));
-            Assert.True(MathF.Abs(want[i] - got[i]) <= tol, $"{device} logit {i}: cpu {want[i]}, device {got[i]}");
+            float difference = MathF.Abs(want[i] - got[i]) / MathF.Max(1f, MathF.Abs(want[i]));
+            if (i < split && difference > prefillWorst) (prefillWorst, prefillAt) = (difference, i);
+            if (i >= split && difference > decodeWorst) (decodeWorst, decodeAt) = (difference, i);
+            // Negated, so a NaN from the CPU side counts as past the bound.
+            if (!(difference <= (i < split ? Tolerance : decodeTolerance)))
+            {
+                over++;
+                if (first < 0) first = i;
+            }
         }
+        string summary = $"{device}: largest relative difference {prefillWorst:G4} at logit {prefillAt} (bound {Tolerance:G2})";
+        if (split < want.Length) summary += $"; decode step {decodeWorst:G4} at logit {decodeAt} (bound {decodeTolerance:G2})";
+        if (over > 0) summary += $"; {over} of {want.Length} past the bound, first logit {first}: cpu {want[first]}, device {got[first]}";
+        Assert.True(over == 0, summary);
+        return summary;
     }
 
     // The PTX beside the test assembly, else the repository's Cuda Ptx folder.
