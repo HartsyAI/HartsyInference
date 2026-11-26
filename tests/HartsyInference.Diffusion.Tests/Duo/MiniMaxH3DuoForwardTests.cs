@@ -19,7 +19,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void CausalReferenceRowsDoNotSeeNoisyRows()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         float[] video = Values(1, VideoRowCount * VideoIn);
         float[] perturbed = (float[])video.Clone();
@@ -42,7 +42,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void BidirectionalReferenceRowsSeeNoisyRows()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         float[] video = Values(1, VideoRowCount * VideoIn);
         float[] perturbed = (float[])video.Clone();
@@ -64,7 +64,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void RoleEmbeddingsAreRefused()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
@@ -78,7 +78,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void MissingAudioRowsAreRefusedWhenTheLayoutHasAudio()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
@@ -93,7 +93,7 @@ public sealed class MiniMaxH3DuoForwardTests
         // A clock near 1e6 (about 11 hours of 25 ms ticks) must not lose the RoPE angle to double-to-F32 rounding
         // or overflow the path: the output stays finite, and the reference rows still do not see the noisy row.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         double[] positions = layout.Positions;
         for (int r = 0; r < layout.Length; r++)
@@ -118,7 +118,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void AudioHeadReturnsOneRowPerAudioRowAtItsPatchWidth()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
@@ -141,7 +141,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void TimeIdBeyondTheGivenTimestepsIsRefused()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
@@ -156,12 +156,12 @@ public sealed class MiniMaxH3DuoForwardTests
     public void ALayoutWithTextRowsNeedsTextStates_InBothForwards()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor empty = new(new TensorShape(0, TextDim), DType.F32);
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
         using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
-        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 4);
+        DuoStreamCache cache = new DuoStreamCache(TestBackends.Cpu, blocks: 1, width: Inner, capacityRows: 4);
 
         ArgumentException full = Assert.Throws<ArgumentException>(() => transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal,
             [], empty, video, audio, Times()));
@@ -176,7 +176,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void NoTimestepIsRefusedByTheNameOfTheCallersParameter()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
@@ -191,7 +191,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void RefinerGroupBeyondTheTextRowsIsRefused()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         using Tensor text = MakeTensor(new TensorShape(TextRowCount, TextDim), Values(2, TextRowCount * TextDim));
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
@@ -207,7 +207,7 @@ public sealed class MiniMaxH3DuoForwardTests
     {
         // The dense route (one [S, S] bias) and the tiled route (a [tile, S] bias per query tile) must agree on the same layout.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         float[] video = Values(1, VideoRowCount * VideoIn);
 
@@ -222,7 +222,7 @@ public sealed class MiniMaxH3DuoForwardTests
     {
         // 40 does not divide the 128-row layout, so the last tile is 8 rows; the bidirectional mask has no zero tiles.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         float[] video = Values(1, VideoRowCount * VideoIn);
 
@@ -272,7 +272,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void ChunkRowsOverrideMustBePositive()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoLayout layout = DuoLayoutBuilder.Build([OneBlock()], DuoRopePolicy.Old);
         Assert.Throws<ArgumentOutOfRangeException>(() => Run(transformer, backend, layout, DuoAttentionMode.Causal, Values(1, VideoRowCount * VideoIn), chunkRows: 0));
     }
@@ -283,7 +283,7 @@ public sealed class MiniMaxH3DuoForwardTests
         // The full layout is shared text, reference video, then noisy video. The cached run commits the first two groups, then
         // denoises the noisy rows against that history. Causal masks make the noisy rows the same in both, so they must agree.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         float[] times = Times();
         IReadOnlyList<DuoGroup> refiner = [new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 0, 2)];
         float[] videoAll = Values(5, 6 * VideoIn);
@@ -302,7 +302,7 @@ public sealed class MiniMaxH3DuoForwardTests
         DuoLayout prefix = CachedLayout(
             [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 2, 4)],
             [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
-        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 8);
+        DuoStreamCache cache = new DuoStreamCache(TestBackends.Cpu, blocks: 1, width: Inner, capacityRows: 8);
         using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
         (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
         prefixOut.Dispose();
@@ -331,7 +331,7 @@ public sealed class MiniMaxH3DuoForwardTests
         // Text reads the history and itself, the noisy rows read both and themselves, padding reads only padding: three calls in the cached
         // forward, one biased call in the full one.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         float[] times = Times();
         IReadOnlyList<DuoGroup> refiner =
             [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 2, 4)];
@@ -348,7 +348,7 @@ public sealed class MiniMaxH3DuoForwardTests
         float[] expected = fullVideo.AsSpan<float>().ToArray();
         fullVideo.Dispose();
 
-        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 4);
+        DuoStreamCache cache = new DuoStreamCache(TestBackends.Cpu, blocks: 1, width: Inner, capacityRows: 4);
         DuoLayout prefix = CachedLayout([shared, reference], [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
         using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
         (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
@@ -374,7 +374,7 @@ public sealed class MiniMaxH3DuoForwardTests
     public void CommitBeyondTheCacheCapacityLeavesTheCacheUnchanged()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         float[] times = Times();
         IReadOnlyList<DuoGroup> refiner = [new DuoGroup(0, 0, DuoGroupKind.Text, DuoModality.None, 0, 2)];
         float[] videoAll = Values(5, 6 * VideoIn);
@@ -382,7 +382,7 @@ public sealed class MiniMaxH3DuoForwardTests
         DuoLayout prefix = CachedLayout(
             [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 2, 4)],
             [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
-        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 5);
+        DuoStreamCache cache = new DuoStreamCache(TestBackends.Cpu, blocks: 1, width: Inner, capacityRows: 5);
         using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
         (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
         prefixOut.Dispose();
@@ -402,7 +402,7 @@ public sealed class MiniMaxH3DuoForwardTests
     [Fact]
     public void StreamCacheCommitIsAllOrNothing()
     {
-        CpuBackend backend = new();
+        IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: 2, width: 4, capacityRows: 3);
         using Tensor keys0 = HeadMajor(2), keys1 = HeadMajor(2), values0 = HeadMajor(2), values1 = HeadMajor(2);
         IReadOnlyList<Tensor> keys = [keys0, keys1], values = [values0, values1];
@@ -435,8 +435,8 @@ public sealed class MiniMaxH3DuoForwardTests
     public void CachedForwardRefusesBidirectionalMode()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
-        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 8);
+        IBackend backend = TestBackends.Cpu;
+        DuoStreamCache cache = new DuoStreamCache(TestBackends.Cpu, blocks: 1, width: Inner, capacityRows: 8);
         DuoLayout current = CachedLayout(
             [new DuoGroup(0, 0, DuoGroupKind.Noisy, DuoModality.Video, 0, 4)],
             [0, 0, 0, 0], [1, 1, 1, 1], [0, 1, 2, 3], [], [], [0], 4);

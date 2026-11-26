@@ -51,6 +51,9 @@ public sealed class DuoStreamCache : IDisposable
     /// <summary>The groups that own the committed rows, in cache coordinates.</summary>
     public IReadOnlyList<DuoGroup> Groups => _groups;
 
+    /// <summary>The backend that owns the segments. A forward over this cache must run on this same instance.</summary>
+    public IBackend Backend => _backend;
+
     /// <summary>The segments of every block; a forward reads them with <see cref="KvSegmentStore.Join"/>.</summary>
     internal KvSegmentStore Store => _store;
 
@@ -104,7 +107,17 @@ public sealed class DuoStreamCache : IDisposable
             {
                 for (int b = 0; b < Blocks; b++)
                 {
-                    slices.Add((SliceRows(keys[b], g.Start, g.End - g.Start), SliceRows(values[b], g.Start, g.End - g.Start)));
+                    Tensor sliceKeys = SliceRows(keys[b], g.Start, g.End - g.Start);
+                    try
+                    {
+                        slices.Add((sliceKeys, SliceRows(values[b], g.Start, g.End - g.Start)));
+                    }
+                    catch
+                    {
+                        // The value slice failed, so the key slice is not in the list the catch below frees: free it here.
+                        sliceKeys.Dispose();
+                        throw;
+                    }
                 }
             }
         }
@@ -162,8 +175,9 @@ public sealed class DuoStreamCache : IDisposable
         _length = cursor;
     }
 
-    /// <summary>Drops the oldest committed clean block: its segment in every layer, and its group. Reference and shared groups are never
-    /// dropped. Returns the rows dropped, or 0 when no clean block is held.</summary>
+    /// <summary>Drops the oldest committed clean block: every clean group of it (video and audio), and its segment in every layer. Reference and
+    /// shared groups are never dropped. Returns the rows dropped. Throws, and drops nothing, when no clean block is held, when the block holds
+    /// no rows, or when the segments and the groups disagree.</summary>
     public int EvictOldestClean()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -185,6 +199,15 @@ public sealed class DuoStreamCache : IDisposable
             throw new InvalidOperationException($"The oldest clean block (block {block}) holds no rows, so evicting it would free nothing.");
         }
 
+        // Eviction removes segment `first` for group `first`, so every layer must hold exactly one segment per group.
+        for (int b = 0; b < Blocks; b++)
+        {
+            if (_store.Count(b) != _groups.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Layer {b} holds {_store.Count(b)} segments for {_groups.Count} groups; eviction assumes one segment per group.");
+            }
+        }
         for (int b = 0; b < Blocks; b++)
         {
             _store.RemoveRange(b, first, count);

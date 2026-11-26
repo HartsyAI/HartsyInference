@@ -24,7 +24,7 @@ public sealed class DuoChunkSessionTests
     public void CachedBlocksMatchTheFullForwardOverTheSameHistory()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = Sample();
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, Cache());
         float[] reference = Values(30, RefRows * VideoIn);
@@ -49,7 +49,7 @@ public sealed class DuoChunkSessionTests
     {
         // The same check against a wrong history: block 0 shifted by 0.5 in the full forward. The cached block 1 must NOT match it.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = Sample();
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, Cache());
         float[] reference = Values(30, RefRows * VideoIn);
@@ -70,7 +70,7 @@ public sealed class DuoChunkSessionTests
     {
         // Block 1 against a forward with no committed block 0 at all (its clean media removed, text kept). It must NOT agree.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = Sample();
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, Cache());
         float[] reference = Values(30, RefRows * VideoIn);
@@ -91,7 +91,7 @@ public sealed class DuoChunkSessionTests
     public void BlocksMustComeInOrderFromTheFirst()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, Cache());
 
         Assert.Throws<InvalidOperationException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn), 2, 1.0));
@@ -108,7 +108,7 @@ public sealed class DuoChunkSessionTests
     public void WrongLengthsAreRefusedBeforeAnythingIsComputed()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, Cache());
 
         Assert.Throws<ArgumentException>(() => session.Prefill(Values(2, Shared * TextDim + 1), Values(30, RefRows * VideoIn)));
@@ -120,6 +120,17 @@ public sealed class DuoChunkSessionTests
         Assert.Throws<ArgumentException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows + 1), Values(41, AudioRows * AudioIn), 2, 1.0));
         Assert.Throws<ArgumentException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn - 1), 2, 1.0));
         Assert.Equal(0, session.NextBlock);
+    }
+
+    [Fact]
+    public void ACacheOnAnotherBackendIsRefusedByTheForward()
+    {
+        // The cache's segments live on TestBackends.Cpu; a forward on a different CpuBackend instance is refused, not run.
+        using MiniMaxH3Transformer transformer = Transformer();
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
+        DuoChunkSession session = new(transformer, new CpuBackend(), ThreeBlockSample(), DuoRopePolicy.Old, cache);
+        Assert.Throws<ArgumentException>(() => session.Prefill(Shared0(), Values(30, RefRows * VideoIn)));
+        Assert.Equal(0, cache.Length);
     }
 
     private static DuoSampleInput Sample() => new()
@@ -137,7 +148,7 @@ public sealed class DuoChunkSessionTests
         NoisyBlocks = [0],
     };
 
-    private static DuoStreamCache Cache() => new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: 64);
+    private static DuoStreamCache Cache() => new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
 
     /// <summary>Three blocks, so a rollout can outgrow a cache that holds the prefix and one block.</summary>
     private static DuoSampleInput ThreeBlockSample() => Sample() with
@@ -157,10 +168,10 @@ public sealed class DuoChunkSessionTests
     {
         // No eviction here: the cache holds the whole history, so each block is compared with a dense forward over all of it.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = ThreeBlockSample();
         float[] reference = Values(30, RefRows * VideoIn);
-        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: 64);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), reference);
 
@@ -189,10 +200,10 @@ public sealed class DuoChunkSessionTests
     public void LongRolloutSlidesTheWindowAndEachBlockMatchesTheWindowedForward()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = ThreeBlockSample();
         float[] reference = Values(30, RefRows * VideoIn);
-        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: OneBlockCapacity);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: OneBlockCapacity);
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), reference);
         Assert.Equal(Shared + RefRows, cache.Length);
@@ -219,11 +230,11 @@ public sealed class DuoChunkSessionTests
     {
         // The prefix, one block, and 8 spare rows: the second block forces eviction, and a video-only eviction would leave 6 audio rows.
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         DuoSampleInput sample = ThreeBlockSample();
         float[] reference = Values(30, RefRows * VideoIn);
         const int capacity = OneBlockCapacity + 8;
-        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: capacity);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: capacity);
         DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), reference);
         for (int b = 0; b < 3; b++)
@@ -238,7 +249,7 @@ public sealed class DuoChunkSessionTests
     [Fact]
     public void EvictingWithNoCleanBlockIsRefused()
     {
-        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: 64);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: 64);
         Assert.Throws<InvalidOperationException>(() => cache.EvictOldestClean());
     }
 
@@ -246,9 +257,9 @@ public sealed class DuoChunkSessionTests
     public void BlockThatCannotFitIsRefusedBeforeAnyEviction()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        using IBackend backend = new CpuBackend();
+        IBackend backend = TestBackends.Cpu;
         // One row short: the prefix and a clean block do not fit, and no clean block is held to drop.
-        DuoStreamCache cache = new(new CpuBackend(), blocks: Layers, width: Inner, capacityRows: OneBlockCapacity - 1);
+        DuoStreamCache cache = new(TestBackends.Cpu, blocks: Layers, width: Inner, capacityRows: OneBlockCapacity - 1);
         DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, cache);
         session.Prefill(Shared0(), Values(30, RefRows * VideoIn));
 
