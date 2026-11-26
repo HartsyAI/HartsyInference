@@ -11,9 +11,10 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>MovieRoll's streaming forwards on a device: the tiny DiT's <c>StreamEncode</c> and <c>StreamDenoise</c> on CUDA against the CPU run, in two
-/// GEMM lanes. Each forward must read nothing back from the device before its result is compared (the count is asserted to be zero). Every tensor is
-/// compared and reported (<c>MAX_ERR</c> lines), not just the first to fail.
+/// <summary>MovieRoll's streaming forwards on a device: the tiny DiT's <c>StreamEncode</c>, <c>StreamDenoise</c> and <c>StreamRecompute</c> (one chunk and
+/// five chunks) on CUDA against the CPU run, in two GEMM lanes. Each forward must read nothing back from the device before its result is compared
+/// (the count is asserted to be zero). Every tensor is compared and reported (<c>MAX_ERR</c> lines), not just the first to fail.
+/// This does not run a full <c>MovieRollSampler</c> pass, so it shows zero reads for those three forwards only.
 /// Runs only through the GPU session (Category=GpuIntegration); it is skipped where no CUDA device is present.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
@@ -29,7 +30,7 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
     private const float ExactTolerance = 5e-4f;
 
     /// <summary>Bound for the default lane (TF32 GEMMs). Provisional: measured at d0452dff4 as 1.068e-3 (block 1 keys) and 6.1e-4 (velocity). Block 2's
-    /// TF32 encode error has not been measured yet, so this is set from the two numbers that exist and must be rechecked against the full run.</summary>
+    /// TF32 encode error and every recompute error are not measured yet, so this is set from the two numbers that exist and must be rechecked against the full run.</summary>
     private const float Tf32Tolerance = 2e-3f;
 
     [CudaDeviceFact]
@@ -149,8 +150,9 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
     public void Cuda_StreamRecomputeOneChunk_Tf32Gemms_ReadsNothingBackAndMatchesTheCpuCache() =>
         RunRecompute(exactGemm: false, [5], Tf32Tolerance);
 
-    /// <summary>Prints the device-to-host read count of a forward and the attention path it took, so a lane's numbers can be read with the switches
-    /// that produced them. <c>CudnnSdpaEngaged</c> is whether the cuDNN scaled-dot-product path ran at all on this backend.</summary>
+    /// <summary>Prints the device-to-host read count of a forward with two switches: <c>HighPrecisionGemm</c> (the lane's GEMM setting) and
+    /// <c>CudnnSdpaEngaged</c> (whether the cuDNN scaled-dot-product path has run on this backend, which is true once any run has used it). It does
+    /// not print the TF32 eligibility or the SDPA no-TF32 flag, so a lane's TF32 state is not fully recorded by this line.</summary>
     private void ReportRun(IBackend backend, string run, long reads)
     {
         output.WriteLine($"D2H_SYNCS {run}: {reads}");
@@ -186,7 +188,8 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
             }
             if (d > max) { max = d; at = i; }
         }
-        output.WriteLine($"MAX_ERR {label}: {max:E3} at flat index {at} of {e.Length} (cpu {e[at]:G9}, device {a[at]:G9})");
+        string values = e.Length > 0 ? $"(cpu {e[at]:G9}, device {a[at]:G9})" : "(empty tensor)";
+        output.WriteLine($"MAX_ERR {label}: {max:E3} at flat index {at} of {e.Length} {values}");
         // NaN never compares below a bound, so a NaN in either tensor fails here rather than passing as a zero error.
         if (!(max <= tolerance)) failures.Add($"{label} max abs error {max:E3} at index {at} exceeds {tolerance:E0} (NaN counts as a failure)");
     }
