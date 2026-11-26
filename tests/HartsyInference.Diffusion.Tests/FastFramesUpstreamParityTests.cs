@@ -105,6 +105,8 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         using CpuBackend backend = new();
         FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
         List<FastFramesFrame> first = pipeline.Rollout(prompt, noise, Frames).ToList();
+        // CPU is resident-only, so a clip that stayed resident leaves the generator marked resident for the next clip.
+        Assert.True(pipeline.GeneratorResident, "a resident clip must leave the generator marked resident");
         List<FastFramesFrame> second = pipeline.Rollout(prompt, noise, Frames).ToList();
 
         Assert.Equal(Frames, second.Count);
@@ -134,6 +136,8 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
 
         Assert.Equal(model.Transformer.BlockCount, firstStreamed);
         Assert.Equal(model.Transformer.BlockCount, pipeline.LastStreamedBlocks);
+        // A streamed clip releases the generator, so it is not marked resident for the next clip.
+        Assert.False(pipeline.GeneratorResident, "a streamed clip must release the generator");
         for (int f = 0; f < Frames; f++)
             AssertClose(first[f].Latent, second[f].Latent, $"second clip, latent frame {f}", 1e-5);
     }

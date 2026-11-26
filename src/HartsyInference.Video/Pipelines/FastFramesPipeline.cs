@@ -261,8 +261,9 @@ public sealed class FastFramesPipeline
     }
 
     /// <summary>After a clip. A streamed clip frees the generator's device weights, the resident prefix included, so the next clip and the
-    /// decoder get the VRAM back and the next placement sizes afresh. A clip that stayed resident keeps them, and the pin says so, which
-    /// lets the next clip skip the admission check the weights already passed. Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
+    /// decoder get the VRAM back. The pin keeps the count it was sized to, so the next placement uploads that prefix only as far as it
+    /// fits. A clip that stayed resident keeps the weights, and the pin says so, which lets the next clip skip the admission check the
+    /// weights already passed. Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
     private void ReleaseOrKeepGenerator(bool streamed)
     {
         if (streamed)
@@ -285,6 +286,9 @@ public sealed class FastFramesPipeline
 
     /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
     public int LastStreamedBlocks { get; private set; }
+
+    /// <summary>True while the generator's weights stay on the device from the last clip, the resident path that <c>ReleaseOrKeepGenerator</c> keeps.</summary>
+    public bool GeneratorResident => _generatorPin.Resident;
 
     /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
     /// they are uploaded before the placement, so the planner counts them as used.</summary>
