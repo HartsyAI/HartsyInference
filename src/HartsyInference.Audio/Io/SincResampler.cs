@@ -21,6 +21,10 @@ public static class SincResampler
     public static float[] ResampleSoxrHqStandIn(ReadOnlySpan<float> input, int inRate, int outRate) =>
         inRate == outRate ? input.ToArray() : Resample(input, inRate, outRate, SoxrHqFilterWidth, SoxrHqRolloff);
 
+    /// <summary>Whether <see cref="ResampleSoxrHqStandIn"/> accepts the rate pair: a pair whose reduced ratio needs too large a kernel table is refused.</summary>
+    public static bool SupportsSoxrHqStandIn(int inRate, int outRate) =>
+        inRate > 0 && outRate > 0 && (inRate == outRate || KernelShape(inRate, outRate, SoxrHqFilterWidth, SoxrHqRolloff).Entries <= MaxKernelEntries);
+
     /// <summary>The torchaudio defaults: 6 zero crossings, 0.99 roll-off.</summary>
     public const int DefaultLowpassFilterWidth = 6;
     public const double DefaultRolloff = 0.99;
@@ -37,14 +41,10 @@ public static class SincResampler
         if (inRate == outRate) return input.ToArray();
         if (input.Length == 0) return [];
 
-        int g = Gcd(inRate, outRate);
-        int orig = inRate / g, @new = outRate / g;
-        double baseFreq = Math.Min(orig, @new) * rolloff;
-        int width = (int)Math.Ceiling(lowpassFilterWidth * (double)orig / baseFreq);
-        int kernelLen = 2 * width + orig;
+        (int orig, int @new, double baseFreq, int width, int kernelLen, long kernelEntries) =
+            KernelShape(inRate, outRate, lowpassFilterWidth, rolloff);
 
         // kernels[p, k] for output phase p and tap k: t = (-p / new + (k - width) / orig) * baseFreq.
-        long kernelEntries = (long)@new * kernelLen;
         if (kernelEntries > MaxKernelEntries)
             throw new ArgumentException($"Resampling {inRate} -> {outRate} Hz needs a {kernelEntries:N0}-entry kernel table (limit {MaxKernelEntries:N0}); use a rate pair with a smaller reduced ratio.", nameof(outRate));
         float[] kernels = new float[kernelEntries];
@@ -89,6 +89,17 @@ public static class SincResampler
             }
         });
         return result;
+    }
+
+    private static (int Orig, int New, double BaseFreq, int Width, int KernelLen, long Entries) KernelShape(int inRate, int outRate,
+        int lowpassFilterWidth, double rolloff)
+    {
+        int g = Gcd(inRate, outRate);
+        int orig = inRate / g, @new = outRate / g;
+        double baseFreq = Math.Min(orig, @new) * rolloff;
+        int width = (int)Math.Ceiling(lowpassFilterWidth * (double)orig / baseFreq);
+        int kernelLen = 2 * width + orig;
+        return (orig, @new, baseFreq, width, kernelLen, (long)@new * kernelLen);
     }
 
     private static int Gcd(int a, int b)

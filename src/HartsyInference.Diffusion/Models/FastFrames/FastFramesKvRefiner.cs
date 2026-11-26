@@ -54,8 +54,8 @@ public sealed class FastFramesKvRefiner : IDisposable
     /// layer count from the stacked head weights, <c>dim</c>-dependent head count from <paramref name="heads"/>.</summary>
     public static FastFramesKvRefinerConfig DetectConfig(IReadOnlyDictionary<string, Tensor> weights, int heads)
     {
-        Tensor stemIn = weights["stem_in.weight"];
-        Tensor dK = weights["heads_grouped.gemms.0.dK_w"];
+        Tensor stemIn = CheckpointTensors.Require(weights, "FastFrames refiner", "stem_in.weight");
+        Tensor dK = CheckpointTensors.Require(weights, "FastFrames refiner", "heads_grouped.gemms.0.dK_w");
         int stemBlocks = 0;
         while (weights.ContainsKey($"stem_blocks.{stemBlocks}.qkv.weight"))
             stemBlocks++;
