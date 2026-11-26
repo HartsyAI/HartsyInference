@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Tests.Parity;
+using HartsyInference.LLM.Tests.Quant;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Quant;
 using Xunit;
@@ -41,7 +42,8 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     public void Cuda_PackedExperts_MatchTheF32Dequantization_ExactGemms()
     {
-        using HartsyInference.Cuda.CudaBackend backend = new(0, PtxDir());
+        using HartsyInference.Cuda.CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        PackedMxfp4CudaTests.RequireDeviceKernel(backend);
         using ExactGemmScope exact = new(backend);
         Compare(backend, ExactTolerance);
     }
@@ -50,15 +52,15 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     public void Cuda_PackedExperts_MatchTheF32Dequantization()
     {
-        using HartsyInference.Cuda.CudaBackend backend = new(0, PtxDir());
+        using HartsyInference.Cuda.CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
+        PackedMxfp4CudaTests.RequireDeviceKernel(backend);
         Compare(backend, Tf32Tolerance);
     }
 
-    [Fact]
+    [VulkanFact]
     [Trait("Category", "GpuIntegration")]
     public void Vulkan_PackedExperts_MatchTheF32Dequantization()
     {
-        if (!HartsyInference.Vulkan.VulkanContext.IsAvailable()) return;
         using HartsyInference.Vulkan.VulkanBackend backend = new();
         Compare(backend, VulkanTolerance);
     }
@@ -124,16 +126,6 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     }
 
     // Random E2M1 nibbles and E8M0 scales for a [rows, cols] projection; returns the packed view and its exact F32 values.
-    private static string PtxDir()
-    {
-        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "HartsyInference.Cuda", "Ptx");
-            if (Directory.Exists(candidate)) return candidate;
-        }
-        return Path.Combine(AppContext.BaseDirectory, "Ptx");
-    }
-
     private static PackedMxfp4Projection Pack(Random rng, int rows, int cols, out float[] values)
     {
         byte[] nibbles = new byte[rows * cols / 2];
