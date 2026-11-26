@@ -42,6 +42,10 @@ public sealed unsafe partial class MiniMaxH3Transformer
             throw new ArgumentException(
                 $"The cache holds {cache.Blocks} blocks of width {cache.Width}; this model needs {_config.NumLayers} of width {inner}.", nameof(cache));
         }
+        if (!ReferenceEquals(cache.Backend, backend))
+        {
+            throw new ArgumentException("The cache's segments live on its own backend; the forward must run on that same instance.", nameof(cache));
+        }
         int seq = layout.Length, past = cache.Length;
         if (seq > MaxDuoDenseBiasRows || past + seq > MaxDuoDenseBiasRows)
         {

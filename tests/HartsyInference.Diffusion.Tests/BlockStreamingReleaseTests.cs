@@ -1,6 +1,7 @@
 using System.Reflection;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -57,9 +58,38 @@ public sealed class BlockStreamingReleaseTests : IDisposable
         Assert.True(restored > freed, "the shared adapter operands must be preloaded again after the block free");
     }
 
-    private BlockStreamingOptions Options(IBackend backend, LongCatTransformer dit, ResidentPrefixPin pin, long tokenLoad) => new()
+    /// <summary>A pin marked resident before any sizing (PinnedBlocks -1), as a fully resident clip leaves it, holds every block. The next
+    /// clip under the automatic policy must release all of them; releasing zero blocks left them resident.</summary>
+    [Fact]
+    public void AnUnsizedResidentPinIsReleasedWholeBeforeTheNextAutoClip()
     {
-        Backend = backend, Denoiser = dit, ModelName = "release-test", HeadroomBytes = 0, TokenLoad = tokenLoad, Pin = pin,
+        using CpuBackend cpu = new();
+        using LongCatTransformer dit = GatedTransformer(cpu);
+        IBackend backend = RecordingBackend.Create(cpu, new NoStreamingCache(), out RecordingBackend recorder);
+        Tensor firstBlockWeight = dit.GetBlock(0).EnumerateWeights().First();
+
+        // A fully resident clip under ForceOff, then the pipeline marks the pin resident.
+        ResidentPrefixPin pin = new();
+        using (BlockStreamingScope.Open(Options(backend, dit, pin, tokenLoad: 100, LowVramMode.ForceOff)))
+        {
+        }
+        pin.Resident = true;
+        Assert.Equal(-1, pin.PinnedBlocks);
+        recorder.Calls.Clear();
+
+        // The next clip runs under Auto: the unsized pin is released.
+        using (BlockStreamingScope.Open(Options(backend, dit, pin, tokenLoad: 100, LowVramMode.Auto)))
+        {
+        }
+
+        bool freedBlockZero = recorder.Calls.Any(c => c.Kind == "FreeWeights" && c.Tensors.Contains(firstBlockWeight));
+        Assert.True(freedBlockZero, "an unsized resident pin must free every block, block 0 included");
+    }
+
+    private BlockStreamingOptions Options(IBackend backend, LongCatTransformer dit, ResidentPrefixPin pin, long tokenLoad,
+        LowVramMode mode = LowVramMode.Auto) => new()
+    {
+        Backend = backend, Denoiser = dit, ModelName = "release-test", HeadroomBytes = 0, TokenLoad = tokenLoad, Pin = pin, Mode = mode,
     };
 
     private LongCatTransformer GatedTransformer(CpuBackend cpu)
