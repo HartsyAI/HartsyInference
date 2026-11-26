@@ -54,6 +54,18 @@ single Python layer-diff pass on Wan 2.2 (the most complete, and now producing r
 weights are staged, no download needed). Note the `TextEmbed` rank-3 fix (2026-07-01) also covers any
 Wan-family text path fed a `CfgHelper.SliceBatchElement` (rank-3) encoder — Lance, Matrix-Game, WanS2V/Vace.
 
+### LongCat device evidence (tiny-config and synthetic, CUDA)
+
+| Test class | Card | Commit | Result | Time per class |
+|---|---|---|---|---|
+| `LongCatCudaParityTests` (needs `HARTSY_LONGCAT_CUDA_PARITY=1`) | RTX 3060, GPU server | `8326f0856` | 4/4 passed, 0 skipped | 11–14 s |
+| `LongCatDeviceResidencyGpuTests` | RTX 3060, GPU server | `8326f0856` | 2/2 passed, 0 skipped | 11–14 s |
+| `LongCatVideoDeviceLoopTests` | RTX 3060, GPU server | `8326f0856` | 5/5 passed, 0 skipped | 11–14 s |
+| `LongCatAvatarDeviceDenoiseTests` | RTX 3060, GPU server | `8326f0856` | 4/4 passed, 0 skipped | 11–14 s |
+
+Evidence is on the server at `/home/hartsy/evidence/longcat-8326f0856/`. These are tiny configs and synthetic weights; they are not
+real-weight runs. The real-weight A/B for the tile knob runs on the RTX 4090 and is not recorded here.
+
 ## Remaining work
 
 Distilled from the retired PHASE_9_VIDEO / VIDEO_CLI_CATALOG_HANDOFF / LTX_PARITY_REPORT plans.
