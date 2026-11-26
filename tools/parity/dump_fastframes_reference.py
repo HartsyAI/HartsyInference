@@ -11,7 +11,9 @@ venv), with the upstream code at the pinned commit mounted or cloned:
 
     # released weights (an FP32 CPU run of S is slow; pass --frames to keep it short):
     python dump_fastframes_reference.py checkpoint --upstream <dir> --model ff-s --checkpoints <dir-with-weights> \\
-        --prompt-embeds <safetensors holding "prompt_embeds" [L, 4096]> --out <out-dir> --frames 4 --precision fp32
+        --prompt-embeds <safetensors holding "prompt_embeds" [L, 4096] | random> --out <out-dir> --frames 4 --precision fp32
+    # "random" (seeded) replaces the umT5 output with fixed embeddings; both sides then see the same input, which is all a numeric
+    # parity check needs. The C# harness reads io.safetensors from --out (FF_REAL_PARITY_DIR).
 
 Upstream hard-codes BF16 in several places (the cuDNN attention casts q/k/v to BF16, the KV cache defaults to BF16, the refiner
 input is cast to BF16). ``--precision fp32`` replaces ``torch.bfloat16`` with ``torch.float32`` before the upstream modules are
@@ -173,7 +175,15 @@ def checkpoint(args):
     frames = args.frames
     config = spec.config.__class__(**{**spec.config.__dict__, "num_frames": frames, "num_pixel_frames": 4 * frames - 3,
                                       "decoder_dtype": dtype, "autocast": False, "fast_ops": False, "allow_tf32": False})
-    prompt_embeds = load_file(args.prompt_embeds)["prompt_embeds"].to(dtype)
+    if args.prompt_embeds == "random":
+        # Seeded stand-in for the umT5 output: parity needs the same embeddings on both sides, not a real prompt. Rows past the
+        # first 64 are zero, as a short prompt's padding is.
+        rng = torch.Generator().manual_seed(args.seed + 1)
+        prompt_embeds = torch.zeros(wan.text_len, 4096, dtype=torch.float32)
+        prompt_embeds[:64] = torch.randn(64, 4096, generator=rng)
+        prompt_embeds = prompt_embeds.to(dtype)
+    else:
+        prompt_embeds = load_file(args.prompt_embeds)["prompt_embeds"].to(dtype)
     if prompt_embeds.shape[0] < wan.text_len:
         # The C# side takes the umT5 output already zero-padded to the generator's text length, as upstream does.
         pad = prompt_embeds.new_zeros(wan.text_len - prompt_embeds.shape[0], prompt_embeds.shape[1])
