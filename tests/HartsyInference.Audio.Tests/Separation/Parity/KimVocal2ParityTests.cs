@@ -33,8 +33,28 @@ public sealed class KimVocal2RealFactAttribute : FactAttribute
     }
 }
 
-/// <summary>Per-stage and end-to-end match of the C# separator against audio-separator 0.30.2 driving LongCat-Video <c>separate_vocals</c> on a saved clip.
-/// A stand-in reference is refused unless <c>HARTSY_KIM_VOCAL2_ALLOW_STANDIN=1</c>, and then covers the network and stem only.</summary>
+/// <summary>Skips unless <c>HARTSY_KIM_VOCAL2_REF</c> holds a reference whose 16 kHz output is soxr_hq: the dumper's (librosa), or a stand-in
+/// that records <c>vocals_16k_resampler</c>. Needs no weights.</summary>
+public sealed class KimVocal2SoxrFactAttribute : FactAttribute
+{
+    public KimVocal2SoxrFactAttribute()
+    {
+        string? reference = Environment.GetEnvironmentVariable(KimVocal2RealFactAttribute.RefVariable);
+        string meta = string.IsNullOrWhiteSpace(reference) ? "" : Path.Combine(reference, "meta.json");
+        if (!File.Exists(meta))
+        {
+            Skip = $"SKIPPED: {KimVocal2RealFactAttribute.RefVariable} is unset or holds no meta.json; the 16 kHz comparison did not happen.";
+        }
+        else if (!KimVocal2ParityTests.ResampledWithSoxr(File.ReadAllText(meta)))
+        {
+            Skip = "SKIPPED: this reference's 16 kHz output is not soxr_hq; the 16 kHz comparison did not happen.";
+        }
+    }
+}
+
+/// <summary>Match of the C# separator against audio-separator 0.30.2 driving LongCat-Video <c>separate_vocals</c> on a saved clip, in two parts:
+/// the network and 44.1 kHz stem (a stand-in reference is refused unless <c>HARTSY_KIM_VOCAL2_ALLOW_STANDIN=1</c>, and then says nothing about
+/// audio-separator), and separately the 16 kHz resampler, fed the reference's own stem so that it does not depend on the network or the backend.</summary>
 public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
 {
     private sealed class Recorder(IMdxSpectrogramModel inner) : IMdxSpectrogramModel
@@ -71,9 +91,7 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
 
         string backendName = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_BACKEND") ?? "cpu";
         using IBackend backend = BackendFactory.Create(backendName);
-        // Off: CUDA's default F32 GEMMs run at TF32 precision. On: full F32. Other backends ignore it.
-        backend.HighPrecisionGemm = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_EXACT_GEMM") == "1";
-        output.WriteLine($"backend: {backendName}, high-precision GEMM {backend.HighPrecisionGemm}");
+        output.WriteLine($"backend: {backendName}");
         Dictionary<string, Tensor> weights = KimVocal2OnnxConverter.Convert(onnx, out _);
         try
         {
@@ -90,7 +108,6 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
             long started = Environment.TickCount64;
             float[][] stem = separator.Separate(left, right,
                 progress: (done, total) => output.WriteLine($"chunk {done}/{total} at {(Environment.TickCount64 - started) / 1000.0:0.0}s"));
-            float[] vocals16 = separator.ToMono(stem, 16_000);
 
             double spec = Compare("chunk0 STFT input", reference, "chunk0_spek", recorder.FirstSpectrogram!);
             double pred = Compare("chunk0 network output", reference, "chunk0_pred", recorder.FirstPrediction!);
@@ -101,26 +118,37 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
             }
             double stem0 = Compare("stem normalized, left", reference, "stem_normalized", stem[0], row: 0);
             double stem1 = Compare("stem normalized, right", reference, "stem_normalized", stem[1], row: 1);
-            double mono = Compare("vocals 16 kHz mono (resampler stand-in)", reference, "vocals_16k", vocals16);
 
             Assert.True(spec < 1e-5, $"STFT relRMS {spec:E2}");
             Assert.True(worstStage < 1e-4, $"worst block relRMS {worstStage:E2}");
             Assert.True(pred < 1e-4, $"network output relRMS {pred:E2}");
             Assert.True(stem0 < 1e-3 && stem1 < 1e-3, $"stem relRMS {stem0:E2} / {stem1:E2}");
-            if (official)
-            {
-                // The polyphase resampler is about 3.4e-3 from soxr_hq, so this limit also catches a return to it.
-                Assert.True(mono < 1e-3, $"16 kHz vocals relRMS {mono:E2}");
-            }
-            else
-            {
-                output.WriteLine("stand-in reference: the 16 kHz figure is against scipy resample_poly and is not asserted");
-            }
         }
         finally
         {
             foreach (Tensor t in weights.Values) t.Dispose();
         }
+    }
+
+    [KimVocal2SoxrFact]
+    [Trait("Category", "Integration")]
+    public void SixteenKilohertzVocalsMatchSoxrHq()
+    {
+        string reference = Environment.GetEnvironmentVariable(KimVocal2RealFactAttribute.RefVariable)!;
+        (long[] shape, float[] data) = Npy.Read(Path.Combine(reference, "stem_normalized.npy"));
+        int n = (int)shape[^1];
+        float[][] stem = [data.AsSpan(0, n).ToArray(), data.AsSpan(n, n).ToArray()];
+        MdxSeparator separator = new(MdxSettings.KimVocal2, new NoModel());
+
+        double mono = Compare("vocals 16 kHz mono (C# soxr_hq stand-in)", reference, "vocals_16k", separator.ToMono(stem, 16_000));
+
+        // The engine polyphase resampler was 3.4e-3 from soxr_hq on the 8 s test mix, so this limit also catches a return to it.
+        Assert.True(mono < 1e-3, $"16 kHz vocals relRMS {mono:E2}");
+    }
+
+    private sealed class NoModel : IMdxSpectrogramModel
+    {
+        public void Run(float[] spectrogram, float[] prediction) => throw new NotSupportedException("the resampler comparison runs no network");
     }
 
     /// <summary>Only the real dumper records the replay check and the audio-separator version.</summary>
@@ -130,6 +158,13 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
         JsonElement root = document.RootElement;
         return root.TryGetProperty("official_matches_replay", out JsonElement replay) && replay.ValueKind == JsonValueKind.True
             && root.TryGetProperty("versions", out JsonElement versions) && versions.TryGetProperty("audio_separator", out _);
+    }
+
+    internal static bool ResampledWithSoxr(string meta)
+    {
+        using JsonDocument document = JsonDocument.Parse(meta);
+        return WrittenByTheRealDriver(meta)
+            || (document.RootElement.TryGetProperty("vocals_16k_resampler", out JsonElement resampler) && resampler.GetString() == "soxr_hq");
     }
 
     private double Compare(string label, string reference, string file, float[] actual, int? row = null)
