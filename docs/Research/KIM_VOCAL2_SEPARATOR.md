@@ -50,7 +50,7 @@ Ops the engine did not have: none. `IBackend.Stft` is radix-2 only (n_fft 7680 =
 `audio-separator`'s own `demix` and LongCat's `_demix_batched` do the same arithmetic; LongCat batches two chunks per model call, which changes nothing numerically. This port follows LongCat's function.
 The port runs one chunk per call.
 
-Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses the engine's `SincResampler.ResampleSoxrHqStandIn` (64-crossing windowed sinc, roll-off 0.955). Measured against librosa 0.11.0 / soxr 1.1.0: 2.7e-4 relRMS on the separated 16 kHz vocals and 5.8e-5 on a 24 kHz speech excerpt brought to 44.1 kHz; the engine's Kaiser polyphase `Resampler` is 3.4e-3 and 9.8e-4 on the same two.
+Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses the engine's `SincResampler.ResampleSoxrHqStandIn` (64-crossing windowed sinc, roll-off 0.955). Measured against librosa 0.11.0 / soxr 1.1.0: 2.7e-4 relRMS on the separated 16 kHz vocals and 5.8e-5 on a 24 kHz speech excerpt brought to 44.1 kHz; the engine's Kaiser polyphase `Resampler` is 3.4e-3 and 9.8e-4 on the same two. **It misses on other speech:** on the first 7.44 s of LongCat's `man.mp3` the separated 16 kHz vocals are **2.5e-3** from `soxr_hq` (2026-11-26), over the 1e-3 limit `KimVocal2ParityTests.SixteenKilohertzVocalsMatchSoxrHq` asserts. That test feeds the reference's own stem to the resampler, so neither the network nor a backend is in the figure. The limit is unchanged and the resampler is not fixed.
 Loudness normalization is not part of the separator: LongCat applies it downstream (`-23 LUFS`, off for Avatar 1.6, on for 1.5 and 1.0).
 
 ## Engine surface
@@ -59,7 +59,7 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
 - `VideoRequest.SeparateDrivingVocals` / `hartsy video --driving-audio <wav> --separate-vocals`: `VideoService` replaces the driving audio with the vocals stem (44.1 kHz stereo, 16-bit PCM WAV) before the recipe runs; the recipe decodes it to the rate and channels it needs. Alongside that clip it hands the recipe 16 kHz mono taken from the float stem (`MdxSeparator.ToMono`: channel mean, SoXR-HQ stand-in), the reference route; LongCat-Avatar encodes that and cuts it to the generated clip length plus one second, as `separate_vocals` does. The separator input is resampled to 44.1 kHz with the same stand-in. Measured on the 8 s test mix (CPU, 2026-11-26), the earlier route (16-bit stereo WAV, decode, mean, the engine's Kaiser polyphase `Resampler`) differs from this one by relRMS 3.5e-3, max 3.1e-3: the resampler accounts for 3.5e-3 and the 16-bit round trip for 8.3e-5; on a 24 kHz speech excerpt the two input resamplers differ by 1.0e-3. Against `soxr_hq` itself (librosa 0.11.0) the new route is 2.7e-4 and the earlier one 3.4e-3 on the same vocals. The reference pads short speech with zeros up to that duration, while the engine recipe repeats the last audio window (unchanged here). The pre-step separates only the clip length of audio (frames / fps, plus one second) when the frame total and fps are known, and the whole track otherwise; it runs before generation and is logged, not reported through step progress. A request without driving
   audio is refused at planning (`video.separate_vocals.no_driving_audio`); a recipe without driving-audio support refuses the audio itself. Any soundtrack a recipe attaches from the driving clip is then the separated vocals;
   a caller who wants the original mix heard passes it as `VideoAudioInput`.
-- The network runs on the CPU backend. Nothing in it requires that any more: the transpose no longer writes through reshaped views, every op exists on CUDA, Vulkan has no 2D transposed convolution and takes the host default for it, and the STFT is host code. What pins it is `FxService` choosing its CPU backend, which stays until the real-weight CUDA and Vulkan runs pass. One chunk is 261,120 samples and the window advances 195,840 (4.44 s); a clip of N seconds takes about ⌈(N · 44100 + 3840 + pad) / 195,840⌉ chunks (3 for the 8 s test clip). The network alone took 37 s per chunk on 8 logical cores in a Release build on random input, peak working set 1.8 GB. The synthetic-weight forward test has passed on CUDA and Vulkan (see Evidence); no real-weight GPU run is claimed.
+- The network runs on the CPU backend. Nothing in it requires that any more: the transpose no longer writes through reshaped views, every op exists on CUDA, Vulkan has no 2D transposed convolution and takes the host default for it, and the STFT is host code. What pins it is `FxService` choosing its CPU backend, which stays until real-weight CUDA and Vulkan runs pass. `KimVocal2Network.Forward` runs under `ExactGemmScope` (see GPU runs below). One chunk is 261,120 samples and the window advances 195,840 (4.44 s); a clip of N seconds takes about ⌈(N · 44100 + 3840 + pad) / 195,840⌉ chunks (3 for the 8 s test clip). The network alone took 37 s per chunk on 8 logical cores in a Release build on random input, peak working set 1.8 GB. No real-weight GPU run has passed.
 - Weights are read from the `.onnx` at load (about a tenth of a second); the Hartsy-hosted safetensors repack of decision D1 is not made, and nothing was uploaded.
 
 ## Evidence (2026-11-23, CPU F32, Debug build of the CLI)
@@ -74,4 +74,30 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
 | Cost | 5 m 58 s for the 8 s clip (3 chunks) through a Debug CLI build; the network alone was 37 s per chunk in a Release build on random input; peak working set 1.8 GB |
 | Against the reference (2026-11-26, CPU F32) | `KimVocal2ParityTests` on the same mix against `dump_kim_vocal2_reference.py` (`audio-separator` 0.30.2, onnxruntime 1.32.0, librosa 0.11.0): STFT 1.8e-7, 11 block outputs at most 1.2e-6, network output 1.5e-6, normalized stem 8.1e-7 / 8.0e-7, 16 kHz vocals 2.7e-4. The stand-in reference (`standin_kim_vocal2_reference.py`) gave the same network figures. Row in [PARITY_VERIFICATION.md](../Checklists/PARITY_VERIFICATION.md) |
 | Network on a GPU, synthetic weights (2026-11-26) | `KimVocal2NetworkTests` on an RTX 4090 at `dfb769638` (#1277, merged as `5ff49e539`): 6 of 6 passed in 51 s, four CPU tests plus one forward test each on CUDA and Vulkan. A tiny random-weight network against the plain-loop reference, relRMS < 1e-5, CUDA with high-precision GEMM (not TF32); on Vulkan the transposed convolutions take the host fallback. As reported by the GPU test session; its log is not in the repository |
-| **Not run** | the `--separate-vocals` video path end to end (no driving-audio video model was run); the real weights on CUDA or Vulkan, including TF32 GEMM; any precision other than F32 |
+| Real weights on a GPU (2026-11-26) | Three runs at `dfb769638` on an RTX 4090, all failed the test as it then stood; figures in [GPU runs](#gpu-runs-with-the-real-weights) |
+| Second clip, CPU F32 (2026-11-26) | First 7.44 s of LongCat `man.mp3`, stand-in reference with python-soxr: STFT 1.8e-7, block outputs at most 1.0e-6, network 5.4e-6, normalized stem 6.2e-7; 16 kHz vocals 2.5e-3 (over the limit). Chunks finished at 65.5 / 126.7 / 171.5 s (Release, 8 logical cores) |
+| **Not run** | the `--separate-vocals` video path end to end (no driving-audio video model was run); the real weights on CUDA or Vulkan since `Forward` forces exact GEMMs; any precision other than F32 |
+
+## GPU runs with the real weights
+
+2026-11-26, RTX 4090 (driver 595.99.02), commit `dfb769638`, `KimVocal2ParityTests.SeparatorMatchesOnnxRuntime`. Reference: the stand-in script of that commit (torch 2.15.0 CPU, onnxruntime 1.32.0,
+scipy `resample_poly`; no audio-separator, librosa or soxr) on a 7.44 s clip from a LongCat speech file; weight sha256 verified. Reported by the GPU test session; its logs are on that host, not in the repository.
+
+| relRMS | CUDA, TF32 GEMM | CUDA, exact GEMM | Vulkan |
+|---|---|---|---|
+| STFT, chunk 0 | 1.79e-7 | 1.79e-7 | 1.79e-7 |
+| Worst block (limit 1e-4) | **1.70e-3** | ~1.55e-6 | ~1.66e-6 |
+| Network output, chunk 0 (limit 1e-4) | **2.25e-3** | 2.94e-6 | 2.94e-6 |
+| Normalized stem (limit 1e-3) | **1.25e-3** | 1.67e-6 | 1.66e-6 |
+| 16 kHz vocals (limit then 1e-2) | **2.571e-2** | **2.570e-2** | **2.570e-2** |
+| Wall time | 14 s | 14 s | 78 s |
+| Peak GPU-wide memory | 3633 MiB | 3679 MiB | 2511 MiB |
+
+- **16 kHz:** at that commit the test compared the C# SoXR-HQ stand-in with scipy `resample_poly`, two different resamplers, and asserted it. The stem feeding it matched within 1.7e-6 on the exact lanes.
+  The current test no longer compares those two; it compares the 16 kHz output only against a `soxr_hq` reference, in its own test.
+- **TF32:** it misses the block, network and stem limits, with roughly 750 times the exact lane's network and stem error, and the two CUDA runs took the same 14 s (whole test, one-second resolution; per-chunk times were not
+  reported). `Forward` therefore runs under `ExactGemmScope`. No TF32 limit was added.
+- **Vulkan, about 22 s per chunk:** Vulkan has no 2D transposed convolution, so the five decoder up-convolutions run in the scalar `IBackend.ConvTranspose2d` default on the host, with a download before and an upload after.
+  On a different PC (8 logical cores, random input without zeros) those five calls alone take 18.6 s per chunk in a Release build and 56 to 71 s in Debug, the largest 7.8 s in Release. That makes the host loop the likely
+  cost, but the split was not profiled on the GPU host, whose build configuration was not reported. A Vulkan kernel for the op is the fix; it is not written.
+

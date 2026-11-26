@@ -13,6 +13,8 @@ namespace HartsyInference.Audio.Models.Separation;
 ///   TFC-TDF(x): h = 3 × relu(conv3x3(h)); y = relu(affine(Linear2(relu(affine(Linear1(h)))))) ; h + y   # Linear over F
 /// </code>
 /// Weight names are those <c>KimVocal2OnnxConverter</c> writes. The affines are the inference BatchNorms after each TDF MatMul.
+/// <para><see cref="Forward"/> runs under an <see cref="ExactGemmScope"/>: with CUDA's default TF32 GEMMs the real weights landed 2.25e-3 relRMS from the
+/// plain-F32 reference on an RTX 4090, against 2.9e-6 with exact ones.</para>
 /// <para>Every op writes a whole tensor, so any backend can run it; the engine's separator service still picks the CPU backend until a real-weight GPU run is on record.</para></summary>
 public sealed class KimVocal2Network : IDisposable
 {
@@ -98,6 +100,7 @@ public sealed class KimVocal2Network : IDisposable
         if (time % (1L << _levels) != 0)
             throw new ArgumentException($"T={time} must be divisible by {1 << _levels} (one halving per encoder level).", nameof(spec));
 
+        using ExactGemmScope exactGemm = new(backend);
         List<Tensor> skips = [];
         Tensor x = ConvRelu(backend, spec, "first_conv", 1, 0, relu: true);
         Tensor? up = null, skip = null, gated = null;
