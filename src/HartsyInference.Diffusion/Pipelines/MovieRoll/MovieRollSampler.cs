@@ -258,8 +258,9 @@ public sealed class MovieRollSampler
 
     private Tensor CopyOf(Tensor source)
     {
+        // A device-side copy of the whole tensor: CopyTo would read a device source back to the host.
         Tensor copy = new(source.Shape, DType.F32);
-        _backend.CopyTo(copy, source);
+        StridedCopies.SliceAxis(_backend, copy, source, 0, 0, source.Shape[0]);
         return copy;
     }
 

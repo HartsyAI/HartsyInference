@@ -14,12 +14,18 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
     private readonly HunyuanVideo15Dit _dit;
     private readonly HunyuanVideo15Vae _vae;
     private readonly MovieRollSchedule _schedule;
+    private readonly long _kvByteBudget;
 
-    public MovieRollPipeline(IBackend backend, HunyuanVideo15Dit dit, HunyuanVideo15Vae vae, MovieRollSchedule schedule) : base(backend)
+    /// <param name="kvByteBudget">The most K and V bytes a run may hold in its cache; <see cref="long.MaxValue"/> means unbounded.
+    /// A run that would exceed it is refused before any write.</param>
+    public MovieRollPipeline(IBackend backend, HunyuanVideo15Dit dit, HunyuanVideo15Vae vae, MovieRollSchedule schedule, long kvByteBudget = long.MaxValue)
+        : base(backend)
     {
         _dit = dit ?? throw new ArgumentNullException(nameof(dit));
         _vae = vae ?? throw new ArgumentNullException(nameof(vae));
         _schedule = schedule ?? throw new ArgumentNullException(nameof(schedule));
+        if (kvByteBudget <= 0) throw new ArgumentOutOfRangeException(nameof(kvByteBudget), kvByteBudget, "The K and V budget is positive.");
+        _kvByteBudget = kvByteBudget;
     }
 
     /// <summary>Runs the rolling sampler over the latent grid and returns the clean latents <c>[1, C, T, H, W]</c>, owned by the caller. <paramref name="noise"/>
@@ -33,10 +39,22 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         if (latentHeight <= 0) throw new ArgumentOutOfRangeException(nameof(latentHeight), "The latent height is positive.");
         if (latentWidth <= 0) throw new ArgumentOutOfRangeException(nameof(latentWidth), "The latent width is positive.");
 
-        using MovieRollKvCache cache = new(Backend);
+        using MovieRollKvCache cache = new(Backend, _kvByteBudget);
         cache.Init(_dit.StreamLayerNames(), latentHeight, latentWidth);
-        MovieRollSampler sampler = new(Backend, _dit, _schedule);
-        return sampler.Sample(cache, options, qwen, byt5, negativeQwen, negativeByt5, noise);
+        // The DiT's weights are resident for the sampling run and released before the VAE decode, as the pipelines do at a stage change.
+        // The VAE has no weight enumerator yet, so its own placement is not managed here.
+        Backend.PreloadWeights(_dit.EnumerateWeights());
+        try
+        {
+            MovieRollSampler sampler = new(Backend, _dit, _schedule);
+            return sampler.Sample(cache, options, qwen, byt5, negativeQwen, negativeByt5, noise);
+        }
+        finally
+        {
+            // Finish the device work that reads these weights before they are released.
+            Backend.Sync();
+            Backend.FreeWeights(_dit.EnumerateWeights());
+        }
     }
 
     /// <summary>Samples, unscales and decodes one clip to frames <c>[1, 3, T', 16·H, 16·W]</c> owned by the caller. Same noise contract as <see cref="SampleLatents"/>.</summary>
