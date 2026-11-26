@@ -45,15 +45,21 @@ public sealed class PackedMxfp4CudaTests
         using CudaBackend backend = new(0, PtxDir());
         IBackend device = backend;
         device.Mxfp4LinearF32(actual, input, weight, recipe);
-        // Without the module the backend answers from the host reference, so the device path must be checked as loaded.
-        CudaKernels? kernels = (CudaKernels?)typeof(CudaBackend).GetField("_kernels", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(backend);
-        Assert.True(kernels?.HasMxfp4LinearKernel == true, "mxfp4_linear_f32.ptx did not load; the device path did not run.");
+        RequireDeviceKernel(backend);
         backend.OffloadActivation(actual);
 
         float[] want = expected.AsReadOnlySpan<float>().ToArray();
         float[] got = actual.AsReadOnlySpan<float>().ToArray();
         for (int i = 0; i < want.Length; i++)
             Assert.True(MathF.Abs(want[i] - got[i]) <= 1e-3f * MathF.Max(1f, MathF.Abs(want[i])), $"y[{i}] host {want[i]} cuda {got[i]}");
+    }
+
+    /// <summary>Fails the test when the MXFP4 module is not loaded: the backend would answer from the host reference, and the device
+    /// path would not run.</summary>
+    internal static void RequireDeviceKernel(CudaBackend backend)
+    {
+        CudaKernels? kernels = (CudaKernels?)typeof(CudaBackend).GetField("_kernels", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?.GetValue(backend);
+        Assert.True(kernels?.HasMxfp4LinearKernel == true, "mxfp4_linear_f32.ptx did not load; the device path did not run.");
     }
 
     private static Tensor Bytes(byte[] values, params long[] shape)
