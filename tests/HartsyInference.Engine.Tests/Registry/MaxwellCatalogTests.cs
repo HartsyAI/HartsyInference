@@ -29,5 +29,6 @@ public sealed class MaxwellCatalogTests
         Assert.Equal(["model.safetensors"], variant.Source.Files);
         Assert.Equal(38_588_885_068, variant.Source.TotalBytes);
         Assert.Contains("chat_template.jinja", variant.Source.SupportFiles);
+        Assert.Equal("3b8b158c1a0656bda3642904a0c5040da7d901fec6167ebff26bf41d69c741ff", variant.Source.Sha256ByFile["model.safetensors"]);
     }
 }
