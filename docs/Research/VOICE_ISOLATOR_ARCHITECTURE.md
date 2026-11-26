@@ -38,7 +38,7 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Reference runs
 
-`tests/python-reference/voice_isolator/dump_tiny_reference.py` builds tiny random-weight checkpoints with the upstream PyTorch network and dumps whole-clip, offline-render and stream outputs; `VoiceIsolatorTinyReferenceTests` compares them. The real-weight check is `VoiceIsolatorGoldenParityTests` against the upstream fixtures (`tests/fixtures/{offline,realtime_stream}_{3s,11s}`, fp32 CPU, tolerance 1e-4).
+`tests/python-reference/voice_isolator/dump_tiny_reference.py` builds tiny random-weight checkpoints with the upstream PyTorch network and dumps whole-clip, offline-render and stream outputs; `VoiceIsolatorTinyReferenceTests` compares them. The real-weight check is `VoiceIsolatorGoldenParityTests` against the upstream fixtures (`tests/fixtures/{offline,realtime_stream}_{3s,11s}`, fp32 CPU, tolerance 1e-4). It passed 4/4 on real weights on 2026-11-26 (worst max abs 5.7e-7); figures in [PARITY_VERIFICATION.md](../Checklists/PARITY_VERIFICATION.md).
 
 ## Not verified
 
