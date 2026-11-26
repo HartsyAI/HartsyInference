@@ -50,7 +50,7 @@ Ops the engine did not have: none. `IBackend.Stft` is radix-2 only (n_fft 7680 =
 `audio-separator`'s own `demix` and LongCat's `_demix_batched` do the same arithmetic; LongCat batches two chunks per model call, which changes nothing numerically. This port follows LongCat's function.
 The port runs one chunk per call.
 
-Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses the engine's `SincResampler.ResampleSoxrHqStandIn`, a Kaiser-windowed sinc fitted on 2026-11-26 to the response measured from python-soxr 1.1.0 (-6 dB at 0.956872 of the lower rate's Nyquist, beta 13.04, 97 samples of the lower rate on each side). Fitted per ratio, this form matches soxr's response to under 1e-6 for 24 kHz to 16 kHz and 44.1 kHz to 22.05 kHz, with half-widths of 96.8 and 97.3; the one set shipped uses 97, which leaves 7.2e-5 on white noise at 24 to 16 kHz. For ratios with many phases (44.1 kHz to 16 kHz, 24 kHz to 44.1 kHz) soxr's measured response droops by about 1e-3 below the cut-off, which is not reproduced. C# against `soxr_hq`, relRMS, with the first stand-in (64-crossing squared-cosine sinc, roll-off 0.955) and the current one:
+Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses the engine's `SincResampler.ResampleSoxrHqStandIn`, a Kaiser-windowed sinc fitted on 2026-11-26 to the response measured from python-soxr 1.1.0 (-6 dB at 0.956872 of the lower rate's Nyquist, beta 13.04, 97 samples of the lower rate on each side). Fitted per ratio, this form matches soxr's response to under 1e-6 for 24 kHz to 16 kHz and 44.1 kHz to 22.05 kHz, with half-widths of 96.8 and 97.3; the one set shipped uses 97, which leaves 7.2e-5 on white noise at 24 to 16 kHz. For ratios with many phases (44.1 kHz to 16 kHz, 24 kHz to 44.1 kHz) soxr's measured response droops by about 1e-3 below the cut-off, and at 44.1 to 16 kHz its sine gain in the transition band differs from the shipped filter by up to 6e-3 (the first stand-in: 6e-2); neither is reproduced. C# against `soxr_hq`, relRMS, with the first stand-in (64-crossing squared-cosine sinc, roll-off 0.955) and the current one:
 
 | Signal, rates | First | Current |
 |---|---|---|
@@ -61,7 +61,7 @@ Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses
 | The same speech at 48 kHz to 16 / 44.1 kHz | 1.8e-3 / 3.5e-6 | 1.4e-5 / 3.3e-6 |
 | White noise, four rate pairs | 9.5e-3 to 9.9e-3 | 7.2e-5 to 1.1e-3 |
 
-The 24 and 48 kHz inputs were made from `man.mp3` with `soxr_vhq`. `KimVocal2ParityTests.SixteenKilohertzVocalsMatchSoxrHq` holds the first two rows below 1e-3 on the reference's own stem; `SoxrHqStandInTests` pins the 24 to 16 kHz transition band without Python. Kernel rows are about 20% longer than before at 44.1 to 16 kHz.
+The 24 and 48 kHz inputs were made from `man.mp3` with `soxr_vhq`. `KimVocal2ParityTests.SixteenKilohertzVocalsMatchSoxrHq` holds the first two rows below 1e-3 on the reference's own stem; `SoxrHqStandInTests` pins the 24 to 16 kHz and 44.1 to 16 kHz transition bands without Python. Kernel rows are about 20% longer than before at 44.1 to 16 kHz.
 Loudness normalization is not part of the separator: LongCat applies it downstream (`-23 LUFS`, off for Avatar 1.6, on for 1.5 and 1.0).
 
 ## Engine surface

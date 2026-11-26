@@ -7,7 +7,8 @@ namespace HartsyInference.Audio.Io;
 /// <c>width</c> in front and <c>width + orig</c> behind, and every <c>orig</c> input samples yield <c>new</c> outputs.
 /// IndexTTS-2's reference pipeline runs <c>torchaudio.transforms.Resample(sr, 16000)</c> on the clip, so its 16 kHz
 /// w2v-bert / CAM++ inputs only match when this exact filter is used; <see cref="Resampler"/> (scipy-style, Kaiser) differs
-/// by a few percent of waveform energy.</summary>
+/// by a few percent of waveform energy.
+/// <para><see cref="ResampleSoxrHqStandIn"/> runs the same polyphase loop under a Kaiser window instead.</para></summary>
 public static class SincResampler
 {
     /// <summary>The Kaiser-windowed sinc that stands in for librosa's default <c>soxr_hq</c> resampler, fitted to the frequency
@@ -15,14 +16,14 @@ public static class SincResampler
     /// <see cref="SoxrHqKaiserBeta"/>, <see cref="SoxrHqHalfWidth"/> samples of the lower rate on each side.</summary>
     public const double SoxrHqRolloff = 0.956872;
     public const double SoxrHqKaiserBeta = 13.04;
-    public const double SoxrHqHalfWidth = 97;
+    public const int SoxrHqHalfWidth = 97;
 
     /// <summary>The window's half-width counted in zero crossings of the rolled-off sinc.</summary>
     private const double SoxrHqZeroCrossings = SoxrHqHalfWidth * SoxrHqRolloff;
 
     /// <summary>The stand-in for <c>librosa.resample(res_type="soxr_hq")</c> (also <c>librosa.load(sr=...)</c>). It is a close
-    /// approximation, not a port: soxr interpolates its coefficients for ratios with many phases (44.1 kHz to 16 kHz), and
-    /// that is not reproduced. Pass-through copy when the rates match.</summary>
+    /// approximation, not a port: at ratios with many phases soxr's response differs a little (up to 6e-3 in gain in the
+    /// transition band at 44.1 kHz to 16 kHz), and that is not reproduced. Pass-through copy when the rates match.</summary>
     public static float[] ResampleSoxrHqStandIn(ReadOnlySpan<float> input, int inRate, int outRate) =>
         Run(input, inRate, outRate, SoxrHqZeroCrossings, SoxrHqRolloff, SoxrHqKaiserBeta);
 
