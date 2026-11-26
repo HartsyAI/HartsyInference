@@ -44,7 +44,7 @@ public sealed class LongCatKvBudgetTests
     {
         long estimate = LongCatRecipeSupport.BudgetHeadroomBytes(39_000, 4096, 11008, measuredPeakBytes: null, cacheBytes: 0);
         long measured = LongCatRecipeSupport.BudgetHeadroomBytes(39_000, 4096, 11008, measuredPeakBytes: 3_000 * Mb, cacheBytes: 0);
-        Assert.Equal(LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes + 3_000 * Mb, measured);
+        Assert.Equal(3_000 * Mb + LongCatRecipeSupport.MeasuredMarginBytes, measured);
         Assert.True(measured < estimate);
         Assert.Equal(measured + 256 * Mb, LongCatRecipeSupport.BudgetHeadroomBytes(39_000, 4096, 11008, measuredPeakBytes: 3_000 * Mb, cacheBytes: 256 * Mb));
     }

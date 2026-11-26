@@ -108,12 +108,45 @@ internal static class LongCatRecipeSupport
     internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth, bool offloaded) =>
         LongCatKvCache.EstimateBytes(config, condLatents, latentHeight, latentWidth, offloaded);
 
-    /// <summary>The headroom a run reserves: the fixed pool and the safety margin, the activations, and the cache. The activations are the per-token
-    /// estimate, or <paramref name="measuredPeakBytes"/> when a measured peak of the run's activations is given in its place.</summary>
+    /// <summary>One measured later-run workload: the size, the new and context latents of its segment, whether it was the distilled pipeline, and the
+    /// allocator's reserved bytes at the worst step of the later segment.</summary>
+    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes);
+
+    /// <summary>The later runs measured on the GPU: main c5fec5d37 with the refusal bypassed in a scratch copy, all eight steps, no OOM. The key is
+    /// exactly what was measured. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
+    /// per-token estimate. The distilled flag is inferred from the eight steps (the Distill8 schedule); it is not in the measurement's log. Audio
+    /// attention was not sampled. Reserved bytes are the pool's RESERVED_MEM_CURRENT (CudaBackend.cs:146-152), which excludes the resident blocks,
+    /// since those are allocated outside the pool (GpuTransferHelper.cs:326, 482).</summary>
+    internal static readonly MeasuredLaterRun[] MeasuredLaterRuns =
+    {
+        new(640, 368, NewLatents: 20, ContextLatents: 4, Distilled: true, 7808L << 20),
+        new(832, 480, NewLatents: 20, ContextLatents: 4, Distilled: true, 11360L << 20),
+    };
+
+    /// <summary>The explicit margin on a measured peak: the safety margin the estimate also keeps. It covers what the measurement did not sample (audio
+    /// attention), the tile heights the attention sizes from free memory (a few tens of MiB of drift per call), and one run's sample against the
+    /// next. It is not scaled between the two sizes: the margin is set against the unsampled terms, which do not grow with the measured ones.</summary>
+    internal const long MeasuredMarginBytes = SafetyBytes;
+
+    /// <summary>The reserved peak measured for exactly this workload (size, new and context latents, distilled), or null when it was not measured. A null
+    /// keeps the per-token estimate and its refusal.</summary>
+    internal static long? MeasuredReservedPeak(int width, int height, int newLatents, int contextLatents, bool distilled)
+    {
+        foreach (MeasuredLaterRun run in MeasuredLaterRuns)
+            if (run.Width == width && run.Height == height && run.NewLatents == newLatents && run.ContextLatents == contextLatents
+                && run.Distilled == distilled)
+                return run.ReservedPeakBytes;
+        return null;
+    }
+
+    /// <summary>The activation budget of a later run: the measured reserved peak plus its margin when the size was measured, else the per-token
+    /// estimate (the fixed pool, the safety margin, and the activations of <paramref name="tokens"/> rows).</summary>
+    internal static long ActivationBudget(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes) =>
+        measuredPeakBytes is long peak ? peak + MeasuredMarginBytes : ActivationHeadroomBytes(tokens, hidden, ffnHidden);
+
+    /// <summary>The headroom a run reserves: the activation budget (see <see cref="ActivationBudget"/>) and the KV cache.</summary>
     internal static long BudgetHeadroomBytes(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes, long cacheBytes) =>
-        measuredPeakBytes is long peak
-            ? FixedPoolBytes + SafetyBytes + peak + cacheBytes
-            : ActivationHeadroomBytes(tokens, hidden, ffnHidden) + cacheBytes;
+        ActivationBudget(tokens, hidden, ffnHidden, measuredPeakBytes) + cacheBytes;
 
     /// <summary>Refuses a run whose budget is negative: the free memory, less the shared weights still to be placed, the activation headroom and the KV
     /// cache, must be at least zero. Otherwise the streamed blocks have nowhere to land and the first step runs out of memory. <paramref name="who"/>
@@ -131,19 +164,21 @@ internal static class LongCatRecipeSupport
         }
     }
 
-    /// <summary>The activation headroom of a later run of <paramref name="tokens"/> rows, the figure its streaming scope reserves.</summary>
-    internal static long LaterRunHeadroom(LongCatParts parts, long tokens) =>
-        ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim);
+    /// <summary>The activation budget of a later run of <paramref name="tokens"/> rows, the figure its streaming scope reserves: measured when the size
+    /// has a measurement, else the per-token estimate.</summary>
+    internal static long LaterRunHeadroom(LongCatParts parts, long tokens, long? measuredPeakBytes = null) =>
+        ActivationBudget(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes);
 
     /// <summary>Before any segment runs: an upper bound on a later run's budget. The free memory is read after a pool trim. Only the shared weights
     /// not yet on the device are subtracted, so a shared weight that an earlier step already uploaded (the audio projection, once it is used twice)
     /// is not counted twice. A later run's free memory cannot exceed this, so a refusal here is one the later run would also get.
-    /// <paramref name="stagedBytes"/> is the later run's offloaded KV pair, which its scope has to cover as well.</summary>
-    internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes)
+    /// <paramref name="stagedBytes"/> is the later run's cached-step bytes, which its scope has to cover as well; <paramref name="measuredPeakBytes"/>
+    /// is the size's measured reserved peak, or null when the size has none.</summary>
+    internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes, long? measuredPeakBytes = null)
     {
         backend.TrimMemoryPool();
-        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens), stagedBytes,
-            "The chain's later run");
+        RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens, measuredPeakBytes),
+            stagedBytes, "The chain's later run");
     }
 
     /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>
