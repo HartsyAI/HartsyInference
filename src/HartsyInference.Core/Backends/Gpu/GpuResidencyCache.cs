@@ -88,6 +88,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     private long _hits;
     private long _misses;
     private long _d2hSyncs;
+    // TEMPORARY diagnostic (remove before merge): HARTSY_D2H_TRACE=<file> appends the shape and the managed stack of every device-to-host read.
+    private static readonly string? D2hTracePath = Environment.GetEnvironmentVariable("HARTSY_D2H_TRACE");
     private int _disposed;
     private volatile bool _resetPending;
 
@@ -550,6 +552,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             return;
         }
         Interlocked.Increment(ref _d2hSyncs);
+        if (D2hTracePath is not null)
+            System.IO.File.AppendAllText(D2hTracePath, $"D2H {tensor.Shape} {tensor.DType}\n{Environment.StackTrace}\n----\n");
         MakeCurrent();
         unsafe
         {
