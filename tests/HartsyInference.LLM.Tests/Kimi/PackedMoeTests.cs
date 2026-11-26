@@ -3,28 +3,55 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.LLM.Kimi;
+using HartsyInference.LLM.Tests.Parity;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Quant;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Kimi;
 
-/// <summary>A latent SiTU MoE with MXFP4-packed routed experts must match the same MoE with those experts dequantized to F32.</summary>
-public sealed class PackedMoeTests
+/// <summary>A latent SiTU MoE with MXFP4-packed routed experts must match the same MoE with those experts dequantized to F32 on the
+/// CPU backend. The bound is per element, on the difference over the larger of 1 and the reference value.</summary>
+public sealed class PackedMoeTests(ITestOutputHelper output)
 {
+    /// <summary>Every product in F32: a backend differs from the reference by rounding order only. The CPU backend, whose packed
+    /// kernel sums in another order than its F32 GEMM, measures 3.6e-7 here.</summary>
+    private const float ExactTolerance = 1e-5f;
+
+    /// <summary>CUDA's default runs the router, latent and shared-expert GEMMs in TF32: the TF32 figure of
+    /// <c>docs/ATTENTION_CONTRACT.md</c> §8. The packed projections are an F32 kernel in both CUDA lanes. A 4090 measured a 6.0e-4
+    /// difference in this lane at <c>aa0e60aba</c>.</summary>
+    private const float Tf32Tolerance = 2e-3f;
+
+    /// <summary>The Vulkan lane's bound, until a device run records the difference it measures.</summary>
+    private const float VulkanTolerance = 1e-3f;
+
     private static readonly float[] E2M1 = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 
     [Fact]
-    public void PackedExperts_MatchTheF32Dequantization() => Compare(new CpuBackend());
+    public void PackedExperts_MatchTheF32Dequantization()
+    {
+        using CpuBackend cpu = new();
+        Compare(cpu, ExactTolerance);
+    }
 
     // The same MoE on a device backend: the packed projections run through IBackend.Mxfp4LinearF32 there.
-    [Fact]
+    [CudaFact]
+    [Trait("Category", "GpuIntegration")]
+    public void Cuda_PackedExperts_MatchTheF32Dequantization_ExactGemms()
+    {
+        using HartsyInference.Cuda.CudaBackend backend = new(0, PtxDir());
+        using ExactGemmScope exact = new(backend);
+        Compare(backend, ExactTolerance);
+    }
+
+    [CudaFact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_PackedExperts_MatchTheF32Dequantization()
     {
-        if (!HartsyInference.Cuda.CudaContext.IsAvailable()) return;
         using HartsyInference.Cuda.CudaBackend backend = new(0, PtxDir());
-        Compare(backend);
+        Compare(backend, Tf32Tolerance);
     }
 
     [Fact]
@@ -33,10 +60,10 @@ public sealed class PackedMoeTests
     {
         if (!HartsyInference.Vulkan.VulkanContext.IsAvailable()) return;
         using HartsyInference.Vulkan.VulkanBackend backend = new();
-        Compare(backend);
+        Compare(backend, VulkanTolerance);
     }
 
-    private static void Compare(IBackend device)
+    private void Compare(IBackend device, float tolerance)
     {
         KimiK31Config c = new()
         {
@@ -74,12 +101,26 @@ public sealed class PackedMoeTests
         float[] x = new float[tokens * c.Hidden];
         for (int i = 0; i < x.Length; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
         using Tensor input = Floats(x, 1, tokens, c.Hidden);
-        using Tensor expected = reference.Forward(new CpuBackend(), input, tokens);
+        using CpuBackend cpu = new();
+        using Tensor expected = reference.Forward(cpu, input, tokens);
         using Tensor actual = packedMoe.Forward(device, input, tokens);
 
         float[] want = expected.AsReadOnlySpan<float>().ToArray();
         float[] got = actual.AsReadOnlySpan<float>().ToArray();
-        for (int i = 0; i < want.Length; i++) Assert.Equal(want[i], got[i], 3);
+        Assert.Equal(want.Length, got.Length);
+        float worst = 0f;
+        int at = 0;
+        for (int i = 0; i < want.Length; i++)
+        {
+            float difference = MathF.Abs(want[i] - got[i]) / MathF.Max(1f, MathF.Abs(want[i]));
+            // A NaN compares false with everything, so it is taken as the worst on its own.
+            if (float.IsNaN(difference) || difference > worst) (worst, at) = (difference, i);
+            if (float.IsNaN(worst)) break;
+        }
+        string found = $"largest relative difference {worst:G6} at element {at}: reference {want[at]}, device {got[at]}, "
+            + $"largest |reference| {want.Max(MathF.Abs):G4}";
+        output.WriteLine($"{device.GetType().Name}: {found}");
+        Assert.True(worst <= tolerance, $"{found}; the bound is {tolerance:G2}.");
     }
 
     // Random E2M1 nibbles and E8M0 scales for a [rows, cols] projection; returns the packed view and its exact F32 values.
