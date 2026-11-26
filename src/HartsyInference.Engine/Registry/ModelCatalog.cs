@@ -3108,8 +3108,9 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "fastframes-l", Modality = vid, DisplayName = "FastFrames L (14B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
-                // Not CLI-drivable until block streaming lands: the 28.6 GB BF16 generator does not fit a 24 GB card, and the CLI would
-                // download about 30 GB before failing. The recipe still constructs for engine-level runs.
+                // Block streaming is in (#1178), but the frame KV cache is not streamed, so 81 frames need an 80 GB card. The flag
+                // stays false until a pod run confirms the L clip (docs/Checklists/FASTFRAMES_GPU_RUNBOOK.md). The recipe constructs
+                // for engine-level runs.
                 CliDrivable = false,
                 Assets = new ModelAsset[]
                 {
