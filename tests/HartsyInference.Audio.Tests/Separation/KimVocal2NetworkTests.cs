@@ -12,7 +12,6 @@ public sealed unsafe class KimVocal2NetworkTests
     private static float[] Run(KimVocal2Reference reference, float[] spec, string backendName = "cpu")
     {
         using IBackend backend = BackendFactory.Create(backendName);
-        backend.HighPrecisionGemm = true;       // this checks wiring, not the default TF32 GEMMs
         using KimVocal2Network network = new(reference.Weights);
         using Tensor input = new(new TensorShape(1, KimVocal2Reference.Channels, KimVocal2Reference.DimF, KimVocal2Reference.Frames), DType.F32);
         spec.AsSpan().CopyTo(new Span<float>((void*)input.DataPointer, spec.Length));
