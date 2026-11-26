@@ -665,12 +665,13 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         // [seq*hq, 2*hd] that is one row per (token, head), so each half is a device last-dim slice (no host read).
         Tensor qgFull = new(new TensorShape(1, seq, hq * hd * 2), DType.F32);
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
-        Tensor qgRows = qgFull.Reshape(new TensorShape(seq * hq, hd * 2));
+        // IntoShape moves the device buffer; Reshape would read it back to the host first.
+        Tensor qgRows = qgFull.IntoShape(new TensorShape(seq * hq, hd * 2));
         Tensor q = new(new TensorShape(1, seq, hq, hd), DType.F32);
         Tensor gate = new(new TensorShape(1, seq, hq, hd), DType.F32);
         backend.SliceLastDim(q, qgRows, 0);
         backend.SliceLastDim(gate, qgRows, hd);
-        qgFull.Dispose();
+        qgRows.Dispose();
 
         Tensor qN = new(q.Shape, DType.F32);
         backend.RmsNorm(qN, q, W($"{p}.attn_q_norm.weight"), Eps);
@@ -715,10 +716,10 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Permute0213(attnFlat, attn, hq, seq, hd);
         attn.Dispose();
 
-        Tensor gateFlat = gate.Reshape(new TensorShape(1, seq, hq * hd));   // view, no copy — same layout already
+        Tensor gateFlat = gate.IntoShape(new TensorShape(1, seq, hq * hd));   // same layout; the device buffer moves, no readback
         Tensor gateSig = new(gateFlat.Shape, DType.F32);
         backend.Sigmoid(gateSig, gateFlat);
-        gate.Dispose();
+        gateFlat.Dispose();
         Tensor gated = new(attnFlat.Shape, DType.F32);
         backend.Mul(gated, attnFlat, gateSig);
         attnFlat.Dispose(); gateSig.Dispose();
