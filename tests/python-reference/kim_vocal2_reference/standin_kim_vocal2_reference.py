@@ -6,6 +6,7 @@ What is a transcription: audio-separator 0.30.2's ``STFT`` class, ``run_model`` 
 karaokenerds). The 16 kHz output is scipy ``resample_poly``, NOT librosa's soxr_hq, so it says nothing about LongCat's resampler.
 
 Shares the sha check, the .npy writer and the per-block onnxruntime session with the dumper, whose top-level imports need numpy only.
+KimVocal2ParityTests accepts its output only with HARTSY_KIM_VOCAL2_ALLOW_STANDIN=1.
 Needs torch, onnx, onnxruntime, numpy and scipy only. The input must be 44.1 kHz stereo 16-bit PCM WAV.
 
     python standin_kim_vocal2_reference.py --longcat LongCat-Video --onnx Kim_Vocal_2.onnx --wav clip.wav --out ref_dir
