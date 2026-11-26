@@ -30,35 +30,35 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
     [RealWeightsFact("VOICE_ISOLATOR_DIR")]
     public void RealtimeStream11sMatchesTheReference() => Check("realtime_stream_11s", "cpu");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [CudaRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_Offline3sMatchesTheReference() => Check("offline_3s", "cuda");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [CudaRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_Offline11sMatchesTheReference() => Check("offline_11s", "cuda");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [CudaRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_RealtimeStream3sMatchesTheReference() => Check("realtime_stream_3s", "cuda");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [CudaRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_RealtimeStream11sMatchesTheReference() => Check("realtime_stream_11s", "cuda");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [VulkanRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Vulkan_Offline3sMatchesTheReference() => Check("offline_3s", "vulkan");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [VulkanRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Vulkan_Offline11sMatchesTheReference() => Check("offline_11s", "vulkan");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [VulkanRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Vulkan_RealtimeStream3sMatchesTheReference() => Check("realtime_stream_3s", "vulkan");
 
-    [RealWeightsFact("VOICE_ISOLATOR_DIR")]
+    [VulkanRealWeightsFact("VOICE_ISOLATOR_DIR")]
     [Trait("Category", "GpuIntegration")]
     public void Vulkan_RealtimeStream11sMatchesTheReference() => Check("realtime_stream_11s", "vulkan");
 
@@ -137,8 +137,12 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
             squares += d * d;
             reference += (double)expected[i] * expected[i];
         }
-        output.WriteLine($"{name}: {expected.Length} samples, max abs error {maxAbs:E3} (tolerance {tolerance:E1}), "
-            + $"relRMS {Math.Sqrt(squares / reference):E3}, {elapsed} ms on {backendName}");
+        string line = $"{name} {backendName}: {expected.Length} samples, max abs error {maxAbs:E3} (tolerance {tolerance:E1}), "
+            + $"relRMS {Math.Sqrt(squares / reference):E3}, {elapsed} ms";
+        output.WriteLine(line);
+        // HARTSY_GOLDEN_LOG names a file that collects one line per case (for the parity table); unset, nothing is written.
+        string? log = Environment.GetEnvironmentVariable("HARTSY_GOLDEN_LOG");
+        if (!string.IsNullOrWhiteSpace(log)) File.AppendAllText(log, line + Environment.NewLine);
         Assert.True(maxAbs <= tolerance, $"{name}: max abs error {maxAbs:E3} exceeds {tolerance:E1}");
     }
 

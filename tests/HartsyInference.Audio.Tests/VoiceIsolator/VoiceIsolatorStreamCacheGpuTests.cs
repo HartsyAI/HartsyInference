@@ -23,24 +23,18 @@ public sealed class VoiceIsolatorStreamCacheGpuTests(ITestOutputHelper output)
     private const int Cache = 80;     // grows past 64 slots; capacity = 120 forces a compaction every 40 frames
     private const float Tol = 1e-4f;
 
-    [Fact]
+    [CudaFact]
     public void Cuda_StreamCacheMatchesTheCpuStream()
     {
-        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend cuda = new(0, PtxDirectory());
         CompareWithCpu(cuda);
     }
 
-    [Fact]
+    [VulkanFact]
     public void Vulkan_StreamCacheMatchesTheCpuStream()
     {
-        VulkanBackend vulkan;
-        try { vulkan = new VulkanBackend(); }
-        catch (Exception ex) { output.WriteLine($"SKIPPED: Vulkan unavailable ({ex.Message})"); return; }
-        using (vulkan)
-        {
-            CompareWithCpu(vulkan);
-        }
+        using VulkanBackend vulkan = new();
+        CompareWithCpu(vulkan);
     }
 
     private void CompareWithCpu(IBackend device)

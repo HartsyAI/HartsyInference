@@ -102,8 +102,17 @@ public sealed class FxService : IFxService
                 $"LookaheadFrames must be one of {string.Join(", ", FxCatalog.VoiceIsolatorRealtimeLookaheads)}.");
         }
         string cacheKey = selector.LocalPath ?? (realtime ? FxCatalog.VoiceIsolatorRealtimeId : FxCatalog.VoiceIsolatorId);
-        // The requested backend. The STFT (VoiceIsolatorSpectral) stays on the host whichever backend runs the network.
-        IBackend backend = _engine.Backend;
+        // Offline runs on the engine's backend (CUDA measured faster than CPU at 3 s and 11 s; Vulkan only at 11 s), with a CPU rerun
+        // when the card is full. Realtime stays on the CPU: neither GPU was faster than the CPU on the golden clips (see
+        // docs/Research/VOICE_ISOLATOR_ARCHITECTURE.md). The STFT (VoiceIsolatorSpectral) stays on the host whichever backend runs.
+        IBackend gpu = realtime ? _cpuBackend.Value : _engine.Backend;
+        return RunWithCpuFallbackAsync(gpu, _cpuBackend.Value,
+            backend => IsolateVoiceOnAsync(backend, selector, request, realtime, cacheKey, cancel), cancel);
+    }
+
+    private Task<StemsResult> IsolateVoiceOnAsync(IBackend backend, AudioModelSelector selector, FxSeparateRequest request, bool realtime,
+        string cacheKey, CancellationToken cancel)
+    {
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Isolator, cacheKey), async ct =>
         {
             float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.VoiceIsolatorSampleRate);
@@ -130,6 +139,25 @@ public sealed class FxService : IFxService
                 SampleRate = runner.SampleRate,
             };
         }, cancel);
+    }
+
+    /// <summary>Runs <paramref name="run"/> on <paramref name="engine"/> when that is CUDA or Vulkan, and on <paramref name="cpu"/> otherwise.
+    /// A GPU run that still ends out of video memory after the audio runtime's own retry, wrapped or not, runs again on the CPU.</summary>
+    internal static async Task<T> RunWithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
+    {
+        if (engine.Device.Type is not (DeviceType.Cuda or DeviceType.Vulkan))
+        {
+            return await run(cpu).ConfigureAwait(false);
+        }
+        try
+        {
+            return await run(engine).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (AudioRuntime.FindOutOfVram(ex) is not null && !cancel.IsCancellationRequested)
+        {
+            Logs.Warning($"[Audio][Voice-Isolator] Not enough video memory on {engine.Device}; isolating on the CPU instead, which takes far longer.");
+            return await run(cpu).ConfigureAwait(false);
+        }
     }
 
     private static bool IsMdxSeparator(AudioModelSelector selector, FxSeparateRequest request)

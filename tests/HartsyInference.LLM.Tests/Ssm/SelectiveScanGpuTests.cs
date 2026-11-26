@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.LLM.Tests.Parity;
 using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
@@ -20,14 +21,13 @@ public sealed class SelectiveScanGpuTests
     public SelectiveScanGpuTests(ITestOutputHelper output) => _output = output;
 
     // rows, frames, channels, states, gated, stateless
-    [Theory]
+    [CudaTheory]
     [InlineData(1, 1, 4, 16, true, false)]    // one frame, the voice isolator's 16-state shape
     [InlineData(2, 7, 5, 16, true, false)]    // batched rows, gate on
     [InlineData(1, 5, 3, 5, false, true)]     // no gate, no carried state: starts from zero
     [InlineData(1, 4, 2, 256, true, false)]   // maximum state count: eight states per lane
     public void Cuda_MatchesReference(int rows, int frames, int channels, int states, bool gated, bool stateless)
     {
-        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using CudaBackend backend = new(0, PtxDir());
         Compare(backend, rows, frames, channels, states, gated, stateless);
         // Without the module the backend answers from the host reference and this test would pass without touching the device.
@@ -35,14 +35,13 @@ public sealed class SelectiveScanGpuTests
         Assert.True(kernels?.HasSelectiveScanKernel == true, "ssm_selective_scan_f32.ptx did not load; the device path did not run.");
     }
 
-    [Theory]
+    [VulkanTheory]
     [InlineData(1, 1, 4, 16, true, false)]
     [InlineData(2, 7, 5, 16, true, false)]
     [InlineData(1, 5, 3, 5, false, true)]
     [InlineData(1, 4, 2, 256, true, false)]
     public void Vulkan_MatchesReference(int rows, int frames, int channels, int states, bool gated, bool stateless)
     {
-        if (!VulkanContext.IsAvailable()) { _output.WriteLine("SKIPPED: Vulkan unavailable"); return; }
         using VulkanBackend backend = new();
         Compare(backend, rows, frames, channels, states, gated, stateless);
     }
