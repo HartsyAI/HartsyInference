@@ -41,6 +41,21 @@ public static class AudioClipCodec
         return (outLeft, outRight);
     }
 
+    /// <summary><see cref="DecodeStereo"/> resampled with the SoXR-HQ stand-in, for a model whose reference loads audio with <c>librosa.load(sr=...)</c>.</summary>
+    internal static (float[] Left, float[] Right) DecodeStereoSoxrHq(AudioClip? clip, int targetSampleRate)
+    {
+        if (clip is null || clip.Data.Length == 0)
+        {
+            return ([], []);
+        }
+        WavFile.DecodedAudio decoded = Decode(clip);
+        float[] left = decoded.Channels.Length > 0 ? decoded.Channels[0] : [];
+        float[] right = decoded.Channels.Length > 1 ? decoded.Channels[1] : left;
+        float[] outLeft = SincResampler.ResampleSoxrHqStandIn(left, decoded.SampleRate, targetSampleRate);
+        float[] outRight = ReferenceEquals(left, right) ? outLeft : SincResampler.ResampleSoxrHqStandIn(right, decoded.SampleRate, targetSampleRate);
+        return (outLeft, outRight);
+    }
+
     /// <summary>Decodes a clip at its native rate and channel count, for pass-through paths that must not resample.</summary>
     public static AudioBuffer DecodeNative(AudioClip? clip)
     {

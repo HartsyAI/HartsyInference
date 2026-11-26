@@ -54,7 +54,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         cancel.ThrowIfCancellationRequested();
         AudioClip speech = request.VideoAudioReference
             ?? throw new InvalidOperationException("LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference.");
-        float[] waveform = VideoRecipeUtils.DecodeMono16k(speech);
+        float[] waveform = VideoRecipeUtils.DrivingSpeech16k(request, speech);
         AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
 
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
@@ -74,7 +74,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             Logs.Warning($"[LongCatAvatarRecipePipeline] The driving audio lasts {drivingSpeech.Seconds:F2} s and the clip {total / (double)settings.Fps:F2} s; "
                 + "the windows past the audio's end repeat its last frame.");
         int clipFrames = plan?.TotalPixelFrames ?? frames;
-        float[] rawAudio = DrivingWindows(waveform, settings.Fps, clipFrames);
+        float[] rawAudio = DrivingWindows(VideoRecipeUtils.CropSeparatedSpeech(request, waveform, clipFrames, settings.Fps), settings.Fps, clipFrames);
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
