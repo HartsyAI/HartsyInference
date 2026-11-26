@@ -3,8 +3,8 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
 using Xunit.Abstractions;
@@ -69,7 +69,11 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
         float[] left = mixData.AsSpan(0, n).ToArray();
         float[] right = mixData.AsSpan(n, n).ToArray();
 
-        using IBackend backend = new CpuBackend();
+        string backendName = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_BACKEND") ?? "cpu";
+        using IBackend backend = BackendFactory.Create(backendName);
+        // Off: CUDA's default F32 GEMMs run at TF32 precision. On: full F32. Other backends ignore it.
+        backend.HighPrecisionGemm = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_EXACT_GEMM") == "1";
+        output.WriteLine($"backend: {backendName}, high-precision GEMM {backend.HighPrecisionGemm}");
         Dictionary<string, Tensor> weights = KimVocal2OnnxConverter.Convert(onnx, out _);
         try
         {
@@ -83,7 +87,9 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
             Recorder recorder = new(new KimVocal2SpectrogramModel(backend, network, settings.Frames));
             MdxSeparator separator = new(settings, recorder);
 
-            float[][] stem = separator.Separate(left, right);
+            long started = Environment.TickCount64;
+            float[][] stem = separator.Separate(left, right,
+                progress: (done, total) => output.WriteLine($"chunk {done}/{total} at {(Environment.TickCount64 - started) / 1000.0:0.0}s"));
             float[] vocals16 = separator.ToMono(stem, 16_000);
 
             double spec = Compare("chunk0 STFT input", reference, "chunk0_spek", recorder.FirstSpectrogram!);
