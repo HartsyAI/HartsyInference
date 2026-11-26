@@ -13,7 +13,7 @@ namespace HartsyInference.Audio.Models.Separation;
 ///   TFC-TDF(x): h = 3 × relu(conv3x3(h)); y = relu(affine(Linear2(relu(affine(Linear1(h)))))) ; h + y   # Linear over F
 /// </code>
 /// Weight names are those <c>KimVocal2OnnxConverter</c> writes. The affines are the inference BatchNorms after each TDF MatMul.
-/// <para>Every op writes a whole tensor, so any backend can run it; the engine's separator service still picks the CPU backend until a GPU run is on record.</para></summary>
+/// <para>Every op writes a whole tensor, so any backend can run it; the engine's separator service still picks the CPU backend until a real-weight GPU run is on record.</para></summary>
 public sealed class KimVocal2Network : IDisposable
 {
     private const int TfcLayers = 3;
