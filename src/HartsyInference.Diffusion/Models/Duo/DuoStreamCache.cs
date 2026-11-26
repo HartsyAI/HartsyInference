@@ -86,4 +86,31 @@ public sealed class DuoStreamCache
         }
         _groups.AddRange(newGroups);
     }
+
+    /// <summary>Drops the oldest committed clean block: its rows in every layer, and its group. Reference and shared rows are never
+    /// dropped. Returns the rows dropped, or 0 when no clean block is held.</summary>
+    public int EvictOldestClean()
+    {
+        int index = _groups.FindIndex(g => g.Kind == DuoGroupKind.Clean);
+        if (index < 0)
+        {
+            return 0;
+        }
+        DuoGroup group = _groups[index];
+        int rows = group.End - group.Start;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            _layers[i].EvictRange(group.Start, rows);
+        }
+        _groups.RemoveAt(index);
+        for (int g = 0; g < _groups.Count; g++)
+        {
+            DuoGroup later = _groups[g];
+            if (later.Start >= group.End)
+            {
+                _groups[g] = later with { Start = later.Start - rows, End = later.End - rows };
+            }
+        }
+        return rows;
+    }
 }

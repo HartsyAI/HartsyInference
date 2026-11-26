@@ -11,7 +11,7 @@ namespace HartsyInference.Diffusion.Tests.Duo;
 /// history. The model has two layers and weights large enough that the history changes the output well beyond the tolerance, and the
 /// negative controls show the check fails when the history is wrong. These are not parity with upstream Duo (that is the L5/L6 step
 /// against the Python reference, not run).</summary>
-public sealed class DuoChunkRolloutTests
+public sealed class DuoChunkSessionTests
 {
     private const int Hidden = 8, Heads = 2, HeadDim = 96, Inner = Heads * HeadDim, Ffn = 16, TextDim = 5, Layers = 2;
     private const int VideoIn = 96, AudioIn = 32, TimeEmbedDim = 6, TimeEmbedHidden = 8;
@@ -138,6 +138,63 @@ public sealed class DuoChunkRolloutTests
     };
 
     private static DuoStreamCache Cache() => new(blocks: Layers, width: Inner, capacityRows: 64);
+
+    /// <summary>Three blocks, so a rollout can outgrow a cache that holds the prefix and one block.</summary>
+    private static DuoSampleInput ThreeBlockSample() => Sample() with
+    {
+        Blocks =
+        [
+            .. Sample().Blocks,
+            new DuoBlockInput { StartMs = 1416.0, BodyTextRows = BodyRows, Video = new DuoGrid(2, 4, 4), AudioSteps = 3, FrameStartsMs = [1416.0, 1516.0] },
+        ],
+    };
+
+    /// <summary>Reference and shared rows (7) plus one clean block (8 video and 6 audio rows): a cache of this size holds exactly one.</summary>
+    private const int OneBlockCapacity = 7 + 14;
+
+    [Fact]
+    public void LongRolloutSlidesTheWindowAndEachBlockMatchesTheWindowedForward()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: OneBlockCapacity);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), reference);
+        Assert.Equal(Shared + RefRows, cache.Length);
+
+        float[][] video = new float[3][];
+        float[][] audio = new float[3][];
+        for (int b = 0; b < 3; b++)
+        {
+            (video[b], audio[b]) = session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            Assert.True(cache.Length <= OneBlockCapacity, "The cache never exceeds its capacity.");
+        }
+        // Once block 1 is committed, block 0 has gone: the cache holds the prefix and block 2 is about to see block 1 only.
+        Assert.Equal(OneBlockCapacity, cache.Length);
+
+        // Block 2 is denoised against the windowed history: reference, shared rows and clean block 1 only.
+        DuoSampleInput window = sample with { Blocks = [sample.Blocks[1], sample.Blocks[2]] };
+        (float[] windowVideo, _) = DuoChunkSession.FullBlock(transformer, backend, window, 1, DuoRopePolicy.Old,
+            Shared0(), [Body(1), Body(2)], reference, video[1], audio[1], Noise(60, VideoRows), Values(61, AudioRows * AudioIn), 2, 1.0);
+        AssertClose(windowVideo, video[2], Tolerance, "block 2 video against the windowed forward");
+    }
+
+    [Fact]
+    public void BlockThatCannotFitIsRefusedBeforeAnyEviction()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        // One row short: the prefix and a clean block do not fit, and no clean block is held to drop.
+        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: OneBlockCapacity - 1);
+        DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), Values(30, RefRows * VideoIn));
+
+        Assert.Throws<InvalidOperationException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn), 2, 1.0));
+        Assert.Equal(Shared + RefRows, cache.Length);
+        Assert.Equal(0, session.NextBlock);
+    }
 
     private static float[] Shared0() => Values(2, Shared * TextDim);
 

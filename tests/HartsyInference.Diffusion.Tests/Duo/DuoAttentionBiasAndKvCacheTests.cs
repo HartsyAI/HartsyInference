@@ -110,7 +110,7 @@ public sealed class DuoAttentionBiasAndKvCacheTests
             int excess = cache.Rows + blockRows - window;
             if (excess > 0)
             {
-                cache.EvictOldest(excess);
+                cache.EvictRange(0, excess);
             }
             cache.Append(keys.AsSpan(start * Width, blockRows * Width), values.AsSpan(start * Width, blockRows * Width));
         }
@@ -125,7 +125,7 @@ public sealed class DuoAttentionBiasAndKvCacheTests
         cache.Append(keys.AsSpan(0, 4 * Width), values.AsSpan(0, 4 * Width));
 
         // Commit the next two rows: drop the two oldest, then append.
-        cache.EvictOldest(chunk);
+        cache.EvictRange(0, chunk);
         cache.Append(keys.AsSpan(4 * Width, chunk * Width), values.AsSpan(4 * Width, chunk * Width));
         Assert.Equal(window, cache.Rows);
 
@@ -150,9 +150,9 @@ public sealed class DuoAttentionBiasAndKvCacheTests
         DuoKvCache cache = new DuoKvCache(3, Width);
         float[] keys = Sequence(2, 7), values = Sequence(2, 8);
         cache.Append(keys, values);
-        Assert.Throws<ArgumentOutOfRangeException>(() => cache.EvictOldest(3));
-        Assert.Throws<ArgumentOutOfRangeException>(() => cache.EvictOldest(-1));
-        cache.EvictOldest(0);
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.EvictRange(0, 3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => cache.EvictRange(0, -1));
+        cache.EvictRange(0, 0);
         Assert.Equal(2, cache.Rows);
         Assert.True(cache.Keys.SequenceEqual(keys));
         Assert.True(cache.Values.SequenceEqual(values));
