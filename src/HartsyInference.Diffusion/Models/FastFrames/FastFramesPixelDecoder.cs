@@ -345,6 +345,13 @@ public sealed class FastFramesPixelDecoder : IDisposable
         return true;
     }
 
+    /// <summary>The decoder's owned device-uploadable weights, for a caller that places them before a clip.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        RequireLoaded();
+        return _owned;
+    }
+
     private void RequireLoaded()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

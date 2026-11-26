@@ -334,6 +334,13 @@ public sealed class FastFramesKvRefiner : IDisposable
     private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
         FastFramesOps.CopyF32(weights[key], weights[key].Shape);
 
+    /// <summary>The refiner's owned device-uploadable weights, for a caller that places them before a clip.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        RequireLoaded();
+        return _owned;
+    }
+
     private void RequireLoaded()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

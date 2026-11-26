@@ -212,7 +212,11 @@ public sealed class FastFramesPipeline
         long kvNeed = ClipKvNeedBytes(latentFrames);
         // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
         // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
-        using BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
+        // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
+        // prefix beside them, so the headroom only has to cover activations.
+        _backend.PreloadWeights(_refiner.EnumerateWeights());
+        _backend.PreloadWeights(_decoder.EnumerateWeights());
+        BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
         {
             Backend = _backend,
             Denoiser = _transformer,
@@ -222,28 +226,53 @@ public sealed class FastFramesPipeline
             Pin = _generatorPin,
             TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
         });
-        LastStreamedBlocks = streaming.StreamedBlocks;
-        // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
-        CheckKvFitsNow(latentFrames);
-        for (int frame = 0; frame < latentFrames; frame++)
+        bool streamed = streaming.StreamedBlocks > 0;
+        try
         {
-            cancel.ThrowIfCancellationRequested();
-            (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
-            FastFramesFrame output;
-            using (pixels)
-                output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
-                    (int)pixels.Shape[2], (int)pixels.Shape[3]);
-            yield return output;
+            LastStreamedBlocks = streaming.StreamedBlocks;
+            // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
+            CheckKvFitsNow(latentFrames);
+            for (int frame = 0; frame < latentFrames; frame++)
+            {
+                cancel.ThrowIfCancellationRequested();
+                (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
+                FastFramesFrame output;
+                using (pixels)
+                    output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
+                        (int)pixels.Shape[2], (int)pixels.Shape[3]);
+                yield return output;
 
-            // The next frame reads this frame's cache slot, so the clean pass or the refinement runs before it. It runs after the
-            // consumer has the frame, so a frame is not held back by the cache work of the one after it.
-            if (frame == 0)
-                CleanPass(promptEmbeds, latent, frame, cache);
-            else
-                Refine(latent, frame, cache, conditioning);
-            streaming.EndStep();
-            progress?.Invoke(frame + 1, latentFrames);
+                // The next frame reads this frame's cache slot, so the clean pass or the refinement runs before it. It runs after the
+                // consumer has the frame, so a frame is not held back by the cache work of the one after it.
+                if (frame == 0)
+                    CleanPass(promptEmbeds, latent, frame, cache);
+                else
+                    Refine(latent, frame, cache, conditioning);
+                streaming.EndStep();
+                progress?.Invoke(frame + 1, latentFrames);
+            }
         }
+        finally
+        {
+            // Disposing the scope evicts the streamed window; the release below then decides what the next clip finds on the device.
+            streaming.Dispose();
+            ReleaseOrKeepGenerator(streamed);
+        }
+    }
+
+    /// <summary>After a clip. A streamed clip frees the generator's device weights, the resident prefix included, so the next clip and the
+    /// decoder get the VRAM back and the next placement sizes afresh. A clip that stayed resident keeps them, and the pin says so, which
+    /// lets the next clip skip the admission check the weights already passed. Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
+    private void ReleaseOrKeepGenerator(bool streamed)
+    {
+        if (streamed)
+        {
+            _backend.FreeWeights(_transformer.EnumerateWeights());
+            _backend.TrimMemoryPool();
+            _generatorPin.Resident = false;
+            return;
+        }
+        _generatorPin.Resident = true;
     }
 
     /// <summary>Bytes the block placement keeps free beyond the clip's frame cache: activations, the refiner and the decoder. When
@@ -257,7 +286,8 @@ public sealed class FastFramesPipeline
     /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
     public int LastStreamedBlocks { get; private set; }
 
-    /// <summary>The activation, refiner and decoder allowance on top of the frame cache when the placement is planned.</summary>
+    /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
+    /// they are uploaded before the placement, so the planner counts them as used.</summary>
     public const long DefaultStreamingHeadroomBytes = 1L << 30;
 
     private IEnumerable<VideoFrame> GenerateCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
