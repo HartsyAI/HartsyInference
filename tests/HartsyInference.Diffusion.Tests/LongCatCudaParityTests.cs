@@ -1,7 +1,8 @@
+using HartsyInference.Cuda;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cuda;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using Xunit;
@@ -19,11 +20,9 @@ public sealed class LongCatCudaParityTests
     private const float Tolerance = 1e-4f;
     private static readonly int Hw = Height * Width;
 
-    [Fact]
+    [LongCatCudaParityFact]
     public void TheVideoLoopOnCudaMatchesTheCpu()
     {
-        if (!Enabled())
-            return;
         LongCatConfig config = LongCatTestData.Tiny;
         Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, 111);
         try
@@ -32,10 +31,13 @@ public sealed class LongCatCudaParityTests
             LongCatPrompt positive = new(Values(rng, TextLength * config.CaptionChannels), TextLength, TextLength);
             LongCatPrompt negative = new(Values(rng, TextLength * config.CaptionChannels), TextLength, TextLength);
             float[] noise = Values(rng, config.InChannels * Frames * Hw);
-            float[] cpu = RunVideo(new CpuBackend(), config, weights, noise, positive, negative);
-            using CudaBackend cuda = new(0, PtxDirectory());
+            float[] cpu;
+            using (CpuBackend cpuBackend = new())
+                cpu = RunVideo(cpuBackend, config, weights, noise, positive, negative);
+            using CudaBackend cuda = GpuDevices.OpenCuda();
             float[] gpu = RunVideo(cuda, config, weights, noise, positive, negative);
 
+            AssertMoved(cpu, noise, "video");
             AssertClose(cpu, gpu, "video");
         }
         finally
@@ -44,11 +46,9 @@ public sealed class LongCatCudaParityTests
         }
     }
 
-    [Fact]
+    [LongCatCudaParityFact]
     public void TheAvatarCachedLoopOnCudaMatchesTheCpu()
     {
-        if (!Enabled())
-            return;
         LongCatConfig config = AvatarConfig();
         Dictionary<string, Tensor> weights = AvatarWeights(config, 113);
         try
@@ -61,10 +61,13 @@ public sealed class LongCatCudaParityTests
             float[] condLatents = Values(rng, config.InChannels * cond * Hw);
             float[] audio = Values(rng, Frames * ctx * width);
             float[] unconditionalAudio = Values(rng, Frames * ctx * width);
-            float[] cpu = RunAvatar(new CpuBackend(), config, weights, noise, condLatents, audio, unconditionalAudio, positive, negative);
-            using CudaBackend cuda = new(0, PtxDirectory());
+            float[] cpu;
+            using (CpuBackend cpuBackend = new())
+                cpu = RunAvatar(cpuBackend, config, weights, noise, condLatents, audio, unconditionalAudio, positive, negative);
+            using CudaBackend cuda = GpuDevices.OpenCuda();
             float[] gpu = RunAvatar(cuda, config, weights, noise, condLatents, audio, unconditionalAudio, positive, negative);
 
+            AssertMoved(cpu, noise, "avatar");
             AssertClose(cpu, gpu, "avatar");
         }
         finally
@@ -101,7 +104,25 @@ public sealed class LongCatCudaParityTests
         Assert.True(worst <= Tolerance, $"{label}: CUDA drifted from the CPU by {worst}");
     }
 
-    private static bool Enabled() => Environment.GetEnvironmentVariable(EnvName) == "1" && CudaContext.IsAvailable();
+    private static void AssertMoved(float[] result, float[] noise, string label)
+    {
+        float moved = 0;
+        for (int i = 0; i < result.Length; i++)
+            moved = MathF.Max(moved, MathF.Abs(result[i] - noise[i]));
+        Assert.True(moved > 1e-3f, $"{label}: the loop left the latents where they started (moved {moved})");
+    }
+
+    /// <summary>Runs only when the env var is 1 and a CUDA device opens. Otherwise the test is reported as skipped, never passed.</summary>
+    private sealed class LongCatCudaParityFactAttribute : FactAttribute
+    {
+        public LongCatCudaParityFactAttribute()
+        {
+            if (Environment.GetEnvironmentVariable(EnvName) != "1")
+                Skip = $"SKIPPED: {EnvName} is not 1.";
+            else if (GpuDevices.CudaFailure is { } failure)
+                Skip = $"SKIPPED: no usable CUDA device ({failure}).";
+        }
+    }
 
     /// <summary>The tiny avatar config: the base tiny shape plus the audio projection and the per-block audio step.</summary>
     private static LongCatConfig AvatarConfig() => new()
@@ -165,15 +186,4 @@ public sealed class LongCatCudaParityTests
         return values;
     }
 
-    private static string PtxDirectory()
-    {
-        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "HartsyInference.Cuda", "Ptx");
-            if (Directory.Exists(candidate))
-                return candidate;
-        }
-
-        throw new DirectoryNotFoundException("HartsyInference.Cuda/Ptx was not found above the test binary.");
-    }
 }
