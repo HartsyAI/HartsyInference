@@ -93,12 +93,11 @@ def randomize(module, torch, seed: int, scale: float = 0.5):
 
 
 def save(tensors: dict, path: Path):
-    from safetensors.torch import save_file
+    # Written through numpy: the torch path of safetensors resolves dtype names through the fp32 alias and failed on every tensor
+    # in the reference run, while a numpy float32 array is written with the right width.
+    from safetensors.numpy import save_file
 
-    # The fp32 alias makes torch.bfloat16 == torch.float32, and safetensors resolves dtype names at call time: with the alias in place a
-    # float32 tensor is written with the wrong width ("invalid shape, data type, or offset"). Save under the real bfloat16.
-    with real_bf16():
-        save_file({k: v.detach().contiguous().cpu().float().clone() for k, v in tensors.items()}, str(path))
+    save_file({k: v.detach().contiguous().cpu().float().numpy() for k, v in tensors.items()}, str(path))
 
 
 def run_rollout(torch, pipeline, causal_model, config, dit, refiner, decoder, prompt_embeds, noise, transition, frames):
