@@ -285,6 +285,14 @@ The planner reproduces these until the row that owns each is rewritten.
   quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
   does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back after a run of calls that fit at it), because `cuMemGetInfo` reads far too low on a card a process has filled past about
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
+- With `numerics.tileFromDevice` on (default off), the tile height is the device's fixed rung over the row bytes: 1 GiB when the card's total VRAM
+  is 20 GiB or more (binary; a 20 GB card reports about 18.6 GiB and gets 512 MiB), else 512 MiB. The rung sets the height only. The tiling,
+  BF16-cast and causal-mask gates share one budget, `min(total/2, free)`. Because free is in that `min`, a gate can still choose a different
+  path on a run with less free VRAM than half the total. The OOM halving and the remembered cap still shorten the tile after a failed
+  allocation, so a run that hits one is not bit-comparable with one that did not. A/B on RTX 4090 at 93 frames, seed 1234, knob
+  `c3a55333c` vs main `712ea2ca7`: 832x480 knob steps 92.7 / 92.0 s, peaks 19585 / 19718 MiB; main steps 90.7 / 91.7 s, peaks
+  20175 / 20051 MiB; the knob reproduces its output (two runs, same sha `6182eb4a`); main does not. These rows were measured on the
+  previous gate (the rung), so the 832x480 and 640x368 A/B must be re-run on this gate before default-on.
 - CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
   attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
   Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an

@@ -319,11 +319,17 @@ public sealed partial class CudaBackend
         return castBytes <= GateBudget();
     }
 
-    /// <summary>The byte budget the attention path gates compare against: half of free VRAM, or the device's tile rung under
-    /// <c>numerics.tileFromDevice</c> (a constant per device).</summary>
+    /// <summary>The byte budget the attention path gates compare against: half of free VRAM, or under <c>numerics.tileFromDevice</c> the one
+    /// device gate budget (<see cref="DeviceGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
     private ulong GateBudget() => EngineKnobs.TileFromDevice.Value == true
-        ? (ulong)TileRungBytes((ulong)_context.GetMemoryInfo().totalBytes)
+        ? DeviceGateBudget((ulong)_context.GetMemoryInfo().totalBytes, (ulong)FreeVram())
         : FreeVram() / 2;
+
+    /// <summary>The one gate budget under <c>numerics.tileFromDevice</c>: half of the device's total VRAM, or the free VRAM when that is less. The
+    /// total half makes a gate's path the same on every run of one device while free VRAM is ample; the free clamp stops a gate choosing a buffer
+    /// the card does not have free now. So the path can still move when free falls below half the total: the A/B rows name the free reading of
+    /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
+    internal static ulong DeviceGateBudget(ulong deviceTotalBytes, ulong freeBytes) => Math.Min(deviceTotalBytes / 2, freeBytes);
 
     /// <summary>Free device memory the attention rows budget against.</summary>
     private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
