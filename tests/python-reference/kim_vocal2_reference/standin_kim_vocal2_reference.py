@@ -5,12 +5,12 @@ What is real here: onnxruntime on the real .onnx, torch.stft / torch.istft, and 
 What is a transcription: audio-separator 0.30.2's ``STFT`` class, ``run_model`` and ``spec_utils.normalize`` (MIT, Copyright (c) 2023
 karaokenerds). The 16 kHz output is scipy ``resample_poly``, NOT librosa's soxr_hq, so it says nothing about LongCat's resampler.
 
+Shares the sha check, the .npy writer and the per-block onnxruntime session with the dumper, whose top-level imports need numpy only.
 Needs torch, onnx, onnxruntime, numpy and scipy only. The input must be 44.1 kHz stereo 16-bit PCM WAV.
 
     python standin_kim_vocal2_reference.py --longcat LongCat-Video --onnx Kim_Vocal_2.onnx --wav clip.wav --out ref_dir
 """
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -24,7 +24,7 @@ import onnxruntime as ort
 import scipy.signal
 import torch
 
-EXPECTED_SHA256 = "ce74ef3b6a6024ce44211a07be9cf8bc6d87728cc852a68ab34eb8e58cde9c8b"
+from dump_kim_vocal2_reference import EXPECTED_SHA256, save, sha256, stage_outputs, stage_session
 
 
 def normalize(wave, max_peak=1.0, min_peak=None):
@@ -55,7 +55,8 @@ def load_longcat_demix(longcat):
 class Model:
     """The parts of audio-separator's MDXSeparator that LongCat's loop calls, with Kim_Vocal_2's constants."""
 
-    n_fft, dim_f, dim_t, compensate, hop_length = 7680, 3072, 256, 1.009, 1024
+    n_fft, dim_f, compensate, hop_length = 7680, 3072, 1.009, 1024
+    segment_size = 256  # audio-separator's default; equals 2 ** mdx_dim_t_set for this model
     overlap, sample_rate, normalization_threshold = 0.25, 44100, 0.9
     torch_device = torch.device("cpu")
 
@@ -66,7 +67,7 @@ class Model:
 
     def initialize_model_settings(self):
         self.trim = self.n_fft // 2
-        self.chunk_size = self.hop_length * (self.dim_t - 1)
+        self.chunk_size = self.hop_length * (self.segment_size - 1)
 
     def stft(self, x):
         batch = x.shape[:-2]
@@ -104,15 +105,10 @@ def main():
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
-    with open(args.onnx, "rb") as f:
-        data = f.read()
-    digest = hashlib.sha256(data).hexdigest()
+    digest = sha256(args.onnx)
     if digest != EXPECTED_SHA256:
         sys.exit(f"Kim_Vocal_2.onnx sha256 {digest} is not the pinned {EXPECTED_SHA256}")
     os.makedirs(args.out, exist_ok=True)
-
-    def save(name, array):
-        np.save(os.path.join(args.out, name + ".npy"), np.ascontiguousarray(array, dtype=np.float32))
 
     longcat = load_longcat_demix(args.longcat)
     model = Model(args.onnx)
@@ -122,28 +118,25 @@ def main():
         pcm = np.frombuffer(w.readframes(w.getnframes()), "<i2")
     mix = (pcm.astype(np.float32) / 32768.0).reshape(-1, 2).T.copy()
     mix = normalize(mix, model.normalization_threshold, -model.normalization_threshold)
-    save("mix_normalized", mix)
+    save(args.out, "mix_normalized", mix)
     source = longcat._demix_batched(model, mix, 2)
-    save("stem_compensated", source)
+    save(args.out, "stem_compensated", source)
     source = normalize(source, model.normalization_threshold, -model.normalization_threshold)
-    save("stem_normalized", source)
+    save(args.out, "stem_normalized", source)
     mono = source.mean(axis=0)
-    save("mono_44k", mono)
-    save("vocals_16k", scipy.signal.resample_poly(mono, 160, 441))
+    save(args.out, "mono_44k", mono)
+    save(args.out, "vocals_16k", scipy.signal.resample_poly(mono, 160, 441))
     for key, value in model.first.items():
-        save("chunk0_" + key, value)
+        save(args.out, "chunk0_" + key, value)
 
     # Every Add output of chunk 0: the 5 encoder blocks, the bottleneck, the 5 decoder blocks.
-    graph = onnx.load(args.onnx)
-    adds = [n.output[0] for n in graph.graph.node if n.op_type == "Add"]
+    _, adds = stage_outputs(args.onnx)
     names = [f"encoding_blocks.{i}" for i in range(5)] + ["bottleneck_block"] + [f"decoding_blocks.{i}" for i in range(5)]
     if len(adds) != len(names):
         sys.exit(f"expected {len(names)} Add nodes, found {len(adds)}")
-    for add in adds:
-        graph.graph.output.append(onnx.helper.make_tensor_value_info(add, onnx.TensorProto.FLOAT, None))
-    staged = ort.InferenceSession(graph.SerializeToString(), providers=["CPUExecutionProvider"])
+    staged = stage_session(args.onnx, adds)
     for name, value in zip(names, staged.run(adds, {"input": model.first["spek"].astype(np.float32)})):
-        save("stage_" + name, value)
+        save(args.out, "stage_" + name, value)
 
     meta = {
         "driver": "stand-in: no audio-separator, no librosa; vocals_16k is scipy resample_poly, not soxr_hq",
