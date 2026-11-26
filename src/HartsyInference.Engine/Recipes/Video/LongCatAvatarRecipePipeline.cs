@@ -64,6 +64,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         int latentFrames = (frames - 1) / LongCatRecipeSupport.TemporalCompressionFactor + 1;
         int latentHeight = height / LongCatRecipeSupport.SpatialCompressionFactor;
         int latentWidth = width / LongCatRecipeSupport.SpatialCompressionFactor;
+        // The attention tile of this generation is pinned to a shape-derived height (numerics.sdpaTile), so the same request makes the same tile
+        // on every run; the pin is scoped to this generation and no other model sees it.
+        using IDisposable attentionTile = LongCatRecipeSupport.PinAttentionTile(_parts.Dit.Config.NumHeads,
+            LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth));
         int seed = RecipeRequestMapper.MapSeed(settings.Seed) ?? SeedGenerator.RandomSeed();
 
         // A chain request longer than the segment runs the chain plan; its audio covers the whole clip, so the windows are cut once for all of it.
