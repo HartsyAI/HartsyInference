@@ -36,7 +36,7 @@ public sealed class AukAudioEmbed
         }
         _linW = AukOps.Take(weights, $"{prefix}.linear.weight", owned, dim, _config.LatentDim);
         _linB = AukOps.Take(weights, $"{prefix}.linear.bias", owned, dim);
-        _convPos.LoadWeights(convWeights, $"{prefix}.conv_pos_embed");
+        _convPos.LoadWeights(convWeights, $"{prefix}.conv_pos_embed", owned);
     }
 
     /// <summary>Input <c>[1, n, latent]</c>, output <c>[1, n, dim]</c>; the caller owns the result.</summary>
