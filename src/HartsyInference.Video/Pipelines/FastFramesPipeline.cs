@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.FastFrames;
+using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 
@@ -86,6 +87,8 @@ public sealed class FastFramesPipeline : IDisposable
     private readonly FastFramesFlowSchedule _schedule;
     private readonly int _gridHeight, _gridWidth;
     private readonly ResidentPrefixPin _generatorPin = new ResidentPrefixPin();
+    private readonly ResidentWeights _refinerWeights;
+    private readonly ResidentWeights _decoderWeights;
 
     /// <summary>Pairs a transformer, a refiner, a decoder and a recipe. Refuses a combination that cannot run, naming both sides, so
     /// the mismatch shows here rather than in the middle of a clip.</summary>
@@ -120,6 +123,8 @@ public sealed class FastFramesPipeline : IDisposable
         _schedule = new FastFramesFlowSchedule(config.Shift);
         _gridHeight = config.LatentHeight / wan.PatchSize.H;
         _gridWidth = config.LatentWidth / wan.PatchSize.W;
+        _refinerWeights = new ResidentWeights(backend, refiner.EnumerateWeights);
+        _decoderWeights = new ResidentWeights(backend, decoder.EnumerateWeights);
     }
 
     /// <summary>The first <c>patchT − 1</c> pixel frames of the clip are dropped (upstream's <c>align_frames</c>: 84 decoded frames to 81).</summary>
@@ -216,8 +221,8 @@ public sealed class FastFramesPipeline : IDisposable
         long kvNeed = ClipKvNeedBytes(latentFrames);
         // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
         // prefix beside them, so the headroom only has to cover activations.
-        _backend.PreloadWeights(_refiner.EnumerateWeights());
-        _backend.PreloadWeights(_decoder.EnumerateWeights());
+        _refinerWeights.Preload();
+        _decoderWeights.Preload();
         // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
         // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
         BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
@@ -276,6 +281,12 @@ public sealed class FastFramesPipeline : IDisposable
     /// Mirrors WanVideoPipeline.ReleaseOrKeepTransformer.</summary>
     private void ReleaseOrKeepGenerator(bool streamed)
     {
+        // After a streamed clip the refiner and the decoder follow the VRAM profile, as the generator's own release does not.
+        if (streamed)
+        {
+            _refinerWeights.Release();
+            _decoderWeights.Release();
+        }
         if (streamed || _disposed)
         {
             FreeGenerator();
@@ -298,8 +309,8 @@ public sealed class FastFramesPipeline : IDisposable
     /// <summary>True while the generator's weights stay on the device from the last clip, the resident path that <c>ReleaseOrKeepGenerator</c> keeps.</summary>
     internal bool GeneratorResident => _generatorPin.Resident;
 
-    /// <summary>Frees the generator's device weights when a resident clip left them there, so a dropped pipeline gives the VRAM back. The
-    /// pipeline does not own the backend, the refiner, the decoder or the transformer object; their owner disposes those. Not thread-safe:
+    /// <summary>Frees the device copies of the generator, the refiner and the decoder, so a dropped pipeline gives the VRAM back. The pipeline
+    /// does not own the backend or the transformer, refiner and decoder objects; their owner disposes those. Not thread-safe:
     /// call it on the thread that enumerates the clips, or after they finish. To abort a clip, cancel its token; a Dispose during a clip
     /// stops it at the next frame boundary.</summary>
     public void Dispose()
@@ -313,6 +324,8 @@ public sealed class FastFramesPipeline : IDisposable
         {
             FreeGenerator();
         }
+        _refinerWeights.Release(force: true);
+        _decoderWeights.Release(force: true);
     }
 
     /// <summary>Frees every generator weight on the device and marks the pin not resident.</summary>

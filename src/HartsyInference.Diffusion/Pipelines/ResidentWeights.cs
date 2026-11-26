@@ -22,10 +22,28 @@ internal sealed class ResidentWeights
     /// <summary>True between a <see cref="Preload"/> that returned and the release that freed the weights.</summary>
     public bool IsResident { get; private set; }
 
-    /// <summary>Uploads the weights as one bulk preload; a preload that throws leaves the model marked not resident.</summary>
+    /// <summary>Uploads the weights as one bulk preload. A preload that throws may have uploaded some of them, so every weight is freed
+    /// again before the exception propagates, and the model is left marked not resident. A failure while freeing is dropped so the
+    /// preload's exception is the one the caller sees.</summary>
     public void Preload()
     {
-        _backend.PreloadWeights(_weights());
+        try
+        {
+            _backend.PreloadWeights(_weights());
+        }
+        catch
+        {
+            try
+            {
+                _backend.FreeWeights(_weights());
+            }
+            catch
+            {
+                // The original exception matters more than a failure to undo a partial upload.
+            }
+            IsResident = false;
+            throw;
+        }
         IsResident = true;
     }
 
