@@ -18,7 +18,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1, ERNIE-5.5 and Kimi K3.1 (host reference models), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
+/// <summary>Opens a Hugging Face safetensors directory for the Text path; the host reference models (DeepSeek-V4.1, ERNIE-5.5, Maxwell, Kimi K3.1, Hy4 Flash, glm5_next), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
 internal static class HfTextDirectoryLoader
 {
     /// <summary>The <c>model_type</c> of a Kimi K3.1 checkpoint.</summary>
@@ -45,14 +45,38 @@ internal static class HfTextDirectoryLoader
     private static readonly Ernie5LoadOptions Ernie5Resident = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = true };
     private static readonly Ernie5LoadOptions Ernie5Streamed = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
 
-    /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1) that <see cref="LoadHostReference"/> serves.</summary>
+    /// <summary>One host reference family <see cref="LoadHostReference"/> serves: its model_type, the checks that refuse a directory before
+    /// TextService unloads the model it replaces (null for none), and its loader onto a backend.</summary>
+    private sealed record HostReferenceFamily(string ModelType, Action<HfCheckpointInfo>? RequireRunnable,
+        Func<HfCheckpointInfo, IBackend, IHostReferenceTextModel> Load);
+
+    /// <summary>DeepSeek-V4.1 keeps its weights on the host, so the caller passes a CPU backend.</summary>
+    private static readonly HostReferenceFamily DeepSeekV41Family =
+        new(DeepSeekV41Config.ModelType, null, (info, backend) => DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions));
+
+    /// <summary>The host reference families other than ERNIE-5.5, whose load takes its own options (see <see cref="LoadHostReference"/>).</summary>
+    private static readonly HostReferenceFamily[] HostReferenceFamilies =
+    [
+        new(MaxwellConfig.ModelType, RequireMaxwellRunnable, (info, backend) => MaxwellTextModel.Load(backend, info.Root, MaxwellOptionsFor(backend.Device))),
+        new(KimiK31ModelType, RequireKimiK31Runnable, (info, backend) => KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens)),
+        // The size and tokenizer checks live in RequireLoadable.
+        new(Hy4FlashConfig.ModelType, info => Hy4FlashTextModel.RequireLoadable(info.Root),
+            (info, backend) => Hy4FlashTextModel.Load(backend, info.Root, MaxSequenceTokens)),
+        new(Glm5NextTextModel.ModelType, RequireGlm5NextRunnable, (info, backend) => Glm5NextTextModel.Load(backend, info.Root, MaxSequenceTokens)),
+        DeepSeekV41Family,
+    ];
+
+    /// <summary>The table entry for <paramref name="info"/>'s model_type, or null when it is ERNIE-5.5 or not a host reference family.</summary>
+    private static HostReferenceFamily? FindHostReferenceFamily(HfCheckpointInfo info)
+    {
+        foreach (HostReferenceFamily family in HostReferenceFamilies)
+            if (string.Equals(info.ModelType, family.ModelType, StringComparison.Ordinal)) return family;
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1, ERNIE-5.5, Maxwell, Kimi K3.1, Hy4 Flash or glm5_next) that <see cref="LoadHostReference"/> serves.</summary>
     internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>
-        string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
-        || string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal)
-        || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal)
-        || IsHy4Flash(info)
-        || IsKimiK31(info)
-        || IsGlm5Next(info);
+        string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal) || FindHostReferenceFamily(info) is not null;
 
     /// <summary>Whether <paramref name="info"/> is a glm5_next checkpoint (Sage S2.1 Flash, GLM-5.3-Flash). It runs on the backend of the requested device.</summary>
     internal static bool IsGlm5Next(HfCheckpointInfo info) => string.Equals(info.ModelType, Glm5NextTextModel.ModelType, StringComparison.Ordinal);
@@ -72,15 +96,7 @@ internal static class HfTextDirectoryLoader
         RequireSupported(info);
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             return Ernie5TextModel.Load(backend, info.Root, ernie5 ?? Ernie5OptionsFor(backend.Device));
-        if (string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal))
-            return MaxwellTextModel.Load(backend, info.Root, MaxwellOptionsFor(backend.Device));
-        if (IsKimiK31(info))
-            return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
-        if (IsHy4Flash(info))
-            return Hy4FlashTextModel.Load(backend, info.Root, MaxSequenceTokens);
-        if (IsGlm5Next(info))
-            return Glm5NextTextModel.Load(backend, info.Root, MaxSequenceTokens);
-        return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
+        return (FindHostReferenceFamily(info) ?? DeepSeekV41Family).Load(info, backend);
     }
 
     /// <summary>Loads a Kimi K3.1 directory sharded over <paramref name="rankBackends"/>, one backend per rank; <paramref name="comm"/> is the collective
@@ -131,24 +147,8 @@ internal static class HfTextDirectoryLoader
     {
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
-        if (string.Equals(info.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal))
-        {
-            MaxwellConfig.Parse(File.ReadAllText(info.ConfigPath));
-            // Refused here, before TextService unloads the model it replaces: the Maxwell Text path needs the template.
-            if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
-                throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Maxwell Text path needs.");
-        }
-        if (IsKimiK31(info))
-            RequireKimiK31Runnable(info);
-        if (IsHy4Flash(info))
-            // Refused here, before TextService unloads the model it replaces: the size and tokenizer checks live in RequireLoadable.
-            Hy4FlashTextModel.RequireLoadable(info.Root);
-        if (IsGlm5Next(info))
-        {
-            Glm5NextTextModel.ReadConfig(info.ConfigPath);
-            if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
-                throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Sage S2.1 Flash Text path needs.");
-        }
+        // Refused here, before TextService unloads the model it replaces.
+        FindHostReferenceFamily(info)?.RequireRunnable?.Invoke(info);
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
         if (!stateful && !miniMax && !IsHostReferenceFamily(info))
@@ -171,6 +171,22 @@ internal static class HfTextDirectoryLoader
         // A Kimi K3.1 directory may carry tiktoken.model instead; RequireKimiK31Runnable has already checked for one of the two.
         if (!IsKimiK31(info) && !File.Exists(Path.Combine(info.Root, "tokenizer.json")))
             throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json, which the Text path needs to build its prompt.");
+    }
+
+    /// <summary>Refuses a Maxwell directory whose config does not parse or that has no chat template, which the Maxwell Text path needs.</summary>
+    private static void RequireMaxwellRunnable(HfCheckpointInfo info)
+    {
+        MaxwellConfig.Parse(File.ReadAllText(info.ConfigPath));
+        if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+            throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Maxwell Text path needs.");
+    }
+
+    /// <summary>Refuses a glm5_next directory whose config is not one the engine builds or that has no chat template.</summary>
+    private static void RequireGlm5NextRunnable(HfCheckpointInfo info)
+    {
+        Glm5NextTextModel.ReadConfig(info.ConfigPath);
+        if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+            throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Sage S2.1 Flash Text path needs.");
     }
 
     /// <summary>Refuses a Kimi K3.1 directory the Text path cannot read before any weight is opened. The tokenizer is tokenizer.json or, when that is absent,

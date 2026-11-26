@@ -1,32 +1,27 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Generation;
-using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Kimi;
 
 /// <summary>Adapts a loaded Kimi K3.1 decoder to <see cref="IGenerationModel"/> so the shared pipeline can drive it.</summary>
 /// <remarks>Owns the checkpoint. Text only, one token per decode step, no batched decode. The decoder runs on the backend it was built on, so
 /// the hidden and logits tensors come back on the host. Not thread-safe: run one sequence at a time.</remarks>
-public sealed class KimiK31GenerationModel : IGenerationModel
+public sealed class KimiK31GenerationModel : HostReplayGenerationModel
 {
     // TODO(kimi): the CUDA and Vulkan decoder is not run on GPU through this adapter. Finish it by running generation on a GPU backend and checking its
     // tokens against the CPU run.
+    // TODO(kimi): no memory guard exists, and Capacity() reports host memory even when the decoder runs on a GPU. Finish it by reporting device
+    // memory for a GPU-built decoder and checking EstimateSequenceBytes against it before a request.
     private readonly KimiK31Checkpoint _checkpoint;
-    private readonly int _maxTokens;
 
     /// <param name="checkpoint">The loaded checkpoint; this adapter takes ownership.</param>
     /// <param name="outputBackend">Backend the decoder was built on.</param>
     /// <param name="maxTokens">The longest sequence the decoder was loaded for.</param>
     public KimiK31GenerationModel(KimiK31Checkpoint checkpoint, IBackend outputBackend, int maxTokens)
+        : base("Kimi K3.1", Required(checkpoint, nameof(checkpoint)).Config.Vocab, checkpoint.Config.Hidden, checkpoint.Config.Layers, outputBackend,
+            maxTokens, "Kimi K3.1", "The Kimi K3.1 decoder takes text tokens only; image embeddings are not supported.", batchDecode: false)
     {
-        ArgumentNullException.ThrowIfNull(checkpoint);
-        ArgumentNullException.ThrowIfNull(outputBackend);
-        ArgumentOutOfRangeException.ThrowIfLessThan(maxTokens, 1);
         _checkpoint = checkpoint;
-        OutputBackend = outputBackend;
-        _maxTokens = maxTokens;
-        Info = new GenerationModelInfo("Kimi K3.1", checkpoint.Config.Vocab, checkpoint.Config.Hidden, checkpoint.Config.Layers, maxTokens);
     }
 
     private KimiK31Model Model => _checkpoint.Model;
@@ -40,114 +35,38 @@ public sealed class KimiK31GenerationModel : IGenerationModel
     internal KimiK31Config DecoderConfig => Config;
 
     /// <summary>The longest sequence the decoder was loaded for.</summary>
-    internal int MaxSequenceTokens => _maxTokens;
+    internal int MaxSequenceTokens => MaxTokens;
 
-    /// <inheritdoc />
-    public GenerationModelInfo Info { get; }
-
-    /// <inheritdoc />
-    public GenerationCapabilities Capabilities { get; } = new();
-
-    /// <inheritdoc />
-    public IBackend OutputBackend { get; }
-
-    /// <inheritdoc />
-    public ISequenceState CreateSequenceState(SequenceStateOptions options)
+    /// <summary>A rough estimate: one MLA latent, rope and hidden row per context token and layer. KDA recurrent state is per sequence and not counted.</summary>
+    public override long EstimateSequenceBytes(int contextTokens)
     {
-        if (options.MaxSequenceTokens > _maxTokens)
-            throw new ArgumentOutOfRangeException(nameof(options), options.MaxSequenceTokens, $"The model was loaded for sequences of up to {_maxTokens} tokens.");
-        int capacity = options.MaxSequenceTokens;
+        long rowFloats = (long)Config.KvLoraRank + Config.QkRopeDim + Config.Hidden;
+        return (long)contextTokens * Config.Layers * rowFloats * sizeof(float);
+    }
+
+    /// <inheritdoc />
+    protected override HostReplaySequenceState CreateReplayState(int capacity)
+    {
         SequenceCache cache = new(new KimiK31State(Config, capacity, Model.Ranks));
-        int dim = Config.Hidden;
-        return new HostReplaySequenceState(capacity, dim,
+        return new HostReplaySequenceState(capacity, Config.Hidden,
             (ids, hidden) => ForwardTokens(ids, hidden, cache),
             () => cache.Reset(Config, capacity, Model.Ranks),
             cache.Dispose);
     }
 
     /// <inheritdoc />
-    public Tensor Prefill(in PrefillChunk chunk, ISequenceState state) => Prefill(chunk, state, CancellationToken.None);
-
-    /// <summary>Checks <paramref name="cancel"/> before running; a prefill is one forward pass and is not interruptible once started.</summary>
-    public Tensor Prefill(in PrefillChunk chunk, ISequenceState state, CancellationToken cancel)
+    protected override void ProjectRows(ReadOnlySpan<float> hidden, int rows, Span<float> logits)
     {
-        cancel.ThrowIfCancellationRequested();
-        HostReplaySequenceState sequence = AsSequence(state);
-        if (chunk.Embeds is not null) throw new NotSupportedException("The Kimi K3.1 decoder takes text tokens only; image embeddings are not supported.");
-        ReadOnlySpan<int> ids = chunk.TokenIds.Span;
-        if (ids.IsEmpty) throw new ArgumentException("Prefill needs at least one token.", nameof(chunk));
-        if (chunk.PosStart != sequence.Length)
-            throw new ArgumentException($"The chunk starts at position {chunk.PosStart} but the sequence holds {sequence.Length} tokens.", nameof(chunk));
-        // checked here, before the sequence moves: a failure inside the forward resets the sequence
-        foreach (int id in ids)
-            if ((uint)id >= (uint)Config.Vocab) throw new ArgumentOutOfRangeException(nameof(chunk), id, "Token id is outside the vocabulary.");
-
-        int dim = Config.Hidden;
-        float[] hidden = new float[ids.Length * dim];
-        sequence.Append(ids, hidden);
-        int rows = chunk.LastRowOnly ? 1 : ids.Length;
-        return Hidden(hidden.AsSpan((ids.Length - rows) * dim, rows * dim), rows);
-    }
-
-    /// <inheritdoc />
-    public Tensor DecodeBatch(ReadOnlySpan<int> tokenIds, ISequenceState[] states)
-    {
-        ArgumentNullException.ThrowIfNull(states);
-        if (states.Length != tokenIds.Length) throw new ArgumentException($"{tokenIds.Length} tokens for {states.Length} sequence states.");
-        // refuse the whole batch before any sequence moves, as the single-sequence path does
-        HashSet<ISequenceState> seen = new(ReferenceEqualityComparer.Instance);
-        for (int i = 0; i < tokenIds.Length; i++)
-        {
-            HostReplaySequenceState sequence = AsSequence(states[i]);
-            if (!seen.Add(sequence)) throw new ArgumentException("A sequence state appears twice in one batch.", nameof(states));
-            if (sequence.Length >= sequence.Capacity) throw new InvalidOperationException($"Sequence {i} is full ({sequence.Capacity} tokens).");
-            if ((uint)tokenIds[i] >= (uint)Config.Vocab) throw new ArgumentOutOfRangeException(nameof(tokenIds), tokenIds[i], "Token id is outside the vocabulary.");
-        }
-        int dim = Config.Hidden;
-        float[] hidden = new float[tokenIds.Length * dim];
-        for (int i = 0; i < tokenIds.Length; i++) AsSequence(states[i]).Append(tokenIds.Slice(i, 1), hidden.AsSpan(i * dim, dim));
-        return Hidden(hidden, tokenIds.Length);
-    }
-
-    /// <inheritdoc />
-    public Tensor ProjectLogits(Tensor hidden, int rows)
-    {
-        ArgumentNullException.ThrowIfNull(hidden);
         int dim = Config.Hidden, vocab = Config.Vocab;
-        if (hidden.DType != DType.F32 || hidden.ElementCount < (long)rows * dim)
-            throw new ArgumentException($"hidden must be F32 with at least {rows} x {dim} values.", nameof(hidden));
-        ReadOnlySpan<float> source = hidden.AsReadOnlySpan<float>();
-        Tensor logits = new(new TensorShape(1, rows, vocab), DType.F32);
-        Span<float> target = logits.AsSpan<float>();
         for (int r = 0; r < rows; r++)
         {
-            float[] row = Model.ProjectHidden(source.Slice(r * dim, dim).ToArray());
-            row.AsSpan().CopyTo(target.Slice(r * vocab, vocab));
+            float[] row = Model.ProjectHidden(hidden.Slice(r * dim, dim).ToArray());
+            row.AsSpan().CopyTo(logits.Slice(r * vocab, vocab));
         }
-        return logits;
-    }
-
-    /// <summary>Empty: the decoder's weights are owned by the checkpoint and are not engine tensors on the residency path.</summary>
-    public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) => [];
-
-    /// <summary>A rough estimate: one MLA latent, rope and hidden row per context token and layer. KDA recurrent state is per sequence and not counted.</summary>
-    public long EstimateSequenceBytes(int contextTokens)
-    {
-        long rowFloats = (long)Config.KvLoraRank + Config.QkRopeDim + Config.Hidden;
-        return (long)contextTokens * Config.Layers * rowFloats * sizeof(float);
-    }
-
-    /// <summary>Free and total host memory as the runtime sees it; the decoder runs on the host or on the backend the checkpoint was loaded to.</summary>
-    public CapacitySnapshot Capacity()
-    {
-        // TODO(kimi): no memory guard exists, and Capacity() reports host memory even when the decoder runs on a GPU. Finish it by reporting device
-        // memory for a GPU-built decoder and checking EstimateSequenceBytes against it before a request.
-        GCMemoryInfo info = GC.GetGCMemoryInfo();
-        return new CapacitySnapshot(Math.Max(0, info.TotalAvailableMemoryBytes - info.MemoryLoadBytes), info.TotalAvailableMemoryBytes);
     }
 
     /// <inheritdoc />
-    public void Dispose() => _checkpoint.Dispose();
+    protected override void DisposeModel() => _checkpoint.Dispose();
 
     private void ForwardTokens(ReadOnlySpan<int> tokenIds, Span<float> hidden, SequenceCache cache)
     {
@@ -158,16 +77,6 @@ public sealed class KimiK31GenerationModel : IGenerationModel
             row.AsSpan().CopyTo(hidden.Slice(i * dim, dim));
         }
     }
-
-    private Tensor Hidden(ReadOnlySpan<float> values, int rows)
-    {
-        Tensor t = new(new TensorShape(1, rows, Config.Hidden), DType.F32);
-        values.CopyTo(t.AsSpan<float>());
-        return t;
-    }
-
-    private static HostReplaySequenceState AsSequence(ISequenceState state) =>
-        state as HostReplaySequenceState ?? throw new ArgumentException($"{state.GetType().Name} is not a Kimi K3.1 sequence state.", nameof(state));
 
     // Holds the decoder state of one sequence, replaced when the sequence resets.
     private sealed class SequenceCache(KimiK31State state) : IDisposable
