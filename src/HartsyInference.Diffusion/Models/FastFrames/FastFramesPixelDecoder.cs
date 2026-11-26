@@ -105,8 +105,6 @@ public sealed class FastFramesPixelDecoder : IDisposable
         foreach ((string name, long[] shape) in ExpectedShapes(_config, prefixed))
         {
             // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
-            if (!weights.ContainsKey(name))
-                throw new ArgumentException($"The decoder checkpoint has no '{name}'.", nameof(weights));
             CheckpointTensors.Require(weights, "FastFrames decoder", name, shape);
         }
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";

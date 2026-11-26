@@ -220,27 +220,41 @@ public sealed class FastFramesPipeline : IDisposable
         // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
         long kvNeed = ClipKvNeedBytes(latentFrames);
         // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
-        // prefix beside them, so the headroom only has to cover activations.
-        _refinerWeights.Preload();
-        _decoderWeights.Preload();
-        // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
-        // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
-        BlockStreamingScope streaming = BlockStreamingScope.Open(new BlockStreamingOptions
+        // prefix beside them, so the headroom only has to cover activations. A failure from here to the first frame releases them and
+        // the generator, so a refused clip leaves nothing it uploaded on the device.
+        BlockStreamingScope? placed = null;
+        try
         {
-            Backend = _backend,
-            Denoiser = _transformer,
-            ModelName = _config.Name,
-            HeadroomBytes = StreamingHeadroomOverride ?? kvNeed + DefaultStreamingHeadroomBytes,
-            Mode = StreamingMode,
-            Pin = _generatorPin,
-            TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
-        });
+            _refinerWeights.Preload();
+            _decoderWeights.Preload();
+            // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
+            // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
+            placed = BlockStreamingScope.Open(new BlockStreamingOptions
+            {
+                Backend = _backend,
+                Denoiser = _transformer,
+                ModelName = _config.Name,
+                HeadroomBytes = StreamingHeadroomOverride ?? kvNeed + DefaultStreamingHeadroomBytes,
+                Mode = StreamingMode,
+                Pin = _generatorPin,
+                TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
+            });
+            LastStreamedBlocks = placed.StreamedBlocks;
+            // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
+            CheckKvFitsNow(latentFrames);
+        }
+        catch
+        {
+            placed?.Dispose();
+            FreeGenerator();
+            _refinerWeights.Release(force: true);
+            _decoderWeights.Release(force: true);
+            throw;
+        }
+        BlockStreamingScope streaming = placed!;
         bool streamed = streaming.StreamedBlocks > 0;
         try
         {
-            LastStreamedBlocks = streaming.StreamedBlocks;
-            // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
-            CheckKvFitsNow(latentFrames);
             for (int frame = 0; frame < latentFrames; frame++)
             {
                 cancel.ThrowIfCancellationRequested();
@@ -326,6 +340,7 @@ public sealed class FastFramesPipeline : IDisposable
         }
         _refinerWeights.Release(force: true);
         _decoderWeights.Release(force: true);
+        _backend.TrimMemoryPool();
     }
 
     /// <summary>Frees every generator weight on the device and marks the pin not resident.</summary>
