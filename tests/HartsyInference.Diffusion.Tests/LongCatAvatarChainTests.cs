@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.LongCat;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -44,6 +45,24 @@ public sealed class LongCatAvatarChainTests : IDisposable
         // The reference (latent 0), the four context latents before the first new one (3…6), then the new latents (7…9).
         Assert.Equal([0, 3, 4, 5, 6, 7, 8, 9], plan.RunLatentIds(1));
         Assert.Equal(29, plan.RunPixelIds(1).Length);
+    }
+
+    /// <summary>A later segment's new frames take the reference layout's audio windows: the 80 windows after its 13 context windows, starting at
+    /// <c>SegmentStartFrame</c>. Only the context's 16-vs-13 part of the layout is still unverified (see <c>RunPixelIds</c>).</summary>
+    [Fact]
+    public void LaterSegmentsNewFramesTakeTheReferenceWindows()
+    {
+        LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
+        LongCatAudioLayout layout = new() { Blocks = 5, Channels = 16, VideoFps = 25, AudioStride = 1 };
+        Assert.True(plan.Segments >= 3);
+        for (int s = 1; s < plan.Segments; s++)
+        {
+            int[] pixels = plan.RunPixelIds(s);
+            int start = LongCatAudioFeatures.SegmentStartFrame(s, layout);
+            int[] newFrames = pixels[^80..];
+            for (int i = 0; i < 80; i++)
+                Assert.Equal(start + 13 + i, newFrames[i]);
+        }
     }
 
     [Fact]

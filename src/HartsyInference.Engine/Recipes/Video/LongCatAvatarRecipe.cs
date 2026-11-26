@@ -23,9 +23,15 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
     internal const int OutputFps = 25;
 
-    /// <summary>The longest chain the recipe accepts, in frames. A chain is decoded in one pass after it is denoised, so this bounds that one
-    /// allocation (about 1.4 GB of F32 RGB at this size). Raising it needs a segment-wise decode first.</summary>
+    /// <summary>The longest chain the recipe accepts at 832x480, in frames. A chain is decoded in one pass after it is denoised, so the budget bounds
+    /// that one allocation: about 1.15 GB of F32 RGB at this size, plus the byte copy. The budget is in pixels, so other sizes get proportionally fewer
+    /// frames. The decode covers whole segments, so the clip can be decoded a little past the request before it is trimmed. Raising the budget needs
+    /// a segment-wise decode first.</summary>
     internal const int MaxChainFrames = 241;
+
+    /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>
+    internal static bool ChainWithinBudget(int totalFrames, int width, int height) =>
+        (long)totalFrames * width * height <= (long)MaxChainFrames * 832 * 480;
 
     /// <summary>The audio front end: Whisper-large-v3 from its upstream repo, at the revision the catalog row pins (the 1.5 repo bundles the same file).</summary>
     internal const string WhisperRepo = "openai/whisper-large-v3";

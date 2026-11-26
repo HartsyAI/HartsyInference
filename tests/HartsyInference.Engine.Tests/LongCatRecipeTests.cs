@@ -112,6 +112,17 @@ public sealed class LongCatRecipeTests
         }
     }
 
+    [Theory]
+    [InlineData(241, 832, 480, true)]
+    [InlineData(242, 832, 480, false)]
+    [InlineData(241, 1280, 720, false)]
+    [InlineData(100, 1280, 720, true)]
+    [InlineData(150, 1280, 720, false)]
+    public void TheChainBudgetCountsPixelsAtTheDefaultSize(int frames, int width, int height, bool expected)
+    {
+        Assert.Equal(expected, LongCatAvatarRecipe.ChainWithinBudget(frames, width, height));
+    }
+
     [Fact]
     public void TheStreamingHeadroomCoversTheFullAvatarRunsActivationsWithAMargin()
     {

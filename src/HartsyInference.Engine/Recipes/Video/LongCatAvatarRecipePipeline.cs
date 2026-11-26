@@ -58,9 +58,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
 
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
-        if (request.ChainTotalFrames is int requested && requested > LongCatAvatarRecipe.MaxChainFrames)
+        if (request.ChainTotalFrames is int requested && !LongCatAvatarRecipe.ChainWithinBudget(requested, width, height))
             throw new ArgumentOutOfRangeException(nameof(request), requested,
-                $"A LongCat-Video-Avatar chain is at most {LongCatAvatarRecipe.MaxChainFrames} frames; the whole chain is decoded in one pass.");
+                $"A LongCat-Video-Avatar chain is at most {LongCatAvatarRecipe.MaxChainFrames} frames at 832x480 (the same pixel count at other sizes); "
+                + "the whole chain is decoded in one pass.");
         if (frames > LongCatAvatarRecipe.SegmentFrames)
             throw new ArgumentOutOfRangeException(nameof(settings), frames, $"One LongCat-Video-Avatar segment is at most {LongCatAvatarRecipe.SegmentFrames} frames.");
         if (settings.Fps != LongCatAvatarRecipe.OutputFps)
@@ -201,7 +202,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         return result;
     }
 
-    /// <summary>The audio tokens of the clip and the same clip with zeroed raw audio (the unconditional pass of the three-pass CFG).</summary>
+    /// <summary>The conditional audio tokens of a run, without the unconditional projection a later segment does not use.</summary>
     private float[] ProjectConditional(float[] rawWindows, int frames, int latentFrames)
     {
         using Tensor raw = new(new TensorShape([frames, RowWidth]), DType.F32);
@@ -211,6 +212,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         return condHost.AsReadOnlySpan<float>().ToArray();
     }
 
+    /// <summary>The audio tokens of the clip and the same clip with zeroed raw audio (the unconditional pass of the three-pass CFG).</summary>
     private (float[] Conditional, float[] Unconditional) ProjectAudio(float[] rawWindows, int frames, int latentFrames)
     {
         using Tensor raw = new(new TensorShape([frames, RowWidth]), DType.F32);
