@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Tests.Shared;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -15,12 +16,13 @@ namespace HartsyInference.Diffusion.Tests;
 /// and must agree to <see cref="DefaultBound"/>, the bound the TF32 error is measured against. Each lane prints its worst absolute difference.
 /// Env-gated: it runs only when HARTSY_LONGCAT_CUDA_PARITY is 1 and CUDA is available, so the suite stays green everywhere else.</summary>
 [Trait("Category", "GpuIntegration")]
-public sealed class LongCatCudaParityTests
+public sealed class LongCatCudaParityTests(ITestOutputHelper output)
 {
     private const string EnvName = "HARTSY_LONGCAT_CUDA_PARITY";
     private const int Frames = 3, Height = 4, Width = 4, TextLength = 6;
 
-    /// <summary>The exact lane's bound: plain F32 on both sides, so only the kernels' reduction order differs.</summary>
+    /// <summary>The exact lane's bound: plain F32 on both sides, so only the kernels' reduction order differs. Measured on a 4090 at 7dd3c077c
+    /// (ExactGemmScope on, the gate on): the video worst absolute difference was 2.384e-6 and the avatar's 1.188e-6, both well inside 1e-5.</summary>
     private const float ExactBound = 1e-5f;
 
     /// <summary>The default lane's bound. Measured on a 4090 at 7dd3c077c (default TF32 GEMMs, the gate on): the video worst absolute difference
@@ -41,7 +43,7 @@ public sealed class LongCatCudaParityTests
     [LongCatCudaParityFact]
     public void TheAvatarCachedLoopWithDefaultGemmsStaysWithinTheTf32Bound() => AvatarParity(exactGemm: false, DefaultBound, "avatar default");
 
-    private static void VideoParity(bool exactGemm, float bound, string label)
+    private void VideoParity(bool exactGemm, float bound, string label)
     {
         LongCatConfig config = LongCatTestData.Tiny;
         Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, 111);
@@ -67,7 +69,7 @@ public sealed class LongCatCudaParityTests
         }
     }
 
-    private static void AvatarParity(bool exactGemm, float bound, string label)
+    private void AvatarParity(bool exactGemm, float bound, string label)
     {
         LongCatConfig config = LongCatTestData.TinyAvatar;
         Dictionary<string, Tensor> weights = LongCatTestData.AvatarWeights(config, 113);
@@ -118,13 +120,13 @@ public sealed class LongCatCudaParityTests
     }
 
     /// <summary>Prints the worst absolute difference of the lane, then asserts it is within <paramref name="bound"/>.</summary>
-    private static void AssertClose(float[] cpu, float[] gpu, float bound, string label)
+    private void AssertClose(float[] cpu, float[] gpu, float bound, string label)
     {
         Assert.Equal(cpu.Length, gpu.Length);
         float worst = 0;
         for (int i = 0; i < cpu.Length; i++)
             worst = MathF.Max(worst, MathF.Abs(cpu[i] - gpu[i]));
-        Console.WriteLine($"{label}: worst absolute difference {worst:E3} (bound {bound:E0})");
+        output.WriteLine($"{label}: worst absolute difference {worst:E3} (bound {bound:E0})");
         Assert.True(worst <= bound, $"{label}: CUDA drifted from the CPU by {worst:E3}, above the bound {bound:E0}");
     }
 
