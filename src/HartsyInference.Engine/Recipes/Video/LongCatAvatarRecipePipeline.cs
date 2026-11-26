@@ -135,16 +135,18 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         float[]? firstFrame, float[] firstAudio, float[] firstUnconditionalAudio, Action<GenerationProgress> bridge, CancellationToken cancel)
     {
         int channels = _parts.Channels, hw = latentHeight * latentWidth, runLatents = plan.RunLatents;
-        int runPixels = 4 * (runLatents - 1) + 1;
-        // The unconditional tokens are the projection of zeroed audio, the same for every later segment.
-        (_, float[] laterUnconditional) = ProjectAudio(new float[runPixels * RowWidth], runPixels, runLatents);
+        // The unconditional tokens are the projection of zeroed audio, the same for every later segment. The run's audio is its windows
+        // (RunWindows) projected for the run's latents without the reference slot, which then takes a copy of the first frame's tokens.
+        (_, float[] laterUnconditional) = ProjectAudio(new float[plan.RunWindows * RowWidth], plan.RunWindows, runLatents - 1);
+        laterUnconditional = LongCatAvatarChainPlan.ReferenceSlotTokens(laterUnconditional, laterUnconditional.Length / (runLatents - 1));
         List<float[]> laterAudio = [];
         List<float[]> laterNoise = [];
         for (int s = 1; s < plan.Segments; s++)
         {
             int[] pixels = plan.RunPixelIds(s);
             float[] raw = GatherWindows(rawAudio, pixels);
-            float[] tokens = ProjectConditional(raw, pixels.Length, runLatents);
+            float[] projected = ProjectConditional(raw, pixels.Length, runLatents - 1);
+            float[] tokens = LongCatAvatarChainPlan.ReferenceSlotTokens(projected, projected.Length / (runLatents - 1));
             laterAudio.Add(tokens);
             laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
         }

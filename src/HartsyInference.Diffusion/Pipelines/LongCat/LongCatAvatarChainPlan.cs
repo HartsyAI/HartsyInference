@@ -37,6 +37,9 @@ public sealed record LongCatAvatarChainPlan
     /// <summary>Latent frames of a later segment's run: its reference slot, its context and its new frames.</summary>
     public int RunLatents => 1 + ContextLatents + NewLatentsPerSegment;
 
+    /// <summary>Audio windows (pixel frames) of a later segment's run, the reference's <c>num_frames</c>: <c>4·(SegmentLatents − 1) + 1</c>.</summary>
+    public int RunWindows => 4 * (SegmentLatents - 1) + 1;
+
     /// <summary>The plan for a chain of at least <paramref name="totalPixelFrames"/> pixel frames, from segments of
     /// <paramref name="segmentLatents"/> latent frames.</summary>
     public static LongCatAvatarChainPlan For(int segmentLatents, int totalPixelFrames, int contextLatents = DefaultContextLatents)
@@ -81,18 +84,35 @@ public sealed record LongCatAvatarChainPlan
         return ids;
     }
 
-    /// <summary>The pixel frames of a later segment's run, in run order: pixel 0, then four per latent of <see cref="RunLatentIds"/> after the reference.
-    /// Its length is <c>4·(RunLatents − 1) + 1</c>.</summary>
-    /// <remarks>Open question, not settled against a reference: the reference's per-segment audio is 93 contiguous windows starting at
-    /// <c>LongCatAudioFeatures.SegmentStartFrame(k)</c>, whose first 13 are the context. This layout instead gives the context four full latent
-    /// groups (16 windows) before the new frames, so the context's audio can differ from the reference's. The new frames' windows agree. Settle it
-    /// with the reference's later-segment windows before relying on chains with real weights.</remarks>
+    /// <summary>The audio windows (pixel frames) of a later segment's run, in order: <c>4·(SegmentLatents − 1) + 1</c> contiguous frames from
+    /// <c>segment · 4 · NewLatentsPerSegment</c>. This is the reference's layout (meituan-longcat/LongCat-Video @ 58eb336, the demo's
+    /// <c>audio_start_idx += stride · (num_frames − num_cond_frames)</c>): the first <c>4·(ContextLatents − 1) + 1</c> windows are the context,
+    /// the rest the new frames. The reference slot takes no window of its own; the audio projection gives it a copy of the first frame's tokens
+    /// (see <see cref="ReferenceSlotTokens"/>). Equals <c>LongCatAudioFeatures.SegmentStartFrame(segment)</c> for the Whisper layout.</summary>
     public int[] RunPixelIds(int segment)
     {
-        List<int> pixels = [];
-        foreach (int latent in RunLatentIds(segment))
-            pixels.AddRange(PixelsOfLatent(latent));
-        return [.. pixels];
+        if (segment < 1 || segment >= Segments)
+            throw new ArgumentOutOfRangeException(nameof(segment), segment, "A later segment index is from 1 to Segments − 1.");
+        int start = segment * 4 * NewLatentsPerSegment;
+        int count = RunWindows;
+        int[] pixels = new int[count];
+        for (int i = 0; i < count; i++)
+            pixels[i] = start + i;
+        return pixels;
+    }
+
+    /// <summary>The audio tokens of a later segment's run, <c>[RunLatents · valuesPerFrame]</c> values, from the tokens of its audio windows
+    /// <c>[(RunLatents − 1) · valuesPerFrame]</c> values: the reference slot takes a copy of the first frame's tokens, placed in front, as the
+    /// reference's audio projection does when a reference latent is present.</summary>
+    public static float[] ReferenceSlotTokens(float[] tokens, int valuesPerFrame)
+    {
+        ArgumentNullException.ThrowIfNull(tokens);
+        if (valuesPerFrame < 1 || tokens.Length == 0 || tokens.Length % valuesPerFrame != 0)
+            throw new ArgumentException("The tokens must be whole frames of valuesPerFrame values.", nameof(tokens));
+        float[] result = new float[tokens.Length + valuesPerFrame];
+        Array.Copy(tokens, 0, result, 0, valuesPerFrame);
+        Array.Copy(tokens, 0, result, valuesPerFrame, tokens.Length);
+        return result;
     }
 
     /// <summary>Joins the chain's segments into one <c>[channels, TotalLatents, hw]</c> latent: segment 0 whole, then each later segment's new frames

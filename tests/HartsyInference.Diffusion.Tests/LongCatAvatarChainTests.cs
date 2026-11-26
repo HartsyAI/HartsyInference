@@ -44,25 +44,36 @@ public sealed class LongCatAvatarChainTests : IDisposable
         Assert.Equal(8, plan.RunLatents);
         // The reference (latent 0), the four context latents before the first new one (3…6), then the new latents (7…9).
         Assert.Equal([0, 3, 4, 5, 6, 7, 8, 9], plan.RunLatentIds(1));
-        Assert.Equal(29, plan.RunPixelIds(1).Length);
+        // A later run's audio is 4·(7 − 1) + 1 windows.
+        Assert.Equal(25, plan.RunPixelIds(1).Length);
     }
 
-    /// <summary>A later segment's new frames take the reference layout's audio windows: the 80 windows after its 13 context windows, starting at
-    /// <c>SegmentStartFrame</c>. Only the context's 16-vs-13 part of the layout is still unverified (see <c>RunPixelIds</c>).</summary>
+    /// <summary>A later segment's audio is the reference's 93 windows from <c>SegmentStartFrame</c> (the demo's layout, 58eb336): the 13 context
+    /// windows, then the 80 new frames' windows. Its reference slot needs no window of its own.</summary>
     [Fact]
-    public void LaterSegmentsNewFramesTakeTheReferenceWindows()
+    public void LaterSegmentsReadTheReferenceWindows()
     {
         LongCatAvatarChainPlan plan = LongCatAvatarChainPlan.For(24, 241);
         LongCatAudioLayout layout = new() { Blocks = 5, Channels = 16, VideoFps = 25, AudioStride = 1 };
         Assert.True(plan.Segments >= 3);
         for (int s = 1; s < plan.Segments; s++)
         {
-            int[] pixels = plan.RunPixelIds(s);
             int start = LongCatAudioFeatures.SegmentStartFrame(s, layout);
-            int[] newFrames = pixels[^80..];
-            for (int i = 0; i < 80; i++)
-                Assert.Equal(start + 13 + i, newFrames[i]);
+            int[] windows = plan.RunPixelIds(s);
+            Assert.Equal(93, windows.Length);
+            for (int i = 0; i < windows.Length; i++)
+                Assert.Equal(start + i, windows[i]);
+            // The new frames are the run's latents 4…23: their first window is the 14th (index 13).
+            Assert.Equal(start + 13, windows[13]);
         }
+    }
+
+    /// <summary>The reference slot takes a copy of the first frame's tokens, placed in front (the reference's <c>audio_start_ref</c>).</summary>
+    [Fact]
+    public void TheReferenceSlotTakesACopyOfTheFirstFrameTokens()
+    {
+        float[] frames = [1, 2, 3, 4, 5, 6];
+        Assert.Equal([1, 2, 1, 2, 3, 4, 5, 6], LongCatAvatarChainPlan.ReferenceSlotTokens(frames, 2));
     }
 
     [Fact]
