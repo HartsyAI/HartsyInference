@@ -185,8 +185,9 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             // The progress steps restart for each segment; this line names the segment they belong to.
             Logs.Info($"[LongCatAvatarRecipePipeline] Later segment {laterRun} of {plan.Segments - 1} (overall segment {laterRun + 1} of {plan.Segments}).");
             return LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
-                // A cached later step runs only its noisy frames through the blocks; the conditioning frames are read from the cache. The activation
-                // headroom therefore counts the new latents, not the whole run.
+                // A cached later step runs only its noisy frames through the blocks. The conditioning frames' keys and values come from the offloaded
+                // cache: a staged pair and the joined copy of it stay on the device for the block, and are counted with the activations, while the
+                // noisy rows' own keys and values are activations. So the headroom counts the new latents, and the cache's two pairs.
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
                     LongCatRecipeSupport.TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
                     LongCatRecipeSupport.CachedStepBytes(_parts.Dit.Config, plan.ContextLatents + 1, latentHeight, latentWidth)),
