@@ -152,8 +152,8 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
     /// <c>sensenova/SenseNova-Loop-9B</c>). The mmproj GGUF carries no pixel bounds of its own, so these are not read from it.</summary>
     public const int MinPixels = 65536;
 
-    /// <summary>The checkpoint processor's upper bound (<c>size.longest_edge</c>): 16 777 216 px, which is 16 384 merged tokens at 4096×4096. Not used by
-    /// default; see <see cref="DefaultMaxPixels"/>.</summary>
+    /// <summary>The checkpoint processor's upper bound (<c>size.longest_edge</c>): 16 777 216 px. It matches the processor's preprocessing only. Running
+    /// <c>Encode</c> at that size needs a full attention mask of 16 384 merged tokens squared (about 17 GB F32), so it does not fit a 12 GB card. Not the default; see <see cref="DefaultMaxPixels"/>.</summary>
     public const int CheckpointMaxPixels = 16777216;
 
     /// <summary>The engine's default upper bound: 768×768 px, the 576 merged tokens the square squash used. Full attention over a larger grid costs
@@ -162,7 +162,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
 
     /// <summary>Preprocesses an RGB image for this tower the way the checkpoint's processor does: an aspect-preserving resize to whole
     /// <c>patch · merge</c> blocks inside <see cref="MinPixels"/>..<paramref name="maxPixels"/>, then normalization. The result's height and width set the
-    /// merged grid (<see cref="MergedGrid"/>) and the number of image tokens. Pass <see cref="CheckpointMaxPixels"/> to match the processor exactly.</summary>
+    /// merged grid (<see cref="MergedGrid"/>) and the number of image tokens. Pass <see cref="CheckpointMaxPixels"/> only to match the processor's output; the default keeps <c>Encode</c> in memory.</summary>
     public Tensor PreprocessImage(ReadOnlySpan<byte> rgb, int width, int height, int maxPixels = DefaultMaxPixels) =>
         VlmImagePreprocessor.PreprocessAspect(rgb, width, height, PatchSize * Merge, MinPixels, maxPixels, ImageMean, ImageStd);
 

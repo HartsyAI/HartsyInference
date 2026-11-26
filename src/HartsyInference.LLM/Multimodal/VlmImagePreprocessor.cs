@@ -53,6 +53,8 @@ public static class VlmImagePreprocessor
     {
         if (factor <= 0 || height <= 0 || width <= 0)
             throw new ArgumentException($"Image {width}x{height} and factor {factor} must be positive.");
+        if (maxPixels < minPixels || maxPixels < (long)factor * factor)
+            throw new ArgumentException($"Pixel bounds [{minPixels}, {maxPixels}] must hold at least one {factor}x{factor} block, with the maximum at or above the minimum.");
         if (Math.Max(height, width) / (double)Math.Min(height, width) > 200)
             throw new ArgumentException($"Image {width}x{height} has an aspect ratio above 200:1; the processor refuses it.");
         int hBar = (int)Math.Round(height / (double)factor) * factor;

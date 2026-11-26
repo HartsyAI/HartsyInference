@@ -74,6 +74,8 @@ public sealed class SsmVisionRefusalTests : IDisposable
         TextDeviceSlot slot = new();
         TextService.LoadVisionInto(slot, text);
 
+        // The generic path ran (it failed to load the stub, which is the expected reason), so the SSM refusal did not fire.
+        Assert.Contains(_warnings, w => w.Contains("Failed to load vision encoder"));
         Assert.DoesNotContain(_warnings, w => w.Contains("is not a Qwen3-VL projector"));
     }
 }

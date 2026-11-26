@@ -60,6 +60,14 @@ public sealed class Qwen35VlAspectResizeTests
         Assert.Equal(0, w % Factor);
     }
 
+    [Theory]
+    [InlineData(1024, 65536)]   // a maximum below one 32×32 block
+    [InlineData(40000, 65536)]  // a maximum below the minimum
+    public void SmartResize_RefusesBoundsThatCannotHoldABlock(int maxPixels, int minPixels)
+    {
+        Assert.Throws<ArgumentException>(() => VlmImagePreprocessor.SmartResize(768, 1024, Factor, minPixels, maxPixels));
+    }
+
     [Fact]
     public void SmartResize_RefusesAnAspectRatioAbove200()
     {
