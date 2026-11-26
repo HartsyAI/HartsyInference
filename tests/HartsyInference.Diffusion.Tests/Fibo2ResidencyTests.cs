@@ -67,6 +67,17 @@ public sealed class Fibo2ResidencyTests
     }
 
     [Fact]
+    public void Fits_KeepsTheDenoiserOnlyWhenTheEncoderFitsWithHeadroom()
+    {
+        const long gib = 1L << 30;
+
+        Assert.True(Fibo2Pipeline.Fits(freeBytes: 4 * gib, needBytes: 2 * gib));
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 5 * gib / 2, needBytes: 2 * gib), "headroom is not spare");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: 0, needBytes: 0), "a backend with no device memory reports 0 and takes the release path");
+        Assert.False(Fibo2Pipeline.Fits(freeBytes: -1, needBytes: 1), "an unknown figure is never a fit");
+    }
+
+    [Fact]
     public void TransformerEnumeratesNoWeightsBeforeItsWeightsLoad()
     {
         using Fibo2Transformer transformer = new(TinyConfig());

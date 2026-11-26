@@ -101,7 +101,7 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         {
             // The text encoder leaves the device before the denoiser loads: on a 12 GB card the two do not fit together. A denoiser kept
             // resident by the VRAM policy from an earlier generation is freed here (forced), or the encoder would load on top of it.
-            _denoiserWeights.Release(force: true);
+            FreeDenoiserForEncoder(() => _textEncoder.EnumerateWeights());
             _textEncoderWeights.Preload();
             try
             {
@@ -173,10 +173,31 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         Logs.Info($"[Fibo2][Residency] {label}: {resident} of {total} tensors resident; {outcome}");
     }
 
+    /// <summary>Whether <paramref name="needBytes"/> fit in the device memory free now, with <see cref="HeadroomBytes"/> to spare. A backend
+    /// that reports no free memory (0) is never a fit, so the caller takes the release path.</summary>
+    internal static bool Fits(long freeBytes, long needBytes) =>
+        freeBytes > 0 && needBytes >= 0 && freeBytes >= needBytes + HeadroomBytes;
+
+    /// <summary>Device headroom kept above a fit, for the allocator and the activations of the next stage.</summary>
+    internal const long HeadroomBytes = 1L << 30;
+
+    /// <summary>Frees the denoiser before an encoder preloads, unless the encoder fits next to it. The denoiser is already on the device when
+    /// it is kept, so its bytes are not in the free figure; a fit therefore keeps both, and the next generation skips the re-upload.</summary>
+    private void FreeDenoiserForEncoder(Func<IEnumerable<Tensor>> encoderWeights)
+    {
+        long encoderBytes = 0;
+        foreach (Tensor tensor in encoderWeights())
+            encoderBytes += tensor.DType.ComputeByteCount(tensor.ElementCount);
+        if (Fits(Backend.FreeMemoryBytes(), encoderBytes))
+            return;
+        _denoiserWeights.Release(force: true);
+    }
+
     /// <summary>One guided velocity: <c>uncond + g · (cond − uncond)</c> when CFG is active, otherwise the conditional velocity alone.
     /// The caller owns the returned tensor.</summary>
     private Tensor Denoise(Tensor latent, float sigma, Tensor conditional, Tensor? unconditional, float guidanceScale)
     {
+        DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={sigma:F4}");
         Tensor conditionalVelocity = _transformer.Forward(Backend, latent, sigma, conditional);
         if (unconditional is null)
             return conditionalVelocity;

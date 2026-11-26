@@ -47,7 +47,8 @@ public sealed unsafe partial class Fibo2Pipeline
             ResidentWeights editEncoder = new(Backend,
                 () => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
                     .Distinct<Tensor>(ReferenceEqualityComparer.Instance));
-            _denoiserWeights.Release(force: true);
+            FreeDenoiserForEncoder(() => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
+                .Distinct<Tensor>(ReferenceEqualityComparer.Instance));
             editEncoder.Preload();
             try
             {
@@ -78,6 +79,7 @@ public sealed unsafe partial class Fibo2Pipeline
                 for (int i = 0; i < steps; i++)
                 {
                     Stopwatch stepWatch = Stopwatch.StartNew();
+                    DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={scheduler.SigmaAt(i):F4}");
                     Tensor velocity = Denoise(latent, scheduler.SigmaAt(i), conditional, unconditional, guidanceScale, references);
                     Tensor next = new(latent.Shape, DType.F32);
                     scheduler.Step(next, velocity, latent, i);
