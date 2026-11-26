@@ -76,7 +76,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain;
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase);
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, LongCatAvatarVariants.Avatar16FamilyId, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The default build's settings (1.5, the catalog row's weights): the distilled path, 8 steps, guidance off (1.0), shift 7. Steps
     /// and guidance are fixed by the distillation, so the planner locks them.</summary>
@@ -113,14 +115,8 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
-        // The 1.6 settings apply only with a 1.6 INT8 catalog row, which does not exist yet; a 1.6 request is refused before any weight is read.
-        // The default and a named 1.5 build run the distilled path with the 1.5 settings.
+        // The 1.6 build runs undistilled on its INT8 row's weights (the 1.6 settings). The default and a named 1.5 build run the distilled path.
         ResolvedModelVariant variant = context.ResolveVariant(LongCatAvatarVariants.Catalog);
-        if (variant.Is(LongCatAvatarVariants.Avatar16))
-        {
-            throw new NotSupportedException("longcat-avatar's 1.6 build runs only once a 1.6 INT8 catalog row exists; none does yet. "
-                + "The 1.5 build (the default) runs instead.");
-        }
         bool distilled = variant.Is(LongCatAvatarVariants.Avatar15);
         // The distilled build is the base plus the DMD LoRA gated on. Without that file the request would run the bare base at 8 steps, so it
         // is refused here, before the checkpoint is opened.
