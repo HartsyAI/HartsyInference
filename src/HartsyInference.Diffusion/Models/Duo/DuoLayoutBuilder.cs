@@ -94,6 +94,53 @@ public static class DuoLayoutBuilder
         return t;
     }
 
+    /// <summary>The cache prefill for one conversation: the portrait reference and the two shared Intent spans, the rows
+    /// <see cref="Build"/> packs before any block. Positions and tags match <see cref="Build"/>, so a cached forward over this
+    /// layout commits the same keys and values the full layout does.</summary>
+    internal static DuoLayout BuildPrefix(DuoSampleInput sample, DuoRopePolicy rope)
+    {
+        Validate(sample);
+        Writer writer = new();
+        int descriptionRows = sample.SharedDescriptionRows, cueRows = sample.SharedCueRows, sharedTotal = descriptionRows + cueRows;
+        writer.AddMedia(0, -1, DuoGroupKind.Reference, sample.Reference, [0.0], audioSteps: 0, startMs: 0.0, timeId: 0);
+        if (descriptionRows > 0)
+        {
+            writer.AddText(0, -1, DuoGroupKind.Shared, SharedPositions(rope, -sharedTotal, descriptionRows), 0);
+        }
+        if (cueRows > 0)
+        {
+            writer.AddText(0, -1, DuoGroupKind.Shared, SharedPositions(rope, -cueRows, cueRows), descriptionRows);
+        }
+        return writer.Finish();
+    }
+
+    /// <summary>One block as the cached path sees it: its body Intent rows and either its noisy media (<paramref name="clean"/>
+    /// false, a denoise pass) or its clean media (a commit, timeline id 0). The text source rows index the chunk's own text
+    /// tensor, which is the shared rows followed by this block's body rows.</summary>
+    internal static DuoLayout BuildChunk(DuoSampleInput sample, int block, DuoRopePolicy rope, bool clean)
+    {
+        Validate(sample);
+        if ((uint)block >= (uint)sample.Blocks.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(block), block, "The block is not in the sample.");
+        }
+        DuoBlockInput b = sample.Blocks[block];
+        Writer writer = new();
+        if (b.BodyTextRows > 0)
+        {
+            writer.AddText(0, block, DuoGroupKind.Text, BodyPositions(rope, b), sample.SharedDescriptionRows + sample.SharedCueRows);
+        }
+        if (clean)
+        {
+            writer.AddMedia(0, block, DuoGroupKind.Clean, b.Video, b.FrameStartsMs, b.AudioSteps, b.StartMs, timeId: 0);
+        }
+        else
+        {
+            writer.AddMedia(0, block, DuoGroupKind.Noisy, b.Video, b.FrameStartsMs, b.AudioSteps, b.StartMs, timeId: writer.NextNoisyTimeId());
+        }
+        return writer.Finish();
+    }
+
     /// <summary>Spatial axes of a latent grid: <c>((1 - d/area)/2 + i*2/area) * 32</c> for <c>d/2</c> patches per axis, with <c>area = sqrt(H*W)</c>.</summary>
     internal static (double[] Height, double[] Width) SpatialAxes(int height, int width)
     {
