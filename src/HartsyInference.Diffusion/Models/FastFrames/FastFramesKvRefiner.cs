@@ -331,8 +331,13 @@ public sealed class FastFramesKvRefiner : IDisposable
         return output;
     }
 
-    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key) =>
-        FastFramesOps.CopyF32(weights[key], weights[key].Shape);
+    /// <summary>An owned F32 copy of a checkpoint tensor, read through <see cref="CheckpointTensors"/> so a missing key names the family.
+    /// Shapes were checked in <see cref="LoadWeights"/> before any copy.</summary>
+    private static Tensor F32(IReadOnlyDictionary<string, Tensor> weights, string key)
+    {
+        Tensor source = CheckpointTensors.Require(weights, "FastFrames refiner", key);
+        return FastFramesOps.CopyF32(source, source.Shape);
+    }
 
     private void RequireLoaded()
     {
