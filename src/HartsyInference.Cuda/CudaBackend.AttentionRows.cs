@@ -301,26 +301,26 @@ public sealed partial class CudaBackend
     /// <summary>A one-row tile, B·H·Skv scores, is within what the softmax addresses; every tiled row needs it.</summary>
     internal static bool OneRowTiles(in AttentionCall c) => (long)c.Batch * c.Heads * c.KeyTokens <= MaterializedMaxScores;
 
-    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than half of free
-    /// VRAM, or one the materialized row does not address.</summary>
+    /// <summary>The query-tiled gate: a one-row tile the softmax addresses, and forced, an F32 score matrix larger than the device's tile rung
+    /// (<see cref="TileRungBytes"/>), or one the materialized row does not address. The gate reads the device, never free memory.</summary>
     private bool TilesScores(in AttentionCall c)
     {
         if (!OneRowTiles(in c)) return false;
         if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
-        return scoreBytes > (ulong)FreeVram() / 2;
+        return scoreBytes > (ulong)TileRungBytes(DeviceTotalVram());
     }
 
-    /// <summary>The BF16 copies of Q, K, V and the output fit in half of free VRAM.</summary>
+    /// <summary>The BF16 copies of Q, K, V and the output fit in the device's tile rung.</summary>
     private bool Bf16CastFits(in AttentionCall c)
     {
         ulong castBytes = sizeof(ushort) * ((ulong)c.Query.Storage.ElementCount + (ulong)c.Key.Storage.ElementCount
             + (ulong)c.Value.Storage.ElementCount + (ulong)c.Output.Storage.ElementCount);
-        return castBytes <= (ulong)FreeVram() / 2;
+        return castBytes <= (ulong)TileRungBytes(DeviceTotalVram());
     }
 
-    /// <summary>Free device memory the attention rows budget against.</summary>
-    private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;
+    /// <summary>The device's total VRAM: a constant per device, so the attention gates it decides do not move with free memory.</summary>
+    private nuint DeviceTotalVram() => _context.GetMemoryInfo().totalBytes;
 
     /// <summary>Whether the equal-head form of a grouped call runs on INT8 v2, Sage or the F16 flash kernel: the kernels the
     /// token-major grouped row yields to and <c>widen.preferred</c> widens for, so the two cannot disagree.</summary>
