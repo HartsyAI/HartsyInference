@@ -137,6 +137,40 @@ public sealed class CrossFrameAttentionTests : IDisposable
     }
 
     [Fact]
+    public void AStreamsRopeTablesAreBuiltOncePerShapeAndChangeNothing()
+    {
+        using Tensor frames = Pixels(new Random(15), Frames);
+        using Dinov3RopeCache rope = new();
+        using CrossFrameKvRing cachedRing = new(2), plainRing = new(2);
+        for (int t = 0; t < Frames; t++)
+        {
+            using Tensor one = Reorder(frames, [t]);
+            AssertSame(_encoder.EncodeFrameIntermediates(_backend, one, Taps, CrossFrameBlocks, cachedRing, rope),
+                _encoder.EncodeFrameIntermediates(_backend, one, Taps, CrossFrameBlocks, plainRing), $"cached frame {t}");
+        }
+
+        Assert.Equal(1, rope.Builds);
+        // A joint clip has another shape: its tables replace the frame's, once for both calls.
+        for (int call = 0; call < 2; call++)
+            AssertSame(_encoder.EncodeFrameIntermediates(_backend, frames, Taps, CrossFrameBlocks, null, rope),
+                _encoder.EncodeFrameIntermediates(_backend, frames, Taps, CrossFrameBlocks), $"joint call {call}");
+        Assert.Equal(2, rope.Builds);
+
+        static void AssertSame(Tensor[] cached, Tensor[] built, string label)
+        {
+            try
+            {
+                for (int tap = 0; tap < Taps.Length; tap++) Assert.True(MaxAbs(cached[tap], built[tap]) == 0, $"{label}, tap {tap}");
+            }
+            finally
+            {
+                DisposeAll(cached);
+                DisposeAll(built);
+            }
+        }
+    }
+
+    [Fact]
     public void TheBlendRampMatchesTorchLinspaceWithoutItsEndpoints()
     {
         Assert.Equal([0.8f, 0.6f, 0.4f, 0.2f], DepthPro2VideoStream.BlendRamp(4));
