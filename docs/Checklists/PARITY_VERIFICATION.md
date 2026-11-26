@@ -471,6 +471,12 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 | RNNoise (`RnnoiseStream`) | `LatencySamples` counted the denoiser's delay as a whole analysis window plus the lookahead frame (three 10 ms frames); it is two — overlap-add holds window minus hop, and the analysis adds nothing because priming completes the first window on arrival. At 16 kHz it declared 800 samples for a real 640. Nothing in production aligned on it yet | Real-speech check at 16 kHz cross-correlated output against the clean clip: best lag 640, not the declared 800; upstream's C library measures 960 samples (20 ms) at 48 kHz the same way | Denoiser latency is one window (`RnnoiseDenoiser.WindowSize`, scaled to the source rate); `RnnoiseRealSpeechTests` asserts the measured lag equals the declared one |
 | Vulkan `ConvTranspose1d` (Kokoro pool, Mimi, PocketTTS, AntiAliasedSnake) | The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so every depthwise or grouped caller failed on Vulkan. Kokoro and StyleTTS 2 both stopped at `groups=512`. | Vulkan audio window on alpha.421, 2026-11-11: Kokoro and StyleTTS 2 failed on the op while 8 of 11 providers passed. | `conv_transpose1d.comp.glsl` takes `groups` (weight `[C_in, C_out/groups, K]`). `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference (synthetic). End-to-end on Vulkan (live, branch build, 2026-11-11): Kokoro and StyleTTS 2 pass a Whisper round trip with WER 0. |
 
+## Engine checks (not model parity)
+
+| Check | Result | Notes |
+|---|---|---|
+| `KvSegmentStore.Join`, CUDA vs CPU (`KvSegmentStoreGpuTests`) | ✅ 3/3, 0 skipped | Head-major join of four segments and a leading-axis join equal on CUDA and the CPU. One four-segment head-major join: 0.363 ms (mean of 20). RTX 3060, peak 445 MiB. Commit `d69d8717a`, 2026-11-26, JOB V. |
+
 ## Conventions / where things live
 - **Reference dumps + scratch:** per-model under the session scratchpad; the moshi/audio refs live in
   `scratchpad/kyutai/`. Reference `.py` scripts are kept beside their dumps.
