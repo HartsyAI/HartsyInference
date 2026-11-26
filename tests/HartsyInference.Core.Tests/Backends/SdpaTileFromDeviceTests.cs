@@ -104,6 +104,21 @@ public sealed class SdpaTileFromDeviceTests
         }
     }
 
+    [Fact]
+    public void TheRowLinesPrintBeforeTheTileAndGateLines()
+    {
+        using IDisposable isolated = TileFreeLog.Isolate();
+        TileFreeLog.RecordRow("tiled.f32");
+        TileFreeLog.RecordRow("tiled.f32");
+        TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
+        TileFreeLog.RecordGate("causal", 20UL << 30, 24UL << 30, over: false);
+
+        string[] lines = TileFreeLog.Summary().Split('\n');
+        Assert.Equal("tileFromDevice row=tiled.f32 executed=2", lines[0]);
+        Assert.StartsWith("tileFromDevice: calls=1 ", lines[1], StringComparison.Ordinal);
+        Assert.StartsWith("tileFromDevice gate=causal ", lines[2], StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(20UL << 30, 1L << 30)]
     [InlineData((20UL << 30) - 1, 512L << 20)]

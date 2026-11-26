@@ -60,6 +60,20 @@ internal static class GpuRunKnobs
     }
 }
 
+/// <summary>A <see cref="FactAttribute"/> that is reported as skipped (not passed) when the whole-run switch is not set up for the test: the variable
+/// <c>HARTSY_GPU_TEST_KNOBS</c> is unset, or, when <paramref name="requiredId"/> is given, does not name that id. The skip is set at discovery.</summary>
+public sealed class WhenRunKnobsFactAttribute : FactAttribute
+{
+    public WhenRunKnobsFactAttribute(string? requiredId = null)
+    {
+        string? raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar);
+        if (string.IsNullOrWhiteSpace(raw))
+            Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} is unset; the whole-run knob check did not run.";
+        else if (requiredId is not null && !raw.Contains(requiredId, StringComparison.Ordinal))
+            Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} does not name {requiredId}.";
+    }
+}
+
 /// <summary>Serializes the tests that read or change the process-wide knob store, so a Reload or a host Set in one cannot race another's assert.</summary>
 [CollectionDefinition(Name, DisableParallelization = true)]
 public static class GlobalKnobStore
@@ -73,20 +87,10 @@ public static class GlobalKnobStore
 [Collection(GlobalKnobStore.Name)]
 public sealed class GpuRunKnobsTests
 {
-    private static string? RunNames(string id)
-    {
-        string? raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar);
-        return string.IsNullOrWhiteSpace(raw) || !raw.Contains(id, StringComparison.Ordinal) ? null : raw;
-    }
-
-    [Fact]
+    [WhenRunKnobsFact]
     public void TheWholeRunKnobsAreInForceForEveryTestInTheRun()
     {
-        string? raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar);
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return;
-        }
+        string raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar)!;
         Assert.True(GpuRunKnobs.TryParse(raw, out KnobProfile profile, out string? error), error);
         foreach (string pair in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
@@ -98,13 +102,9 @@ public sealed class GpuRunKnobsTests
         }
     }
 
-    [Fact]
+    [WhenRunKnobsFact("numerics.tileFromDevice")]
     public void TheRunProfileSurvivesAReloadAndAClear()
     {
-        if (RunNames("numerics.tileFromDevice=true") is null)
-        {
-            return;
-        }
         // Paint21 and other suites call KnobFile.Reload and KnobStore.Clear mid-run; neither may drop the whole-run profile.
         KnobFile.Reload();
         Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
@@ -114,13 +114,9 @@ public sealed class GpuRunKnobsTests
         Assert.True(EngineKnobs.TileFromDevice.Value == true);
     }
 
-    [Fact]
+    [WhenRunKnobsFact("numerics.tileFromDevice")]
     public void AHostSetDoesNotBeatTheRunProfile()
     {
-        if (RunNames("numerics.tileFromDevice=true") is null)
-        {
-            return;
-        }
         // Order: request profile, run profile, host overrides. A host Set to off must not turn the lane's knob back off.
         KnobStore.Set(EngineKnobs.TileFromDevice, false);
         try
