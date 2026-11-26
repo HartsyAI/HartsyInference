@@ -50,7 +50,7 @@ Ops the engine did not have: none. `IBackend.Stft` is radix-2 only (n_fft 7680 =
 `audio-separator`'s own `demix` and LongCat's `_demix_batched` do the same arithmetic; LongCat batches two chunks per model call, which changes nothing numerically. This port follows LongCat's function.
 The port runs one chunk per call.
 
-Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses the engine's `SincResampler.ResampleSoxrHqStandIn` (64-crossing windowed sinc, roll-off 0.955). Measured against librosa 0.11.0 / soxr 1.1.0: 2.7e-4 relRMS on the separated 16 kHz vocals and 5.8e-5 on a 24 kHz speech excerpt brought to 44.1 kHz; the engine's Kaiser polyphase `Resampler` is 3.4e-3 and 9.8e-4 on the same two. **It misses on a second clip:** on the first 7.44 s of LongCat's `man.mp3` the separated 16 kHz vocals are **2.5e-3** from `soxr_hq` (2026-11-26), over the 1e-3 limit `KimVocal2ParityTests.SixteenKilohertzVocalsMatchSoxrHq` asserts. That test feeds the reference's own stem to the resampler, so neither the network nor a backend is in the figure. The first 5.5 s of that stem are near silent; in the half-second windows after that the figure is 2.6e-4 to 3.4e-3, and dropping 0.25 s at each end leaves 2.7e-3, so the clip edges are not the cause. The polyphase `Resampler` is 2.8e-2 on the same stem. One clip with about 2 s of voice: what in the signal drives the difference has not been analysed. The limit is unchanged and the resampler is not fixed.
+Not reproduced bit for bit: librosa's default `soxr_hq` resampler. The port uses the engine's `SincResampler.ResampleSoxrHqStandIn` (64-crossing windowed sinc, roll-off 0.955). Measured against librosa 0.11.0 / soxr 1.1.0: 2.7e-4 relRMS on the separated 16 kHz vocals and 5.8e-5 on a 24 kHz speech excerpt brought to 44.1 kHz; the engine's Kaiser polyphase `Resampler` is 3.4e-3 and 9.8e-4 on the same two. **It misses on a second clip:** on the first 7.44 s of LongCat's `man.mp3` the separated 16 kHz vocals are **2.5e-3** from `soxr_hq` (2026-11-26), over the 1e-3 limit `KimVocal2ParityTests.SixteenKilohertzVocalsMatchSoxrHq` asserts. That test feeds the reference's own stem to the resampler, so neither the network nor a backend is in the figure. The first 5.5 s of that stem are near silent; in the half-second windows after that the figure is 2.6e-4 to 3.4e-3, and dropping 0.25 s at each end leaves 2.7e-3, so the clip edges are not the cause. The polyphase `Resampler` is 2.8e-2 on the same stem. One clip with about 2 s of voice: what in the signal drives the difference has not been analysed. The limit is unchanged and the resampler is not fixed ([ROADMAP](../Checklists/ROADMAP.md)).
 Loudness normalization is not part of the separator: LongCat applies it downstream (`-23 LUFS`, off for Avatar 1.6, on for 1.5 and 1.0).
 
 ## Engine surface
@@ -61,6 +61,10 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
   a caller who wants the original mix heard passes it as `VideoAudioInput`.
 - The network runs on the CPU backend. Nothing in it requires that any more: the transpose no longer writes through reshaped views, every op exists on CUDA, Vulkan has no 2D transposed convolution and takes the host default for it, and the STFT is host code. What pins it is `FxService` choosing its CPU backend, which stays until real-weight CUDA and Vulkan runs pass. `KimVocal2Network.Forward` runs under `ExactGemmScope` (see GPU runs below). One chunk is 261,120 samples and the window advances 195,840 (4.44 s); a clip of N seconds takes about ⌈(N · 44100 + 3840 + pad) / 195,840⌉ chunks (3 for the 8 s test clip). The network alone took 37 s per chunk on 8 logical cores in a Release build on random input, peak working set 1.8 GB. No real-weight GPU run has passed.
 - Weights are read from the `.onnx` at load (about a tenth of a second); the Hartsy-hosted safetensors repack of decision D1 is not made, and nothing was uploaded.
+
+## Known limits
+
+- `ExactGemmScope` flips one backend-wide `HighPrecisionGemm` property with no synchronisation. That is harmless while `FxService` runs the network on its own CPU backend. Once it moves to a shared CUDA backend, other work running there during a `Forward` also gets exact GEMMs (BF16 weights are then upcast on every call), and overlapping scopes can restore each other's value: the switch-over needs a backend of its own or serialised requests.
 
 ## Evidence (2026-11-23, CPU F32, Debug build of the CLI)
 
@@ -80,7 +84,7 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
 
 ## GPU runs with the real weights
 
-2026-11-26, RTX 4090 (driver 595.99.02), commit `dfb769638`, `KimVocal2ParityTests.SeparatorMatchesOnnxRuntime`. Reference: the stand-in script of that commit (torch 2.15.0 CPU, onnxruntime 1.32.0,
+2026-11-26, RTX 4090 (driver 595.99.02), commit `dfb769638`, `KimVocal2ParityTests.SeparatorMatchesOnnxRuntime` (since renamed `SeparatorMatchesTheReference`). Reference: the stand-in script of that commit (torch 2.15.0 CPU, onnxruntime 1.32.0,
 scipy `resample_poly`; no audio-separator, librosa or soxr) on a 7.44 s clip from a LongCat speech file; weight sha256 verified. Reported by the GPU test session; its logs are on that host, not in the repository.
 
 | relRMS | CUDA, TF32 GEMM | CUDA, exact GEMM | Vulkan |
@@ -93,7 +97,7 @@ scipy `resample_poly`; no audio-separator, librosa or soxr) on a 7.44 s clip fro
 | Wall time | 14 s | 14 s | 78 s |
 | Peak GPU-wide memory | 3633 MiB | 3679 MiB | 2511 MiB |
 
-- **16 kHz:** at that commit the test compared the C# SoXR-HQ stand-in with scipy `resample_poly`, two different resamplers, and asserted it. The stem feeding it matched within 1.7e-6 on the exact lanes.
+- **16 kHz:** at that commit the test compared the C# SoXR-HQ stand-in with scipy `resample_poly`, two different resamplers, and asserted it below 1e-2 whatever the reference. The stem feeding it matched within 1.7e-6 on the exact lanes.
   The current test no longer compares those two; it compares the 16 kHz output only against a `soxr_hq` reference, in its own test.
 - **TF32:** it misses the block, network and stem limits, with roughly 750 times the exact lane's network and stem error, and the two CUDA runs took the same 14 s (whole test, one-second resolution; per-chunk times were not
   reported). `Forward` therefore runs under `ExactGemmScope`. No TF32 limit was added.
