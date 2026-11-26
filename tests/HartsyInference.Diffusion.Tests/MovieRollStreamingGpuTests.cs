@@ -34,6 +34,7 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         cpuFixture.Dit.StreamEncode(cpuFixture.Backend, Latent(2), new float[2], cpuCache, fullHistoryBlocks: 1, startFrame: 0);
 
         using Fixture device = new(GpuDevices.OpenCuda());
+        ApplyGemmLane(device.Backend);
         using MovieRollKvCache cache = new(device.Backend);
         cache.Init(device.Dit.StreamLayerNames(), Height, Width);
         device.Backend.ResetD2hSyncCount();
@@ -55,6 +56,7 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
             cpuCache, fullHistoryBlocks: 1);
 
         using Fixture device = new(GpuDevices.OpenCuda());
+        ApplyGemmLane(device.Backend);
         using MovieRollKvCache cache = new(device.Backend);
         cache.Init(device.Dit.StreamLayerNames(), Height, Width);
         device.Backend.ResetD2hSyncCount();
@@ -65,32 +67,50 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
         output.WriteLine($"D2H_SYNCS StreamDenoise (forward only, before the comparison read): {reads}");
 
         Assert.Equal(0, reads);
-        AssertClose(expected, actual);
+        AssertClose("StreamDenoise velocity", expected, actual);
+    }
+
+    /// <summary>The GEMM lane. <c>exact</c> forces full-F32 GEMMs (<see cref="IBackend.HighPrecisionGemm"/>), so any remaining error is not TF32
+    /// rounding; <c>tf32</c> (the default, and the device's own setting) leaves TF32 on. Set by <c>MOVIEROLL_GEMM_LANE</c>.</summary>
+    private void ApplyGemmLane(IBackend backend)
+    {
+        string lane = Environment.GetEnvironmentVariable("MOVIEROLL_GEMM_LANE") ?? "tf32";
+        if (lane == "exact") backend.HighPrecisionGemm = true;
+        else if (lane != "tf32") throw new InvalidOperationException($"MOVIEROLL_GEMM_LANE must be exact or tf32; got {lane}.");
+        output.WriteLine($"GEMM_LANE {lane} HighPrecisionGemm={backend.HighPrecisionGemm}");
     }
 
     private static Tensor Latent(int frames, long seed = 3) =>
         TorchCompatibleNoise.Randn(new TensorShape([1L, Channels, frames, Height, Width]), seed);
 
-    private static void AssertCacheClose(MovieRollKvCache expected, MovieRollKvCache actual, IEnumerable<string> layers)
+    private void AssertCacheClose(MovieRollKvCache expected, MovieRollKvCache actual, IEnumerable<string> layers)
     {
         foreach (string layer in layers)
         {
             (Tensor ek, Tensor ev)? e = expected.Get(layer);
             (Tensor ak, Tensor av)? a = actual.Get(layer);
             Assert.True(e is not null && a is not null, $"{layer}: a cache entry is missing.");
-            AssertClose(e!.Value.ek, a!.Value.ak);
-            AssertClose(e.Value.ev, a.Value.av);
+            AssertClose($"{layer} keys", e!.Value.ek, a!.Value.ak);
+            AssertClose($"{layer} values", e.Value.ev, a.Value.av);
         }
     }
 
-    private static void AssertClose(Tensor expected, Tensor actual)
+    /// <summary>Compares two tensors and reports the largest absolute error with its flat index and the CPU and device values there, so a failure
+    /// names the element. The bound is <see cref="Tolerance"/> in every lane.</summary>
+    private void AssertClose(string label, Tensor expected, Tensor actual)
     {
         Assert.Equal(expected.Shape, actual.Shape);
         ReadOnlySpan<float> e = expected.AsReadOnlySpan<float>();
         ReadOnlySpan<float> a = actual.AsReadOnlySpan<float>();
         float max = 0f;
-        for (int i = 0; i < e.Length; i++) max = Math.Max(max, Math.Abs(e[i] - a[i]));
-        Assert.True(max <= Tolerance, $"max abs error {max:E3} exceeds {Tolerance:E0}.");
+        int at = 0;
+        for (int i = 0; i < e.Length; i++)
+        {
+            float d = Math.Abs(e[i] - a[i]);
+            if (d > max) { max = d; at = i; }
+        }
+        output.WriteLine($"MAX_ERR {label}: {max:E3} at flat index {at} of {e.Length} (cpu {(e.Length > 0 ? e[at] : 0f):G9}, device {(a.Length > 0 ? a[at] : 0f):G9})");
+        Assert.True(max <= Tolerance, $"{label}: max abs error {max:E3} at flat index {at} exceeds {Tolerance:E0}.");
     }
 
     private static HunyuanVideo15Config TinyConfig() => new()
