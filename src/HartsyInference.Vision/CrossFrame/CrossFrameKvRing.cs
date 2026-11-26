@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
@@ -145,6 +146,8 @@ public sealed class CrossFrameKvRing : IDisposable
         Entry entry = Get(block);
         if (entry.Seen == 0) throw new InvalidOperationException($"Block {block} has no keys and values yet.");
         int rows = LiveRows(block), segments = 1 + Math.Min(entry.Seen, Window);
+        // Two segments (a first frame, or a window of one) concat in one CUDA kernel that writes the tensor once.
+        if (segments == 2) return entry.Store.Join(0, 0, segments);
         Tensor keys = ReadRows(entry, rows, segments, values: false);
         try
         {
@@ -157,9 +160,9 @@ public sealed class CrossFrameKvRing : IDisposable
         }
     }
 
-    // The live segments one after another along the rows, one strided copy each (a concat on this axis costs a GPU backend one copy per head and
-    // segment). The first write must cover the new tensor, or a GPU backend uploads its host bytes before a partial one, so it is first filled from
-    // an element of the pooled segment, which is already on the device.
+    // The live segments one after another along the rows, one strided copy each: CUDA's concat of more than two inputs on this axis runs one copy
+    // per head and segment (the cost is in CudaBackend.Concat). The first write must cover the new tensor, or a GPU backend uploads its host bytes
+    // before a partial one, so it is first filled from an element of the pooled segment, which is already on the device.
     private static Tensor ReadRows(Entry entry, int rows, int segments, bool values)
     {
         Tensor Segment(int slot) => values ? entry.Store.Values(0, slot) : entry.Store.Keys(0, slot);
@@ -171,10 +174,11 @@ public sealed class CrossFrameKvRing : IDisposable
             for (int slot = 0; slot < segments; slot++)
             {
                 Tensor segment = Segment(slot);
-                StridedCopies.ScatterAxis(entry.Backend, result, segment, 2, at);
-                at += segment.Shape[2];
+                StridedCopies.ScatterAxis(entry.Backend, result, segment, TokenAxis, at);
+                at += segment.Shape[TokenAxis];
             }
 
+            Debug.Assert(at == rows, "the live segments must fill the rows the ring reports");
             return result;
         }
         catch
