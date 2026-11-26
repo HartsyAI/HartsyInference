@@ -1,9 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Guidance;
-using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -31,7 +29,6 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
     private const int CondSlot = 0;
     private const int UncondSlot = 1;
 
-    private readonly LlamaStyleEncoder _textEncoder;
     private readonly Flux2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder _vaeEncoder;
@@ -39,9 +36,8 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
     private readonly Tensor _bnVar;
     private readonly float _bnEps;
     private readonly Flux2Config _config;
-    private readonly int[] _textEncoderLayers;
-    private readonly EncodedPromptCache _promptCache = new(2);
-    private bool _ditResident;
+    private readonly CachedPromptTaps _prompts;
+    private readonly ResidentWeights _denoiser;
 
     /// <summary>Creates the pipeline. Every component is borrowed; the caller owns and disposes them.</summary>
     public Flux2EditPipeline(IBackend backend, LlamaStyleEncoder textEncoder, Flux2Transformer transformer, VaeDecoder vaeDecoder,
@@ -56,7 +52,6 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         ArgumentNullException.ThrowIfNull(bnVar);
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(textEncoderLayers);
-        _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _vaeEncoder = vaeEncoder;
@@ -64,10 +59,9 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         _bnVar = bnVar;
         _bnEps = bnEps;
         _config = config;
-        _textEncoderLayers = textEncoderLayers;
+        _prompts = new CachedPromptTaps(backend, textEncoder, textEncoderLayers, config.ContextInDim, Family);
+        _denoiser = new ResidentWeights(backend, transformer.EnumerateWeights);
     }
-
-    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>The T coordinate of every grid: the target at 0, then reference <c>i</c> at <c>10 + 10·i</c>.</summary>
     public static float[] GridTimes(int referenceCount)
@@ -98,13 +92,13 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         Tensor? uncond = null;
         try
         {
-            cond = EncodePrompt(prompt, CondSlot);
+            cond = _prompts.Encode(CondSlot, prompt.Tokens, prompt.Padding, _denoiser);
             if (guided)
-                uncond = EncodePrompt(negative!, UncondSlot);
+                uncond = _prompts.Encode(UncondSlot, negative!.Tokens, negative.Padding, _denoiser);
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         return EditEncoded(cond, uncond, references, request, onProgress);
@@ -223,25 +217,9 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
 
             float[] gridTimes = GridTimes(referenceTokens.Count);
             Tensor[] referenceParts = referenceTokens.Select(r => r.Tokens).ToArray();
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
-            _ditResident = true;
-            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(PredictionType.FlowVelocity, (x, sigma, _) =>
-            {
-                Tensor condVelocity = Predict(x, referenceParts, sigma, cond, gridTimes, patH, patW);
-                if (!guided)
-                    return new DenoisePrediction(condVelocity, condVelocity);
-                Tensor uncondVelocity;
-                try
-                {
-                    uncondVelocity = Predict(x, referenceParts, sigma, uncond!, gridTimes, patH, patW);
-                }
-                catch
-                {
-                    condVelocity.Dispose();
-                    throw;
-                }
-                return new DenoisePrediction(condVelocity, uncondVelocity, cfg);
-            });
+            _denoiser.Preload();
+            TwoPassCfgPredictor<Tensor> predictor = new TwoPassCfgPredictor<Tensor>(PredictionType.FlowVelocity,
+                (x, sigma, _, text) => Predict(x, referenceParts, sigma, text, gridTimes, patH, patW), cond, guided ? uncond : null, cfg);
             for (int i = 0; i < steps; i++)
             {
                 Stopwatch stepSw = Stopwatch.StartNew();
@@ -261,7 +239,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
                     });
                 }
             }
-            ReleaseTransformer();
+            _denoiser.Release();
 
             using Tensor vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, latent, patH, patW, _bnMean, _bnVar, _bnEps,
                 _config.VaeLatentChannels, _config.PatchSize);
@@ -272,7 +250,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         finally
@@ -282,7 +260,7 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
     }
 
     /// <inheritdoc/>
-    protected override void DisposeCore() => _promptCache.Dispose();
+    protected override void DisposeCore() => _prompts.Dispose();
 
     /// <summary>The target tokens' velocity for one prompt: <c>[x, references...]</c> through the transformer, then the
     /// first grid's rows.</summary>
@@ -300,60 +278,5 @@ public sealed unsafe class Flux2EditPipeline : DiffusionPipelineBase
         Tensor target = new Tensor(new TensorShape(1, gridTokens, velocity.Shape[2]), DType.F32);
         Backend.SliceRows(target, velocity, 0);
         return target;
-    }
-
-    /// <summary>Encodes a prompt through the variant's taps, reusing the last result for the same ids. The transformer is
-    /// evicted first: the encoder and a resident transformer need not fit together. Right-padded prompts are masked as
-    /// transformers does, which is what diffusers' <c>attention_mask</c> does.</summary>
-    private Tensor EncodePrompt(IrisZPrompt prompt, int slot)
-    {
-        if (_promptCache.TryGet(slot, prompt.Tokens, prompt.ValidLength, out Tensor? cached))
-            return cached!;
-        ReleaseTransformer(force: true);
-        Tensor hidden;
-        try
-        {
-            hidden = prompt.ValidLength > 0
-                ? _textEncoder.EncodeMultiLayer(Backend, [prompt.Tokens], _textEncoderLayers, interleavedLayout: false,
-                    TextEncoderPadding.Transformers(prompt.ValidLength))
-                : _textEncoder.EncodeMultiLayer(Backend, [prompt.Tokens], _textEncoderLayers);
-        }
-        finally
-        {
-            Backend.FreeWeights(_textEncoder.EnumerateWeights());
-        }
-        _ = hidden.DataPointer;
-        Backend.FreeActivations();
-        if (hidden.Shape[2] != _config.ContextInDim)
-        {
-            long got = hidden.Shape[2];
-            hidden.Dispose();
-            throw new HartsyInferenceException($"{Family} text features are {got} wide; the transformer expects {_config.ContextInDim}.");
-        }
-        _promptCache.Store(slot, prompt.Tokens, prompt.ValidLength, hidden);
-        return hidden;
-    }
-
-    /// <summary>Frees the transformer's device weights unless the VRAM profile keeps models resident.</summary>
-    private void ReleaseTransformer(bool force = false)
-    {
-        if (!_ditResident || (!force && KeepModelsResident))
-            return;
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        _ditResident = false;
-    }
-
-    /// <summary>Best effort: a failed stage leaves its temporaries in the activation cache, and a sticky device error
-    /// must not mask the failure being reported.</summary>
-    private void ReclaimAfterFailure()
-    {
-        try
-        {
-            Backend.FreeActivations();
-        }
-        catch (Exception cleanup)
-        {
-            Logs.Warning($"{Family}: reclaiming activations after a failed generation also failed: {cleanup.Message}");
-        }
     }
 }
