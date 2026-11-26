@@ -5,9 +5,9 @@ using Xunit;
 
 namespace HartsyInference.Vision.Tests.CrossFrame;
 
-/// <summary>The unbuffered ring against a plain host model of itself: the pooled prefix is the mean of the visible frames' prefixes, the key and
-/// value caches hold the pooled rows first and then one slot per frame (oldest overwritten once the ring wraps), and <c>LiveCopy</c> is the live
-/// prefix of every head. The ring writes through backend ops only, so this also holds on a backend that keeps the caches on the device.</summary>
+/// <summary>The unbuffered ring against a plain host model of itself: the pooled prefix is the mean of the visible frames' prefixes, and
+/// <c>Read</c> gives the pooled rows first and then one slot per frame (oldest replaced once the ring wraps), head-major. The ring owns what
+/// <c>Update</c> is given and frees what it replaces or refuses.</summary>
 public sealed class CrossFrameKvRingTests : IDisposable
 {
     private const int Window = 3, Frames = 7, PrefixRows = 2, Width = 5, Patches = 3, Heads = 2, Dim = 4;
@@ -15,7 +15,7 @@ public sealed class CrossFrameKvRingTests : IDisposable
     private readonly CpuBackend _backend = new();
 
     [Fact]
-    public void PooledPrefixIsTheMeanOfTheVisibleFramesAndTheCachesFollowTheSlots()
+    public void PooledPrefixIsTheMeanOfTheVisibleFramesAndTheRowsFollowTheSlots()
     {
         Random rng = new(5);
         using CrossFrameKvRing ring = new(Window);
@@ -33,55 +33,137 @@ public sealed class CrossFrameKvRingTests : IDisposable
             float[] expectedMean = Mean(prefixes.Skip(Math.Max(0, t + 1 - Window)).ToList());
             Assert.True(MaxAbs(pooled.AsReadOnlySpan<float>(), expectedMean) <= 1e-6f, $"frame {t}: pooled prefix");
 
-            float[] pooledKeyRows = Random(rng, PrefixRows * Heads * Dim), pooledValueRows = Random(rng, PrefixRows * Heads * Dim);
-            using Tensor keyTensor = Make(key, 1, Patches, Heads, Dim), valueTensor = Make(value, 1, Patches, Heads, Dim);
-            using Tensor pooledKey = Make(pooledKeyRows, 1, PrefixRows, Heads, Dim), pooledValue = Make(pooledValueRows, 1, PrefixRows, Heads, Dim);
-            int live = ring.Update(_backend, 0, keyTensor, valueTensor, pooledKey, pooledValue);
+            float[] pooledKey = Random(rng, PrefixRows * Heads * Dim), pooledValue = Random(rng, PrefixRows * Heads * Dim);
+            int live = ring.Update(0, Rows(key, Patches), Rows(value, Patches), Rows(pooledKey, PrefixRows), Rows(pooledValue, PrefixRows));
             Assert.Equal(PrefixRows + Math.Min(t + 1, Window) * Patches, live);
             Assert.Equal(live, ring.LiveRows(0));
 
             // Slot s holds frame (t - ((t - s) mod Window)); rows before the first slot are the pooled rows.
-            int capacity = PrefixRows + Window * Patches;
-            ReadOnlySpan<float> cacheK = ring.Keys(0).AsReadOnlySpan<float>(), cacheV = ring.Values(0).AsReadOnlySpan<float>();
-            for (int h = 0; h < Heads; h++)
+            (Tensor readKeys, Tensor readValues) = ring.Read(0);
+            using (readKeys)
+            using (readValues)
             {
-                for (int r = 0; r < PrefixRows; r++)
-                    for (int d = 0; d < Dim; d++)
-                    {
-                        Assert.Equal(pooledKeyRows[(r * Heads + h) * Dim + d], cacheK[(h * capacity + r) * Dim + d]);
-                        Assert.Equal(pooledValueRows[(r * Heads + h) * Dim + d], cacheV[(h * capacity + r) * Dim + d]);
-                    }
-
+                Assert.Equal(new TensorShape(1, Heads, live, Dim), readKeys.Shape);
+                Assert.Equal(readKeys.Shape, readValues.Shape);
+                List<float[]> keyRows = [pooledKey], valueRows = [pooledValue];
                 for (int s = 0; s < Math.Min(t + 1, Window); s++)
                 {
                     int frame = t - ((t - s) % Window + Window) % Window;
-                    for (int p = 0; p < Patches; p++)
-                        for (int d = 0; d < Dim; d++)
-                        {
-                            Assert.Equal(keys[frame][(p * Heads + h) * Dim + d], cacheK[(h * capacity + PrefixRows + s * Patches + p) * Dim + d]);
-                            Assert.Equal(values[frame][(p * Heads + h) * Dim + d], cacheV[(h * capacity + PrefixRows + s * Patches + p) * Dim + d]);
-                        }
+                    keyRows.Add(keys[frame]);
+                    valueRows.Add(values[frame]);
                 }
-            }
 
-            using Tensor liveKeys = CrossFrameKvRing.LiveCopy(_backend, ring.Keys(0), live);
-            Assert.Equal(new TensorShape(1, Heads, live, Dim), liveKeys.Shape);
-            ReadOnlySpan<float> copied = liveKeys.AsReadOnlySpan<float>();
-            for (int h = 0; h < Heads; h++)
-                for (int i = 0; i < live * Dim; i++)
-                    Assert.Equal(cacheK[h * capacity * Dim + i], copied[h * live * Dim + i]);
+                Assert.Equal(HeadMajor(keyRows), readKeys.AsReadOnlySpan<float>().ToArray());
+                Assert.Equal(HeadMajor(valueRows), readValues.AsReadOnlySpan<float>().ToArray());
+            }
+        }
+
+        Assert.Equal(Frames, ring.Seen(0));
+    }
+
+    [Fact]
+    public void TheRingFreesWhatItReplacesAndEverythingWhenItIsDisposed()
+    {
+        CrossFrameKvRing ring = new(Window);
+        List<Tensor[]> given = [];
+        for (int t = 0; t < Window + 1; t++) given.Add(Step(ring, Patches));
+
+        // Frame 3 replaced frame 0's slot, and every frame replaced the pooled rows of the frame before it.
+        Assert.False(Alive(given[0][0]) || Alive(given[0][1]));
+        for (int t = 1; t <= Window; t++) Assert.True(Alive(given[t][0]) && Alive(given[t][1]));
+        for (int t = 0; t < Window; t++) Assert.False(Alive(given[t][2]) || Alive(given[t][3]));
+        Assert.True(Alive(given[Window][2]) && Alive(given[Window][3]));
+
+        ring.Dispose();
+        ring.Dispose();
+
+        Assert.All(given.SelectMany(tensors => tensors), t => Assert.False(Alive(t)));
+        Assert.Throws<ObjectDisposedException>(() => ring.Read(0));
+    }
+
+    [Fact]
+    public void ARefusedUpdateFreesItsTensorsAndKeepsTheRows()
+    {
+        using CrossFrameKvRing ring = new(Window);
+        Step(ring, Patches);
+        (Tensor before, Tensor beforeValues) = ring.Read(0);
+        using (before)
+        using (beforeValues)
+        {
+            Tensor[] other = Four(Patches + 1);
+            Assert.Throws<ArgumentException>(() => ring.Update(0, other[0], other[1], other[2], other[3]));
+            Tensor[] unseen = Four(Patches);
+            Assert.Throws<InvalidOperationException>(() => ring.Update(1, unseen[0], unseen[1], unseen[2], unseen[3]));
+
+            Assert.All(other.Concat(unseen), t => Assert.False(Alive(t)));
+            Assert.Equal(1, ring.Seen(0));
+            (Tensor after, Tensor afterValues) = ring.Read(0);
+            using (after)
+            using (afterValues)
+            {
+                Assert.Equal(before.AsReadOnlySpan<float>().ToArray(), after.AsReadOnlySpan<float>().ToArray());
+                Assert.Equal(beforeValues.AsReadOnlySpan<float>().ToArray(), afterValues.AsReadOnlySpan<float>().ToArray());
+            }
         }
     }
 
     [Fact]
-    public void LiveCopyRefusesMoreRowsThanTheCacheHolds()
+    public void ABlockRefusesReadsBeforeItsFirstUpdateAndAnotherBackendAfterItsFirstPrefix()
     {
-        using Tensor cache = new(new TensorShape(1, 2, 6, 4), DType.F32);
-        Assert.Throws<ArgumentOutOfRangeException>(() => CrossFrameKvRing.LiveCopy(_backend, cache, 7));
-        Assert.Throws<ArgumentOutOfRangeException>(() => CrossFrameKvRing.LiveCopy(_backend, cache, 0));
+        using CrossFrameKvRing ring = new(Window);
+        using Tensor prefix = Make(new float[PrefixRows * Width], 1, PrefixRows, Width);
+        ring.UpdatePrefix(_backend, 0, prefix).Dispose();
+        using CpuBackend other = new();
+
+        Assert.Throws<InvalidOperationException>(() => ring.Read(0));
+        Assert.Throws<ArgumentException>(() => ring.UpdatePrefix(other, 0, prefix));
     }
 
     public void Dispose() => _backend.Dispose();
+
+    // One frame through block 0; returns the four tensors the ring was given.
+    private Tensor[] Step(CrossFrameKvRing ring, int patches)
+    {
+        using Tensor prefix = Make(new float[PrefixRows * Width], 1, PrefixRows, Width);
+        ring.UpdatePrefix(_backend, 0, prefix).Dispose();
+        Tensor[] four = Four(patches);
+        ring.Update(0, four[0], four[1], four[2], four[3]);
+        return four;
+    }
+
+    private static Tensor[] Four(int patches)
+    {
+        Random rng = new(patches);
+        return [Rows(Random(rng, patches * Heads * Dim), patches), Rows(Random(rng, patches * Heads * Dim), patches),
+            Rows(Random(rng, PrefixRows * Heads * Dim), PrefixRows), Rows(Random(rng, PrefixRows * Heads * Dim), PrefixRows)];
+    }
+
+    private static Tensor Rows(float[] values, int rows) => Make(values, 1, rows, Heads, Dim);
+
+    // Token-major segments of [rows, Heads, Dim], one after another, as one head-major [Heads, rows, Dim] array.
+    private static float[] HeadMajor(List<float[]> segments)
+    {
+        float[] tokens = segments.SelectMany(s => s).ToArray();
+        int rows = tokens.Length / (Heads * Dim);
+        float[] result = new float[tokens.Length];
+        for (int r = 0; r < rows; r++)
+            for (int h = 0; h < Heads; h++)
+                Array.Copy(tokens, (r * Heads + h) * Dim, result, (h * rows + r) * Dim, Dim);
+        return result;
+    }
+
+    private static bool Alive(Tensor t)
+    {
+        try
+        {
+            _ = t.AsReadOnlySpan<byte>().Length;
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
 
     private static float[] Random(Random rng, int count)
     {

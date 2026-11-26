@@ -1,19 +1,18 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.CrossFrame;
 
 /// <summary>
 /// The unbuffered form of <see cref="CrossFrameTokens"/> (upstream <c>KVCache</c>): per cross-frame block, a FIFO of the last <see cref="Window"/>
-/// frames, the current one included. Each block keeps a ring of the frames' prefix tokens and a head-major key/value cache <c>[1, heads, prefix +
-/// Window·N, D]</c> whose first <c>prefix</c> rows hold the keys and values of the pooled prefix (the mean of the visible frames' prefixes) and
-/// whose slot <c>s</c> holds the patch keys and values of a frame. The current frame's patches attend to the first <see cref="LiveRows"/> rows,
-/// which <see cref="LiveCopy"/> reads.
-/// Slots fill in arrival order and then wrap, so the oldest frame is overwritten; attention has no temporal position, so slot order changes only
-/// rounding. Per frame and block, call <see cref="UpdatePrefix"/>, then <see cref="Update"/>. Every write and read is a backend op
-/// (<see cref="IBackend.CopyStrided"/>, <see cref="IBackend.AccumulateStrided"/>), so on a GPU backend the caches stay on the device and a frame
-/// moves no key or value rows through the host.
+/// frames, the current one included. Each block keeps a ring of the frames' prefix tokens and, in a <see cref="KvSegmentStore"/>, the keys and
+/// values as token-major <c>[1, rows, heads, D]</c> segments: segment 0 holds those of the pooled prefix (the mean of the visible frames' prefixes)
+/// and segment <c>1 + s</c> those of the frame in slot <c>s</c>. <see cref="Read"/> joins the live ones into the head-major rows the current frame's
+/// patches attend to. Slots fill in arrival order and then wrap, so the oldest frame is replaced; attention has no temporal position, so slot order
+/// changes only rounding. Per frame and block, call <see cref="UpdatePrefix"/>, then <see cref="Update"/>, then <see cref="Read"/>. Every write and
+/// read is a backend op and every kept tensor is pinned, so on a GPU backend the caches stay on the device.
 /// </summary>
 /// <remarks>
 /// A frame that fails part-way leaves some blocks one frame ahead of the others; the ring is then unusable and must be replaced
@@ -23,6 +22,9 @@ namespace HartsyInference.Vision.CrossFrame;
 /// </remarks>
 public sealed class CrossFrameKvRing : IDisposable
 {
+    private const int TokenAxis = 1;
+    private const int PooledSlot = 0;
+
     private readonly Dictionary<int, Entry> _blocks = [];
     private bool _disposed;
 
@@ -41,7 +43,8 @@ public sealed class CrossFrameKvRing : IDisposable
 
     /// <summary>
     /// Stores the current frame's prefix tokens <paramref name="prefix"/> <c>[1, P, C]</c> in block <paramref name="block"/>'s ring and returns the
-    /// pooled prefix, their mean <c>[1, P, C]</c> over the frames visible to this one (the caller owns it).
+    /// pooled prefix, their mean <c>[1, P, C]</c> over the frames visible to this one (the caller owns it). The first call for a block fixes the
+    /// backend that holds its caches.
     /// </summary>
     public Tensor UpdatePrefix(IBackend backend, int block, Tensor prefix)
     {
@@ -52,8 +55,12 @@ public sealed class CrossFrameKvRing : IDisposable
             throw new ArgumentException($"The prefix must be F32 [1, P, C]; got {prefix.DType} {prefix.Shape}.", nameof(prefix));
         if (!_blocks.TryGetValue(block, out Entry? entry))
         {
-            entry = new Entry { Prefixes = Zeroed(backend, new TensorShape(Window, prefix.Shape[1], prefix.Shape[2])) };
+            entry = NewEntry(backend, new TensorShape(Window, prefix.Shape[1], prefix.Shape[2]));
             _blocks[block] = entry;
+        }
+        else if (!ReferenceEquals(entry.Backend, backend))
+        {
+            throw new ArgumentException($"Block {block}'s caches live on another backend.", nameof(backend));
         }
         else if (entry.Prefixes.Shape[1] != prefix.Shape[1] || entry.Prefixes.Shape[2] != prefix.Shape[2])
         {
@@ -87,54 +94,83 @@ public sealed class CrossFrameKvRing : IDisposable
 
     /// <summary>
     /// Stores the current frame's patch keys and values (token-major <c>[1, N, heads, D]</c>) in its slot and the pooled prefix's (<c>[1, P, heads,
-    /// D]</c>) ahead of the slots, then counts the frame as seen. Returns how many rows of <see cref="Keys"/> and <see cref="Values"/> the frame
-    /// attends to.
+    /// D]</c>) ahead of the slots, then counts the frame as seen. The ring takes ownership of all four tensors, also when it throws, and frees
+    /// those it replaces. Returns how many rows <see cref="Read"/> now gives.
     /// </summary>
-    public int Update(IBackend backend, int block, Tensor key, Tensor value, Tensor pooledKey, Tensor pooledValue)
+    public int Update(int block, Tensor key, Tensor value, Tensor pooledKey, Tensor pooledValue)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(backend);
-        if (!_blocks.TryGetValue(block, out Entry? entry))
-            throw new InvalidOperationException($"Call UpdatePrefix for block {block} before Update.");
-        CheckRows(key, nameof(key));
-        CheckRows(pooledKey, nameof(pooledKey));
-        if (!value.Shape.Equals(key.Shape) || value.DType != DType.F32)
-            throw new ArgumentException($"The values must match the keys {key.Shape}; got {value.DType} {value.Shape}.", nameof(value));
-        if (!pooledValue.Shape.Equals(pooledKey.Shape) || pooledValue.DType != DType.F32)
-            throw new ArgumentException(
-                $"The pooled values must match the pooled keys {pooledKey.Shape}; got {pooledValue.DType} {pooledValue.Shape}.", nameof(pooledValue));
-        int patches = (int)key.Shape[1], heads = (int)key.Shape[2], dim = (int)key.Shape[3], prefix = (int)pooledKey.Shape[1];
-        if (pooledKey.Shape[2] != heads || pooledKey.Shape[3] != dim)
-            throw new ArgumentException($"The pooled keys must have {heads} heads of {dim}; got {pooledKey.Shape}.", nameof(pooledKey));
-        if (entry.Keys is null)
+        bool pooledGiven = false, frameGiven = false;
+        try
         {
-            TensorShape shape = new(1, heads, prefix + (long)Window * patches, dim);
-            entry.Keys = Zeroed(backend, shape);
-            entry.Values = Zeroed(backend, shape);
-            entry.Patches = patches;
-            entry.Prefix = prefix;
-        }
-        else if (entry.Patches != patches || entry.Prefix != prefix || entry.Keys.Shape[1] != heads || entry.Keys.Shape[3] != dim)
-        {
-            throw new ArgumentException(
-                $"Block {block} caches {entry.Prefix} + {Window} x {entry.Patches} rows of {entry.Keys.Shape[1]} heads; got {key.Shape}.",
-                nameof(key));
-        }
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!_blocks.TryGetValue(block, out Entry? entry))
+                throw new InvalidOperationException($"Call UpdatePrefix for block {block} before Update.");
+            CheckRows(key, nameof(key));
+            CheckRows(pooledKey, nameof(pooledKey));
+            if (!value.Shape.Equals(key.Shape) || value.DType != DType.F32)
+                throw new ArgumentException($"The values must match the keys {key.Shape}; got {value.DType} {value.Shape}.", nameof(value));
+            if (!pooledValue.Shape.Equals(pooledKey.Shape) || pooledValue.DType != DType.F32)
+                throw new ArgumentException(
+                    $"The pooled values must match the pooled keys {pooledKey.Shape}; got {pooledValue.DType} {pooledValue.Shape}.",
+                    nameof(pooledValue));
+            int patches = (int)key.Shape[1], heads = (int)key.Shape[2], dim = (int)key.Shape[3], prefix = (int)pooledKey.Shape[1];
+            if (pooledKey.Shape[2] != heads || pooledKey.Shape[3] != dim)
+                throw new ArgumentException($"The pooled keys must have {heads} heads of {dim}; got {pooledKey.Shape}.", nameof(pooledKey));
+            if (entry.Seen > 0 && (entry.Patches != patches || entry.Prefix != prefix || entry.Heads != heads || entry.Dim != dim))
+                throw new ArgumentException(
+                    $"Block {block} caches {entry.Prefix} + {Window} x {entry.Patches} rows of {entry.Heads} heads; got {key.Shape}.", nameof(key));
 
-        int slot = entry.Seen % Window;
-        WriteRows(backend, entry.Keys, key, prefix + slot * patches);
-        WriteRows(backend, entry.Values!, value, prefix + slot * patches);
-        WriteRows(backend, entry.Keys, pooledKey, 0);
-        WriteRows(backend, entry.Values!, pooledValue, 0);
-        entry.Seen++;
-        return prefix + Math.Min(entry.Seen, Window) * patches;
+            // The pooled rows first: the store then never has an empty slot before a frame's.
+            pooledGiven = true;
+            entry.Store.Set(0, PooledSlot, pooledKey, pooledValue);
+            frameGiven = true;
+            entry.Store.Set(0, 1 + entry.Seen % Window, key, value);
+            (entry.Patches, entry.Prefix, entry.Heads, entry.Dim) = (patches, prefix, heads, dim);
+            entry.Seen++;
+            return LiveRows(block);
+        }
+        finally
+        {
+            if (!pooledGiven)
+            {
+                pooledKey?.Dispose();
+                pooledValue?.Dispose();
+            }
+
+            if (!frameGiven)
+            {
+                key?.Dispose();
+                value?.Dispose();
+            }
+        }
     }
 
-    /// <summary>Block <paramref name="block"/>'s head-major key cache; borrowed, valid until the ring is disposed.</summary>
-    public Tensor Keys(int block) => Get(block).Keys ?? throw new InvalidOperationException($"Block {block} has no keys yet.");
-
-    /// <summary>Block <paramref name="block"/>'s head-major value cache; borrowed, valid until the ring is disposed.</summary>
-    public Tensor Values(int block) => Get(block).Values ?? throw new InvalidOperationException($"Block {block} has no values yet.");
+    /// <summary>The keys and values the frame last stored in block <paramref name="block"/> attends to, head-major <c>[1, heads, rows, D]</c>: the
+    /// pooled prefix's rows, then the filled slots in slot order. Both are new tensors the caller owns.</summary>
+    /// <exception cref="InvalidOperationException">The block has seen no frame.</exception>
+    public (Tensor Keys, Tensor Values) Read(int block)
+    {
+        Entry entry = Get(block);
+        if (entry.Seen == 0) throw new InvalidOperationException($"Block {block} has no keys and values yet.");
+        (Tensor joinedKeys, Tensor joinedValues) = entry.Store.Join(0, 0, 1 + Math.Min(entry.Seen, Window));
+        Tensor? keys = null;
+        try
+        {
+            keys = HeadMajor(entry.Backend, joinedKeys);
+            joinedKeys.Dispose();   // before the values are permuted, so at most three of the four joined sizes are alive
+            return (keys, HeadMajor(entry.Backend, joinedValues));
+        }
+        catch
+        {
+            keys?.Dispose();
+            throw;
+        }
+        finally
+        {
+            joinedKeys.Dispose();
+            joinedValues.Dispose();
+        }
+    }
 
     /// <summary>The rows the frame last stored in block <paramref name="block"/> attends to.</summary>
     public int LiveRows(int block)
@@ -149,9 +185,9 @@ public sealed class CrossFrameKvRing : IDisposable
         _disposed = true;
         foreach (Entry entry in _blocks.Values)
         {
+            entry.Store.Dispose();
+            entry.Backend.UnpinActivation(entry.Prefixes);
             entry.Prefixes.Dispose();
-            entry.Keys?.Dispose();
-            entry.Values?.Dispose();
         }
 
         _blocks.Clear();
@@ -170,58 +206,53 @@ public sealed class CrossFrameKvRing : IDisposable
             throw new ArgumentException($"{name} must be F32 token-major [1, S, heads, D]; got {rows.DType} {rows.Shape}.", name);
     }
 
-    // Token-major [1, S, heads, D] rows into head-major cache rows [first, first + S) of every head, as one strided copy on the backend.
-    private static void WriteRows(IBackend backend, Tensor cache, Tensor rows, int first)
+    // [1, S, heads, D] to [1, heads, S, D].
+    private static Tensor HeadMajor(IBackend backend, Tensor rows)
     {
-        long count = rows.Shape[1], heads = rows.Shape[2], dim = rows.Shape[3], capacity = cache.Shape[2];
-        StridedView destination = new([count, heads, dim], [dim, capacity * dim, 1], first * dim);
-        StridedView source = new([count, heads, dim], [heads * dim, dim, 1], 0);
-        backend.CopyStrided(cache, rows, new StridedCopySpec(destination, source));
+        int count = (int)rows.Shape[1], heads = (int)rows.Shape[2], dim = (int)rows.Shape[3];
+        Tensor result = new(new TensorShape(1, heads, count, dim), DType.F32);
+        try
+        {
+            backend.Permute0213(result, rows, count, heads, dim);
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
-    /// <summary>The first <paramref name="rows"/> rows of every head of a head-major cache <c>[1, heads, capacity, D]</c>
-    /// (<see cref="Keys"/> or <see cref="Values"/>), as a new <c>[1, heads, rows, D]</c> tensor (one strided copy on the backend); the caller owns
-    /// it.</summary>
-    public static Tensor LiveCopy(IBackend backend, Tensor cache, int rows)
+    // The prefix ring is allocated and zeroed on the device by one broadcast copy, so the first in-place scatter into it finds a device buffer
+    // instead of uploading a host buffer. Slots no frame has written are never read.
+    private static Entry NewEntry(IBackend backend, TensorShape prefixShape)
     {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(cache);
-        if (cache.DType != DType.F32 || cache.Shape.Rank != 4 || cache.Shape[0] != 1)
-            throw new ArgumentException($"The cache must be F32 head-major [1, heads, capacity, D]; got {cache.DType} {cache.Shape}.", nameof(cache));
-        long heads = cache.Shape[1], capacity = cache.Shape[2], dim = cache.Shape[3];
-        if (rows < 1 || rows > capacity)
-            throw new ArgumentOutOfRangeException(nameof(rows), rows, $"A cache of {capacity} rows has no {rows} live rows.");
-        Tensor live = new(new TensorShape(1, heads, rows, dim), DType.F32);
-        backend.CopyStrided(live, cache, StridedCopySpec.Gather(new StridedView([heads, rows, dim], [capacity * dim, dim, 1], 0)));
-        return live;
-    }
-
-    // A cache allocated and zeroed on the device by one broadcast copy, so the first in-place scatter into it finds a device buffer instead of
-    // uploading a host buffer the size of the whole cache. Rows no frame has written are never read.
-    private static Tensor Zeroed(IBackend backend, TensorShape shape)
-    {
-        Tensor cache = new(shape, DType.F32);
+        Tensor prefixes = new(prefixShape, DType.F32);
         try
         {
             using Tensor zero = new(new TensorShape(1), DType.F32);
             zero.AsSpan<float>().Clear();
-            StridedCopies.FillFrom(backend, cache, zero);
-            return cache;
+            StridedCopies.FillFrom(backend, prefixes, zero);
+            backend.PinActivation(prefixes);
+            return new Entry { Backend = backend, Prefixes = prefixes, Store = new KvSegmentStore(backend, 1, TokenAxis) };
         }
         catch
         {
-            cache.Dispose();
+            backend.UnpinActivation(prefixes);
+            prefixes.Dispose();
             throw;
         }
     }
 
     private sealed class Entry
     {
+        public required IBackend Backend { get; init; }
         public required Tensor Prefixes { get; init; }
-        public Tensor? Keys { get; set; }
-        public Tensor? Values { get; set; }
+        public required KvSegmentStore Store { get; init; }
         public int Patches { get; set; }
         public int Prefix { get; set; }
+        public int Heads { get; set; }
+        public int Dim { get; set; }
         public int Seen { get; set; }
     }
 }

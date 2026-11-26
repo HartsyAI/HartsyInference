@@ -242,34 +242,38 @@ public sealed unsafe class Dinov3VisionEncoder
         StridedCopies.SliceAxis(backend, prefixRows, frame, 1, 0, prefix);
         StridedCopies.SliceAxis(backend, patchRows, frame, 1, prefix, patches);
 
-        int live;
-        Tensor? qMh = null, keys = null, values = null;
+        Tensor? qMh = null;
+        Tensor keys, values;
         try
         {
             (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, rope.Cos, rope.Sin);
             using (q)
-            using (k)
-            using (v)
             {
-                using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
-                (Tensor pq, Tensor pk, Tensor pv) = layer.ProjectAttention(backend, pooled, null, null);
-                pq.Dispose();
-                using (pk)
-                using (pv)
-                    live = ring.Update(backend, block, k, v, pk, pv);
+                Tensor pk, pv;
+                try
+                {
+                    using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
+                    (Tensor pq, pk, pv) = layer.ProjectAttention(backend, pooled, null, null);
+                    pq.Dispose();
+                }
+                catch
+                {
+                    k.Dispose();
+                    v.Dispose();
+                    throw;
+                }
+
+                ring.Update(block, k, v, pk, pv);   // the ring owns all four from here
                 qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
                 backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
             }
 
-            // Exact-length copies of the live rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
-            keys = CrossFrameKvRing.LiveCopy(backend, ring.Keys(block), live);
-            values = CrossFrameKvRing.LiveCopy(backend, ring.Values(block), live);
+            // Exact-length rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
+            (keys, values) = ring.Read(block);
         }
         catch
         {
             qMh?.Dispose();
-            keys?.Dispose();
-            values?.Dispose();
             throw;
         }
 
