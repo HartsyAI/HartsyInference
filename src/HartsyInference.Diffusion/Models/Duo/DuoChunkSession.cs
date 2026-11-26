@@ -9,7 +9,8 @@ namespace HartsyInference.Diffusion.Models.Duo;
 /// Intent rows once; <see cref="GenerateBlock"/> then denoises the next block against the committed history and commits its clean result.
 /// Blocks must come in order from 0, and every input is length-checked against the layout before anything is computed. The denoise is the
 /// shared Euler loop, so the cached path and a full forward over the same history take the same schedule and noise.
-/// CPU reference: it allocates per call and is for tiny-config self-consistency tests, not production.</summary>
+/// The denoise runs on the backend: the state stays device-resident across the Euler steps, and the clean block is read back once, after the
+/// commit check. <see cref="FullBlock"/> is the dense host reference that the tests compare against.</summary>
 internal sealed class DuoChunkSession
 {
     private readonly MiniMaxH3Transformer _transformer;
@@ -126,6 +127,10 @@ internal sealed class DuoChunkSession
                 Tensor? nextAudio;
                 try
                 {
+                    if ((audio is null) != (predicted.Audio is null))
+                    {
+                        throw new InvalidOperationException("The forward returned audio for one stream of the block and not the other.");
+                    }
                     nextAudio = audio is null || predicted.Audio is null ? null : Euler(audio, predicted.Audio, remaining);
                 }
                 catch
