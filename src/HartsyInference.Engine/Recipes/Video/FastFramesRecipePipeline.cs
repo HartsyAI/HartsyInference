@@ -120,17 +120,31 @@ public sealed class FastFramesRecipePipeline : IVideoRecipePipeline
         // The pipeline first: it frees the generator's device weights, and the loaders then release the host objects. The loaders
         // hold the transformer, the refiner, the decoder and the umT5 encoder. Each one's Tensor.Dispose runs its GPU dispose callback,
         // so their device copies go with it (not verified on a device). A recipe dropped without Dispose frees nothing.
+        // Each release runs even when an earlier one throws; the failures are rethrown together after all of them.
+        List<Exception>? failures = null;
         try
         {
             _pipeline.Dispose();
         }
-        finally
+        catch (Exception ex)
         {
-            foreach (IDisposable loader in _loaders)
+            (failures ??= []).Add(ex);
+        }
+        foreach (IDisposable loader in _loaders)
+        {
+            try
             {
                 loader.Dispose();
             }
-            _loaders.Clear();
+            catch (Exception ex)
+            {
+                (failures ??= []).Add(ex);
+            }
+        }
+        _loaders.Clear();
+        if (failures is not null)
+        {
+            throw new AggregateException("A FastFrames recipe failed to release one or more parts.", failures);
         }
     }
 }
