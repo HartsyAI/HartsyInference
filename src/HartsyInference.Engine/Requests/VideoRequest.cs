@@ -78,6 +78,10 @@ public sealed record VideoRequest
     /// <summary>Optional reference audio driving audio-conditioned video (e.g. speech-to-video).</summary>
     public AudioClip? VideoAudioReference { get; init; }
 
+    /// <summary>Set by the engine's vocal pre-step: the separated speech as 16 kHz mono taken from the float stem, so a speech encoder does not
+    /// decode the 16-bit <see cref="VideoAudioReference"/> and resample it a second way. Null outside that step.</summary>
+    internal float[]? SeparatedSpeech16k { get; init; }
+
     /// <summary>Runs <see cref="VideoAudioReference"/> through the Kim_Vocal_2 vocal separator first and drives the video with the vocals alone (44.1 kHz stereo; the recipe decodes it to the rate it needs). Needs driving audio; a recipe without driving-audio support refuses the request as it does for the audio itself. Runs on the CPU before generation and can take minutes (logged, not reported through step progress); only the first clip-length of audio plus a second is separated when the frame total and fps are known. A soundtrack the recipe attaches from the driving clip is then the separated vocals, not the original mix.</summary>
     public bool SeparateDrivingVocals { get; init; }
 

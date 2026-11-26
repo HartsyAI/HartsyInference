@@ -141,7 +141,7 @@ public sealed class FxService : IFxService
         IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, cacheKey), async ct =>
         {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(request.Audio, MdxSampleRate);
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(request.Audio, MdxSampleRate);
             if (left.Length == 0)
             {
                 throw new ArgumentException("The audio to separate decoded to no samples.", nameof(request));
@@ -163,22 +163,24 @@ public sealed class FxService : IFxService
         }, cancel);
     }
 
-    /// <summary>The vocals of <paramref name="audio"/> as a 44.1 kHz stereo WAV clip (16-bit PCM, as <see cref="AudioClipCodec.EncodeWav(float[], float[]?, int)"/> writes), for the video driving-audio pre-step: the recipe decodes it to the rate and channels it needs.</summary>
-    internal Task<AudioClip> SeparateVocalsClipAsync(AudioClip audio, double? maxSeconds, CancellationToken cancel)
+    /// <summary>The vocals of <paramref name="audio"/> for the video driving-audio pre-step, in both forms: a 44.1 kHz stereo WAV clip (16-bit PCM) for a soundtrack or a recipe that decodes it, and 16 kHz mono taken from the float stem the way the reference does, for a speech encoder.</summary>
+    internal Task<SeparatedVocals> SeparateVocalsClipAsync(AudioClip audio, double? maxSeconds, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(audio);
         AudioModelSelector selector = new(FxCatalog.KimVocal2Id, FxCatalog.KimVocal2Id, null);
         IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, FxCatalog.KimVocal2Id), async ct =>
         {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(audio, MdxSampleRate);
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(audio, MdxSampleRate);
             if (left.Length == 0)
             {
                 throw new ArgumentException("The driving audio decoded to no samples.", nameof(audio));
             }
             MdxVocalRunner runner = await LoadKimVocal2Async(selector, FxCatalog.KimVocal2Id, backend, ct).ConfigureAwait(false);
             float[][] vocals = runner.Separate(left, right, null, maxSeconds, LogProgress, ct);
-            return new AudioClip { Data = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate), Format = "wav" };
+            AudioClip stem = new() { Data = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate), Format = "wav" };
+            // Uncropped: the recipe cuts it to the length of the clip it actually generates, which a chain rounds up.
+            return new SeparatedVocals(stem, runner.ToMono(vocals, SeparatedVocals.SpeechSampleRate, null));
         }, cancel);
     }
 

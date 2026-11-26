@@ -6,6 +6,7 @@ using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
@@ -509,6 +510,26 @@ internal static class VideoRecipeUtils
         long bytes = (long)seq * dim * 4;
         Buffer.MemoryCopy((float*)x.DataPointer, (float*)o.DataPointer, bytes, bytes);
         return o;
+    }
+
+    /// <summary>The driving speech as mono 16 kHz: the vocal pre-step's own waveform when the request carries one, else <paramref name="speech"/> decoded.</summary>
+    internal static float[] DrivingSpeech16k(VideoRequest request, AudioClip speech) => request.SeparatedSpeech16k ?? DecodeMono16k(speech);
+
+    // LongCat's separator input rate, and the margin its demo adds to the clip length (generate_duration + 1.0).
+    private const int SeparatorSampleRate = 44_100;
+    private const double SpeechMarginSeconds = 1d;
+
+    /// <summary>Cuts separated speech to what LongCat's <c>separate_vocals(duration: clip + 1 s)</c> returns:
+    /// <c>ceil(ceil(duration × 44100) × 16000 / 44100)</c> samples. A request that was not separated is returned as is.</summary>
+    internal static float[] CropSeparatedSpeech(VideoRequest request, float[] speech16k, int clipFrames, int fps)
+    {
+        if (request.SeparatedSpeech16k is null)
+        {
+            return speech16k;
+        }
+        double sourceSamples = Math.Ceiling((clipFrames / (double)fps + SpeechMarginSeconds) * SeparatorSampleRate);
+        int keep = (int)Math.Ceiling(sourceSamples * SeparatedVocals.SpeechSampleRate / SeparatorSampleRate);
+        return keep < speech16k.Length ? speech16k[..keep] : speech16k;
     }
 
     /// <summary>Decodes an <see cref="AudioClip"/> to mono 16 kHz float samples (the extension's <c>AudioDecoder.DecodeMono16k</c>). Only RIFF/WAVE is decodable in-engine — the ffmpeg transcode the extension used for compressed containers is host-side, so anything else is refused rather than silently mis-read.</summary>

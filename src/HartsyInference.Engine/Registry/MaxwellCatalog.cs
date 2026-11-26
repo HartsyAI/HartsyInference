@@ -7,13 +7,14 @@ internal static class MaxwellCatalog
     /// <summary>Catalog id of the model.</summary>
     internal const string Id = "maxwell-v1-flash";
 
-    /// <summary>Builds the entry. It is not CLI-drivable until a real-weight run has passed, so the CLI does not offer the 38.6 GB download yet.</summary>
+    /// <summary>Builds the entry. Drivable from the CLI and the native API through TextService, which runs the real FP8 checkpoint on CUDA. Still
+    /// <see cref="ModelStatus.ValidationPending"/>: no reference tokens have been compared on the real weights (see MODEL_STATUS_LLM.md).</summary>
     internal static CatalogEntry Build() => new()
     {
         Id = Id, Modality = Modality.Text, DisplayName = "Maxwell-V1.0-Flash",
         Architecture = "45 layers, hidden 2048; block-sparse GQA (32 query / 4 KV heads, 128-token blocks, 8 prefix + 8 local + 16 remote, per-layer indexer); "
             + "mHC with 4 residual streams; sigmoid MoE (256 routed, top-12, one shared expert, 3 dense layers); 1 MTP layer (not loaded)",
-        Status = ModelStatus.Structural, CliDrivable = false, HuggingFaceRepo = "maxwell-model/Maxwell-V1-Flash",
+        Status = ModelStatus.ValidationPending, CliDrivable = true, HuggingFaceRepo = "maxwell-model/Maxwell-V1-Flash",
         Variants =
         [
             new CatalogVariant

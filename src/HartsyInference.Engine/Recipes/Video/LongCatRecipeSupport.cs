@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -18,7 +19,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <summary>What every LongCat recipe loads: the DiT from the checkpoint directory, the VAE, and umT5 with its tokenizer. The latent channel count
 /// is the DiT's own <see cref="LongCatConfig.InChannels"/>, so a tiny config and the release (16 channels) share one path.</summary>
 internal sealed record LongCatParts(LongCatTransformer Dit, int Channels, int CaptionChannels, bool HasAudio, IWanVaeDecoder Decoder,
-    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer, AdjunctGate? DmdGate = null);
+    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer, AdjunctGate? DmdGate = null, AdjunctGate? OpsdGate = null);
 
 /// <summary>Where the umT5 and VAE come from. Null in production (the engine's side-model downloads); a test injects small stand-ins here, so the
 /// recipe path runs end to end without the multi-gigabyte files. Each factory returns objects the caller owns.</summary>
@@ -110,17 +111,18 @@ internal static class LongCatRecipeSupport
 
     /// <summary>One measured later-run workload: the size, the new and context latents of its segment, whether it was the distilled pipeline, and the
     /// allocator's reserved bytes at the worst step of the later segment.</summary>
-    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes);
+    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes,
+        DeviceType Device);
 
     /// <summary>The later runs measured on the GPU: main c5fec5d37 with the refusal bypassed in a scratch copy, all eight steps, no OOM. The key is
-    /// exactly what was measured. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
+    /// exactly what was measured: the device type (CUDA), size, latents and the distilled flag. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
     /// per-token estimate. The distilled flag is inferred from the eight steps (the Distill8 schedule); it is not in the measurement's log. Audio
     /// attention was not sampled. Reserved bytes are the pool's RESERVED_MEM_CURRENT (CudaBackend.cs:146-152), which excludes the resident blocks,
     /// since those are allocated outside the pool (GpuTransferHelper.cs:326, 482).</summary>
     internal static readonly MeasuredLaterRun[] MeasuredLaterRuns =
     {
-        new(640, 368, NewLatents: 20, ContextLatents: 4, Distilled: true, 7808L << 20),
-        new(832, 480, NewLatents: 20, ContextLatents: 4, Distilled: true, 11360L << 20),
+        new(640, 368, NewLatents: 20, ContextLatents: 4, Distilled: true, 7808L << 20, DeviceType.Cuda),
+        new(832, 480, NewLatents: 20, ContextLatents: 4, Distilled: true, 11360L << 20, DeviceType.Cuda),
     };
 
     /// <summary>The explicit margin on a measured peak: the safety margin the estimate also keeps. It covers what the measurement did not sample (audio
@@ -128,15 +130,34 @@ internal static class LongCatRecipeSupport
     /// next. It is not scaled between the two sizes: the margin is set against the unsampled terms, which do not grow with the measured ones.</summary>
     internal const long MeasuredMarginBytes = SafetyBytes;
 
-    /// <summary>The reserved peak measured for exactly this workload (size, new and context latents, distilled), or null when it was not measured. A null
+    /// <summary>The reserved peak measured for exactly this workload (device type, size, new and context latents, distilled), or null when it was not measured. A null
     /// keeps the per-token estimate and its refusal.</summary>
-    internal static long? MeasuredReservedPeak(int width, int height, int newLatents, int contextLatents, bool distilled)
+    internal static long? MeasuredReservedPeak(DeviceType device, int width, int height, int newLatents, int contextLatents, bool distilled)
     {
+        // The pool's reserved bytes are the CUDA allocator's. A Vulkan (or any other) run has no measurement, so it keeps the estimate.
         foreach (MeasuredLaterRun run in MeasuredLaterRuns)
-            if (run.Width == width && run.Height == height && run.NewLatents == newLatents && run.ContextLatents == contextLatents
-                && run.Distilled == distilled)
+            if (run.Device == device && run.Width == width && run.Height == height && run.NewLatents == newLatents
+                && run.ContextLatents == contextLatents && run.Distilled == distilled)
                 return run.ReservedPeakBytes;
         return null;
+    }
+
+    /// <summary>The later runs' figures for one build: the token count of a later step, its KV cache bytes, the measured peak it may use, and whether
+    /// its cache is offloaded. A mixed (1.6) run is uncached: its step runs every context and new frame, holds no cache, has no measurement, and
+    /// does not offload.</summary>
+    internal sealed record LongCatLaterRunFigures(long Tokens, long CacheBytes, long? MeasuredPeak, bool OffloadKv);
+
+    internal static LongCatLaterRunFigures LaterRunFigures(bool mixed, LongCatAvatarChainPlan plan, int latentHeight, int latentWidth,
+        LongCatConfig config, int pixelWidth, int pixelHeight, bool distilled, DeviceType device)
+    {
+        if (mixed)
+        {
+            return new LongCatLaterRunFigures(TokenCount(plan.ContextLatents + 1 + plan.NewLatentsPerSegment, latentHeight, latentWidth), 0, null,
+                OffloadKv: false);
+        }
+        return new LongCatLaterRunFigures(TokenCount(plan.NewLatentsPerSegment, latentHeight, latentWidth),
+            CachedStepBytes(config, plan.ContextLatents + 1, latentHeight, latentWidth),
+            MeasuredReservedPeak(device, pixelWidth, pixelHeight, plan.NewLatentsPerSegment, plan.ContextLatents, distilled), OffloadKv: true);
     }
 
     /// <summary>The activation budget of a later run: the measured reserved peak plus its margin when the size was measured, else the per-token
@@ -198,6 +219,31 @@ internal static class LongCatRecipeSupport
     /// <summary>The DMD distillation LoRA's static multiplier: the reference's <c>--lora_multiplier</c> default, applied when the LoRA is gated on.</summary>
     internal const float DmdMultiplier = 0.8f;
 
+    /// <summary>The two LoRA files of the 1.6 build: the DMD (loraA) and OPSD (loraB) adapters, found beside the checkpoint's own folder as the
+    /// release lays them out (<c>loraA/lora.safetensors</c>, <c>loraB/lora.safetensors</c>).</summary>
+    internal sealed record LongCatLoraFiles(string DmdPath, string OpsdPath);
+
+    /// <summary>Refuses a 1.6 build whose loraA or loraB is missing, before any weight is read, and names the row that holds them.</summary>
+    internal static void RequireAvatar16Loras(string checkpointPath)
+    {
+        LongCatLoraFiles files = Avatar16LoraFiles(checkpointPath);
+        foreach (string path in new[] { files.DmdPath, files.OpsdPath })
+        {
+            if (!File.Exists(path))
+            {
+                throw new NotSupportedException($"The 1.6 build needs its LoRA at '{path}', which is not there. Refusing to run without it. "
+                    + "The 1.6 build is the longcat-avatar-1.6 row (longcat-avatar:1.6 from the CLI), with loraA and loraB beside its base folder.");
+            }
+        }
+    }
+
+    /// <summary>The 1.6 LoRA files for a checkpoint directory (the INT8 or bf16 base folder under the 1.6 row).</summary>
+    internal static LongCatLoraFiles Avatar16LoraFiles(string checkpointPath)
+    {
+        string root = Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".";
+        return new LongCatLoraFiles(Path.Combine(root, "loraA", "lora.safetensors"), Path.Combine(root, "loraB", "lora.safetensors"));
+    }
+
     /// <summary>Where the 1.5 distillation LoRA sits: <c>lora/dmd_lora.safetensors</c> beside the checkpoint's own folder (the reference layout).</summary>
     internal static string DmdLoraPath(string checkpointPath) =>
         Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
@@ -205,8 +251,12 @@ internal static class LongCatRecipeSupport
     /// <summary>Loads the parts. With <paramref name="attachDmd"/>, the DMD LoRA is attached as a runtime gated term on the DiT's weights (the
     /// INT8 base included), so it is live only while its <see cref="AdjunctGate"/> is enabled. A missing LoRA file is refused here, before any
     /// weight is read, so a distilled request never runs on the bare base.</summary>
-    internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false)
+    internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false,
+        LongCatLoraFiles? mixedLoras = null)
     {
+        // The placements the engine sets that LongCat cannot honour: CFG-parallel, DiT shards and context parallel are refused; a separate text-encoder
+        // or VAE backend is warned about and runs on the primary (the engine's placement policy, UnhonouredBackends).
+        UnhonouredBackends.Refuse(context, "LongCat");
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
@@ -214,9 +264,24 @@ internal static class LongCatRecipeSupport
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
         loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
         AdjunctGate? dmdGate = null;
+        AdjunctGate? opsdGate = null;
         LoraStack? loras = null;
         LoraFile? dmd = null;
-        if (attachDmd)
+        LoraFile? opsd = null;
+        if (mixedLoras is { } mixed)
+        {
+            // The 1.6 pair: the DMD and OPSD LoRAs, each at multiplier 1; the mixed schedule switches their gates per step.
+            RequireAvatar16Loras(context.CheckpointPath);
+            dmd = LoraFile.Load(mixed.DmdPath);
+            opsd = LoraFile.Load(mixed.OpsdPath);
+            loras = new LoraStack();
+            dmdGate = new AdjunctGate();
+            opsdGate = new AdjunctGate();
+            loras.AddGated(dmd, dmdGate, 1f);
+            loras.AddGated(opsd, opsdGate, 1f);
+            loras.ApplyTo(weights, LoraTarget.Transformer, context.Backend);
+        }
+        else if (attachDmd)
         {
             string dmdPath = DmdLoraPath(context.CheckpointPath);
             if (!File.Exists(dmdPath))
@@ -230,6 +295,8 @@ internal static class LongCatRecipeSupport
         LongCatTransformer dit = new(checkpoint.Config);
         loaders.Add(dit);
         dit.LoadWeights(weights);
+        if (opsd is not null)
+            loaders.Add(opsd);
         if (dmd is not null)
         {
             loaders.Add(dmd);
@@ -251,7 +318,8 @@ internal static class LongCatRecipeSupport
         loaders.Add(tokenizer);
         // The avatar's audio modules are the audio_proj.* weights; a base checkpoint has none.
         bool hasAudio = checkpoint.Weights.Keys.Any(key => key.StartsWith("audio_proj.", StringComparison.Ordinal));
-        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer, dmdGate);
+        return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer, dmdGate,
+            opsdGate);
     }
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>

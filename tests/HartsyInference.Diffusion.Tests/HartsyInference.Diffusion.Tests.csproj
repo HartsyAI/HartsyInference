@@ -17,6 +17,7 @@
     <None Include="Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Duo\*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\flux2_edit_tiny\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Fibo2\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\fastframes_tiny\*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\LtxVideo2VaeEncoder\*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\sana_wm_s4_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
@@ -26,6 +27,7 @@
     <None Include="Fixtures\sana_wm_s2_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\hy15_dit_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\hy15_vae_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\hy15_vae_tiny_z4.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\rolling_tiny.safetensors" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

@@ -59,18 +59,20 @@ public sealed class DuoKvCache
         Rows += rows;
     }
 
-    /// <summary>Drops the <paramref name="rows"/> oldest rows, shifting the rest to the front.</summary>
-    public void EvictOldest(int rows)
+    /// <summary>Drops <paramref name="count"/> rows starting at row <paramref name="first"/>, shifting the later rows down to close the gap.
+    /// Rows before <paramref name="first"/> keep their place, so a reference or shared span can stay while a clean block goes.</summary>
+    public void EvictRange(int first, int count)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(rows);
-        if (rows > Rows)
+        ArgumentOutOfRangeException.ThrowIfNegative(first);
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        if (first + count > Rows)
         {
-            throw new ArgumentOutOfRangeException(nameof(rows), rows, $"Only {Rows} rows are held.");
+            throw new ArgumentOutOfRangeException(nameof(count), count, $"Rows [{first}, {first + count}) are not all held; {Rows} rows are held.");
         }
-        int keep = Rows - rows;
-        Array.Copy(_keys, rows * Width, _keys, 0, keep * Width);
-        Array.Copy(_values, rows * Width, _values, 0, keep * Width);
-        Rows = keep;
+        int tail = Rows - (first + count);
+        Array.Copy(_keys, (first + count) * Width, _keys, first * Width, tail * Width);
+        Array.Copy(_values, (first + count) * Width, _values, first * Width, tail * Width);
+        Rows -= count;
     }
 
     /// <summary>Forgets every row; the buffers are reused.</summary>

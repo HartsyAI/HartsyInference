@@ -86,4 +86,40 @@ public sealed class DuoStreamCache
         }
         _groups.AddRange(newGroups);
     }
+
+    /// <summary>Drops the oldest committed clean block: every clean group of it (video and audio), in every layer. Reference and shared
+    /// groups are never dropped. Returns the rows dropped. Throws when no clean block is held, or when the block holds no rows, since
+    /// either would free nothing.</summary>
+    public int EvictOldestClean()
+    {
+        int first = _groups.FindIndex(g => g.Kind == DuoGroupKind.Clean);
+        if (first < 0)
+        {
+            throw new InvalidOperationException("No clean block is held to evict.");
+        }
+        int block = _groups[first].Block;
+        int count = 0, rows = 0;
+        for (int i = first; i < _groups.Count && _groups[i].Kind == DuoGroupKind.Clean && _groups[i].Block == block; i++)
+        {
+            count++;
+            rows += _groups[i].End - _groups[i].Start;
+        }
+        if (rows == 0)
+        {
+            throw new InvalidOperationException($"The oldest clean block (block {block}) holds no rows, so evicting it would free nothing.");
+        }
+
+        int start = _groups[first].Start;
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            _layers[i].EvictRange(start, rows);
+        }
+        _groups.RemoveRange(first, count);
+        for (int g = first; g < _groups.Count; g++)
+        {
+            DuoGroup later = _groups[g];
+            _groups[g] = later with { Start = later.Start - rows, End = later.End - rows };
+        }
+        return rows;
+    }
 }
