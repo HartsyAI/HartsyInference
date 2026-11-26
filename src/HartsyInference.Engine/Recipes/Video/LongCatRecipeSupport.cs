@@ -81,9 +81,10 @@ internal static class LongCatRecipeSupport
     /// memory when it does not. Disposing the scope evicts the streamed window; the resident prefix stays on the device until the pipeline's pin
     /// releases it (the denoise loop's finally frees the whole DiT). <paramref name="cacheBytes"/> is the KV cache the run keeps for its blocks; it
     /// counts against the same budget as the activations, and a run whose cache leaves no room is refused before its denoise starts.</summary>
-    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens, long cacheBytes = 0)
+    internal static BlockStreamingScope OpenDenoiseStream(IBackend backend, LongCatParts parts, string modelName, long tokens, long cacheBytes = 0,
+        long? measuredPeakBytes = null)
     {
-        long headroom = ActivationHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim) + cacheBytes;
+        long headroom = BudgetHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes, cacheBytes);
         if (cacheBytes > 0)
         {
             // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
@@ -97,11 +98,17 @@ internal static class LongCatRecipeSupport
         });
     }
 
-    /// <summary>The bytes a run's KV cache takes on the device: the keys and values of its <paramref name="condLatents"/> conditioning latent
-    /// frames, in every block, in F32 (the layout the cache is built in). At 832x480 with five conditioning latents that is 12.3 GB.</summary>
-    internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth) =>
-        KvSegmentStore.EstimateBytes(config.Depth, (long)condLatents * (latentHeight / config.PatchSize.H) * (latentWidth / config.PatchSize.W),
-            config.HiddenSize, DType.F32);
+    /// <summary>The bytes a run's KV cache takes on the device, in F32: every block's keys and values for the conditioning latents (12.3 GB at 832x480
+    /// with five of them, 7.25 GB at 640x368). Offloaded, the cache lives in host memory and the device holds one block's pair at a time.</summary>
+    internal static long KvCacheBytes(LongCatConfig config, int condLatents, int latentHeight, int latentWidth, bool offloaded) =>
+        LongCatKvCache.EstimateBytes(config, condLatents, latentHeight, latentWidth, offloaded);
+
+    /// <summary>The headroom a run reserves: the fixed pool and the safety margin, the activations, and the cache. The activations are the per-token
+    /// estimate, or <paramref name="measuredPeakBytes"/> when a measured peak of the run's activations is given in its place.</summary>
+    internal static long BudgetHeadroomBytes(long tokens, int hidden, int ffnHidden, long? measuredPeakBytes, long cacheBytes) =>
+        measuredPeakBytes is long peak
+            ? FixedPoolBytes + SafetyBytes + peak + cacheBytes
+            : ActivationHeadroomBytes(tokens, hidden, ffnHidden) + cacheBytes;
 
     /// <summary>Refuses a run whose budget is negative: the free memory after the shared weights, less the activation headroom and the cache, must be
     /// at least zero, or the streamed blocks have nowhere to land and the first step dies out of memory.</summary>

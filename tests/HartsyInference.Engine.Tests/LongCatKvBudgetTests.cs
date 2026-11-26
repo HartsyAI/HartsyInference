@@ -15,7 +15,7 @@ public sealed class LongCatKvBudgetTests
     {
         LongCatConfig config = new() { HiddenSize = 4096, Depth = 48, PatchSize = (1, 2, 2) };
         // 832x480 is a 104x60 latent grid; 5 latent frames of 30x52 tokens each.
-        long bytes = LongCatRecipeSupport.KvCacheBytes(config, condLatents: 5, latentHeight: 60, latentWidth: 104);
+        long bytes = LongCatRecipeSupport.KvCacheBytes(config, condLatents: 5, latentHeight: 60, latentWidth: 104, offloaded: false);
         long expected = 2L * 48 * (5 * 30 * 52) * 4096 * 4;
         Assert.Equal(expected, bytes);
         Assert.Equal(12_268_339_200L, bytes);
@@ -26,7 +26,27 @@ public sealed class LongCatKvBudgetTests
     {
         LongCatConfig config = new() { HiddenSize = 4096, Depth = 48, PatchSize = (1, 2, 2) };
         // 640x368 is a 80x46 latent grid: 23x40 tokens per frame, 4600 tokens for five frames.
-        Assert.Equal(2L * 48 * (5 * 23 * 40) * 4096 * 4, LongCatRecipeSupport.KvCacheBytes(config, 5, 46, 80));
+        Assert.Equal(2L * 48 * (5 * 23 * 40) * 4096 * 4, LongCatRecipeSupport.KvCacheBytes(config, 5, 46, 80, offloaded: false));
+    }
+
+    [Fact]
+    public void OffloadedTheDeviceHoldsOneBlockOfTheCache()
+    {
+        LongCatConfig config = new() { HiddenSize = 4096, Depth = 48, PatchSize = (1, 2, 2) };
+        long device = LongCatRecipeSupport.KvCacheBytes(config, 5, 60, 104, offloaded: false);
+        long staged = LongCatRecipeSupport.KvCacheBytes(config, 5, 60, 104, offloaded: true);
+        Assert.Equal(device / 48, staged);
+        Assert.Equal(255_590_400L, staged);
+    }
+
+    [Fact]
+    public void AMeasuredPeakReplacesThePerTokenEstimate()
+    {
+        long estimate = LongCatRecipeSupport.BudgetHeadroomBytes(39_000, 4096, 11008, measuredPeakBytes: null, cacheBytes: 0);
+        long measured = LongCatRecipeSupport.BudgetHeadroomBytes(39_000, 4096, 11008, measuredPeakBytes: 3_000 * Mb, cacheBytes: 0);
+        Assert.Equal(LongCatRecipeSupport.FixedPoolBytes + LongCatRecipeSupport.SafetyBytes + 3_000 * Mb, measured);
+        Assert.True(measured < estimate);
+        Assert.Equal(measured + 256 * Mb, LongCatRecipeSupport.BudgetHeadroomBytes(39_000, 4096, 11008, measuredPeakBytes: 3_000 * Mb, cacheBytes: 256 * Mb));
     }
 
     [Fact]

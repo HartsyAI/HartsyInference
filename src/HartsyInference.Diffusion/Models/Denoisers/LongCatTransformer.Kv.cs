@@ -11,13 +11,42 @@ public sealed class LongCatKvCache : IDisposable
 {
     private readonly KvSegmentStore _store;
 
-    internal LongCatKvCache(KvSegmentStore store, IBackend backend, int frames, int gridH, int gridW)
+    internal LongCatKvCache(KvSegmentStore store, IBackend backend, int frames, int gridH, int gridW, bool offloaded)
     {
         _store = store;
         Backend = backend;
         Frames = frames;
         GridH = gridH;
         GridW = gridW;
+        Offloaded = offloaded;
+    }
+
+    /// <summary>True when the keys and values live in host memory and each block stages its own pair to the device for its attention.</summary>
+    public bool Offloaded { get; }
+
+    /// <summary>Makes block <paramref name="layer"/>'s keys and values resident for one forward, and releases them when the returned scope is
+    /// disposed. A device cache needs no staging and returns null. An offloaded one places its two tensors through the same weight preload the
+    /// streaming code uses, so the device copy is found by tensor and freed after the block.</summary>
+    internal IDisposable? Stage(int layer)
+    {
+        if (!Offloaded)
+            return null;
+        Tensor[] pair = [_store.Keys(layer, 0), _store.Values(layer, 0)];
+        Backend.PreloadWeights(pair);
+        return new StagedPair(Backend, pair);
+    }
+
+    private sealed class StagedPair(IBackend backend, Tensor[] tensors) : IDisposable
+    {
+        private bool _freed;
+
+        public void Dispose()
+        {
+            if (_freed)
+                return;
+            _freed = true;
+            backend.FreeWeights(tensors);
+        }
     }
 
     /// <summary>The backend that built the cache and holds its tensors.</summary>
@@ -42,13 +71,18 @@ public sealed class LongCatKvCache : IDisposable
     public long Bytes => _store.Bytes;
 
     /// <summary>Bytes a cache over <paramref name="condFrames"/> latent frames of <paramref name="latentHeight"/> × <paramref name="latentWidth"/> will take.</summary>
-    public static long EstimateBytes(LongCatConfig config, int condFrames, int latentHeight, int latentWidth)
+    public static long EstimateBytes(LongCatConfig config, int condFrames, int latentHeight, int latentWidth) =>
+        EstimateBytes(config, condFrames, latentHeight, latentWidth, offloaded: false);
+
+    /// <summary>Bytes a cache over <paramref name="condFrames"/> latent frames takes on the device. A device cache holds all of them; an offloaded one
+    /// holds one block's keys and values at a time, which is the staging the forward needs.</summary>
+    public static long EstimateBytes(LongCatConfig config, int condFrames, int latentHeight, int latentWidth, bool offloaded)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentOutOfRangeException.ThrowIfLessThan(condFrames, 1);
         LongCatTransformer.RequireTiling(config, condFrames, latentHeight, latentWidth);
         long tokens = checked((long)condFrames * (latentHeight / config.PatchSize.H) * (latentWidth / config.PatchSize.W));
-        return KvSegmentStore.EstimateBytes(config.Depth, tokens, config.HiddenSize, DType.F32);
+        return KvSegmentStore.EstimateBytes(offloaded ? 1 : config.Depth, tokens, config.HiddenSize, DType.F32);
     }
 
     /// <summary>The keys of block <paramref name="layer"/>, <c>[1, heads, Tokens, headDim]</c>, borrowed.</summary>
@@ -69,7 +103,7 @@ public sealed partial class LongCatTransformer
 {
     /// <summary>The cache pass over conditioning latents <c>[1, C, F, H, W]</c>, where <c>F</c> is <paramref name="conditioning"/>'s conditioning frame
     /// count. The reference's <c>_cache_clean_latents</c>: zero timesteps, <c>skip_crs_attn</c> and <c>return_kv</c>.</summary>
-    public LongCatKvCache BuildKvCache(IBackend backend, Tensor condLatent, in LongCatConditioning conditioning)
+    public LongCatKvCache BuildKvCache(IBackend backend, Tensor condLatent, in LongCatConditioning conditioning, bool offload = false)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(condLatent);
@@ -100,6 +134,9 @@ public sealed partial class LongCatTransformer
                 Tensor next = _blocks[i].ForwardCacheBuild(backend, cur, timeEmbed, in inputs, store, i);
                 cur.Dispose();
                 cur = next;
+                // Offloaded: the block's keys and values leave the device now, so the cache never holds more than the block being built.
+                if (offload)
+                    store.MoveLayerToHost(i);
             }
         }
         catch
@@ -109,7 +146,7 @@ public sealed partial class LongCatTransformer
             throw;
         }
         cur.Dispose();
-        return new LongCatKvCache(store, backend, frames, gridH, gridW);
+        return new LongCatKvCache(store, backend, frames, gridH, gridW, offload);
     }
 
     /// <summary>The denoising pass over the noisy latents <c>[1, C, N, H, W]</c> with <paramref name="cache"/> in front of them. The conditioning
@@ -173,10 +210,13 @@ public sealed partial class LongCatTransformer
             for (int i = 0; i < _blocks.Length; i++)
             {
                 BeforeBlockForward?.Invoke(i);
-                Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, new LongCatPastKv(cache.Keys(i), cache.Values(i)),
-                    Probe, Probe is null ? "" : $"block{i}", audioTokens);
-                cur.Dispose();
-                cur = next;
+                using (cache.Stage(i))
+                {
+                    Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, new LongCatPastKv(cache.Keys(i), cache.Values(i)),
+                        Probe, Probe is null ? "" : $"block{i}", audioTokens);
+                    cur.Dispose();
+                    cur = next;
+                }
             }
 
             using Tensor finalModulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _finalAdaW!, _finalAdaB);
