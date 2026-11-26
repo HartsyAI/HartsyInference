@@ -21,7 +21,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     internal const int SegmentFrames = 93;
 
     /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
-    internal const int OutputFps = 25;
+    public const int OutputFps = 25;
 
     /// <summary>The longest chain the recipe accepts at 832x480, in frames. Each segment is decoded once, on its own, and its output frames are kept as
     /// bytes until the clip is written: at this size the kept frames are about 288 MB, and one segment's decode peaks near 445 MB of F32 RGB. The budget
@@ -30,6 +30,24 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     internal const int MaxChainFrames = 241;
 
     /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>
+    /// <summary>The checks a request is refused on before any weight is read, each with its stable code.</summary>
+    internal static void ValidateChainRequest(int? chainTotal, int frames, int width, int height, int fps)
+    {
+        if (chainTotal is int requested && !ChainWithinBudget(requested, width, height))
+            throw new VideoChainException("video.chain.budget",
+                $"A LongCat-Video-Avatar chain is at most {MaxChainFrames} frames at 832x480 (the same pixel count at other sizes).",
+                nameof(chainTotal));
+        if (frames > SegmentFrames)
+            throw new VideoChainException("video.chain.segment_frames",
+                $"One LongCat-Video-Avatar segment is at most {SegmentFrames} frames.", nameof(frames));
+        if (fps != OutputFps)
+            throw new VideoChainException("video.chain.fps",
+                $"LongCat-Video-Avatar's audio windows are built for {OutputFps} fps.", nameof(fps));
+    }
+
+    /// <summary>True when the driving audio is shorter than the clip: the windows past its end repeat its last frame.</summary>
+    internal static bool DrivingAudioIsShort(double seconds, int frames, int fps) => seconds + 1e-6 < frames / (double)fps;
+
     internal static bool ChainWithinBudget(int totalFrames, int width, int height) =>
         (long)totalFrames * width * height <= (long)MaxChainFrames * 832 * 480;
 

@@ -58,14 +58,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
 
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
-        if (request.ChainTotalFrames is int requested && !LongCatAvatarRecipe.ChainWithinBudget(requested, width, height))
-            throw new ArgumentOutOfRangeException(nameof(request), requested,
-                $"A LongCat-Video-Avatar chain is at most {LongCatAvatarRecipe.MaxChainFrames} frames at 832x480 (the same pixel count at other sizes); "
-                + "each segment is decoded on its own, and the output frames are held in host memory.");
-        if (frames > LongCatAvatarRecipe.SegmentFrames)
-            throw new ArgumentOutOfRangeException(nameof(settings), frames, $"One LongCat-Video-Avatar segment is at most {LongCatAvatarRecipe.SegmentFrames} frames.");
-        if (settings.Fps != LongCatAvatarRecipe.OutputFps)
-            throw new ArgumentOutOfRangeException(nameof(settings), settings.Fps, $"LongCat-Video-Avatar's audio windows are built for {LongCatAvatarRecipe.OutputFps} fps.");
+        LongCatAvatarRecipe.ValidateChainRequest(request.ChainTotalFrames, frames, width, height, settings.Fps);
         if (width % LongCatRecipeSupport.PatchGrid != 0 || height % LongCatRecipeSupport.PatchGrid != 0)
             throw new ArgumentException($"LongCat-Video-Avatar needs width and height in multiples of {LongCatRecipeSupport.PatchGrid}, got {width}×{height}.");
         int latentFrames = (frames - 1) / LongCatRecipeSupport.TemporalCompressionFactor + 1;
@@ -76,7 +69,11 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // A chain request longer than the segment runs the chain plan; its audio covers the whole clip, so the windows are cut once for all of it.
         int total = request.ChainTotalFrames is int chainTotal && chainTotal > frames ? chainTotal : frames;
         LongCatAvatarChainPlan? plan = total > frames ? LongCatAvatarChainPlan.For(latentFrames, total) : null;
-        float[] rawAudio = DrivingWindows(waveform, settings.Fps, plan?.TotalPixelFrames ?? frames);
+        int clipFrames = plan?.TotalPixelFrames ?? frames;
+        if (!drivingSpeech.IsEmpty && LongCatAvatarRecipe.DrivingAudioIsShort(drivingSpeech.Seconds, clipFrames, settings.Fps))
+            Logs.Warning($"[LongCatAvatarRecipePipeline] The driving audio lasts {drivingSpeech.Seconds:F2} s and the clip {clipFrames / (double)settings.Fps:F2} s; "
+                + "the windows past the audio's end repeat its last frame.");
+        float[] rawAudio = DrivingWindows(waveform, settings.Fps, clipFrames);
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
@@ -180,11 +177,18 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         };
 
         // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
-        Func<LongCatAvatarRun, float[]> denoiseSegment = run => LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
-            () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
-            onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
-            bridge);
+        int laterRun = 0;
+        Func<LongCatAvatarRun, float[]> denoiseSegment = run =>
+        {
+            laterRun++;
+            // The progress steps restart for each segment; this line names the segment they belong to.
+            Logs.Info($"[LongCatAvatarRecipePipeline] Later segment {laterRun} of {plan.Segments - 1} (overall segment {laterRun} of {plan.Segments}).");
+            return LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
+                    LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
+                onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
+                bridge);
+        };
 
         _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise, contextFromSegment, denoiseSegment);
         if (output.Segments != plan.Segments || output.Frames.Length != plan.TotalPixelFrames)
