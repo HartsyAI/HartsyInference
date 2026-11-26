@@ -15,7 +15,8 @@ public sealed class FastFramesDecoderGpuParityTests
     private const int Frames = 3;
     private const int GridH = 4, GridW = 6;
 
-    /// <summary>Plain F32 GEMMs (the exact lane): the decoder on CUDA matches CPU to rounding.</summary>
+    /// <summary>Plain F32 GEMMs (the exact lane), the synthetic decoder of this file on CUDA against CpuBackend. Measured on a 4090
+    /// (RTX 4090) at 498c3f228: relative difference 6.36367e-8, 6.34626e-8 and 6.38269e-8 at frames 0, 1 and 2, against a bound of 1e-5.</summary>
     [CudaDeviceFact]
     public void DecodeFrameOnCudaWithExactGemmsMatchesCpuAcrossFrames() => Compare(exactGemm: true, tolerance: 1e-5);
 
