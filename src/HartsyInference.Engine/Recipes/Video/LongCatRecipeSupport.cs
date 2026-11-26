@@ -391,6 +391,22 @@ internal static class LongCatRecipeSupport
 
     /// <summary>Re-encodes the last <c>1 + 4·(contextLatents − 1)</c> frames of an already decoded segment (see <see cref="ReencodedContext"/>), so the
     /// caller can keep the segment's other frames for its output.</summary>
+    /// <summary>The 1.6 chain's context: the segment's last <paramref name="contextLatents"/> latent frames, carried as they are, <c>[channels,
+    /// contextLatents, hw]</c>. The segment is <c>[channels, segmentFrames, hw]</c>, channel-major.</summary>
+    internal static float[] CarriedContext(float[] segmentLatents, int channels, int segmentFrames, int contextLatents, int hw)
+    {
+        ArgumentNullException.ThrowIfNull(segmentLatents);
+        if (contextLatents < 1 || contextLatents > segmentFrames)
+            throw new ArgumentOutOfRangeException(nameof(contextLatents), contextLatents, $"The context is 1 to {segmentFrames} latent frames.");
+        if (segmentLatents.Length != (long)channels * segmentFrames * hw)
+            throw new ArgumentException($"The segment has {segmentLatents.Length} values; {channels} × {segmentFrames} × {hw} expected.", nameof(segmentLatents));
+        float[] context = new float[(long)channels * contextLatents * hw];
+        int first = segmentFrames - contextLatents;
+        for (int c = 0; c < channels; c++)
+            Array.Copy(segmentLatents, ((long)c * segmentFrames + first) * hw, context, (long)c * contextLatents * hw, (long)contextLatents * hw);
+        return context;
+    }
+
     internal static float[] EncodeContext(IBackend backend, IWanVaeEncoder encoder, byte[][] decoded, int contextLatents, int channels,
         int latentHeight, int latentWidth)
     {
