@@ -19,11 +19,12 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     /// <summary>The bound on a logit's difference over max(1, |CPU logit|).</summary>
     private const float Tolerance = 1e-3f;
 
-    /// <summary>The bound on the decode step of the real-dimension checkpoint on Vulkan, which is sensitive to rounding. On the CPU alone, a
-    /// run with AVX2 disabled differs from the AVX2 run by up to 6.5e-4 in the decode step (1.1e-4 in the prefill rows), and moving every F32
-    /// weight of the dequantized twin by one ulp moves it by up to 4.2e-4 (prefill 8.0e-5); both peak at logit 22962. A 4090's Vulkan run at
-    /// <c>aa0e60aba</c> held <see cref="Tolerance"/> on every prefill logit and first crossed it at that logit, with 1.005e-3.</summary>
-    private const float VulkanRealDimensionDecodeTolerance = 3e-3f;
+    /// <summary>The bound on the decode step of the real-dimension checkpoint, which is sensitive to rounding. On the CPU alone, a run with
+    /// AVX2 disabled differs from the AVX2 run by up to 6.5e-4 in the decode step (1.1e-4 in the prefill rows), and moving every F32 weight of
+    /// the dequantized twin by one ulp moves it by up to 4.2e-4 (prefill 8.0e-5); both peak at logit 22962. On an RTX 4090 at
+    /// <c>cacee5b7b</c>, against that host's CPU: CUDA with exact GEMMs 9.5e-4 in the decode step, at logit 22962 (prefill 6.2e-5); Vulkan
+    /// with F16 GEMM off 1.005e-3 (prefill 5.9e-5).</summary>
+    private const float RealDimensionDecodeTolerance = 3e-3f;
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "hartsy-ernie5-gpu-" + Guid.NewGuid().ToString("N"));
 
@@ -67,16 +68,15 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
 
     // The real checkpoint's dimensions, FP8, three layers (HCA, DSA, HCA) and two MoE layers: the shapes and kernel limits of the rental run.
     // High-precision GEMM so the F32 projections (router, LM head, head mixes) run without TF32; otherwise their ~1e-3 rounding, not the FP8
-    // path, is what this comparison measures.
+    // path, is what this comparison measures. On both devices the decode step has its own bound, RealDimensionDecodeTolerance.
     [ErnieCudaFact]
     public void Cuda_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new CudaBackend(0, PtxDirectory()) { HighPrecisionGemm = true }, "CUDA",
-        resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides);
+        resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides, RealDimensionDecodeTolerance);
 
-    // F16 GEMM off, the Vulkan counterpart of HighPrecisionGemm above: it rounds GEMM inputs to F16, about 1e-3 off by itself. The decode step
-    // has its own bound, VulkanRealDimensionDecodeTolerance.
+    // F16 GEMM off, the Vulkan counterpart of HighPrecisionGemm above: it rounds GEMM inputs to F16, about 1e-3 off by itself.
     [ErnieVulkanFact]
     public void Vulkan_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new VulkanBackend { EnableF16Gemm = false }, "Vulkan", resident: false,
-        Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides, VulkanRealDimensionDecodeTolerance);
+        Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides, RealDimensionDecodeTolerance);
 
     // The engine's Text service end to end on the device: the slot's backend is the requested GPU (resident layers), and a request generates on the
     // pipeline and, with continuous batching on, on the scheduler under the device gate. The tokens must match the CPU run of the same request.
