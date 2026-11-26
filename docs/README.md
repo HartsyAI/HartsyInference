@@ -19,6 +19,7 @@ git preserves removed history.
 | Real-weight numerical evidence | [Checklists/PARITY_VERIFICATION.md](Checklists/PARITY_VERIFICATION.md) |
 | DeepSeek-V4.1-Flash rented-GPU runbook and frozen gates | [Checklists/DSV41_RENTAL_RUNBOOK.md](Checklists/DSV41_RENTAL_RUNBOOK.md) |
 | ERNIE-5.5-Flash-Base one-pod real-weight run: pod, volume, pinned download, checks, expected output | [Checklists/ERNIE55_POD_RUNBOOK.md](Checklists/ERNIE55_POD_RUNBOOK.md) |
+| FastFrames rented-GPU runbook: hardware per run, weights and hashes, the pod script, what to return | [Checklists/FASTFRAMES_GPU_RUNBOOK.md](Checklists/FASTFRAMES_GPU_RUNBOOK.md) |
 | CoLa3D geometry decoder and prompt inputs: key groups, shape VAE relation, unverified prompt conventions | [Research/COLA3D_GEOMETRY_DECODER.md](Research/COLA3D_GEOMETRY_DECODER.md) |
 | World live viewer (`--view`): pacing, control schemes, adding one for a new world model | [Research/WORLD_LIVE_VIEWER.md](Research/WORLD_LIVE_VIEWER.md) |
 | Hunyuan3D-2.1 shape model: source spike, MoE and reuse map, licence | [Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md](Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md) |
