@@ -46,7 +46,7 @@ public sealed class MovieRollStreamingGpuTests(ITestOutputHelper output)
     }
 
     [CudaDeviceFact]
-    public void Cuda_StreamDenoise_ReadsOnlyTheVelocityBackAndMatchesTheCpuRun()
+    public void Cuda_StreamDenoise_ReadsNothingBackAndMatchesTheCpuRun()
     {
         using Fixture cpuFixture = new();
         using MovieRollKvCache cpuCache = new(cpuFixture.Backend);

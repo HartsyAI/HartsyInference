@@ -9,9 +9,9 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>The block-streaming hook on MovieRoll's streaming forwards. <c>SyntheticSmoke</c>: this checks that every streaming path calls
-/// <see cref="HunyuanVideo15Dit.BeforeBlockForward"/> for each block, in order, before the block runs, which is what <c>BlockStreamingScope</c>
-/// stages and evicts on. Whether the staged weights actually move to a device is checked by the GpuIntegration tests, not here.</summary>
+/// <summary>The block-streaming hook on MovieRoll's streaming entry points. <c>SyntheticSmoke</c>: this checks that <c>StreamEncode</c>,
+/// <c>StreamRecompute</c> and <c>StreamDenoise</c> call <see cref="HunyuanVideo15Dit.BeforeBlockForward"/> once per block, in order. It does not
+/// check staging or eviction; those happen in <c>BlockStreamingScope</c> on a device, and nothing here runs one.</summary>
 [Trait("Category", "SyntheticSmoke")]
 public sealed class MovieRollStreamHookTests
 {
@@ -59,7 +59,7 @@ public sealed class MovieRollStreamHookTests
         using MovieRollKvCache cache = new(fixture.Backend);
         cache.Init(fixture.Dit.StreamLayerNames(), Height, Width);
 
-        // A window with no history: the encode pass above ran every block once, and StreamDenoise runs the same loop for a noisy window.
+        // One encoded frame is in the cache first; the noisy window then goes through StreamDenoise. Only the hook calls are checked here.
         fixture.Dit.StreamEncode(fixture.Backend, Latent(1), new float[1], cache, fullHistoryBlocks: 1, startFrame: 0);
         calls.Clear();
         using Tensor velocity = fixture.Dit.StreamDenoise(fixture.Backend, Latent(1, seed: 5), new float[1], 0f, fixture.Qwen, fixture.ByT5,
