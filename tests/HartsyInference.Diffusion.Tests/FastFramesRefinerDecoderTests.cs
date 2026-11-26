@@ -508,7 +508,7 @@ public sealed class FastFramesRefinerDecoderTests
         Dictionary<string, Tensor> partialRefiner = new(refinerWeights);
         partialRefiner.Remove("stem_norm.bias");
         using FastFramesKvRefiner refiner = new(TinyRefiner);
-        Assert.Throws<ArgumentException>(() => refiner.LoadWeights(partialRefiner));
+        Assert.Throws<KeyNotFoundException>(() => refiner.LoadWeights(partialRefiner));
         refiner.LoadWeights(refinerWeights);
         foreach (Tensor t in refinerWeights.Values)
             t.Dispose();
@@ -518,7 +518,30 @@ public sealed class FastFramesRefinerDecoderTests
         Dictionary<string, Tensor> partialDecoder = new(decoderWeights);
         partialDecoder.Remove("fc_out.bias");
         using FastFramesPixelDecoder decoder = new(c);
-        Assert.Throws<ArgumentException>(() => decoder.LoadWeights(partialDecoder));
+        Assert.Throws<KeyNotFoundException>(() => decoder.LoadWeights(partialDecoder));
+        decoder.LoadWeights(decoderWeights);
+        foreach (Tensor t in decoderWeights.Values)
+            t.Dispose();
+    }
+
+    [Fact]
+    public void AWrongShapedCheckpointTensorIsRefusedBeforeAnyCopy()
+    {
+        Dictionary<string, Tensor> refinerWeights = RefinerWeights(TinyRefiner, seed: 19);
+        using Tensor wrongRefiner = new(new TensorShape(3), DType.F32);
+        Dictionary<string, Tensor> badRefiner = new(refinerWeights) { ["stem_norm.bias"] = wrongRefiner };
+        using FastFramesKvRefiner refiner = new(TinyRefiner);
+        Assert.Throws<InvalidDataException>(() => refiner.LoadWeights(badRefiner));
+        refiner.LoadWeights(refinerWeights);
+        foreach (Tensor t in refinerWeights.Values)
+            t.Dispose();
+
+        FastFramesPixelDecoderConfig c = new(Dim: 8, InputDim: 8, LowBlocks: 1, HighBlocks: 1, FfnMultiplier: 4);
+        Dictionary<string, Tensor> decoderWeights = DecoderWeights(c, seed: 20, prefix: "");
+        using Tensor wrongDecoder = new(new TensorShape(3), DType.F32);
+        Dictionary<string, Tensor> badDecoder = new(decoderWeights) { ["fc_out.bias"] = wrongDecoder };
+        using FastFramesPixelDecoder decoder = new(c);
+        Assert.Throws<InvalidDataException>(() => decoder.LoadWeights(badDecoder));
         decoder.LoadWeights(decoderWeights);
         foreach (Tensor t in decoderWeights.Values)
             t.Dispose();

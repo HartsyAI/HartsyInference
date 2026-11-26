@@ -112,6 +112,7 @@ public static class ModelIdentityCatalog
             Video("ltx-2.5-distilled", "lightricks-ltx-video-2-5", "LTX-2.5 Distilled", "Lightricks", "other", "960x960"),
             Video("wan", "wan-2_2-ti2v-5b", "Wan 2.2 TI2V 5B", "Alibaba Wan", "apache-2.0", "960x960"),
             Video("hunyuan-video", "hunyuan-video", "HunyuanVideo", "Tencent", "other", "720x720"),
+            Video("movieroll", "movieroll", "MovieRoll", "Tencent", "other", "864x480"),
             Video("minimax-h3", "minimax-h3", "MiniMax-H3", "MiniMax", "other", "960x960"),
             Video("kandinsky5-video", "kandinsky5-video-lite", "Kandinsky 5 Video Lite", "Sber AI", "apache-2.0", "640x640"),
             Video("lance-video", "lance-t2v", "Lance (Video)", "Lance", "other", "640x640"),

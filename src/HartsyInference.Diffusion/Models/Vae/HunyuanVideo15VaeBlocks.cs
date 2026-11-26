@@ -10,6 +10,11 @@ namespace HartsyInference.Diffusion.Models.Vae;
 internal sealed class HunyuanVideo15VaeWeights(IReadOnlyDictionary<string, Tensor> source)
 {
     private readonly HashSet<string> _used = new(StringComparer.Ordinal);
+    private readonly List<(string Name, IVaeModule Module)> _made = [];
+
+    /// <summary>Every layer this load built, with the checkpoint prefix it came from (<c>encoder.*</c> or <c>decoder.*</c>): the VAE's weights are
+    /// the owned tensors of these layers.</summary>
+    public IReadOnlyList<(string Name, IVaeModule Module)> Modules => _made;
 
     public Tensor Take(string key)
     {
@@ -25,6 +30,7 @@ internal sealed class HunyuanVideo15VaeWeights(IReadOnlyDictionary<string, Tenso
         Tensor gamma = Take($"{prefix}.gamma");
         WanRmsNorm norm = new((int)gamma.Shape.ElementCount, eps);
         norm.LoadWeights(gamma);
+        _made.Add((prefix, norm));
         return norm;
     }
 
@@ -36,9 +42,17 @@ internal sealed class HunyuanVideo15VaeWeights(IReadOnlyDictionary<string, Tenso
         Tensor bias = Take($"{weightBase}.bias");
         int k = (int)weight.Shape[2];
         if (k == 3)
-            return new CausalConv3d(weight, bias, padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: true, spatialReplicatePad: true);
+        {
+            CausalConv3d conv3 = new(weight, bias, padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: true, spatialReplicatePad: true);
+            _made.Add((weightBase, conv3));
+            return conv3;
+        }
         if (k == 1)
-            return new CausalConv3d(weight, bias);
+        {
+            CausalConv3d conv1 = new(weight, bias);
+            _made.Add((weightBase, conv1));
+            return conv1;
+        }
         throw new InvalidDataException($"HunyuanVideo-1.5 VAE conv '{weightBase}' has kernel {k}; only 1 and 3 exist in this architecture.");
     }
 

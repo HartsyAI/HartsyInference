@@ -55,6 +55,9 @@ public sealed class MovieRollSampler
     private readonly HunyuanVideo15Dit _dit;
     private readonly MovieRollSchedule _schedule;
 
+    /// <summary>Called after each denoise step of the queue; the block streamer's per-step trim hooks here.</summary>
+    public Action? StepCompleted { get; init; }
+
     /// <summary>KV recomputes that fired in the most recent <see cref="Sample"/> call (reset at its start).</summary>
     public int RecomputeCount { get; private set; }
 
@@ -122,7 +125,10 @@ public sealed class MovieRollSampler
                     : round < options.NumChunks ? options.ChunkFrames : tail;
                 queue.Add(noise(frames));
                 for (int step = 0; step < stepsPerWindow; step++)
+                {
                     StepQueue(cache, options, queue, round * stepsPerWindow + step, qwen, byt5, negativeQwen, negativeByt5);
+                    StepCompleted?.Invoke();
+                }
             }
             return Concat(outputs);
         }
