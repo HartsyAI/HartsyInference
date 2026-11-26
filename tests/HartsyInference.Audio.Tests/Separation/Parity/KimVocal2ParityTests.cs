@@ -3,7 +3,6 @@ using System.Text.RegularExpressions;
 using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using Xunit;
@@ -66,12 +65,9 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
 
         string backendName = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_BACKEND") ?? "cpu";
         using IBackend backend = BackendFactory.Create(backendName);
-        if (backend is CudaBackend cuda)
-        {
-            // Off: CUDA's default F32 GEMMs run at TF32 precision. On: full F32.
-            cuda.HighPrecisionGemm = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_EXACT_GEMM") == "1";
-        }
-        output.WriteLine($"backend: {backendName}" + (backend is CudaBackend c ? $", high-precision GEMM {c.HighPrecisionGemm}" : ""));
+        // Off: CUDA's default F32 GEMMs run at TF32 precision. On: full F32. Other backends ignore it.
+        backend.HighPrecisionGemm = Environment.GetEnvironmentVariable("HARTSY_KIM_VOCAL2_EXACT_GEMM") == "1";
+        output.WriteLine($"backend: {backendName}, high-precision GEMM {backend.HighPrecisionGemm}");
         Dictionary<string, Tensor> weights = KimVocal2OnnxConverter.Convert(onnx, out _);
         try
         {

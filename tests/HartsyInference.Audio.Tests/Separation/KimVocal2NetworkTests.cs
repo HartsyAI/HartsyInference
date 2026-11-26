@@ -12,6 +12,7 @@ public sealed unsafe class KimVocal2NetworkTests
     private static float[] Run(KimVocal2Reference reference, float[] spec, string backendName = "cpu")
     {
         using IBackend backend = BackendFactory.Create(backendName);
+        backend.HighPrecisionGemm = true;       // this checks wiring, not the default TF32 GEMMs
         using KimVocal2Network network = new(reference.Weights);
         using Tensor input = new(new TensorShape(1, KimVocal2Reference.Channels, KimVocal2Reference.DimF, KimVocal2Reference.Frames), DType.F32);
         spec.AsSpan().CopyTo(new Span<float>((void*)input.DataPointer, spec.Length));
@@ -23,15 +24,13 @@ public sealed unsafe class KimVocal2NetworkTests
     [Fact]
     public void ForwardMatchesThePlainLoopReference() => AssertMatchesReference("cpu");
 
-    [GpuBackendTheory("cuda")]
+    [GpuBackendFact("cuda")]
     [Trait("Category", "GpuIntegration")]
-    [InlineData("cuda")]
-    public void ForwardOnCudaMatchesThePlainLoopReference(string backendName) => AssertMatchesReference(backendName);
+    public void ForwardOnCudaMatchesThePlainLoopReference() => AssertMatchesReference("cuda");
 
-    [GpuBackendTheory("vulkan")]
+    [GpuBackendFact("vulkan")]
     [Trait("Category", "GpuIntegration")]
-    [InlineData("vulkan")]
-    public void ForwardOnVulkanMatchesThePlainLoopReference(string backendName) => AssertMatchesReference(backendName);
+    public void ForwardOnVulkanMatchesThePlainLoopReference() => AssertMatchesReference("vulkan");
 
     private static void AssertMatchesReference(string backendName)
     {
