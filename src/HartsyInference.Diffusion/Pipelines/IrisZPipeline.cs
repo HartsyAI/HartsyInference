@@ -3,7 +3,6 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -39,7 +38,6 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
     private const int CondSlot = 0;
     private const int UncondSlot = 1;
 
-    private readonly LlamaStyleEncoder _textEncoder;
     private readonly Flux2Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder _vaeEncoder;
@@ -49,9 +47,8 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
     private readonly Flux2Config _config;
     private readonly Tensor _emptyPrompt;
     private readonly float _skyCeiling;
-    private readonly int[] _textEncoderLayers;
-    private readonly EncodedPromptCache _promptCache = new(2);
-    private bool _ditResident;
+    private readonly CachedPromptTaps _prompts;
+    private readonly ResidentWeights _denoiser;
 
     /// <summary>Creates the pipeline. <paramref name="emptyPrompt"/> is the release's <c>empty_prompt</c> tensor as F32
     /// <c>[1, L, context]</c>, borrowed; it conditions every run without a prompt, so those never load the text encoder.</summary>
@@ -77,7 +74,6 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
             throw new ArgumentException(
                 $"The empty prompt must be F32 [1, L, {config.ContextInDim}], got {emptyPrompt.DType} {emptyPrompt.Shape}.", nameof(emptyPrompt));
         }
-        _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _vaeEncoder = vaeEncoder;
@@ -87,10 +83,9 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         _config = config;
         _emptyPrompt = emptyPrompt;
         _skyCeiling = skyCeiling;
-        _textEncoderLayers = textEncoderLayers;
+        _prompts = new CachedPromptTaps(backend, textEncoder, textEncoderLayers, config.ContextInDim, Family);
+        _denoiser = new ResidentWeights(backend, transformer.EnumerateWeights);
     }
-
-    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Prompt to image, optionally with its depth. A null <paramref name="prompt"/> is the empty prompt and runs
     /// unguided. <paramref name="emptyPrompt"/> is the tokenized empty prompt for the unconditional branch; null uses
@@ -157,7 +152,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         finally
@@ -201,7 +196,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         finally
@@ -243,8 +238,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         try
         {
             rgbTokens = EncodeImage(image);
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
-            _ditResident = true;
+            _denoiser.Preload();
             int done = 0;
             foreach (int seed in seeds)
             {
@@ -279,7 +273,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
                     depth?.Dispose();
                 }
             }
-            ReleaseTransformer();
+            _denoiser.Release();
 
             List<float[]> members = new List<float[]>(seeds.Count);
             foreach (List<Tensor> seedEstimates in estimates)
@@ -294,7 +288,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         finally
@@ -306,7 +300,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
     }
 
     /// <inheritdoc/>
-    protected override void DisposeCore() => _promptCache.Dispose();
+    protected override void DisposeCore() => _prompts.Dispose();
 
     /// <summary>Denoises <paramref name="latent"/> in place: the RGB grid alone when <paramref name="fixedDepth"/> holds
     /// the depth grid's tokens (at <paramref name="fixedDepthSigma"/>, never stepped), or both grids when it is null.</summary>
@@ -323,8 +317,9 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, Family);
 
         bool guided = prompt is not null && CfgHelper.IsGuidanceActive(cfg);
-        Tensor cond = prompt is null ? _emptyPrompt : EncodePrompt(prompt, CondSlot);
-        Tensor? uncond = !guided ? null : emptyPrompt is null ? _emptyPrompt : EncodePrompt(emptyPrompt, UncondSlot);
+        Tensor cond = prompt is null ? _emptyPrompt : _prompts.Encode(CondSlot, prompt.Tokens, prompt.Padding, _denoiser);
+        Tensor? uncond = !guided ? null
+            : emptyPrompt is null ? _emptyPrompt : _prompts.Encode(UncondSlot, emptyPrompt.Tokens, emptyPrompt.Padding, _denoiser);
         Tensor? weighted = null;
         try
         {
@@ -336,25 +331,10 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
             Tensor condText = weighted ?? cond;
             DenoiserProbe.Condition("cond", condText);
             DenoiserProbe.Condition("uncond", uncond);
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
-            _ditResident = true;
-            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(PredictionType.FlowVelocity, (x, sigma, _) =>
-            {
-                Tensor condVelocity = PredictRgb(x, fixedDepth, sigma, fixedDepthSigma, depthModality, condText, patH, patW);
-                if (!guided)
-                    return new DenoisePrediction(condVelocity, condVelocity);
-                Tensor uncondVelocity;
-                try
-                {
-                    uncondVelocity = PredictRgb(x, fixedDepth, sigma, fixedDepthSigma, depthModality, uncond!, patH, patW);
-                }
-                catch
-                {
-                    condVelocity.Dispose();
-                    throw;
-                }
-                return new DenoisePrediction(condVelocity, uncondVelocity, cfg);
-            });
+            _denoiser.Preload();
+            TwoPassCfgPredictor<Tensor> predictor = new TwoPassCfgPredictor<Tensor>(PredictionType.FlowVelocity,
+                (x, sigma, _, text) => PredictRgb(x, fixedDepth, sigma, fixedDepthSigma, depthModality, text, patH, patW),
+                condText, uncond, cfg);
             for (int i = 0; i < steps; i++)
             {
                 Stopwatch stepSw = Stopwatch.StartNew();
@@ -380,7 +360,7 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         {
             weighted?.Dispose();
         }
-        ReleaseTransformer();
+        _denoiser.Release();
     }
 
     /// <summary>The RGB grid's velocity, or both grids' when the depth grid is being denoised too.</summary>
@@ -421,37 +401,6 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         Tensor slice = new Tensor(new TensorShape(1, gridTokens, tokens.Shape[2]), DType.F32);
         Backend.SliceRows(slice, tokens, grid * gridTokens);
         return slice;
-    }
-
-    /// <summary>Encodes a prompt through the variant's taps, reusing the last result for the same ids. The transformer is
-    /// evicted first: the encoder and a resident transformer need not fit together.</summary>
-    private Tensor EncodePrompt(IrisZPrompt prompt, int slot)
-    {
-        if (_promptCache.TryGet(slot, prompt.Tokens, prompt.ValidLength, out Tensor? cached))
-            return cached!;
-        ReleaseTransformer(force: true);
-        Tensor hidden;
-        try
-        {
-            hidden = prompt.ValidLength > 0
-                ? _textEncoder.EncodeMultiLayer(Backend, [prompt.Tokens], _textEncoderLayers, interleavedLayout: false,
-                    TextEncoderPadding.Transformers(prompt.ValidLength))
-                : _textEncoder.EncodeMultiLayer(Backend, [prompt.Tokens], _textEncoderLayers);
-        }
-        finally
-        {
-            Backend.FreeWeights(_textEncoder.EnumerateWeights());
-        }
-        _ = hidden.DataPointer;
-        Backend.FreeActivations();
-        if (hidden.Shape[2] != _config.ContextInDim)
-        {
-            long got = hidden.Shape[2];
-            hidden.Dispose();
-            throw new HartsyInferenceException($"{Family} text features are {got} wide; the transformer expects {_config.ContextInDim}.");
-        }
-        _promptCache.Store(slot, prompt.Tokens, prompt.ValidLength, hidden);
-        return hidden;
     }
 
     /// <summary>VAE-encodes an image into BN-normalized packed tokens, releasing the encoder afterwards.</summary>
@@ -509,28 +458,5 @@ public sealed unsafe class IrisZPipeline : DiffusionPipelineBase
         if (patW < 1 || patH < 1)
             throw new ArgumentException($"{Family} needs at least {factor} pixels on a side; got {width}x{height}.");
         return (patW * factor, patH * factor, patW, patH);
-    }
-
-    /// <summary>Frees the transformer's device weights unless the VRAM profile keeps models resident.</summary>
-    private void ReleaseTransformer(bool force = false)
-    {
-        if (!_ditResident || (!force && KeepModelsResident))
-            return;
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-        _ditResident = false;
-    }
-
-    /// <summary>Best effort: a failed stage leaves its temporaries in the activation cache, and a sticky device error
-    /// must not mask the failure being reported.</summary>
-    private void ReclaimAfterFailure()
-    {
-        try
-        {
-            Backend.FreeActivations();
-        }
-        catch (Exception cleanup)
-        {
-            Logs.Warning($"{Family}: reclaiming activations after a failed generation also failed: {cleanup.Message}");
-        }
     }
 }
