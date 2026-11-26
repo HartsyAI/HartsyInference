@@ -138,14 +138,14 @@ public sealed unsafe partial class MiniMaxH3Transformer
         DuoRoute route = ResolveDuoRoute(seq, chunkRows);
         IReadOnlyList<DuoMaskRect> rects = DuoMask.Build(layout.Groups, layout.Groups, mode);
         DuoAttentionBias.ValidateRows(rects, seq, seq);
-        using Tensor? bias = route.Tiled ? null : HostTensor(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
+        using Tensor? bias = route.Tiled ? null : DuoDeviceWindow.Upload(new TensorShape(seq, seq), DuoAttentionBias.BuildRows(rects, seq, 0, seq, seq));
         using DuoTileMasks? tiles = route.Tiled ? new DuoTileMasks(rects, seq) : null;
         BlockAttention attention = route.Tiled ? BlockAttention.Tiled(tiles!.Tile) : BlockAttention.Dense(bias!);
         using Tensor tEmb = BuildTimeEmbedding(backend, times);
         using Tensor modIndex = BuildDuoModulationIndex(layout);
         (float[] cosValues, float[] sinValues) = DuoRope.Tables(layout.Positions, headDim);
-        using Tensor cos = HostTensor(new TensorShape(seq, headDim), cosValues);
-        using Tensor sin = HostTensor(new TensorShape(seq, headDim), sinValues);
+        using Tensor cos = DuoDeviceWindow.Upload(new TensorShape(seq, headDim), cosValues);
+        using Tensor sin = DuoDeviceWindow.Upload(new TensorShape(seq, headDim), sinValues);
 
         Tensor stream = BuildDuoStream(backend, layout, refinerGroups, mode, textStates, videoRows, audioRows, hidden,
             textCount, videoCount, audioCount);
@@ -278,7 +278,7 @@ public sealed unsafe partial class MiniMaxH3Transformer
     /// <summary>The refiner's visibility bias over its own rows, or null when the refiner has no blocks, as upstream builds the graph only for blocks.</summary>
     private Tensor? DuoRefinerBias(IReadOnlyList<DuoGroup> refinerGroups, int rows, DuoAttentionMode mode) =>
         _config.TokenRefinerNumLayers > 0
-            ? HostTensor(new TensorShape(rows, rows),
+            ? DuoDeviceWindow.Upload(new TensorShape(rows, rows),
                 DuoAttentionBias.Build(DuoMask.Build(refinerGroups, refinerGroups, mode, refiner: true), rows, rows))
             : null;
 
@@ -331,11 +331,4 @@ public sealed unsafe partial class MiniMaxH3Transformer
         }
     }
 
-    /// <summary>A host-written F32 tensor with the given values (row-major, length must equal the shape's element count).</summary>
-    private static Tensor HostTensor(TensorShape shape, float[] values)
-    {
-        Tensor t = new Tensor(shape, DType.F32);
-        values.AsSpan().CopyTo(t.AsSpan<float>());
-        return t;
-    }
 }

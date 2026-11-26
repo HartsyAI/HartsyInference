@@ -1,21 +1,20 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Duo;
 using HartsyInference.Diffusion.Models.Music;
+using HartsyInference.ModelAssets.Duo;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests.Duo;
 
 /// <summary>The Duo audio stream decoder on a tiny MiniMax-H3 audio VAE decoder with random weights. With a left context and a lookahead
 /// at least the decoder's receptive field, the blocks concatenate to one full decode of the sequence. Dropping either the left context or
-/// the lookahead changes the output. These are self-consistency checks: parity against upstream is not run.</summary>
+/// the lookahead changes the output. The shipped geometry is checked on the real decoder class, without weights. These are self-consistency
+/// checks: parity against upstream is not run.</summary>
 public sealed class DuoAudioStreamDecoderTests
 {
     private const int Width = 32;            // LatentChannels, the shipped default
-    private const int BlockSteps = 12;
     private const int Blocks = 10;
-    private const int SamplesPerStep = 4;    // the tiny decoder's upsample rates 2 × 2
-    private const int Total = Blocks * BlockSteps;
-    private const int Lookahead = BlockSteps;
+    private const int SamplesPerStep = 4;   // the tiny decoder's upsample rates 2 × 2
     private const int Context = 32;
     /// <summary>Scale of the random conv weights. Large enough that the output peaks well above zero, so relative checks are meaningful.</summary>
     private const float WeightScale = 0.4f;
@@ -23,6 +22,11 @@ public sealed class DuoAudioStreamDecoderTests
     private const float RelativeTolerance = 1e-4f;
     /// <summary>A dropped context or lookahead must move the output by at least this fraction of its peak, or the check would pass it.</summary>
     private const float Sensitivity = 1e-2f;
+
+    private static readonly DuoCodecSpec Spec = DuoCodecSpec.Get("duo_5_17");
+    private static readonly int BlockSteps = Spec.AudioLatents;
+    private static readonly int Total = Blocks * BlockSteps;
+    private static readonly int Lookahead = BlockSteps;
 
     [Fact]
     public void BlocksWithFullContextConcatenateToOneFullDecode()
@@ -70,7 +74,7 @@ public sealed class DuoAudioStreamDecoderTests
     public void ANoBlockStreamPublishesNothing()
     {
         using Tiny tiny = Tiny.Create();
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, Lookahead, Context);
+        DuoAudioStreamDecoder stream = Make(tiny, Lookahead, Context);
 
         Assert.Empty(stream.End());
     }
@@ -79,7 +83,7 @@ public sealed class DuoAudioStreamDecoderTests
     public void ABlockOfTheWrongLengthIsRefused()
     {
         using Tiny tiny = Tiny.Create();
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, Lookahead, Context);
+        DuoAudioStreamDecoder stream = Make(tiny, Lookahead, Context);
 
         Assert.Throws<ArgumentException>(() => stream.OnBlock(new float[2 * BlockSteps * Width - 1]));
     }
@@ -89,15 +93,14 @@ public sealed class DuoAudioStreamDecoderTests
     {
         using Tiny tiny = Tiny.Create();
 
-        Assert.Throws<ArgumentOutOfRangeException>(() =>
-            DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, BlockSteps + 1, Context));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Make(tiny, BlockSteps + 1, Context));
     }
 
     [Fact]
     public void NothingCanFollowEnd()
     {
         using Tiny tiny = Tiny.Create();
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, Lookahead, Context);
+        DuoAudioStreamDecoder stream = Make(tiny, Lookahead, Context);
         stream.OnBlock(new float[2 * BlockSteps * Width]);
         stream.End();
 
@@ -106,12 +109,12 @@ public sealed class DuoAudioStreamDecoderTests
     }
 
     [Fact]
-    public void ADecodeThatReturnsItsWindowIsDisposedOnce()
+    public void ADecodeThatReturnsItsWindowIsRefusedWithoutDisposingItTwice()
     {
-        // The delegate hands back the window it was given. That is an invalid shape for the crop, so publishing throws; the window must be
-        // disposed once on the way out, not twice. The throw is the observable outcome here, the dispose count is not visible to the test.
+        // The decoder hands back the window it was given. That is an invalid shape for the crop, so publishing throws; the window is disposed
+        // once on the way out. The throw is the observable outcome; the dispose count is not visible to the test.
         int calls = 0;
-        DuoAudioStreamDecoder stream = new(window =>
+        DuoAudioStreamDecoder stream = new(TestBackends.Cpu, window =>
         {
             calls++;
             return window;
@@ -122,10 +125,25 @@ public sealed class DuoAudioStreamDecoderTests
         Assert.Equal(1, calls);
     }
 
+    [Fact]
+    public void ForH3AcceptsTheShippedGeometryAndRefusesAnotherSampleRate()
+    {
+        // The geometry check runs before any decode, so neither decoder needs weights.
+        using MiniMaxH3AudioVaeDecoder shipped = new();
+        Assert.NotNull(DuoAudioStreamDecoder.ForH3(shipped, TestBackends.Cpu, Spec, lookaheadSteps: 0, contextSteps: 0));
+
+        using MiniMaxH3AudioVaeDecoder other = new(new MiniMaxH3AudioVaeConfig { SampleRate = 16000 });
+        Assert.Throws<InvalidOperationException>(() => DuoAudioStreamDecoder.ForH3(other, TestBackends.Cpu, Spec, 0, 0));
+    }
+
+    private static DuoAudioStreamDecoder Make(Tiny tiny, int lookaheadSteps, int contextSteps) =>
+        new(TestBackends.Cpu, window => tiny.Decoder.Decode(TestBackends.Cpu, window), Width, SamplesPerStep, BlockSteps, lookaheadSteps,
+            contextSteps);
+
     /// <summary>Feeds every block to the stream and gathers what it publishes, [channel][sample] over the whole sequence.</summary>
     private static float[] Stream(Tiny tiny, float[] full, int lookaheadSteps, int contextSteps)
     {
-        DuoAudioStreamDecoder stream = DuoAudioStreamDecoder.ForH3(tiny.Decoder, TestBackends.Cpu, BlockSteps, lookaheadSteps, contextSteps);
+        DuoAudioStreamDecoder stream = Make(tiny, lookaheadSteps, contextSteps);
         int keep = BlockSteps * SamplesPerStep;
         float[] gathered = new float[2 * Blocks * keep];
         int published = 0;
