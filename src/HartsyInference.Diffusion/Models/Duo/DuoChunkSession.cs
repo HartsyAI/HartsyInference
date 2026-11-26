@@ -139,18 +139,20 @@ internal sealed class DuoChunkSession
                 audio = nextAudio;
             }
 
-            // The window slides: the oldest clean blocks go, reference and shared rows stay, so this block's rows fit.
-            while (_cache.Length + committedRows > _cache.CapacityRows)
-            {
-                _cache.EvictOldestClean();
-            }
-            ForwardTensors(_transformer, _backend, clean, refiner, textTensor, video, audio, [1f, 1f], _cache, commit: true).Dispose();
+            // The check comes before any change to the cache: a non-finite block is refused with the history exactly as it was.
             float[] outVideo = video.AsSpan<float>().ToArray();
             float[] outAudio = audio is null ? [] : audio.AsSpan<float>().ToArray();
             if (!IsFinite(outVideo) || !IsFinite(outAudio))
             {
                 throw new InvalidOperationException("Nonfinite generated Duo latent.");
             }
+
+            // The window slides: the oldest clean blocks go, reference and shared rows stay, so this block's rows fit.
+            while (_cache.Length + committedRows > _cache.CapacityRows)
+            {
+                _cache.EvictOldestClean();
+            }
+            ForwardTensors(_transformer, _backend, clean, refiner, textTensor, video, audio, [1f, 1f], _cache, commit: true).Dispose();
             _nextBlock++;
             return (outVideo, outAudio);
         }

@@ -268,6 +268,30 @@ public sealed class DuoChunkSessionTests
         Assert.Equal(0, session.NextBlock);
     }
 
+    [Fact]
+    public void ANonfiniteBlockIsRefusedWithTheHistoryUnchanged()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        DuoStreamCache cache = Cache();
+        DuoChunkSession session = new(transformer, backend, Sample(), DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), Values(30, RefRows * VideoIn));
+        int lengthBefore = cache.Length;
+        float[] poisoned = Noise(40, VideoRows);
+        poisoned[0] = float.NaN;
+
+        Assert.Throws<InvalidOperationException>(() =>
+            session.GenerateBlock(0, Body(0), poisoned, Values(41, AudioRows * AudioIn), 2, 1.0));
+        Assert.Equal(lengthBefore, cache.Length);
+        Assert.Equal(0, session.NextBlock);
+
+        // The same block with clean noise still generates, from the same history.
+        (float[] video, float[] audio) = session.GenerateBlock(0, Body(0), Noise(40, VideoRows), Values(41, AudioRows * AudioIn), 2, 1.0);
+        Assert.All(video, v => Assert.True(float.IsFinite(v)));
+        Assert.All(audio, a => Assert.True(float.IsFinite(a)));
+        Assert.Equal(1, session.NextBlock);
+    }
+
     private static float[] Shared0() => Values(2, Shared * TextDim);
 
     private static float[] Body(int block) => Values(10 + block, BodyRows * TextDim);
