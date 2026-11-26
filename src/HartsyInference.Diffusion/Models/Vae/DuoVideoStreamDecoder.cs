@@ -19,7 +19,15 @@ public sealed class DuoVideoStreamDecoder
     private const int ChunkLatents = 5;
 
     private readonly Func<Tensor, Tensor> _decodeWindow;
-    private readonly List<Chunk> _history = [];
+    private readonly List<Chunk> _recent = [];
+    private int _received;
+    private int _base;
+    private int _height;
+    private int _width;
+    private bool _ended;
+
+    /// <summary>Chunks still held. The schedule reads at most the last two, so this stays at two or three.</summary>
+    internal int RetainedChunks => _recent.Count;
 
     public DuoVideoStreamDecoder(Func<Tensor, Tensor> decodeWindow)
     {
@@ -38,12 +46,17 @@ public sealed class DuoVideoStreamDecoder
     /// the first chunk, otherwise the previous block.</summary>
     public IReadOnlyList<DuoDecodedBlock> OnChunk(Tensor chunk)
     {
+        if (_ended)
+        {
+            throw new InvalidOperationException("The stream has ended; no chunk can follow End.");
+        }
         Chunk z = Read(chunk);
-        int index = _history.Count;
-        _history.Add(z);
+        int index = _received++;
+        _recent.Add(z);
         DuoDecodeStep? step = DuoVideoDecodePlan.OnChunk(index);
         if (step is null)
         {
+            Trim();
             return [];
         }
         // Whole chunks from the window's first chunk up to the newest previous one, then the newest chunk's first two latents.
@@ -53,13 +66,20 @@ public sealed class DuoVideoStreamDecoder
             segments.Add(new Segment(c, 0, ChunkLatents));
         }
         segments.Add(new Segment(index, 0, 2));
-        return [Publish(step.Value, segments)];
+        DuoDecodedBlock block = Publish(step.Value, segments);
+        Trim();
+        return [block];
     }
 
     /// <summary>Ends the stream and publishes the last block from its own last two latents. Empty when no chunk arrived.</summary>
     public IReadOnlyList<DuoDecodedBlock> End()
     {
-        DuoDecodeStep? step = DuoVideoDecodePlan.AtEnd(_history.Count);
+        if (_ended)
+        {
+            throw new InvalidOperationException("The stream has already ended.");
+        }
+        _ended = true;
+        DuoDecodeStep? step = DuoVideoDecodePlan.AtEnd(_received);
         if (step is null)
         {
             return [];
@@ -81,8 +101,7 @@ public sealed class DuoVideoStreamDecoder
         {
             throw new InvalidOperationException($"The window holds {latents} latents; the schedule needs {step.WindowLatents}.");
         }
-        Chunk first = _history[segments[0].Chunk];
-        using Tensor window = BuildWindow(segments, first.Height, first.Width);
+        using Tensor window = BuildWindow(segments, _height, _width);
         using Tensor pixels = _decodeWindow(window);
         return Crop(step, pixels);
     }
@@ -99,7 +118,7 @@ public sealed class DuoVideoStreamDecoder
             int t = 0;
             foreach (Segment segment in segments)
             {
-                ReadOnlySpan<float> source = _history[segment.Chunk].Data;
+                ReadOnlySpan<float> source = At(segment.Chunk).Data;
                 for (int k = 0; k < segment.Count; k++, t++)
                 {
                     source.Slice(((c * ChunkLatents) + segment.Start + k) * plane, plane)
@@ -151,13 +170,40 @@ public sealed class DuoVideoStreamDecoder
         return (byte)Math.Round(unit * 255f, MidpointRounding.ToEven);
     }
 
-    private static Chunk Read(Tensor chunk)
+    private Chunk Read(Tensor chunk)
     {
+        if (chunk.DType != DType.F32)
+        {
+            throw new ArgumentException($"A chunk must be F32; got {chunk.DType}.", nameof(chunk));
+        }
         if (chunk.Shape.Rank != 5 || chunk.Shape[0] != 1 || chunk.Shape[1] != Channels || chunk.Shape[2] != ChunkLatents)
         {
             throw new ArgumentException($"A chunk is [1, {Channels}, {ChunkLatents}, H, W]; got {chunk.Shape}.", nameof(chunk));
         }
-        return new Chunk(chunk.AsSpan<float>().ToArray(), (int)chunk.Shape[3], (int)chunk.Shape[4]);
+        int height = (int)chunk.Shape[3], width = (int)chunk.Shape[4];
+        if (_received == 0)
+        {
+            _height = height;
+            _width = width;
+        }
+        else if (height != _height || width != _width)
+        {
+            throw new ArgumentException($"Every chunk must be {_height}x{_width} latent pixels, as the first; got {height}x{width}.", nameof(chunk));
+        }
+        return new Chunk(chunk.AsSpan<float>().ToArray(), height, width);
+    }
+
+    /// <summary>The retained chunk with absolute index <paramref name="chunk"/>.</summary>
+    private Chunk At(int chunk) => _recent[chunk - _base];
+
+    /// <summary>Drops every chunk but the newest two. The next window reads from two chunks back, and nothing older is ever needed again.</summary>
+    private void Trim()
+    {
+        while (_recent.Count > 2)
+        {
+            _recent.RemoveAt(0);
+            _base++;
+        }
     }
 
     private readonly record struct Segment(int Chunk, int Start, int Count);

@@ -107,6 +107,52 @@ public sealed class DuoVideoStreamDecoderTests
         Assert.Throws<ArgumentException>(() => decoder.OnChunk(new Tensor(new TensorShape(new long[] { 1, 24, 4, Height, Width }), DType.F32)));
     }
 
+    [Fact]
+    public void HistoryStaysBoundedOverALongStream()
+    {
+        List<float[]> windows = [];
+        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        for (int c = 0; c < 12; c++)
+        {
+            decoder.OnChunk(Chunk(c));
+            Assert.True(decoder.RetainedChunks <= 2, $"After chunk {c} the decoder holds {decoder.RetainedChunks} chunks.");
+        }
+        decoder.End();
+        Assert.True(decoder.RetainedChunks <= 2);
+    }
+
+    [Fact]
+    public void AWindowAtFourChunksSlidesToChunksOneAndTwo()
+    {
+        List<float[]> windows = [];
+        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        for (int c = 0; c < 4; c++)
+        {
+            decoder.OnChunk(Chunk(c));
+        }
+
+        Assert.Equal(Expected((1, 0, 5), (2, 0, 5), (3, 0, 2)), windows[2]);
+    }
+
+    [Fact]
+    public void AChunkOfAnotherTypeOrSizeIsRefused()
+    {
+        DuoVideoStreamDecoder decoder = new(FakeDecoder([]));
+        decoder.OnChunk(Chunk(0));
+        Assert.Throws<ArgumentException>(() => decoder.OnChunk(new Tensor(new TensorShape(new long[] { 1, 24, 5, Height, Width }), DType.F16)));
+        Assert.Throws<ArgumentException>(() => decoder.OnChunk(new Tensor(new TensorShape(new long[] { 1, 24, 5, Height + 2, Width }), DType.F32)));
+    }
+
+    [Fact]
+    public void ChunksAfterEndAndASecondEndAreRefused()
+    {
+        DuoVideoStreamDecoder decoder = new(FakeDecoder([]));
+        decoder.OnChunk(Chunk(0));
+        decoder.End();
+        Assert.Throws<InvalidOperationException>(() => decoder.OnChunk(Chunk(1)));
+        Assert.Throws<InvalidOperationException>(() => decoder.End());
+    }
+
     private static Func<Tensor, Tensor> FakeDecoder(List<float[]> windows) => window =>
     {
         windows.Add(window.AsSpan<float>().ToArray());
