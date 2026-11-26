@@ -13,7 +13,7 @@ Offline scripts for the GPU server. Nothing here runs in the engine, and nothing
 |---|---|---|
 | `diffusion_models/rmbg3_bf16.safetensors` | 16,452,934,194 | `a5df048f799025510f29a743c0dca0d4f1362478ec00f6f7c86ee66d57b4e5d9` |
 | `diffusion_models/rmbg3_int8_convrot.safetensors` | 8,408,562,474 | `bc29b9a87ed378596c5ca5bc0c5bdfaa8aabc8415d33f3c767f9a3cbd9fd566d` |
-| `qwen3vl_4b_int8_convrot.safetensors` (encoder, int8 path) | 4,858,559,240 | `32de113c…` (full hash in the architecture doc) |
+| `qwen3vl_4b_int8_convrot.safetensors` (encoder, int8 path) | 4,858,559,240 | `32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c` |
 | Fibo 2.0 encoder (bf16) and FLUX.2 VAE | see the architecture doc | shared with Fibo 2.0 |
 
 The diffusers reference needs a diffusers-layout copy of the pipeline. The Comfy repack above is a different layout, so the reference script cannot read it. If only the repack is on the server, stop there and report.
