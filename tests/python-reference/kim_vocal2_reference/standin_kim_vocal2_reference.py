@@ -3,11 +3,12 @@ are installed: it drives the real audio-separator 0.30.2.
 
 What is real here: onnxruntime on the real .onnx, torch.stft / torch.istft, and LongCat-Video's own ``_demix_batched`` loaded from its file.
 What is a transcription: audio-separator 0.30.2's ``STFT`` class, ``run_model`` and ``spec_utils.normalize`` (MIT, Copyright (c) 2023
-karaokenerds). The 16 kHz output is scipy ``resample_poly``, NOT librosa's soxr_hq, so it says nothing about LongCat's resampler.
+karaokenerds). The 16 kHz output is python-soxr at soxr_hq, cut or padded to ceil(n * 16000 / 44100) samples: the call
+``librosa.resample`` makes for LongCat, without importing librosa.
 
 Shares the sha check, the .npy writer and the per-block onnxruntime session with the dumper, whose top-level imports need numpy only.
 KimVocal2ParityTests accepts its output only with HARTSY_KIM_VOCAL2_ALLOW_STANDIN=1.
-Needs torch, onnx, onnxruntime, numpy and scipy only. The input must be 44.1 kHz stereo 16-bit PCM WAV.
+Needs torch, onnx, onnxruntime, numpy and soxr only. The input must be 44.1 kHz stereo 16-bit PCM WAV.
 
     python standin_kim_vocal2_reference.py --longcat LongCat-Video --onnx Kim_Vocal_2.onnx --wav clip.wav --out ref_dir
 """
@@ -22,7 +23,7 @@ import wave
 import numpy as np
 import onnx
 import onnxruntime as ort
-import scipy.signal
+import soxr
 import torch
 
 from dump_kim_vocal2_reference import EXPECTED_SHA256, save, sha256, stage_outputs, stage_session
@@ -36,6 +37,13 @@ def normalize(wave, max_peak=1.0, min_peak=None):
     elif min_peak is not None and maxv < min_peak:
         wave *= min_peak / maxv
     return wave
+
+
+def resample_16k(mono):
+    """librosa.resample(mono, orig_sr=44100, target_sr=16000) with its defaults (res_type soxr_hq, fix=True, scale=False)."""
+    out = soxr.resample(mono, 44100, 16000, quality="soxr_hq")
+    length = int(np.ceil(mono.shape[-1] * (16000 / 44100)))
+    return np.pad(out[:length], (0, max(0, length - out.shape[-1]))).astype(mono.dtype)
 
 
 def load_longcat_demix(longcat):
@@ -126,7 +134,7 @@ def main():
     save(args.out, "stem_normalized", source)
     mono = source.mean(axis=0)
     save(args.out, "mono_44k", mono)
-    save(args.out, "vocals_16k", scipy.signal.resample_poly(mono, 160, 441))
+    save(args.out, "vocals_16k", resample_16k(mono))
     for key, value in model.first.items():
         save(args.out, "chunk0_" + key, value)
 
@@ -140,10 +148,11 @@ def main():
         save(args.out, "stage_" + name, value)
 
     meta = {
-        "driver": "stand-in: no audio-separator, no librosa; vocals_16k is scipy resample_poly, not soxr_hq",
+        "driver": "stand-in: no audio-separator, no librosa; vocals_16k is python-soxr soxr_hq",
+        "vocals_16k_resampler": "soxr_hq",
         "onnx_sha256": digest,
         "versions": {"onnxruntime": ort.__version__, "onnx": onnx.__version__, "torch": torch.__version__,
-                     "numpy": np.__version__, "scipy": scipy.__version__},
+                     "numpy": np.__version__, "soxr": soxr.__version__},
     }
     with open(os.path.join(args.out, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
