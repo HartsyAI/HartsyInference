@@ -197,13 +197,10 @@ public sealed class MdxSeparatorTests
     }
 
     [Fact]
-    public void MonoMixResamplesTo16kAndCrops()
+    public void MonoMixResamplesTo16k()
     {
-        MdxSeparator separator = new(Small(), new IdentityModel());
         float[] a = Tones(44_100, 0.5);
-        float[] mono = separator.ToMono([a, a], 16_000, targetSamplesAtSourceRate: 22_050);
-        Assert.Equal(8_000, mono.Length);
-        float[] full = separator.ToMono([a, a], 16_000);
+        float[] full = MdxSeparator.ToMono([a, a], 44_100, 16_000);
         Assert.Equal(16_000, full.Length);
         // A tone well below 8 kHz keeps its energy through the resampler.
         double rms = Math.Sqrt(full.Skip(2000).Take(12_000).Sum(v => (double)v * v) / 12_000);
