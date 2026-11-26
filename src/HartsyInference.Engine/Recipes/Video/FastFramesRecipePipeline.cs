@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Prompting;
@@ -120,31 +121,9 @@ public sealed class FastFramesRecipePipeline : IVideoRecipePipeline
         // The pipeline first: it frees the generator's device weights, and the loaders then release the host objects. The loaders
         // hold the transformer, the refiner, the decoder and the umT5 encoder. Each one's Tensor.Dispose runs its GPU dispose callback,
         // so their device copies go with it (not verified on a device). A recipe dropped without Dispose frees nothing.
-        // Each release runs even when an earlier one throws; the failures are rethrown together after all of them.
-        List<Exception>? failures = null;
-        try
-        {
-            _pipeline.Dispose();
-        }
-        catch (Exception ex)
-        {
-            (failures ??= []).Add(ex);
-        }
-        foreach (IDisposable loader in _loaders)
-        {
-            try
-            {
-                loader.Dispose();
-            }
-            catch (Exception ex)
-            {
-                (failures ??= []).Add(ex);
-            }
-        }
+        // CompositeDisposable releases each part even when an earlier one throws, then rethrows the failures together.
+        IDisposable?[] parts = [_pipeline, .. _loaders];
         _loaders.Clear();
-        if (failures is not null)
-        {
-            throw new AggregateException("A FastFrames recipe failed to release one or more parts.", failures);
-        }
+        new CompositeDisposable(parts).Dispose();
     }
 }
