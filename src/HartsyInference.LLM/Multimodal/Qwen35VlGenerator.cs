@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Sampling;
@@ -22,7 +23,7 @@ public sealed class Qwen35VlGenerator
 
     /// <summary>Generates an answer about <paramref name="pixelValues"/>. The image's merged grid is read from those pixels via the Qwen3-VL tower
     /// (<see cref="Qwen3VlEncoder.MergedGrid"/>), never inferred from the token count: a 2×8 grid and a 4×4 grid both hold 16 tokens.</summary>
-    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    public unsafe VlGeneration Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null, bool? enableThinking = null)
     {
         MRopeImageGrid grid = Qwen3VlEncoder.MergedGrid(pixelValues, _vision.PatchSize, _vision.Merge);
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler (matches MultimodalGenerator).
@@ -38,9 +39,12 @@ public sealed class Qwen35VlGenerator
         int imgTokens = (int)imageEmbeds.Shape[1];
         // 2. Qwen-VL ChatML wrapping (same token layout as qwen25vl):
         //    "<|im_start|>user\n<|vision_start|> [image] <|vision_end|>{q}<|im_end|>\n<|im_start|>assistant\n"
+        // --no-thinking: the shipped template closes an empty think block after the assistant turn starts; without it the model writes its reasoning into the answer.
+        string thinkOff = enableThinking == false ? "<think>\n\n</think>\n\n" : "";
         int[] pre = _tok.Encode("<|im_start|>user\n<|vision_start|>", addSpecial: true);
-        int[] post = _tok.Encode($"<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
+        int[] post = _tok.Encode($"<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n{thinkOff}", addSpecial: true);
         int seqLen = pre.Length + imgTokens + post.Length;
+        Logs.Info($"[Qwen35VlGenerator] image grid {grid} ({grid.Tokens} merged tokens); prompt {seqLen} tokens; max new tokens {maxTokens}; thinking {(enableThinking == false ? "off" : "default")}.");
 
         // 3. Assemble the spliced input-embedding sequence [pre][image][post] (host F32).
         using Tensor embeds = new(new TensorShape(1, seqLen, hidden), DType.F32);
@@ -84,8 +88,11 @@ public sealed class Qwen35VlGenerator
             logits = _model.ForwardLastLogits(_backend, new[] { token });
             token = sampler.Next(new Span<float>(logits), history);
         }
-        return sb.ToString();
+        return new VlGeneration(sb.ToString(), StoppedOnToken: stops.Contains(token));
     }
+
+    /// <summary>The generated text, and whether decoding ended on a stop token (false: the budget ran out first).</summary>
+    public readonly record struct VlGeneration(string Text, bool StoppedOnToken);
 
     /// <summary>Axis-major M-RoPE positions <c>[3 · seqLen]</c> for <c>[pre][image][post]</c>: the image's placeholder run at
     /// <paramref name="imageStart"/> takes <c>(start + t, start + row, start + col)</c> over <paramref name="grid"/>, and the text after it

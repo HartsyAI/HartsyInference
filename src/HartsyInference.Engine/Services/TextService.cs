@@ -887,6 +887,7 @@ public sealed partial class TextService : ITextService, IDisposable
         SamplingOptions sampling = BuildVisionSampling(request);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
         string answer;
+        StopReason reason = StopReason.Stop;
         if (slot.MllamaVision is not null)
         {
             using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
@@ -900,7 +901,10 @@ public sealed partial class TextService : ITextService, IDisposable
             // aspect-preserving resize (the grid is read from the resized pixels), not the square squash below.
             Qwen3VlEncoder vision = slot.SpliceVision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector.");
             using Tensor px = vision.PreprocessImage(image.Rgb, image.Width, image.Height);
-            answer = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, question, maxTokens, sampling);
+            Qwen35VlGenerator.VlGeneration gen = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!)
+                .Generate(px, question, maxTokens, sampling, request.EnableThinking);
+            answer = gen.Text;
+            reason = gen.StoppedOnToken ? StopReason.Stop : StopReason.Length;
         }
         else
         {
@@ -915,7 +919,7 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
         int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
-        return new GenOutcome(answer, StopReason.Stop, 0, completion);
+        return new GenOutcome(answer, reason, 0, completion);
     }
 
     /// <summary>Loads a Hugging Face text directory: a host reference model (DeepSeek-V4.1, ERNIE-5.5, Kimi K3.1), a stateful family, or
