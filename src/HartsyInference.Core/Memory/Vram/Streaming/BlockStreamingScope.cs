@@ -156,7 +156,9 @@ public sealed class BlockStreamingScope : IDisposable
             // The prefix being freed may be exactly what a previous generation's captured graph baked pointers to
             // (LTX-2 replays one over this very scope), so the graph has to go before the memory does.
             VramGraphGuard.InvalidateBeforeRelease(backend);
-            backend.FreeWeights(BlockRangeWeights(denoiser, 0, pin.PinnedBlocks));
+            // An unsized pin (PinnedBlocks == -1) holds every block, as ReleasePinnedBlocks assumes; freeing zero blocks would leave them resident.
+            int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : denoiser.BlockCount;
+            backend.FreeWeights(BlockRangeWeights(denoiser, 0, residentBlocks));
             // Freeing a block also frees the LoRA adapter operands it expands to, and those are shared-resident: restore them before the
             // free-memory read, or the prefix is sized against memory the forward still needs.
             backend.PreloadWeights(denoiser.EnumerateSharedWeights());
