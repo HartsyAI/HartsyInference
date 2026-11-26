@@ -30,7 +30,8 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(noise);
-        if (latentHeight <= 0 || latentWidth <= 0) throw new ArgumentOutOfRangeException(nameof(latentHeight), "The latent grid is positive.");
+        if (latentHeight <= 0) throw new ArgumentOutOfRangeException(nameof(latentHeight), "The latent height is positive.");
+        if (latentWidth <= 0) throw new ArgumentOutOfRangeException(nameof(latentWidth), "The latent width is positive.");
 
         using MovieRollKvCache cache = new(Backend);
         cache.Init(_dit.StreamLayerNames(), latentHeight, latentWidth);
@@ -42,6 +43,10 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
     public Tensor Generate(MovieRollSamplerOptions options, Tensor qwen, Tensor? byt5, Tensor? negativeQwen, Tensor? negativeByt5,
         int latentHeight, int latentWidth, Func<int, Tensor> noise)
     {
+        // The latents come from the DiT's backend, and Scale and Decode run on it too. A separate VAE backend would need a host hop between
+        // the two, which this pipeline does not do yet, so it is refused rather than silently ignored.
+        if (!ReferenceEquals(VaeBackend, Backend))
+            throw new NotSupportedException("MovieRollPipeline decodes on the DiT backend only; a separate VaeBackend is not wired.");
         using Tensor latents = SampleLatents(options, qwen, byt5, negativeQwen, negativeByt5, latentHeight, latentWidth, noise);
         // The decoder takes the latent already divided by the scaling factor (movieroll_pipeline.py:decode_latents, latents / scaling_factor).
         using Tensor unscaled = new(latents.Shape, DType.F32);

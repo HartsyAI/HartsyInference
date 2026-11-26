@@ -59,6 +59,39 @@ public sealed class MovieRollPipelineTests
         for (int i = 0; i < a.Length; i++) Assert.Equal(b[i], a[i]);
     }
 
+    [Fact]
+    public void GenerateDecodesTheSampledLatentsOnTheDitBackend()
+    {
+        // A 4-channel tiny VAE (dump_hy15_vae_tiny.py --latent 4) matches the tiny DiT. The scaling factor is 2, so the unscale is exercised.
+        using Fixture fixture = new();
+        using SafeTensorsLoader vaeWeights = new();
+        vaeWeights.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_vae_tiny_z4.safetensors"));
+        HunyuanVideo15VaeConfig config = new()
+        {
+            LatentChannels = Channels, BlockOutChannels = [4, 8, 16, 32, 32], LayersPerBlock = 2,
+            SpatialCompression = 16, TemporalCompression = 4, ScalingFactor = 2f,
+        };
+        HunyuanVideo15Vae vae = new(config);
+        vae.LoadWeights(vaeWeights.GetAllTensors()
+            .Where(pair => pair.Key.StartsWith("encoder.", StringComparison.Ordinal) || pair.Key.StartsWith("decoder.", StringComparison.Ordinal))
+            .ToDictionary(pair => pair.Key, pair => pair.Value));
+        using MovieRollPipeline pipeline = new(fixture.Backend, fixture.Dit, vae, MovieRollSchedule.Base(4, 2, 5.0));
+
+        using Tensor frames = pipeline.Generate(Options, fixture.Qwen, fixture.ByT5, fixture.NegativeQwen, fixture.NegativeByt5, Height, Width,
+            SeededNoise(7));
+        // 6 latent frames decode to 4 * (6 - 1) + 1 = 21 frames; each latent pixel is 16 x 16.
+        Assert.Equal(new TensorShape([1L, 3, 21, Height * 16, Width * 16]), frames.Shape);
+
+        // The same decode by hand: sampler latents, divided by the scaling factor, then the VAE.
+        using Tensor latents = fixture.DirectSample(SeededNoise(7));
+        using Tensor scaled = new(latents.Shape, DType.F32);
+        fixture.Backend.Scale(scaled, latents, 1f / config.ScalingFactor);
+        using Tensor expected = vae.Decode(fixture.Backend, scaled);
+        ReadOnlySpan<float> a = frames.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> b = expected.AsReadOnlySpan<float>();
+        for (int i = 0; i < a.Length; i++) Assert.Equal(b[i], a[i]);
+    }
+
     /// <summary>Draws the same noise sequence for a seed: each call takes the next seed, so the sampler's draws are reproducible.</summary>
     private static Func<int, Tensor> SeededNoise(long seed)
     {
