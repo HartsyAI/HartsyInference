@@ -29,7 +29,6 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// request before it is trimmed. Kept at 241 for now: no measurement says a larger kept-frame set is safe on the target machines.</summary>
     internal const int MaxChainFrames = 241;
 
-    /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>
     /// <summary>The checks a request is refused on before any weight is read, each with its stable code.</summary>
     internal static void ValidateChainRequest(int? chainTotal, int frames, int width, int height, int fps)
     {
@@ -48,6 +47,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <summary>True when the driving audio is shorter than the clip: the windows past its end repeat its last frame.</summary>
     internal static bool DrivingAudioIsShort(double seconds, int frames, int fps) => seconds + 1e-6 < frames / (double)fps;
 
+    /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>
     internal static bool ChainWithinBudget(int totalFrames, int width, int height) =>
         (long)totalFrames * width * height <= (long)MaxChainFrames * 832 * 480;
 

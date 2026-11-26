@@ -182,7 +182,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         {
             laterRun++;
             // The progress steps restart for each segment; this line names the segment they belong to.
-            Logs.Info($"[LongCatAvatarRecipePipeline] Later segment {laterRun} of {plan.Segments - 1} (overall segment {laterRun} of {plan.Segments}).");
+            Logs.Info($"[LongCatAvatarRecipePipeline] Later segment {laterRun} of {plan.Segments - 1} (overall segment {laterRun + 1} of {plan.Segments}).");
             return LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
                     LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
