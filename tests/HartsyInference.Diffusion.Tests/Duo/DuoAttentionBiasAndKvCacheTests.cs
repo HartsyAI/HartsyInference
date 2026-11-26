@@ -145,6 +145,19 @@ public sealed class DuoAttentionBiasAndKvCacheTests
     }
 
     [Fact]
+    public void EvictRangeInTheMiddleKeepsTheRowsOnEitherSideInOrder()
+    {
+        DuoKvCache cache = new DuoKvCache(5, 2);
+        cache.Append([0f, 1f, 2f, 3f, 4f, 5f, 6f, 7f], [10f, 11f, 12f, 13f, 14f, 15f, 16f, 17f]);
+
+        cache.EvictRange(1, 2);
+
+        Assert.Equal(2, cache.Rows);
+        Assert.True(cache.Keys.SequenceEqual(new float[] { 0f, 1f, 6f, 7f }));
+        Assert.True(cache.Values.SequenceEqual(new float[] { 10f, 11f, 16f, 17f }));
+    }
+
+    [Fact]
     public void EvictOldestChecksBoundsAndZeroIsANoOp()
     {
         DuoKvCache cache = new DuoKvCache(3, Width);

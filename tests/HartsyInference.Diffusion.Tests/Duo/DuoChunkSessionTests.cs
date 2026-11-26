@@ -182,6 +182,34 @@ public sealed class DuoChunkSessionTests
     }
 
     [Fact]
+    public void EvictionTakesTheWholeOldestBlockIncludingItsAudio()
+    {
+        // The prefix, one block, and 8 spare rows: the second block forces eviction, and a video-only eviction would leave 6 audio rows.
+        using MiniMaxH3Transformer transformer = Transformer();
+        using IBackend backend = new CpuBackend();
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        const int capacity = OneBlockCapacity + 8;
+        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: capacity);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), reference);
+        for (int b = 0; b < 3; b++)
+        {
+            session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), 2, 1.0);
+            // Only one block is ever held beside the prefix, and both of its groups go with it.
+            Assert.Equal(Shared + RefRows + VideoRows + AudioRows, cache.Length);
+            Assert.All(cache.Groups.Where(g => g.Kind == DuoGroupKind.Clean), g => Assert.Equal(b, g.Block));
+        }
+    }
+
+    [Fact]
+    public void EvictingWithNoCleanBlockIsRefused()
+    {
+        DuoStreamCache cache = new(blocks: Layers, width: Inner, capacityRows: 64);
+        Assert.Throws<InvalidOperationException>(() => cache.EvictOldestClean());
+    }
+
+    [Fact]
     public void BlockThatCannotFitIsRefusedBeforeAnyEviction()
     {
         using MiniMaxH3Transformer transformer = Transformer();
