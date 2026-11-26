@@ -61,7 +61,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         if (request.ChainTotalFrames is int requested && !LongCatAvatarRecipe.ChainWithinBudget(requested, width, height))
             throw new ArgumentOutOfRangeException(nameof(request), requested,
                 $"A LongCat-Video-Avatar chain is at most {LongCatAvatarRecipe.MaxChainFrames} frames at 832x480 (the same pixel count at other sizes); "
-                + "the whole chain is decoded in one pass.");
+                + "each segment is decoded on its own, and the output frames are held in host memory.");
         if (frames > LongCatAvatarRecipe.SegmentFrames)
             throw new ArgumentOutOfRangeException(nameof(settings), frames, $"One LongCat-Video-Avatar segment is at most {LongCatAvatarRecipe.SegmentFrames} frames.");
         if (settings.Fps != LongCatAvatarRecipe.OutputFps)
@@ -97,11 +97,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
         float[] firstWindows = rawAudio.Length == frames * RowWidth ? rawAudio : rawAudio[..(frames * RowWidth)];
         (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(firstWindows, frames, latentFrames);
-        float[] latents;
-        int decodedLatents = latentFrames;
+        byte[][] decoded;
         if (plan is null)
         {
-            latents = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+            float[] latents = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
                     LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth)),
                 onStep =>
@@ -111,16 +110,16 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                     return _pipeline.Denoise(run).Latents;
                 },
                 bridge);
+            cancel.ThrowIfCancellationRequested();
+            decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
         }
         else
         {
-            decodedLatents = plan.TotalLatents;
-            latents = RunChain(plan, rawAudio, latentFrames, latentHeight, latentWidth, seed, noise, positive, negative, settings, mode,
+            // Each segment is decoded once inside the chain and its output frames are kept; no joined latent is decoded.
+            decoded = RunChain(plan, rawAudio, latentFrames, latentHeight, latentWidth, seed, noise, positive, negative, settings, mode,
                 condLatents, firstFrame, audioTokens, unconditionalTokens, bridge, cancel);
+            cancel.ThrowIfCancellationRequested();
         }
-        cancel.ThrowIfCancellationRequested();
-
-        byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, decodedLatents, latentHeight, latentWidth);
         Logs.Info($"[LongCatAvatarRecipePipeline] Decoded {decoded.Length} frames {width}x{height}.");
         // The clip is cut to the requested length, and so is the soundtrack.
         byte[][] clip = decoded.Length > total ? decoded[..total] : decoded;
@@ -129,8 +128,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>The chain: segment 0 is an ordinary generation, and the later segments run through the pipeline's chain with their own audio and
-    /// noise. Returns the joined latent of the whole chain, <c>[channels, plan.TotalLatents, hw]</c>.</summary>
-    private float[] RunChain(LongCatAvatarChainPlan plan, float[] rawAudio, int latentFrames, int latentHeight, int latentWidth, int seed,
+    /// noise. Every segment is denoised in its own streaming scope and decoded once, outside any scope; each decoded segment keeps its output frames
+    /// (segment 0 all of them, a later segment those after its context), and its last frames are re-encoded as the next context on the 1.5 path.
+    /// Returns the chain's output frames, <c>plan.TotalPixelFrames</c> of them.</summary>
+    private byte[][] RunChain(LongCatAvatarChainPlan plan, float[] rawAudio, int latentFrames, int latentHeight, int latentWidth, int seed,
         float[] noise, LongCatPrompt positive, LongCatPrompt negative, VideoEffectiveSettings settings, LongCatAvatarMode mode, int condLatents,
         float[]? firstFrame, float[] firstAudio, float[] firstUnconditionalAudio, Action<GenerationProgress> bridge, CancellationToken cancel)
     {
@@ -151,28 +152,44 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
         }
 
-        return LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+        // Segment 0: an ordinary generation in its own streaming scope.
+        float[] first = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
+            () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
+                LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth)),
+            onStep => _pipeline.Denoise(SegmentRun(latentFrames, latentHeight, latentWidth, noise, positive, negative, firstAudio,
+                firstUnconditionalAudio, settings, mode, condLatents, firstFrame, onStep, cancel)).Latents,
+            bridge);
+
+        // The later segments: each run is denoised in its own scope, so the decode and the encode between runs are outside any scope.
+        LongCatAvatarRun template = new(channels, runLatents, latentHeight, latentWidth, laterNoise[0],
+            positive, negative, laterAudio[0], laterUnconditional,
+            settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
+            settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
+            _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, LongCatAvatarMode.Avc, plan.ContextLatents + 1, null,
+            Cancel: cancel, LoraGate: _loraGate);
+
+        // Each segment is decoded once. Segment 0 keeps all its frames; a later segment keeps the frames after its context. The last frames of a
+        // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490; the 1.6 build would carry
+        // the latents, and it is refused before this point). The last segment's context is not encoded.
+        List<byte[]> output = [];
+        int segmentsSeen = 0, contextPixels = 1 + LongCatVaeSeam.TemporalScale * (plan.ContextLatents - 1);
+        Func<float[], bool, float[]> contextFromSegment = (segment, last) =>
+        {
+            byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, segment, channels, plan.SegmentLatents, latentHeight, latentWidth);
+            output.AddRange(decoded[(segmentsSeen == 0 ? 0 : contextPixels)..]);
+            segmentsSeen++;
+            return last ? [] : LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, decoded, plan.ContextLatents, channels, latentHeight, latentWidth);
+        };
+
+        // The later runs: each in its own streaming scope, so the reservations are returned before the decode and the encode.
+        Func<LongCatAvatarRun, float[]> denoiseSegment = run => LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
             () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
                 LongCatRecipeSupport.TokenCount(runLatents, latentHeight, latentWidth)),
-            onStep =>
-            {
-                float[] first = _pipeline.Denoise(SegmentRun(latentFrames, latentHeight, latentWidth, noise, positive, negative, firstAudio,
-                    firstUnconditionalAudio, settings, mode, condLatents, firstFrame, onStep, cancel)).Latents;
-                if (plan.Segments == 1)
-                    return first;
-                LongCatAvatarRun template = new(channels, runLatents, latentHeight, latentWidth, laterNoise[0], positive, negative, laterAudio[0],
-                    laterUnconditional, settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
-                    settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
-                    _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, LongCatAvatarMode.Avc, plan.ContextLatents + 1, null,
-                    OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate);
-                // The 1.5 build (use_vcond False in the reference, and the only one this recipe runs) re-encodes each segment's last decoded frames as
-                // the next context; the 1.6 build would carry the latents instead, and it is refused before this point.
-                IReadOnlyList<float[]> segments = _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise,
-                    segment => LongCatRecipeSupport.ReencodedContext(_backend, _parts.Decoder, _parts.Encoder, segment, channels,
-                        plan.SegmentLatents, plan.ContextLatents, latentHeight, latentWidth));
-                return plan.Join(segments, channels, hw);
-            },
+            onStep => _pipeline.Denoise(run with { OnProgress = onStep }).Latents,
             bridge);
+
+        _pipeline.Chain(template, plan.ContextLatents, first, laterAudio, laterNoise, contextFromSegment, denoiseSegment);
+        return [.. output];
     }
 
     /// <summary>One generation's run: the segment's latents, its audio and its conditioning.</summary>

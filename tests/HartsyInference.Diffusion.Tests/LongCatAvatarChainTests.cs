@@ -17,13 +17,13 @@ public sealed class LongCatAvatarChainTests : IDisposable
 {
     private const int Height = 4, Width = 4, TextLength = 6, SegmentLatents = 7, Context = 4;
     private static readonly int Hw = Height * Width;
-    private readonly LongCatConfig _config = AvatarConfig();
+    private readonly LongCatConfig _config = LongCatTestData.TinyAvatar;
     private readonly Dictionary<string, Tensor> _weights;
     private readonly CpuBackend _backend = new();
 
     public LongCatAvatarChainTests()
     {
-        _weights = AvatarWeights(_config, 131);
+        _weights = LongCatTestData.AvatarWeights(_config, 131);
     }
 
     public void Dispose()
@@ -86,11 +86,11 @@ public sealed class LongCatAvatarChainTests : IDisposable
         using LongCatTransformer transformer = new(_config);
         transformer.LoadWeights(_weights);
         LongCatAvatarPipeline pipeline = new(_backend, transformer);
-        LongCatPrompt positive = new(Values(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
-        LongCatPrompt negative = new(Values(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt positive = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt negative = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
         int ctx = _config.AudioContextTokens, width = _config.AudioOutputDim, channels = _config.InChannels;
-        LongCatAvatarRun first = new(channels, SegmentLatents, Height, Width, Values(rng, channels * SegmentLatents * Hw), positive, negative,
-            Values(rng, SegmentLatents * ctx * width), Values(rng, SegmentLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f,
+        LongCatAvatarRun first = new(channels, SegmentLatents, Height, Width, LongCatTestData.RandomValues(rng, channels * SegmentLatents * Hw), positive, negative,
+            LongCatTestData.RandomValues(rng, SegmentLatents * ctx * width), LongCatTestData.RandomValues(rng, SegmentLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f,
             2f, 1.5f, LongCatAvatarMode.At2v);
         float[] firstLatents = pipeline.Denoise(first).Latents;
         int runLatents = plan.RunLatents;
@@ -98,15 +98,15 @@ public sealed class LongCatAvatarChainTests : IDisposable
         List<float[]> noises = [];
         for (int s = 1; s < plan.Segments; s++)
         {
-            audio.Add(Values(rng, runLatents * ctx * width));
-            noises.Add(Values(rng, channels * runLatents * Hw));
+            audio.Add(LongCatTestData.RandomValues(rng, runLatents * ctx * width));
+            noises.Add(LongCatTestData.RandomValues(rng, channels * runLatents * Hw));
         }
         LongCatAvatarRun template = new(channels, runLatents, Height, Width, noises[0], positive, negative, audio[0],
-            Values(rng, runLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f, 2f, 1.5f, LongCatAvatarMode.Avc, Context + 1);
+            LongCatTestData.RandomValues(rng, runLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f, 2f, 1.5f, LongCatAvatarMode.Avc, Context + 1);
 
         List<float[]> asked = [];
         float[] zeroContext = new float[channels * Context * Hw];
-        pipeline.Chain(template, plan.ContextLatents, firstLatents, audio, noises, segment =>
+        pipeline.Chain(template, plan.ContextLatents, firstLatents, audio, noises, (segment, last) =>
         {
             asked.Add(segment);
             return zeroContext;
@@ -126,13 +126,13 @@ public sealed class LongCatAvatarChainTests : IDisposable
         using LongCatTransformer transformer = new(_config);
         transformer.LoadWeights(_weights);
         LongCatAvatarPipeline pipeline = new(_backend, transformer);
-        LongCatPrompt positive = new(Values(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
-        LongCatPrompt negative = new(Values(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt positive = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
+        LongCatPrompt negative = new(LongCatTestData.RandomValues(rng, TextLength * _config.CaptionChannels), TextLength, TextLength);
         int ctx = _config.AudioContextTokens, width = _config.AudioOutputDim, channels = _config.InChannels;
 
         // Segment 0: an ordinary generation of SegmentLatents latents, with its own audio.
-        LongCatAvatarRun first = new(channels, SegmentLatents, Height, Width, Values(rng, channels * SegmentLatents * Hw), positive, negative,
-            Values(rng, SegmentLatents * ctx * width), Values(rng, SegmentLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f,
+        LongCatAvatarRun first = new(channels, SegmentLatents, Height, Width, LongCatTestData.RandomValues(rng, channels * SegmentLatents * Hw), positive, negative,
+            LongCatTestData.RandomValues(rng, SegmentLatents * ctx * width), LongCatTestData.RandomValues(rng, SegmentLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f,
             2f, 1.5f, LongCatAvatarMode.At2v);
         float[] firstLatents = pipeline.Denoise(first).Latents;
 
@@ -142,11 +142,11 @@ public sealed class LongCatAvatarChainTests : IDisposable
         List<float[]> noises = [];
         for (int s = 1; s < plan.Segments; s++)
         {
-            audio.Add(Values(rng, runLatents * ctx * width));
-            noises.Add(Values(rng, channels * runLatents * Hw));
+            audio.Add(LongCatTestData.RandomValues(rng, runLatents * ctx * width));
+            noises.Add(LongCatTestData.RandomValues(rng, channels * runLatents * Hw));
         }
         LongCatAvatarRun template = new(channels, runLatents, Height, Width, noises[0], positive, negative, audio[0],
-            Values(rng, runLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f, 2f, 1.5f, LongCatAvatarMode.Avc,
+            LongCatTestData.RandomValues(rng, runLatents * ctx * width), Steps: 2, LongCatAvatarSchedule.Kind.Linear, 3f, 2f, 1.5f, LongCatAvatarMode.Avc,
             Context + 1);
 
         IReadOnlyList<float[]> segments = pipeline.Chain(template, plan.ContextLatents, firstLatents, audio, noises);
@@ -172,67 +172,5 @@ public sealed class LongCatAvatarChainTests : IDisposable
             new(new TensorShape([1, 3, 1 + 4 * (latent.Shape[2] - 1), latent.Shape[3] * 8, latent.Shape[4] * 8]), DType.F32);
 
         public IEnumerable<Tensor> EnumerateWeights() => [];
-    }
-
-    /// <summary>The tiny avatar config: the base tiny shape plus the audio projection and the per-block audio step.</summary>
-    private static LongCatConfig AvatarConfig() => new()
-    {
-        HiddenSize = 128, Depth = 2, NumHeads = 4, InChannels = 4, OutChannels = 4, CaptionChannels = 48, AdalnTembedDim = 64,
-        FrequencyEmbeddingSize = 64, PatchSize = (1, 2, 2), TextTokensZeroPad = true, AudioOutputDim = 16, AudioWindow = 5, AudioBlock = 3,
-        AudioChannel = 6, AudioIntermediateDim = 16, AudioContextTokens = 4, AudioVaeScale = 4,
-    };
-
-    /// <summary>The tiny config's base weights plus the audio projection and each block's audio step, with seeded values.</summary>
-    private static Dictionary<string, Tensor> AvatarWeights(LongCatConfig config, int seed)
-    {
-        Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, seed);
-        Random rng = new(seed + 1);
-        int h = config.HiddenSize, ctx = config.AudioContextTokens, outDim = config.AudioOutputDim, inter = config.AudioIntermediateDim;
-        int seqLen = config.AudioWindow, seqLenVf = config.AudioWindow + config.AudioVaeScale - 1, blocks = config.AudioBlock, channels = config.AudioChannel;
-        void Add(string key, params int[] dims) => weights[key] = RandomTensor(rng, dims);
-        Add("audio_proj.proj1.weight", inter, seqLen * blocks * channels);
-        Add("audio_proj.proj1.bias", inter);
-        Add("audio_proj.proj1_vf.weight", inter, seqLenVf * blocks * channels);
-        Add("audio_proj.proj1_vf.bias", inter);
-        Add("audio_proj.proj2.weight", inter, inter);
-        Add("audio_proj.proj2.bias", inter);
-        Add("audio_proj.proj3.weight", ctx * outDim, inter);
-        Add("audio_proj.proj3.bias", ctx * outDim);
-        Add("audio_proj.norm.weight", outDim);
-        Add("audio_proj.norm.bias", outDim);
-        for (int b = 0; b < config.Depth; b++)
-        {
-            string p = $"blocks.{b}.";
-            Add(p + "audio_adaLN_modulation.1.weight", 3 * h, config.AdalnTembedDim);
-            Add(p + "audio_adaLN_modulation.1.bias", 3 * h);
-            Add(p + "pre_video_crs_attn_norm.weight", h);
-            Add(p + "pre_video_crs_attn_norm.bias", h);
-            Add(p + "audio_cross_attn.q_linear.weight", h, h);
-            Add(p + "audio_cross_attn.q_linear.bias", h);
-            Add(p + "audio_cross_attn.kv_linear.weight", 2 * h, outDim);
-            Add(p + "audio_cross_attn.kv_linear.bias", 2 * h);
-            Add(p + "audio_cross_attn.q_norm.weight", config.HeadDim);
-            Add(p + "audio_cross_attn.k_norm.weight", config.HeadDim);
-            Add(p + "audio_cross_attn.proj.weight", h, h);
-            Add(p + "audio_cross_attn.proj.bias", h);
-        }
-        return weights;
-    }
-
-    private static Tensor RandomTensor(Random rng, params int[] dims)
-    {
-        Tensor tensor = new(new TensorShape(dims.Select(d => (long)d).ToArray()), DType.F32);
-        Span<float> values = tensor.AsSpan<float>();
-        for (int i = 0; i < values.Length; i++)
-            values[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
-        return tensor;
-    }
-
-    private static float[] Values(Random rng, int count)
-    {
-        float[] values = new float[count];
-        for (int i = 0; i < count; i++)
-            values[i] = (float)(rng.NextDouble() * 2 - 1);
-        return values;
     }
 }

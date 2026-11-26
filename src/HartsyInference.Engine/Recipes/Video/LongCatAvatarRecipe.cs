@@ -23,10 +23,10 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
     /// <summary>The frame rate the Whisper windows are aligned to (the reference's 25 fps).</summary>
     internal const int OutputFps = 25;
 
-    /// <summary>The longest chain the recipe accepts at 832x480, in frames. A chain is decoded in one pass after it is denoised, so the budget bounds
-    /// that one allocation: about 1.15 GB of F32 RGB at this size, plus the byte copy. The budget is in pixels, so other sizes get proportionally fewer
-    /// frames. The decode covers whole segments, so the clip can be decoded a little past the request before it is trimmed. Raising the budget needs
-    /// a segment-wise decode first.</summary>
+    /// <summary>The longest chain the recipe accepts at 832x480, in frames. Each segment is decoded once, on its own, and its output frames are kept as
+    /// bytes until the clip is written: at this size the kept frames are about 288 MB, and one segment's decode peaks near 445 MB of F32 RGB. The budget
+    /// is in pixels, so other sizes get proportionally fewer frames. The decoded segments cover whole segments, so the clip can run a little past the
+    /// request before it is trimmed. Kept at 241 for now: no measurement says a larger kept-frame set is safe on the target machines.</summary>
     internal const int MaxChainFrames = 241;
 
     /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>

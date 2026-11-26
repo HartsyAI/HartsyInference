@@ -292,7 +292,10 @@ public sealed class LongCatAvatarPipeline
     /// index, drops the reference, and contributes its frames after the context. By default the context is the carried latent frames. With
     /// <paramref name="contextFromSegment"/> (the 1.5 path, use_vcond False in the reference) the context is whatever that function returns for the
     /// segment's latents: the reference re-encodes the segment's last decoded pixel frames, and that round trip is the VAE seam, supplied by the
-    /// caller. The chain is not compared with a reference chain run yet.</summary>
+    /// caller; it is called once per segment, in order, and its return for the last segment is unused. The chain is not compared with a reference
+    /// chain run yet.</summary>
+    /// <param name="denoiseSegment">Runs one segment's run and returns its latents. The caller can scope each run (for example its own streaming
+    /// scope, so work between segments runs outside it). Null runs <c>Denoise</c> directly.</param>
     /// <param name="template">The per-segment run. Its <see cref="LongCatAvatarRun.Frames"/> is one segment's latent frames plus one for the
     /// reference slot (so a segment of N frames after the context needs Frames = N + 1). Its <see cref="LongCatAvatarRun.UnconditionalAudioTokens"/>
     /// is used for every later segment, so it must be sized for the template's Frames. Mode, conditioning, audio and noise are set per segment.</param>
@@ -302,7 +305,7 @@ public sealed class LongCatAvatarPipeline
     /// <param name="noises">Each later segment's noise, <c>[channels, template.Frames, hw]</c>.</param>
     /// <returns>Segment 0 whole, then each later segment's new frames (context dropped), each <c>[channels, frames, hw]</c>.</returns>
     public IReadOnlyList<float[]> Chain(LongCatAvatarRun template, int contextFrames, float[] firstLatents, IReadOnlyList<float[]> audioTokens,
-        IReadOnlyList<float[]> noises, Func<float[], float[]>? contextFromSegment = null)
+        IReadOnlyList<float[]> noises, Func<float[], bool, float[]>? contextFromSegment = null, Func<LongCatAvatarRun, float[]>? denoiseSegment = null)
     {
         ArgumentNullException.ThrowIfNull(template);
         ArgumentNullException.ThrowIfNull(firstLatents);
@@ -319,9 +322,19 @@ public sealed class LongCatAvatarPipeline
 
         // The reference latent is the first frame of segment 0 and stays fixed; the context is the last frames of the previous segment.
         float[] reference = FrameOf(firstLatents, channels, segmentFrames, hw, 0);
-        float[] context = contextFromSegment is null
-            ? LastFrames(firstLatents, channels, segmentFrames, hw, contextFrames)
-            : ContextOf(contextFromSegment, firstLatents, channels, hw, contextFrames);
+
+        // Each segment's latents go to contextFromSegment exactly once, in order, with last = true for the final segment (its return is unused).
+        float[] NextContext(float[] segment, bool last)
+        {
+            if (contextFromSegment is null)
+                return LastFrames(segment, channels, segmentFrames, hw, contextFrames);
+            float[] next = contextFromSegment(segment, last);
+            if (!last && next.Length != channels * contextFrames * hw)
+                throw new InvalidOperationException($"The re-encoded context holds {next.Length} values; expected {channels * contextFrames * hw}.");
+            return next;
+        }
+
+        float[] context = NextContext(firstLatents, last: noises.Count == 0);
         List<float[]> outputs = [firstLatents];
         for (int s = 0; s < noises.Count; s++)
         {
@@ -333,24 +346,13 @@ public sealed class LongCatAvatarPipeline
                 AudioTokens = audioTokens[s],
                 Noise = noises[s],
             };
-            float[] full = Denoise(run).Latents;
+            float[] full = denoiseSegment is null ? Denoise(run).Latents : denoiseSegment(run);
             // Drop the reference (frame 0 of the run): what remains is the context followed by this segment's frames.
             float[] withoutReference = RemoveFirstFrame(full, channels, frames, hw);
             outputs.Add(LastFrames(withoutReference, channels, segmentFrames, hw, noisy));
-            context = contextFromSegment is null
-                ? LastFrames(withoutReference, channels, segmentFrames, hw, contextFrames)
-                : ContextOf(contextFromSegment, withoutReference, channels, hw, contextFrames);
+            context = NextContext(withoutReference, last: s == noises.Count - 1);
         }
         return outputs;
-    }
-
-    /// <summary>The re-encoded context of a segment, checked against the shape the run's conditioning takes.</summary>
-    private static float[] ContextOf(Func<float[], float[]> contextFromSegment, float[] segment, int channels, int hw, int contextFrames)
-    {
-        float[] context = contextFromSegment(segment);
-        if (context.Length != channels * contextFrames * hw)
-            throw new InvalidOperationException($"The re-encoded context holds {context.Length} values; expected {channels * contextFrames * hw}.");
-        return context;
     }
 
     private static float[] FrameOf(float[] latent, int channels, int frames, int hw, int index)
