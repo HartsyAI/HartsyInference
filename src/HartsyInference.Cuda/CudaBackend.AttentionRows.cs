@@ -308,7 +308,7 @@ public sealed partial class CudaBackend
         if (!OneRowTiles(in c)) return false;
         if (EngineKnobs.SdpaForceTiled.Value || ScoresPastMaterialized(in c)) return true;
         ulong scoreBytes = (ulong)((long)c.Batch * c.Heads) * (ulong)c.QueryTokens * (ulong)c.KeyTokens * sizeof(float);
-        return scoreBytes > (ulong)FreeVram() / 2;
+        return scoreBytes > GateBudget();
     }
 
     /// <summary>The BF16 copies of Q, K, V and the output fit in half of free VRAM.</summary>
@@ -316,8 +316,14 @@ public sealed partial class CudaBackend
     {
         ulong castBytes = sizeof(ushort) * ((ulong)c.Query.Storage.ElementCount + (ulong)c.Key.Storage.ElementCount
             + (ulong)c.Value.Storage.ElementCount + (ulong)c.Output.Storage.ElementCount);
-        return castBytes <= (ulong)FreeVram() / 2;
+        return castBytes <= GateBudget();
     }
+
+    /// <summary>The byte budget the attention path gates compare against: half of free VRAM, or the device's tile rung under
+    /// <c>numerics.tileFromDevice</c> (a constant per device).</summary>
+    private ulong GateBudget() => EngineKnobs.TileFromDevice.Value == true
+        ? (ulong)TileRungBytes((ulong)_context.GetMemoryInfo().totalBytes)
+        : FreeVram() / 2;
 
     /// <summary>Free device memory the attention rows budget against.</summary>
     private nuint FreeVram() => TestFreeVramOverride?.Invoke() ?? _context.GetMemoryInfo().freeBytes;

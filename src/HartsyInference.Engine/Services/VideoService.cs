@@ -150,8 +150,8 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         double? seconds = DrivingAudioSeconds(request);
         Logs.Info("[VideoAudio] Separating the driving audio's vocals on the CPU before generation"
             + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
-        AudioClip vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, seconds, cancel).ConfigureAwait(false);
-        return request with { VideoAudioReference = vocals, SeparateDrivingVocals = false };
+        SeparatedVocals vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, seconds, cancel).ConfigureAwait(false);
+        return request with { VideoAudioReference = vocals.Stem, SeparatedSpeech16k = vocals.Speech16k, SeparateDrivingVocals = false };
     }
 
     /// <summary>Seconds of driving audio the clip can use: its frame total over its rate, plus one second of margin as LongCat adds. Null when either is unknown, which separates the whole track.</summary>
