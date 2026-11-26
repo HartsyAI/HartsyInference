@@ -28,6 +28,29 @@ public sealed class Qwen35VlAspectResizeTests
         Assert.Equal((wantH, wantW), (gotH, gotW));
     }
 
+    [Theory]
+    [InlineData(1080, 1920, 576, 1024)]   // 576 merged tokens: the engine's default budget
+    [InlineData(3000, 4000, 640, 864)]
+    [InlineData(4096, 4096, 768, 768)]
+    [InlineData(768, 1024, 640, 864)]
+    public void SmartResize_AtTheEngineDefaultBudget_MatchesTheProcessorWithThatMaximum(int h, int w, int wantH, int wantW)
+    {
+        (int gotH, int gotW) = VlmImagePreprocessor.SmartResize(h, w, Factor, Min, Qwen3VlEncoder.DefaultMaxPixels);
+        Assert.Equal((wantH, wantW), (gotH, gotW));
+        Assert.True((long)gotH * gotW <= Qwen3VlEncoder.DefaultMaxPixels);
+    }
+
+    [Fact]
+    public void PreprocessAspect_LargePhoto_StaysAtTheDefaultTokenBudget()
+    {
+        // A 3000×4000 photo: 640×864 px is 20×27 = 540 merged tokens, under the 576 the default budget allows.
+        const int w = 4000, h = 3000;
+        byte[] rgb = new byte[w * h * 3];
+        using Tensor px = VlmImagePreprocessor.PreprocessAspect(rgb, w, h, Factor, Min, Qwen3VlEncoder.DefaultMaxPixels, [0.5f, 0.5f, 0.5f], [0.5f, 0.5f, 0.5f]);
+        Assert.Equal(new TensorShape(1, 3, 640, 864), px.Shape);
+        Assert.True(Qwen3VlEncoder.MergedGrid(px, Factor / 2, 2).Tokens <= 576);
+    }
+
     [Fact]
     public void SmartResize_OverTheMaximum_ScalesDownBelowIt()
     {

@@ -148,15 +148,23 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         return new MRopeImageGrid(1, H / block, Wd / block);
     }
 
-    /// <summary>The checkpoint's pixel bounds (<c>size.shortest_edge</c> and <c>size.longest_edge</c> in <c>preprocessor_config.json</c> of
-    /// <c>sensenova/SenseNova-Loop-9B</c>): an image is resized to its own aspect ratio inside them, not squashed to <c>clip.vision.image_size</c>.</summary>
-    public const int MinPixels = 65536, MaxPixels = 16777216;
+    /// <summary>The checkpoint processor's lower pixel bound (<c>size.shortest_edge</c> in <c>preprocessor_config.json</c> of
+    /// <c>sensenova/SenseNova-Loop-9B</c>). The mmproj GGUF carries no pixel bounds of its own, so these are not read from it.</summary>
+    public const int MinPixels = 65536;
+
+    /// <summary>The checkpoint processor's upper bound (<c>size.longest_edge</c>): 16 777 216 px, which is 16 384 merged tokens at 4096×4096. Not used by
+    /// default; see <see cref="DefaultMaxPixels"/>.</summary>
+    public const int CheckpointMaxPixels = 16777216;
+
+    /// <summary>The engine's default upper bound: 768×768 px, the 576 merged tokens the square squash used. Full attention over a larger grid costs
+    /// quadratic memory (the 768×768 image run peaked at 9.8 GB on a 12 GB card), so a large photo is scaled down to this budget, keeping its aspect ratio.</summary>
+    public const int DefaultMaxPixels = 768 * 768;
 
     /// <summary>Preprocesses an RGB image for this tower the way the checkpoint's processor does: an aspect-preserving resize to whole
-    /// <c>patch · merge</c> blocks inside <see cref="MinPixels"/>..<see cref="MaxPixels"/>, then normalization. The result's height and width set the
-    /// merged grid (<see cref="MergedGrid"/>) and the number of image tokens.</summary>
-    public Tensor PreprocessImage(ReadOnlySpan<byte> rgb, int width, int height) =>
-        VlmImagePreprocessor.PreprocessAspect(rgb, width, height, PatchSize * Merge, MinPixels, MaxPixels, ImageMean, ImageStd);
+    /// <c>patch · merge</c> blocks inside <see cref="MinPixels"/>..<paramref name="maxPixels"/>, then normalization. The result's height and width set the
+    /// merged grid (<see cref="MergedGrid"/>) and the number of image tokens. Pass <see cref="CheckpointMaxPixels"/> to match the processor exactly.</summary>
+    public Tensor PreprocessImage(ReadOnlySpan<byte> rgb, int width, int height, int maxPixels = DefaultMaxPixels) =>
+        VlmImagePreprocessor.PreprocessAspect(rgb, width, height, PatchSize * Merge, MinPixels, maxPixels, ImageMean, ImageStd);
 
     /// <summary>Encodes a preprocessed image <c>[1, 3, H, W]</c> into <c>[1, tokens, textHidden]</c>.</summary>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
