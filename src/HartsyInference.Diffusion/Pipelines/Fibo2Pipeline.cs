@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -108,6 +110,7 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             {
                 _textEncoderWeights.Release(force: true);
             }
+            AfterWeightRelease(() => _textEncoder.EnumerateWeights(), "text encoder");
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
             TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
@@ -131,8 +134,11 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             {
                 _denoiserWeights.Release();
             }
+            AfterWeightRelease(() => _transformer.EnumerateWeights(), "denoiser");
 
+            DeviceMemoryTrace.Record(Backend, "fibo2: before VAE decode");
             using Tensor decoded = DecodeLatent(latent!);
+            DeviceMemoryTrace.Record(Backend, "fibo2: after VAE decode");
             // Suppresses the VAE round trip in the kept region; the host recomposites itself when it owns the mask.
             if (plan.MaskPixel is not null && img2img!.RecompositeAtEnd)
                 MaskBlendUtilities.BlendChannelsInPlace(decoded, img2img.SourceImage, plan.MaskPixel);
@@ -146,6 +152,16 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             conditional?.Dispose();
             unconditional?.Dispose();
         }
+    }
+
+    /// <summary>After a weight release: trims the device pool so freed blocks leave the reservation, records the device usage at this
+    /// stage, and logs how many of the released tensors are still resident. A nonzero count means the release did not leave the GPU.</summary>
+    private void AfterWeightRelease(Func<IEnumerable<Tensor>> released, string label)
+    {
+        Backend.TrimMemoryPool();
+        DeviceMemoryTrace.Record(Backend, $"fibo2: {label} released");
+        int resident = released().Count(Backend.IsWeightResident);
+        Logs.Info($"[Fibo2][Residency] {label}: {resident} tensors still resident after release");
     }
 
     /// <summary>One guided velocity: <c>uncond + g · (cond − uncond)</c> when CFG is active, otherwise the conditional velocity alone.

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
@@ -60,6 +61,8 @@ public sealed unsafe partial class Fibo2Pipeline
             {
                 editEncoder.Release(force: true);
             }
+            AfterWeightRelease(() => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
+                .Distinct<Tensor>(ReferenceEqualityComparer.Instance), "edit encoders (language and vision)");
 
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
@@ -83,7 +86,10 @@ public sealed unsafe partial class Fibo2Pipeline
             }
 
             _denoiserWeights.Release();
+            AfterWeightRelease(() => _transformer.EnumerateWeights(), "denoiser");
+            DeviceMemoryTrace.Record(Backend, "fibo2: before VAE decode");
             using Tensor decoded = DecodeLatent(latent);
+            DeviceMemoryTrace.Record(Backend, "fibo2: after VAE decode");
             return (ImagePostProcessor.TensorToRgbBytes(decoded), (int)decoded.Shape[3], (int)decoded.Shape[2], resolvedSeed);
         }
         finally
