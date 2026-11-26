@@ -161,7 +161,7 @@ public sealed class MiniMaxH3DuoForwardTests
         using Tensor empty = new(new TensorShape(0, TextDim), DType.F32);
         using Tensor video = MakeTensor(new TensorShape(VideoRowCount, VideoIn), Values(3, VideoRowCount * VideoIn));
         using Tensor audio = MakeTensor(new TensorShape(AudioRowCount, AudioIn), Values(4, AudioRowCount * AudioIn));
-        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 4);
+        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 4);
 
         ArgumentException full = Assert.Throws<ArgumentException>(() => transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal,
             [], empty, video, audio, Times()));
@@ -302,7 +302,7 @@ public sealed class MiniMaxH3DuoForwardTests
         DuoLayout prefix = CachedLayout(
             [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 2, 4)],
             [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
-        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 8);
+        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 8);
         using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
         (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
         prefixOut.Dispose();
@@ -348,7 +348,7 @@ public sealed class MiniMaxH3DuoForwardTests
         float[] expected = fullVideo.AsSpan<float>().ToArray();
         fullVideo.Dispose();
 
-        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 4);
+        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 4);
         DuoLayout prefix = CachedLayout([shared, reference], [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
         using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
         (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
@@ -382,7 +382,7 @@ public sealed class MiniMaxH3DuoForwardTests
         DuoLayout prefix = CachedLayout(
             [new DuoGroup(0, 0, DuoGroupKind.Shared, DuoModality.None, 0, 2), new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 2, 4)],
             [1, 1, 0, 0], [0, 0, 0, 0], [2, 3], [0, 1], [0, 1], [], 0);
-        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 5);
+        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 5);
         using Tensor prefixVideo = MakeTensor(new TensorShape(2, VideoIn), videoAll[..(2 * VideoIn)]);
         (Tensor prefixOut, _) = transformer.ForwardDuoCached(backend, prefix, DuoAttentionMode.Causal, refiner, text, prefixVideo, null, times, cache, commit: true);
         prefixOut.Dispose();
@@ -402,32 +402,41 @@ public sealed class MiniMaxH3DuoForwardTests
     [Fact]
     public void StreamCacheCommitIsAllOrNothing()
     {
-        DuoStreamCache cache = new DuoStreamCache(blocks: 2, width: 4, capacityRows: 3);
-        float[][] keys = [new float[4], new float[3]];
-        float[][] values = [new float[4], new float[4]];
+        CpuBackend backend = new();
+        using DuoStreamCache cache = new(backend, blocks: 2, width: 4, capacityRows: 3);
+        using Tensor keys0 = HeadMajor(2), keys1 = HeadMajor(2), values0 = HeadMajor(2), values1 = HeadMajor(2);
+        IReadOnlyList<Tensor> keys = [keys0, keys1], values = [values0, values1];
         IReadOnlyList<DuoGroup> groups = [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 1)];
 
-        // Block 1's keys are the wrong length: nothing may be appended to block 0 either.
-        Assert.Throws<ArgumentException>(() => cache.Commit(keys, values, 1, groups));
+        // A group that names rows beyond the tensors is refused, and nothing is appended to either block.
+        Assert.Throws<ArgumentException>(() => cache.Commit(keys, values,
+            [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 3)]));
         Assert.Equal(0, cache.Length);
         Assert.Empty(cache.Groups);
+        Assert.Equal(0, cache.Store.Count(0));
 
-        // A group that names rows outside the committed range is refused the same way.
-        float[][] goodKeys = [new float[4], new float[4]];
-        Assert.Throws<ArgumentException>(() => cache.Commit(goodKeys, values, 1,
+        // One key tensor for two blocks is refused before anything is touched.
+        Assert.Throws<ArgumentException>(() => cache.Commit([keys0], values, groups));
+        Assert.Equal(0, cache.Store.Count(1));
+
+        // Two rows fit; a second commit of two more rows does not, and leaves the first commit in place.
+        cache.Commit(keys, values, [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 2)]);
+        Assert.Equal(2, cache.Length);
+        Assert.Throws<InvalidOperationException>(() => cache.Commit(keys, values,
             [new DuoGroup(0, -1, DuoGroupKind.Reference, DuoModality.Video, 0, 2)]));
-        Assert.Equal(0, cache.Length);
-
-        cache.Commit(goodKeys, values, 1, groups);
-        Assert.Equal(1, cache.Length);
+        Assert.Equal(2, cache.Length);
+        Assert.Equal(1, cache.Store.Count(0));
+        Assert.Equal(1, cache.Store.Count(1));
     }
+
+    private static Tensor HeadMajor(int rows) => new(new TensorShape(new long[] { 1, 1, rows, 4 }), DType.F32);
 
     [Fact]
     public void CachedForwardRefusesBidirectionalMode()
     {
         using MiniMaxH3Transformer transformer = Transformer();
         using IBackend backend = new CpuBackend();
-        DuoStreamCache cache = new DuoStreamCache(blocks: 1, width: Inner, capacityRows: 8);
+        DuoStreamCache cache = new DuoStreamCache(new CpuBackend(), blocks: 1, width: Inner, capacityRows: 8);
         DuoLayout current = CachedLayout(
             [new DuoGroup(0, 0, DuoGroupKind.Noisy, DuoModality.Video, 0, 4)],
             [0, 0, 0, 0], [1, 1, 1, 1], [0, 1, 2, 3], [], [], [0], 4);
