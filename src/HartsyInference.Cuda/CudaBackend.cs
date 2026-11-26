@@ -5513,7 +5513,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (query.DType == DType.BF16 && mask is null)
             {
                 ulong castScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-                if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > GateBudget())
+                bool castOver = castScoreBytes > GateBudget();
+                LogGate("cast.score", castOver);
+                if (EngineKnobs.SdpaForceTiled.Value || castOver)
                 {
                     SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
@@ -5870,13 +5872,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c),
             castTarget);
 
-    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit the gate budget: half of free VRAM, or under
+    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit the gate budget (logged as gate "causal"): half of free VRAM, or under
     /// <c>numerics.tileFromDevice</c> the shared <see cref="DeviceGateBudget"/> (cuMemGetInfo counts pool reservations as used).</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
         ulong castBytes = 2UL * sizeof(ushort) * (ulong)d * ((ulong)hq * (ulong)tq + (ulong)hkv * (ulong)kvLen);
-        return maskBytes + castBytes < GateBudget();
+        bool fits = maskBytes + castBytes < GateBudget();
+        LogGate("causal", !fits);
+        return fits;
     }
 
     /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.

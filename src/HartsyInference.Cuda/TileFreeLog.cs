@@ -1,32 +1,60 @@
+using System.Globalization;
+
 namespace HartsyInference.Cuda;
 
-/// <summary>Per-run free-memory log for the <c>numerics.tileFromDevice</c> A/B: one aggregate per process, written to stderr at exit.</summary>
-/// <remarks>Records only when the knob is on, so an ordinary run logs nothing. Free memory is logged so a run can be read against the gates it
-/// might have tripped: a call's tile height is the device's, but the gate that picks its path still reads free VRAM under the clamp.</remarks>
+/// <summary>Per-run free-memory log for the <c>numerics.tileFromDevice</c> A/B: one aggregate per process, written to stderr at exit and, when the
+/// environment names a file, appended to it.</summary>
+/// <remarks>Records only when the knob is on, so an ordinary run logs nothing. Two kinds of record: each tiled call's tile height (the score
+/// tile's free and total reading and planned and final rows), and each budget gate's decision (the bytes it compared, the budget, and whether the
+/// free VRAM or half the total set that budget). The file route exists because <c>dotnet test</c> at default verbosity does not show a test
+/// process's stderr; <c>HARTSY_TILE_FREE_LOG</c> names the file, and each process appends one block.</remarks>
 internal static class TileFreeLog
 {
+    /// <summary>The environment variable that names the file each process appends its summary to.</summary>
+    internal const string EnvVar = "HARTSY_TILE_FREE_LOG";
+
+    private sealed class GateTally
+    {
+        public long Decisions, Over, FreeLimited;
+    }
+
     private static readonly object _gate = new();
     private static bool _registered;
     private static long _calls, _halvedCalls;
     private static ulong _minFree = ulong.MaxValue, _maxFree, _total;
     private static readonly SortedSet<long> _heights = new();
+    private static readonly SortedDictionary<string, GateTally> _gates = new(StringComparer.Ordinal);
 
     /// <summary>Records one tiled call: the free and total reading it took, the planned tile height, and the height it ran at after any OOM halving.</summary>
     internal static void Record(ulong freeBytes, ulong totalBytes, long plannedRows, long finalRows)
     {
         lock (_gate)
         {
-            if (!_registered)
-            {
-                _registered = true;
-                AppDomain.CurrentDomain.ProcessExit += (_, _) => WriteSummary();
-            }
+            Register();
             _calls++;
             if (finalRows < plannedRows) _halvedCalls++;
             _minFree = Math.Min(_minFree, freeBytes);
             _maxFree = Math.Max(_maxFree, freeBytes);
             _total = totalBytes;
             _heights.Add(finalRows);
+        }
+    }
+
+    /// <summary>Records one budget gate's decision. <paramref name="over"/> means the bytes exceeded the budget (the tiled or fallback side). The
+    /// budget came from free VRAM, not half the total, when free was below half the total.</summary>
+    internal static void RecordGate(string gate, ulong freeBytes, ulong totalBytes, bool over)
+    {
+        lock (_gate)
+        {
+            Register();
+            if (!_gates.TryGetValue(gate, out GateTally? tally))
+            {
+                tally = new GateTally();
+                _gates[gate] = tally;
+            }
+            tally.Decisions++;
+            if (over) tally.Over++;
+            if (freeBytes < totalBytes / 2) tally.FreeLimited++;
         }
     }
 
@@ -41,20 +69,60 @@ internal static class TileFreeLog
             _maxFree = 0;
             _total = 0;
             _heights.Clear();
+            _gates.Clear();
         }
     }
 
-    /// <summary>The one-line aggregate: call count, OOM-halved calls, the free-VRAM range in MiB, and the distinct tile heights run.</summary>
+    /// <summary>The aggregate, one line per kind: the tile line first, then one line per gate in name order.</summary>
     internal static string Summary()
     {
         lock (_gate)
         {
-            if (_calls == 0) return "tileFromDevice: no tiled calls this process.";
-            string heights = string.Join(",", _heights.Take(8)) + (_heights.Count > 8 ? ",..." : "");
-            return $"tileFromDevice: calls={_calls} halved={_halvedCalls} totalMiB={_total >> 20} " +
-                   $"freeMiB min={_minFree >> 20} max={_maxFree >> 20} tileRows=[{heights}]";
+            if (_calls == 0 && _gates.Count == 0) return "tileFromDevice: no tiled calls or gate decisions this process.";
+            List<string> lines = [];
+            if (_calls > 0)
+            {
+                string heights = string.Join(",", _heights.Take(8)) + (_heights.Count > 8 ? ",..." : "");
+                lines.Add($"tileFromDevice: calls={_calls} halved={_halvedCalls} totalMiB={_total >> 20} " +
+                          $"freeMiB min={_minFree >> 20} max={_maxFree >> 20} tileRows=[{heights}]");
+            }
+            foreach (KeyValuePair<string, GateTally> gate in _gates)
+            {
+                lines.Add($"tileFromDevice gate={gate.Key} decisions={gate.Value.Decisions} over={gate.Value.Over} " +
+                          $"freeLimited={gate.Value.FreeLimited}");
+            }
+            return string.Join('\n', lines);
         }
     }
 
-    private static void WriteSummary() => Console.Error.WriteLine(Summary());
+    /// <summary>Appends the summary to <paramref name="path"/> as one block, with the process id and a UTC stamp. A failure to write is reported on
+    /// stderr, never thrown: the log must not fail a run.</summary>
+    internal static void AppendTo(string path)
+    {
+        try
+        {
+            string stamp = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+            File.AppendAllText(path, $"# pid={Environment.ProcessId} utc={stamp}{Environment.NewLine}{Summary()}{Environment.NewLine}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            Console.Error.WriteLine($"{EnvVar}: could not append to '{path}': {ex.Message}");
+        }
+    }
+
+    /// <summary>Registers the process-exit writer once. Caller holds <c>_gate</c>.</summary>
+    private static void Register()
+    {
+        if (_registered) return;
+        _registered = true;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => WriteAtExit();
+    }
+
+    private static void WriteAtExit()
+    {
+        string summary = Summary();
+        Console.Error.WriteLine(summary);
+        string? path = Environment.GetEnvironmentVariable(EnvVar);
+        if (!string.IsNullOrWhiteSpace(path)) AppendTo(path);
+    }
 }

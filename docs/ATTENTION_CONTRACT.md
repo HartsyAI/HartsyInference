@@ -294,6 +294,16 @@ The planner reproduces these until the row that owns each is rewritten.
   `c3a55333c` vs main `712ea2ca7`: 832x480 knob steps 92.7 / 92.0 s, peaks 19585 / 19718 MiB; main steps 90.7 / 91.7 s, peaks
   20175 / 20051 MiB; the knob reproduces its output (two runs, same sha `6182eb4a`); main does not. These rows were measured on the
   previous gate (the rung), so the 832x480 and 640x368 A/B must be re-run on this gate before default-on.
+- Reading the free-memory log (`numerics.tileFromDevice` A/B). Two switches, set together for a run:
+  `HARTSY_GPU_TEST_KNOBS=numerics.tileFromDevice=true` turns the knob on for a GpuIntegration test run (test projects only), and
+  `HARTSY_TILE_FREE_LOG=<file>` names the file each process appends its summary to (any run: the CLI generation or a test host). The
+  variable is read only when the knob is on, so an ordinary run writes nothing. The file gets one block per process: a `# pid=… utc=…` line,
+  then a `tileFromDevice: calls=… halved=… totalMiB=… freeMiB min/max=… tileRows=[…]` line (every tiled score-tile call) and one
+  `tileFromDevice gate=<tiles|bf16cast|cast.score|causal> decisions=… over=… freeLimited=…` line per budget gate. `over` counts calls whose
+  bytes exceeded the gate's budget (the tiled or fallback side); `freeLimited` counts decisions where free VRAM, not half the total, set
+  the budget. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted. A tile line at
+  `halved>0` means an OOM halved that call's tile. Stderr also shows the summary, but `dotnet test` at default verbosity hides a test
+  host's stderr, so read the file.
 - CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
   attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
   Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
