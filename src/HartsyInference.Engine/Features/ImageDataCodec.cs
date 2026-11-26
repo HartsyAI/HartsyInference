@@ -9,6 +9,11 @@ public static class ImageDataCodec
     /// <summary>Decodes PNG bytes. Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
     public static ImageData Decode(ReadOnlySpan<byte> encoded)
     {
+        if (JpegDecoder.IsJpeg(encoded))
+        {
+            (byte[] jpg, int jw, int jh) = JpegDecoder.Decode(encoded);
+            return new ImageData { Rgb = jpg, Width = jw, Height = jh };
+        }
         RequirePng(encoded);
         (byte[] rgb, int width, int height) = PngDecoder.Decode(encoded);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
@@ -22,6 +27,7 @@ public static class ImageDataCodec
     public static ImageData DecodeBase64WithAlpha(string base64)
     {
         byte[] bytes = Base64Payload(base64);
+        if (JpegDecoder.IsJpeg(bytes)) return Decode(bytes);   // JPEG has no alpha plane
         RequirePng(bytes);
         DecodedPng png = PngDecoder.DecodeWithAlpha(bytes);
         return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
@@ -55,7 +61,7 @@ public static class ImageDataCodec
         if (!IsPng(encoded))
         {
             throw new NotSupportedException(
-                $"Unsupported image format (leading bytes {Describe(encoded)}). The engine decodes PNG; re-encode the image as PNG.");
+                $"Unsupported image format (leading bytes {Describe(encoded)}). The engine decodes PNG and baseline JPEG; re-encode the image as one of them.");
         }
     }
 
