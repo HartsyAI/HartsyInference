@@ -244,7 +244,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
         state.Previous2[index] = previous1;
         state.Previous1[index] = current;
 
-        Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
+        using Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
         backend.Transpose2D(tokenMajor, conv, dim, tokens);
         conv.Dispose();
         using Tensor normed = FastFramesOps.LayerNormAffine(backend, tokenMajor, block.NormW, block.NormB, _config.Eps);
