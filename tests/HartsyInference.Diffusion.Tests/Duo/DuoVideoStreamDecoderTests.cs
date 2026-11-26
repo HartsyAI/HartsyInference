@@ -16,7 +16,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void TheFirstChunkDecodesNothing()
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
 
         Assert.Empty(decoder.OnChunk(Chunk(0)));
         Assert.Empty(windows);
@@ -30,7 +30,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void EveryChunkPublishesOneBlockAndEndPublishesTheLastOnce(int chunks)
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
         List<DuoDecodedBlock> blocks = [];
         for (int c = 0; c < chunks; c++)
         {
@@ -48,7 +48,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void WindowsHoldTheRightLatentsAtEveryStep()
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
         decoder.OnChunk(Chunk(0));
         decoder.OnChunk(Chunk(1));
         decoder.OnChunk(Chunk(2));
@@ -66,7 +66,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void EndAfterOneChunkUsesItsOwnLastTwoLatents()
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
         decoder.OnChunk(Chunk(0));
         List<DuoDecodedBlock> blocks = decoder.End().ToList();
 
@@ -79,7 +79,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void EachBlockIsTheCroppedFramesOfItsWindowInRgbAsDerivedFromUpstream()
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
         decoder.OnChunk(Chunk(0));
         DuoDecodedBlock first = decoder.OnChunk(Chunk(1)).Single();
         DuoDecodedBlock second = decoder.OnChunk(Chunk(2)).Single();
@@ -104,7 +104,7 @@ public sealed class DuoVideoStreamDecoderTests
     [Fact]
     public void AChunkOfTheWrongShapeIsRefused()
     {
-        DuoVideoStreamDecoder decoder = new(FakeDecoder([]));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder([]));
         Assert.Throws<ArgumentException>(() => decoder.OnChunk(new Tensor(new TensorShape(new long[] { 1, 24, 4, Height, Width }), DType.F32)));
     }
 
@@ -112,7 +112,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void HistoryStaysBoundedOverALongStream()
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
         for (int c = 0; c < 12; c++)
         {
             decoder.OnChunk(Chunk(c));
@@ -126,7 +126,7 @@ public sealed class DuoVideoStreamDecoderTests
     public void AWindowAtFourChunksSlidesToChunksOneAndTwo()
     {
         List<float[]> windows = [];
-        DuoVideoStreamDecoder decoder = new(FakeDecoder(windows));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder(windows));
         for (int c = 0; c < 4; c++)
         {
             decoder.OnChunk(Chunk(c));
@@ -138,7 +138,7 @@ public sealed class DuoVideoStreamDecoderTests
     [Fact]
     public void AChunkOfAnotherTypeOrSizeIsRefused()
     {
-        DuoVideoStreamDecoder decoder = new(FakeDecoder([]));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder([]));
         decoder.OnChunk(Chunk(0));
         Assert.Throws<ArgumentException>(() => decoder.OnChunk(new Tensor(new TensorShape(new long[] { 1, 24, 5, Height, Width }), DType.F16)));
         Assert.Throws<ArgumentException>(() => decoder.OnChunk(new Tensor(new TensorShape(new long[] { 1, 24, 5, Height + 2, Width }), DType.F32)));
@@ -147,7 +147,7 @@ public sealed class DuoVideoStreamDecoderTests
     [Fact]
     public void ChunksAfterEndAndASecondEndAreRefused()
     {
-        DuoVideoStreamDecoder decoder = new(FakeDecoder([]));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder([]));
         decoder.OnChunk(Chunk(0));
         decoder.End();
         Assert.Throws<InvalidOperationException>(() => decoder.OnChunk(Chunk(1)));
@@ -160,7 +160,7 @@ public sealed class DuoVideoStreamDecoderTests
         List<float[]> windows = [];
         bool fail = false;
         Func<Tensor, Tensor> inner = FakeDecoder(windows);
-        DuoVideoStreamDecoder decoder = new(window => fail ? throw new InvalidOperationException("decoder down") : inner(window));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, window => fail ? throw new InvalidOperationException("decoder down") : inner(window));
         decoder.OnChunk(Chunk(0));
         int retained = decoder.RetainedChunks;
 
@@ -181,7 +181,7 @@ public sealed class DuoVideoStreamDecoderTests
         List<float[]> windows = [];
         bool fail = false;
         Func<Tensor, Tensor> inner = FakeDecoder(windows);
-        DuoVideoStreamDecoder decoder = new(window => fail ? throw new InvalidOperationException("decoder down") : inner(window));
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, window => fail ? throw new InvalidOperationException("decoder down") : inner(window));
         decoder.OnChunk(Chunk(0));
         decoder.OnChunk(Chunk(1));
 
@@ -192,6 +192,20 @@ public sealed class DuoVideoStreamDecoderTests
         Assert.Equal(1, last.Block);
         Assert.Equal(Expected((0, 0, 5), (1, 0, 5), (1, 3, 2)), windows[^1]);
         Assert.Throws<InvalidOperationException>(() => decoder.End());
+    }
+
+    [Fact]
+    public void DisposeFreesTheRetainedChunksAndRefusesMoreChunks()
+    {
+        DuoVideoStreamDecoder decoder = new(TestBackends.Cpu, FakeDecoder([]));
+        decoder.OnChunk(Chunk(0));
+        decoder.OnChunk(Chunk(1));
+        Assert.Equal(2, decoder.RetainedChunks);
+
+        decoder.Dispose();
+        decoder.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => decoder.OnChunk(Chunk(2)));
     }
 
     private static Func<Tensor, Tensor> FakeDecoder(List<float[]> windows) => window =>
