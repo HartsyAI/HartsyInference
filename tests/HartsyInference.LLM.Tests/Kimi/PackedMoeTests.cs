@@ -22,9 +22,10 @@ public sealed class PackedMoeTests(ITestOutputHelper output)
     private const float ExactTolerance = 1e-5f;
 
     /// <summary>CUDA's default runs the router, latent and shared-expert GEMMs in TF32; the packed projections are an F32 kernel
-    /// there too. This is the TF32 figure of <c>docs/ATTENTION_CONTRACT.md</c> §8: a bound on the relative L2, paired with an absolute
-    /// one of this figure times the largest |reference|, which the test holds for each element. Measured on an RTX 4090 at
-    /// <c>7679bde01</c>: relative L2 6.9e-4; the largest difference over max(1, |reference|) 2.7e-3, at element 33.</summary>
+    /// there too. The relative L2 bound is the TF32 figure of <c>docs/ATTENTION_CONTRACT.md</c> §8. A relative L2 alone lets one element
+    /// be far off, so the test also caps each element's absolute difference at this figure times the largest |reference|, the size of
+    /// §8's absolute floor. Measured on an RTX 4090 at <c>7679bde01</c>: relative L2 6.9e-4; the largest difference over
+    /// max(1, |reference|) 2.7e-3, at element 33.</summary>
     private const float Tf32Tolerance = 2e-3f;
 
     private static readonly float[] E2M1 = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
