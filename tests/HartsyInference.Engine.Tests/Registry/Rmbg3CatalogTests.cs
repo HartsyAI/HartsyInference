@@ -97,13 +97,27 @@ public sealed class Rmbg3CatalogTests
     }
 
     [Fact]
-    public void CatalogFeatures_RmbgFourteenHasNoMatteOrReleaseFlag()
+    public void CatalogFeatures_RmbgFourteenIsABackgroundRemoverButNotAMatteOrReleaseModel()
     {
-        CatalogFeatures features = ModelCatalog.Find("rmbg")?.Features ?? CatalogFeatures.None;
-
-        Assert.False(features.HasFlag(CatalogFeatures.AlphaMatte));
-        Assert.False(features.HasFlag(CatalogFeatures.ReleasesGeneratorFirst));
+        CatalogEntry rmbg = ModelCatalog.Find("rmbg") ?? throw new InvalidOperationException("rmbg missing from the catalog");
+        Assert.True(rmbg.Features.HasFlag(CatalogFeatures.BackgroundRemoval));
+        Assert.False(rmbg.Features.HasFlag(CatalogFeatures.AlphaMatte));
+        Assert.False(rmbg.Features.HasFlag(CatalogFeatures.ReleasesGeneratorFirst));
         Assert.False(BackgroundRemovalStage.NeedsGeneratorReleased(new ImageRequest { Prompt = "", RemoveBackground = true }));
+    }
+
+    [Fact]
+    public void EveryAlphaMatteEntry_IsRoutedToTheRmbg3VariantOnTheFiboRecipe()
+    {
+        // A new AlphaMatte entry fails here until it is named in Fibo2Recipe.Matches and Fibo2Variants, so it cannot run silently on the Dev defaults.
+        List<CatalogEntry> matters = ModelCatalog.All.Where(e => e.Features.HasFlag(CatalogFeatures.AlphaMatte)).ToList();
+        Assert.Equal(2, matters.Count);
+
+        foreach (CatalogEntry entry in matters)
+        {
+            Assert.True(new Fibo2Recipe().Matches(entry.Id), $"Fibo2Recipe.Matches does not claim '{entry.Id}'.");
+            Assert.True(VariantFor(entry.Id).Is(Fibo2Variants.Rmbg3), $"'{entry.Id}' does not resolve to the RMBG 3.0 variant.");
+        }
     }
 
     [Fact]

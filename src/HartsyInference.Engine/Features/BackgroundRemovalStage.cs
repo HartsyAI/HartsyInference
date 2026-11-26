@@ -6,14 +6,15 @@ using HartsyInference.Engine.Requests;
 namespace HartsyInference.Engine.Features;
 
 /// <summary>Cuts the subject out of a finished generation. The matte (RMBG-1.4 unless
-/// <see cref="ImageRequest.RemoveBackgroundModel"/> names RMBG 3.0) becomes <see cref="ImageResult.Alpha"/> and
+/// <see cref="ImageRequest.RemoveBackgroundModel"/> names another catalog entry flagged <see cref="CatalogFeatures.BackgroundRemoval"/>,
+/// such as RMBG 3.0) becomes <see cref="ImageResult.Alpha"/> and
 /// the generated RGB is left exactly as it was, so the caller composites the cutout against whatever it likes. Mirrors
 /// where the ComfyUI backend puts its <c>SwarmRemBg</c> node — last, over the final pixels, after every refine pass.
 /// <para>Deliberately NOT an <see cref="Recipes.ImageFeatures"/> bit: this is pixel post-processing that works for any
 /// family, so no recipe has to declare it.</para></summary>
 public static class BackgroundRemovalStage
 {
-    /// <summary>The matter ids <see cref="ImageRequest.RemoveBackgroundModel"/> accepts; RMBG-1.4 is the default.</summary>
+    /// <summary>The matter id <see cref="ImageRequest.RemoveBackgroundModel"/> defaults to (RMBG-1.4, flagged BackgroundRemoval in the catalog).</summary>
     public const string DefaultModelId = "rmbg";
 
     /// <summary>The catalog id of the matter <paramref name="request"/> asks for, or null when it asks for no cutout.</summary>
@@ -26,10 +27,15 @@ public static class BackgroundRemovalStage
         {
             return named ? throw new NotSupportedException("RemoveBackgroundModel needs RemoveBackground to be on.") : null;
         }
-        string id = named ? request.RemoveBackgroundModel!.Trim().ToLowerInvariant() : DefaultModelId;
-        return id == DefaultModelId || HasFeature(id, CatalogFeatures.BackgroundRemoval)
-            ? id
-            : throw new NotSupportedException($"Background removal runs rmbg (RMBG-1.4) or a catalog model flagged BackgroundRemoval; '{id}' is not one of them.");
+        string id = named ? request.RemoveBackgroundModel!.Trim() : DefaultModelId;
+        if (HasFeature(id, CatalogFeatures.BackgroundRemoval))
+        {
+            return ModelCatalog.Find(id)!.Id;
+        }
+        string valid = string.Join(", ", ModelCatalog.All
+            .Where(entry => entry.Features.HasFlag(CatalogFeatures.BackgroundRemoval))
+            .Select(entry => entry.Id));
+        throw new NotSupportedException($"Background removal runs a catalog model flagged BackgroundRemoval ({valid}); '{id}' is not one of them.");
     }
 
     /// <summary>Whether the cutout runs a model that needs the generating pipeline released first (catalog flag).</summary>
