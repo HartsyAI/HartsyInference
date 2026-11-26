@@ -6307,11 +6307,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return raised >= MinTileScoreBytes ? new TileCap(0, 0, cap.ProbeAfter) : new TileCap(raised, 0, cap.ProbeAfter);
     }
 
-    /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
-    /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
-    /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
-    /// it limits the tile like the free-memory reading does, so a card that really is full pays its allocation failures once and not on every call.</summary>
-    /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
     /// <summary>The fixed score-tile rung of a device, for <c>numerics.tileFromDevice</c>: 1 GiB at 20 GB total or more, else 512 MiB.</summary>
     internal static long TileRungBytes(ulong deviceTotalBytes) => deviceTotalBytes >= 20UL << 30 ? 1L << 30 : 512L << 20;
 
@@ -6330,6 +6325,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return Math.Min(rows, cap);
     }
 
+    /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
+    /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
+    /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
+    /// it limits the tile like the free-memory reading does, so a card that really is full pays its allocation failures once and not on every call.</summary>
+    /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
     internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced, long capBytes = 0)
     {
         long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
