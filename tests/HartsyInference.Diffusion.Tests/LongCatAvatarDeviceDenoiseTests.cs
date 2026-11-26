@@ -14,17 +14,12 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
     private const int Frames = 5, Height = 4, Width = 4, TextLength = 6, Steps = 3;
     private static readonly int Hw = Height * Width;
     private readonly CpuBackend _backend = new();
-    private readonly LongCatConfig _config = new()
-    {
-        HiddenSize = 128, Depth = 2, NumHeads = 4, InChannels = 4, OutChannels = 4, CaptionChannels = 48, AdalnTembedDim = 64,
-        FrequencyEmbeddingSize = 64, PatchSize = (1, 2, 2), TextTokensZeroPad = true, AudioOutputDim = 16, AudioWindow = 5, AudioBlock = 3,
-        AudioChannel = 6, AudioIntermediateDim = 16, AudioContextTokens = 4, AudioVaeScale = 4,
-    };
+    private readonly LongCatConfig _config = LongCatTestData.TinyAvatar;
     private readonly Dictionary<string, Tensor> _weights;
 
     public LongCatAvatarDeviceDenoiseTests()
     {
-        _weights = AvatarWeights(71);
+        _weights = LongCatTestData.AvatarWeights(_config, 71);
     }
 
     public void Dispose()
@@ -170,51 +165,6 @@ public sealed class LongCatAvatarDeviceDenoiseTests : IDisposable
     }
 
     /// <summary>The tiny config's base weights plus the avatar's audio projection and each block's audio step, with seeded values.</summary>
-    private Dictionary<string, Tensor> AvatarWeights(int seed)
-    {
-        Dictionary<string, Tensor> weights = LongCatTestData.Weights(_config, seed);
-        Random rng = new(seed + 1);
-        int h = _config.HiddenSize, ctx = _config.AudioContextTokens, outDim = _config.AudioOutputDim, inter = _config.AudioIntermediateDim;
-        int seqLen = _config.AudioWindow, seqLenVf = _config.AudioWindow + _config.AudioVaeScale - 1, blocks = _config.AudioBlock, channels = _config.AudioChannel;
-        void Add(string key, params int[] dims) => weights[key] = RandomTensor(rng, dims);
-        Add("audio_proj.proj1.weight", inter, seqLen * blocks * channels);
-        Add("audio_proj.proj1.bias", inter);
-        Add("audio_proj.proj1_vf.weight", inter, seqLenVf * blocks * channels);
-        Add("audio_proj.proj1_vf.bias", inter);
-        Add("audio_proj.proj2.weight", inter, inter);
-        Add("audio_proj.proj2.bias", inter);
-        Add("audio_proj.proj3.weight", ctx * outDim, inter);
-        Add("audio_proj.proj3.bias", ctx * outDim);
-        Add("audio_proj.norm.weight", outDim);
-        Add("audio_proj.norm.bias", outDim);
-        for (int b = 0; b < _config.Depth; b++)
-        {
-            string p = $"blocks.{b}.";
-            Add(p + "audio_adaLN_modulation.1.weight", 3 * h, _config.AdalnTembedDim);
-            Add(p + "audio_adaLN_modulation.1.bias", 3 * h);
-            Add(p + "pre_video_crs_attn_norm.weight", h);
-            Add(p + "pre_video_crs_attn_norm.bias", h);
-            Add(p + "audio_cross_attn.q_linear.weight", h, h);
-            Add(p + "audio_cross_attn.q_linear.bias", h);
-            Add(p + "audio_cross_attn.kv_linear.weight", 2 * h, outDim);
-            Add(p + "audio_cross_attn.kv_linear.bias", 2 * h);
-            Add(p + "audio_cross_attn.q_norm.weight", _config.HeadDim);
-            Add(p + "audio_cross_attn.k_norm.weight", _config.HeadDim);
-            Add(p + "audio_cross_attn.proj.weight", h, h);
-            Add(p + "audio_cross_attn.proj.bias", h);
-        }
-        return weights;
-    }
-
-    private static Tensor RandomTensor(Random rng, params int[] dims)
-    {
-        Tensor tensor = new(new TensorShape(dims.Select(d => (long)d).ToArray()), DType.F32);
-        Span<float> values = tensor.AsSpan<float>();
-        for (int i = 0; i < values.Length; i++)
-            values[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
-        return tensor;
-    }
-
     private static float[] RandomArray(Random rng, int count)
     {
         float[] values = new float[count];
