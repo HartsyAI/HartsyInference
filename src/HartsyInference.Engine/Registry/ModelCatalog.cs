@@ -1188,7 +1188,7 @@ public static class ModelCatalog
             Hy4FlashCatalog.Instruct(),
             Hy4FlashCatalog.Fp8(),
             Hy4FlashCatalog.Base(),
-            // Text / LLM — Maxwell-V1.0-Flash: host reference model (MaxwellModel, block-sparse attention with its indexer) on the Text path; structural until a real-weight run.
+            // Text / LLM — Maxwell-V1.0-Flash: host reference model (MaxwellModel, block-sparse attention with its indexer) on the Text path; CUDA real-weight run passed through TextService, reference token comparison pending.
             MaxwellCatalog.Build(),
 
             // Text / LLM — Kimi K3.1 Pro: text decoder on the Text path (device-chosen backend, no vision, single device); structural until a real run.
@@ -2554,8 +2554,9 @@ public static class ModelCatalog
                 CliDrivable = true, // `hartsy fx separate <wav> -m kim-vocal-2`, and `hartsy video --driving-audio <wav> --separate-vocals`.
                 // Weights: the vocal_separator/Kim_Vocal_2.onnx file of meituan-longcat/LongCat-Video-Avatar-1.6 (66,759,214 bytes, sha256 pinned in
                 // FxCatalog), read straight from the .onnx by ModelAssets/Onnx. Licence: not stated by the file, the repo or UVR's model repository
-                // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend; no numerical match against
-                // onnxruntime yet, hence ValidationPending (docs/Checklists/MODEL_STATUS_AUDIO.md).
+                // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend.
+                // The network and stem match onnxruntime (docs/Checklists/PARITY_VERIFICATION.md); the audio-separator driver and the librosa
+                // resample are uncompared, hence ValidationPending.
             },
 
             new CatalogEntry

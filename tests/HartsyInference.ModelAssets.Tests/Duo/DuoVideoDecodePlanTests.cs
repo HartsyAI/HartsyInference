@@ -19,10 +19,21 @@ public sealed class DuoVideoDecodePlanTests
         Assert.True(spec.Delayed);
     }
 
-    [Fact]
-    public void AnUnknownModeIsRefusedNotGuessed()
+    [Theory]
+    [InlineData("old")]
+    [InlineData("sana_1_4")]
+    [InlineData("duo_2_5")]
+    [InlineData("duo_5_18")]
+    public void UnreleasedAndUnknownModesAreRefused(string mode)
     {
-        Assert.Throws<ArgumentException>(() => DuoCodecSpec.Get("duo_5_18"));
+        Assert.Throws<NotSupportedException>(() => DuoCodecSpec.Get(mode));
+    }
+
+    [Fact]
+    public void EofIsMarkedOnlyOnTheEndCall()
+    {
+        Assert.False(DuoVideoDecodePlan.OnChunk(1)!.Value.EndOfStream);
+        Assert.True(DuoVideoDecodePlan.AtEnd(2)!.Value.EndOfStream);
     }
 
     [Fact]
