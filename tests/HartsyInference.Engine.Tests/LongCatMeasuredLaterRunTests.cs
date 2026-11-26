@@ -28,7 +28,7 @@ public sealed class LongCatMeasuredLaterRunTests
 
     /// <summary>The measured workload's key: the plan the measurement ran (24-latent segments, 4 context latents, 20 new, distilled).</summary>
     private static long? Peak(int width, int height, int newLatents = 20, int contextLatents = 4, bool distilled = true) =>
-        LongCatRecipeSupport.MeasuredReservedPeak(width, height, newLatents, contextLatents, distilled);
+        LongCatRecipeSupport.MeasuredReservedPeak(DeviceType.Cuda, width, height, newLatents, contextLatents, distilled);
 
     private static long Measured(int width, int height, long cache) =>
         LongCatRecipeSupport.BudgetHeadroomBytes(NoisyTokens(width, height), 4096, 11008, Peak(width, height), cache);
@@ -44,6 +44,15 @@ public sealed class LongCatMeasuredLaterRunTests
         Assert.Null(Peak(1024, 576));
         Assert.Null(Peak(832, 464));
         Assert.Null(Peak(832, 480, distilled: false));
+    }
+
+    [Fact]
+    public void AVulkanRunHasNoMeasuredPeakEvenAtAMeasuredSize()
+    {
+        // The measurement is CUDA's reserved bytes; the same size on Vulkan keeps the estimate.
+        Assert.Null(LongCatRecipeSupport.MeasuredReservedPeak(DeviceType.Vulkan, 640, 368, 20, 4, true));
+        Assert.Null(LongCatRecipeSupport.MeasuredReservedPeak(DeviceType.Vulkan, 832, 480, 20, 4, true));
+        Assert.Equal(7808 * Mb, LongCatRecipeSupport.MeasuredReservedPeak(DeviceType.Cuda, 640, 368, 20, 4, true));
     }
 
     [Fact]

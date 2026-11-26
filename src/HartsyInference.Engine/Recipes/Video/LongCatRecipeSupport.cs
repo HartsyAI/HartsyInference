@@ -110,7 +110,8 @@ internal static class LongCatRecipeSupport
 
     /// <summary>One measured later-run workload: the size, the new and context latents of its segment, whether it was the distilled pipeline, and the
     /// allocator's reserved bytes at the worst step of the later segment.</summary>
-    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes);
+    internal readonly record struct MeasuredLaterRun(int Width, int Height, int NewLatents, int ContextLatents, bool Distilled, long ReservedPeakBytes,
+        DeviceType Device = DeviceType.Cuda);
 
     /// <summary>The later runs measured on the GPU: main c5fec5d37 with the refusal bypassed in a scratch copy, all eight steps, no OOM. The key is
     /// exactly what was measured. A segment of other new or context latents, another size, or the undistilled pipeline has no entry and keeps the
@@ -130,11 +131,12 @@ internal static class LongCatRecipeSupport
 
     /// <summary>The reserved peak measured for exactly this workload (size, new and context latents, distilled), or null when it was not measured. A null
     /// keeps the per-token estimate and its refusal.</summary>
-    internal static long? MeasuredReservedPeak(int width, int height, int newLatents, int contextLatents, bool distilled)
+    internal static long? MeasuredReservedPeak(DeviceType device, int width, int height, int newLatents, int contextLatents, bool distilled)
     {
+        // The pool's reserved bytes are the CUDA allocator's. A Vulkan (or any other) run has no measurement, so it keeps the estimate.
         foreach (MeasuredLaterRun run in MeasuredLaterRuns)
-            if (run.Width == width && run.Height == height && run.NewLatents == newLatents && run.ContextLatents == contextLatents
-                && run.Distilled == distilled)
+            if (run.Device == device && run.Width == width && run.Height == height && run.NewLatents == newLatents
+                && run.ContextLatents == contextLatents && run.Distilled == distilled)
                 return run.ReservedPeakBytes;
         return null;
     }
