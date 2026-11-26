@@ -226,6 +226,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
             for (int i = 0; i < _blocks.Length; i++)
             {
+                BeforeBlockForward?.Invoke(i);
                 string layer = StreamLayerName(i);
                 if (encode && i >= fullHistoryBlocks) cache.TrimToSink(layer, MovieRollSinkChunks);
                 if (encode && i == _blocks.Length - 1)
@@ -446,6 +447,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width,
         Tensor[] temb, TokenSegmentLayout[] layouts)
     {
+        // One hook per block, before any of its chunks run, so the streamer stages the block for the whole chunked pass.
+        BeforeBlockForward?.Invoke(block);
         bool lastBlock = block == _blocks.Length - 1;
         if (lastBlock)
         {
