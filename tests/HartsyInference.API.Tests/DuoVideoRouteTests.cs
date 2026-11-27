@@ -103,6 +103,19 @@ public sealed class DuoVideoRouteTests : IAsyncLifetime
         }
     }
 
+    [Theory]
+    [InlineData("/v1/native/video/plan")]
+    [InlineData("/v1/native/video/stream")]
+    public async Task AMissingRunFolderIsA404NamingWhatTheClientSent(string route)
+    {
+        HttpResponseMessage response = await _http.PostAsJsonAsync(route, Body("no-such-run", window: 34));
+        string text = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("no-such-run", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(Path.GetFileName(_release.Root), text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ThePlanRouteAcceptsAFullPathUnderTheModelsRoot()
     {

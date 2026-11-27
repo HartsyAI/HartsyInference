@@ -341,14 +341,15 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        int exitCode;
-        bool duo = settings.DuoRunFolder is not null || settings.DuoWindowFrames is not null;
-        if (duo && !DuoCliGate.IsDuo(ModelSelector.Parse(settings.Model).Id))
+        // Refused here, before any file is looked for or offered for download.
+        string family = ModelSelector.Parse(settings.Model).Id;
+        if (DuoCliGate.Refusal(family, settings.DuoRunFolder, settings.DuoWindowFrames) is { } refusal)
         {
-            AnsiConsole.MarkupLine("[red]--duo-run-folder and --duo-window-frames need -m duo-v1-causal or -m duo-v1-2-causal.[/]");
+            AnsiConsole.MarkupLine($"[red]{refusal}[/]");
             return 1;
         }
-        if (!duo && !CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out exitCode))
+        int exitCode;
+        if (!DuoCliGate.IsDuo(family) && !CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out exitCode))
             return exitCode;
 
         if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
@@ -481,6 +482,19 @@ internal static class DuoCliGate
     /// <summary>True when <paramref name="family"/> resolves to the Duo recipe.</summary>
     internal static bool IsDuo(string? family) =>
         !string.IsNullOrEmpty(family) && VideoRecipeRegistry.Resolve(family) is DuoRecipe;
+
+    /// <summary>Why the run options do not fit <paramref name="family"/>, or null when they do: Duo needs a run folder, and no other family
+    /// takes the options.</summary>
+    internal static string? Refusal(string? family, string? runFolder, int? windowFrames)
+    {
+        if (IsDuo(family))
+        {
+            return string.IsNullOrWhiteSpace(runFolder) ? "Duo takes no prompt; it needs --duo-run-folder." : null;
+        }
+        return runFolder is null && windowFrames is null
+            ? null
+            : "--duo-run-folder and --duo-window-frames need -m duo-v1-causal or -m duo-v1-2-causal.";
+    }
 }
 
 /// <summary>The LongCat-Video-Avatar gates the video command applies. Keyed on the family the request resolves to through the recipe

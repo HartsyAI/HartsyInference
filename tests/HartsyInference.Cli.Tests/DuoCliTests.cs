@@ -58,4 +58,15 @@ public sealed class DuoCliTests
     [InlineData("", false)]
     public void OnlyTheCausalDuoModelsTakeTheRunOptions(string model, bool expected) =>
         Assert.Equal(expected, DuoCliGate.IsDuo(model));
+
+    [Fact]
+    public void ADuoRunWithoutAFolderAndAnotherFamilyWithDuoOptionsAreRefusedUpFront()
+    {
+        Assert.Contains("--duo-run-folder", DuoCliGate.Refusal("duo-v1-causal", null, null), StringComparison.Ordinal);
+        Assert.Contains("--duo-run-folder", DuoCliGate.Refusal("duo-v1-causal", null, 34), StringComparison.Ordinal);
+        Assert.Null(DuoCliGate.Refusal("duo-v1-causal", "run", null));
+        Assert.Null(DuoCliGate.Refusal("minimax-h3", null, null));
+        Assert.NotNull(DuoCliGate.Refusal("minimax-h3", "run", null));
+        Assert.NotNull(DuoCliGate.Refusal("", null, 34));
+    }
 }

@@ -11,7 +11,8 @@ namespace HartsyInference.API.Endpoints;
 internal static class DuoRunFolderGate
 {
     /// <summary>Replaces the request's run folder with its full path under the models root (a relative one is taken under it). Returns the
-    /// 400 to answer with when the value is not a folder name under that root, else null. The message repeats nothing of the server path.</summary>
+    /// 400 to answer with when the value is not a folder name under that root, the 404 when no such folder exists, else null. A message
+    /// repeats the value as given, never the resolved server path.</summary>
     public static IResult? Confine(NativeVideoRequest request)
     {
         if (request.Request?.Extra is null || !request.Request.Extra.TryGetValue(DuoRecipePipeline.RunFolderKey, out object? value))
@@ -41,6 +42,11 @@ internal static class DuoRunFolderGate
         if (!PackageListing.IsUnder(full, modelsRoot))
         {
             return Refuse("is outside the models root; over HTTP a run folder must be under it.");
+        }
+        if (!Directory.Exists(full))
+        {
+            return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound,
+                $"Extra[\"{DuoRecipePipeline.RunFolderKey}\"]: '{folder}' is not a directory.", "invalid_request_error");
         }
         Dictionary<string, object> extra = new(request.Request.Extra, StringComparer.Ordinal)
         {
