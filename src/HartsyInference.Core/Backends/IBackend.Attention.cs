@@ -67,6 +67,25 @@ public partial interface IBackend
     void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default) =>
         throw NotSupportedPrimitive(nameof(SolAttention));
 
+    /// <summary>Whether <see cref="BlockSparseAttention"/> runs on this backend. False by default, and a call made anyway is
+    /// refused.</summary>
+    bool HasBlockSparseAttention => false;
+
+    /// <summary>Block-sparse attention over a 3D token grid (<see cref="BlockSparseAttentionReference"/>): each query block scores
+    /// every key block by the dot product of the two blocks' mean rows, keeps the highest, and its tokens attend exactly those
+    /// blocks' keys. Operands and output are in <c>(T, H, W)</c> raster order.</summary>
+    /// <param name="output">F32 <c>[B, H, Sq, D]</c>; must not be an input.</param>
+    /// <param name="query">F32 <c>[B, H, Sq, D]</c>, already normed and rotated.</param>
+    /// <param name="key">F32 <c>[B, H, Sk, D]</c>.</param>
+    /// <param name="value">F32 <c>[B, H, Sk, D]</c>.</param>
+    /// <param name="options">The grids, blocks, sparsity and score multiplier.</param>
+    /// <param name="selected">When not null, receives each query block's key blocks, ascending, as I32
+    /// <c>[B, H, QueryBlocks, SelectedBlocks]</c>.</param>
+    /// <exception cref="NotSupportedException">The backend has no block-sparse attention; see
+    /// <see cref="HasBlockSparseAttention"/>.</exception>
+    void BlockSparseAttention(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
+        Tensor? selected = null) => throw NotSupportedPrimitive(nameof(BlockSparseAttention));
+
     /// <summary>Whether the backend has any kernel that reads paged keys and values. False by default, and a caller then
     /// builds no paged call at all.</summary>
     bool HasPagedAttention => false;
