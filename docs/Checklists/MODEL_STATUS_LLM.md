@@ -226,7 +226,10 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   [HY4_FLASH_ARCHITECTURE.md](../Research/HY4_FLASH_ARCHITECTURE.md). The reference is an unmerged transformers PR; the HF-class dump script ran in the reference container and its outputs are committed under `tests/python-reference/hy4_flash/data` (see PARITY_VERIFICATION). Bar (policy: huge MoE LLMs, here Hy4 Flash 220B and Sage S2.1 Flash 320B, are verified at tiny-config parity only; a CUDA or Vulkan device path is not required):
   - Required: parity of every component on the tiny config against the HF classes; the catalog entry; status and PARITY rows that match what ran. No host loops on a device route: there is none to check.
   - Waived: real-weight generation and parity (287 GB FP8 and 440 GB BF16 not downloaded); the released tokenizer normaliser (not read); the MTP layer (the drafter's tensors are counted as skipped MTP keys); LoRA (none, see above); a CUDA and Vulkan device path (not built, not required by policy).
-  - Open: image chat through the service (embeddings prefill is refused).
+  - Open on the tiny bar: none. Decisions (2026-11-26, manager), recorded in writing:
+    - SwarmUI: deferred. The released checkpoints are refused by size (host reference, up to 1 GiB), so no SwarmUI instance can run them; only the tiny configs run, and the bar does not require a SwarmUI run for them.
+    - CLI: run by model path on the tiny synthetic checkpoint: `hartsy text "What is this?" --model-path <tiny dir> -b cpu --max-tokens 4 --temperature 0`, exit 0, `stopped_on length` after 4 tokens (random weights, so the reply text is not meaningful). The catalog rows keep `CliDrivable = false`: a catalog id would refuse the released checkpoint by size, and the CLI cannot run it.
+    - A live reasoning reply through the image route is an accepted documented limit: the random tiny checkpoint never writes the close marker; the split helper is tested (`SplitVisionReasoning_SplitsOnTheHy4Markers`).
 - [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types
   it widens to F32, then an A/B against llama.cpp CUDA ([details](#muse-spark-open)).
 
