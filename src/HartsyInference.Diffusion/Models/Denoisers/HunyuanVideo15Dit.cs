@@ -81,7 +81,6 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         _finalModW = F32(w, "final_layer.adaLN_modulation.1.weight"); _finalModB = F32(w, "final_layer.adaLN_modulation.1.bias");
         _finalW = F32(w, "final_layer.linear.weight"); _finalB = F32(w, "final_layer.linear.bias");
         _refiner.LoadWeights(w, "txt_in");
-        for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"transformer_blocks.{i}");
     }
 
     /// <summary>One block's weights under <c>transformer_blocks.{index}</c>. The block keeps references to these tensors until its next load.</summary>
