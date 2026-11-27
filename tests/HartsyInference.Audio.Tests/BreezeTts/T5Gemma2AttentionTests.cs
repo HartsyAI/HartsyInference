@@ -19,6 +19,7 @@ namespace HartsyInference.Audio.Tests.BreezeTts;
 /// <para>The tolerances were fixed before the first run: 1e-4 relative to the larger of 1 and the value on the CPU
 /// backend and on Vulkan, and 2e-3 on CUDA, whose F32 dense row multiplies in TF32 (the contract's bound for it, and
 /// what the other audio sites on that row are held to).</para></summary>
+[Collection("AttentionEvidence")]
 public sealed unsafe class T5Gemma2AttentionTests(ITestOutputHelper output)
 {
     private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f;

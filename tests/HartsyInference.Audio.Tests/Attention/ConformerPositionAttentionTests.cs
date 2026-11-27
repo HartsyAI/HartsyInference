@@ -16,6 +16,7 @@ namespace HartsyInference.Audio.Tests.Attention;
 /// key.
 /// <para>The tolerances were fixed before the first run: 1e-4 relative to the larger of 1 and the value on the CPU backend
 /// and on Vulkan, and on CUDA the contract bound for TF32, 2e-3.</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class ConformerPositionAttentionTests
 {
     private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f;

@@ -15,6 +15,7 @@ namespace HartsyInference.Audio.Tests.Attention;
 /// and the mask is the shifted block's 0 or -100. The loop is kept here, verbatim in its arithmetic, as the oracle.
 /// <para>The tolerances were fixed before the first run: 1e-4 relative to the larger of 1 and the value on the CPU backend
 /// and on Vulkan, and on CUDA the contract bound for TF32, 2e-3.</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class SwinWindowAttentionTests
 {
     private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f;
