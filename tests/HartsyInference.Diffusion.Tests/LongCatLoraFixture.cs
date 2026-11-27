@@ -16,10 +16,21 @@ internal sealed class LongCatLoraFixture : IDisposable
     private readonly Dictionary<string, Tensor> _tensors = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (Tensor Down, Tensor[] Ups)> _modules = new(StringComparer.Ordinal);
 
-    public LongCatLoraFixture(string path, LongCatConfig config, int seed, float alphaScale = 0.5f, float firstBlockAlphaScale = float.NaN)
+    /// <param name="only">When set, the file adapts that one module, which may also be one only the refinement LoRA covers
+    /// (<c>blocks.i.adaLN_modulation.1</c>, <c>blocks.i.cross_attn.proj</c>, <c>final_layer.adaLN_modulation.1</c>,
+    /// <c>final_layer.linear</c>).</param>
+    public LongCatLoraFixture(string path, LongCatConfig config, int seed, float alphaScale = 0.5f, float firstBlockAlphaScale = float.NaN,
+        string? only = null)
     {
         AlphaScale = alphaScale;
         int h = config.HiddenSize, f = config.FfnHiddenDim;
+        if (only is not null)
+        {
+            Add(only, Shape(config, only), seed, alphaScale);
+            SafeTensorsWriter.Save(path, _tensors);
+            Path = path;
+            return;
+        }
         for (int b = 0; b < config.Depth; b++)
         {
             float scale = b == 0 && !float.IsNaN(firstBlockAlphaScale) ? firstBlockAlphaScale : alphaScale;
@@ -31,25 +42,37 @@ internal sealed class LongCatLoraFixture : IDisposable
             int salt = 0;
             foreach ((string name, int input, int[] outs) in specs)
             {
-                string module = $"blocks.{b}.{name}";
-                Tensor down = LongCatTestData.Random(new TensorShape(outs.Length * Rank, input), seed + 31 * b + salt++, 0.4f);
-                Tensor[] ups = outs.Select((o, i) =>
-                    LongCatTestData.Random(new TensorShape(o, Rank), seed + 977 * b + 13 * salt + i, 0.4f)).ToArray();
-                _modules[module] = (down, ups);
-                string key = "lora___lorahyphen___" + module.Replace(".", "___lorahyphen___", StringComparison.Ordinal);
-                _tensors[key + ".lora_down.weight"] = down;
-                if (outs.Length == 1)
-                    _tensors[key + ".lora_up.weight"] = ups[0];
-                else
-                    for (int i = 0; i < outs.Length; i++)
-                        _tensors[$"{key}.lora_up.blocks.{i}.weight"] = ups[i];
-                Tensor alpha = new(new TensorShape(Array.Empty<long>()), DType.F32);
-                alpha.AsSpan<float>()[0] = scale;
-                _tensors[key + ".alpha_scale"] = alpha;
+                salt++;
+                Add($"blocks.{b}.{name}", (input, outs), seed + 31 * b + salt, scale, seed + 977 * b + 13 * salt);
             }
         }
         SafeTensorsWriter.Save(path, _tensors);
         Path = path;
+    }
+
+    private static (int In, int[] Outs) Shape(LongCatConfig config, string module)
+    {
+        string key = module + ".weight";
+        TensorShape shape = LongCatCheckpoint.ExpectedShapes(config)[key];
+        return ((int)shape[1], [(int)shape[0]]);
+    }
+
+    private void Add(string module, (int In, int[] Outs) shape, int seed, float scale, int? upSeed = null)
+    {
+        Tensor down = LongCatTestData.Random(new TensorShape(shape.Outs.Length * Rank, shape.In), seed, 0.4f);
+        Tensor[] ups = shape.Outs.Select((o, i) =>
+            LongCatTestData.Random(new TensorShape(o, Rank), (upSeed ?? seed + 7919) + i, 0.4f)).ToArray();
+        _modules[module] = (down, ups);
+        string key = "lora___lorahyphen___" + module.Replace(".", "___lorahyphen___", StringComparison.Ordinal);
+        _tensors[key + ".lora_down.weight"] = down;
+        if (shape.Outs.Length == 1)
+            _tensors[key + ".lora_up.weight"] = ups[0];
+        else
+            for (int i = 0; i < shape.Outs.Length; i++)
+                _tensors[$"{key}.lora_up.blocks.{i}.weight"] = ups[i];
+        Tensor alpha = new(new TensorShape(Array.Empty<long>()), DType.F32);
+        alpha.AsSpan<float>()[0] = scale;
+        _tensors[key + ".alpha_scale"] = alpha;
     }
 
     public string Path { get; }

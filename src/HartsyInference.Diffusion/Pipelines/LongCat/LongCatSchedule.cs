@@ -1,8 +1,9 @@
 namespace HartsyInference.Diffusion.Pipelines.LongCat;
 
 /// <summary>The LongCat-Video flow-match sigma schedule, as the pinned reference builds it: the base schedule (a linear ramp, or the
-/// distilled indices), the static shift <c>s·σ / (1 + (s − 1)·σ)</c>, and for continuation the <c>enhance_hf</c> tail. Sigmas are returned
-/// with the terminal 0 appended, timesteps are <c>σ·1000</c> per denoising step.</summary>
+/// distilled indices), the static shift <c>s·σ / (1 + (s − 1)·σ)</c>, for continuation the <c>enhance_hf</c> tail, and for the 720p
+/// refinement the cut at its noise level. Sigmas are returned with the terminal 0 appended, timesteps are <c>σ·1000</c> per
+/// denoising step.</summary>
 public sealed record LongCatSchedule(float[] Sigmas, float[] Timesteps)
 {
     /// <summary>Number of denoising steps.</summary>
@@ -32,11 +33,32 @@ public sealed record LongCatSchedule(float[] Sigmas, float[] Timesteps)
                 kept.Add(t);
         for (int i = 0; i < 10; i++)
             kept.Add(500f - i * 50f);   // numpy linspace(500, 0, 10, endpoint=False): 500, 450, …, 50
-        float[] timesteps = kept.ToArray();
-        float[] sigmas = new float[timesteps.Length + 1];
-        for (int i = 0; i < timesteps.Length; i++)
+        return FromTimesteps(kept);
+    }
+
+    /// <summary>The 720p refinement's schedule (<c>generate_refine</c>): one step at <c>threshold · 1000</c>, then every step of the
+    /// shifted base schedule below it. With 50 steps, shift 12 and threshold 0.5 that is five steps: 500, 443.0, 343.5, 207.8 and
+    /// 11.9.</summary>
+    /// <param name="threshold">The noise level the refinement starts from, in <c>(0, 1]</c>.</param>
+    public static LongCatSchedule Refinement(int steps, float shift, float threshold)
+    {
+        if (!(threshold > 0f && threshold <= 1f))
+            throw new ArgumentOutOfRangeException(nameof(threshold), threshold, "The refinement threshold lies in (0, 1].");
+        float start = threshold * 1000f;
+        List<float> timesteps = [start];
+        foreach (float t in Build(steps, distill: false, shift).Timesteps)
+            if (t < start)
+                timesteps.Add(t);
+        return FromTimesteps(timesteps);
+    }
+
+    /// <summary>A schedule that steps through <paramref name="timesteps"/>, each sigma a thousandth of its timestep.</summary>
+    private static LongCatSchedule FromTimesteps(List<float> timesteps)
+    {
+        float[] sigmas = new float[timesteps.Count + 1];
+        for (int i = 0; i < timesteps.Count; i++)
             sigmas[i] = timesteps[i] / 1000f;
-        return new LongCatSchedule(sigmas, timesteps);
+        return new LongCatSchedule(sigmas, timesteps.ToArray());
     }
 
     /// <summary>Sigmas for the denoising steps, then the terminal 0. Mirrors <c>FlowMatchEulerDiscreteScheduler.set_timesteps</c> with

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -46,6 +47,10 @@ public sealed record LongCatConfig
     /// <summary>Text rows past the valid length are zeroed after the caption projection and still attended (both shipped configs
     /// set this); off drops them.</summary>
     public bool TextTokensZeroPad { get; init; } = true;
+
+    /// <summary>The block-sparse self-attention of the 720p refinement (<c>bsa_params</c>). It runs only on a forward that asks
+    /// for it.</summary>
+    public LongCatSparseAttention SparseAttention { get; init; } = LongCatSparseAttention.Released;
 
     /// <summary>Width of the audio tokens the avatar's audio cross-attention reads (the reference's <c>output_dim</c>). Used only when a block
     /// is given audio weights.</summary>
@@ -116,6 +121,7 @@ public sealed record LongCatConfig
             FrequencyEmbeddingSize = Int(root, "frequency_embedding_size", defaults.FrequencyEmbeddingSize),
             PatchSize = patch,
             TextTokensZeroPad = zeroPad,
+            SparseAttention = SparseAttentionOf(root, defaults.SparseAttention),
             AudioOutputDim = Int(root, "output_dim", defaults.AudioOutputDim),
             AudioWindow = Int(root, "audio_window", defaults.AudioWindow),
             AudioBlock = Int(root, "audio_block", defaults.AudioBlock),
@@ -162,6 +168,40 @@ public sealed record LongCatConfig
 
     private static TensorShape Required(Func<string, TensorShape?> shapeOf, string key) =>
         shapeOf(key) ?? throw new ArgumentException($"The checkpoint has no {key}.");
+
+    /// <summary>The <c>bsa_params</c> of a config, or <paramref name="fallback"/> when it has none. Only the top-k form is
+    /// implemented, so any other parameter is refused rather than ignored.</summary>
+    private static LongCatSparseAttention SparseAttentionOf(JsonElement root, LongCatSparseAttention fallback)
+    {
+        if (!root.TryGetProperty("bsa_params", out JsonElement parameters) || parameters.ValueKind != JsonValueKind.Object)
+            return fallback;
+        LongCatSparseAttention sparse = fallback;
+        foreach (JsonProperty parameter in parameters.EnumerateObject())
+        {
+            JsonElement value = parameter.Value;
+            sparse = parameter.Name switch
+            {
+                "sparsity" when value.ValueKind == JsonValueKind.Number && value.GetDouble() is >= 0.0 and <= 1.0 =>
+                    sparse with { Sparsity = value.GetDouble() },
+                "chunk_3d_shape_q" => sparse with { QueryBlock = Block(value, parameter.Name) },
+                "chunk_3d_shape_k" => sparse with { KeyBlock = Block(value, parameter.Name) },
+                _ => throw new InvalidDataException($"The LongCat config's bsa_params.{parameter.Name} is not supported: "
+                    + "sparsity in [0, 1], chunk_3d_shape_q and chunk_3d_shape_k are."),
+            };
+        }
+        return sparse;
+    }
+
+    private static TokenGrid3D Block(JsonElement value, string name)
+    {
+        if (value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 3)
+        {
+            (int frames, int height, int width) = (Whole(value[0], name), Whole(value[1], name), Whole(value[2], name));
+            if (frames > 0 && height > 0 && width > 0)
+                return new TokenGrid3D(frames, height, width);
+        }
+        throw new InvalidDataException($"The LongCat config's bsa_params.{name} must be three positive whole numbers.");
+    }
 
     private static int Int(JsonElement root, string name, int fallback) =>
         root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.Number ? Whole(value, name) : fallback;

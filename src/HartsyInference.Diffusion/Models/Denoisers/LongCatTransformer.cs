@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Numerics;
 using System.Linq;
@@ -181,7 +182,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     /// <c>[frames·tracks·contextTokens, audioOutputDim]</c> (<see cref="LongCatAvatarAudio.JoinTracks"/>), and each block places its noisy
     /// tokens by its reference attention map. It needs at least one conditioning frame, as the reference does.
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, ReadOnlySpan<float> frameTimesteps, in LongCatConditioning conditioning,
-        int validTextTokens = -1, Tensor? audioTokens = null, LongCatSpeakers? speakers = null)
+        int validTextTokens = -1, Tensor? audioTokens = null, LongCatSpeakers? speakers = null, bool blockSparse = false)
     {
         if (!_loaded)
             throw new InvalidOperationException("The transformer has no weights: LoadWeights was never called, or it failed.");
@@ -207,6 +208,11 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
                     nameof(speakers));
             RequireSpeakers(speakers, audioTokens, frames, gridH, gridW);
         }
+        AttentionSegment[] segments = conditioning.AttentionPlan(hw, frames);
+        // The reference keeps a one-frame clip dense. The plan is built before any tensor, so a grid it refuses leaves nothing behind.
+        BlockSparseAttentionOptions[]? sparse = blockSparse && frames > 1
+            ? SparsePlan(backend, segments, hw, gridH, gridW, in conditioning, audioTokens is not null || speakers is not null)
+            : null;
 
         // The caption and timestep embeddings run first: they can throw (a bad validTextTokens), and the patch embedding is the one tensor
         // that would leak on that path.
@@ -228,8 +234,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
             Probe("rope_cos", cos);
             Probe("rope_sin", sin);
         }
-        AttentionSegment[] segments = conditioning.AttentionPlan(hw, frames);
-        LongCatBlockInputs inputs = new(frames, hw, conditioning.NumCondLatents, cos, sin, segments, FrameRowIndex(frames, hw));
+        LongCatBlockInputs inputs = new(frames, hw, conditioning.NumCondLatents, cos, sin, segments, FrameRowIndex(frames, hw), sparse);
 
         Tensor cur = hidden;
         for (int i = 0; i < _blocks.Length; i++)

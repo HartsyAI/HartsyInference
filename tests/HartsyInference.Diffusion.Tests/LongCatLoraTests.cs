@@ -187,6 +187,34 @@ public sealed class LongCatLoraTests : IDisposable
         Dispose(mergedHalf, _dense);
     }
 
+    /// <summary>The refinement LoRA also adapts the modulation projections, the cross-attention output and the final layer.</summary>
+    [Theory]
+    [InlineData("blocks.1.adaLN_modulation.1")]
+    [InlineData("blocks.0.cross_attn.proj")]
+    [InlineData("final_layer.adaLN_modulation.1")]
+    [InlineData("final_layer.linear")]
+    public void AGatedLoraOnATargetOnlyTheRefinementUsesIsTheMergedWeight(string module)
+    {
+        using LongCatLoraFixture fixture = new(PathOf("r.safetensors"), _config, 19, only: module);
+        using LoraFile file = LoraFile.Load(fixture.Path);
+        using LoraStack stack = new();
+        AdjunctGate gate = new();
+        stack.AddGated(file, gate);
+        Dictionary<string, Tensor> patched = new(_dense, StringComparer.Ordinal);
+        stack.ApplyTo(patched, LoraTarget.Transformer, _backend);
+
+        float[] baseline = Forward(_dense);
+        float[] on;
+        using (gate.Enable(1f))
+            on = Forward(patched);
+
+        Dictionary<string, Tensor> merged = fixture.MergedInto(_dense, 1f);
+        Assert.True(LongCatTestData.RelRms(on, Forward(merged)) < 2e-5, "gate on is the merged weight");
+        Assert.True(LongCatTestData.RelRms(on, baseline) > 1e-4, "the LoRA must change the output");
+        Assert.Equal(baseline, Forward(patched));
+        Dispose(merged, _dense);
+    }
+
     [Fact]
     public void PerStepSwitchingRunsTheFirstLoraThenTheSecond()
     {
