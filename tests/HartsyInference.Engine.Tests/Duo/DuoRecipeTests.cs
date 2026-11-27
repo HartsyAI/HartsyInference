@@ -131,6 +131,11 @@ public sealed class DuoRecipeTests : IDisposable
         string expected = Path.Combine(empty, "realization", "backbone");
         Assert.All(absent, path => Assert.Contains(expected, DuoRecipe.BackboneRefusal(Spec(path)), StringComparison.Ordinal));
         Assert.Null(DuoRecipe.BackboneRefusal(new ModelSpec { Requested = empty, Modality = Modality.Video, LocalPath = empty }));
+        // A LoRA folder on disk under another name is accepted, as construction accepts it.
+        string renamed = Path.Combine(_release.Release, "realization", "lora");
+        Directory.Move(_release.Dcp, renamed);
+        Assert.Null(DuoRecipe.BackboneRefusal(Spec(renamed)));
+        Assert.Null(DuoRecipe.BackboneRefusal(Spec(Path.Combine(renamed, "__0_0.distcp"))));
     }
 
     [Fact]

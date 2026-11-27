@@ -32,12 +32,18 @@ internal sealed record DuoAssets(string LoraDirectory, IReadOnlyList<string> Bac
             Codec(components?.AudioVae, Path.Combine(root, "codec", "audio_vae", "diffusion_pytorch_model.safetensors"), "audio VAE"));
     }
 
-    /// <summary>Where the backbone of the release at <paramref name="checkpointPath"/> belongs: the release folder, its
-    /// <c>realization/dcp</c> folder or a file in it. Told apart by name, so no file has to exist yet.</summary>
+    /// <summary>Where the backbone of the release at <paramref name="checkpointPath"/> belongs: the release folder, its LoRA folder or a
+    /// file in it. A LoRA folder on disk is known by its <c>.metadata</c> under any name, as <see cref="Resolve"/> reads it; before a
+    /// download, <c>realization/dcp</c> is known by name.</summary>
     public static string BackboneFolder(string checkpointPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(checkpointPath));
+        string? lora = File.Exists(full) ? Path.GetDirectoryName(full) : full;
+        if (lora is not null && File.Exists(Path.Combine(lora, ".metadata")) && Path.GetDirectoryName(lora) is { } beside)
+        {
+            return Path.Combine(beside, "backbone");
+        }
         foreach (string? dcp in new[] { full, Path.GetDirectoryName(full) })
         {
             string? parent = dcp is null ? null : Path.GetDirectoryName(dcp);
