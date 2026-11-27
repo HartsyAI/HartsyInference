@@ -651,7 +651,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         int d = DModel;
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);
-        Tensor attnOut = FullAttnCore(backend, hIn, i, seq, ropeCos, ropeSin);
+        // A decode step passes the one table RunTrunk built for the token; without it each layer rebuilt the rope on the host.
+        Tensor attnOut = FullAttnCore(backend, hIn, i, seq, ropeCos ?? stepCos, ropeSin ?? stepSin);
         Tensor afterAttn = new(flat, DType.F32);
         backend.Add(afterAttn, hIn, attnOut);
         attnOut.Dispose();
