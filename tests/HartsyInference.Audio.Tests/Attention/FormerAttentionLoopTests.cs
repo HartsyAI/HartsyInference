@@ -19,6 +19,7 @@ namespace HartsyInference.Audio.Tests.Attention;
 /// value. The CPU backend and Vulkan met it on that run. CUDA missed it on one case (1.04e-4 on the 512-channel MRTE
 /// shape): it serves F32 attention from its materialized row, whose products run in TF32, as they do for every caller of
 /// the shared layer. CUDA is held to the contract bound for TF32, 2e-3, set after seeing that miss.</para></summary>
+[Collection("AttentionEvidence")]
 public sealed class FormerAttentionLoopTests
 {
     private const float Tolerance = 1e-4f, Tf32Tolerance = 2e-3f;

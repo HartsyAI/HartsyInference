@@ -330,7 +330,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         int s = (int)input.Shape[0];
         QkRotation rotation = new(QkRotationKind.InterleavedPairs, inputs.Cos, inputs.Sin, s);
         AttentionCallContext context = new() { QueryRotation = rotation, KeyRotation = rotation };
-        if (inputs.Segments.Length == 1)
+        if (inputs.Sparse is null && inputs.Segments.Length == 1)
         {
             AttentionSegment.Validate(inputs.Segments, s);
             // The fused path needs one projection tile, and it exposes no rotated queries and keys for the reference map.
@@ -354,7 +354,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 using Tensor referenceKeys = HeadMajorFirstRows(backend, k, inputs.TokensPerFrame);
                 speakerMap = speakers.ReferenceMap(backend, _selfAttention, q, inputs.CondFrames * inputs.TokensPerFrame, referenceKeys);
             }
-            Tensor flat = SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments);
+            Tensor flat = inputs.Sparse is { } sparse
+                ? BlockSparseSelfAttention(backend, q, k, v, inputs.Segments, sparse)
+                : SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments);
             return _selfAttention.ProjectOutput(backend, flat);
         }
         finally

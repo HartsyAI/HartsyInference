@@ -24,5 +24,6 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\GpuRunKnobs.cs" Link="Shared\GpuRunKnobs.cs" />
+    <Compile Include="..\Shared\GpuDeviceFacts.cs" Link="Shared\GpuDeviceFacts.cs" />
   </ItemGroup>
 </Project>

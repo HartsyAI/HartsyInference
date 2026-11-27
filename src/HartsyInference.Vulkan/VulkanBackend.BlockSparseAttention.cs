@@ -18,17 +18,26 @@ public sealed partial class VulkanBackend
     /// <summary>The workgroup memory the selection fills.</summary>
     private const uint BlockSparseSharedBytes = 32 * 1024;
 
-    /// <summary>The most work one submission of the selection or the attention takes, in element operations. Windows resets
-    /// a device whose submission outruns its watchdog, so a pass with more is split.</summary>
+    /// <summary>The work above which the selection or the attention is split into several submissions, in element operations
+    /// estimated from the pass's loops: Windows resets a device whose submission outruns its watchdog. It is not a hard bound on
+    /// a submission. A pass under it shares one with the dispatches recorded before it, a part never takes less than one
+    /// workgroup along x for every head and batch, and the selection's reads of its shared counts are not counted.</summary>
     internal long BlockSparseWorkPerSubmit { get; set; } = 1L << 33;
+
+    /// <summary>Dispatches the selection and the attention have recorded, one a part of a split pass; tests read it.</summary>
+    internal int BlockSparseDispatches { get; private set; }
+
+    /// <summary>The largest operand or output a storage buffer binding reaches: the device's range, which a test lowers.</summary>
+    internal long? BlockSparseMaxOperandBytes { get; set; }
 
     /// <inheritdoc/>
     public bool HasBlockSparseAttention => Vk.MaxComputeSharedMemoryBytes >= BlockSparseSharedBytes;
 
     /// <inheritdoc/>
-    /// <remarks>Head dim up to 128 and up to 7680 key blocks; BF16 takes a device with 16-bit storage. The block means and
-    /// scores are the reference's operations, uncontracted and with a correctly rounded divide, so the selection is the
-    /// reference's where the driver keeps subnormal values; the attention is F32 with an online softmax. A large call goes
+    /// <remarks>Head dim up to 128 and up to 7680 key blocks, with no operand or output past the device's storage-buffer range;
+    /// BF16 takes a device with 16-bit storage and <c>shaderInt16</c>. The block means and scores are the reference's operations,
+    /// uncontracted and with a correctly rounded divide, so the selection is the reference's where the driver keeps subnormal
+    /// values and rounds to nearest even (the shaders declare no float-controls mode); the attention is F32 with an online softmax. A large call goes
     /// to the device in submissions of bounded work. Nothing waits for it: the output and the selection report stay there
     /// until read.</remarks>
     public void BlockSparseAttention(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
@@ -55,6 +64,15 @@ public sealed partial class VulkanBackend
         if (Math.Max(tileGroups, keyBlocks) > Vk.MaxComputeWorkGroupCountX || heads > Vk.MaxComputeWorkGroupCountY
             || batch > Vk.MaxComputeWorkGroupCountZ)
             throw new AttentionUnsupportedException($"Vulkan BlockSparseAttention cannot dispatch {query.Shape} in these blocks on this device.");
+
+        long reach = BlockSparseMaxOperandBytes ?? Vk.MaxStorageBufferRange;
+        foreach (Tensor operand in (ReadOnlySpan<Tensor>)[query, key, value, output])
+        {
+            long bytes = operand.DType.ComputeByteCount(operand.ElementCount);
+            if (bytes > reach)
+                throw new AttentionUnsupportedException($"Vulkan BlockSparseAttention binds each operand whole: {operand.Shape} "
+                    + $"{operand.DType} takes {bytes} bytes, past the device's storage-buffer range of {reach}.");
+        }
 
         using OpScope _op = EnterOp();
         VulkanBuffer qBuf = GetBuffer(query), kBuf = GetBuffer(key), vBuf = GetBuffer(value);
@@ -137,6 +155,7 @@ public sealed partial class VulkanBackend
         {
             BinaryWriteUInt(pc, pc.Length - 4, (uint)first);
             Dispatch(kernel, buffers, pc, (uint)Math.Min(part, groups - first), (uint)heads, (uint)batch);
+            BlockSparseDispatches++;
             if (split) SubmitRecordedDispatches();
         }
     }

@@ -40,6 +40,19 @@ public sealed record LongCatRun(
     bool EnhanceHf = false,
     bool RecordTrace = false, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default);
 
+/// <summary>One 720p refinement on a latent of shape <c>[channels, frames, height, width]</c> (batch 1). <paramref name="Latent"/> is
+/// the normalized VAE encoding of the upsampled low-resolution clip and <paramref name="Noise"/> a draw of the same shape: the run
+/// starts at <c>(1 − Threshold)·Latent + Threshold·Noise</c>. <paramref name="CondLatents"/>, the normalized encoding of the
+/// condition frames, then replaces the first <paramref name="NumCondLatents"/> frames, which are never stepped. Block-sparse
+/// attention needs <paramref name="NumCondLatents"/>, the remaining frames and the token grid to be multiples of its block
+/// (4 in the released model).</summary>
+public sealed record LongCatRefineRun(
+    int Channels, int Frames, int Height, int Width,
+    float[] Latent, float[] Noise, LongCatPrompt Prompt,
+    int NumCondLatents = 0, float[]? CondLatents = null,
+    int Steps = 50, float Shift = 12f, float Threshold = 0.5f,
+    bool RecordTrace = false, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default);
+
 /// <summary>One step as the reference records it: the guided, negated velocity over the stepped frames, and the latent after the step.</summary>
 public sealed record LongCatStepTrace(float Timestep, float Sigma, float[] Velocity, float[] SampleOut);
 
@@ -47,7 +60,7 @@ public sealed record LongCatStepTrace(float Timestep, float Sigma, float[] Veloc
 public sealed record LongCatResult(float[] Latents, LongCatSchedule Schedule, IReadOnlyList<LongCatStepTrace> Steps);
 
 /// <summary>LongCat-Video base pipelines on a <see cref="LongCatTransformer"/>: text-to-video, image-to-video and continuation (with
-/// the <c>enhance_hf</c> schedule), and the segment chain of long video. Latent math runs on the host in F32; the DiT runs on
+/// the <c>enhance_hf</c> schedule), the segment chain of long video, and the 720p refinement. Latent math runs on the host in F32; the DiT runs on
 /// <see cref="IBackend"/>. Text and VAE stay outside: the caller supplies umT5 features and normalized conditioning latents (the Wan VAE
 /// encode and decode, and the umT5 numerics, are verified separately, not here).</summary>
 /// <remarks>Parity with the pinned reference (<c>meituan-longcat/LongCat-Video</c> @ 58eb336) is checked by
@@ -72,13 +85,39 @@ public sealed class LongCatVideoPipeline
         Validate(run);
         int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
         int cond = run.Mode == LongCatConditioningMode.Text ? 0 : run.NumCondLatents;
-        int stepped = frames - cond;
         LongCatSchedule schedule = LongCatSchedule.Build(run.Steps, run.Distill, run.Shift);
         if (run.Mode == LongCatConditioningMode.Continuation && run.EnhanceHf)
             schedule = schedule.EnhanceHf();
         if (cond > 0 && run.CondLatents!.Length != channels * cond * hw)
             throw new ArgumentException($"The conditioning latents hold {run.CondLatents.Length} values; expected {channels} x {cond} x {hw}.", nameof(run));
+        return Loop(run, schedule, cond, blockSparse: false);
+    }
 
+    /// <summary>Runs the 720p refinement (the reference's <c>generate_refine</c> between its VAE encode and decode): unguided steps of
+    /// <see cref="LongCatSchedule.Refinement"/> with block-sparse self-attention. The caller applies the refinement LoRA to the
+    /// transformer's weights and enables its gate.</summary>
+    public LongCatResult Refine(LongCatRefineRun refine)
+    {
+        Validate(refine);
+        LongCatSchedule schedule = LongCatSchedule.Refinement(refine.Steps, refine.Shift, refine.Threshold);
+        float keep = 1f - refine.Threshold;
+        float[] start = new float[refine.Latent.Length];
+        for (int i = 0; i < start.Length; i++)
+            start[i] = keep * refine.Latent[i] + refine.Threshold * refine.Noise[i];
+        int cond = refine.NumCondLatents;
+        LongCatRun run = new(refine.Channels, refine.Frames, refine.Height, refine.Width, start, refine.Prompt, refine.Prompt,
+            schedule.Steps, Distill: false, refine.Shift, Guidance: 1f,
+            cond > 0 ? LongCatConditioningMode.Image : LongCatConditioningMode.Text, cond, refine.CondLatents,
+            EnhanceHf: false, refine.RecordTrace, refine.OnProgress, refine.Cancel);
+        return Loop(run, schedule, cond, blockSparse: true);
+    }
+
+    /// <summary>Steps the frames past <paramref name="cond"/> through <paramref name="schedule"/>; the run's noise is the starting
+    /// latent.</summary>
+    private LongCatResult Loop(LongCatRun run, LongCatSchedule schedule, int cond, bool blockSparse)
+    {
+        int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
+        int stepped = frames - cond;
         List<LongCatStepTrace> trace = new(run.RecordTrace ? schedule.Steps : 0);
         long started = System.Diagnostics.Stopwatch.GetTimestamp();
         if (stepped == 0)
@@ -119,8 +158,8 @@ public sealed class LongCatVideoPipeline
                 {
                     // Both velocities stay live until the reduction, which reads both. The positive one is one latent-sized tensor
                     // (about 9.6 MB at 832 x 480 x 93), so keeping it through the negative forward costs little next to the activations.
-                    using Tensor positive = Predict(input, run, run.Positive, frameTimesteps, conditioning, tensors);
-                    using Tensor negative = Predict(input, run, run.Negative, frameTimesteps, conditioning, tensors);
+                    using Tensor positive = Predict(input, run.Positive, frameTimesteps, conditioning, tensors, blockSparse);
+                    using Tensor negative = Predict(input, run.Negative, frameTimesteps, conditioning, tensors, blockSparse);
                     using Tensor positiveStep = StepRows(positive, channels, frames, cond, stepped, hw);
                     using Tensor uncondStep = GuidedUncondRows(negative, positive, guidedFrom, channels, frames, cond, stepped, hw);
                     if (run.RecordTrace)
@@ -130,7 +169,7 @@ public sealed class LongCatVideoPipeline
                 }
                 else
                 {
-                    using Tensor output = Predict(input, run, run.Positive, frameTimesteps, conditioning, tensors);
+                    using Tensor output = Predict(input, run.Positive, frameTimesteps, conditioning, tensors, blockSparse);
                     using Tensor velocity = StepRows(output, channels, frames, cond, stepped, hw);
                     if (run.RecordTrace)
                         RecordStep(trace, timestep, schedule.Sigmas[i], state.Shape, velocity, velocity, 1f, guidedFrom);
@@ -230,11 +269,35 @@ public sealed class LongCatVideoPipeline
     }
 
     /// <summary>One forward pass over the whole clip; the velocity stays on the device, owned by the caller.</summary>
-    private Tensor Predict(Tensor input, LongCatRun run, LongCatPrompt prompt, float[] frameTimesteps, LongCatConditioning conditioning,
-        LongCatRunTensors tensors)
+    private Tensor Predict(Tensor input, LongCatPrompt prompt, float[] frameTimesteps, LongCatConditioning conditioning,
+        LongCatRunTensors tensors, bool blockSparse)
     {
         Tensor text = tensors.Text(prompt);
-        return _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens);
+        return _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens, blockSparse: blockSparse);
+    }
+
+    private void Validate(LongCatRefineRun run)
+    {
+        if (run.Channels != _dit.Config.InChannels)
+            throw new ArgumentException($"The run has {run.Channels} channels; the transformer takes {_dit.Config.InChannels}.", nameof(run));
+        long values = (long)run.Channels * run.Frames * run.Height * run.Width;
+        if (run.Latent.Length != values || run.Noise.Length != values)
+            throw new ArgumentException("The latent and the noise must both match [channels, frames, height, width].", nameof(run));
+        (int _, int patchH, int patchW) = _dit.Config.PatchSize;
+        if (run.Height % patchH != 0 || run.Width % patchW != 0)
+            throw new ArgumentException("The latent height and width must tile into the patch size.", nameof(run));
+        if (run.NumCondLatents < 0 || run.NumCondLatents >= run.Frames)
+            throw new ArgumentOutOfRangeException(nameof(run), run.NumCondLatents,
+                $"A refinement conditions on 0 to {run.Frames - 1} of its {run.Frames} latent frames.");
+        long conditioned = (long)run.Channels * run.NumCondLatents * run.Height * run.Width;
+        if (run.NumCondLatents > 0 && run.CondLatents?.Length != conditioned)
+            throw new ArgumentException($"The conditioning latents must hold {conditioned} values.", nameof(run));
+        // The grids the block-sparse attention reads, refused here rather than at the first forward.
+        int gridH = run.Height / patchH, gridW = run.Width / patchW;
+        if (run.NumCondLatents > 0)
+            _ = _dit.Config.SparseAttention.Options(run.NumCondLatents, run.NumCondLatents, gridH, gridW);
+        _ = _dit.Config.SparseAttention.Options(run.Frames - run.NumCondLatents, run.Frames, gridH, gridW);
+        run.Prompt.Validate(_dit.Config.CaptionChannels);
     }
 
     private void Validate(LongCatRun run)

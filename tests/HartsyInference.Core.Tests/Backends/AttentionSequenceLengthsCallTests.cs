@@ -7,6 +7,7 @@ namespace HartsyInference.Core.Tests.Backends;
 
 /// <summary>A call with a key length per sequence and an LSE output: what the contract accepts, which rows may take it,
 /// and that the host reference runs it.</summary>
+[Collection("AttentionEvidence")]
 public sealed class AttentionSequenceLengthsCallTests
 {
     private const int Batch = 2, Heads = 4, KvHeads = 2, Rows = 3, Capacity = 12, Dim = 16;
