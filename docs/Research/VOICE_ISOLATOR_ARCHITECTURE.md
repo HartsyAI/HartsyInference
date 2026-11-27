@@ -41,7 +41,7 @@ Measured on the 3060 against the CPU on the same golden clips (fp32, wall time o
 | realtime 3 s | 38.0 s | 54 s | 237 s |
 | realtime 11 s | 213 s | 208 s | 116 s |
 
-CUDA is faster offline at both lengths and no faster realtime, so offline uses it and realtime stays on CPU. Vulkan is faster only offline at 11 s; the 3 s offline and the realtime runs were slower, so Vulkan is not routed by the service. Timings include the GPU's shared load from other sessions. Every GPU case passes the 1e-4 tolerance; the CPU maximum is 5.7e-7.
+CUDA is faster offline at both lengths and no faster realtime, so offline uses it and realtime stays on CPU. Vulkan is faster only offline at 11 s; the 3 s offline and the realtime runs were slower, so Vulkan is not routed by the service. Timings include the GPU's shared load from other sessions. Every GPU case passes the 1e-4 tolerance. Max abs error: CPU up to 5.7e-7; Vulkan 1.6e-7 to 5.7e-7; CUDA 2.6e-5 to 8.5e-5 (relRMS up to 1.2e-4). The CUDA gap is about 150 times the Vulkan error and is not explained yet (check GEMM precision such as TF32 before tightening).
 
 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
 
@@ -55,4 +55,4 @@ CUDA is faster offline at both lengths and no faster realtime, so offline uses i
 
 ## Not verified
 
-GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. Not run: the `hartsy fx separate sample_14.wav -m voice-isolator` and `-m voice-isolator-realtime` CLI runs on the final build; the STFT and the Mamba conv history on the host (see Engine surface).
+GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 208 s, on CPU by design). The STFT and the Mamba conv history stay on the host (see Engine surface).
