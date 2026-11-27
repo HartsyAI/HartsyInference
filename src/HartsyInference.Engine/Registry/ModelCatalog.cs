@@ -3175,6 +3175,10 @@ public static class ModelCatalog
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/config.json",
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
+                    // The distillation LoRA of the 8-step path. The recipe reads it from lora/ beside base_model/ and refuses to run without it.
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "lora/dmd_lora.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/lora", TargetName = "dmd_lora.safetensors", Role = "lora",
+                        Sha256 = "d969115a7f3fbc212a277ed4399f77a1a065d170148c6d4bc272e980cd3e907a" },
                     // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
                     SideModels.Umt5Xxl,
                     SideModels.Wan21Vae,
