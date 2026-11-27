@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -65,10 +66,14 @@ public sealed class Glm5NextModel : IDisposable
     {
         int d = _c.Hidden;
         if (ids.Length == 0) return [];
-        // The device gather when the table is resident (TryGatherRowsResident), otherwise the needed rows on the host (GatherRows); the full table
-        // is never pulled onto the card for one lookup. Out-of-range ids are refused by the gather contract.
+        // The device gather only when the table is resident (TryGatherRowsResident). Otherwise the needed rows are gathered on the host by the
+        // row-index reference, so a non-resident table is never uploaded to the card for one lookup. Out-of-range ids are refused by the contract.
         using Tensor rows = new(new TensorShape(ids.Length, d), DType.F32);
-        if (!_backend.TryGatherRowsResident(rows, _embedding, ids)) _backend.GatherRows(rows, _embedding, ids);
+        if (!_backend.TryGatherRowsResident(rows, _embedding, ids))
+        {
+            using Tensor index = IndexTensor.Rows(ids);
+            RowIndexReference.Gather(rows, _embedding, index);
+        }
         return rows.AsReadOnlySpan<float>().ToArray();
     }
 
