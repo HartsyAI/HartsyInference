@@ -54,6 +54,7 @@ layout(push_constant) uniform Push {
     uint kbh;
     uint kbw;
     float scale;
+    uint firstGroup;
 } pc;
 
 // About 27 KB, under the 32 KiB the backend requires of a device.
@@ -87,7 +88,8 @@ float weightOf(float score, float maximum) {
 void main() {
     uint queryLength = pc.qbt * pc.qbh * pc.qbw, keyLength = pc.kbt * pc.kbh * pc.kbw;
     uint tiles = (queryLength + QT - 1u) / QT;
-    uint qb = gl_WorkGroupID.x / tiles, tile = gl_WorkGroupID.x % tiles;
+    uint group = pc.firstGroup + gl_WorkGroupID.x;
+    uint qb = group / tiles, tile = group % tiles;
     uint h = gl_WorkGroupID.y, b = gl_WorkGroupID.z;
     uint tid = gl_LocalInvocationID.x;
     uint head = b * pc.heads + h;

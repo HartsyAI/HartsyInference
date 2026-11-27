@@ -18,14 +18,19 @@ public sealed partial class VulkanBackend
     /// <summary>The workgroup memory the selection fills.</summary>
     private const uint BlockSparseSharedBytes = 32 * 1024;
 
+    /// <summary>The most work one submission of the selection or the attention takes, in element operations. Windows resets
+    /// a device whose submission outruns its watchdog, so a pass with more is split.</summary>
+    internal long BlockSparseWorkPerSubmit { get; set; } = 1L << 33;
+
     /// <inheritdoc/>
     public bool HasBlockSparseAttention => Vk.MaxComputeSharedMemoryBytes >= BlockSparseSharedBytes;
 
     /// <inheritdoc/>
     /// <remarks>Head dim up to 128 and up to 7680 key blocks; BF16 takes a device with 16-bit storage. The block means and
     /// scores are the reference's operations, uncontracted and with a correctly rounded divide, so the selection is the
-    /// reference's where the driver keeps subnormal values; the attention is F32 with an online softmax. Nothing waits for the
-    /// device: the output and the selection report stay on it until read.</remarks>
+    /// reference's where the driver keeps subnormal values; the attention is F32 with an online softmax. A large call goes
+    /// to the device in submissions of bounded work. Nothing waits for it: the output and the selection report stay there
+    /// until read.</remarks>
     public void BlockSparseAttention(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
         Tensor? selected = null)
     {
@@ -63,7 +68,7 @@ public sealed partial class VulkanBackend
             outBuf = _xfer.AllocateDevice((ulong)output.DType.ComputeByteCount(output.ElementCount));
             // With no selected block there is no report, and the attention pass reads no entry of what is bound in its place.
             selection = _xfer.AllocateDevice(Math.Max(sizeof(int), selectionBytes));
-            Span<byte> pc = stackalloc byte[17 * 4];
+            Span<byte> pc = stackalloc byte[18 * 4];
             if (chosen > 0)
             {
                 queryMeans = _xfer.AllocateDevice((ulong)(sequences * queryBlocks * dim) * sizeof(float));
@@ -78,8 +83,9 @@ public sealed partial class VulkanBackend
                 BinaryWriteUInt(pc, 12, (uint)keyBlocks);
                 BinaryWriteUInt(pc, 16, (uint)chosen);
                 Span<ulong> selectBufs = stackalloc ulong[] { selection.Handle, queryMeans.Handle, keyMeans.Handle };
-                Dispatch(GetKernel("block_sparse_select", storageBufferCount: 3, default), selectBufs, pc[..20],
-                    (uint)queryBlocks, (uint)heads, (uint)batch);
+                // Each key block is scored over the head dim and then read once for each of the threshold's 32 bits.
+                DispatchBlockSparse(GetKernel("block_sparse_select", storageBufferCount: 3, default), selectBufs, pc[..24],
+                    queryBlocks, heads, batch, sequences * keyBlocks * (dim + 32L));
             }
 
             ReadOnlySpan<int> fields =
@@ -97,7 +103,9 @@ public sealed partial class VulkanBackend
                 _ => "block_sparse_attend_bf16",
             };
             Span<ulong> attendBufs = stackalloc ulong[] { qBuf.Handle, kBuf.Handle, vBuf.Handle, selection.Handle, outBuf.Handle };
-            Dispatch(GetKernel(attend, storageBufferCount: 5, default), attendBufs, pc, (uint)tileGroups, (uint)heads, (uint)batch);
+            long pairs = (long)BlockSparseQueryTile * Math.Max(1, chosen) * keyBlock.Tokens;
+            DispatchBlockSparse(GetKernel(attend, storageBufferCount: 5, default), attendBufs, pc, tileGroups, heads, batch,
+                sequences * pairs * dim);
 
             CacheOutput(output, outBuf);
             outputCached = true;
@@ -114,6 +122,32 @@ public sealed partial class VulkanBackend
             if (queryMeans is not null) _xfer.FreeDevice(queryMeans);
             if (keyMeans is not null) _xfer.FreeDevice(keyMeans);
         }
+    }
+
+    /// <summary>Dispatches <paramref name="groups"/> workgroups along x for every head and batch, split so that no
+    /// submission takes more than <see cref="BlockSparseWorkPerSubmit"/> (one workgroup along x at the least). The last
+    /// four bytes of <paramref name="pc"/> take the first workgroup of each part.</summary>
+    private void DispatchBlockSparse(VulkanKernel kernel, ReadOnlySpan<ulong> buffers, Span<byte> pc, long groups, int heads,
+        int batch, long workPerGroup)
+    {
+        long part = Math.Max(1, BlockSparseWorkPerSubmit / workPerGroup);
+        bool split = groups > part;
+        if (split) SubmitRecordedDispatches();
+        for (long first = 0; first < groups; first += part)
+        {
+            BinaryWriteUInt(pc, pc.Length - 4, (uint)first);
+            Dispatch(kernel, buffers, pc, (uint)Math.Min(part, groups - first), (uint)heads, (uint)batch);
+            if (split) SubmitRecordedDispatches();
+        }
+    }
+
+    // Inside an op the transient uploads stay alive: they are released at the op's end, after a later submission. A step
+    // graph being captured records elsewhere and is submitted whole.
+    private void SubmitRecordedDispatches()
+    {
+        if (_capturingStepGraph) return;
+        _stream.SubmitAndAdvance();
+        _dispatchesSinceSubmit = 0;
     }
 
     private void BlockSparseMeans(string shader, VulkanBuffer rows, VulkanBuffer means, int tokens, int dim, int heads, int blocks,

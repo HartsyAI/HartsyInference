@@ -22,19 +22,23 @@ public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
     public void BlockSparseBesideDense(int frames, int height, int width, int heads)
     {
         using CudaBackend cuda = new(0, Path.Combine(AppContext.BaseDirectory, "Ptx"));
-        Record(cuda, frames, height, width, heads);
+        Record(cuda, frames, height, width, heads, dense: true);
     }
 
-    /// <summary>The smaller grid only: the Vulkan attention is one dispatch, and a longer one can trip a driver's watchdog.</summary>
+    /// <summary>Dense attention is timed on the 4-frame grid only: Vulkan dense attention loses the device at 12 frames and
+    /// 8 heads on Windows. On a card driving a display, run the cases one at a time, smallest first.</summary>
     [VulkanTheory]
-    [InlineData(12, 44, 80, 8)]
-    public void VulkanBlockSparseBesideDense(int frames, int height, int width, int heads)
+    [InlineData(4, 44, 80, 1, true)]
+    [InlineData(4, 44, 80, 4, true)]
+    [InlineData(12, 44, 80, 8, false)]
+    [InlineData(12, 44, 80, 32, false)]
+    public void VulkanBlockSparseBesideDense(int frames, int height, int width, int heads, bool dense)
     {
         using VulkanBackend vulkan = new();
-        Record(vulkan, frames, height, width, heads);
+        Record(vulkan, frames, height, width, heads, dense);
     }
 
-    private void Record(IBackend backend, int frames, int height, int width, int heads)
+    private void Record(IBackend backend, int frames, int height, int width, int heads, bool dense)
     {
         BlockSparseAttentionOptions options = new()
         {
@@ -51,10 +55,11 @@ public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
             using Tensor output = new(shape, type);
             double sparse = Median(backend, () => backend.BlockSparseAttention(output, query, key, value, options));
             log.WriteLine($"{type}: block-sparse {sparse:F1} ms");
+            if (!dense) continue;
             try
             {
-                double dense = Median(backend, () => backend.ScaledDotProductAttention(output, query, key, value, null, scale));
-                log.WriteLine($"{type}: dense {dense:F1} ms, ratio {dense / sparse:F2}");
+                double full = Median(backend, () => backend.ScaledDotProductAttention(output, query, key, value, null, scale));
+                log.WriteLine($"{type}: dense {full:F1} ms, ratio {full / sparse:F2}");
             }
             catch (NotSupportedException refusal)
             {

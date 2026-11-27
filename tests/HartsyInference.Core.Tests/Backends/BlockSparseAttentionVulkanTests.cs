@@ -66,6 +66,15 @@ public sealed class BlockSparseAttentionVulkanTests(ITestOutputHelper log)
     }
 
     [VulkanFact]
+    public void ACallSplitIntoManySubmissionsMatchesTheCpuReference()
+    {
+        // One unit of work a submission: every workgroup along x of the selection and the attention goes alone.
+        using VulkanBackend vulkan = new() { BlockSparseWorkPerSubmit = 1 };
+        Checks.MatchesTheCpuReferenceOnRandomShapes(vulkan, log, seed: 9, batch: 2, heads: 3, dim: 32, queryGrid: [4, 8, 16],
+            keyGrid: [8, 8, 8], queryBlock: [4, 4, 8], keyBlock: [4, 4, 4], sparsity: 0.75, scale: 0f);
+    }
+
+    [VulkanFact]
     public void NearTiedBlocksAreSelectedAsTheReferenceDoes()
     {
         using VulkanBackend vulkan = new();

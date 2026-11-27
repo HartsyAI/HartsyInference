@@ -25,6 +25,7 @@ layout(push_constant) uniform Push {
     uint queryBlocks;
     uint keyBlocks;
     uint chosen;
+    uint firstBlock;
 } pc;
 
 shared float s_mean[MAX_DIM];
@@ -41,7 +42,7 @@ uint rankKey(float score) {
 }
 
 void main() {
-    uint qb = gl_WorkGroupID.x, h = gl_WorkGroupID.y, b = gl_WorkGroupID.z;
+    uint qb = pc.firstBlock + gl_WorkGroupID.x, h = gl_WorkGroupID.y, b = gl_WorkGroupID.z;
     uint tid = gl_LocalInvocationID.x;
     uint head = b * pc.heads + h;
 
