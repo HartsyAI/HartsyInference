@@ -7,6 +7,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -34,6 +35,17 @@ public sealed class DuoRecipeTests : IDisposable
         Assert.IsType<DuoRecipe>(VideoRecipeRegistry.Resolve("duo-v1-causal"));
         Assert.IsType<DuoRecipe>(VideoRecipeRegistry.Resolve("duo-v1-2-causal"));
         Assert.Null(VideoRecipeRegistry.Resolve("duo-v1-distill"));
+    }
+
+    /// <summary>A release folder named with <c>--model-path</c> holds the LoRA, so nothing is left to download.</summary>
+    [Theory]
+    [InlineData("duo-v1-causal")]
+    [InlineData("duo-v1-2-causal")]
+    public void AReleaseFolderSatisfiesTheCatalogFiles(string id)
+    {
+        CatalogEntry entry = ModelCatalog.All.Single(e => e.Id == id);
+
+        Assert.Empty(ModelDownloader.MissingAssets(entry, _release.Release));
     }
 
     [Fact]
