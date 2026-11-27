@@ -86,7 +86,7 @@ internal static class LongCatRecipeSupport
         long? measuredPeakBytes = null)
     {
         long headroom = BudgetHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes, cacheBytes);
-        if (cacheBytes > 0)
+        if (cacheBytes > 0 && HasDeviceBudget(backend))
         {
             // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
             backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
@@ -199,9 +199,15 @@ internal static class LongCatRecipeSupport
     internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes, long? measuredPeakBytes = null)
     {
         backend.TrimMemoryPool();
+        if (!HasDeviceBudget(backend))
+            return;
         RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens, measuredPeakBytes),
             stagedBytes, "The chain's later run");
     }
+
+    /// <summary>Whether the backend has device memory to budget. One without it (the CPU, which reports a total of 0) has no room to check: its 0 free
+    /// bytes mean "not applicable", not "full".</summary>
+    private static bool HasDeviceBudget(IBackend backend) => backend.GetVramInfo().TotalBytes > 0;
 
     /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>
     internal static long NonResidentSharedBytes(IBackend backend, LongCatTransformer dit)

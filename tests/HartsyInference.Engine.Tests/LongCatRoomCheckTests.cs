@@ -132,9 +132,20 @@ public sealed class LongCatRoomCheckTests
         LongCatRecipeSupport.RequireChainRoom(backend.Backend, parts, 1_000, 0);
     }
 
+    [Fact]
+    public void ABackendWithoutDeviceMemoryIsNotRefused()
+    {
+        using LongCatTransformer dit = new(new LongCatConfig());
+        LongCatParts parts = new(dit, 4, 48, false, null!, null!, null!, null!);
+        using CpuBackend cpu = new();
+
+        LongCatRecipeSupport.RequireChainRoom(cpu, parts, 1_000, 1L << 30);
+    }
+
     private static OrderRecorder Recorder() => OrderRecorder.Create();
 
-    /// <summary>A backend that answers the memory calls the check makes and records their order; everything else goes to the CPU backend.</summary>
+    /// <summary>A device backend as the check sees one: it answers the memory calls and records the order of the trim and the free read; everything else
+    /// goes to the CPU backend.</summary>
     public class OrderRecorder : DispatchProxy
     {
         private readonly CpuBackend _cpu = new();
@@ -162,6 +173,8 @@ public sealed class LongCatRoomCheckTests
                 case nameof(IBackend.FreeMemoryBytes):
                     Calls.Add(nameof(IBackend.FreeMemoryBytes));
                     return FreeBytes;
+                case nameof(IBackend.GetVramInfo):
+                    return (FreeBytes, 1L << 45);
                 default:
                     return targetMethod.Invoke(_cpu, args);
             }

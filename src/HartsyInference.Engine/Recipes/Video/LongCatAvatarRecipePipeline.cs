@@ -1,6 +1,4 @@
 using HartsyInference.Audio.Models.LongCat;
-using HartsyInference.Audio.Models.Whisper;
-using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Diffusion.Requests;
@@ -24,16 +22,15 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly IBackend _backend;
     private readonly LongCatAvatarPipeline _pipeline;
     private readonly LongCatParts _parts;
-    private readonly WhisperEncoder _whisper;
-    private readonly MelSpectrogramExtractor _mel;
+    private readonly LongCatDrivingFeatures _drivingFeatures;
     private readonly List<IDisposable> _loaders;
     private readonly bool _distilled;
     private readonly AdjunctGate? _loraGate;
     private readonly LongCatAvatarLoraSchedule? _loraMix;
 
     /// <summary>Wraps the constructed pipeline, taking ownership of every disposable in <paramref name="loaders"/>.</summary>
-    internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, WhisperEncoder whisper,
-        MelSpectrogramExtractor mel, List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate, LongCatAvatarLoraSchedule? loraMix = null)
+    internal LongCatAvatarRecipePipeline(IBackend backend, LongCatAvatarPipeline pipeline, LongCatParts parts, LongCatDrivingFeatures drivingFeatures,
+        List<IDisposable> loaders, bool distilled, AdjunctGate? loraGate, LongCatAvatarLoraSchedule? loraMix = null)
     {
         // A distilled pipeline is only valid with its LoRA gate: the gate is what makes it the distilled model.
         if (distilled && loraGate is null && loraMix is null)
@@ -44,8 +41,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         _backend = backend;
         _pipeline = pipeline;
         _parts = parts;
-        _whisper = whisper;
-        _mel = mel;
+        _drivingFeatures = drivingFeatures;
         _loaders = loaders;
     }
 
@@ -234,17 +230,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     /// <summary>Whisper features of the driving speech, cut into one 5-frame window per video frame: <c>[frames, 5 · 5 · 1280]</c>.</summary>
     private float[] DrivingWindows(float[] waveform, int fps, int frames)
     {
-        // Whisper is only needed for these features. Its device copies are released as soon as they are read, so they do not sit in VRAM
-        // through the denoise (the pipeline is cached, and the next request uploads them again on demand).
-        float[] features;
-        try
-        {
-            features = LongCatWhisperFeatures.Extract(_backend, _whisper, _mel, waveform, fps);
-        }
-        finally
-        {
-            _backend.FreeWeights(_whisper.EnumerateWeights());
-        }
+        float[] features = _drivingFeatures(waveform, fps);
         int featureFrames = features.Length / (LongCatAudioLayout.Whisper.Blocks * LongCatAudioLayout.Whisper.Channels);
         if (featureFrames < 1)
             throw new InvalidOperationException("The driving speech is shorter than one video frame.");
