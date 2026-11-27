@@ -135,10 +135,12 @@ public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
                 string? streamQuant = QuantRefusal(ditSource.Weights.Values.Select(weight => weight.DType));
                 if (streamQuant is not null) throw new NotSupportedException(streamQuant);
                 RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
-                HunyuanVideo15BlockLoader blockLoader = new(dit, config, ditSource.Weights, DitHalfCastSources(context.Backend));
+                HunyuanVideo15BlockLoader blockLoader = HunyuanVideo15BlockLoader.FromCheckpoint(dit, config, context.Backend, ditSource,
+                    DitHalfCastSources(context.Backend));
                 loaders.Add(blockLoader);
                 blockLoader.LoadShared();
                 dit.LoadBlock = blockLoader.LoadBlock;
+                dit.UnloadBlock = blockLoader.UnloadBlock;
             }
             else
             {

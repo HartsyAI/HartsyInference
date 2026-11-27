@@ -61,15 +61,15 @@ public sealed class HunyuanVideo15BlockLoaderTests
         using HunyuanVideo15Dit resident = new(config);
         resident.LoadWeights(converted);
 
-        // Streamed: the shared weights once, then each block as the forward reaches it.
-        using HunyuanVideo15Dit streamed = new(config);
-        using HunyuanVideo15BlockLoader loader2 = readFromFile
-            ? HunyuanVideo15BlockLoader.FromFile(streamed, config, source, castSources, path, CheckpointHeader.Read(path).Descriptors)
-            : new HunyuanVideo15BlockLoader(streamed, config, source, castSources);
-        loader2.LoadShared();
-        streamed.LoadBlock = loader2.LoadBlock;
-
+        // Streamed: the shared weights once, then each block as the forward reaches it, released after it.
         using CpuBackend backend = new();
+        using HunyuanVideo15Dit streamed = new(config);
+        using HunyuanVideo15BlockLoader blockLoader = new(streamed, config, backend, source, castSources, readBlocksFromFile: readFromFile);
+        blockLoader.LoadShared();
+        streamed.LoadBlock = blockLoader.LoadBlock;
+        streamed.UnloadBlock = blockLoader.UnloadBlock;
+        Assert.True(streamed.StreamsBlockWeights);
+
         Random rng = new(7);
         using Tensor latent = RandomTensor(rng, 1, 4, 2, 4, 4);
         using Tensor qwen = RandomTensor(rng, 1, 3, 24);

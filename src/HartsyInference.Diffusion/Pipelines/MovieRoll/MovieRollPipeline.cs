@@ -47,6 +47,22 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
 
         using MovieRollKvCache cache = new(Backend, _kvByteBudget);
         cache.Init(_dit.StreamLayerNames(), latentHeight, latentWidth);
+        if (_dit.StreamsBlockWeights)
+        {
+            // A loader owns the blocks' weights: it loads each block before that block's forward and releases it after, freeing the device copy in
+            // the same step. Only the shared weights are resident for the run, so no streaming scope manages the blocks.
+            Backend.PreloadWeights(_dit.EnumerateSharedWeights());
+            try
+            {
+                MovieRollSampler streamedSampler = new(Backend, _dit, _schedule);
+                return streamedSampler.Sample(cache, options, qwen, byt5, negativeQwen, negativeByt5, noise);
+            }
+            finally
+            {
+                Backend.Sync();
+                Backend.FreeWeights(_dit.EnumerateSharedWeights());
+            }
+        }
         // The DiT's blocks stream through BlockStreamingScope on a backend with a streaming cache, as the HunyuanVideo pipeline does: the shared
         // weights and a resident prefix are preloaded, and the rest of the blocks are staged one at a time as the forward reaches them. A backend
         // without a streaming cache preloads the whole DiT here.
