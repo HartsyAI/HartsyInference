@@ -102,7 +102,28 @@ public sealed unsafe class WhisperEncoder : IDisposable
     public Tensor Forward(IBackend backend, Tensor mel) => Forward(backend, mel, timer: null);
 
     /// <summary><see cref="Forward(IBackend, Tensor)"/> with the stem and each layer attributed to <paramref name="timer"/>.</summary>
-    internal Tensor Forward(IBackend backend, Tensor mel, StageTimer? timer)
+    internal Tensor Forward(IBackend backend, Tensor mel, StageTimer? timer) => Run(backend, mel, timer, hiddenStates: null);
+
+    /// <summary>Forward pass that keeps every hidden state, as HF's <c>output_hidden_states=True</c> returns them: the
+    /// stem plus positions, then the input of each later layer, and last the output of the final layer after the final
+    /// LayerNorm (<c>EncoderLayers + 1</c> entries, each <c>[B, n_frames/2, d_model]</c>). The caller owns and
+    /// disposes all of them.</summary>
+    public Tensor[] ForwardAllHiddenStates(IBackend backend, Tensor mel)
+    {
+        List<Tensor> states = new(_cfg.EncoderLayers + 1);
+        try
+        {
+            states.Add(Run(backend, mel, timer: null, states));
+        }
+        catch
+        {
+            foreach (Tensor state in states) state.Dispose();
+            throw;
+        }
+        return [.. states];
+    }
+
+    private Tensor Run(IBackend backend, Tensor mel, StageTimer? timer, List<Tensor>? hiddenStates)
     {
         ThrowIfDisposed();
         if (!_weightsLoaded) throw new InvalidOperationException("Call LoadWeights before Forward.");
@@ -152,7 +173,8 @@ public sealed unsafe class WhisperEncoder : IDisposable
         for (int i = 0; i < _layers.Length; i++)
         {
             Tensor next = _layers[i].Forward(backend, hidden);
-            hidden.Dispose();
+            if (hiddenStates is null) hidden.Dispose();
+            else hiddenStates.Add(hidden);
             hidden = next;
             timer?.Accumulate("enc.layer");
         }
@@ -160,6 +182,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
         // Stage 6: final layer norm.
         Tensor normed = new(hidden.Shape, DType.F32);
         backend.LayerNorm(normed, hidden, _finalLnWeight!, _finalLnBias!, _cfg.LayerNormEps);
+        // The last layer's raw output is not an HF hidden state: only its normed form is.
         hidden.Dispose();
         return normed;
     }

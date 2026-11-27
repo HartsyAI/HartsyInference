@@ -8,7 +8,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Everything the Text path needs to run a V4.1 directory: the generation model, the tokenizer from the checkpoint's <c>tokenizer.json</c>, and the chat template.</summary>
 /// <remarks>Owns the generation model, which owns the checkpoint. This is the host reference path, not a serving path: dense weights are F32 on the host.</remarks>
-public sealed class DeepSeekV41TextModel : IDisposable
+public sealed class DeepSeekV41TextModel : IHostReferenceTextModel
 {
     /// <summary>The begin-of-sentence literal in the official <c>tokenizer.json</c>.</summary>
     public const string BosLiteral = "<｜begin▁of▁sentence｜>";
@@ -24,6 +24,10 @@ public sealed class DeepSeekV41TextModel : IDisposable
 
     /// <summary>The V4.1 conversation encoder behind the template interface.</summary>
     public ChatTemplateEncoderAdapter Template { get; }
+
+    IGenerationModel IHostReferenceTextModel.Generation => Generation;
+
+    IChatTemplate IHostReferenceTextModel.Template => Template;
 
     private DeepSeekV41TextModel(DeepSeekV41GenerationModel generation, ILlmTokenizer tokenizer, ChatTemplateEncoderAdapter template)
     {

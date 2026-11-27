@@ -29,7 +29,7 @@ public sealed unsafe class DepthAnythingV2Model
     /// <c>ls·.gamma</c> → <c>layer_scale·.lambda1</c>); <c>depth_head.*</c> loads directly.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        Dictionary<string, Tensor> backbone = RemapBackboneKeys(weights, _preset.Backbone.HiddenSize);
+        Dictionary<string, Tensor> backbone = Dinov2HubKeys.Remap(weights, "pretrained.", _preset.Backbone);
         _backbone.LoadWeights(backbone);
         _head.LoadWeights(weights);
     }
@@ -77,55 +77,5 @@ public sealed unsafe class DepthAnythingV2Model
         for (int b = 0; b < batch; b++)
             Buffer.MemoryCopy(src + ((long)b * seqLen + prefixTokens) * hidden, dst + (long)b * numPatches * hidden, rowBytes, rowBytes);
         return patches;
-    }
-
-    /// <summary>torch.hub DINOv2 keys → the HF-style keys <see cref="Dinov2VisionEncoder"/> loads.</summary>
-    private static Dictionary<string, Tensor> RemapBackboneKeys(IReadOnlyDictionary<string, Tensor> w, int hidden)
-    {
-        const string p = "pretrained.";
-        Dictionary<string, Tensor> mapped = new()
-        {
-            ["embeddings.cls_token"] = w[$"{p}cls_token"],
-            ["embeddings.position_embeddings"] = w[$"{p}pos_embed"],
-            ["embeddings.patch_embeddings.projection.weight"] = w[$"{p}patch_embed.proj.weight"],
-            ["embeddings.patch_embeddings.projection.bias"] = w[$"{p}patch_embed.proj.bias"],
-            ["layernorm.weight"] = w[$"{p}norm.weight"],
-            ["layernorm.bias"] = w[$"{p}norm.bias"],
-        };
-        if (w.TryGetValue($"{p}register_tokens", out Tensor? reg))
-            mapped["embeddings.register_tokens"] = reg;
-
-        for (int i = 0; w.ContainsKey($"{p}blocks.{i}.norm1.weight"); i++)
-        {
-            string src = $"{p}blocks.{i}";
-            string dst = $"encoder.layer.{i}";
-            mapped[$"{dst}.norm1.weight"] = w[$"{src}.norm1.weight"];
-            mapped[$"{dst}.norm1.bias"] = w[$"{src}.norm1.bias"];
-            mapped[$"{dst}.norm2.weight"] = w[$"{src}.norm2.weight"];
-            mapped[$"{dst}.norm2.bias"] = w[$"{src}.norm2.bias"];
-            mapped[$"{dst}.attention.output.dense.weight"] = w[$"{src}.attn.proj.weight"];
-            mapped[$"{dst}.attention.output.dense.bias"] = w[$"{src}.attn.proj.bias"];
-            mapped[$"{dst}.layer_scale1.lambda1"] = w[$"{src}.ls1.gamma"];
-            mapped[$"{dst}.layer_scale2.lambda1"] = w[$"{src}.ls2.gamma"];
-            mapped[$"{dst}.mlp.fc1.weight"] = w[$"{src}.mlp.fc1.weight"];
-            mapped[$"{dst}.mlp.fc1.bias"] = w[$"{src}.mlp.fc1.bias"];
-            mapped[$"{dst}.mlp.fc2.weight"] = w[$"{src}.mlp.fc2.weight"];
-            mapped[$"{dst}.mlp.fc2.bias"] = w[$"{src}.mlp.fc2.bias"];
-
-            Tensor qkvW = Dinov2VisionEncoder.F32(w[$"{src}.attn.qkv.weight"]);
-            Tensor qkvB = Dinov2VisionEncoder.F32(w[$"{src}.attn.qkv.bias"]);
-            for (int part = 0; part < 3; part++)
-            {
-                string name = part == 0 ? "query" : part == 1 ? "key" : "value";
-                Tensor pw = new(new TensorShape(hidden, hidden), DType.F32);
-                Tensor pb = new(new TensorShape(hidden), DType.F32);
-                long wBytes = (long)hidden * hidden * sizeof(float);
-                Buffer.MemoryCopy((float*)qkvW.DataPointer + (long)part * hidden * hidden, (float*)pw.DataPointer, wBytes, wBytes);
-                Buffer.MemoryCopy((float*)qkvB.DataPointer + (long)part * hidden, (float*)pb.DataPointer, (long)hidden * sizeof(float), (long)hidden * sizeof(float));
-                mapped[$"{dst}.attention.attention.{name}.weight"] = pw;
-                mapped[$"{dst}.attention.attention.{name}.bias"] = pb;
-            }
-        }
-        return mapped;
     }
 }

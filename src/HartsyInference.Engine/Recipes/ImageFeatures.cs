@@ -59,4 +59,10 @@ public enum ImageFeatures
     /// <see cref="IArchitectureRecipe.PromptWeighting"/> and never declared by a recipe directly, so the bit and the
     /// mechanism cannot disagree.</summary>
     PromptWeighting = 2048,
+
+    /// <summary>The family returns its image as ordered RGBA layers in <see cref="Requests.ImageResult.Layers"/> as well as
+    /// the composite. Never requested by a composition object: a recipe declares it, and <c>ImagesService</c> then
+    /// recomputes the composite from the layers and refuses the post-steps that have no defined layered behaviour
+    /// (<see cref="Features.LayeredImage.Violation"/>).</summary>
+    LayeredOutput = 4096,
 }

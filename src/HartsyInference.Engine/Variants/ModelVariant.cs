@@ -41,6 +41,10 @@ public sealed record ModelVariant
     /// catalog entry), e.g. LTX-2.5's <c>ltx-2.5-distilled</c>; null when the declaring recipe serves it.</summary>
     public string? RoutesToFamily { get; init; }
 
+    /// <summary>The variant whose weight structure this one shares, for a fine-tune the weights cannot tell from its base.
+    /// A caller hint naming this variant then selects it over the base's structural match.</summary>
+    public string? FineTuneOf { get; init; }
+
     /// <summary>Whether this variant declares any structural rule.</summary>
     public bool HasStructuralRule => StructuralMarkers.Count > 0 || StructuralMatch is not null;
 

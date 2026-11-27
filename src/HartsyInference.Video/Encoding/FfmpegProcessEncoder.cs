@@ -8,7 +8,8 @@ public sealed class FfmpegProcessEncoder : IVideoEncoder
 {
     private readonly string _ffmpegPath;
 
-    public FfmpegProcessEncoder(string ffmpegPath = "ffmpeg") => _ffmpegPath = ffmpegPath;
+    /// <param name="ffmpegPath">The ffmpeg command; null uses <see cref="FfmpegLocator"/> (the <c>paths.ffmpegDir</c> folder, else PATH).</param>
+    public FfmpegProcessEncoder(string? ffmpegPath = null) => _ffmpegPath = ffmpegPath ?? FfmpegLocator.Resolve("ffmpeg");
 
     /// <inheritdoc/>
     public async Task EncodeAsync(IAsyncEnumerable<VideoFrame> frames, string outputPath, int fps, CancellationToken cancellationToken = default)
@@ -38,7 +39,7 @@ public sealed class FfmpegProcessEncoder : IVideoEncoder
         catch (Exception ex)
         {
             throw new InvalidOperationException(
-                $"Failed to launch ffmpeg ('{_ffmpegPath}'). Install ffmpeg or use BmpSequenceEncoder. {ex.Message}", ex);
+                $"Failed to launch ffmpeg ('{_ffmpegPath}'). {FfmpegLocator.InstallHint} Or use BmpSequenceEncoder. {ex.Message}", ex);
         }
 
         try

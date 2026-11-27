@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -11,16 +14,20 @@ public sealed class Qwen35VlGenerator
 {
     private readonly Qwen35Model _model;
     private readonly ILlmTokenizer _tok;
-    private readonly IVlmImageEncoder _vision;
+    private readonly Qwen3VlEncoder _vision;
     private readonly IBackend _backend;
 
-    public Qwen35VlGenerator(Qwen35Model model, ILlmTokenizer tok, IVlmImageEncoder vision, IBackend backend)
+    public Qwen35VlGenerator(Qwen35Model model, ILlmTokenizer tok, Qwen3VlEncoder vision, IBackend backend)
     {
         _model = model; _tok = tok; _vision = vision; _backend = backend;
     }
 
-    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    /// <summary>Generates an answer about <paramref name="pixelValues"/>. The image's merged grid is read from those pixels via the Qwen3-VL tower
+    /// (<see cref="Qwen3VlEncoder.MergedGrid"/>), never inferred from the token count: a 2×8 grid and a 4×4 grid both hold 16 tokens.</summary>
+    public unsafe VisionGeneration Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null,
+        string turnTail = DefaultTurnTail)
     {
+        MRopeImageGrid grid = Qwen3VlEncoder.MergedGrid(pixelValues, _vision.PatchSize, _vision.Merge);
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler (matches MultimodalGenerator).
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
@@ -35,8 +42,10 @@ public sealed class Qwen35VlGenerator
         // 2. Qwen-VL ChatML wrapping (same token layout as qwen25vl):
         //    "<|im_start|>user\n<|vision_start|> [image] <|vision_end|>{q}<|im_end|>\n<|im_start|>assistant\n"
         int[] pre = _tok.Encode("<|im_start|>user\n<|vision_start|>", addSpecial: true);
-        int[] post = _tok.Encode($"<|vision_end|>{question}<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
+        // The turn tail is the loaded template's own rendering after the user content (see JinjaChatTemplate.TurnTailAfterUser).
+        int[] post = _tok.Encode($"<|vision_end|>{question}{turnTail}", addSpecial: true);
         int seqLen = pre.Length + imgTokens + post.Length;
+        Logs.Info($"[Qwen35VlGenerator] image grid MRopeImageGrid {{ T = {grid.T}, H = {grid.H}, W = {grid.W}, Tokens = {grid.Tokens} }}; prompt {seqLen} tokens; max new tokens {maxTokens}; reasoning open {ReasoningOpen(turnTail)}.");
 
         // 3. Assemble the spliced input-embedding sequence [pre][image][post] (host F32).
         using Tensor embeds = new(new TensorShape(1, seqLen, hidden), DType.F32);
@@ -61,16 +70,58 @@ public sealed class Qwen35VlGenerator
         System.Text.StringBuilder sb = new();
 
         _model.ResetState();
-        float[] logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen);
+        float[] logits;
+        {
+            int[] positions = BuildPositions(seqLen, pre.Length, imgTokens, grid, out int nextPosition);
+            (Tensor cos, Tensor sin) = _model.BuildMultimodalRope(positions, seqLen, 0, seqLen);
+            using (cos)
+            using (sin)
+            {
+                logits = _model.ForwardEmbedsLastLogits(_backend, embeds, seqLen, cos, sin, nextPosition);
+            }
+        }
         int token = sampler.Next(new Span<float>(logits), history);
 
+        int? openId = _tok.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[0]), closeId = _tok.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]);
         for (int step = 0; step < maxTokens && !stops.Contains(token); step++)
         {
-            sb.Append(_tok.Decode(new[] { token }));
+            sb.Append(PieceText(_tok, token, openId, closeId));
             history.Add(token);
             logits = _model.ForwardLastLogits(_backend, new[] { token });
             token = sampler.Next(new Span<float>(logits), history);
         }
-        return sb.ToString();
+        return new VisionGeneration(sb.ToString(), StoppedOnToken: stops.Contains(token));
+    }
+
+    /// <summary>The text of one generated token. The reasoning markers are control tokens in these templates, and <see cref="ILlmTokenizer.Decode"/> drops
+    /// control ids, so the closing marker would vanish before the reasoning split sees it. They are written as their literal text, as the text path keeps them.</summary>
+    internal static string PieceText(ILlmTokenizer tok, int token, int? openId, int? closeId)
+    {
+        if (closeId is int c && token == c) return SpecialLiteralEscaper.ReasoningMarkers[1];
+        if (openId is int o && token == o) return SpecialLiteralEscaper.ReasoningMarkers[0];
+        return tok.Decode(new[] { token });
+    }
+
+    /// <summary>The turn tail when no template is loaded: a plain assistant header, no reasoning block.</summary>
+    public const string DefaultTurnTail = "<|im_end|>\n<|im_start|>assistant\n";
+
+    /// <summary>True when the turn tail leaves a reasoning block open for the model to write into (a template's <c>&lt;think&gt;</c> prefill
+    /// that is not closed in the same tail). The caller then splits the answer at its closing marker.</summary>
+    public static bool ReasoningOpen(string turnTail) =>
+        turnTail.Contains("<think>", StringComparison.Ordinal) && !turnTail.Contains("</think>", StringComparison.Ordinal);
+
+    /// <summary>Axis-major M-RoPE positions <c>[3 · seqLen]</c> for <c>[pre][image][post]</c>: the image's placeholder run at
+    /// <paramref name="imageStart"/> takes <c>(start + t, start + row, start + col)</c> over <paramref name="grid"/>, and the text after it
+    /// resumes at <c>start + max(T, H, W)</c>, not at the sequence index. Refuses a grid that does not hold exactly the encoder's tokens.</summary>
+    internal static int[] BuildPositions(int seqLen, int imageStart, int imageTokens, MRopeImageGrid grid, out int nextPosition)
+    {
+        if (grid.Tokens != imageTokens)
+            throw new ArgumentException($"The image grid {grid} holds {grid.Tokens} tokens but the encoder returned {imageTokens}.", nameof(grid));
+        if (imageStart < 0 || imageStart + imageTokens > seqLen)
+            throw new ArgumentOutOfRangeException(nameof(imageStart), "The image run does not fit in the sequence.");
+        const int placeholder = -1;
+        int[] layout = new int[seqLen];
+        for (int i = 0; i < seqLen; i++) layout[i] = i >= imageStart && i < imageStart + imageTokens ? placeholder : 0;
+        return MRopePositions.Build(layout, placeholder, [grid], out nextPosition);
     }
 }

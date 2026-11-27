@@ -13,6 +13,14 @@ public static class GgufConfigFactory
     /// <summary>The top-k renormalization default for an architecture whose GGUF omits <c>expert_weights_norm</c>.</summary>
     internal static bool DefaultNormTopK(string arch) => !NoTopKRenormByDefault.Contains(arch);
 
+    /// <summary>The routed-expert activation of a GGUF MoE architecture. Placement planning reads it too, so both agree.</summary>
+    public static ActivationKind MoeExpertActivation(string arch) => arch switch
+    {
+        "gemma4" => ActivationKind.GeluTanh,
+        "minimax-m3" => ActivationKind.SwigluOai,
+        _ => ActivationKind.Silu,
+    };
+
     /// <summary>Derives a <see cref="TransformerConfig"/> from <paramref name="metadata"/> and the HF-remapped <paramref name="weights"/> (the dict returned by <c>GgufModelLoader.Load(...).Weights</c>).</summary>
     public static TransformerConfig FromGguf(GgufMetadata metadata, IReadOnlyDictionary<string, Tensor> weights, bool lowVramQuant = false)
     {
@@ -322,7 +330,7 @@ public static class GgufConfigFactory
                 RoutedScalingFactor = expertWeightsScale,
                 // Gemma-4's MoE branch uses GeGLU (tanh-GELU), matching its dense FFN; every other MoE arch here
                 // (Mixtral/Qwen-MoE/OLMoE/DeepSeek) uses SwiGLU (the record default).
-                Activation = isGemma4 ? ActivationKind.GeluTanh : isMiniMaxM3 ? ActivationKind.SwigluOai : ActivationKind.Silu,
+                Activation = MoeExpertActivation(arch),
                 SwigluAlpha = swigluAlpha,
                 SwigluLimit = swigluLimit,
                 // Muse Spark runs its experts in a narrower latent space entered through ffn_latent_down/ffn_pre_exp_norm.

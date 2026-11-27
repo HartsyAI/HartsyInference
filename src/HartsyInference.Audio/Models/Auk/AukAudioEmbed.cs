@@ -23,19 +23,20 @@ public sealed class AukAudioEmbed
         });
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, ICollection<Tensor> owned)
     {
         int dim = _config.Dim;
         long convIn = dim / _config.ConvPosGroups;
         string conv = $"{prefix}.conv_pos_embed.conv1d";
+        Dictionary<string, Tensor> convWeights = [];
         foreach (string i in new[] { "0", "2" })
         {
-            AukOps.Require(weights, $"{conv}.{i}.weight", dim, convIn, _config.ConvPosKernel);
-            AukOps.Require(weights, $"{conv}.{i}.bias", dim);
+            convWeights[$"{conv}.{i}.weight"] = AukOps.Take(weights, $"{conv}.{i}.weight", owned, dim, convIn, _config.ConvPosKernel);
+            convWeights[$"{conv}.{i}.bias"] = AukOps.Take(weights, $"{conv}.{i}.bias", owned, dim);
         }
-        _linW = AukOps.Take(weights, $"{prefix}.linear.weight", dim, _config.LatentDim);
-        _linB = AukOps.Take(weights, $"{prefix}.linear.bias", dim);
-        _convPos.LoadWeights(weights, $"{prefix}.conv_pos_embed");
+        _linW = AukOps.Take(weights, $"{prefix}.linear.weight", owned, dim, _config.LatentDim);
+        _linB = AukOps.Take(weights, $"{prefix}.linear.bias", owned, dim);
+        _convPos.LoadWeights(convWeights, $"{prefix}.conv_pos_embed", owned);
     }
 
     /// <summary>Input <c>[1, n, latent]</c>, output <c>[1, n, dim]</c>; the caller owns the result.</summary>

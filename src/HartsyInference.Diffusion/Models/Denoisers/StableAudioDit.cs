@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -33,8 +36,12 @@ public sealed unsafe class StableAudioDit : IDisposable
         _preprocessConvW = Pick(w, "preprocess_conv.weight");
         _postprocessConvW = Pick(w, "postprocess_conv.weight");
         _timestepFeaturesW = PickF32(w, "timestep_features.weight");
-        _condEmbed0W = Pick(w, "to_cond_embed.0.weight");
-        _condEmbed2W = Pick(w, "to_cond_embed.2.weight");
+        // Open Small projects the T5 tokens to the model width (project_cond_tokens); Open 1.0 does not, and its
+        // cross-attention reads the raw 768-wide tokens.
+        _condEmbed0W = PickOpt(w, "to_cond_embed.0.weight");
+        _condEmbed2W = PickOpt(w, "to_cond_embed.2.weight");
+        if ((_condEmbed0W is null) != (_condEmbed2W is null))
+            throw new InvalidDataException("Stable Audio DiT: to_cond_embed has only one of its two layers.");
         _globalEmbed0W = Pick(w, "to_global_embed.0.weight");
         _globalEmbed2W = Pick(w, "to_global_embed.2.weight");
         _timestepEmbed0W = Pick(w, "to_timestep_embed.0.weight");
@@ -92,8 +99,9 @@ public sealed unsafe class StableAudioDit : IDisposable
         chLast.Dispose();
 
         int lc = (int)condTokens.Shape[1];
-        Tensor cond = MlpProj(backend, condTokens, _condEmbed0W!, _condEmbed2W!, lc, dim);
-        Tensor globalProj = MlpProj(backend, globalCond, _globalEmbed0W!, _globalEmbed2W!, 1, dim);
+        bool projectCond = _condEmbed0W is not null;
+        Tensor cond = projectCond ? MlpProj(backend, condTokens, _condEmbed0W!, _condEmbed2W!, lc) : condTokens;
+        Tensor globalProj = MlpProj(backend, globalCond, _globalEmbed0W!, _globalEmbed2W!, 1);
         Tensor timeEmb = TimestepEmbed(backend, timestep, dim);
         backend.Add(globalProj, globalProj, timeEmb);
         timeEmb.Dispose();
@@ -115,7 +123,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             cur.Dispose();
             cur = next;
         }
-        cond.Dispose();
+        if (projectCond)
+            cond.Dispose();
         cosTable.Dispose();
         sinTable.Dispose();
 
@@ -139,13 +148,18 @@ public sealed unsafe class StableAudioDit : IDisposable
     }
 
     /// <summary>The <c>to_cond_embed</c> / <c>to_global_embed</c> conditioning MLP: Linear(no bias) → SiLU →
-    /// Linear(no bias), both stages projecting to <paramref name="dim"/>.</summary>
-    private static Tensor MlpProj(IBackend backend, Tensor input, Tensor w0, Tensor w2, int rows, int dim)
+    /// Linear(no bias). The intermediate and output widths come from the checkpoint; Open 1.0 keeps its conditioning
+    /// MLP at 768 wide even though the DiT itself is 1536 wide.</summary>
+    private static Tensor MlpProj(IBackend backend, Tensor input, Tensor w0, Tensor w2, int rows)
     {
-        Tensor h1 = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        if (w0.Shape.Rank != 2 || w2.Shape.Rank != 2 || w0.Shape[1] != input.Shape[2] || w2.Shape[1] != w0.Shape[0])
+            throw new InvalidDataException($"Stable Audio conditioning MLP shape mismatch: input {input.Shape}, first {w0.Shape}, second {w2.Shape}.");
+        int hidden = (int)w0.Shape[0];
+        int output = (int)w2.Shape[0];
+        Tensor h1 = new Tensor(new TensorShape(1, rows, hidden), DType.F32);
         backend.Linear(h1, input, w0, null);
         backend.Silu(h1, h1);
-        Tensor outp = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        Tensor outp = new Tensor(new TensorShape(1, rows, output), DType.F32);
         backend.Linear(outp, h1, w2, null);
         h1.Dispose();
         return outp;
@@ -190,6 +204,12 @@ public sealed unsafe class StableAudioDit : IDisposable
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
+    private static Tensor PickNormF32(IReadOnlyDictionary<string, Tensor> w, string prefix, string standard, string stableAudioTools)
+    {
+        string standardKey = $"{prefix}.{standard}";
+        return w.ContainsKey(standardKey) ? PickF32(w, standardKey) : PickF32(w, $"{prefix}.{stableAudioTools}");
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0) _blocks = [];
@@ -214,27 +234,34 @@ public sealed unsafe class StableAudioDit : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _preNormW = PickF32(w, $"{p}.pre_norm.weight");
-            _preNormB = PickF32(w, $"{p}.pre_norm.bias");
+            _preNormW = PickNormF32(w, $"{p}.pre_norm", "weight", "gamma");
+            _preNormB = PickNormF32(w, $"{p}.pre_norm", "bias", "beta");
             _selfQkvW = Pick(w, $"{p}.self_attn.to_qkv.weight");
-            _selfQNormW = PickF32(w, $"{p}.self_attn.q_norm.weight");
-            _selfQNormB = PickF32(w, $"{p}.self_attn.q_norm.bias");
-            _selfKNormW = PickF32(w, $"{p}.self_attn.k_norm.weight");
-            _selfKNormB = PickF32(w, $"{p}.self_attn.k_norm.bias");
+            // Per-head QK-LayerNorm only where the config has it (Open Small); Open 1.0 has none.
+            if (_c.QkNorm)
+            {
+                _selfQNormW = PickF32(w, $"{p}.self_attn.q_norm.weight");
+                _selfQNormB = PickF32(w, $"{p}.self_attn.q_norm.bias");
+                _selfKNormW = PickF32(w, $"{p}.self_attn.k_norm.weight");
+                _selfKNormB = PickF32(w, $"{p}.self_attn.k_norm.bias");
+            }
             _selfOutW = Pick(w, $"{p}.self_attn.to_out.weight");
 
-            _crossNormW = PickF32(w, $"{p}.cross_attend_norm.weight");
-            _crossNormB = PickF32(w, $"{p}.cross_attend_norm.bias");
+            _crossNormW = PickNormF32(w, $"{p}.cross_attend_norm", "weight", "gamma");
+            _crossNormB = PickNormF32(w, $"{p}.cross_attend_norm", "bias", "beta");
             _crossQW = Pick(w, $"{p}.cross_attn.to_q.weight");
             _crossKvW = Pick(w, $"{p}.cross_attn.to_kv.weight");
-            _crossQNormW = PickF32(w, $"{p}.cross_attn.q_norm.weight");
-            _crossQNormB = PickF32(w, $"{p}.cross_attn.q_norm.bias");
-            _crossKNormW = PickF32(w, $"{p}.cross_attn.k_norm.weight");
-            _crossKNormB = PickF32(w, $"{p}.cross_attn.k_norm.bias");
+            if (_c.QkNorm)
+            {
+                _crossQNormW = PickF32(w, $"{p}.cross_attn.q_norm.weight");
+                _crossQNormB = PickF32(w, $"{p}.cross_attn.q_norm.bias");
+                _crossKNormW = PickF32(w, $"{p}.cross_attn.k_norm.weight");
+                _crossKNormB = PickF32(w, $"{p}.cross_attn.k_norm.bias");
+            }
             _crossOutW = Pick(w, $"{p}.cross_attn.to_out.weight");
 
-            _ffNormW = PickF32(w, $"{p}.ff_norm.weight");
-            _ffNormB = PickF32(w, $"{p}.ff_norm.bias");
+            _ffNormW = PickNormF32(w, $"{p}.ff_norm", "weight", "gamma");
+            _ffNormB = PickNormF32(w, $"{p}.ff_norm", "bias", "beta");
             _ff0W = Pick(w, $"{p}.ff.ff.0.proj.weight");
             _ff0B = PickOpt(w, $"{p}.ff.ff.0.proj.bias");
             _ff2W = Pick(w, $"{p}.ff.ff.2.weight");
@@ -291,8 +318,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             backend.SliceLastDim(vFlat, qkv, 2 * dim);
             qkv.Dispose();
 
-            Tensor q = HeadsNormRope(backend, qFlat, rows, heads, hd, _selfQNormW!, _selfQNormB!, rotDim, cosTable, sinTable);
-            Tensor k = HeadsNormRope(backend, kFlat, rows, heads, hd, _selfKNormW!, _selfKNormB!, rotDim, cosTable, sinTable);
+            Tensor q = HeadsNormRope(backend, qFlat, rows, heads, hd, _selfQNormW, _selfQNormB, rotDim, cosTable, sinTable);
+            Tensor k = HeadsNormRope(backend, kFlat, rows, heads, hd, _selfKNormW, _selfKNormB, rotDim, cosTable, sinTable);
             qFlat.Dispose(); kFlat.Dispose();
             Tensor v = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
             backend.Permute0213(v, vFlat, rows, heads, hd);
@@ -316,7 +343,7 @@ public sealed unsafe class StableAudioDit : IDisposable
 
             Tensor qFlat = new Tensor(new TensorShape(1, rows, dim), DType.F32);
             backend.Linear(qFlat, n, _crossQW!, null);
-            Tensor q = HeadsNormRope(backend, qFlat, rows, heads, hd, _crossQNormW!, _crossQNormB!, 0, null, null);
+            Tensor q = HeadsNormRope(backend, qFlat, rows, heads, hd, _crossQNormW, _crossQNormB, 0, null, null);
             qFlat.Dispose();
 
             Tensor kv = new Tensor(new TensorShape(1, condLen, 2 * kvDim), DType.F32);
@@ -327,7 +354,7 @@ public sealed unsafe class StableAudioDit : IDisposable
             backend.SliceLastDim(vFlat, kv, kvDim);
             kv.Dispose();
 
-            Tensor kHeads = HeadsNormRope(backend, kFlat, condLen, kvHeads, hd, _crossKNormW!, _crossKNormB!, 0, null, null);
+            Tensor kHeads = HeadsNormRope(backend, kFlat, condLen, kvHeads, hd, _crossKNormW, _crossKNormB, 0, null, null);
             kFlat.Dispose();
             Tensor vHeads = new Tensor(new TensorShape(1, kvHeads, condLen, hd), DType.F32);
             backend.Permute0213(vHeads, vFlat, condLen, kvHeads, hd);
@@ -340,8 +367,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             {
                 kRep = new Tensor(new TensorShape(1, heads, condLen, hd), DType.F32);
                 vRep = new Tensor(new TensorShape(1, heads, condLen, hd), DType.F32);
-                backend.RepeatKvHeads(kRep, kHeads, kvHeads, group);
-                backend.RepeatKvHeads(vRep, vHeads, kvHeads, group);
+                StridedCopies.RepeatInterleave(backend, kRep, kHeads, 1, group);
+                StridedCopies.RepeatInterleave(backend, vRep, vHeads, 1, group);
                 kHeads.Dispose(); vHeads.Dispose();
             }
 
@@ -358,16 +385,19 @@ public sealed unsafe class StableAudioDit : IDisposable
 
         /// <summary>flat [1,rows,H·D] → per-head QK-LayerNorm (on the pre-permute [1,rows,H,D] view — LayerNorm
         /// only reduces over the last dim, so this is identical to normalizing the post-permute layout) → optional
-        /// partial RoPE via <see cref="Core.Backends.IBackend.ApplyRopeSingle"/> (pass <c>rotDim=0</c>/<c>cosTable=null</c>
+        /// partial RoPE via <c>RotaryCall.TokenMajor</c> (pass <c>rotDim=0</c>/<c>cosTable=null</c>
         /// to skip, e.g. cross-attention) → <see cref="Core.Backends.IBackend.Permute0213"/> to heads-first
         /// [1,H,rows,D]. Order matters: LayerNorm must run BEFORE RoPE (matches <c>stable_audio_tools.Attention</c>).</summary>
         private Tensor HeadsNormRope(IBackend backend, Tensor flat, int rows, int heads, int hd,
-            Tensor normW, Tensor normB, int rotDim, Tensor? cosTable, Tensor? sinTable)
+            Tensor? normW, Tensor? normB, int rotDim, Tensor? cosTable, Tensor? sinTable)
         {
             Tensor headsFlat = flat.Reshape(new TensorShape(1, rows, heads, hd));
             Tensor normed = new Tensor(headsFlat.Shape, DType.F32);
-            backend.LayerNorm(normed, headsFlat, normW, normB, _c.QkNormEps);
-            if (cosTable is not null) backend.ApplyRopeSingle(normed, cosTable, sinTable!, rotDim);
+            if (normW is not null)
+                backend.LayerNorm(normed, headsFlat, normW, normB!, _c.QkNormEps);
+            else
+                backend.Scale(normed, headsFlat, 1.0f);
+            if (cosTable is not null) backend.Rotary(RotaryCall.TokenMajor(normed, cosTable, sinTable!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotDim));
             Tensor headsT = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
             backend.Permute0213(headsT, normed, rows, heads, hd);
             normed.Dispose();

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
@@ -23,6 +24,8 @@ public static class VideoEndpoints
             NativeVideoRequest req, IInferenceEngine engine,
             [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, CancellationToken ct) =>
         {
+            if (DuoRunFolderGate.Confine(req) is IResult refused)
+                return refused;
             ModelSpec spec;
             VideoPlan plan;
             try
@@ -58,6 +61,8 @@ public static class VideoEndpoints
             NativeVideoRequest req, IInferenceEngine engine,
             [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, HttpContext ctx, CancellationToken ct) =>
         {
+            if (DuoRunFolderGate.Confine(req) is IResult refused)
+                return refused;
             ModelSpec spec;
             VideoPlan plan;
             // Resolve the identical plan generation consumes before SSE writes its 200 response headers. Invalid
@@ -100,7 +105,17 @@ public static class VideoEndpoints
                 // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
                 IProgress<StepPreview> progress = SseHelpers.InlineProgress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
-                VideoGenerationResult result = await engine.Video.GenerateAsync(plan, req.Request, progress, ct);
+                VideoGenerationResult result;
+                try
+                {
+                    result = await engine.Video.GenerateAsync(plan, req.Request, progress, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Loader and recipe messages can name host paths; the client gets none, the log keeps the whole error.
+                    Logs.Error("[NativeVideo] Generation failed.", ex);
+                    throw new HartsyInferenceException(NativeVideoPlanResponse.SanitizeError(ex.Message));
+                }
                 foreach (VideoFrame frame in result.Frames)
                 {
                     ct.ThrowIfCancellationRequested();

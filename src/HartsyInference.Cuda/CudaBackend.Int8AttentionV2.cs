@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -7,12 +9,11 @@ using HartsyInference.Cuda.Profiling;
 
 namespace HartsyInference.Cuda;
 
-// INT8 attention v2 rows (S.17/S.18, M.4/M.5): admission, the persistent workspace and the three launches.
+// INT8 attention v2 rows (S.17/S.18, M.4/M.5): admission, the persistent workspace and the three launches, four with a rotation.
 public sealed partial class CudaBackend
 {
-    private ulong _int8V2Workspace;
-    private long _int8V2WorkspaceBytes;
-    private long _int8V2GrowthFailedAt = long.MaxValue;
+    private readonly HighWaterWorkspace _int8V2Workspace = new(static bytes => GpuTransferHelper.AllocateDevice((nuint)bytes),
+        GpuTransferHelper.FreeDevice);
     private long _int8V2ExecutionCount;
 
     /// <summary>Number of INT8 attention v2 executions this session.</summary>
@@ -22,7 +23,28 @@ public sealed partial class CudaBackend
     internal int Int8V2BlockRows => Int8V2BlockRowsOverride is 64 or 128 ? Int8V2BlockRowsOverride : 64;
 
     /// <summary>Bytes the INT8 v2 workspace holds now (its high-water mark since it was last released).</summary>
-    internal long Int8V2WorkspaceBytes => _int8V2WorkspaceBytes;
+    internal long Int8V2WorkspaceBytes => _int8V2Workspace.Bytes;
+
+    /// <summary>Bytes of earlier INT8 v2 workspaces kept alive because a captured graph still replays into them. Takes the
+    /// op lock: only the workspace's size may be read without it.</summary>
+    internal long Int8V2WorkspaceRetainedBytes
+    {
+        get
+        {
+            using OpScope _op = EnterOp();
+            return _int8V2Workspace.RetainedBytes;
+        }
+    }
+
+    /// <summary>Live graphs that lease the current INT8 v2 workspace.</summary>
+    internal int Int8V2WorkspaceLeases
+    {
+        get
+        {
+            using OpScope _op = EnterOp();
+            return _int8V2Workspace.CurrentLeases;
+        }
+    }
 
     /// <summary>The shape checks every INT8 v2 decision shares: the knob, F16 or F32, head dim 128, both sequences at the engage
     /// length, and a grid and counter slot per (batch, head).</summary>
@@ -39,12 +61,19 @@ public sealed partial class CudaBackend
         && (c.Numerics.Refused & AttentionFormats.Int8) == 0 && c.Mask.Bias is null && !c.Positions.OnDevice && c.Key.DType == c.Query.DType && c.Value.DType == c.Query.DType
         && c.Output.DType == c.Query.DType && c.Scale > 0f && float.IsFinite(c.Scale);
 
-    /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded.</summary>
+    /// <summary>Whether the kernels of the PV format <c>numerics.int8AttnV2F16Pv</c> picks are loaded, and with
+    /// <c>numerics.int8AttnV2Rotate</c> the rotation kernel too: a call asked to rotate never runs unrotated.</summary>
     private bool Int8V2KernelsLoaded()
     {
         EnsureKernels();
+        if (EngineKnobs.Int8AttnV2Rotate.Value && !_kernels!.HasInt8AttentionV2Rotation) return false;
         return EngineKnobs.Int8AttnV2F16Pv.Value ? _kernels!.HasInt8AttentionV2F16Pv : _kernels!.HasInt8AttentionV2;
     }
+
+    /// <summary>The transform <c>numerics.int8AttnV2Rotate</c> gives a call of <paramref name="validKeys"/> keys: none, or the
+    /// pinned rule's (<see cref="Int8AttentionRotation.Select"/>).</summary>
+    private static Int8Rotation CurrentInt8V2Rotation(int validKeys) =>
+        EngineKnobs.Int8AttnV2Rotate.Value ? Int8AttentionRotation.Select(Int8AttentionV2Layout.HeadDim, validKeys) : Int8Rotation.None;
 
     /// <summary>What the INT8 v2 rows take beyond their declared capability: <see cref="Int8V2Eligible"/>, the row's PV format,
     /// 16-byte aligned rows and the kernels.</summary>
@@ -65,7 +94,7 @@ public sealed partial class CudaBackend
         if (!Int8V2ShapeEligible(batch, heads, queryTokens, keys, headDim, headDim, dtype) || !Int8V2KernelsLoaded()) return false;
         long bytes = new Int8AttentionV2Layout(batch, heads, queryTokens, keys, CurrentInt8V2Pv()).Bytes;
         // A capture cannot grow the workspace, and a size that failed to allocate is not retried: such a call takes the next row.
-        return bytes <= _int8V2WorkspaceBytes || (!StreamIsCapturing() && bytes < _int8V2GrowthFailedAt);
+        return bytes <= _int8V2Workspace.Bytes || (!StreamIsCapturing() && bytes < _int8V2Workspace.GrowthFailedAt);
     }
 
     /// <summary>The PV format the knobs pick.</summary>
@@ -95,7 +124,7 @@ public sealed partial class CudaBackend
             Tensor output = c.Output.Storage;
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, Int8V2BlockRows, null);
+            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, Int8V2BlockRows, null, CurrentInt8V2Rotation(c.ValidKvLength));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cached = true;
             Interlocked.Increment(ref _int8V2ExecutionCount);
@@ -110,10 +139,19 @@ public sealed partial class CudaBackend
         }
     }
 
-    /// <summary>The stats, quant and attention launches of one call over device operands.</summary>
+    /// <summary>The stats, quant and attention launches of one call over device operands. With a rotation (or
+    /// <paramref name="rotationKernel"/>, a test's way to run the rotation kernel's identity) the quant launch leaves Q to the
+    /// rotation launch, which also rewrites the K it wrote; V is never rotated.</summary>
     private void LaunchInt8V2(in AttentionCall c, in Int8AttentionV2Layout layout, ulong workspace, ulong pQ, ulong pK, ulong pV,
-        ulong pOut, int blockRows, Int8V2TraceArgs? trace)
+        ulong pOut, int blockRows, Int8V2TraceArgs? trace, Int8Rotation rotation = Int8Rotation.None, bool rotationKernel = false)
     {
+        uint transform = Int8AttentionRotation.Resolve(rotation, Int8AttentionV2Layout.HeadDim, c.ValidKvLength) switch
+        {
+            Int8Rotation.H4 => 1u,
+            Int8Rotation.SignedH128 => 2u,
+            _ => 0u,
+        };
+        bool rotated = transform != 0 || rotationKernel;
         bool f32 = c.Query.DType == DType.F32, f32Out = c.Output.DType == DType.F32;
         ulong elem = f32 ? 4UL : 2UL;
         ulong q = pQ + (ulong)c.Query.Offset * elem, k = pK + (ulong)c.Key.Offset * elem, v = pV + (ulong)c.Value.Offset * elem;
@@ -125,7 +163,11 @@ public sealed partial class CudaBackend
                 _stream.Handle);
         using (NvtxRange _ = NvtxRange.PushFine("Int8V2.Quant"))
             _kernels!.LaunchInt8V2Quant(f32, q, Strides(c.Query), k, Strides(c.Key), v, Strides(c.Value), workspace, in layout, c.Batch,
-                c.Heads, c.QueryTokens, keys, _stream.Handle);
+                c.Heads, c.QueryTokens, keys, _stream.Handle, queries: !rotated);
+        if (rotated)
+            using (NvtxRange _ = NvtxRange.PushFine("Int8V2.RotatedQk"))
+                _kernels!.LaunchInt8V2RotatedQk(f32, q, Strides(c.Query), k, Strides(c.Key), workspace, in layout, c.Batch, c.Heads,
+                    c.QueryTokens, keys, transform, _stream.Handle);
         using (NvtxRange _ = NvtxRange.PushFine("Int8V2.Attention"))
             _kernels!.LaunchInt8V2Attention(blockRows, f32Out, o, Strides(c.Output), workspace, in layout, c.Batch, c.Heads, c.QueryTokens,
                 keys, c.Scale * Int8AttentionV2Reference.Log2E, _stream.Handle, trace);
@@ -141,41 +183,26 @@ public sealed partial class CudaBackend
 
     /// <summary>The workspace grown to at least <paramref name="bytes"/>, or 0 (the call takes the next row) while the stream
     /// captures and it is smaller, or when that size did not fit in VRAM since activations were last freed. A capture never
-    /// allocates it, and a captured graph must never hold a pointer a later growth frees. Ops are serialized (EnterOp).</summary>
+    /// allocates it. A graph that captures a call leases the buffer it baked, so a later growth or release keeps that buffer
+    /// until the graph is disposed or reset; the step graph is reset before growth instead, so its buffer is freed first.
+    /// Ops are serialized (EnterOp).</summary>
     private ulong EnsureInt8V2Workspace(long bytes)
     {
-        if (bytes <= _int8V2WorkspaceBytes) return _int8V2Workspace;
-        if (StreamIsCapturing() || bytes >= _int8V2GrowthFailedAt) return 0;
+        ulong workspace = _int8V2Workspace.Use(bytes, CapturingGraph);
+        if (workspace != 0) return workspace;
+        if (StreamIsCapturing() || bytes >= _int8V2Workspace.GrowthFailedAt) return 0;
         StepGraphInvalidateForActivationFree();
-        // Free first: old and new together would need both at peak, which is what fails near the VRAM limit.
-        FreeInt8V2Workspace();
         try
         {
-            _int8V2Workspace = GpuTransferHelper.AllocateDevice((nuint)bytes);
+            workspace = _int8V2Workspace.Grow(bytes);
+            AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.int8v2.workspace.grow", bytes);
+            return workspace;
         }
         catch (OutOfVramException ex)
         {
-            _int8V2GrowthFailedAt = bytes;
             Logs.Warning($"[INT8 attention v2] its {bytes >> 20} MB workspace does not fit ({ex.Message}); such calls take the next row.");
             return 0;
         }
-        _int8V2WorkspaceBytes = bytes;
-        return _int8V2Workspace;
     }
 
-    /// <summary>Returns the workspace to the stream-ordered pool when activations are freed, and lets a size that did not fit try
-    /// again; the next call grows it again.</summary>
-    private void ReleaseInt8V2Workspace()
-    {
-        _int8V2GrowthFailedAt = long.MaxValue;
-        FreeInt8V2Workspace();
-    }
-
-    private void FreeInt8V2Workspace()
-    {
-        ulong buffer = _int8V2Workspace;
-        _int8V2Workspace = 0;
-        _int8V2WorkspaceBytes = 0;
-        if (buffer != 0) GpuTransferHelper.FreeDevice(buffer);
-    }
 }

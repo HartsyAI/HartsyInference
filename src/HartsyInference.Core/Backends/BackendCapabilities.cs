@@ -37,7 +37,7 @@ public sealed class BackendCapabilities
     /// <summary>Whether this backend supports scaled dot-product attention.</summary>
     public bool SupportsSdpa { get; init; }
 
-    /// <summary>Whether this backend supports FFT / STFT for audio processing.</summary>
+    /// <summary>Whether this backend supports STFT for audio processing.</summary>
     public bool SupportsFft { get; init; }
 
     /// <summary>Maximum tensor dimensions supported.</summary>

@@ -173,10 +173,6 @@ public static class SideModels
         Sha256 = "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd"
     };
 
-    /// <summary>Qwen3.5-9B at Q8_0 — MOSS-Image's frozen text encoder (the final normalized hidden state of every prompt
-    /// token), in unsloth's llama.cpp repack of <c>Qwen/Qwen3.5-9B</c>: half the size of the BF16 trunk OpenMOSS ships
-    /// under <c>text_encoder/</c>, and it carries its own tokenizer. A full MOSS-Image folder's BF16 encoder is used
-    /// instead when the checkpoint sits in one. Hash is pinned on the first real-weight run.</summary>
     /// <summary>Qwen3.5-9B in bf16 (the stock weights MOSS-Image was trained against; Comfy-Org's <c>MOSS-Image</c> repack
     /// ships the same file). Its hidden states match OpenMOSS's reference, where the Q8 GGUF's do not (see MossImageRecipe).</summary>
     public static readonly ModelAsset Qwen35_9BBf16 = new ModelAsset
@@ -202,7 +198,7 @@ public static class SideModels
     };
 
     /// <summary>The Qwen3.5 fast tokenizer (248k byte-level BPE vocabulary, chat special tokens), for a Qwen3.5 text
-    /// encoder loaded from safetensors, which carry no tokenizer. Hash is pinned on the first real-weight run.</summary>
+    /// encoder loaded from safetensors, which carry no tokenizer. Hash is the LFS object id at Qwen/Qwen3.5-9B @c202236235.</summary>
     public static readonly ModelAsset Qwen35Tokenizer = new ModelAsset
     {
         Repo = "Qwen/Qwen3.5-9B",
@@ -210,7 +206,7 @@ public static class SideModels
         TargetSubdir = "Tokenizers/Qwen35",
         TargetName = "qwen35_tokenizer.json",
         Role = "tokenizer",
-        Sha256 = null
+        Sha256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
     };
 
     /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's, Mage-Flow's and FLUX.3 Klein's text encoder (rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use. Flat filename matches SwarmUI's Comfy <c>RequireClipModel("qwen3vl_4b.safetensors")</c> for file reuse.</summary>
@@ -245,6 +241,17 @@ public static class SideModels
         TargetName = "qwen_2.5_vl_7b_fp8_scaled.safetensors",
         Role = "text encoder",
         Sha256 = "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4"
+    };
+
+    /// <summary>Glyph-ByT5-small (Glyph-SDXL-v2's byte-level T5 encoder, fp16): HunyuanImage 2.1's second text encoder,
+    /// run on quoted prompt text only. Hash is the LFS object id at Comfy-Org/Hunyuan-Image-2.1 @78cfe74376.</summary>
+    public static readonly ModelAsset ByT5SmallGlyphXl = new ModelAsset
+    {
+        Repo = "Comfy-Org/Hunyuan-Image-2.1",
+        RepoPath = "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        TargetSubdir = "text_encoders",
+        Role = "text encoder",
+        Sha256 = "516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48"
     };
 
     /// <summary>HunyuanImage 2.1 VAE (32× downscale, 64-channel latent).</summary>
@@ -370,13 +377,16 @@ public static class SideModels
     };
 
     /// <summary>Qwen3-VL-4B text encoder as the Comfy-Org <c>int8_tensorwise</c> + ConvRot 256 build (4.86 GB), the encoder
-    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).
+    /// <para>The target name is its own folder, not <c>fibo2/qwen3vl_4b_int8_convrot.safetensors</c>: a same-named file from another
+    /// build (4,450,477,142 B, an int8 vision tower) sat there and satisfied the existence check, so the RMBG 3.0 run loaded it.
+    /// The pinned build lands beside it and nothing overwrites the other file.</para></summary>
     public static readonly ModelAsset Fibo2Qwen3VL4BInt8 = new ModelAsset
     {
         Repo = "Comfy-Org/Fibo-2.0",
         RepoPath = "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
         TargetSubdir = "text_encoders",
-        TargetName = "fibo2/qwen3vl_4b_int8_convrot.safetensors",
+        TargetName = "fibo2/comfy-org/qwen3vl_4b_int8_convrot.safetensors",
         Role = "text encoder",
         Sha256 = "32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c"
     };
@@ -391,6 +401,28 @@ public static class SideModels
         TargetName = "fibo2/flux2-vae.safetensors",
         Role = "vae",
         Sha256 = "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+    };
+
+    /// <summary>Iris-Z-small's empty-prompt conditioning (speridlabs/iris-z, FLUX non-commercial licence): the Qwen3-8B
+    /// features of an empty prompt, BF16 <c>[1, 512, 12288]</c>. It sits beside the transformer shards.</summary>
+    public static readonly ModelAsset IrisZSmallEmptyPrompt = new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = "Iris-Z-small/empty_prompt.safetensors",
+        TargetSubdir = "Stable-Diffusion/IrisZ/Iris-Z-small",
+        Role = "conditioning",
+        Sha256 = "3e39a39a9444db5b63b376470deeff230f4428945f2cc510a4ef83534ca11925"
+    };
+
+    /// <summary>Iris-Z-big's empty-prompt conditioning (speridlabs/iris-z, FLUX non-commercial licence): the
+    /// Mistral-Small-3 features of an empty prompt, BF16 <c>[1, 512, 15360]</c>. It sits beside the transformer shards.</summary>
+    public static readonly ModelAsset IrisZBigEmptyPrompt = new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = "Iris-Z-big/empty_prompt.safetensors",
+        TargetSubdir = "Stable-Diffusion/IrisZ/Iris-Z-big",
+        Role = "conditioning",
+        Sha256 = "90513ddf7f69e551200f80f7a369ffacf8fde283ca295fd1fd5bb68169e1fb24"
     };
 
     /// <summary>FLUX.2 VAE with the small decoder (96-192-384-384) that OpenMOSS ships for MOSS-Image: its decoder tensors
@@ -414,6 +446,18 @@ public static class SideModels
         TargetSubdir = "Lora",
         Role = "lora",
         Sha256 = "71dda6079e18d354e16e3347bc49a9b710afd9495c378efbb833d30cac9cb81b",
+    };
+
+    /// <summary>OneReward's object-removal LoRA for the FLUX.1 Fill transformer, applied by name with <c>--lora</c> (ComfyUI's
+    /// OneReward workflow loads it model-only at strength 1 on the OneReward transformer). CC-BY-NC-4.0. Hash is the LFS object
+    /// id at Comfy-Org/OneReward @77a4042ca2.</summary>
+    public static readonly ModelAsset OneRewardObjectRemovalLora = new ModelAsset
+    {
+        Repo = "Comfy-Org/OneReward",
+        RepoPath = "split_files/loras/flux.1-fill-dev-object-removal-lora.safetensors",
+        TargetSubdir = "Lora",
+        Role = "lora",
+        Sha256 = "63b3f284682ffe65eff22473179b48db107b0d1ff8f2b0a03c6dd2c8f21e8451",
     };
 
     /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
@@ -583,6 +627,18 @@ public static class SideModels
         TargetName = "AceStep/ace_1.5_vae.safetensors",
         Role = "vae",
         Sha256 = "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb"
+    };
+
+    /// <summary>HunyuanVideo-1.5 VAE (fp32 diffusers file, 5.04 GB) as the MovieRoll reference loads it (<c>vae/</c> of <c>tencent/HunyuanVideo-1.5</c>).
+    /// The hash is the LFS object id from the repo's public metadata; the repo is not gated.</summary>
+    public static readonly ModelAsset MovieRollVae = new ModelAsset
+    {
+        Repo = "tencent/HunyuanVideo-1.5",
+        RepoPath = "vae/diffusion_pytorch_model.safetensors",
+        TargetSubdir = "HunyuanVideo-1.5/vae",
+        TargetName = "diffusion_pytorch_model.safetensors",
+        Role = "vae",
+        Sha256 = "2609ed7033c052fdf164afcac71e8a7c82afccdbb001d673444a72f194fbb918"
     };
 
     /// <summary>HunyuanVideo 3D causal VAE (bf16) — Comfy-Org's standard HunyuanVideo repack; shared architecture with Kandinsky-5 Video's bundled diffusers VAE.</summary>

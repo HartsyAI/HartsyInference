@@ -2,11 +2,11 @@ using System;
 using System.Collections.Generic;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Vision.Pipelines;
 
 namespace HartsyInference.Vision.Segmentation;
 

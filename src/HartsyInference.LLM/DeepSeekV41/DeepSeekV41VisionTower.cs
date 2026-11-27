@@ -1,5 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -55,9 +59,9 @@ public sealed class DeepSeekV41VisionTower : IDisposable
         int dim = Config.HiddenSize, heads = Config.NumHeads, headDim = Config.HeadDim, inter = Config.IntermediateSize;
 
         DeepSeekV41VisionRopeTable rope = DeepSeekV41VisionRopeTable.Build(gridHeight, gridWidth, headDim, Config.RopeTheta);
-        using Tensor cos = DeepSeekV41HostMath.Tensor(rope.Cos, 1, n, headDim);
-        using Tensor sin = DeepSeekV41HostMath.Tensor(rope.Sin, 1, n, headDim);
-        using Tensor input = DeepSeekV41HostMath.Tensor(patches, n, Config.PatchInputDim);
+        using Tensor cos = HostMath.Tensor(rope.Cos, 1, n, headDim);
+        using Tensor sin = HostMath.Tensor(rope.Sin, 1, n, headDim);
+        using Tensor input = HostMath.Tensor(patches, n, Config.PatchInputDim);
         using Workspace w = new(n, dim, heads, headDim, inter);
 
         _backend.Linear(w.X, input, _weights.PatchProj, _weights.PatchBias);
@@ -90,8 +94,8 @@ public sealed class DeepSeekV41VisionTower : IDisposable
         _backend.SliceLastDim(w.Q, w.Qkv, 0);
         _backend.SliceLastDim(w.K, w.Qkv, dim);
         _backend.SliceLastDim(w.V, w.Qkv, 2 * dim);
-        _backend.ApplyRopeSingle(w.Q, cos, sin);
-        _backend.ApplyRopeSingle(w.K, cos, sin);
+        _backend.Rotary(RotaryCall.TokenMajor(w.Q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        _backend.Rotary(RotaryCall.TokenMajor(w.K, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
         _backend.Permute0213(w.QHeads, w.Q, n, heads, headDim);
         _backend.Permute0213(w.KHeads, w.K, n, heads, headDim);
         _backend.Permute0213(w.VHeads, w.V, n, heads, headDim);
@@ -106,7 +110,7 @@ public sealed class DeepSeekV41VisionTower : IDisposable
     {
         _backend.RmsNorm(w.Normed, w.X, b.Norm2, NormEps);
         _backend.Linear(w.GateUp, w.Normed, b.W1, null);
-        _backend.GluActivate(w.Act, w.GateUp, inter, gelu: false);
+        _backend.Glu(w.Act, w.GateUp, GluSpec.SwiGlu);
         _backend.Linear(w.Branch, w.Act, b.W2, null);
         _backend.Add(w.X, w.X, w.Branch);
     }

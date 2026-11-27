@@ -1,7 +1,7 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 

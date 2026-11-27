@@ -39,7 +39,7 @@ public static class DitDtype
 /// whose step issues an identical op sequence every step captures it once and replays it with a single
 /// <c>cuGraphLaunch</c> (host issue time → ~0). Models opt in IN CODE via the <c>IBackend.StepGraph*</c> API with
 /// fixed boundary buffers (see <c>Krea2Transformer.ForwardPatched</c> for the reference pattern: per-step-varying
-/// inputs refreshed via <c>CopyInto</c>, in-place Euler via <c>CfgEulerStep</c>, self-disables on capture failure).
+/// inputs refreshed via <c>CopyInto</c>, in-place Euler via <c>GuidedEulerStep</c>, self-disables on capture failure).
 ///
 /// <para>Tri-state (the EnvSwitch convention): <see cref="Enabled"/> is the experimental opt-in gate (default
 /// OFF — models where the graph was wall-neutral, e.g. GPU-bound Z-Image); <see cref="EnabledDefaultOn"/> is

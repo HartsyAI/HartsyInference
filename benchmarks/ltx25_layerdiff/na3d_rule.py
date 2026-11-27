@@ -1,8 +1,8 @@
-"""Is our Na3d window rule the same as comfy_kitchen.na3d's, in the regime where the window actually slides?
+"""Is our neighborhood attention window rule the same as comfy_kitchen.na3d's, in the regime where the window actually slides?
 
 Stage 0 of the decoder has H,W clamped to the full axis (dense) and matched the reference; stage 1 is the first
 place H,W genuinely slide, and it diverges. This compares comfy_kitchen.na3d against a numpy transcription of
-IBackend.Na3dReference on exactly that shape.
+NeighborhoodAttentionReference.Apply on exactly that shape.
 """
 import numpy as np
 import torch

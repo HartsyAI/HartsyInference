@@ -63,17 +63,18 @@ internal sealed unsafe class VibeVoiceConvNeXtBlock
             bias: true);
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
+    /// <param name="keepStoredWeight">Keeps the convolution and the two feed-forward weights as stored (see <see cref="SConv1d.LoadWeights"/>); norms, gammas and biases are always F32.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool keepStoredWeight = false)
     {
         _normW = WhisperOps.EnsureF32(w[$"{_prefix}.norm.weight"]);
         _ffnNormW = WhisperOps.EnsureF32(w[$"{_prefix}.ffn_norm.weight"]);
         _gammaW = VibeVoiceOps.ToChannelScaleWeight(w[$"{_prefix}.gamma"], _dim);
         _ffnGammaW = VibeVoiceOps.ToChannelScaleWeight(w[$"{_prefix}.ffn_gamma"], _dim);
-        _ffn1W = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear1.weight"]);
+        _ffn1W = keepStoredWeight ? w[$"{_prefix}.ffn.linear1.weight"] : WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear1.weight"]);
         _ffn1B = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear1.bias"]);
-        _ffn2W = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear2.weight"]);
+        _ffn2W = keepStoredWeight ? w[$"{_prefix}.ffn.linear2.weight"] : WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear2.weight"]);
         _ffn2B = WhisperOps.EnsureF32(w[$"{_prefix}.ffn.linear2.bias"]);
-        _mixer.LoadWeights(w, $"{_prefix}.mixer.conv");
+        _mixer.LoadWeights(w, $"{_prefix}.mixer.conv", keepStoredWeight);
     }
 
     /// <summary>Forward on <paramref name="x"/> <c>[batch, dim, t]</c> channels-first; streams via the mixer when <paramref name="cache"/> is non-null (per-(layer, sample) depthwise-conv history), otherwise non-streaming.</summary>

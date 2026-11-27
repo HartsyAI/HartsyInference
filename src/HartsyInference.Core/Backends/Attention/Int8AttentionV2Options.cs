@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>How INT8 attention v2 groups its K scales.</summary>
 public enum Int8KeyScaleGrouping
@@ -10,6 +10,17 @@ public enum Int8KeyScaleGrouping
 
     /// <summary>One scale per key, what the CUDA kernel runs. Layout <c>[B, Hkv, kvLen]</c>.</summary>
     PerKey,
+}
+
+/// <summary>What is subtracted from a head's keys before they are quantized, when keys are smoothed.</summary>
+public enum Int8KeyCenter
+{
+    /// <summary>Each key segment's channel mean.</summary>
+    SegmentMean,
+
+    /// <summary>One of the head's own key rows (<see cref="Int8RepresentativeKey"/>), or nothing when no row qualifies.
+    /// One segment only.</summary>
+    RepresentativeKey,
 }
 
 /// <summary>The formats P and V take in the PV product.</summary>
@@ -57,8 +68,15 @@ public sealed record Int8AttentionV2Options
     /// <summary>Subtract each key segment's channel mean before K is quantized.</summary>
     public bool SmoothKeys { get; init; } = true;
 
+    /// <summary>What smoothing subtracts from the keys. Either way the reference keeps <c>q · center</c> and adds it back
+    /// to each score, so sinks, biases and the LSE see the unsmoothed score.</summary>
+    public Int8KeyCenter KeyCenter { get; init; } = Int8KeyCenter.SegmentMean;
+
     /// <summary>Starts of the key segments after the first, ascending; each is smoothed with its own mean.</summary>
     public IReadOnlyList<int> KeySegmentStarts { get; init; } = [];
+
+    /// <summary>The transform applied to each Q row and each smoothed K row before quantization.</summary>
+    public Int8Rotation Rotation { get; init; } = Int8Rotation.None;
 
     /// <summary>One V channel scale per key tile instead of one per sequence, applied at each tile's drain.</summary>
     public bool ValueScalesPerTile { get; init; }
@@ -69,7 +87,9 @@ public sealed record Int8AttentionV2Options
     /// <summary>Seed of the stochastic rounding hash.</summary>
     public uint RoundingSeed { get; init; }
 
-    /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's.</summary>
+    /// <summary>The recurrence's exp2, null for double exp2 narrowed to F32; a kernel test replays the GPU's. It is asked
+    /// only for arguments up to <see cref="Int8AttentionV2Reference.U8Offset"/>, so a function need be right only there
+    /// (<see cref="Int8AttentionExp2.Evaluate"/> is not above 127).</summary>
     public Func<float, float>? Exp2 { get; init; }
 
     /// <summary>Observes every u8 key tile a row drains, for a kernel's trace test; null in normal use.</summary>

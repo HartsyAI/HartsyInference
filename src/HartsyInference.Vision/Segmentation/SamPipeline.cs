@@ -1,9 +1,9 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Vision.Pipelines;
 using HartsyInference.Vision.Segmentation.Sam2;
 
 namespace HartsyInference.Vision.Segmentation;

@@ -16,6 +16,10 @@ real-weight converter**, *not* the DiT/backbone.
 
 ## Parity-debugging methodology
 
+Before trusting any test run on a GPU: a run whose test host crashed still ends in `Passed!`. See the entry on
+that under [Correctness & verification discipline](#correctness--verification-discipline); it applies to every
+backend and model.
+
 **The layer-by-layer bisect (the workhorse):**
 1. Build a Python reference (venv) that dumps: initial noise, text embeddings, per-step latents
    (binary + mean/std/min/max JSON), final latent. Run C# with Python's **saved** noise/embeddings —
@@ -159,7 +163,7 @@ no bug, any more than one bad seed was proof there was one.
 - **Un-normalized V + an F16 attention fast path = threshold NaN.** Microsoft Lens RMS-norms Q/K but not
   V; its residual stream is architecturally huge (`max|V|` 18940→71583 across forwards), crossing F16's
   65504 → solid black. Fix: never let such V reach an F16 row. Lens's attention asserts no F16 bound and takes the
-  BF16 grant (F32's range); `numerics.sdpaF16`, which forces F16 for every caller, still clips it. A power-of-two
+  BF16 grant (F32's range); `numerics.sdpaF16`, which forces F16 for every caller, is refused there (`AttentionNumerics.WideRange`), so it no longer clips it. A power-of-two
   damp on V (scaled back out of the output) is exact on F32 rows if an F16 path must be used.
 - **F16 damp in front of a norm without a matched eps = washed-out image, never a NaN.** A damp `c` on a
   projection that feeds an RMSNorm is exact only as `RMSNorm(c·x, c²·eps)`; with the plain eps the norm sees
@@ -170,7 +174,7 @@ no bug, any more than one bad seed was proof there was one.
 - **YaRN RoPE needs HF's dimension-index ramp + `attention_factor` mscale** (Lens: 1.3466×), not a
   wavelength ramp.
 - **Phi head_dim=96** (non-power-of-two) hit an infinite CUDA fallback recursion; pad the flash-attn
-  block to next power of two, and extract the CPU reference to `AttentionReference` so the GPU fallback
+  block to next power of two, and extract the CPU reference to `FlashAttentionKernels` so the GPU fallback
   can't re-dispatch into itself. **Phi-4-mini fused-QKV split** must use real `head_dim=128`, not
   `rope.dimension_count=96` (they coincided on Phi-3.5, hiding the bug).
 
@@ -398,6 +402,7 @@ no bug, any more than one bad seed was proof there was one.
   synchronous transfers (`CudaMemory`) run on the calling backend's stream for this reason, so look for a raw
   driver call on stream 0 or a context-wide sync. The owner falls back to eager and recaptures
   (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op in the step itself.
+- **`CUDA_ERROR_ILLEGAL_ADDRESS` (700) on the second generation of a loaded pipeline, with the context unusable afterwards** (every cleanup step then fails): a captured step graph is replaying against weights that were freed after the first generation and uploaded again elsewhere. Freeing weights does not invalidate the graph (an activation free does), so the denoiser must invalidate it before it frees its weights (`Hunyuan3DDit.InvalidateStepGraph`); a pipeline freed between runs never shows it.
 - **`step-graph capture recorded a FREE of external device ptr` outside a capture step** means a capture window
   was left open. Look for the earlier failure that should have closed it: a `StepGraphReset` that threw, or a
   capture whose owner never reached its end.
@@ -422,6 +427,49 @@ no bug, any more than one bad seed was proof there was one.
 ---
 
 ## GPU residency / throughput (CUDA)
+
+- **OPEN, not diagnosed: CUDA graph decode and eager decode produce different text for the same greedy request.**
+  Qwen3-4B Q4_K_M, 8,192 prompt tokens, 128 generated, seed 42, RTX 4090: the eager lanes give one text (SHA-256
+  prefix 26c68e74a9df5f02, 777 characters) and the graph lane another (d490e1fc030bf1fd, 792 characters), parting at
+  character 343. It is the same on the PR 02 pin and on the PR 12 candidate, and stable across 40 graph runs, so it
+  predates the attention series. Nobody has found the token where the two decodes part: the campaign saved text, not
+  token ids. A greedy decode can legitimately flip at a near-tie when two paths round differently, so this may be
+  benign, but a captured graph replaying something stale would look the same. To locate it, save token ids and
+  logits for both paths at the first differing step. Source:
+  [the PR 12 report](../../benchmarks/attention/reports/pr12-qwen-primary.md).
+- **A TRELLIS.2 or Pixal3D shape or texture flow step stops returning and nothing is logged (Windows).** The entry below is the cause. These flow stages now run a
+  `StageWatchdog` (`HartsyInference.Core.Runtime`; the small structure flows are not watched): when no step finishes for ten times the median step so far (never under two minutes), it logs one `[Stall]`
+  warning naming the stage, the free and total device memory as of the last finished step and the remedies, and the next finished step throws `StageStalledException`, so a run that would
+  have crawled on is ended with a clear error. A slow first step (lazy uploads and kernel setup) only warns and is left out of the median, and a backend that reports no device memory (the CPU) is not watched. A step already
+  running cannot be interrupted, so a stage that never returns is reported, not ended; stop the process. The plan's memory reason also says when a recorded peak is past the roughly 8 GiB
+  Windows gives one process. Measured on the 3060 (2026-11-14): the 1024 cascade with 12 steps completes in about 15.5 minutes on an idle card, with F32 flows (11.9 GB card peak) and with
+  `numerics.flowF16Weights` (11.7 GB; 13% less GPU time), but 9 of 12 fine-flow steps run at 33 to 36 s, three times a step that does not page; the earlier 23-minute stall at the first fine step
+  happened while another program was also using the card.
+- **A flow or DiT that takes 5 s runs 6 to 35 times slower, or never finishes a step, with no error and the GPU at 99% (Windows).** Not an
+  attention route, a pool-accounting or an OOM-retry problem (`CudaMemory.OomRetries` stays 0). Measured on an RTX 3060 12 GB (driver 610.88,
+  Windows 11 build 26200): one process that allocates in 64 MB steps sees `cuMemGetInfo` free fall linearly (3,141 MB free at 8,064 MB allocated)
+  and then, between 8,064 and 8,192 MB, drop to 0 while 4 GB is still physically free. The DXGI video-memory budget of the process
+  (`IDXGIAdapter3::QueryVideoMemoryInfo`) collapses from 11,347 MB to about 5,430 MB, and allocations go on succeeding (12.9 GB "used" on a 12 GB
+  card), out of system memory. Whatever sits past about 8 GiB is paged, so a forward that needs it crawls; the collapse shows a moment after the
+  allocation that causes it. A clean 1.3B TRELLIS.2 flow peaks at 8.2 GB and takes 5.5 s; with the previous stage's pool, cached weights and the
+  F32-widened flow (4.9 GB) the process crossed it: 650 to 775 s per fine shape step, 360 to 460 s per texture step. A per-block `Sync`, a trimmed pool
+  or a device sweep between stages (`Trellis2DeviceMemory`) only worked by keeping the peak under the limit. Confirm it: `cuMemGetInfo` free reading 0
+  while the card is not full, or DXGI `CurrentUsage` above `Budget`; the log now says so once (`[Cuda] The device reports no free memory after a
+  large allocation, which succeeded ...`). What the backend does about it (Windows only; `vram.overcommitReliefMb = 0` turns all of it off): (1) an explicit
+  `PreloadWeights` stops when the device reports under 64 MB free, releases the last weights it uploaded from the host (never an activation promoted
+  in place, whose device buffer may be the only copy) until `vram.overcommitReliefMb` (3072) is given back and free memory returns, and leaves the
+  rest on the host, where they upload per op; `vram.preloadHeadroomMb` (2048) also keeps a preload from taking the last of the free memory, and a
+  warning counts the weights it left on the host; (2) the first time a device reports itself full, the used-memory level it was at becomes that
+  device's limit, which auto-promotion, cached weight casts and later preloads stay under (forgotten again if real use passes it with gigabytes free);
+  (3) a large allocation that finds the device full trims the allocator pool (reserved-but-free memory, never a live buffer; at most once a second,
+  and not while a step-graph capture is open, since the trim synchronizes the stream).
+  Real generation, TRELLIS.2 `--grid 1024 --texture` with the stage sweeps removed, 3 steps per stage, bust, seed 1, 15-minute budget: before, the
+  first fine shape step ran 720 s and 628 s (two runs, neither finished); after, 64 s, then 17.9 s, 17.8 s, 16.2 s per step, 13.5 s per texture step,
+  and 16 of 17 progress steps in 277 s. With the sweeps in place (the shipped configuration) the output is byte-identical (vertex and index
+  SHA-256) and the time unchanged, and no warning fires. Guard: `PreloadUnderPressureGpuTests` (benchmark lane; 11.2 GB of weights asked for on a 12 GB
+  card: 0 MB free after the preload before the fix, 6,149 MB after, and a 12288x12288 matmul in 0.5 s). Not solved: a process whose working set simply
+  needs more than about 8 GiB at once, which streams or pages whatever it does; keep stage peaks under it. Preloads by group
+  (`PreloadWeightGroups`, the MoE LLMs) do not check the device and are not covered by the preload give-back.
 
 - **A model is GPU-resident only if EVERY hot-path op is a backend op.** One `.DataPointer`/`AsSpan` read
   on a GPU tensor fires `cuStreamSynchronize`+D2H copy (lazy-sync). Ideogram 4's CPU "glue" (modulation
@@ -668,12 +716,10 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   `rope_decode_step` already reads). Regression tests deliberately pass a wrong/stale placeholder alongside
   the real devicePos value specifically to prove the placeholder is ignored, not merely that a plausible
   value happens to be correct by coincidence.
-- **`ConvTranspose1d`'s shipped shader has no `groups` field at all** — its inner loop sums over the full
-  `cIn` range assuming dense `[cIn, cOut, K]` weights, unlike `conv1d.comp.glsl` which does support
-  `groups`. Dispatching a depthwise (`groups>1`) call through it would silently read the wrong weight
-  slice. `VulkanBackend.ConvTranspose1d` now throws `NotSupportedException` for `groups != 1` instead of
-  producing wrong output; extending the shader for grouped transposed conv (needed for BigVGAN-style
-  anti-aliased upsampling) is open work.
+- **`ConvTranspose1d` on Vulkan rejected `groups != 1`.** The shader had no `groups` field, so depthwise upsamples
+  (BigVGAN-style, Kokoro's pool) and grouped Mimi or PocketTTS calls threw `NotSupportedException`. The shader now takes
+  `groups` with weight `[C_in, C_out/groups, K]`; the parity test is `VulkanConvTranspose1dParityTests`. If a grouped
+  call throws now, check its weight and channel shapes against that layout first.
 - **`SliceLastDim`, `ApplyRope`, `KvCacheAppend` had NO `VulkanBackend` override at all** — every call
   fell through to `IBackend`'s CPU-loop default, which reads `.DataPointer` directly. On a GPU-resident
   input that forces a full device sync + host readback (`GetD2hSyncCount`), and the next GPU op needing
@@ -715,7 +761,7 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   through one shared `DispatchFlashAttention` helper. Supports causal masking, GQA (query head `h` reads
   kv head `h/(hq/hkv)`), a sliding window, and (a separate `HAS_MASK=1`-compiled module, same convention
   as `snake`'s `USE_BETA`) an optional additive `[Sq,Skv]` mask broadcast across batch/head. Does NOT
-  support softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class) — those fall through to `AttentionReference`'s
+  support softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class) — those fall through to `FlashAttentionKernels`'s
   CPU reference, a documented scope boundary (none of these appear at Wan-video scale, so it doesn't
   block the OOM fix). Sets `FlashDecodeSupported => true`, unblocking Zonos onto the GPU-resident path.
   Measured (RTX 4090): the exact previously-unrunnable shape (B=1,H=24,S=16384,D=128) now completes in
@@ -915,6 +961,85 @@ run-by-run history is in git and in `ROADMAP.md` §3.
 - **Graph/step capture is model-dependent.** A Vulkan-native capture mechanism (persistent command pool +
   reusable command buffer + fence) was proven correct in isolation but did not fit the model's memory
   profile. Prove the mechanism separately from proving it helps.
+- **`dotnet test` prints `Passed!` after the test host crashes: a thread of the NVIDIA Vulkan driver.** Located,
+  and the engine now keeps off the path that sets it off (below). On the RTX 3060 (driver 610.88, Windows 11) the LLM GPU
+  lane (`--filter Category=GpuIntegration -f net10.0`) ended after about 10 seconds with `Passed! - Failed: 0,
+  Passed: 100, Skipped: 19, Total: 119` where the same filter and framework list 345 tests. Further up, the console
+  said `The active test run was aborted. Reason: Test host process crashed` and `Test Run Aborted.`; the TRX
+  outcome was `Failed` and the exit code 1. A search for failed tests finds none.
+  - **How often** (2026-11-21, one card shared with other sessions, so the rate moved with the load): the lane, about
+    2 of 25 runs. `AttentionPreparationEvidenceTests` alone in its process: 3 of 25, 1 of 29, 1 of 8, 0 of 12, 2 of
+    3, 3 of 11, then 1 of 28 once the machine was quiet. The test `--blame` names as running changes from crash to
+    crash, and has been a CUDA test and a test that computes on the host only.
+  - **What dies.** A native thread whose start routine is `nvoglv64.dll+0xA3D280`. Decoded from the DLL, it does
+    `mov rbx, rcx; ...; mov rcx, rbx; call qword ptr [rbx+10h]`: it calls a function pointer held in its argument
+    block, and that block holds garbage. So it faults at `nvoglv64.dll+0xA3D2A5` on a non-canonical address, or
+    jumps to `0`, to `0xFFF000000F7`, or to an address inside the block itself, as a freed heap block would give.
+    Its stack is `BaseThreadInitThunk` and `RtlUserThreadStart` and nothing else: no code of ours, so no managed
+    exception and nothing on stderr. Windows records each one in the Application log (source `.NET Runtime`, event
+    1026, `testhost.exe`, exception code `c0000005`). 32 crashed hosts were recorded from inside the process (see
+    below), every one with this signature.
+  - **What sets it off.** A process that creates a `VulkanBackend`, has it compile the cooperative-matrix attention
+    pipelines (`ScaledDotProductAttention` at head dim 64 with the F16 permission, on a pipeline cache that does not
+    already hold them) and destroys it, again and again, with no other Vulkan instance alive. That is necessary, not
+    sufficient: the same loop, every round on an empty cache directory of its own, crashed 5 of 5 while other jobs
+    shared the machine, 0 of 5 half an hour later when it was quiet, and 5 of 8 with every CPU core kept busy. The
+    lane crashed about 2 of 25 times on the shared cache file, 10 of 12 on a private empty directory during a busy
+    stretch, and 1 of 5 the same way on a quiet one. What the rate follows is not pinned down: load on the machine
+    is the best lead, and an empty cache alone is not it. One process per variant: that loop ended the process in 9
+    of 9 processes, at rounds 4 to 35, usually with the main thread inside `vkDestroyDevice`, twice while the next
+    backend was being created, once during the next attention call. A pause of 1 s before the destroy did not help.
+    The loop survived with only an instance (100 rounds), an instance and a device (100), a backend that ran nothing
+    (100), a backend that ran `Scale` (40), a backend that ran the scalar attention kernel (40), and one backend
+    reused for 200 cooperative-matrix calls. Reading the output back every round made it rarer: at 40 rounds the
+    host crashed in 1 of 3 processes with the read and 3 of 5 without.
+  - **What stops it.** One more Vulkan instance alive in the process. With an idle `VulkanInstance` held for the
+    whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it had cost up to
+    1.8 s. So `VulkanInstance` creates one more instance before the first and never destroys it
+    (`VulkanInstance.HoldsProcessInstance`); `diagnostics.vkKeepInstance` turns that off, and a process that never
+    touches Vulkan (no backend, no `VulkanContext` device count, which `auto` asks for only when CUDA is not taken)
+    never creates it. `VulkanBackendTeardownTests` is the loop, every round on an empty cache directory of its own:
+    alone in its process, interleaved over one afternoon, it crashed the host in 10 of 18 runs with the setting off
+    and 0 of 13 with it on. The lane, 5 runs each way on a quiet machine: 1 crashed with the setting off, 0 with it
+    on, which by itself separates nothing (the lane runs its classes in parallel, so another class usually has an
+    instance alive). A census of the threads that start inside `nvoglv64.dll` shows what the hold changes: with the
+    setting off every backend starts 5 threads at `+0xA3D280` and ends them when it is disposed; with it on, one of
+    those exists before the first backend and lives for the process, and each backend starts and ends 4. The same
+    threads start whatever the backend then runs, so that does not say why only the cooperative-matrix path
+    crashes, and that the crash runs into that one thread or its state is an inference, not something seen in the
+    driver. Not checked: other driver versions, the RTX 4090, other vendors, Linux.
+  - **Leads that did not hold** (the first was reported as the cause before it was checked):
+    - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
+      ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
+      to the end of a method before calling it a leak;
+    - a finalizer running after its device. The six Vulkan finalizers and `VulkanDevice.Dispose` were logged
+      through a crashed run: 61 devices disposed, no finalizer ran. A forced-collection repro crashed 3 of 3 in one
+      sitting and survived 6 of 6 an hour later on the same binaries, so it showed nothing about collection;
+    - the `VulkanPipelineCache: failed to persist cache ... being used by another process` warning just before
+      it, or a damaged cache file. The write is caught and logged, and nothing tied the file to the crash;
+    - OBS Studio's capture layer. `graphics-hook64.dll` is loaded into every Vulkan process on a machine with OBS
+      installed (the implicit layer `VK_LAYER_OBS_HOOK`), and it is on the stack of the thread inside
+      `vkDestroyDevice`. Interleaved A/B on the evidence class, the layer on against
+      `DISABLE_VULKAN_OBS_CAPTURE=1`: 3 crashed of 11 against 3 of 10, with the hook DLL confirmed absent in the
+      second arm. So the crash does not need the layer; whether the layer changes its rate, that sample cannot say.
+  - **How to capture a native crash like this one.**
+    - `--blame` names a test, which here was not the cause. `--blame-crash` writes no dump without procdump.
+    - `DOTNET_DbgEnableMiniDump=1` with `DOTNET_DbgMiniDumpType=2` fails on a process with a GPU context
+      (`MiniDumpWriteDump - Only part of a ReadProcessMemory or WriteProcessMemory request was completed`). Type `1`
+      writes a usable dump of about 300 MB, without the memory that names managed frames or the exception record.
+    - What named the thread: a first-chance vectored exception handler (`AddVectoredExceptionHandler`) installed
+      from a `[ModuleInitializer]` in the test assembly, with an `[UnmanagedCallersOnly]` callback. On an access
+      violation that is not a managed null dereference it appends to a file the instruction and its module, the
+      registers, `Environment.StackTrace` (the managed callers of the native call that faulted, when the thread has
+      any) and the module of every return address on the stack, then lets the exception continue. It was a scratch
+      file and is not in the tree; it is about 120 lines and worth making a test utility if a second native crash
+      turns up.
+    - Then a loop in one process per variant, each going one stage deeper, found the trigger in minutes where the
+      lane had taken hours.
+  - **A pass line alone is not a pass.** Compare the total with `dotnet test --list-tests` under the same
+    `--filter` and one `--framework` (the repo builds two, and an unscoped listing doubles the count; a theory
+    whose data cannot be serialized lists as one entry and runs as several, so allow for that), search the output
+    for `aborted`, and check the exit code: a crashed run exits 1.
 
 ### GEMM acceleration: what was tried, and what holds
 
@@ -963,6 +1088,13 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   RWKV-6 rescale) and the SigLIP mmproj swap under [Weight layout](#weight-layout--transpose--converter-parity).
 - **Qwen3.5 Gated DeltaNet:** missing `q *= 1/√head_dim` before the recurrence produces fluent-looking
   word salad (not a crash).
+- **Some llama.cpp Qwen3.5 GGUFs store the Gated DeltaNet value heads TILED when there are more value than key heads.** In the
+  SenseNova fork at 24ea7bb (conversion/qwen.py `_LinearAttentionVReorderBase`) that covers qkv V rows, z, a, b, `A_log`, `dt_bias`,
+  conv V channels and the `out_proj` columns. This engine and transformers use GROUPED order (value head `h` reads key head `h / repeat`).
+  The layout depends on the converter version, not on the architecture name, and the version history of upstream llama.cpp was not
+  checked. Only the SenseNova-Loop path un-tiles at load (`Qwen35Model.PrepareSenseNovaWeights`). A plain `qwen35` GGUF with unequal
+  head counts (9B-class, Clef) is not converted and is suspected wrong until checked against the HF route; detecting the layout will need
+  a signal in the file, since the architecture alone does not decide it.
 - **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
   row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
 - **A GGUF codec that agrees with its GPU kernel can still be wrong** — a kernel written to mirror the host

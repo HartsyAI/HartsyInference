@@ -17,8 +17,22 @@ public sealed record MiniMaxH3Config
     /// <summary>Video latent channels (24); the patch is 1x2x2 so the head emits 4x this.</summary>
     public int LatentsDim { get; init; } = 24;
 
-    /// <summary>Audio latent channels (32), stereo at 40 Hz.</summary>
+    /// <summary>False for the image build, which has no audio stream.</summary>
+    public bool HasAudio { get; init; } = true;
+
+    /// <summary>Audio latent channels (32), stereo at 40 Hz. Zero on an image build; read <see cref="AudioChannels"/>.</summary>
     public int AudioLatentsDim { get; init; } = 32;
+
+    /// <summary>Audio latent channels; throws on an image build so audio code cannot run without a stream.</summary>
+    public int AudioChannels => HasAudio
+        ? AudioLatentsDim
+        : throw new InvalidOperationException("This MiniMax-H3 checkpoint has no audio stream.");
+
+    /// <summary>Stacked output heads per stream (1 for the video build; the declared <c>pdd_steps</c> for an image build).</summary>
+    public int OutputHeadCount { get; init; } = 1;
+
+    /// <summary>The image build's sigma grid, from 1.0 down to 0.0, with <see cref="OutputHeadCount"/> + 1 points.</summary>
+    public IReadOnlyList<double>? OutputHeadSigmas { get; init; }
 
     public int PatchT { get; init; } = 1;
     public int PatchH { get; init; } = 2;
@@ -52,19 +66,30 @@ public sealed record MiniMaxH3Config
     /// <summary>Video rows carry <c>LatentsDim * patch volume</c> features.</summary>
     public int VideoPatchDim => LatentsDim * PatchT * PatchH * PatchW;
 
-    /// <summary>True when <paramref name="weights"/> carries the H3 signature (both patch projections).</summary>
+    /// <summary>True when <paramref name="weights"/> carries the joint audio/video H3 signature (both patch projections).</summary>
     public static bool Matches(IReadOnlyDictionary<string, Tensor> weights) =>
         weights.ContainsKey("video_patch_proj.weight") && weights.ContainsKey("audio_patch_proj.weight");
 
+    /// <summary>True for the H3 image build: video and condition projections, no audio projection.</summary>
+    public static bool MatchesImage(IReadOnlyDictionary<string, Tensor> weights) =>
+        weights.ContainsKey("video_patch_proj.weight") && weights.ContainsKey("condition_proj.weight")
+        && !weights.ContainsKey("audio_patch_proj.weight");
+
     /// <summary>Derives the config from checkpoint shapes, mirroring ComfyUI's <c>model_detection</c> H3 branch —
     /// nothing is assumed from the nominal defaults.</summary>
-    public static MiniMaxH3Config Detect(IReadOnlyDictionary<string, Tensor> weights)
+    public static MiniMaxH3Config Detect(IReadOnlyDictionary<string, Tensor> weights) => Detect(weights, null);
+
+    /// <summary>Derives the config from shapes. <paramref name="metadata"/> is the safetensors metadata; an image build
+    /// reads its output-head layout from it and refuses a layout the shapes do not match.</summary>
+    public static MiniMaxH3Config Detect(IReadOnlyDictionary<string, Tensor> weights, IReadOnlyDictionary<string, string>? metadata)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        if (!Matches(weights))
+        bool image = MatchesImage(weights);
+        if (!image && !Matches(weights))
         {
             throw new ArgumentException(
-                "Not a MiniMax-H3 checkpoint: both 'video_patch_proj.weight' and 'audio_patch_proj.weight' are required.");
+                "Not a MiniMax-H3 checkpoint: 'video_patch_proj.weight' with either 'audio_patch_proj.weight' "
+                + "or 'condition_proj.weight' is required.");
         }
 
         int hidden = (int)weights["video_patch_proj.weight"].Shape[0];
@@ -74,9 +99,12 @@ public sealed record MiniMaxH3Config
         // fc1 is the gated SwiGLU pair, so the true ffn width is half its rows.
         int ffn = (int)(Require(weights, "blocks.0.mlp.fc1.weight").Shape[0] / 2);
         int textDim = (int)Require(weights, "condition_proj.weight").Shape[1];
-        // video_out emits the patch volume (1x2x2 = 4) times the latent channels.
-        int latentsDim = (int)(Require(weights, "final_layer.video_out.weight").Shape[0] / 4);
-        int audioLatentsDim = (int)Require(weights, "final_layer.audio_out.weight").Shape[0];
+        // video_out emits the patch volume (1x2x2 = 4) times the latent channels, once per output head.
+        long videoOutRows = Require(weights, "final_layer.video_out.weight").Shape[0];
+        MiniMaxH3OutputHeads? outputHeads = image ? MiniMaxH3OutputHeads.Resolve(videoOutRows, metadata) : null;
+        int headCount = outputHeads?.Count ?? 1;
+        int latentsDim = (int)(videoOutRows / (4L * headCount));
+        int audioLatentsDim = image ? 0 : (int)Require(weights, "final_layer.audio_out.weight").Shape[0];
         int ropeLen = (int)Require(weights, "rope.inv_freq").Shape[0];
 
         MiniMaxH3Config config = new MiniMaxH3Config
@@ -88,7 +116,10 @@ public sealed record MiniMaxH3Config
             AttentionHeadDim = headDim,
             FfnHiddenSize = ffn,
             LatentsDim = latentsDim,
+            HasAudio = !image,
             AudioLatentsDim = audioLatentsDim,
+            OutputHeadCount = headCount,
+            OutputHeadSigmas = outputHeads?.Sigmas,
             TextDim = textDim,
             RopeInvFreqLen = ropeLen,
         };

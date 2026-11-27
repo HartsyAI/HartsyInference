@@ -114,14 +114,21 @@ public sealed record MiniMaxH3Assets
         };
     }
 
-    private static MiniMaxH3Assets FromFlat(string ditFile, ComponentOverrides? components)
+    /// <summary>The folders a flat-layout component search walks: the DiT's own folder and up to three ancestors, so a
+    /// VAE or text encoder beside the checkpoint or under its models root is found.</summary>
+    internal static List<string> FlatSearchRoots(string ditFile)
     {
-        string? ditDir = Path.GetDirectoryName(ditFile);
         List<string> roots = [];
-        for (string? d = ditDir; d is not null && roots.Count < 4; d = Path.GetDirectoryName(d))
+        for (string? d = Path.GetDirectoryName(ditFile); d is not null && roots.Count < 4; d = Path.GetDirectoryName(d))
         {
             roots.Add(d);
         }
+        return roots;
+    }
+
+    private static MiniMaxH3Assets FromFlat(string ditFile, ComponentOverrides? components)
+    {
+        List<string> roots = FlatSearchRoots(ditFile);
         string video = components?.VideoVae ?? components?.Vae
             ?? FindFlat(roots, _vaeFolders, ["video_vae"], preferQuantized: false)
             ?? throw new FileNotFoundException(
@@ -151,7 +158,7 @@ public sealed record MiniMaxH3Assets
     /// <summary>Searches each root's component folders for a <c>minimax_h3</c> file also matching one of
     /// <paramref name="hints"/>. Quantized text encoders remain the practical default, but a validation-pending
     /// quantized video VAE must be selected explicitly instead of displacing the proven FP16/BF16 component.</summary>
-    private static string? FindFlat(List<string> roots, string[] folders, string[] hints,
+    internal static string? FindFlat(List<string> roots, string[] folders, string[] hints,
         bool preferQuantized = true)
     {
         foreach (string root in roots)

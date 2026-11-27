@@ -12,4 +12,7 @@ public enum VoiceTurnKind
 
     /// <summary>The host asked the agent to say something (<see cref="VoiceAgentSession.SpeakAsync"/>).</summary>
     Speak,
+
+    /// <summary>The caller typed a message (<see cref="VoiceAgentSession.SubmitUserTextAsync"/>).</summary>
+    Typed,
 }

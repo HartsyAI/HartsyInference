@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -45,7 +46,7 @@ public static unsafe class Wan22VaePatch
             throw new ArgumentException($"Channels {packedC} not divisible by p² ({p * p}).");
         int c = packedC / (p * p);
         Tensor outT = new Tensor(new TensorShape([(long)b, c, t, h * p, w * p]), x.DType);
-        backend.UnpatchifyVae(outT, x, patchSize);
+        PixelShuffles.DepthToSpace(backend, outT, x, ShuffleSpec.ChannelsFirst(b, t, h, w, c, 1, p, p, ChannelOrder.CWHT));
         return outT;
     }
 

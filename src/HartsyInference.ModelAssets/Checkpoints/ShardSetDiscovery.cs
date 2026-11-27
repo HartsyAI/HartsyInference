@@ -10,7 +10,7 @@ public static class ShardSetDiscovery
     /// <summary>Largest shard count accepted. A real checkpoint is tens of shards; this bounds the probe on a crafted name.</summary>
     private const int MaxShards = 1000;
 
-    private static readonly Regex ShardName = new(@"^(?<stem>.+)-(?<index>\d{5})-of-(?<total>\d{5})\.safetensors$",
+    private static readonly Regex ShardName = new(@"^(?<stem>.+)-(?<index>\d{5})(?<of>-of-)(?<total>\d{5})(?<extension>\.safetensors)$",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
     /// <summary>The shard files that make up <paramref name="path"/>, in index order. A path that is not a shard
@@ -32,10 +32,18 @@ public static class ShardSetDiscovery
         {
             throw new InvalidDataException($"'{Path.GetFileName(path)}' declares {total} shards; expected 1 to {MaxShards}.");
         }
+        int index = int.Parse(match.Groups["index"].Value, System.Globalization.CultureInfo.InvariantCulture);
+        if (index < 1 || index > total)
+        {
+            throw new InvalidDataException($"'{Path.GetFileName(path)}' names shard {index} of a {total}-shard set.");
+        }
+        // Siblings are spelled as the given name is: the match ignores case, a case-sensitive filesystem does not.
+        string of = match.Groups["of"].Value;
+        string extension = match.Groups["extension"].Value;
         string[] shards = new string[total];
         for (int i = 0; i < total; i++)
         {
-            string name = $"{stem}-{i + 1:D5}-of-{total:D5}.safetensors";
+            string name = $"{stem}-{i + 1:D5}{of}{total:D5}{extension}";
             shards[i] = Path.Combine(directory, name);
             if (!File.Exists(shards[i]))
             {

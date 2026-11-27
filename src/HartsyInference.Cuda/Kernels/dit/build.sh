@@ -8,10 +8,12 @@ KERNELS=(
     "dit_f16"
     "dit_bf16"
     "stepcache"
-    "dit_rope"
     "dit_fp8emit"
-    "mg3_action"
     "dit_norm_act"
+    "frame_scan"
+    "ucpe"
+    "frame_conv"
+    "rms_relu"
 )
 
 # shellcheck source=../build_common.sh

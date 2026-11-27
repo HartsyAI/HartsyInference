@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Music;
 
@@ -172,7 +173,7 @@ public sealed class LtxAudioCausalConv2d
 }
 
 /// <summary>Parameter-free per-pixel RMS normalization over the channel dim (<c>LTX2AudioPixelNorm</c>):
-/// <c>x / sqrt(mean_c(x²) + eps)</c>. Routed through the device <see cref="IBackend.WanRmsNormChannel"/> op
+/// <c>x / sqrt(mean_c(x²) + eps)</c>. Routed through the device <see cref="IBackend.NormModulate"/> channel L2 norm
 /// (<c>x·sqrt(C)/max(L2_C, eps′)</c>) with the eps folded as <c>eps′ = sqrt(C·eps)</c>, which matches the reference
 /// exactly in both the signal limit (<c>L2 ≫ eps′</c>, difference ≤ eps/(2·mean_C(x²))) and the silence limit
 /// (both reduce to <c>x/sqrt(eps)</c>).</summary>
@@ -182,7 +183,7 @@ public static class LtxAudioPixelNorm
     {
         int c = (int)x.Shape[1];
         Tensor outT = new Tensor(x.Shape, DType.F32);
-        backend.WanRmsNormChannel(outT, x, null, MathF.Sqrt(c * eps));
+        backend.NormModulate(NormModulateCall.Channel(outT, x, NormKind.L2Norm, MathF.Sqrt(c * eps)));
         return outT;
     }
 }

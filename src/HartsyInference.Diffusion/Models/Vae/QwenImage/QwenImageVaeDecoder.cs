@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -252,9 +253,9 @@ public sealed class QwenImageVaeDecoder : IDisposable
         }
 
         // ── 6. Head: RMSNorm(96) → SiLU → 3×3 Conv2D to RGB ──
-        // Device norm (WanRmsNormChannel) — the host loop here drained the full-res [1,96,H,W] tensor.
+        // Device norm (the channel L2 NormModulate) — the host loop here drained the full-res [1,96,H,W] tensor.
         Tensor headNorm = new Tensor(hidden.Shape, DType.F32);
-        backend.WanRmsNormChannel(headNorm, hidden, _headGamma!, 1e-12f);
+        backend.NormModulate(NormModulateCall.Channel(headNorm, hidden, NormKind.L2Norm, 1e-12f).WithAffine(_headGamma!, null));
         hidden.Dispose();
 
         Tensor headSilu = new Tensor(headNorm.Shape, DType.F32);

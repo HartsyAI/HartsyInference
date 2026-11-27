@@ -5,7 +5,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Engine.Requests;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Gpu;
 using HartsyInference.Voice.Turns;
@@ -236,6 +236,12 @@ public sealed partial class VoiceAgentSession
                     string reason = heard.Length == 0 ? "the recognizer heard no words" : $"the recognizer heard no words (\"{heard}\")";
                     Logs.Debug($"[Voice] Turn {id} not answered: {reason}.");
                     session.CountDiscarded(id, reason);
+                    return;
+                }
+                if (session._options.TranscribeOnly)
+                {
+                    session.AddTranscript(id, TextRole.User, heard, interrupted: false);
+                    session.Emit(VoiceAgentEventKind.UserTranscript, id, heard);
                     return;
                 }
                 session.AddUserTurn(id, heard);

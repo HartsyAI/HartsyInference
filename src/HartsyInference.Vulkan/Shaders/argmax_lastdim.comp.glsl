@@ -2,7 +2,7 @@
 // row's winning index to out_data[row]. A single-workgroup dispatch writes out_data[0], which is the
 // on-device greedy sampling step.
 //
-// Ties go to the LOWER index, matching IBackend.ArgMaxLastDim. Both halves matter: the per-thread scan keeps
+// Ties go to the LOWER index, matching IBackend.ArgMaxInto. Both halves matter: the per-thread scan keeps
 // the earliest with a strict >, and the tree reduction breaks ties explicitly, because which thread holds
 // which candidate is an artifact of the stride order.
 //

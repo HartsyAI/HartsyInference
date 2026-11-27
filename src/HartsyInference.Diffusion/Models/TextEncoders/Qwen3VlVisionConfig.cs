@@ -52,6 +52,11 @@ public sealed record Qwen3VlVisionConfig
     /// runs it; false keeps the tanh approximation the blocks use.</summary>
     public bool MergerExactGelu { get; init; }
 
+    /// <summary>MOSS-VL's merger layout: the last block and each deepstack tap (kept raw, not merged) get their own
+    /// per-token LayerNorm, the streams are concatenated per token, and one MLP reads four consecutive tokens at once.
+    /// False keeps Qwen3-VL's per-tap merger stack.</summary>
+    public bool UnifiedDeepstackMerger { get; init; }
+
     /// <summary>Per-side grid count for the learned position embedding = round(sqrt(NumPositionEmbeddings)) = 48.</summary>
     public int NumGridPerSide => (int)Math.Round(Math.Sqrt(NumPositionEmbeddings));
 

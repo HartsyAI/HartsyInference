@@ -2,6 +2,7 @@ using System.Diagnostics;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Sampling;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -341,7 +342,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         Tensor condLogits = _languageModel.SemanticLogits(backend, condRow);
         Tensor uncondLogits = _languageModel.SemanticLogits(backend, uncondRow);
         Tensor guided = new Tensor(new TensorShape(1, MiniMaxMusic3GlobalLm.SemanticVocabSize + 1), DType.F32);
-        backend.CfgTopKGuided(guided, condLogits, uncondLogits, TopK, CfgScale);
+        backend.TopKGuidedLogits(guided, condLogits, uncondLogits, TopK, CfgScale);
         backend.SampleTopKInto(token, guided, TopK, 1f, 1f, 0f, rngState);
         condRow.Dispose();
         uncondRow.Dispose();
@@ -362,7 +363,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         backend.SliceRows(uncond, logits, 1);
         Tensor guided = new Tensor(new TensorShape(1, vocab), DType.F32);
         backend.Fill(guided, 0f);
-        backend.CfgEulerStep(guided, cond, uncond, CfgScale, 1f);
+        backend.GuidedEulerStep(guided, cond, uncond, GuidedEulerSpec.Lerp(CfgScale, 1f));
         backend.SampleTopKInto(token, guided, TopK, 1f, 1f, 0f, rngState);
         logits.Dispose();
         cond.Dispose();

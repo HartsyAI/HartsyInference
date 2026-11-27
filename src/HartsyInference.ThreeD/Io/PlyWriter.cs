@@ -41,6 +41,52 @@ public static class PlyWriter
         return sb.ToString();
     }
 
+    /// <summary>Serializes <paramref name="mesh"/> to binary little-endian PLY: the same properties as <see cref="WriteMesh"/>, an order of magnitude smaller and faster to read for a large mesh.</summary>
+    public static byte[] WriteMeshBinary(Mesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        bool hasN = mesh.Normals is { Length: > 0 } && mesh.Normals.Length == mesh.Vertices.Length;
+        bool hasC = mesh.VertexColors is { Length: > 0 } && mesh.VertexColors.Length == mesh.Vertices.Length;
+        int vc = mesh.VertexCount, fc = mesh.TriangleCount;
+
+        StringBuilder h = new();
+        h.Append("ply\nformat binary_little_endian 1.0\ncomment HartsyInference.ThreeD\n");
+        h.Append("element vertex ").Append(vc).Append('\n');
+        h.Append("property float x\nproperty float y\nproperty float z\n");
+        if (hasN) h.Append("property float nx\nproperty float ny\nproperty float nz\n");
+        if (hasC) h.Append("property uchar red\nproperty uchar green\nproperty uchar blue\n");
+        h.Append("element face ").Append(fc).Append('\n');
+        h.Append("property list uchar int vertex_indices\nend_header\n");
+        byte[] header = Encoding.ASCII.GetBytes(h.ToString());
+
+        int vertexBytes = 12 + (hasN ? 12 : 0) + (hasC ? 3 : 0);
+        byte[] data = new byte[checked(header.Length + vc * vertexBytes + fc * 13)];
+        header.CopyTo(data, 0);
+        int off = header.Length;
+        for (int i = 0; i < vc; i++)
+        {
+            for (int k = 0; k < 3; k++) Put(data, ref off, mesh.Vertices[i * 3 + k]);
+            if (hasN)
+            {
+                for (int k = 0; k < 3; k++) Put(data, ref off, mesh.Normals![i * 3 + k]);
+            }
+            if (hasC)
+            {
+                for (int k = 0; k < 3; k++) data[off++] = (byte)U8(mesh.VertexColors![i * 3 + k]);
+            }
+        }
+        for (int t = 0; t < fc; t++)
+        {
+            data[off++] = 3;
+            for (int k = 0; k < 3; k++)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(off), mesh.Indices[t * 3 + k]);
+                off += 4;
+            }
+        }
+        return data;
+    }
+
     /// <summary>Writes <paramref name="mesh"/> as ASCII PLY to <paramref name="path"/>.</summary>
     public static void SaveMesh(string path, Mesh mesh) => File.WriteAllText(path, WriteMesh(mesh));
 

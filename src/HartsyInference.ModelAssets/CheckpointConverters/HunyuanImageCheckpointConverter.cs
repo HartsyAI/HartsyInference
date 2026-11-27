@@ -1,4 +1,4 @@
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;

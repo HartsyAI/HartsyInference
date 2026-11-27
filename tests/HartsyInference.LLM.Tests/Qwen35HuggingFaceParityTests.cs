@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;

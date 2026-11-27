@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -96,7 +97,7 @@ public sealed unsafe class ZImageRope : IQkRotation, IHeadMajorQkRotation
     }
 
     /// <summary>Device RoPE (B=1, the pipeline case): rotates Q and K in-place on the PRE-permute
-    /// <c>[1, seqLen, numHeads, headDim]</c> layout via <see cref="IBackend.WanRopeInterleaved"/> — the same
+    /// <c>[1, seqLen, numHeads, headDim]</c> layout via <c>RotaryCall.Rows</c> — the same
     /// interleaved-pair rotation as <see cref="ApplyRotation"/> (adjacent pair (2i, 2i+1), angle shared across
     /// heads), bit-identical to the host path because RoPE indexes only (position, dim). This replaces the host
     /// <see cref="Forward"/> that D2H-round-tripped the full ~63 MB Q and K activations every block every step
@@ -107,8 +108,8 @@ public sealed unsafe class ZImageRope : IQkRotation, IHeadMajorQkRotation
         int seqLen = CheckGpuPrecondition("ApplyGpu", q);
         using RopeTableLease lease = _deviceTables.Acquire(backend, 0, seqLen, _positions!);
         (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
-        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>GQA variant of <see cref="ApplyGpu"/>: rotates Q with <paramref name="numHeads"/> and K with
@@ -119,8 +120,8 @@ public sealed unsafe class ZImageRope : IQkRotation, IHeadMajorQkRotation
         int seqLen = CheckGpuPrecondition("ApplyGpuGqa", q);
         using RopeTableLease lease = _deviceTables.Acquire(backend, 0, seqLen, _positions!);
         (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
-        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, seqLen, numKvHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, seqLen, numKvHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>Releases the device-resident table copies for <paramref name="backend"/> while preserving the CPU precompute.

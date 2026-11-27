@@ -2,7 +2,6 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Moonshine;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 

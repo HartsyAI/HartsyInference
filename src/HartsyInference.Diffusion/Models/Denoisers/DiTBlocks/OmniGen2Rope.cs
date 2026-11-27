@@ -38,7 +38,7 @@ public sealed unsafe class OmniGen2Rope : IDisposable
     private readonly int _headDim;
     private readonly RopeFrequencyPlan _plan;
 
-    // Device rope tables (WanRopeInterleaved [S, headDim] layout). Positions are step-invariant and size-invariant, so a
+    // Device rope tables (the interleaved rotary (RotaryCall.Rows) [S, headDim] layout). Positions are step-invariant and size-invariant, so a
     // table built once is reused across every block and every denoise step of a generation (and across generations at the
     // same geometry) — this is what turns the per-block host Q/K drain into a single device kernel. One slot per stream
     // type used concurrently in a forward (text / image / joint).
@@ -159,7 +159,7 @@ public sealed unsafe class OmniGen2Rope : IDisposable
     }
 
     /// <summary>Expands a host <c>[S, halfDim]</c> pair-angle table (from <see cref="BuildTableFromPositions"/> /
-    /// the fixed builders) into the <c>[S, headDim]</c> F32 layout <c>IBackend.WanRopeInterleaved</c> reads — pair
+    /// the fixed builders) into the <c>[S, headDim]</c> F32 layout <c>RotaryCall.Rows</c> reads — pair
     /// <c>i</c>'s angle duplicated at indices <c>2i</c> and <c>2i+1</c>. That kernel's rotation
     /// (<c>re·c − im·s, im·c + re·s</c> on adjacent pairs) matches <see cref="ApplyRotation"/> exactly, so applying it
     /// pre-permute on <c>[1, S, H, D]</c> Q/K is bit-equivalent to the host <see cref="Apply"/> — minus the per-block
@@ -191,7 +191,7 @@ public sealed unsafe class OmniGen2Rope : IDisposable
     }
 
     /// <summary>Returns the cached device <c>(cos, sin)</c> tables for a text-only stream (positions <c>(s,s,s)</c>),
-    /// building them on first use. <c>[txtSeqLen, headDim]</c> in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/>
+    /// building them on first use. <c>[txtSeqLen, headDim]</c> in the <c>RotaryCall.Rows</c>
     /// convention — bit-equivalent to the host <see cref="ApplyText"/> path minus the per-block Q/K D2H drain.</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(int txtSeqLen) =>
         _textTables.GetOrBuildStaged(txtSeqLen, static length => OmniGen2PosEmbed.TextRows(length));

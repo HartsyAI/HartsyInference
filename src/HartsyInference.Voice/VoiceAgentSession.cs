@@ -2,13 +2,13 @@ using System.Threading.Channels;
 using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
-using HartsyInference.Cpu;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Turns;
 
@@ -33,6 +33,9 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     private const int RingSeconds = 30;
     private const int MaxSynthesisInFlight = 2;
     private const string OverlapDiscardReason = "speech within the reply that did not barge in";
+
+    /// <summary>Longest typed message <see cref="SubmitUserTextAsync"/> accepts.</summary>
+    public const int MaxTypedTextChars = 2_000;
 
     private readonly VoiceModelSet _models;
     private readonly ITextService _text;
@@ -83,7 +86,7 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         _tools = tools;
         _options = options;
         _llm = VoiceModelSet.ResolveLlm(options);
-        _prefixCacheKey = options.EnablePrefixCache ? $"voice:{Guid.NewGuid():N}" : null;
+        _prefixCacheKey = options.EnablePrefixCache && !options.TranscribeOnly ? $"voice:{Guid.NewGuid():N}" : null;
         _conversation = new VoiceConversation(options.SystemPrompt);
         long backlogLimit = (long)VoiceAudioFrontend.SampleRate * RingSeconds;
         inboundCapacity = inboundCapacity > 0 ? inboundCapacity : (int)BitOperations.RoundUpToPowerOf2((uint)backlogLimit);
@@ -237,6 +240,47 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         return cancel.CanBeCanceled ? completion.Task.WaitAsync(cancel) : completion.Task;
     }
 
+    /// <summary>A message the caller typed: answered like a transcribed utterance (it becomes a user turn, the model replies, the
+    /// reply is spoken) with the same events and metrics, minus the recognition timings. While a reply or a spoken prompt is
+    /// audible and <see cref="VoiceAgentOptions.BargeInEnabled"/> is on it interrupts that audio exactly as speech would; with
+    /// barge-in off, or while the model is still thinking, it queues behind the turn in progress. Completes when its reply has
+    /// played or was interrupted; cancelled if the session ends first.</summary>
+    /// <exception cref="ArgumentException">The text has no letters or digits, or is longer than <see cref="MaxTypedTextChars"/>.</exception>
+    /// <exception cref="InvalidOperationException">The session is not started or has ended, or is <see cref="VoiceAgentOptions.TranscribeOnly"/>.</exception>
+    public Task SubmitUserTextAsync(string text, CancellationToken cancel = default)
+    {
+        if (_options.TranscribeOnly)
+        {
+            throw new InvalidOperationException("The session only transcribes; nothing would answer a typed message.");
+        }
+        if (State == VoiceAgentState.Created)
+        {
+            throw new InvalidOperationException("The session has not been started.");
+        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(text);
+        string message = text.Trim();
+        if (message.Length > MaxTypedTextChars || !HasWords(message))
+        {
+            throw new ArgumentException(message.Length > MaxTypedTextChars
+                ? $"A typed message is at most {MaxTypedTextChars} characters."
+                : "A typed message needs at least one letter or digit.", nameof(text));
+        }
+        // Read before the write: the turn the message queues behind is the one it may interrupt, never the one it starts.
+        int speaking = _options.BargeInEnabled ? _signals.SpeakingTurn : 0;
+        TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_inputs.Writer.TryWrite(VoiceTurnInput.Typed(message, completion, MonotonicClock.NowNs())))
+        {
+            throw new InvalidOperationException("The session has ended.");
+        }
+        // After the write, so the turn loop finds the message waiting when the interrupted turn ends instead of going idle first.
+        long now = MonotonicClock.NowNs();
+        if (speaking != 0 && _signals.TryBargeIn(speaking, now))
+        {
+            Emit(new VoiceAgentEvent { Kind = VoiceAgentEventKind.BargeIn, TurnId = speaking, TimestampNs = now });
+        }
+        return cancel.CanBeCanceled ? completion.Task.WaitAsync(cancel) : completion.Task;
+    }
+
     /// <summary>A key the caller pressed (0-9, *, #, A-D), as the host learned it out of band (RFC 2833, SIP INFO): answered
     /// as the user message <c>[DTMF n]</c>, queued behind any turn in progress. Not the tones the session hears in the
     /// audio itself; those are <see cref="VoiceAgentOptions.DetectInbandDtmf"/> and reach the model as
@@ -309,13 +353,13 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
 
     private static void RequireSameModels(VoiceAgentOptions loaded, VoiceAgentOptions requested)
     {
-        if (loaded.SttModel != requested.SttModel || loaded.TtsModel != requested.TtsModel || loaded.AudioDevice != requested.AudioDevice
-            || loaded.Denoise != requested.Denoise || loaded.CpuThreadCap != requested.CpuThreadCap)
+        if (loaded.SttModel != requested.SttModel || loaded.TtsModel != requested.TtsModel || loaded.Language != requested.Language
+            || loaded.AudioDevice != requested.AudioDevice || loaded.Denoise != requested.Denoise || loaded.CpuThreadCap != requested.CpuThreadCap)
         {
             throw new ArgumentException(
-                $"The session's models ({requested.SttModel}, {requested.TtsModel} on {requested.AudioDevice}, denoise {requested.Denoise}, "
-                + $"cpu cap {requested.CpuThreadCap}) differ from the model set's ({loaded.SttModel}, {loaded.TtsModel} on {loaded.AudioDevice}, "
-                + $"denoise {loaded.Denoise}, cpu cap {loaded.CpuThreadCap}).",
+                $"The session's models ({requested.SttModel} in {requested.Language}, {requested.TtsModel} on {requested.AudioDevice}, denoise "
+                + $"{requested.Denoise}, cpu cap {requested.CpuThreadCap}) differ from the model set's ({loaded.SttModel} in {loaded.Language}, "
+                + $"{loaded.TtsModel} on {loaded.AudioDevice}, denoise {loaded.Denoise}, cpu cap {loaded.CpuThreadCap}).",
                 nameof(requested));
         }
     }

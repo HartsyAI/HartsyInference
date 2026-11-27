@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -20,6 +21,12 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// <inheritdoc/>
     public string Name => "kandinsky5-video";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["vlm", "clip"], Format = "text", Negative = "separate", Supports = [],
+        Guide = "docs/prompting/kandinsky5-video.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Start-frame image-to-video: the first frame is VAE-encoded and pinned as latent frame 0, with

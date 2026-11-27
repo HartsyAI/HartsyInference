@@ -9,10 +9,10 @@ public enum QkRotationKind
     /// <summary>No rotation.</summary>
     None,
 
-    /// <summary>Interleaved pairs, <see cref="IBackend.WanRopeInterleaved"/> over each tensor with its own head count.</summary>
+    /// <summary>Interleaved pairs, one shared table over each tensor with its own head count (<c>RotaryCall.Rows</c>).</summary>
     InterleavedPairs,
 
-    /// <summary>Rotate-half with tables broadcast over heads, <see cref="IBackend.ApplyRopeSingle"/>.</summary>
+    /// <summary>Rotate-half with tables broadcast over heads (<c>RotaryCall.TokenMajor</c>).</summary>
     RotateHalf,
 
     /// <summary>LTX-2's split rotation, fused with the full-width norm.</summary>
@@ -21,10 +21,10 @@ public enum QkRotationKind
     /// <summary>The LTX-0.9 lineage: interleaved pairs over the full inner width after the full-width norm.</summary>
     FullWidthInterleaved,
 
-    /// <summary>Rotate-half on Q and K together, <see cref="IBackend.ApplyRope"/>: set on both, with one table pair.</summary>
+    /// <summary>Rotate-half on Q and K together: set on both, with one table pair.</summary>
     RotateHalfPaired,
 
-    /// <summary>Interleaved pairs with per-head tables <c>[heads, S, D]</c>, <see cref="IBackend.WanRopeInterleavedPerHead"/>.</summary>
+    /// <summary>Interleaved pairs with per-head tables <c>[heads, S, D]</c> (<c>RotaryCall.RowsPerHead</c>).</summary>
     InterleavedPairsPerHead,
 }
 

@@ -21,8 +21,18 @@ public static class PngDecoder
         return Decode(bytes);
     }
 
-    /// <summary>Decodes a PNG from raw bytes. Returns HWC-packed RGB u8, the source width, and height.</summary>
+    /// <summary>Decodes a PNG from raw bytes. Returns HWC-packed RGB u8, the source width, and height; alpha and EXIF orientation are dropped.</summary>
     public static (byte[] rgb, int width, int height) Decode(ReadOnlySpan<byte> data)
+    {
+        DecodedPng png = Parse(data, applyOrientation: false);
+        return (png.Rgb, png.Width, png.Height);
+    }
+
+    /// <summary>Decodes a PNG with its alpha (RGBA, or RGB with a colour-key <c>tRNS</c> chunk) and applies its <c>eXIf</c>
+    /// orientation to the pixels the way PIL's <c>ImageOps.exif_transpose</c> does.</summary>
+    public static DecodedPng DecodeWithAlpha(ReadOnlySpan<byte> data) => Parse(data, applyOrientation: true);
+
+    private static DecodedPng Parse(ReadOnlySpan<byte> data, bool applyOrientation)
     {
         if (data.Length < 8 || !data.Slice(0, 8).SequenceEqual(_pngSignature))
             throw new ArgumentException("Not a PNG file — signature mismatch.", nameof(data));
@@ -30,6 +40,8 @@ public static class PngDecoder
         int offset = 8;
         int width = 0, height = 0, bitDepth = 0, colorType = -1, interlace = 0;
         List<byte[]> idatChunks = new();
+        byte[]? transparency = null;
+        byte[]? exif = null;
 
         while (offset < data.Length)
         {
@@ -68,6 +80,12 @@ public static class PngDecoder
                 case "IDAT":
                     idatChunks.Add(body.ToArray());
                     break;
+                case "tRNS":
+                    transparency = body.ToArray();
+                    break;
+                case "eXIf":
+                    exif = body.ToArray();
+                    break;
                 case "IEND":
                     goto EndLoop;
                 // All other chunks (tEXt, pHYs, gAMA, sRGB, PLTE without indexed color, etc.) ignored.
@@ -97,20 +115,29 @@ public static class PngDecoder
 
         // Strip zlib 2-byte header (CMF + FLG).
         ReadOnlySpan<byte> deflated = compressed.AsSpan(2);
-        byte[] decompressed;
-        using (MemoryStream ms = new(deflated.ToArray()))
-        using (DeflateStream df = new(ms, CompressionMode.Decompress))
-        using (MemoryStream output = new())
-        {
-            df.CopyTo(output);
-            decompressed = output.ToArray();
-        }
-
         // Output stride = 1 (filter byte) + bytes per scanline.
         int channelsIn = colorType == 2 ? 3 : 4;
         int bytesPerPixel = channelsIn; // 8-bit per channel.
+        long expectedBytes = (1L + (long)width * bytesPerPixel) * height;
+        if (expectedBytes > int.MaxValue || (long)width * height * 3 > int.MaxValue)
+            throw new InvalidDataException($"PNG dimensions {width} x {height} are too large to decode.");
         int scanlineBytes = width * bytesPerPixel;
-        int expected = (1 + scanlineBytes) * height;
+        int expected = (int)expectedBytes;
+
+        // Inflate at most one byte past what the header promises, so a stream that expands far beyond its dimensions (a deflate bomb)
+        // is refused without being held in memory.
+        byte[] decompressed;
+        using (MemoryStream ms = new(deflated.ToArray()))
+        using (DeflateStream df = new(ms, CompressionMode.Decompress))
+        // Presized to what the header promises so it does not grow by doubling, but only up to 64 MiB: a header can promise far more than the data holds.
+        using (MemoryStream output = new(Math.Min(expected + 1, 64 << 20)))
+        {
+            byte[] block = new byte[81920];
+            int read;
+            while (output.Length <= expected && (read = df.Read(block, 0, (int)Math.Min(block.Length, expected + 1L - output.Length))) > 0)
+                output.Write(block, 0, read);
+            decompressed = output.ToArray();
+        }
         if (decompressed.Length != expected)
             throw new InvalidDataException($"PNG decompressed data is {decompressed.Length} bytes; expected {expected}.");
 
@@ -120,6 +147,8 @@ public static class PngDecoder
         byte[] rawScanline = new byte[scanlineBytes]; // filter-undone current row
         byte[] prevScanline = new byte[scanlineBytes]; // filter-undone previous row
         byte[] rgb = new byte[width * height * 3];
+        int[]? colorKey = colorType == 2 ? ReadColorKey(transparency) : null;
+        byte[]? alpha = colorType == 6 || colorKey is not null ? new byte[width * height] : null;
 
         int srcOffset = 0;
         for (int y = 0; y < height; y++)
@@ -129,16 +158,23 @@ public static class PngDecoder
             UnfilterScanline(filterType, decompressed.AsSpan(srcOffset, scanlineBytes), prevScanline, rawScanline, bytesPerPixel);
             srcOffset += scanlineBytes;
 
-            // Copy R, G, B into output. If RGBA, drop the alpha channel.
             int outBase = y * width * 3;
             if (colorType == 2)
             {
-                // 3 channels → straight copy.
                 Buffer.BlockCopy(rawScanline, 0, rgb, outBase, scanlineBytes);
+                if (colorKey is not null)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        int inOff = x * 3;
+                        bool keyed = rawScanline[inOff] == colorKey[0] && rawScanline[inOff + 1] == colorKey[1]
+                            && rawScanline[inOff + 2] == colorKey[2];
+                        alpha![y * width + x] = keyed ? (byte)0 : (byte)255;
+                    }
+                }
             }
             else
             {
-                // 4 channels → drop alpha.
                 for (int x = 0; x < width; x++)
                 {
                     int inOff = x * 4;
@@ -146,6 +182,7 @@ public static class PngDecoder
                     rgb[outOff + 0] = rawScanline[inOff + 0];
                     rgb[outOff + 1] = rawScanline[inOff + 1];
                     rgb[outOff + 2] = rawScanline[inOff + 2];
+                    alpha![y * width + x] = rawScanline[inOff + 3];
                 }
             }
 
@@ -153,7 +190,26 @@ public static class PngDecoder
             (rawScanline, prevScanline) = (prevScanline, rawScanline);
         }
 
-        return (rgb, width, height);
+        int orientation = ExifOrientation.ReadTiff(exif);
+        if (applyOrientation && orientation != ExifOrientation.Upright)
+        {
+            (rgb, alpha, width, height) = ExifOrientation.Apply(rgb, alpha, width, height, orientation);
+        }
+
+        return new DecodedPng(rgb, alpha, width, height, orientation, applyOrientation && orientation != ExifOrientation.Upright);
+    }
+
+    /// <summary>The three 8-bit colour-key samples of an RGB <c>tRNS</c> chunk, or null when there is none.</summary>
+    private static int[]? ReadColorKey(byte[]? transparency)
+    {
+        if (transparency is not { Length: >= 6 })
+            return null;
+        return
+        [
+            BinaryPrimitives.ReadUInt16BigEndian(transparency.AsSpan(0)),
+            BinaryPrimitives.ReadUInt16BigEndian(transparency.AsSpan(2)),
+            BinaryPrimitives.ReadUInt16BigEndian(transparency.AsSpan(4)),
+        ];
     }
 
     private static void UnfilterScanline(byte filterType, ReadOnlySpan<byte> filtered, byte[] prev, byte[] output, int bpp)

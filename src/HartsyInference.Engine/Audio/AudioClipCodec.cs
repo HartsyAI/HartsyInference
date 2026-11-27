@@ -22,7 +22,12 @@ public static class AudioClipCodec
     }
 
     /// <summary>Decodes a clip to a stereo pair at <paramref name="targetSampleRate"/> (mono sources duplicate the single channel), for the models that need true stereo input such as Demucs.</summary>
-    public static (float[] Left, float[] Right) DecodeStereo(AudioClip? clip, int targetSampleRate)
+    public static (float[] Left, float[] Right) DecodeStereo(AudioClip? clip, int targetSampleRate) => DecodeStereo(clip, targetSampleRate, soxrHq: false);
+
+    /// <summary><see cref="DecodeStereo(AudioClip?, int)"/> resampled with the SoXR-HQ stand-in, for a model whose reference loads audio with <c>librosa.load(sr=...)</c>.</summary>
+    internal static (float[] Left, float[] Right) DecodeStereoSoxrHq(AudioClip? clip, int targetSampleRate) => DecodeStereo(clip, targetSampleRate, soxrHq: true);
+
+    private static (float[] Left, float[] Right) DecodeStereo(AudioClip? clip, int targetSampleRate, bool soxrHq)
     {
         if (clip is null || clip.Data.Length == 0)
         {
@@ -31,13 +36,23 @@ public static class AudioClipCodec
         WavFile.DecodedAudio decoded = Decode(clip);
         float[] left = decoded.Channels.Length > 0 ? decoded.Channels[0] : [];
         float[] right = decoded.Channels.Length > 1 ? decoded.Channels[1] : left;
-        if (decoded.SampleRate == targetSampleRate)
+        int sourceRate = decoded.SampleRate;
+        if (sourceRate == targetSampleRate)
         {
             return (left, right);
         }
-        // Separate resampler instances: the polyphase filter carries per-stream state.
-        float[] outLeft = Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(left);
-        float[] outRight = ReferenceEquals(left, right) ? outLeft : Resampler.Create(decoded.SampleRate, targetSampleRate).Resample(right);
+        if (soxrHq && !SincResampler.SupportsSoxrHqStandIn(sourceRate, targetSampleRate))
+        {
+            Logs.Warning($"[Audio] {sourceRate} Hz to {targetSampleRate} Hz is too large a ratio for the SoXR-HQ stand-in; "
+                + "using the polyphase resampler, which is off the reference route.");
+            soxrHq = false;
+        }
+        // A new polyphase resampler per channel: the filter carries per-stream state.
+        float[] Resample(float[] channel) => soxrHq
+            ? SincResampler.ResampleSoxrHqStandIn(channel, sourceRate, targetSampleRate)
+            : Resampler.Create(sourceRate, targetSampleRate).Resample(channel);
+        float[] outLeft = Resample(left);
+        float[] outRight = ReferenceEquals(left, right) ? outLeft : Resample(right);
         return (outLeft, outRight);
     }
 

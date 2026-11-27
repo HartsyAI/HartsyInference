@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
@@ -10,7 +11,7 @@ public sealed partial class CudaBackend
     internal int Int8V2BlockRowsOverride { get; set; }
 
     /// <summary>Test hook: the smallest workspace size that ran out of VRAM since activations were last freed.</summary>
-    internal long Int8V2GrowthFailedAtForTest { get => _int8V2GrowthFailedAt; set => _int8V2GrowthFailedAt = value; }
+    internal long Int8V2GrowthFailedAtForTest { get => _int8V2Workspace.GrowthFailedAt; set => _int8V2Workspace.GrowthFailedAt = value; }
 
     /// <summary>Test hook: each loaded INT8 v2 entry's registers and local bytes as the driver compiled it for this card.</summary>
     internal (string Name, int Registers, int LocalBytes)[] Int8V2EntryResourcesForTest()
@@ -21,9 +22,11 @@ public sealed partial class CudaBackend
     }
 
     /// <summary>Test hook: runs one call on <paramref name="pv"/> at <paramref name="blockRows"/> and copies its workspace back, with
-    /// the trace of (batch, head, query tile) when <paramref name="traceTarget"/> is set (u8 PV, F32 output).</summary>
+    /// the trace of (batch, head, query tile) when <paramref name="traceTarget"/> is set (u8 PV, F32 output).
+    /// <paramref name="rotation"/> rotates Q and K; <paramref name="rotationKernel"/> sends an unrotated call through the
+    /// rotation kernel too.</summary>
     internal unsafe Int8V2Readback RunInt8AttentionV2ForTest(in AttentionCall c, Int8AttentionV2Pv pv, int blockRows,
-        (int Batch, int Head, int QueryTile)? traceTarget = null)
+        (int Batch, int Head, int QueryTile)? traceTarget = null, Int8Rotation rotation = Int8Rotation.None, bool rotationKernel = false)
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -52,7 +55,7 @@ public sealed partial class CudaBackend
                     Batch = (uint)target.Batch, Head = (uint)target.Head, QueryTile = (uint)target.QueryTile,
                 };
             }
-            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, blockRows, trace);
+            LaunchInt8V2(in c, layout, workspace, pQ, pK, pV, pOut, blockRows, trace, rotation, rotationKernel);
             _stream.Synchronize();
             T[] Read<T>(ulong at, long count) where T : unmanaged
             {

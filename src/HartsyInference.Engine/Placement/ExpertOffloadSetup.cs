@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -48,6 +48,35 @@ public static class ExpertOffloadSetup
             offload.Seed(layers, perLayer);
             Logs.Info($"{logTag} Expert offload: {ByteFormat.GbF1(budgetBytes)} cache, seeded {perLayer} of {numExperts} experts in "
                 + $"each of {layers.Count} layers.");
+            return offload;
+        }
+        catch
+        {
+            offload.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Attaches an expert offload with no CPU runner: a device cache of <paramref name="budgetBytes"/> holds the routed experts
+    /// admission keeps, and every miss runs on the device from a copy uploaded for that call. For a model whose experts the packed CPU
+    /// kernels cannot run (block-FP8 weights, a SiTU activation). The caller preloads the dense weights first; the cache starts empty
+    /// and fills from what is actually routed, and weight casts stay cached. Attach before the first forward. The caller owns the
+    /// returned offload and disposes it before the model.</summary>
+    /// <exception cref="HartsyInferenceException">The backend is not CUDA.</exception>
+    public static MoeExpertOffload AttachDeviceOnly(IBackend backend, IExpertOffloadTarget model, long budgetBytes, string logTag)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(model);
+        if (backend is not CudaBackend cuda)
+        {
+            throw new HartsyInferenceException($"Expert offload needs a CUDA backend; this model runs on {backend.Capabilities.Name}.");
+        }
+        MoeExpertOffload offload = CudaMoeOffload.CreateDeviceOnly(cuda, budgetBytes, model.EnumerateExpertWeights());
+        try
+        {
+            IReadOnlyList<(int Layer, int ExpertCount)> layers = model.AttachExpertOffload(offload);
+            Logs.Info($"{logTag} Expert cache: {ByteFormat.GbF1(budgetBytes)} on the device across {layers.Count} MoE layers; misses run on the "
+                + "device from a per-call upload.");
             return offload;
         }
         catch

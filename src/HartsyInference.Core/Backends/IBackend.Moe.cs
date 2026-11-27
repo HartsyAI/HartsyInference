@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -14,9 +15,11 @@ public partial interface IBackend
     /// <param name="bias">Selection-only bias added to the scores (the weights stay unbiased); null for none.</param>
     /// <param name="altBias">Bias used instead of <paramref name="bias"/> for tokens whose kind is non-zero (image tokens).</param>
     /// <param name="tokenKinds">I32 kind per token, required with <paramref name="altBias"/>.</param>
+    /// <param name="dense">F32 <c>[T, E]</c> to also receive every token's weights at its expert ids and zeros elsewhere, for a
+    /// combine that runs every expert densely; null for the pairs alone.</param>
     void MoeRoute(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null) =>
-        throw NotSupportedPrimitive(nameof(MoeRoute));
+        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null, Tensor? dense = null) =>
+        MoeReference.Route(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds, dense);
 
     /// <summary>Histogram, exclusive scan and stable expert-major permutation of the token-to-expert pairs.</summary>
     /// <param name="counts">I32 [E] rows per expert.</param>
@@ -30,13 +33,6 @@ public partial interface IBackend
     /// <summary>Weighted, deterministic sum of each token's k expert rows: <c>output[t] (+)= sum_j w[t,j] * expertOut[pairSlot[t,j]]</c>.</summary>
     void MoeCombine(Tensor output, Tensor expertOut, Tensor pairSlot, Tensor topkWeight, int k, bool accumulate) =>
         throw NotSupportedPrimitive(nameof(MoeCombine));
-
-    /// <summary>Top-k over the last dimension; see <see cref="TopKReference.Apply"/> for the exact ordering and padding rules.</summary>
-    /// <param name="validLengths">Optional I32 per-row count of leading entries that may be chosen.</param>
-    /// <param name="sortByIndex">Order the result by ascending index instead of descending value.</param>
-    void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false) =>
-        throw NotSupportedPrimitive(nameof(TopKLastDim));
 
     /// <summary>True when <see cref="MoeExpertGateUp"/> and <see cref="MoeExpertDown"/> run experts stored as <paramref name="expertType"/>,
     /// so a routed-expert stage can stay on the device from the router to the combine.</summary>

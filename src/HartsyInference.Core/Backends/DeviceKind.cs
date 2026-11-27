@@ -18,7 +18,7 @@ public readonly record struct DeviceKind(DeviceType Type, int Ordinal = 0)
     /// <summary>Whether this is a CUDA GPU device.</summary>
     public bool IsCuda => Type == DeviceType.Cuda;
 
-    /// <summary>Whether this is a Vulkan GPU device.</summary>
+    /// <summary>Whether this is a Vulkan GPU device. Kept beside <see cref="IsCuda"/> for host applications that branch on the device family.</summary>
     public bool IsVulkan => Type == DeviceType.Vulkan;
 
     /// <summary>Creates a ROCm device with the specified ordinal.</summary>

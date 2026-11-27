@@ -85,6 +85,16 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         /// <summary>Pages this sequence reserved at admission; returned to <see cref="_reservedPages"/> when it leaves the active set.</summary>
         public int ReservedPages;
 
+        /// <summary>Started just before this sequence's prefill, as <see cref="TextGenerationPipeline"/> starts its own: time queued before admission is not in it.</summary>
+        public required System.Diagnostics.Stopwatch Clock;
+
+        /// <summary>The clock's reading when the first token was sampled.</summary>
+        public double PrefillMilliseconds;
+
+        /// <summary>The clock's reading when this sequence's latest token was produced: the first token's, then the end of each decode round it fed.
+        /// Decode time ends here, not when the result is built, which is an admission pass later.</summary>
+        public double LastTokenMilliseconds;
+
         public void Dispose()
         {
             Cache.Dispose();
@@ -285,6 +295,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     Exception? injected = TestFaultInjector?.Invoke(feeders.Count);
                     if (injected is not null) throw injected;
                     await RunGpuWork(work).ConfigureAwait(false);
+                    foreach (ActiveSeq seq in feeders) seq.LastTokenMilliseconds = seq.Clock.Elapsed.TotalMilliseconds;
                 }
                 catch (Exception ex)
                 {
@@ -596,14 +607,23 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         ISequenceState cache = graphEligible
             ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, null, req.Loops ?? 0))
             : _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, _pool, req.Loops ?? 0));
+        if (HartsyInference.Core.Backends.Attention.AttentionEvidence.Enabled)
+            HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
+                HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.Cache,
+                cache is PagedKvCache ? "scheduler.paged" : cache is FixedKvCache ? "scheduler.fixed" : "scheduler.other");
         try
         {
             List<int> generated = new(req.MaxTokens);
             SamplerChain sampler = SamplerChain.FromOptions(req.Sampling, _tokenizer, vocab);
             int next;
-            using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0), cache))
-            using (Tensor logits = _model.ProjectLogits(hidden, promptIds.Length))
-                next = sampler.Next(LastRow(logits, promptIds.Length, vocab), generated);
+            // The same split TextGenerationPipeline reports: prefill ends when the first logits row is sampled.
+            System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+            // Logits for the last prompt position only, as TextGenerationPipeline asks for them: sampling reads one row, and
+            // projecting every row builds a [prompt, vocab] tensor (several GiB for a long prompt) that is then copied to the host.
+            using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0, LastRowOnly: true), cache))
+            using (Tensor logits = _model.ProjectLogits(hidden, 1))
+                next = sampler.Next(LastRow(logits, 1, vocab), generated);
+            double prefillMs = clock.Elapsed.TotalMilliseconds;
 
             // Fired once the prompt is in the cache, as TextGenerationPipeline does: the caller reads the prompt length from it.
             req.OnPrefillCompleted?.Invoke(promptIds.Length);
@@ -633,6 +653,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             {
                 Pending = pending, PromptIds = promptIds, Cache = cache, Sampler = sampler,
                 Stops = stops, Generated = generated, Next = next, GraphSession = session,
+                Clock = clock, PrefillMilliseconds = prefillMs, LastTokenMilliseconds = prefillMs,
             };
         }
         catch
@@ -657,6 +678,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
     private void RunDecodeRound(List<ActiveSeq> feeders)
     {
+        using HartsyInference.Core.Backends.Attention.AttentionEvidenceContext evidence =
+            HartsyInference.Core.Backends.Attention.AttentionEvidence.Context("scheduler.decode");
+        HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
+            HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.Cache, "scheduler.decode.batch", count: feeders.Count);
         int vocab = _model.Info.VocabSize;
         int bn = feeders.Count;
         int[] tokens = new int[bn];
@@ -688,13 +713,17 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Next = next;
     }
 
-    /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).</summary>
+    /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).
+    /// Decode time is this request's wall time from its first token to its last, so it includes the rounds it shared with other sequences and the prefill of
+    /// any request admitted between them; a request that needed no decode round reports 0.</summary>
     private GenerationResult BuildResult(ActiveSeq seq, bool stopped) => new()
     {
         TokenIds = seq.Generated,
         Text = _tokenizer.Decode(seq.Generated),
         PromptTokens = seq.PromptIds.Length,
         StoppedOnStopToken = stopped,
+        PrefillMilliseconds = seq.PrefillMilliseconds,
+        DecodeMilliseconds = seq.LastTokenMilliseconds - seq.PrefillMilliseconds,
     };
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
@@ -705,7 +734,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         return new Span<float>(p + (long)(t - 1) * vocab, vocab);
     }
 
-    /// <summary>Stops the background loop and fails every request it has not finished: queued requests fail at once, and active sequences fail when the loop exits. Each fails with <see cref="SchedulerStoppedException"/>, so no caller waits on a loop that will not run. Does NOT dispose the shared <see cref="PagedKvPool"/> (the caller owns it and may share it across schedulers/sessions).</summary>
+    /// <summary>Stops the background loop and fails every request it has not finished: queued requests fail at once, and active sequences fail when the loop exits. Each fails with <see cref="SchedulerStoppedException"/>, so no caller waits on a loop that will not run. Does NOT dispose the <see cref="PagedKvPool"/>: the caller owns it. A pool serves one scheduler at a time, since the pool regrows its buffers without a lock.</summary>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

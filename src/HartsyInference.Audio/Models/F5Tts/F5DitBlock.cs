@@ -43,22 +43,23 @@ internal sealed unsafe class F5DitBlock
 
     public F5DitBlock(F5TtsConfig cfg) { _cfg = cfg; }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, ICollection<Tensor> owned)
     {
-        _attnNormLinW = WhisperOps.EnsureF32(w[$"{prefix}.attn_norm.linear.weight"]);
-        _attnNormLinB = WhisperOps.EnsureF32(w[$"{prefix}.attn_norm.linear.bias"]);
-        _qW = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_q.weight"]);
-        _qB = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_q.bias"]);
-        _kW = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_k.weight"]);
-        _kB = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_k.bias"]);
-        _vW = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_v.weight"]);
-        _vB = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_v.bias"]);
-        _oW = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_out.0.weight"]);
-        _oB = WhisperOps.EnsureF32(w[$"{prefix}.attn.to_out.0.bias"]);
-        _ffW1 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.0.0.weight"]);
-        _ffB1 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.0.0.bias"]);
-        _ffW2 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.2.weight"]);
-        _ffB2 = WhisperOps.EnsureF32(w[$"{prefix}.ff.ff.2.bias"]);
+        int dim = _cfg.Dim;
+        _attnNormLinW = F5Ops.Take(w, $"{prefix}.attn_norm.linear.weight", owned, 6 * dim, dim);
+        _attnNormLinB = F5Ops.Take(w, $"{prefix}.attn_norm.linear.bias", owned, 6 * dim);
+        _qW = F5Ops.Take(w, $"{prefix}.attn.to_q.weight", owned, dim, dim);
+        _qB = F5Ops.Take(w, $"{prefix}.attn.to_q.bias", owned, dim);
+        _kW = F5Ops.Take(w, $"{prefix}.attn.to_k.weight", owned, dim, dim);
+        _kB = F5Ops.Take(w, $"{prefix}.attn.to_k.bias", owned, dim);
+        _vW = F5Ops.Take(w, $"{prefix}.attn.to_v.weight", owned, dim, dim);
+        _vB = F5Ops.Take(w, $"{prefix}.attn.to_v.bias", owned, dim);
+        _oW = F5Ops.Take(w, $"{prefix}.attn.to_out.0.weight", owned, dim, dim);
+        _oB = F5Ops.Take(w, $"{prefix}.attn.to_out.0.bias", owned, dim);
+        _ffW1 = F5Ops.Take(w, $"{prefix}.ff.ff.0.0.weight", owned, _cfg.FfInner, dim);
+        _ffB1 = F5Ops.Take(w, $"{prefix}.ff.ff.0.0.bias", owned, _cfg.FfInner);
+        _ffW2 = F5Ops.Take(w, $"{prefix}.ff.ff.2.weight", owned, dim, _cfg.FfInner);
+        _ffB2 = F5Ops.Take(w, $"{prefix}.ff.ff.2.bias", owned, dim);
         _attn = new AttentionLayer(
             new AttentionLayerConfig { Heads = _cfg.Heads, KvHeads = _cfg.Heads, HeadDim = _cfg.HeadDim, ComputeDType = DType.F32 },
             new AttentionLayerWeights
@@ -97,7 +98,7 @@ internal sealed unsafe class F5DitBlock
         backend.AffineBroadcastLastDim(modded, normed, scaleMsa, shiftMsa);
         normed.Dispose();
 
-        // 3. Self-attention with RoPE on Q, K, on-device (WanRopeInterleaved has a CUDA kernel; ApplyRopeInterleaved does not).
+        // 3. Self-attention with RoPE on Q, K, on-device (the interleaved rotary (RotaryCall.Rows) has a CUDA kernel; the interleaved rotary (RotaryCall.TokenMajor) does not).
         //    The ropes are the layer's own QueryRotation/KeyRotation, so q/k stay [1, T, heads, headDim].
         if (Prof) { backend.Sync(); _swQkv.Restart(); }
         (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, modded, releaseInput: true);

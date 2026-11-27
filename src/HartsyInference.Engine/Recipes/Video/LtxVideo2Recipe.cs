@@ -16,6 +16,7 @@ using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -74,6 +75,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public string Name => _distilled ? LtxVideo2Variants.DistilledFamilyId : "ltx-video-2";
 
     /// <inheritdoc/>
+    /// <remarks>The guide states a negative only for the dev build. A file under a dev id may be distilled, so the variant-less answer leaves it unset.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "video", Encoders = ["llm"], Format = "text", Supports = [], Guide = "docs/prompting/ltx-video.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        !_distilled && variant is not null && variant.Is(LtxVideo2Variants.Dev) ? Prompt! with { Negative = "separate" } : Prompt;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => _distilled
         ? string.Equals(familyId, LtxVideo2Variants.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
         : DevFamilyIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
@@ -90,7 +102,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public VideoConstraints Constraints { get; } = new VideoConstraints { Frames = FrameGrid.StepPlusOne(new LtxVideo2Config().VaeTemporalCompression, FrameNormalization.SnapNearest) };
 
     /// <inheritdoc/>
-    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). NOTE: when the backend reports <c>SupportsQuantized</c> this recipe keeps the DiT resident as PACKED nvfp4, and <c>LoraStack</c> dequant-merges fp8 only — a non-fp8 quantized weight refuses by name with the "use a safetensors build" message, the same boundary HunyuanImage's Q4_K GGUF hits. A LoRA on a resident-nvfp4 LTX-2 build therefore refuses rather than merging; that is intended, not a regression. Image-to-video is still absent and tracked separately: only <c>LtxVideo2VaeDecoder</c> is ported, so there is no encoder to turn an init image into latents.</remarks>
+    /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20 — the first conditioning this family declares at all (it previously inherited <see cref="IVideoRecipe"/>'s <c>None</c>). NOTE: when the backend reports <c>SupportsQuantizedType(DType.F4E2M1)</c> this recipe keeps the DiT resident as PACKED nvfp4. <c>LoraStack</c> merges fp8 and int8 weights and attaches a LoRA to any other quantized weight as a runtime adjunct, so a LoRA on a resident-nvfp4 LTX-2 build takes that adjunct path. That path is unverified on LTX-2's packed DiT with real weights. Image-to-video is still absent and tracked separately: only <c>LtxVideo2VaeDecoder</c> is ported, so there is no encoder to turn an init image into latents.</remarks>
     public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <inheritdoc/>
@@ -566,7 +578,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower — Gemma ships no embedded tokenizer in the engine.</summary>
-    private static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
+    internal static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
     {
         List<string> dirs = new List<string>();
         string? ckptDir = File.Exists(checkpointPath) ? Path.GetDirectoryName(checkpointPath) : checkpointPath;
@@ -602,6 +614,6 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 return spm[0];
             }
         }
-        throw new FileNotFoundException($"LTX-2 needs the Gemma SentencePiece tokenizer (tokenizer.model) next to the checkpoint (searched: {string.Join(", ", dirs)}).");
+        throw new FileNotFoundException($"A Gemma-3 text encoder needs its SentencePiece tokenizer (tokenizer.model) next to the checkpoint (searched: {string.Join(", ", dirs)}).");
     }
 }

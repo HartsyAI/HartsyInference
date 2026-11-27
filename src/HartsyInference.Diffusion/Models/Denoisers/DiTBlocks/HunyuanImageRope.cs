@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -74,7 +75,7 @@ public sealed unsafe class HunyuanImageRope : IDisposable
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, seqLen);
     }
 
-    /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> Q/K pair via <see cref="IBackend.WanRopeInterleaved"/>
+    /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> Q/K pair via <c>RotaryCall.Rows</c>
     /// (same interleaved-pair rotation): rotates the leading <c>Π packedDims</c> tokens in place, leaving any trailing
     /// (text) rows untouched — so it works both on a standalone image tensor and on a joint <c>[img, txt]</c> tensor
     /// with image-first layout. Replaces the per-block host path (a full Q/K D2H→trig→H2D round trip per block per
@@ -83,8 +84,26 @@ public sealed unsafe class HunyuanImageRope : IDisposable
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, ReadOnlySpan<int> packedDims)
     {
         (Tensor cos, Tensor sin, int seqLen) = GetTables(backend, packedDims);
-        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+    }
+
+    /// <summary>Rotates the leading <paramref name="tokens"/> rows of a token-major <c>[1, S, heads, D]</c> (or flat <c>[1, S, heads·D]</c>)
+    /// <paramref name="x"/> at explicit positions: <paramref name="positions"/> holds one row of <see cref="AxesDim"/> coordinates per token,
+    /// the layout <see cref="HunyuanImagePosEmbed.GridRows"/> produces for a packed grid. Any row may repeat or be any integer, so a
+    /// streaming window can rotate its cached history at the packed positions it occupies. Batch 1 only; the tables are leased for the call.</summary>
+    public void RotateRows(IBackend backend, Tensor x, ReadOnlySpan<float> positions, int tokens, int heads, int slot = 0)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (tokens <= 0)
+            throw new ArgumentOutOfRangeException(nameof(tokens), tokens, "RotateRows needs at least one token.");
+        if (positions.Length != checked(tokens * _axesDim.Length))
+            throw new ArgumentException($"{tokens} tokens over {_axesDim.Length} axes take {tokens * _axesDim.Length} positions; got {positions.Length}.",
+                nameof(positions));
+        using RopeTableLease lease = _deviceTables.Acquire(backend, slot, tokens, positions);
+        Tensor cos = lease.DeviceCos ?? throw new InvalidOperationException("RoPE device tables require a preloading cache.");
+        Tensor sin = lease.DeviceSin ?? throw new InvalidOperationException("RoPE device tables require a preloading cache.");
+        backend.Rotary(RotaryCall.Rows(x, cos, sin, tokens, heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>Releases the held device tables and the cache. Tables still under a lease are freed by their last release.</summary>
@@ -101,7 +120,7 @@ public sealed unsafe class HunyuanImageRope : IDisposable
     }
 
     /// <summary>Returns the duplicated-pair cos/sin tables <c>[S, headDim]</c> for <paramref name="packedDims"/> on
-    /// <paramref name="backend"/>, the layout <see cref="IBackend.WanRopeInterleaved"/> reads. Each backend holds one grid;
+    /// <paramref name="backend"/>, the layout <c>RotaryCall.Rows</c> reads. Each backend holds one grid;
     /// a grid change releases that backend's previous lease after the new one is acquired.</summary>
     private (Tensor Cos, Tensor Sin, int SeqLen) GetTables(IBackend backend, ReadOnlySpan<int> packedDims)
     {

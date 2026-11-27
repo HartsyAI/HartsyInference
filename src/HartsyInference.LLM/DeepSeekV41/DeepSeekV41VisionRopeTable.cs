@@ -3,7 +3,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <summary>Two-dimensional rotary tables of the vision tower for one patch grid: cos and sin, row-major <c>[Patches, HeadDim]</c>, laid out for the half-split rotation.</summary>
 /// <remarks>Matches upstream <c>get_vision_cos_sin</c> run at half the head width. Patch <c>(h, w)</c>, numbered row-major, has its row angles <c>h * invFreq[j]</c> in the first
 /// quarter of the head and its column angles <c>w * invFreq[j]</c> in the second. Upstream rotates elements <c>i</c> and <c>i + HeadDim / 2</c> of a head by one shared angle, so that half is repeated
-/// and the table is what <see cref="HartsyInference.Core.Backends.IBackend.ApplyRopeSingle"/> reads. The angles are built in float32 like upstream.
+/// and the table is what <see cref="HartsyInference.Core.Backends.IBackend.the rotate-half rotary (RotaryCall.TokenMajor)"/> reads. The angles are built in float32 like upstream.
 /// This is not the interleaved one-dimensional table <see cref="DeepSeekV41RopeTable"/> holds.</remarks>
 public sealed class DeepSeekV41VisionRopeTable
 {

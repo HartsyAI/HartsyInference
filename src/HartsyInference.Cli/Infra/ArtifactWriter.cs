@@ -20,7 +20,7 @@ public static class ArtifactWriter
 
         string dir = string.IsNullOrWhiteSpace(outputDir) ? RepoPaths.OutputRoot() : Path.GetFullPath(outputDir);
         Directory.CreateDirectory(dir);
-        string slug = Slug.Make(promptSlug);
+        string slug = Slug.Make(artifact.SlugHint ?? promptSlug);
         string ext = artifact.Extension.TrimStart('.');
         string path = NextAvailablePath(dir, i => $"{slug}-{i:D4}.{ext}", File.Exists, () => $"{slug}-{Guid.NewGuid():N}.{ext}");
 
@@ -28,6 +28,10 @@ public static class ArtifactWriter
             File.WriteAllBytes(path, artifact.FileBytes!);
         else
             File.WriteAllText(path, artifact.Text ?? "", new UTF8Encoding(false));
+
+        string stem = Path.Combine(dir, Path.GetFileNameWithoutExtension(path));
+        foreach ((string suffix, byte[] bytes) in artifact.Companions)
+            File.WriteAllBytes($"{stem}.{suffix}", bytes);
 
         return path;
     }

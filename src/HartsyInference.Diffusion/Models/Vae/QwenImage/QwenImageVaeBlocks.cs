@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -94,12 +95,12 @@ public sealed class QwenImageResidualBlock
         int width = (int)x.Shape[3];
 
         // Residual path: RMSNorm → SiLU → Conv2d → RMSNorm → SiLU → Conv2d.
-        // GPU-residency port: the norms and the residual add run as backend ops (WanRmsNormChannel — the
+        // GPU-residency port: the norms and the residual add run as backend ops (the channel L2 NormModulate — the
         // same WAN RMS_norm the video VAE uses — and device Add). The previous host loops each forced a
         // full D2H drain of an up-to-[1,96,1024,1024] conv output + CPU triple-loop + H2D re-upload; over
         // ~17 residual blocks that was ~20 s of the 27 s Krea2 gen (the VAE, not the DiT, was the gap).
         Tensor h = new Tensor(x.Shape, DType.F32);
-        backend.WanRmsNormChannel(h, x, _gamma0!, 1e-12f);
+        backend.NormModulate(NormModulateCall.Channel(h, x, NormKind.L2Norm, 1e-12f).WithAffine(_gamma0!, null));
 
         Tensor hSilu = new Tensor(h.Shape, DType.F32);
         backend.Silu(hSilu, h);
@@ -111,7 +112,7 @@ public sealed class QwenImageResidualBlock
         hSilu.Dispose();
 
         Tensor hNorm = new Tensor(midShape, DType.F32);
-        backend.WanRmsNormChannel(hNorm, hMid, _gamma3!, 1e-12f);
+        backend.NormModulate(NormModulateCall.Channel(hNorm, hMid, NormKind.L2Norm, 1e-12f).WithAffine(_gamma3!, null));
         hMid.Dispose();
 
         Tensor hSilu2 = new Tensor(midShape, DType.F32);
@@ -218,7 +219,7 @@ public sealed class QwenImageAttentionBlock
 
         // 1. RMSNorm across channel dim (device — see QwenImageResidualBlock for the port rationale).
         Tensor normed = new Tensor(x.Shape, DType.F32);
-        backend.WanRmsNormChannel(normed, x, _normGamma!, 1e-12f);
+        backend.NormModulate(NormModulateCall.Channel(normed, x, NormKind.L2Norm, 1e-12f).WithAffine(_normGamma!, null));
 
         // 2. to_qkv: Conv2D 1×1, producing [B, 3*dim, H, W].
         TensorShape qkvShape = new TensorShape(batch, 3 * _dim, height, width);

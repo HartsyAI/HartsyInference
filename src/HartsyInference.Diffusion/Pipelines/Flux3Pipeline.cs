@@ -1,8 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -24,7 +22,6 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
 {
     private const string Family = "FLUX.3";
 
-    private readonly LlamaStyleEncoder _textEncoder;
     private readonly Flux3Transformer _transformer;
     private readonly VaeDecoder _vaeDecoder;
     private readonly VaeEncoder? _vaeEncoder;
@@ -35,8 +32,8 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
     private const int CondSlot = 0;
     private const int UncondSlot = 1;
 
-    private readonly EncodedPromptCache _promptCache = new(2);
-    private bool _ditResident;
+    private readonly CachedPromptTaps _prompts;
+    private readonly ResidentWeights _denoiser;
 
     /// <summary>Creates the pipeline; <paramref name="vaeEncoder"/> is required for img2img, inpaint and references.</summary>
     public Flux3Pipeline(IBackend backend, LlamaStyleEncoder textEncoder, Flux3Transformer transformer, VaeDecoder vaeDecoder,
@@ -48,7 +45,6 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         ArgumentNullException.ThrowIfNull(vaeDecoder);
         ArgumentNullException.ThrowIfNull(bnMean);
         ArgumentNullException.ThrowIfNull(bnVar);
-        _textEncoder = textEncoder;
         _transformer = transformer;
         _vaeDecoder = vaeDecoder;
         _vaeEncoder = vaeEncoder;
@@ -56,10 +52,9 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         _bnVar = bnVar;
         _bnEps = bnEps;
         _config = transformer.Config;
+        _prompts = new CachedPromptTaps(backend, textEncoder, _config.TextEncoderLayers, _config.ContextInDim, Family);
+        _denoiser = new ResidentWeights(backend, transformer.EnumerateWeights);
     }
-
-    /// <summary>Keeps the DiT resident across generations unless the VRAM profile says otherwise.</summary>
-    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Generates an image. <paramref name="negative"/> is encoded only when the full build runs guided
     /// (<c>cfg &gt; 1</c>). <paramref name="referenceImages"/> are <c>[1, 3, H, W]</c> RGB in [-1, 1] with sides that are
@@ -153,30 +148,16 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                 packedMask = MaskBlendUtilities.PackLatentMask2x2(latentMask, latH, latW);
             }
 
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
-            _ditResident = true;
+            _denoiser.Preload();
             condStates = _config.FlowMap ? null : _transformer.PrecomputeConditioning(Backend, condInput);
             uncondStates = _config.FlowMap || !guided ? null : _transformer.PrecomputeConditioning(Backend, uncondInput!);
             float[] timestepTable = scheduler.Timesteps.ToArray();
-            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(PredictionType.FlowVelocity, (x, sigma, stepIndex) =>
+            TwoPassCfgPredictor<Branch> predictor = new TwoPassCfgPredictor<Branch>(PredictionType.FlowVelocity, (x, sigma, stepIndex, branch) =>
             {
                 float t = stepIndex < steps && sigma == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex] / 1000f : sigma;
                 float? target = _config.FlowMap ? NextScheduleSigma(sampler.Sigmas, sigma) : null;
-                Tensor cond = _transformer.Forward(Backend, x, patH, patW, t, condInput, condStates, target);
-                if (!guided)
-                    return new DenoisePrediction(cond, cond);
-                Tensor uncond;
-                try
-                {
-                    uncond = _transformer.Forward(Backend, x, patH, patW, t, uncondInput!, uncondStates, target);
-                }
-                catch
-                {
-                    cond.Dispose();
-                    throw;
-                }
-                return new DenoisePrediction(cond, uncond, cfg);
-            });
+                return _transformer.Forward(Backend, x, patH, patW, t, branch.Input, branch.States, target);
+            }, new Branch(condInput, condStates), guided ? new Branch(uncondInput!, uncondStates) : null, cfg);
 
             for (int i = plan.StartStep; i < steps; i++)
             {
@@ -190,7 +171,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                 Logs.Debug($"{Family} step {i + 1}/{steps} done in {stepSw.ElapsedMilliseconds}ms");
                 if (onProgress is not null)
                 {
-                    using Tensor preview = Flux2LatentOps.FromPackedTokens(latent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    using Tensor preview = Flux2LatentOps.FromPackedTokens(Backend, latent, patH, patW, _bnMean, _bnVar, _bnEps,
                         _config.VaeLatentChannels, _config.PatchSize);
                     onProgress(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
@@ -203,7 +184,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         catch
         {
             latent?.Dispose();
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         finally
@@ -217,18 +198,14 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             packedMask?.Dispose();
         }
 
-        if (!KeepModelsResident)
-        {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
-        }
+        _denoiser.Release();
         byte[] rgb;
         try
         {
             Tensor vaeLatent;
             using (Tensor finalLatent = latent)
             {
-                vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
                     _config.VaeLatentChannels, _config.PatchSize);
             }
             Tensor image;
@@ -245,7 +222,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         Backend.FreeActivations();
@@ -254,52 +231,14 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
     }
 
     /// <inheritdoc/>
-    protected override void DisposeCore() => _promptCache.Dispose();
+    protected override void DisposeCore() => _prompts.Dispose();
 
-    /// <summary>After a stage throws mid-op (an OOM, a cancellation, a device error), the temporaries of whatever op was
-    /// running are still in the backend's activation cache. Reclaiming them here covers every block and stage at once,
-    /// so a retry starts from the memory a fresh request would. Best effort: a sticky device error must not mask the
-    /// failure being reported.</summary>
-    private void ReclaimAfterFailure()
-    {
-        try
-        {
-            Backend.FreeActivations();
-        }
-        catch (Exception cleanup)
-        {
-            Logs.Warning($"{Family}: reclaiming activations after a failed generation also failed: {cleanup.Message}");
-        }
-    }
+    /// <summary>One prompt through the eight Qwen3-VL taps, cached per slot; a miss evicts the DiT first.</summary>
+    private Tensor EncodePrompt(Flux3PromptTokens prompt, int slot) =>
+        _prompts.Encode(slot, prompt.Tokens.Tokens, TextEncoderPadding.Transformers(prompt.ValidLength), _denoiser);
 
-    /// <summary>Encodes one prompt through the eight Qwen3-VL taps, reusing the last result for the same ids. The DiT
-    /// is evicted first because the encoder and a resident DiT need not fit together.</summary>
-    private Tensor EncodePrompt(Flux3PromptTokens prompt, int slot)
-    {
-        if (_promptCache.TryGet(slot, prompt.Tokens.Tokens, prompt.ValidLength, out Tensor? cached))
-            return cached!;
-        if (_ditResident)
-        {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
-        }
-        Tensor hidden;
-        try
-        {
-            hidden = _textEncoder.EncodeMultiLayer(Backend, [prompt.Tokens.Tokens], _config.TextEncoderLayers,
-                interleavedLayout: false, TextEncoderPadding.Transformers(prompt.ValidLength));
-        }
-        finally
-        {
-            Backend.FreeWeights(_textEncoder.EnumerateWeights());
-        }
-        _ = hidden.DataPointer;
-        Backend.FreeActivations();
-        if (hidden.Shape[2] != _config.ContextInDim)
-            throw new HartsyInferenceException($"FLUX.3 text features are {hidden.Shape[2]} wide; the transformer expects {_config.ContextInDim}.");
-        _promptCache.Store(slot, prompt.Tokens.Tokens, prompt.ValidLength, hidden);
-        return hidden;
-    }
+    /// <summary>One CFG branch's conditioning: the text and reference input, and its precomputed states (null for the distilled build).</summary>
+    private sealed record Branch(Flux3ConditionInput Input, Flux3ConditionStates? States);
 
     /// <summary>VAE-encodes each reference and concatenates their packed tokens in order.</summary>
     private (Tensor? Tokens, List<(int Height, int Width)> Shapes) EncodeReferences(IReadOnlyList<Tensor>? images)
@@ -320,7 +259,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
                         $"FLUX.3 reference images need sides that are multiples of {_config.VaeDownscaleFactor}; got {w}x{h}.");
                 }
                 using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, image);
-                parts.Add(Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize));
+                parts.Add(Flux2LatentOps.ToPackedTokens(Backend, vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize));
                 shapes.Add((h / _config.VaeDownscaleFactor, w / _config.VaeDownscaleFactor));
             }
             if (parts.Count == 1)
@@ -348,11 +287,11 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
         int patH, int patW, int seed, int startStep, bool keepSource)
     {
         using Tensor noise = TakeOrCreateNoise(request, new TensorShape(1, _config.InChannels, patH, patW), seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(noise);
+        Tensor packedNoise = Flux2LatentOps.PackHost(noise);
         if (request is not ImageToImageRequest img2img)
             return (packedNoise, null);
         using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
-        Tensor source = Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+        Tensor source = Flux2LatentOps.ToPackedTokensHost(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
         Tensor noised = new Tensor(packedNoise.Shape, DType.F32);
         scheduler.AddNoise(noised, source, packedNoise, startStep);
         packedNoise.Dispose();
@@ -375,7 +314,7 @@ public sealed unsafe class Flux3Pipeline : DiffusionPipelineBase
             return;
         }
         using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, patH, patW), noiseSeed);
-        using Tensor freshPacked = Flux2LatentOps.Pack(freshNoise);
+        using Tensor freshPacked = Flux2LatentOps.PackHost(freshNoise);
         using Tensor noisedSource = new Tensor(latent.Shape, DType.F32);
         FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(noisedSource, source, freshPacked, sigma);
         MaskBlendUtilities.BlendPackedInPlace(latent, noisedSource, packedMask);

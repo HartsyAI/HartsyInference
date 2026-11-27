@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
@@ -8,7 +8,7 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The Fibo 2.0 recipe casts a BF16 checkpoint to F16 before loading, so the denoiser must read half-precision storage
 /// correctly. The learned Perceiver queries are read as raw floats, so the tiny F32 fixture is cast to F16 for that one tensor and
-/// compared with its F32 run. The other weights stay F32: the CPU backend's linear kernels take F32 only.</summary>
+/// compared with its F32 run. The other weights stay F32, so the one half-precision read is the only difference between the two runs.</summary>
 public sealed unsafe class Fibo2HalfPrecisionTests
 {
     /// <summary>F16 rounds every weight by about 5e-4 relative, and the error compounds through the blocks. A raw float read of

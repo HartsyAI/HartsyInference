@@ -12,6 +12,23 @@ public abstract class NativeArtifactRequest
     public string? OutputDir { get; set; }
 }
 
+/// <summary>Body of <c>POST /v1/native/images/remove-people</c>: a photo and a mask that covers the people to remove. The model, prompt,
+/// negative prompt, guidance and LoRA are the people-removal recipe, so the caller sends no generation settings.</summary>
+public sealed class RemovePeopleRequest : NativeArtifactRequest
+{
+    /// <summary>Base64 PNG or JPEG of the photo to edit.</summary>
+    public string InitImageBase64 { get; set; } = "";
+
+    /// <summary>Base64 mask, white where the people are. Same size as the photo.</summary>
+    public string MaskBase64 { get; set; } = "";
+
+    /// <summary><c>fp8</c> (the default) or <c>bf16</c>.</summary>
+    public string? Precision { get; set; }
+
+    /// <summary>Seed; unset or -1 picks one.</summary>
+    public long? Seed { get; set; }
+}
+
 /// <summary>Envelope for every native generation route: model selection alongside the untouched native request record. <c>model</c>/<c>modelPath</c> live in the body (not the query string) so this shape stays identical across every modality and lines up with where the OpenAI-compat layer already carries <c>model</c>.</summary>
 public sealed class NativeImageRequest : NativeArtifactRequest
 {

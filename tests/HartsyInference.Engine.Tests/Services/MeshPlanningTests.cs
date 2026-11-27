@@ -1,0 +1,834 @@
+using System.Reflection;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Planning.Memory;
+using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
+
+namespace HartsyInference.Engine.Tests.Services;
+
+public sealed class MeshPlanningTests
+{
+    private static readonly string[] NonTunableProperties =
+        [nameof(MeshRequest.Prompt), nameof(MeshRequest.Image), nameof(MeshRequest.SceneMesh), nameof(MeshRequest.ScenePrompt), nameof(MeshRequest.Vram), nameof(MeshRequest.Settings)];
+
+    public static TheoryData<string> Ids()
+    {
+        TheoryData<string> data = [];
+        foreach (string id in MeshModelIds.Described)
+            data.Add(id);
+        return data;
+    }
+
+    private static MeshModelProfile Profile(string id) => MeshModelProfiles.Find(id) ?? throw new InvalidOperationException($"No profile for {id}.");
+
+    private static ImageData Image() => new()
+    {
+        Rgb = new byte[4 * 4 * 3],
+        Width = 4,
+        Height = 4,
+        Alpha = [.. Enumerable.Range(0, 16).Select(i => i < 8 ? (byte)0 : (byte)255)],
+    };
+
+    private static SceneMeshData Scene() => new() { Data = System.Text.Encoding.ASCII.GetBytes("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"), Format = "obj" };
+
+    private static MeshControl Box() => new() { Kind = MeshControlKind.BoundingBox, Values = [0.5f, 0.5f, 0.5f] };
+
+    /// <summary>The smallest request the model accepts, built from what its profile says it takes.</summary>
+    private static MeshRequest Valid(string id)
+    {
+        MeshInputKind input = Profile(id).Input;
+        return new MeshRequest
+        {
+            Image = input is MeshInputKind.SceneMesh ? null : Image(),
+            SceneMesh = input is MeshInputKind.SceneMesh or MeshInputKind.SceneMeshAndImage ? Scene() : null,
+            Control = input is MeshInputKind.ImageAndControl ? Box() : null,
+        };
+    }
+
+    /// <summary>A grid the model accepts when it reads one: its first listed value, else its default, else 64.</summary>
+    private static int LegalGrid(string id)
+    {
+        MeshFieldSpec field = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.GridResolution));
+        string? text = field.Values?[0] ?? field.Default;
+        return text is not null && int.TryParse(text, out int value) && value > 0 ? value : 64;
+    }
+
+    private static MeshRequest With(MeshRequest request, string field, string id) => field switch
+    {
+        nameof(MeshRequest.Steps) => request with { Steps = 5 },
+        nameof(MeshRequest.GridResolution) => request with { GridResolution = LegalGrid(id) },
+        nameof(MeshRequest.FieldOfViewRadians) => request with { FieldOfViewRadians = 0.5 },
+        nameof(MeshRequest.Samples) => request with { Samples = 2 },
+        nameof(MeshRequest.Colors) => request with { Colors = false },
+        nameof(MeshRequest.Chains) => request with { Chains = false },
+        nameof(MeshRequest.Rigged) => request with { Rigged = true },
+        nameof(MeshRequest.Texture) => request with { Texture = true },
+        nameof(MeshRequest.TextureSize) => request with { TextureSize = 512 },
+        nameof(MeshRequest.Mesh) => request with { Mesh = true },
+        nameof(MeshRequest.Control) => request with { Control = Box() },
+        nameof(MeshRequest.Quality) => request with { Quality = MeshQuality.Max },
+        nameof(MeshRequest.Remesh) => request with { Remesh = true, Texture = true },
+        nameof(MeshRequest.Views) => request with { Views = [new MeshViewImage { View = MeshView.Left, Image = Image() }] },
+        nameof(MeshRequest.Guidance) => request with { Guidance = 2 },
+        nameof(MeshRequest.SplatCount) => request with { SplatCount = 65536 },
+        nameof(MeshRequest.Framing) => request with { Framing = MeshFraming.Photo },
+        nameof(MeshRequest.TokenBudget) => request with { TokenBudget = 0.5 },
+        _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
+    };
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void EveryModelDescribesEveryTunableField(string id)
+        => Assert.Equal(MeshModelProfile.TunableFields.Order(), Profile(id).Fields.Select(f => f.Name).Order());
+
+    [Fact]
+    public void EveryRequestPropertyIsEitherTunableOrAnInputOrASetting()
+    {
+        string[] properties = [.. typeof(MeshRequest).GetProperties(BindingFlags.Public | BindingFlags.Instance).Select(p => p.Name)];
+
+        Assert.Equal(properties.Order(), MeshModelProfile.TunableFields.Concat(NonTunableProperties).Order());
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void TheSmallestRequestOfEveryModelPassesTheValidator(string id)
+        => MeshRequestValidator.Validate(id, Valid(id), matterAvailable: false);
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void ARejectedFieldFailsTheValidator(string id)
+    {
+        foreach (MeshFieldSpec field in Profile(id).Fields.Where(f => f.Access == MeshFieldAccess.Rejected))
+        {
+            Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, With(Valid(id), field.Name, id), matterAvailable: false));
+
+            Assert.True(error is NotSupportedException, $"{id} {field.Name} should be rejected, got {error?.GetType().Name ?? "no exception"}");
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void AnIgnoredOrUsedFieldIsNotRejectedForBeingSet(string id)
+    {
+        string[] sampled = [nameof(MeshRequest.Steps), nameof(MeshRequest.GridResolution), nameof(MeshRequest.FieldOfViewRadians)];
+        foreach (MeshFieldSpec field in Profile(id).Fields.Where(f => f.Access != MeshFieldAccess.Rejected && sampled.Contains(f.Name)))
+        {
+            Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, With(Valid(id), field.Name, id), matterAvailable: false));
+
+            Assert.True(error is null, $"{id} {field.Name} is described as accepted but failed: {error?.Message}");
+        }
+    }
+
+    [Theory]
+    [InlineData("trellis2", 512, true)]
+    [InlineData("trellis2", 1536, true)]
+    [InlineData("trellis2", 768, false)]
+    [InlineData("pixal3d", 1024, true)]
+    [InlineData("pixal3d", 1536, true)]
+    [InlineData("pixal3d", 512, false)]
+    [InlineData("cola3d", 16, true)]
+    [InlineData("cola3d", 1024, true)]
+    [InlineData("cola3d", 1040, false)]
+    [InlineData("cola3d", 250, false)]
+    public void TheGridValuesAndRangesOfTheProfileAreTheOnesTheValidatorEnforces(string id, int grid, bool legal)
+    {
+        MeshRequest request = Valid(id) with { GridResolution = grid };
+        Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
+
+        Assert.Equal(legal, error is null);
+        MeshFieldSpec field = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.GridResolution));
+        if (field.Values is not null)
+            Assert.Equal(legal, field.Values.Contains(grid.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+        else
+            Assert.Equal(legal, grid >= field.Min && grid <= field.Max && grid % 16 == 0);
+    }
+
+    [Theory]
+    [InlineData("trellis2", 200, true)]
+    [InlineData("trellis2", 201, false)]
+    [InlineData("pixal3d", 201, false)]
+    public void TheStepRangeOfTheProfileIsTheOneTheValidatorEnforces(string id, int steps, bool legal)
+    {
+        Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, Valid(id) with { Steps = steps }, matterAvailable: false));
+
+        Assert.Equal(legal, error is null);
+        Assert.Equal(200, Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Steps)).Max);
+    }
+
+    [Theory]
+    [InlineData(15, false)]
+    [InlineData(16, true)]
+    [InlineData(8192, true)]
+    [InlineData(8193, false)]
+    public void TheTextureSizeRangeIsEnforcedForTheModelsThatTexture(int size, bool legal)
+    {
+        MeshRequest request = Valid("trellis2") with { Texture = true, TextureSize = size };
+        Exception? error = Record.Exception(() => MeshRequestValidator.Validate("trellis2", request, matterAvailable: false));
+
+        Assert.Equal(legal, error is null);
+        MeshFieldSpec field = Profile("trellis2").Fields.Single(f => f.Name == nameof(MeshRequest.TextureSize));
+        Assert.Equal(16, field.Min);
+        Assert.Equal(8192, field.Max);
+    }
+
+    [Theory]
+    [InlineData(0.01, true)]
+    [InlineData(1.5707, true)]
+    [InlineData(0.0, false)]
+    [InlineData(1.5707963267948966, false)]
+    public void TheFieldOfViewOpenIntervalIsEnforced(double fov, bool legal)
+    {
+        MeshRequest request = Valid("pixal3d") with { FieldOfViewRadians = fov };
+        Exception? error = Record.Exception(() => MeshRequestValidator.Validate("pixal3d", request, matterAvailable: false));
+
+        Assert.Equal(legal, error is null);
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void EveryPresetOfEveryModelPassesTheValidatorOnceResolved(string id)
+    {
+        foreach ((MeshQuality quality, MeshPreset preset) in Profile(id).Presets)
+        {
+            MeshRequest request = MeshQualityPresets.Resolve(id, Valid(id) with { Quality = quality, Texture = preset.TextureSize != 0 });
+
+            Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
+
+            Assert.True(error is null, $"{id} {quality}: {error?.Message}");
+            Assert.False(string.IsNullOrWhiteSpace(preset.Basis));
+        }
+    }
+
+    [Fact]
+    public void AModelWithPresetsDescribesBothAndOneWithoutRejectsThem()
+    {
+        Assert.Equal([MeshQuality.High, MeshQuality.Max], Profile("trellis2").Presets.Keys.Order());
+        Assert.Empty(Profile("triposr").Presets);
+        Assert.Equal(MeshFieldAccess.Used, Profile("trellis2").Fields.Single(f => f.Name == nameof(MeshRequest.Quality)).Access);
+        Assert.Equal(MeshFieldAccess.Rejected, Profile("triposr").Fields.Single(f => f.Name == nameof(MeshRequest.Quality)).Access);
+    }
+
+    [Fact]
+    public void AResolvedPresetFillsOnlyTheFieldsTheRequestLeavesUnset()
+    {
+        MeshRequest request = Valid("trellis2") with { Quality = MeshQuality.Max, Texture = true, TextureSize = 1024 };
+
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", request);
+
+        Assert.Equal(1536, resolved.GridResolution);
+        Assert.Equal(1024, resolved.TextureSize);
+        Assert.Equal(0, resolved.Steps);
+        Assert.Equal(MeshQuality.Default, MeshQualityPresets.Resolve("trellis2", Valid("trellis2")).Quality);
+        Assert.Equal(0, MeshQualityPresets.Resolve("trellis2", Valid("trellis2")).GridResolution);
+    }
+
+    [Fact]
+    public void ThePresetTextureSizeNeedsTheTextureOptionSoAShapeOnlyRequestStaysLegal()
+    {
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", Valid("trellis2") with { Quality = MeshQuality.High });
+
+        Assert.Equal(0, resolved.TextureSize);
+        MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
+    }
+
+    [Fact]
+    public async Task APlanNamesThePresetAsTheSourceOfWhatItFilledAndValidatesTheResolvedRequest()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Quality = MeshQuality.Max, Steps = 8 });
+
+        Assert.Equal(("1536", ParameterSource.ProfileDefault), (plan.Settings[nameof(MeshRequest.GridResolution)].Value, plan.Settings[nameof(MeshRequest.GridResolution)].Source));
+        Assert.Equal(ParameterSource.UserOverride, plan.Settings[nameof(MeshRequest.Steps)].Source);
+        Assert.DoesNotContain(plan.Issues, i => i.Field == nameof(MeshRequest.Quality));
+    }
+
+    [Fact]
+    public void APresetThatSetsStepsFillsThemOnlyWhenTheRequestLeavesThemUnset()
+    {
+        MeshPreset preset = new() { Steps = 7, GridResolution = 64, Basis = "test" };
+
+        MeshRequest filled = MeshQualityPresets.Apply(preset, new MeshRequest());
+        MeshRequest kept = MeshQualityPresets.Apply(preset, new MeshRequest { Steps = 3, GridResolution = 32 });
+
+        Assert.Equal((7, 64), (filled.Steps, filled.GridResolution));
+        Assert.Equal((3, 32), (kept.Steps, kept.GridResolution));
+        Assert.Equal(7, MeshQualityPresets.Supplied(preset, new MeshRequest(), nameof(MeshRequest.Steps)));
+        Assert.Null(MeshQualityPresets.Supplied(new MeshPreset { Basis = "test" }, new MeshRequest(), nameof(MeshRequest.Steps)));
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d-omni", 512)]
+    [InlineData("hunyuan3d-xpart", 384)]
+    public async Task APresetGridPastTheMeasuredOneGetsAnUnknownMemoryVerdictNotTheSmallerGridsPeak(string id, int grid)
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid(id) with { Quality = MeshQuality.High };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), request);
+
+        Assert.Equal(grid, MeshQualityPresets.Resolve(id, request).GridResolution);
+        Assert.Equal(Planning.Memory.MemoryFitVerdict.Unknown, plan.Memory.Verdict);
+    }
+
+    [Fact]
+    public async Task APresetValueEqualToTheModelsDefaultIsNotCreditedToThePreset()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Quality = MeshQuality.High });
+
+        Assert.Equal(ParameterSource.RecipeDefault, plan.Settings[nameof(MeshRequest.GridResolution)].Source);
+    }
+
+    [Theory]
+    [InlineData(512, 7.4)]
+    [InlineData(1536, null)]
+    [InlineData(1024, null)]
+    public void Trellis2PlansFromAPeakOnlyAt512(int grid, double? expected)
+    {
+        double? peak = MeshModelProfiles.Find("trellis2")!.PeakGiB!(Valid("trellis2") with { GridResolution = grid });
+
+        Assert.Equal(expected, peak);
+    }
+
+    [Fact]
+    public void APeakPastWhatWindowsGivesOneProcessIsJudgedWithAPagingWarning()
+    {
+        MemoryEstimate estimate = new()
+        {
+            FamilyId = "test",
+            Phases = [new MemoryPhase(MemoryComponent.Stage, 10L << 30, 0, 0, false)],
+            Accuracy = MemoryEstimateAccuracy.Measured,
+        };
+
+        MemoryFit windows = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+        MemoryFit other = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: false);
+
+        Assert.Equal(MemoryFitVerdict.Resident, windows.Verdict);
+        Assert.Contains("Windows", windows.Reason);
+        Assert.DoesNotContain("Windows", other.Reason);
+    }
+
+    [Fact]
+    public async Task Trellis2At512WithMattingGetsNoPagingWarning()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("trellis2") with { GridResolution = 512, Image = new ImageData { Rgb = new byte[4 * 4 * 3], Width = 4, Height = 4 } };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), request);
+        MemoryEstimate estimate = MeshMemoryProfile.Estimate("trellis2", request)!;
+        MemoryFit fit = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+
+        Assert.True(MeshMemoryProfile.Mattes("trellis2", request));
+        Assert.DoesNotContain("page", fit.Reason);
+        Assert.NotNull(plan.Memory);
+    }
+
+    [Theory]
+    [InlineData("trellis2", false, 0, "Remesh")]
+    [InlineData("trellis2", true, 1536, "Remesh")]
+    [InlineData("pixal3d", true, 1536, "Remesh")]
+    public void RemeshNeedsTextureAndAGridOf512Or1024(string id, bool texture, int grid, string field)
+    {
+        MeshRequest request = Valid(id) with { Remesh = true, Texture = texture, GridResolution = grid };
+
+        Exception error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false))!;
+
+        Assert.NotNull(error);
+        Assert.Equal(field, MeshFieldTag.FieldOf(error));
+    }
+
+    [Theory]
+    [InlineData("trellis2", 512)]
+    [InlineData("trellis2", 1024)]
+    [InlineData("pixal3d", 1024)]
+    public void RemeshWithTextureAtAFineEnoughGridPassesTheValidatorAndReachesTheOptions(string id, int grid)
+    {
+        MeshRequest request = Valid(id) with { Remesh = true, Texture = true, GridResolution = grid };
+
+        MeshRequestValidator.Validate(id, request, matterAvailable: false);
+
+        Assert.True(id == "trellis2" ? Trellis2RequestMapper.ToOptions(request).Remesh : Pixal3DRequestMapper.ToOptions(request).Remesh);
+    }
+
+    [Theory]
+    [InlineData("trellis2", true, 0, null, true)]
+    [InlineData("trellis2", true, 512, null, true)]
+    [InlineData("trellis2", true, 1024, null, true)]
+    [InlineData("trellis2", true, 1536, null, false)]
+    [InlineData("trellis2", false, 512, null, false)]
+    [InlineData("trellis2", true, 512, false, false)]
+    [InlineData("trellis2", true, 512, true, true)]
+    [InlineData("pixal3d", true, 0, null, true)]
+    [InlineData("pixal3d", true, 1024, null, true)]
+    [InlineData("pixal3d", true, 1536, null, false)]
+    [InlineData("pixal3d", false, 1024, null, false)]
+    [InlineData("pixal3d", true, 1024, false, false)]
+    public void RemeshIsOnForTexturedOutputUnlessTheCallerOptsOut(string id, bool texture, int grid, bool? remesh, bool expected)
+    {
+        MeshRequest request = Valid(id) with { Texture = texture, GridResolution = grid, Remesh = remesh };
+
+        MeshRequestValidator.Validate(id, request, matterAvailable: false);
+
+        Assert.Equal(expected, id == "trellis2" ? Trellis2RequestMapper.ToOptions(request).Remesh : Pixal3DRequestMapper.ToOptions(request).Remesh);
+    }
+
+    [Fact]
+    public void AMaxPresetWithTextureKeepsGrid1536AndLeavesTheRemeshOff()
+    {
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", Valid("trellis2") with { Quality = MeshQuality.Max, Texture = true });
+
+        Assert.Equal(1536, resolved.GridResolution);
+        Assert.False(Trellis2RequestMapper.ToOptions(resolved).Remesh);
+        MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
+    }
+
+    [Fact]
+    public async Task APlanShowsTheRemeshDefaultAndTheOptOut()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan on = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, GridResolution = 512 });
+        MeshPlan off = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, GridResolution = 512, Remesh = false });
+        MeshPlan shapeOnly = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { GridResolution = 512 });
+
+        Assert.Equal("true", on.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.Equal(ParameterSource.RecipeDefault, on.Settings[nameof(MeshRequest.Remesh)].Source);
+        Assert.Equal("false", off.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.Equal(ParameterSource.UserOverride, off.Settings[nameof(MeshRequest.Remesh)].Source);
+        Assert.Equal("false", shapeOnly.Settings[nameof(MeshRequest.Remesh)].Value);
+        MeshPlan max = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, Quality = MeshQuality.Max });
+        Assert.Equal("false", max.Settings[nameof(MeshRequest.Remesh)].Value);
+        MeshPlan forced = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, Quality = MeshQuality.Max, Remesh = true });
+        Assert.Equal("true", forced.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.Equal(ParameterSource.UserOverride, forced.Settings[nameof(MeshRequest.Remesh)].Source);
+        Assert.Equal("1024", forced.Settings[nameof(MeshRequest.GridResolution)].Value);
+        Assert.Equal("auto", engine.MeshPlanning.Describe("trellis2").Fields[nameof(MeshRequest.Remesh)].Default);
+        Assert.DoesNotContain(on.Issues.Concat(off.Issues).Concat(shapeOnly.Issues), i => i.Field == nameof(MeshRequest.Remesh));
+    }
+
+    [Fact]
+    public async Task APlanListsRemeshAsAFieldOfTheTexturedModelsOnly()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshModelDescriptor trellis = engine.MeshPlanning.Describe("trellis2");
+        MeshModelDescriptor triposr = engine.MeshPlanning.Describe("triposr");
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Remesh = true, Texture = true, GridResolution = 512 });
+
+        Assert.Equal(MeshFieldAccess.Used, trellis.Fields[nameof(MeshRequest.Remesh)].Access);
+        Assert.Equal(MeshFieldAccess.Rejected, triposr.Fields[nameof(MeshRequest.Remesh)].Access);
+        Assert.Equal("true", plan.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.DoesNotContain(plan.Issues, i => i.Field == nameof(MeshRequest.Remesh));
+    }
+
+    [Theory]
+    [InlineData("triposr")]
+    [InlineData("hunyuan3d")]
+    [InlineData("hunyuan3d-paint21")]
+    public void RemeshAloneIsRejectedForAModelWithoutTextureOutputAndTaggedToItsField(string id)
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate(id, Valid(id) with { Remesh = true }, matterAvailable: false));
+
+        Assert.Equal(nameof(MeshRequest.Remesh), MeshFieldTag.FieldOf(error));
+    }
+
+    [Fact]
+    public void AMaxPresetGivesWayToGrid1024ForARemeshRequest()
+    {
+        MeshRequest request = Valid("trellis2") with { Quality = MeshQuality.Max, Texture = true, Remesh = true };
+
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", request);
+
+        Assert.Equal(1024, resolved.GridResolution);
+        MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
+        Assert.Equal(1536, MeshQualityPresets.Resolve("trellis2", request with { Remesh = false }).GridResolution);
+    }
+
+    [Fact]
+    public void ARemeshRequestLeavesAPaintPresetsTextureEdgeAlone()
+    {
+        MeshRequest request = Valid("hunyuan3d-paint21") with { Quality = MeshQuality.High, Remesh = true };
+
+        Assert.Equal(4096, MeshQualityPresets.Resolve("hunyuan3d-paint21", request).GridResolution);
+    }
+
+    [Fact]
+    public void APeakJustUnderTheWindowsBudgetGetsNoPagingWarning()
+    {
+        MemoryEstimate estimate = new()
+        {
+            FamilyId = "test",
+            Phases = [new MemoryPhase(MemoryComponent.Stage, (8L << 30) - 1, 0, 0, false)],
+            Accuracy = MemoryEstimateAccuracy.Measured,
+        };
+
+        MemoryFit fit = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+
+        Assert.DoesNotContain("Windows", fit.Reason);
+    }
+
+    [Fact]
+    public async Task APlanReportsAPresetOnAModelWithoutOneAsAnErrorOnTheQualityField()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Quality = MeshQuality.High });
+
+        Assert.Contains(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error && i.Field == nameof(MeshRequest.Quality));
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void EveryModelRejectsASeedBeyondTheSamplersRangeAndAcceptsTheLargestOne(string id)
+    {
+        MeshRequest beyond = Valid(id) with { Seed = (long)int.MaxValue + 1 };
+        MeshRequest largest = Valid(id) with { Seed = int.MaxValue };
+        MeshRequest wrapsToZero = Valid(id) with { Seed = 1L << 32 };
+
+        foreach (MeshRequest request in new[] { beyond, wrapsToZero })
+        {
+            ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
+            Assert.Equal(nameof(MeshRequest.Seed), MeshFieldTag.FieldOf(error));
+        }
+        Assert.Null(Record.Exception(() => MeshRequestValidator.Validate(id, largest, matterAvailable: false)));
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void EveryProfileStatesTheSeedMaximum(string id)
+    {
+        MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
+
+        Assert.Equal((double)int.MaxValue, seed.Max);
+        Assert.Contains(seed.Access, new[] { MeshFieldAccess.Used, MeshFieldAccess.Ignored });
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d")]
+    [InlineData("trellis")]
+    [InlineData("unirig")]
+    [InlineData("triposr")]
+    public async Task TheModelsThatOnceWrappedALargeSeedNowReportItAsAPlanError(string id)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { Seed = (1L << 32) + 5 });
+
+        Assert.Contains(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error && i.Field == nameof(MeshRequest.Seed));
+    }
+
+    [Fact]
+    public void AnUnknownModelFailsAsUnknownBeforeItsSeedIsRangeChecked()
+    {
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("no-such-model", Valid("hunyuan3d") with { Seed = 1L << 32 }, matterAvailable: false));
+    }
+
+    [Fact]
+    public async Task AnIgnoredSeedOutOfRangeIsOneErrorNotAnErrorAndAnIgnoredWarning()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Seed = 1L << 32 });
+
+        Assert.Single(plan.Issues, i => i.Field == nameof(MeshRequest.Seed));
+        Assert.Equal(MeshPlanIssueSeverity.Error, plan.Issues.Single(i => i.Field == nameof(MeshRequest.Seed)).Severity);
+    }
+
+    [Fact]
+    public void TheSamplerCastIsCheckedSoNoCallerCanWrapASeed()
+    {
+        Assert.Null(MeshSeed.ForSampler(-1));
+        Assert.Equal(7, MeshSeed.ForSampler(7));
+        Assert.Throws<OverflowException>(() => MeshSeed.ForSampler(1L << 32));
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d-part", "segments a triangle mesh into parts")]
+    [InlineData("unirig", "rigs a triangle mesh")]
+    public void ASceneModelWithoutAMeshSaysWhatItDoes(string id, string verb)
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate(id, new MeshRequest(), matterAvailable: false));
+
+        Assert.Contains(verb, error.Message);
+        Assert.Equal(nameof(MeshRequest.SceneMesh), MeshFieldTag.FieldOf(error));
+    }
+
+    [Theory]
+    [InlineData("trellis2", "TextureSize")]
+    [InlineData("pixal3d", "TextureSize")]
+    public async Task PlanNamesTheFieldOfAnIssue(string id, string field)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { TextureSize = 512 });
+
+        Assert.Equal(field, Assert.Single(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Theory]
+    [InlineData("trellis2", nameof(MeshRequest.GridResolution))]
+    [InlineData("pixal3d", nameof(MeshRequest.GridResolution))]
+    public async Task PlanNamesTheGridFieldOfAPipelineError(string id, string field)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { GridResolution = 768 });
+
+        Assert.Equal(field, Assert.Single(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Fact]
+    public async Task PlanNamesTheFieldsOfOtherPipelineErrors()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan fov = await engine.MeshPlanning.PlanAsync(Spec("pixal3d"), Valid("pixal3d") with { FieldOfViewRadians = 2.0 });
+        MeshPlan steps = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Steps = 500 });
+        MeshPlan rigged = await engine.MeshPlanning.PlanAsync(Spec("hairdeck"), Valid("hairdeck") with { Rigged = true, Chains = false });
+        MeshPlan seed = await engine.MeshPlanning.PlanAsync(Spec("hairdeck"), Valid("hairdeck") with { Seed = (long)int.MaxValue + 1 });
+
+        Assert.Equal(nameof(MeshRequest.FieldOfViewRadians), fov.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Steps), steps.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Rigged), rigged.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Seed), seed.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Theory]
+    [InlineData(2, 2, 11, null)]
+    [InlineData(2, 2, 12, 3)]
+    public void AMalformedImageBufferIsReportedAgainstTheImageField(int width, int height, int rgbLength, int? alphaLength)
+    {
+        ImageData image = new() { Rgb = new byte[rgbLength], Width = width, Height = height, Alpha = alphaLength is int n ? new byte[n] : null };
+
+        ArgumentException error = Assert.ThrowsAny<ArgumentException>(
+            () => MeshRequestValidator.Validate("trellis2", new MeshRequest { Image = image }, matterAvailable: true));
+
+        Assert.Equal(nameof(MeshRequest.Image), MeshFieldTag.FieldOf(error));
+    }
+
+    [Fact]
+    public async Task PlanNamesTheFieldOfRejectedOptionsOfOtherModels()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan samples = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Samples = 2 });
+        MeshPlan chains = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Chains = false });
+        MeshPlan seed = await engine.MeshPlanning.PlanAsync(Spec("hunyuan3d-part"), Valid("hunyuan3d-part") with { Seed = (long)int.MaxValue + 1 });
+
+        Assert.Equal(nameof(MeshRequest.Samples), samples.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Chains), chains.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Seed), seed.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Fact]
+    public async Task APlanForAModelWithoutARecordedPeakSaysWhyThereIsNoFit()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr"));
+
+        Assert.Equal(MemoryFitVerdict.Unknown, plan.Memory.Verdict);
+        Assert.Contains("No device-memory peak", plan.Memory.Reason);
+    }
+
+    [Fact]
+    public void AMissingRequiredInputIsReportedAgainstItsField()
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("triposr", new MeshRequest(), matterAvailable: false));
+
+        Assert.Equal(nameof(MeshRequest.Image), MeshFieldTag.FieldOf(error));
+    }
+
+    [Fact]
+    public void TRELLIS2WithoutAlphaOrAMatterIsRefusedAndWithTheMatterIsAccepted()
+    {
+        MeshRequest request = Valid("trellis2") with { Image = Image() with { Alpha = null } };
+
+        HartsyInference.Core.Exceptions.HartsyInferenceException error =
+            Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => MeshRequestValidator.Validate("trellis2", request, matterAvailable: false));
+        Assert.Equal(nameof(MeshRequest.Image), MeshFieldTag.FieldOf(error));
+        MeshRequestValidator.Validate("trellis2", request, matterAvailable: true);
+    }
+
+    [Fact]
+    public void ViewsAreTakenByTheMultiviewShapeBuildAndThePaintModelsOnly()
+    {
+        MeshViewImage left = new() { View = MeshView.Left, Image = Image() };
+        MeshRequestValidator.Validate("hunyuan3d-mv", Valid("hunyuan3d-mv") with { Views = [left, left with { View = MeshView.Back }] }, matterAvailable: false);
+        MeshRequestValidator.Validate("hunyuan3d-paint21", Valid("hunyuan3d-paint21") with { Views = [left] }, matterAvailable: false);
+
+        Exception single = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d", Valid("hunyuan3d") with { Views = [left] }, matterAvailable: false));
+        Assert.Equal(nameof(MeshRequest.Views), MeshFieldTag.FieldOf(single));
+        Assert.Throws<ArgumentException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", Valid("hunyuan3d-mv") with { Views = [left, left] }, matterAvailable: false));
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", new MeshRequest { Views = [left] }, matterAvailable: false));
+        MeshViewImage torn = new() { View = MeshView.Right, Image = new ImageData { Rgb = new byte[5], Width = 4, Height = 4 } };
+        Assert.Throws<ArgumentException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", Valid("hunyuan3d-mv") with { Views = [torn] }, matterAvailable: false));
+    }
+
+    [Fact]
+    public void AnUnknownModelHasNoProfileAndFailsTheValidator()
+    {
+        Assert.Null(MeshModelProfiles.Find("hunyuan3d-mv-turbo"));
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d-mv-turbo", Valid("trellis2"), matterAvailable: false));
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d-part")]
+    [InlineData("hunyuan3d-xpart")]
+    public void ThePartModelsListTheSonataNonCommercialLicenceAsARestriction(string id)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshModelDescriptor descriptor = engine.MeshPlanning.Describe(id);
+
+        Assert.Contains(descriptor.Licence.Restrictions, r => r.Contains("CC-BY-NC 4.0", StringComparison.Ordinal) && r.Contains("facebook/sonata", StringComparison.Ordinal));
+        Assert.Contains("CC-BY-NC 4.0", descriptor.Licence.Summary);
+    }
+
+    [Fact]
+    public void DescribeReturnsOneDescriptorPerDescribedModelWithItsGatedRepositories()
+    {
+        using InferenceEngine engine = new("cpu");
+        IReadOnlyList<MeshModelDescriptor> all = engine.MeshPlanning.DescribeAll();
+
+        Assert.Equal(MeshModelIds.Described.Order(), all.Select(d => d.Id).Order());
+        MeshModelDescriptor hairdeck = engine.MeshPlanning.Describe("hairdeck");
+        Assert.Contains("facebook/sam3", hairdeck.Licence.GatedRepos);
+        Assert.Contains("facebook/dinov3-vitl16-pretrain-lvd1689m", hairdeck.Licence.GatedRepos);
+        Assert.Empty(engine.MeshPlanning.Describe("hunyuan3d").Licence.GatedRepos);
+        Assert.Equal(MeshOutputKinds.Splats | MeshOutputKinds.Mesh, engine.MeshPlanning.Describe("sam3d-objects").Outputs);
+        Assert.Equal(MeshInputKind.ImageWithMask, engine.MeshPlanning.Describe("sam3d-objects").Input);
+        Assert.Throws<NotSupportedException>(() => engine.MeshPlanning.Describe("hunyuan3d-mv-turbo"));
+    }
+
+    [Fact]
+    public async Task PlanReportsAnUnsupportedFieldWithItsNameAndIsNotValid()
+    {
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = Spec("trellis2");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(spec, Valid("trellis2") with { FieldOfViewRadians = 0.5 });
+
+        Assert.False(plan.IsValid);
+        MeshPlanIssue issue = Assert.Single(plan.Issues, i => i.Code == "mesh.request.unsupported");
+        Assert.Equal(nameof(MeshRequest.FieldOfViewRadians), issue.Field);
+    }
+
+    [Fact]
+    public async Task PlanWarnsAboutAnIgnoredFieldAndStaysValid()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Steps = 12 });
+
+        Assert.True(plan.IsValid);
+        MeshPlanIssue warning = Assert.Single(plan.Issues, i => i.Code == "mesh.field.ignored");
+        Assert.Equal(nameof(MeshRequest.Steps), warning.Field);
+        Assert.False(plan.Settings.ContainsKey(nameof(MeshRequest.Steps)));
+    }
+
+    [Fact]
+    public async Task PlanReportsWhereEachSettingCameFrom()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("pixal3d"), Valid("pixal3d") with { GridResolution = 1536 });
+
+        Assert.Equal(new ResolvedParameter("1536", ParameterSource.UserOverride), plan.Settings[nameof(MeshRequest.GridResolution)]);
+        Assert.Equal(ParameterSource.RecipeDefault, plan.Settings[nameof(MeshRequest.Steps)].Source);
+        Assert.Equal("0.8575560450553894", plan.Settings[nameof(MeshRequest.FieldOfViewRadians)].Value);
+    }
+
+    [Fact]
+    public async Task PlanForAModelWithoutAnyCheckpointIsNotValid()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("hunyuan3d") with { LocalPath = null }, Valid("hunyuan3d"));
+
+        Assert.False(plan.IsValid);
+        Assert.Contains(plan.Issues, i => i.Code == "mesh.model.not_installed");
+    }
+
+    [Fact]
+    public async Task GenerateRunsTheSameValidationAsPlan()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("trellis2") with { FieldOfViewRadians = 0.5 };
+
+        await Assert.ThrowsAsync<NotSupportedException>(() => engine.Mesh.GenerateAsync(Spec("trellis2"), request));
+    }
+
+    [Fact]
+    public async Task ASam3dMeshRequestIsPlannedAsMeshTrueFromTheUserAndKeepsPreviewAndFrameUsed()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("sam3d-objects") with { Mesh = true };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("sam3d-objects"), request);
+        MeshPlan splats = await engine.MeshPlanning.PlanAsync(Spec("sam3d-objects"), Valid("sam3d-objects"));
+
+        Assert.Equal(new ResolvedParameter("true", ParameterSource.UserOverride), plan.Settings[nameof(MeshRequest.Mesh)]);
+        Assert.Equal(new ResolvedParameter("false", ParameterSource.RecipeDefault), splats.Settings[nameof(MeshRequest.Mesh)]);
+        // The finisher decimates a preview and applies the frame to every glb, so a model that can return a mesh describes both as used.
+        Assert.All([nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame)], name => Assert.Equal(MeshFieldAccess.Used, Profile("sam3d-objects").Fields.Single(f => f.Name == name).Access));
+        Assert.Equal(MeshFieldAccess.Ignored, Profile("trellis").Fields.Single(f => f.Name == nameof(MeshRequest.Frame)).Access);
+    }
+
+    [Fact]
+    public void ASam3dMeshRunHasAMeasuredPeakAndASplatRunHasNone()
+    {
+        MemoryEstimate? mesh = MeshMemoryProfile.Estimate("sam3d-objects", new MeshRequest { Mesh = true });
+
+        Assert.NotNull(mesh);
+        Assert.Equal(MemoryEstimateAccuracy.Measured, mesh.Accuracy);
+        Assert.Null(MeshMemoryProfile.Estimate("sam3d-objects", new MeshRequest()));
+    }
+
+    [Fact]
+    public void MeasuredPeaksBecomeAOneStageEstimateAndOthersHaveNone()
+    {
+        MemoryEstimate? p1024 = MeshMemoryProfile.Estimate("pixal3d", new MeshRequest());
+        MemoryEstimate? p1536 = MeshMemoryProfile.Estimate("pixal3d", new MeshRequest { GridResolution = 1536 });
+
+        Assert.NotNull(p1024);
+        Assert.Equal(MemoryEstimateAccuracy.Measured, p1024.Accuracy);
+        Assert.True(p1536!.PeakResidentBytes > p1024.PeakResidentBytes);
+        Assert.Null(MeshMemoryProfile.Estimate("triposr", new MeshRequest()));
+        Assert.Null(MeshMemoryProfile.Estimate("hunyuan3d-mv", new MeshRequest()));
+    }
+
+    [Fact]
+    public void AMeasuredPeakIsHeldAgainstTheWholeCard()
+    {
+        MemoryEstimate estimate = MeshMemoryProfile.Estimate("pixal3d", new MeshRequest { GridResolution = 1536 })!;
+
+        Assert.Equal(MemoryFitVerdict.Resident, MeshMemoryProfile.Judge(estimate, 12L << 30, HartsyInference.Core.Memory.Vram.VramTier.Auto).Verdict);
+        Assert.Equal(MemoryFitVerdict.Infeasible, MeshMemoryProfile.Judge(estimate, 8L << 30, HartsyInference.Core.Memory.Vram.VramTier.Auto).Verdict);
+    }
+
+    [Fact]
+    public async Task TheGenericMemoryServiceAnswersForMeshModelsWithAPeakAndRefusesTheRest()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MemoryEstimate estimate = await engine.MemoryEstimation.EstimateAsync(Spec("pixal3d"), new MemoryEstimateRequest(1024, 1024));
+
+        Assert.Equal("pixal3d", estimate.FamilyId);
+        await Assert.ThrowsAsync<NotSupportedException>(() => engine.MemoryEstimation.EstimateAsync(Spec("triposr"), new MemoryEstimateRequest(1024, 1024)));
+        MemoryFit fit = await engine.MemoryEstimation.AssessAsync(Spec("triposr"), new MemoryEstimateRequest(1024, 1024));
+        Assert.Equal(MemoryFitVerdict.Unknown, fit.Verdict);
+    }
+
+    private static ModelSpec Spec(string id) => new()
+    {
+        Requested = id,
+        Modality = Modality.Mesh,
+        Catalog = HartsyInference.Engine.Registry.ModelCatalog.Find(id),
+        LocalPath = Path.GetTempPath(),
+    };
+}

@@ -5,6 +5,10 @@ public sealed class PullModelRequest
 {
     /// <summary>Catalog id to download the preset assets for.</summary>
     public string Model { get; set; } = "";
+
+    /// <summary>Optional catalog variant to download instead of the default asset set (for example <c>nf4</c> or <c>fp8</c> for
+    /// <c>moss-vl-realtime</c>); see the entry's <c>Variants</c>. Null or empty downloads the default set.</summary>
+    public string? Variant { get; set; }
 }
 
 /// <summary>Request body for <c>POST /admin/models/quantize</c>. Precision is a request field rather than a

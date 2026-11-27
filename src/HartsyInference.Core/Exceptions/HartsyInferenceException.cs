@@ -7,5 +7,5 @@ public class HartsyInferenceException : Exception
 
     public HartsyInferenceException(string message) : base(message) { }
 
-    public HartsyInferenceException(string message, Exception innerException) : base(message, innerException) { }
+    public HartsyInferenceException(string message, Exception? innerException) : base(message, innerException) { }
 }

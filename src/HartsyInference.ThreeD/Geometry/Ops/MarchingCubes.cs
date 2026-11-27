@@ -30,14 +30,19 @@ public static class MarchingCubes
         for (int x = 0; x < nx - 1; x++)
         {
             int cubeIndex = 0;
+            bool finite = true;
             for (int c = 0; c < 8; c++)
             {
                 int cx = x + cox[c], cy = y + coy[c], cz = z + coz[c];
                 cornerLin[c] = field.Index(cx, cy, cz);
                 float v = field.Values[cornerLin[c]];
                 val[c] = v;
+                finite &= float.IsFinite(v);
                 if (v < isoLevel) cubeIndex |= 1 << c;
             }
+
+            // A NaN corner marks a point the decoder never evaluated (FlashVDM); such a cell emits nothing.
+            if (!finite) continue;
 
             int edges = EdgeTable[cubeIndex];
             if (edges == 0) continue;

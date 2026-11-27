@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
 /// <summary>Splits a Hunyuan3D-2 checkpoint into the three component weight dicts the pipeline loads: the shape <c>Dit</c>, the <c>ShapeVae</c> decoder, and the <c>Dinov2</c> image conditioner. Follows the project's converter pattern (detect layout → route keys by prefix → strip component prefix).
-/// <para><b>Numerics validation-pending</b> — the per-key rename tables and prefix set are <b>validation-gated</b>; they're finalized against the reference checkpoint during the layer-diff pass (see <c>docs/Research/HUNYUAN3D_2_ARCHITECTURE.md</c>). This router classifies by coarse prefix so the structural pipeline can load a converted checkpoint end-to-end.</para></summary>
+/// <para>Keys route by coarse prefix; the key layout was checked against the <c>tencent/Hunyuan3D-2</c> header (see <c>docs/Research/HUNYUAN3D_ARCHITECTURE.md</c>).</para></summary>
 public static class Hunyuan3DCheckpointConverter
 {
     /// <summary>Per-component weight dictionaries, keyed by the names each component's <c>LoadWeights</c> expects.</summary>

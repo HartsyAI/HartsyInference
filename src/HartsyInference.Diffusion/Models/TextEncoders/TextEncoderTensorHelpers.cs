@@ -153,6 +153,28 @@ internal static unsafe class TextEncoderTensorHelpers
         return mask;
     }
 
+    /// <summary>Additive mask <c>[B, 1, S, S]</c> for a right-padded batch: row <c>b</c> is causal and blocks every key at or
+    /// beyond <c>validLengths[b]</c>, so no token attends a padding key. Pass <see cref="int.MaxValue"/> for no window.</summary>
+    internal static Tensor BuildKeyPaddedCausalMask(int[] validLengths, int seqLen, int window)
+    {
+        const float negInf = -1e30f;
+        int batch = validLengths.Length;
+        Tensor mask = new(new TensorShape(batch, 1, seqLen, seqLen), DType.F32);
+        float* p = (float*)mask.DataPointer;
+        for (int b = 0; b < batch; b++)
+        {
+            for (int i = 0; i < seqLen; i++)
+            {
+                for (int j = 0; j < seqLen; j++)
+                {
+                    bool blocked = j > i || j >= validLengths[b] || (window != int.MaxValue && j <= i - window);
+                    p[((long)b * seqLen + i) * seqLen + j] = blocked ? negInf : 0f;
+                }
+            }
+        }
+        return mask;
+    }
+
     /// <summary>Gathers one row of a split-half RoPE table <c>[positions, half]</c> per token, so tokens can take
     /// arbitrary rotary positions (e.g. <see cref="TextEncoderPadding"/>) through the position-indexed table contract.</summary>
     internal static float[] GatherRopeRows(float[] halfTable, int half, int seqLen, Func<int, int> positionOf)
@@ -163,8 +185,26 @@ internal static unsafe class TextEncoderTensorHelpers
         return gathered;
     }
 
-    /// <summary>Expands a cached split-half table <c>[S, D/2]</c> to the backend RoPE contract <c>[B, S, D]</c>, duplicating each frequency into both vector halves and each batch row.</summary>
-    internal static Tensor BuildFullWidthRopeTable(float[] halfTable, int batch, int seqLen, int headDim)
+    /// <summary>Per-row <see cref="GatherRopeRows"/> for a right-padded batch: row <c>b</c>, token <c>s</c> takes position
+    /// <c>s</c> while <c>s &lt; validLengths[b]</c> and <paramref name="paddedPosition"/> after. Result is <c>[B, S, half]</c>.</summary>
+    internal static float[] GatherPaddedRopeRows(float[] halfTable, int half, int seqLen, int[] validLengths, int paddedPosition)
+    {
+        float[] gathered = new float[(long)validLengths.Length * seqLen * half];
+        for (int b = 0; b < validLengths.Length; b++)
+        {
+            for (int s = 0; s < seqLen; s++)
+            {
+                int position = s < validLengths[b] ? s : paddedPosition;
+                Array.Copy(halfTable, (long)position * half, gathered, ((long)b * seqLen + s) * half, half);
+            }
+        }
+        return gathered;
+    }
+
+    /// <summary>Expands a cached split-half table to the backend RoPE contract <c>[B, S, D]</c>, duplicating each frequency into
+    /// both vector halves and each batch row. With <paramref name="rowsPerBatch"/> the table is already per batch row,
+    /// <c>[B, S, D/2]</c>, as <see cref="GatherPaddedRopeRows"/> returns it.</summary>
+    internal static Tensor BuildFullWidthRopeTable(float[] halfTable, int batch, int seqLen, int headDim, bool rowsPerBatch = false)
     {
         ArgumentNullException.ThrowIfNull(halfTable);
         if (batch <= 0) throw new ArgumentOutOfRangeException(nameof(batch), "Batch must be positive.");
@@ -173,7 +213,7 @@ internal static unsafe class TextEncoderTensorHelpers
             throw new ArgumentOutOfRangeException(nameof(headDim), "Split-half RoPE requires a positive even head dimension.");
 
         int half = headDim / 2;
-        int required = checked(seqLen * half);
+        int required = checked((rowsPerBatch ? batch : 1) * seqLen * half);
         if (halfTable.Length < required)
             throw new ArgumentException(
                 $"RoPE table has {halfTable.Length} values, but sequence {seqLen} and head dimension {headDim} require at least {required}.",
@@ -185,7 +225,7 @@ internal static unsafe class TextEncoderTensorHelpers
         {
             for (int s = 0; s < seqLen; s++)
             {
-                int sourceBase = s * half;
+                long sourceBase = (rowsPerBatch ? (long)b * seqLen + s : s) * half;
                 long destinationBase = ((long)b * seqLen + s) * headDim;
                 for (int i = 0; i < half; i++)
                 {

@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Worlds;
+
 namespace HartsyInference.Engine;
 
 /// <summary>One selectable model in the catalog: its CLI id, modality, backing architecture, and maturity.</summary>
@@ -31,7 +33,18 @@ public sealed record CatalogEntry
     /// when no preset download is defined.</summary>
     public IReadOnlyList<ModelAsset> Assets { get; init; } = Array.Empty<ModelAsset>();
 
+    /// <summary>Whether the loader reads every file of the model from the folder named with <c>--model-path</c> (SAM 3D Objects does), so that a folder holding the
+    /// <see cref="Assets"/> is the install wherever the catalog would have put them. False for models whose loaders look their side files up under the catalog folders.</summary>
+    public bool LoadsFromFolder { get; init; }
+
+    /// <summary>What a world model accepts, checked before any weight loads. Null for every non-world entry; a
+    /// catalog-less world spec gets the defaults.</summary>
+    public WorldCapabilities? World { get; init; }
+
     /// <summary>Derivatives of this model (different quantizations or conversions), each with its own pinned download and
     /// the components it ships. Empty for a model with a single form; such a model's files are <see cref="Assets"/>.</summary>
     public IReadOnlyList<CatalogVariant> Variants { get; init; } = Array.Empty<CatalogVariant>();
+
+    /// <summary>What the model is for beyond generation (background removal, alpha matte). Consumers test these flags rather than the id.</summary>
+    public CatalogFeatures Features { get; init; }
 }

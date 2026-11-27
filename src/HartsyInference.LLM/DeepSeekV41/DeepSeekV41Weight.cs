@@ -2,13 +2,14 @@ using System.Buffers;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.BlockScale;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>One two-dimensional weight of the V4.1 host model, either as F32 values or in the form the checkpoint stores it (FP8 block-scaled, MXFP4, BF16, ...) decoded by row window while it is used.</summary>
 /// <remarks>A stored weight keeps only a borrowed view of the checkpoint tensor, so the checkpoint must outlive it. Products against a stored weight are bit-identical to the same product against its F32 widening,
-/// because each output element is the same sequential dot over the same decoded values.</remarks>
+/// because each output element is the same fixed-order dot over the same decoded values.</remarks>
 public sealed class DeepSeekV41Weight
 {
     // rows of a stored weight decoded at once; bounds the scratch buffer to about 16 MiB
@@ -95,7 +96,7 @@ public sealed class DeepSeekV41Weight
     /// <summary><c>y[t,o] = sum_i x[t,i] * w[o,i]</c> with the weight as <c>[outDim, inDim]</c>.</summary>
     public float[] Linear(ReadOnlySpan<float> x, int tokens, int inDim, int outDim)
     {
-        if (_values is not null) return DeepSeekV41HostMath.Linear(x, _values, tokens, inDim, outDim);
+        if (_values is not null) return HostMath.Linear(x, _values, tokens, inDim, outDim);
         CheckShape(inDim, outDim);
         if (x.Length != (long)tokens * inDim) throw new ArgumentException("Linear operands do not match the stated shape.", nameof(x));
         float[] y = new float[checked(tokens * outDim)];
@@ -106,7 +107,7 @@ public sealed class DeepSeekV41Weight
             for (int row = 0; row < outDim; row += window)
             {
                 int count = Math.Min(window, outDim - row);
-                DeepSeekV41HostMath.LinearInto(x, ReadRows(row, count, inDim, scratch), tokens, inDim, count, y, outDim, row);
+                HostMath.LinearInto(x, ReadRows(row, count, inDim, scratch), tokens, inDim, count, y, outDim, row);
             }
         }
         finally

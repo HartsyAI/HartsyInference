@@ -60,6 +60,10 @@ public sealed record Flux2Config
     /// <summary>Sinusoidal timestep embedding input channel count (256 for all Flux.2 variants).</summary>
     public int TimestepChannels { get; init; } = 256;
 
+    /// <summary>Rows of the learned modality embedding added to every image token after the input projection; 0 when the
+    /// checkpoint has none. Iris-Z has four: RGB, depth, given RGB and given depth.</summary>
+    public int ModalityCount { get; init; }
+
     /// <summary>Text encoder type used by this variant.</summary>
     public required Flux2TextEncoderType TextEncoderType { get; init; }
 
@@ -100,6 +104,14 @@ public sealed record Flux2Config
         GuidanceEmbed = false,
         TextEncoderType = Flux2TextEncoderType.Qwen,
     };
+
+    /// <summary>Iris-Z-small (speridlabs/iris-z): FLUX.2 Klein base 9B with a four-row modality embedding. Verified against
+    /// the header of <c>Iris-Z-small/transformer-*.safetensors</c>.</summary>
+    public static Flux2Config IrisZSmall => Klein9B with { ModalityCount = 4 };
+
+    /// <summary>Iris-Z-big (speridlabs/iris-z): FLUX.2 Dev with the guidance embedding removed and a four-row modality
+    /// embedding. Verified against the tensor names in <c>Iris-Z-big/transformer.safetensors.index.json</c>.</summary>
+    public static Flux2Config IrisZBig => Dev with { GuidanceEmbed = false, ModalityCount = 4 };
 
     /// <summary>Flux.2 Dev 32B preset (defaults from diffusers Flux2Transformer2DModel). 8 double + 48 single, hidden=6144, 48 heads, Mistral text encoder, guidance embedding for CFG distillation.</summary>
     public static Flux2Config Dev => new()

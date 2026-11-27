@@ -1,3 +1,4 @@
+using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Codec;
 

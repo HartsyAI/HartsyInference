@@ -51,6 +51,20 @@ public static class ModelVariantResolver
         {
             if (variant.HasStructuralRule && probe.HasAllKeys(variant.StructuralMarkers) && (variant.StructuralMatch?.Invoke(probe) ?? true))
             {
+                if (hinted?.FineTuneOf == variant.Id)
+                {
+                    return new ResolvedModelVariant(catalog.FamilyId, hinted, ModelVariantSource.CallerHint, $"hint '{hint}'");
+                }
+                // A fine-tune the weights cannot tell from this base is named by its file or folder when no hint picked a
+                // different variant: a host that only knows the base's class (or a local path) would otherwise run the base.
+                if (hinted is null || ReferenceEquals(hinted, variant))
+                {
+                    ResolvedModelVariant? byName = FineTuneByFilename(catalog, variant, probe);
+                    if (byName is not null)
+                    {
+                        return byName;
+                    }
+                }
                 string evidence = variant.StructuralMarkers.Count > 0
                     ? "tensor " + string.Join(", ", variant.StructuralMarkers) : "weight structure";
                 return new ResolvedModelVariant(catalog.FamilyId, variant, ModelVariantSource.Structure, evidence)
@@ -102,6 +116,29 @@ public static class ModelVariantResolver
             }
         }
         return new ResolvedModelVariant(catalog.FamilyId, catalog.Default, ModelVariantSource.Default, "no variant signal found");
+    }
+
+    /// <summary>The <see cref="ModelVariant.FineTuneOf"/> child of <paramref name="baseVariant"/> whose file-name tokens one of
+    /// the checkpoint's names carries, as a filename guess; null when none does.</summary>
+    private static ResolvedModelVariant? FineTuneByFilename(ModelVariantCatalog catalog, ModelVariant baseVariant, CheckpointProbe probe)
+    {
+        foreach (ModelVariant child in catalog.Variants)
+        {
+            if (child.StructureRequired || !string.Equals(child.FineTuneOf, baseVariant.Id, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            foreach (string fileName in probe.FileNames)
+            {
+                IReadOnlyList<string>? tokens = MatchTokenSet(child, fileName);
+                if (tokens is not null)
+                {
+                    return new ResolvedModelVariant(catalog.FamilyId, child, ModelVariantSource.Filename,
+                        $"file name '{fileName}' has token(s) {string.Join("+", tokens)}, and the weights are {baseVariant.DisplayName}'s");
+                }
+            }
+        }
+        return null;
     }
 
     /// <summary>Whole-token split of a file name on <c>- _ . space</c>; the unit filename evidence is matched in.</summary>

@@ -30,7 +30,7 @@ Optional deeper bisects:
   proj) plus the per-block stage-0 outputs. Point the test at it with `LTX25_REFATTN`.
 - `LTX25_OURDUMP=<dir>` mirrors the C# side's own tensors so a divergence can be dissected in numpy — which rows,
   which channels, what weight the output implies — rather than through summary statistics.
-- `na3d_rule.py` compares our `Na3dWindowStart` rule against `comfy_kitchen.na3d` directly, in both the clamped
+- `na3d_rule.py` compares our `NeighborhoodAttentionContract.WindowStart` rule against `comfy_kitchen.na3d` directly, in both the clamped
   and genuinely-sliding regimes. Runs on CPU; needs no checkpoint.
 
 ## The trap that will waste your session

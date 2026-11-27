@@ -76,7 +76,7 @@ public sealed class QwenImage21Rope : IDisposable
         ToTuples(QwenImage21PosEmbed.ImageRows(textLen, imgH, imgW));
 
     /// <summary>Builds (or returns the cached) text-prefix tables, <c>[textLen, headDim]</c> F32 in the
-    /// <see cref="IBackend.WanRopeInterleaved"/> convention (pair <c>i</c>'s angle duplicated at <c>2i</c> and
+    /// <c>RotaryCall.Rows</c> convention (pair <c>i</c>'s angle duplicated at <c>2i</c> and
     /// <c>2i+1</c>).</summary>
     public (Tensor Cos, Tensor Sin) GetOrBuildTextTables(IBackend backend, int textLen) =>
         _textTables.GetOrBuild(backend, textLen, static length => QwenImage21PosEmbed.TextRows(length));

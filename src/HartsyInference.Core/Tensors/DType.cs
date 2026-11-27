@@ -154,6 +154,9 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>64-bit IEEE 754 floating point (double precision).</summary>
     public static readonly DType F64 = new("F64", 8, false);
 
+    /// <summary>64-bit complex (two F32 parts); parsed from headers so a file holding a buffer of it opens, refused where a tensor is materialised.</summary>
+    public static readonly DType C64 = new("C64", 8, false);
+
     /// <summary>Whether this dtype is a floating-point format (F32, F16, BF16, F8E4M3, F8E5M2).</summary>
     public bool IsFloatingPoint => this == F32 || this == F16 || this == BF16 || this == F8E4M3 || this == F8E5M2;
 
@@ -162,6 +165,9 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
 
     /// <summary>Whether this is an FNUZ FP8 encoding that no engine kernel decodes.</summary>
     public bool IsFnuz => this == F8E4M3Fnuz || this == F8E5M2Fnuz;
+
+    /// <summary>Whether this is a complex format that no engine kernel reads.</summary>
+    public bool IsComplex => this == C64;
 
     /// <summary>Whether this dtype is the FP4 (e2m1) tensor-core format.</summary>
     public bool IsFp4 => this == F4E2M1;

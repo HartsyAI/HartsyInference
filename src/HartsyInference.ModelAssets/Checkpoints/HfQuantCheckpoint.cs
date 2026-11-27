@@ -21,8 +21,10 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     private const string Weight = ".weight";
     private const int Mxfp8BlockWidth = 32;
     private const int Nvfp4BlockWidth = 16;
+    private const int Mxfp4BlockWidth = 32;
     private const string PackedWeight = ".weight_packed";
     private const string GlobalScaleSuffix = ".weight_global_scale";
+    private const string ScaleSuffix = "_scale";
     private readonly ShardedSafeTensorSet _set;
     private readonly Dictionary<string, HfQuantWeight> _weights = new(StringComparer.Ordinal);
     private int _disposed;
@@ -89,6 +91,17 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     /// <summary>Whether <paramref name="path"/> names one of this checkpoint's files, through a symbolic link in any component.</summary>
     public bool IsSourceFile(string path) => _set.Shards.Any(shard => FileSystemPathIdentity.SamePath(shard.Path, path));
 
+    /// <summary>A block-scaled FP8 weight as stored: its E4M3 tensor and its F32 <c>weight_scale_inv</c> grid, both fresh borrowed views of the
+    /// mapped checkpoint. The caller owns the weight view; the scale view must stay alive while the weight is used, because the weight's
+    /// <see cref="QuantWeightInfo"/> borrows it.</summary>
+    public (Tensor Weight, Tensor Scale) BorrowFp8Block(string name)
+    {
+        HfQuantWeight w = Get(name);
+        if (w.Storage != HfWeightStorage.Fp8Block)
+            throw new InvalidOperationException($"'{name}' is stored as {w.Storage}; it is not a block-scaled FP8 weight.");
+        return (_set.GetTensor(w.SourceKey), _set.GetTensor(w.SourceKey + "_scale_inv"));
+    }
+
     /// <summary>A plain weight as stored, as a fresh borrowed view of the mapped checkpoint (an expert of a fused stack is a row view).</summary>
     public Tensor Borrow(string name)
     {
@@ -123,6 +136,16 @@ public sealed partial class HfQuantCheckpoint : IDisposable
                 {
                     return GptqInt4Codec.Dequantize(qweight, scales, qzeros, gIdx, GptqGroupSize);
                 }
+            }
+            case HfWeightStorage.Fp8Channel:
+            {
+                // A row scale is a block grid of [rows, 1] over blocks one row high and the full row wide; a tensor scale is one block.
+                using Tensor q = _set.GetTensor(w.SourceKey);
+                using Tensor scale = _set.GetTensor(w.SourceKey + ScaleSuffix);
+                long rows = q.Shape[0], cols = q.Shape[1];
+                bool perTensor = scale.Shape.ElementCount == 1;
+                using Tensor grid = scale.Reshape(perTensor ? new TensorShape(1, 1) : new TensorShape(rows, 1));
+                return Fp8BlockF32Codec.Dequantize(q, grid, perTensor ? checked((int)rows) : 1, checked((int)cols));
             }
             case HfWeightStorage.BlockRecipe:
                 return DecodeRecipe(w);
@@ -297,13 +320,14 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         {
             if (nf4Parts.Contains(key) || key.EndsWith("_scale_inv", StringComparison.Ordinal) || key.EndsWith(".scales", StringComparison.Ordinal)
                 || key.EndsWith(".qzeros", StringComparison.Ordinal) || key.EndsWith(".g_idx", StringComparison.Ordinal)
-                || IsNvfp4Companion(key))
+                || IsNvfp4Companion(key) || IsFp8ScaleCompanion(key))
             {
                 continue;
             }
             if (key.EndsWith(PackedWeight, StringComparison.Ordinal))
             {
-                AddNvfp4(key, location);
+                if (IsMxfp4Packed(key)) AddMxfp4(key, location);
+                else AddNvfp4(key, location);
                 continue;
             }
             if (key.EndsWith(".qweight", StringComparison.Ordinal))
@@ -317,6 +341,11 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             if (fused.Success)
             {
                 AddFusedExperts(fused, key, location);
+                continue;
+            }
+            if (location.DType == DType.F8E4M3 && !_set.Inventory.ContainsKey(key + "_scale_inv") && _set.Inventory.ContainsKey(key + ScaleSuffix))
+            {
+                AddFp8Channel(key, location);
                 continue;
             }
             if (location.DType == DType.F8E4M3)
@@ -334,6 +363,52 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         }
     }
 
+    /// <summary>compressed-tensors FP8 with a <c>channel</c> (<c>[out, 1]</c> or <c>[out]</c>) or <c>tensor</c> (one value) weight scale.</summary>
+    private void AddFp8Channel(string key, TensorLocation location)
+    {
+        TensorLocation scale = _set.Inventory[key + ScaleSuffix];
+        bool perRow = location.Shape.Rank == 2 && scale.Shape.ElementCount == location.Shape[0]
+            && (scale.Shape.Rank == 1 || (scale.Shape.Rank == 2 && scale.Shape[1] == 1));
+        if (location.Shape.Rank != 2 || !(perRow || scale.Shape.ElementCount == 1) || scale.DType.IsQuantized)
+        {
+            throw new InvalidDataException(
+                $"FP8 weight '{key}' {location.Shape} needs a float scale [{location.Shape[0]}, 1] or a single value; '{key}{ScaleSuffix}' is {scale.DType.Name} {scale.Shape}.");
+        }
+        Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.Fp8Channel, location.DType, key));
+    }
+
+    private static readonly string[] Fp8ScaleSuffixes = [".weight_scale", ".input_scale"];
+
+    /// <summary>The <c>weight_scale</c> (and compressed-tensors' static <c>input_scale</c>) beside an FP8 weight that has no
+    /// <c>weight_scale_inv</c>: read with the weight, not as a weight of its own. <c>input_scale</c> is only skipped: this loader
+    /// runs weight-only (activations are not quantized), so the static activation scale has no use.</summary>
+    private bool IsFp8ScaleCompanion(string key)
+    {
+        foreach (string suffix in Fp8ScaleSuffixes)
+        {
+            if (!key.EndsWith(suffix, StringComparison.Ordinal)) continue;
+            string weight = key[..^suffix.Length] + Weight;
+            if (_set.Inventory.TryGetValue(weight, out TensorLocation? w) && w is not null && w.DType == DType.F8E4M3
+                && !_set.Inventory.ContainsKey(weight + "_scale_inv"))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Whether <paramref name="directory"/>'s <c>config.json</c> declares a <c>quantization_config</c> (top level or in
+    /// <c>text_config</c>): its weights then need this reader rather than a plain float load.</summary>
+    public static bool DeclaresQuantization(string directory)
+    {
+        string path = Path.Combine(directory, "config.json");
+        if (!File.Exists(path)) return false;
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        System.Text.Json.JsonElement root = doc.RootElement;
+        static bool Has(System.Text.Json.JsonElement e) =>
+            e.ValueKind == System.Text.Json.JsonValueKind.Object && e.TryGetProperty("quantization_config", out System.Text.Json.JsonElement q)
+            && q.ValueKind == System.Text.Json.JsonValueKind.Object;
+        return Has(root) || (root.TryGetProperty("text_config", out System.Text.Json.JsonElement text) && Has(text));
+    }
+
     /// <summary>MXFP8: a U8 E8M0 scale per 32 inputs of each row, <c>[out, in/32]</c>.</summary>
     private void AddMxfp8(string key, TensorLocation location)
     {
@@ -346,6 +421,31 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         QuantBinding binding = new(key, QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(1, Mxfp8BlockWidth), DType.U8,
             location.Shape[0], location.Shape[1], scaleKey);
         Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.BlockRecipe, location.DType, key, Binding: binding));
+    }
+
+    /// <summary>compressed-tensors MXFP4 (<c>mxfp4-pack-quantized</c>): a packed <c>[out, in/2]</c> U8 weight with a U8 E8M0 scale
+    /// per 32 inputs, <c>[out, in/32]</c>, and no global scale. Recognized by its U8 companion scale; NVFP4 scales are F8E4M3.</summary>
+    private void AddMxfp4(string key, TensorLocation location)
+    {
+        string module = key[..^PackedWeight.Length];
+        string scaleKey = module + ".weight_scale";
+        RequireCompanion(scaleKey, key);
+        TensorLocation scale = _set.Inventory[scaleKey];
+        long rows = location.Shape[0], cols = location.Shape[1] * 2;
+        if (location.DType != DType.U8 || location.Shape.Rank != 2 || scale.DType != DType.U8 || scale.Shape.Rank != 2 || scale.Shape[0] != rows
+            || scale.Shape[1] * Mxfp4BlockWidth != cols)
+        {
+            throw new InvalidDataException(
+                $"MXFP4 weight '{key}' ({location.DType.Name} {location.Shape}) needs U8 scales [{rows}, {cols / Mxfp4BlockWidth}]; got {scale.DType.Name} {scale.Shape}.");
+        }
+        QuantBinding binding = new(module + Weight, QuantEncoding.Mxfp4E8M0, new BlockGeometry(1, Mxfp4BlockWidth), DType.U8, rows, cols, scaleKey);
+        Add(new HfQuantWeight(module + Weight, new TensorShape(rows, cols), HfWeightStorage.BlockRecipe, DType.U8, key, Binding: binding));
+    }
+
+    private bool IsMxfp4Packed(string key)
+    {
+        string scaleKey = key[..^PackedWeight.Length] + ".weight_scale";
+        return _set.Inventory.TryGetValue(scaleKey, out TensorLocation? scale) && scale is { } found && found.DType == DType.U8;
     }
 
     /// <summary>compressed-tensors NVFP4 (<c>nvfp4-pack-quantized</c>): packed <c>[out, in/2]</c> U8, an E4M3 scale per 16 inputs and a scalar F32 global scale.</summary>

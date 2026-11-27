@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 
@@ -108,6 +109,7 @@ public static class MoeTopologyFactory
         ActivationKind.GeluTanh => ExpertActivation.GeluTanh,
         ActivationKind.Relu => ExpertActivation.Relu,
         ActivationKind.ReluSquared => ExpertActivation.ReluSquared,
+        ActivationKind.Situ => ExpertActivation.Situ,
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown activation."),
     };
 }

@@ -7,11 +7,13 @@ KERNELS=(
     "lm_f32"
     "lm_history_f32"
     "lm_embed_gather"
-    "lm_cfg_topk_guided"
     "flash_attn_f32"
     "flash_attn_f32_split"
     "flash_attn_causal_f16"
     "flash_attn_decode_gqa"
+    "flash_attn_decode_gqa_paged"
+    "flash_attn_decode_lengths"
+    "flash_attn_decode_merge"
     "kv_scatter_f16"
     "lm_sample_topk"
     "lm_norm_q8_fast"
@@ -37,6 +39,9 @@ KERNELS=(
     "mul_mat_vec_q2k_q8_1"
     "mul_mat_vec_q3k_q8_1"
     "ssm_prefill_f32"
+    "ssm_channel_decay_prefill_f32"
+    "ssm_selective_scan_f32"
+    "mxfp4_linear_f32"
 )
 # m16n8k16 F16 MMA and cp.async: no Turing build. Turing takes the flash_attn_f32 rows.
 SM80_ONLY=("flash_attn_causal_f16")

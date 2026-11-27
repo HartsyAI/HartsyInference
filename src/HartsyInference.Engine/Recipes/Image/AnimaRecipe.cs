@@ -1,6 +1,5 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -16,6 +15,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Lora;
+using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -27,6 +28,20 @@ public sealed class AnimaRecipe : IArchitectureRecipe, IReferenceAdapterRecipe
 
     /// <inheritdoc/>
     public string Name => "anima";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "tags", Supports = ["weights", "regions", "text-rendering"],
+        Guide = "docs/prompting/anima.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(AnimaVariants.Base) ? Prompt! with { Negative = "separate" }
+        : variant.Is(AnimaVariants.Turbo) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Anima shares the Qwen-Image VAE; its encoder half is built alongside the decoder and <see cref="AnimaPipeline"/> implements the latent-mask blend.</remarks>

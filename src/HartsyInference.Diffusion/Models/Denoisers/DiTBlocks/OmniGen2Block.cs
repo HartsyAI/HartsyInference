@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -368,9 +369,9 @@ public sealed unsafe class OmniGen2Block
         rope.Apply(kMh, ropeCos, ropeSin, batch, _numKvHeads, seqLen);
 
         Tensor kRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(kRep, kMh, _numKvHeads, _kvGroupSize);
+        StridedCopies.RepeatInterleave(backend, kRep, kMh, 1, _kvGroupSize);
         Tensor vRep = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroupSize, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(vRep, vMh, _numKvHeads, _kvGroupSize);
+        StridedCopies.RepeatInterleave(backend, vRep, vMh, 1, _kvGroupSize);
         kMh.Dispose();
         vMh.Dispose();
 

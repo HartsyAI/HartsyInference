@@ -1,4 +1,7 @@
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -23,6 +26,10 @@ public interface IVideoRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
+    /// <summary>True when the family refuses the CFG-parallel, DiT-shard and context-parallel placements. The engine refuses them before the
+    /// memory report, so a refusing family never reaches the CFG-parallel warning; the recipe re-checks without a warning.</summary>
+    bool RefusesUnhonouredPlacements => false;
+
     /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies — the
     /// video counterpart of <see cref="IArchitectureRecipe.PromptWeighting"/>, and the source of
     /// <see cref="VideoFeatures.PromptWeighting"/>.</summary>
@@ -34,6 +41,11 @@ public interface IVideoRecipe
 
     /// <summary>What this family can generate: limits planning validates a request against, which its own defaults satisfy.</summary>
     VideoConstraints Constraints { get; }
+
+    /// <summary>Why this family cannot run a request, when the request and its resolved settings alone show it; null otherwise. Planning
+    /// reports it as a blocking issue, before any weight is read. <paramref name="request"/> has <paramref name="settings"/> applied.
+    /// The exact-hash profile path (MiniMax-H3) does not ask.</summary>
+    string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => null;
 
     /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
     ModelVariantCatalog? Variants => null;
@@ -47,6 +59,15 @@ public interface IVideoRecipe
     /// <summary>The sampler/schedule selection <paramref name="variant"/> accepts; the default is the family table entry.</summary>
     SamplingCapabilities.SamplingSupport SamplingSupportFor(string familyId, ResolvedModelVariant? variant) =>
         SamplingCapabilities.ForVideo(familyId);
+
+    /// <summary>What shapes this family's prompt text: encoder kinds, format, negative handling and what the prompt may
+    /// carry. Declared only from a reviewed prompting guide (or the recipe's own encoder construction); the default
+    /// declares nothing, and a field left unset was not established, never "no". Generation settings stay in <see cref="Defaults"/>.</summary>
+    PromptProfile? Prompt => null;
+
+    /// <summary>The prompt profile of <paramref name="variant"/>; the default is the family-level <see cref="Prompt"/>.
+    /// A family overrides it where variants differ, such as a guidance-free build that takes no negative.</summary>
+    PromptProfile? PromptFor(ResolvedModelVariant? variant) => Prompt;
 
     /// <summary>What this family's activations cost at a given geometry, read from the checkpoint header without
     /// loading weights; the default describes nothing and the memory estimate falls back to a generic allowance.</summary>

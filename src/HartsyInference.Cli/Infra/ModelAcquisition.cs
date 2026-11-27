@@ -1,14 +1,19 @@
 using System.Collections.Concurrent;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Services;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;
 
 /// <summary>Ensures a selected catalog model's files are on disk before use: the SwarmUI "pick a model, it fetches everything" flow.</summary>
 /// <remarks>If any preset asset (transformer / text encoder / VAE) is missing, it lists them, asks the user to confirm,
-/// and downloads the complete set into the right folders. Returns the spec with its resolved local path once present;
-/// leaves it unchanged (so the handler surfaces the normal not-found error) if the user declines.</remarks>
+/// and downloads the complete set into the right folders. Returns the spec with its resolved local path once present.
+/// A declined prompt leaves the spec unchanged and refuses every download until the run ends: the engine fetches missing files on its own,
+/// so without that refusal "no" would only move the download to the model load. A run without a terminal counts as declined, unless
+/// <c>paths.allowDownloads</c> says yes.</remarks>
 public static class ModelAcquisition
 {
     /// <summary>Modalities whose models self-download through <see cref="AudioModelCache"/>, a separate cache keyed by repo.</summary>
@@ -39,15 +44,58 @@ public static class ModelAcquisition
     private static readonly ConcurrentDictionary<string, byte> _audioAssetsConfirmed = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Downloads <paramref name="spec"/>'s catalog assets if missing (with confirmation). No-op for models with no preset assets.</summary>
-    /// <returns>The spec pointed at the now-present primary file.</returns>
-    public static ModelSpec EnsurePresent(ModelSpec spec)
+    /// <returns>The spec pointed at the now-present primary file, to be disposed when the run ends.</returns>
+    public static AcquiredModel EnsurePresent(ModelSpec spec)
+    {
+        // A Duo run also needs a backbone no catalog file provides, so it is refused before anything is offered.
+        if (DuoRecipe.BackboneRefusal(spec) is { } refusal)
+        {
+            throw new DirectoryNotFoundException(refusal);
+        }
+        bool declined = false;
+        ModelSpec ready = Acquire(spec, ref declined);
+        return new AcquiredModel(ready, declined ? RefuseForThisRun(spec) : null);
+    }
+
+    /// <summary>Completes a refusal's "was not downloaded: " after the user said no.</summary>
+    private const string DeclinedReason = "the download was declined for this run; --set paths.allowDownloads=true allows it";
+
+    /// <summary>Says what a declined download means for this run and refuses the rest of its downloads.</summary>
+    private static IDisposable RefuseForThisRun(ModelSpec spec)
+    {
+        AnsiConsole.MarkupLine($"[yellow]Nothing was downloaded. This run uses only what is on disk; 'hartsy pull {Markup.Escape(spec.Catalog!.Id)}' fetches the files above.[/]");
+        return DownloadPermission.Refuse(DownloadPermission.IsDecided ? DownloadPermission.SettingOffReason
+            : InteractivePrompt.CanAsk ? DeclinedReason : InteractivePrompt.CannotAskReason);
+    }
+
+    /// <summary>The refusal the process starts with: a run whose input is a pipe, a file or closed cannot say yes, so nothing is downloaded for it, not at
+    /// the prompt and not by a model load. A set <c>paths.allowDownloads</c> is the answer instead; it is applied here because a <c>--set</c> value does
+    /// not reach a thread that runs outside this one's context.</summary>
+    internal static IDisposable? RefuseAtStart(bool canAsk)
+    {
+        if (DownloadPermission.IsDecided)
+            return EngineKnobs.AllowDownloads.Value ? null : DownloadPermission.Refuse(DownloadPermission.SettingOffReason);
+        return canAsk ? null : DownloadPermission.Refuse(InteractivePrompt.CannotAskReason);
+    }
+
+    /// <summary>The answer to "may these be downloaded": the setting's when it has a value, so that nobody is asked a question whose answer would not
+    /// count, else the user's at a terminal, else no. Standard input that is not a terminal is never read for the answer.</summary>
+    internal static bool MayDownload(bool canAsk, Func<bool> ask) =>
+        DownloadPermission.IsDecided ? EngineKnobs.AllowDownloads.Value : canAsk && ask();
+
+    private static bool MayDownload() =>
+        MayDownload(InteractivePrompt.CanAsk, static () => InteractivePrompt.Confirm("Download these now?", defaultYes: false));
+
+    private static ModelSpec Acquire(ModelSpec spec, ref bool declined)
     {
         if (spec.Catalog is not { } cat || cat.Assets.Count == 0)
             return spec;
 
         if (UsesAudioCache(cat, spec.Modality))
         {
-            if (!_audioAssetsConfirmed.ContainsKey(cat.Id) && EnsureAudioAssetsPresent(cat, spec.Modality))
+            if (_audioAssetsConfirmed.ContainsKey(cat.Id))
+                return spec;
+            if (EnsureAudioAssetsPresent(cat, spec.Modality, out declined))
                 _audioAssetsConfirmed.TryAdd(cat.Id, 0);
             return spec;
         }
@@ -58,7 +106,14 @@ public static class ModelAcquisition
         // AudioWeightsCatalog data once the files are on disk.
         bool isFolderFamily = spec.Modality == Modality.Music && AudioWeightsCatalog.IsFolderCheckpoint(cat.Id);
 
-        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat);
+        // A checkpoint named with --model-path already is the transformer, so the catalog's copy is not fetched.
+        // For a model that loads from a folder, a --model-path folder holding the other files is not asked about them either.
+        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat, spec.LocalPath)
+            .Where(a => spec.LocalPath is null || a.Role != "transformer")
+            .ToList();
+        // A 3D model's loader looks in more places than the catalog folder (the DINOv2 copy inside a Hunyuan3D shape checkpoint, the folder named as the model path): ask only about what it would not find.
+        if (spec.Modality == Modality.Mesh && missing.Count > 0)
+            missing = NarrowToWhatTheMeshLoaderNeeds(spec, missing);
         if (missing.Count == 0)
         {
             string? present = isFolderFamily ? null : ModelDownloader.PrimaryLocalPath(cat);
@@ -67,12 +122,18 @@ public static class ModelAcquisition
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
         ListMissingAssets(missing, showTargetDir: true);
+        if (cat.LoadsFromFolder && spec.LocalPath is not null && Directory.Exists(spec.LocalPath))
+            AnsiConsole.MarkupLine("[yellow]The --model-path folder lacks these files; they download to the folder above, which is not the one this run reads. Drop --model-path or copy them there.[/]");
 
-        if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
+        if (!MayDownload())
+        {
+            declined = true;
             return spec;
+        }
 
         try
         {
+            using IDisposable granted = DownloadPermission.Grant();
             DownloadWithProgressAsync(missing, CancellationToken.None).GetAwaiter().GetResult();
         }
         catch (Exception ex)
@@ -86,6 +147,20 @@ public static class ModelAcquisition
         return primary is not null ? spec with { LocalPath = primary } : spec;
     }
 
+    /// <summary><paramref name="missing"/> without the files the 3D model's own loader finds elsewhere, so the prompt never lists a file the run does not need.</summary>
+    private static IReadOnlyList<ModelAsset> NarrowToWhatTheMeshLoaderNeeds(ModelSpec spec, IReadOnlyList<ModelAsset> missing)
+    {
+        try
+        {
+            HashSet<ModelAsset> needed = [.. new MeshAssetService().MissingAssets(spec)];
+            return [.. missing.Where(needed.Contains)];
+        }
+        catch (NotSupportedException)
+        {
+            return missing; // the inventory throws only for a model id without a wired pipeline: the catalog list stands
+        }
+    }
+
     /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the <c>Models/&lt;subdir&gt;</c> tree.</summary>
     internal static bool UsesAudioCache(CatalogEntry cat, Modality modality)
         => AudioCacheModalities.Contains(modality) && !StandardDownloadMusicIds.Contains(cat.Id);
@@ -95,9 +170,11 @@ public static class ModelAcquisition
     /// SwarmUI-style <c>Models/&lt;subdir&gt;</c> tree, which these models never read from) and fetches anything missing via
     /// the same <see cref="AudioModelCache.GetAsync"/> the Engine's own descriptors call internally, so the file lands
     /// exactly where the generation call will look for it.</remarks>
+    /// <param name="declined">True when the user, or a run without a terminal, declined the download.</param>
     /// <returns>True when all assets are present (or were downloaded); false on decline or failure.</returns>
-    internal static bool EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality, bool confirm = true, CancellationToken ct = default)
+    internal static bool EnsureAudioAssetsPresent(CatalogEntry cat, Modality modality, out bool declined, bool confirm = true, CancellationToken ct = default)
     {
+        declined = false;
         string category = AudioCategoryFor(modality);
         // An asset may override the category so prefetch fetches into the same directory the loader reads from.
         List<ModelAsset> missing = cat.Assets.Where(a => !File.Exists(AudioAssetPath(a, a.AudioCategory ?? category))).ToList();
@@ -107,11 +184,15 @@ public static class ModelAcquisition
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
         ListMissingAssets(missing, showTargetDir: false);
 
-        if (confirm && !InteractivePrompt.Confirm("Download these now?", defaultYes: false))
+        if (confirm && !MayDownload())
+        {
+            declined = true;
             return false;
+        }
 
         try
         {
+            using IDisposable granted = DownloadPermission.Grant();
             AnsiConsole.Progress()
                 .Columns(new TaskDescriptionColumn(), new SpinnerColumn())
                 .Start(ctx =>

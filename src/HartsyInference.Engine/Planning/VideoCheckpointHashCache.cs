@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Planning;
 

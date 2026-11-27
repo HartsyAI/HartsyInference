@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -39,10 +40,30 @@ public sealed class WanVideoRecipe : IVideoRecipe
     private readonly string _familyId;
 
     /// <summary>Binds the recipe to one Wan family id. The catalog slug "wan" derives the config from the weights; a compat-class id ("wan-22-5b" / "wan-21-1_3b" / "wan-21-14b") selects the matching preset instead.</summary>
-    public WanVideoRecipe(string familyId = "wan") => _familyId = familyId;
+    public WanVideoRecipe(string familyId = "wan")
+    {
+        _familyId = familyId;
+        // The guide states on-screen text for Wan 2.1 only; wan-21-14b also carries 2.2 14B weights, so only the 1.3B id claims it.
+        Prompt = new()
+        {
+            Kind = "video", Encoders = ["t5"], Format = "text", Negative = "separate",
+            Supports = familyId is Wan21_1_3BCompatClassId ? ["text-rendering"] : [],
+            Guide = "docs/prompting/wan.md",
+        };
+    }
 
     /// <inheritdoc/>
     public string Name => _familyId;
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; }
+
+    /// <inheritdoc/>
+    /// <remarks>Animate and speech-to-video are not covered by the Wan guide, and the standalone recipes for them say so.</remarks>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && (variant.Is(WanVideoVariants.Animate) || variant.Is(WanVideoVariants.Animate2) || variant.Is(WanVideoVariants.S2V))
+            ? new PromptProfile { Kind = Prompt!.Kind }
+            : Prompt;
 
 
     /// <inheritdoc/>
@@ -117,8 +138,14 @@ public sealed class WanVideoRecipe : IVideoRecipe
         _ => SamplingCapabilities.ForVideo(_familyId),
     };
 
+    /// <summary>Catalog ids of the Wan 2.2 A14B entries. The generic <c>wan</c> recipe serves them, deriving the 14B config from
+    /// the weights, so their <see cref="Name"/> stays <c>wan</c>.</summary>
+    internal static readonly string[] A14BCatalogIds = ["wan-22-t2v-a14b", "wan-22-i2v-a14b"];
+
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase)
+        || (_familyId == "wan" && A14BCatalogIds.Contains(familyId, StringComparer.OrdinalIgnoreCase));
 
     /// <summary>The defaults for this recipe's compat class: Wan 2.1 and Wan 2.2 5B take core's per-class values, the
     /// generic <c>"wan"</c> slug the values core gives every Wan.</summary>

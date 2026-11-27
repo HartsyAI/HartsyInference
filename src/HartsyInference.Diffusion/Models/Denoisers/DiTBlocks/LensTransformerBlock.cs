@@ -1,5 +1,10 @@
+using System.Threading;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -7,6 +12,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Microsoft Lens dual-stream MMDiT block (<c>LensTransformerBlock</c>). Mirrors upstream's per-stream modulation: <c>mod1, mod2 = Linear(SiLU(temb)).chunk(2)</c>, then <c>_modulate(x, mod) = (x*(1+scale)+shift, gate)</c> with <c>mod.chunk(3) = (shift, scale, gate)</c> — net effect is the standard <c>(shift_attn, scale_attn, gate_attn, shift_mlp, scale_mlp, gate_mlp)</c> 6-output order produced by <see cref="AdaLNModulation"/> with <c>numParams=6</c>. Joint attention concats <c>[img, txt]</c> per stream, applies complex-polar RoPE separately before concat, runs joint SDPA, splits back. <b>Returns <c>(text, image)</c></b> (encoder first, image second — matches upstream's <c>return encoder_hidden_states, hidden_states</c> in <c>LensTransformerBlock.forward</c>). Stream norms are RMSNorm with learned scale (vs QwenImageBlock's LayerNormNoAffine); FFN is SwiGLU with <c>w1/w2/w3</c> naming (vs QwenImageBlock's GELU); QKV is bias=True (upstream <c>img_qkv</c>/<c>txt_qkv</c> is split into <c>to_q/k/v</c> at checkpoint conversion).</summary>
 public sealed unsafe class LensTransformerBlock
 {
+    private static int _sdpaF16Warned;
+
     private readonly int _hiddenSize;
     private readonly int _numHeads;
     private readonly int _headDim;
@@ -233,8 +240,8 @@ public sealed unsafe class LensTransformerBlock
         {
             (Tensor ropeCos, Tensor ropeSin) = rope.GetOrBuildJointTables(
                 imgPackedH, imgPackedW, txtSeqLen, txtPositionStart);
-            backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
-            backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
+            backend.Rotary(RotaryCall.Rows(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+            backend.Rotary(RotaryCall.Rows(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         }
 
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──
@@ -251,10 +258,12 @@ public sealed unsafe class LensTransformerBlock
         if (batch != 1)
             rope.ApplyJoint(jointQ, jointK, batch, _numHeads, imgPackedH, imgPackedW, txtSeqLen, txtPositionStart);
 
-        // ── 7. Joint SDPA (no mask). V is not normalized and passes F16's range late in the schedule: BF16 at most, never F16. ──
+        // ── 7. Joint SDPA (no mask). V overflows F16, so the demand is F32 or BF16 whatever the knobs say. ──
         Tensor jointAttnOut = new Tensor(jointMh, DType.F32);
-        AttentionCall call = AttentionCall.FromScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: false);
-        backend.Attention(EngineKnobs.LensBf16.Value ? call with { Numerics = AttentionNumerics.Bf16Storage } : call);
+        if (EngineKnobs.SdpaF16.Value) WarnSdpaF16Refused();
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(jointAttnOut, jointQ, jointK, jointV, null, scale, allowF16: false)
+            with { Numerics = AttentionNumerics.WideRange(EngineKnobs.LensBf16.Value) };
+        backend.Attention(call);
         jointQ.Dispose();
         jointK.Dispose();
         jointV.Dispose();
@@ -313,5 +322,11 @@ public sealed unsafe class LensTransformerBlock
         for (int i = 0; i < txtMod.Length; i++) txtMod[i].Dispose();
 
         return (txtFinal, imgFinal);
+    }
+
+    private static void WarnSdpaF16Refused()
+    {
+        if (Interlocked.Exchange(ref _sdpaF16Warned, 1) == 0)
+            Logs.Warning("numerics.sdpaF16 is ignored for Lens: its joint attention refuses F16 because its V overflows F16.");
     }
 }

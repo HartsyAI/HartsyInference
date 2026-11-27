@@ -243,24 +243,6 @@ public sealed class ControlFoleyClap
     /// <summary>Fetches <paramref name="key"/> as F32 after checking its shape.</summary>
     internal static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape)
     {
-        if (!weights.TryGetValue(key, out Tensor? tensor))
-        {
-            throw new KeyNotFoundException($"ControlFoley CLAP checkpoint is missing '{key}'.");
-        }
-
-        if (tensor.Shape.Rank != shape.Length)
-        {
-            throw new InvalidDataException($"'{key}' has rank {tensor.Shape.Rank}, expected {shape.Length}.");
-        }
-
-        for (int d = 0; d < shape.Length; d++)
-        {
-            if (tensor.Shape[d] != shape[d])
-            {
-                throw new InvalidDataException($"'{key}' dimension {d} is {tensor.Shape[d]}, expected {shape[d]}.");
-            }
-        }
-
-        return WhisperOps.EnsureF32(tensor);
+        return WhisperOps.EnsureF32(CheckpointTensors.Require(weights, "ControlFoley CLAP", key, shape));
     }
 }

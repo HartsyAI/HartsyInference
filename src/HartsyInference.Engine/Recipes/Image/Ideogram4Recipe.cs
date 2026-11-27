@@ -1,6 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -13,6 +13,7 @@ using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -25,6 +26,12 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "ideogram4";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Format = "json", Supports = ["boxes", "text-rendering"], Boxes = "yxyx-1000",
+        Guide = "docs/prompting/ideogram-4.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Ideogram 4 shares the Flux.2 VAE; its packed-latent mask blend uses the channel-inner variant.

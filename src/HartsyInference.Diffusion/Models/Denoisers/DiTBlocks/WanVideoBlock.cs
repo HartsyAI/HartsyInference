@@ -1,7 +1,12 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -24,12 +29,6 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     // I2V image cross-attention KV (cross-attn to CLIP image context); present only when the checkpoint ships them.
     private Tensor? _addK, _addKB, _addV, _addVB, _normAddedK;
     private AttentionLayer? _selfAttention, _crossAttention, _imageAttention, _selfAttention16, _crossAttention16;
-
-    internal AttentionLayer? SelfAttentionStage => _selfAttention;
-    internal AttentionLayer? CrossAttentionStage => _crossAttention;
-    internal AttentionLayer? ImageAttentionStage => _imageAttention;
-    internal AttentionLayer? SelfAttentionF16Stage => _selfAttention16;
-    internal AttentionLayer? CrossAttentionF16Stage => _crossAttention16;
 
     public WanVideoBlock(WanVideoConfig c, bool crossAttnNorm)
     {
@@ -280,7 +279,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         (Tensor kRef, Tensor drivingV) = ProjectDrivingKv(backend, drivingInput, refSeq, idx);
         if (!ReferenceEquals(drivingInput, stored)) drivingInput.Dispose();
         if (ctx.PoseStrength != 1.0f) backend.Scale(drivingV, drivingV, ctx.PoseStrength);
-        backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
+        backend.Rotary(RotaryCall.Rows(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
 
         ScaleReferenceRows(backend, v, hw, _dim, ctx.ReferenceImageStrength);
         Tensor kGen = ToBhsd(backend, kn, s);
@@ -542,7 +541,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     private Tensor NormModulateF16(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F16);
-        backend.LayerNormModulate(o, x, scale, shift, _eps);
+        backend.NormModulate(NormModulateCall.Rows(o, x, NormKind.LayerNorm, _eps).WithModulation(ModulationSpec.Broadcast(x, scale, shift, ScaleMode.OnePlus)));
         return o;
     }
 

@@ -2,7 +2,6 @@ using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -39,7 +38,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
     private readonly float _bnEps;
     private readonly MossImageConfig _config;
     private readonly EncodedPromptCache _promptCache = new(2);
-    private bool _ditResident;
+    private readonly ResidentWeights _denoiser;
 
     /// <summary>Creates the pipeline; <paramref name="vaeEncoder"/> is required for img2img and inpaint.</summary>
     public MossImagePipeline(IBackend backend, IFinalHiddenStateEncoder textEncoder, MossImageTransformer transformer,
@@ -59,15 +58,13 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         _bnVar = bnVar;
         _bnEps = bnEps;
         _config = transformer.Config;
+        _denoiser = new ResidentWeights(backend, transformer.EnumerateWeights);
         if (textEncoder.HiddenSize != _config.TextDim)
         {
             throw new HartsyInferenceException(
                 $"{Family}: the text encoder's hidden size {textEncoder.HiddenSize} does not match the transformer's text width {_config.TextDim}.");
         }
     }
-
-    /// <summary>Keeps the DiT resident across generations unless the VRAM profile says otherwise.</summary>
-    private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Generates an image. <paramref name="negative"/> is encoded whenever the CFG scale is not 1 (the reference
     /// runs both branches even below 1); an absent negative is the empty prompt. <see cref="TextToImageRequest.SigmaShift"/>
@@ -168,8 +165,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             DenoiserProbe.Condition("cond.weighted", weightedCond);
             DenoiserProbe.Condition("uncond.weighted", weightedUncond);
             DenoiserProbe.Condition("ref", referenceTokens?.Select(r => r.Tokens).ToArray());
-            Backend.PreloadWeights(_transformer.EnumerateWeights());
-            _ditResident = true;
+            _denoiser.Preload();
             ReferenceAttentionMode mode = references?.Options.Mode ?? ReferenceAttentionMode.CachedKv;
             cond = _transformer.PrepareConditioning(Backend, weightedCond ?? condText, patH, patW, referenceTokens, mode);
             uncond = guided ? _transformer.PrepareConditioning(Backend, weightedUncond ?? uncondText!, patH, patW, referenceTokens, mode) : null;
@@ -205,7 +201,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
                 if (onProgress is not null)
                 {
                     using Tensor? snapshot = graph ? _transformer.SnapshotGraphLatent(Backend) : null;
-                    using Tensor preview = Flux2LatentOps.FromPackedTokens(snapshot ?? latent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    using Tensor preview = Flux2LatentOps.FromPackedTokens(Backend, snapshot ?? latent, patH, patW, _bnMean, _bnVar, _bnEps,
                         _config.VaeLatentChannels, _config.PatchSize);
                     onProgress(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                     {
@@ -220,7 +216,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         catch
         {
             if (!graph) latent?.Dispose();
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         finally
@@ -239,18 +235,14 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             packedMask?.Dispose();
         }
 
-        if (!KeepModelsResident)
-        {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
-        }
+        _denoiser.Release();
         byte[] rgb;
         try
         {
             Tensor vaeLatent;
             using (Tensor finalLatent = latent)
             {
-                vaeLatent = Flux2LatentOps.FromPackedTokens(finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                vaeLatent = Flux2LatentOps.FromPackedTokens(Backend, finalLatent, patH, patW, _bnMean, _bnVar, _bnEps,
                     _config.VaeLatentChannels, _config.PatchSize);
             }
             Tensor image;
@@ -267,7 +259,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         }
         catch
         {
-            ReclaimAfterFailure();
+            ReclaimAfterFailure(Family);
             throw;
         }
         Backend.FreeActivations();
@@ -307,20 +299,6 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>After a stage throws mid-op, the temporaries of whatever op was running are still in the backend's
-    /// activation cache; reclaiming them here lets a retry start from the memory a fresh request would. Best effort.</summary>
-    private void ReclaimAfterFailure()
-    {
-        try
-        {
-            Backend.FreeActivations();
-        }
-        catch (Exception cleanup)
-        {
-            Logs.Warning($"{Family}: reclaiming activations after a failed generation also failed: {cleanup.Message}");
-        }
-    }
-
     /// <summary>Encodes one prompt's final Qwen3.5 hidden states, reusing the last result for the same ids and images.
     /// On a shared backend the DiT is evicted first, since the 9B encoder and a resident DiT need not fit together.</summary>
     private Tensor EncodePrompt(WeightedTokenSequence prompt, int slot, IReadOnlyList<Tensor> images)
@@ -334,11 +312,8 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         if (_promptCache.TryGet(slot, prompt.Tokens, discriminator, out Tensor? cached))
             return cached!;
         IBackend encoderBackend = TextEncoderBackend;
-        if (_ditResident && ReferenceEquals(encoderBackend, Backend))
-        {
-            Backend.FreeWeights(_transformer.EnumerateWeights());
-            _ditResident = false;
-        }
+        if (ReferenceEquals(encoderBackend, Backend))
+            _denoiser.Release(force: true);
         Tensor hidden;
         Stopwatch sw = Stopwatch.StartNew();
         try
@@ -395,11 +370,11 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
         int patH, int patW, int seed, int startStep, bool keepSource)
     {
         using Tensor noise = TakeOrCreateNoise(request, new TensorShape(1, _config.LatentChannels, patH, patW), seed);
-        Tensor packedNoise = Flux2LatentOps.Pack(noise);
+        Tensor packedNoise = Flux2LatentOps.PackHost(noise);
         if (request is not ImageToImageRequest img2img)
             return (packedNoise, null);
         using Tensor vaeLatent = _vaeEncoder!.Encode(Backend, img2img.SourceImage);
-        Tensor source = Flux2LatentOps.ToPackedTokens(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
+        Tensor source = Flux2LatentOps.ToPackedTokensHost(vaeLatent, _bnMean, _bnVar, _bnEps, _config.PatchSize);
         Tensor noised = new(packedNoise.Shape, DType.F32);
         scheduler.AddNoise(noised, source, packedNoise, startStep);
         packedNoise.Dispose();
@@ -420,7 +395,7 @@ public sealed unsafe class MossImagePipeline : DiffusionPipelineBase
             return;
         }
         using Tensor freshNoise = SeedGenerator.CreateNoise(new TensorShape(1, _config.LatentChannels, patH, patW), noiseSeed);
-        using Tensor freshPacked = Flux2LatentOps.Pack(freshNoise);
+        using Tensor freshPacked = Flux2LatentOps.PackHost(freshNoise);
         using Tensor noisedSource = new(latent.Shape, DType.F32);
         FlowMatchEulerDiscreteScheduler.AddNoiseAtSigma(noisedSource, source, freshPacked, sigma);
         MaskBlendUtilities.BlendPackedInPlace(latent, noisedSource, packedMask);

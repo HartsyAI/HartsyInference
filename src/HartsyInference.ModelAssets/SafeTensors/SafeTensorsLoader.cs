@@ -1,4 +1,4 @@
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.SafeTensors;
@@ -61,6 +61,7 @@ public sealed class SafeTensorsLoader : IDisposable
         // reference (e.g. a helper that returns only GetAllTensors()). Explicit Dispose() still tears it down — the
         // documented "don't dispose the loader while using its tensors" contract is unchanged.
         tensor.SetKeepAlive(_handle);
+        TensorFileExtents.Register(tensor, _handle, descriptor.DataOffset);
         return tensor;
     }
 

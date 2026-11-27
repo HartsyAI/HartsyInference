@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -133,7 +134,7 @@ public sealed unsafe class ErnieImageRope
     /// <summary>Applies the non-interleaved Megatron-style rotation to Q/K on-device: slices the packed
     /// <c>[B, S, 2·headDim]</c> freqs (from <see cref="BuildFreqs"/>) into <c>cos = freqs[..., :headDim]</c> /
     /// <c>sin = freqs[..., headDim:]</c> and applies <c>x·cos + rotate_half(x)·sin</c> with
-    /// <c>rotate_half(x)=cat(-x[half:], x[:half])</c> via <see cref="IBackend.ApplyRope"/>. Keeps Q/K
+    /// <c>rotate_half(x)=cat(-x[half:], x[:half])</c> via <see cref="IBackend.Rotary"/>. Keeps Q/K
     /// device-resident (no per-block D2H/H2D). q/k are <c>[B, S, numHeads, headDim]</c> (pre-permute,
     /// matching <c>transformer_ernie_image.py</c>'s <c>unflatten(-1, (heads, -1))</c> layout), modified in place.</summary>
     public void ApplyRotaryEmbGpu(IBackend backend, Tensor q, Tensor k, Tensor freqs)
@@ -145,7 +146,8 @@ public sealed unsafe class ErnieImageRope
         Tensor sin = new Tensor(csShape, DType.F32);
         backend.SliceLastDim(cos, freqs, 0);          // freqs[..., 0 : headDim]
         backend.SliceLastDim(sin, freqs, _headDim);   // freqs[..., headDim : 2·headDim]
-        backend.ApplyRope(q, k, cos, sin);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
         cos.Dispose();
         sin.Dispose();
     }

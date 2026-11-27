@@ -124,7 +124,7 @@ public sealed unsafe class Kandinsky5Pipeline : DiffusionPipelineBase
 
         // Sampler selection (2026-08-20). Kandinsky 5 is flow-matching, so it had no user-selectable sampler at all
         // before this. The predictor hands back the RAW cond/uncond pair — the fused device op applies uncond-anchored
-        // CFG at the real scale, exactly as the direct CfgEulerStep call did — and everything family-specific (the
+        // CFG at the real scale, exactly as the direct GuidedEulerStep call did — and everything family-specific (the
         // dual-encoder conditioning, the diagnostic dump) stays inside the closure.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Kandinsky 5",
             startsFromNoisedInit: startStep > 0);

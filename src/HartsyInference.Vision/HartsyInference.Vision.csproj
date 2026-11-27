@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Vision.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.Vision.Dinov3.Tests" />
   </ItemGroup>
 
 </Project>

@@ -10,13 +10,14 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Variants;
+using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -25,6 +26,20 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "qwen-image";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["text-rendering"],
+        Guide = "docs/prompting/qwen-image.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(QwenImageVariants.Base) ? Prompt! with { Negative = "separate" }
+        : variant.Is(QwenImageVariants.EditPlus) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>The family-level union. The base offers classic strength-based img2img/inpaint only; the Edit variants

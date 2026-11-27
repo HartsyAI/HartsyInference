@@ -6,10 +6,12 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -36,8 +38,34 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 704, SigmaShift = 1.15,
     };
 
+    /// <summary>RMBG 3.0's sampling settings: 4 steps and no guidance, as on the Bria model card (briaai/RMBG-3.0); the card sets no size,
+    /// because the size follows the source image's aspect ratio (<see cref="Features.Rmbg3Matte"/>).</summary>
+    public static ImageDefaults Rmbg3Defaults { get; } = new ImageDefaults
+    {
+        Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024, SigmaShift = null,
+    };
+
+    /// <summary>The flow-match shift exponent diffusers derives from the latent token count (<c>calculate_shift</c> with the pipeline's
+    /// scheduler config: tokens 256 to 4096 map linearly from 0.5 to 1.15, unclamped). A 1024×1024 image is 4096 tokens, so it gives
+    /// ComfyUI's fixed 1.15 there and less for smaller images.</summary>
+    public static double DynamicShift(int width, int height)
+    {
+        const double baseShift = 0.5, maxShift = 1.15, baseTokens = 256, maxTokens = 4096;
+        double tokens = (width / 16) * (double)(height / 16);
+        double slope = (maxShift - baseShift) / (maxTokens - baseTokens);
+        return tokens * slope + (baseShift - baseTokens * slope);
+    }
+
     /// <inheritdoc/>
     public string Name => "fibo2";
+
+    /// <inheritdoc/>
+    /// <remarks>Numeric boxes are unconfirmed against the official schema, so neither boxes nor a box form is declared.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "json", Supports = ["text-rendering"],
+        Guide = "docs/prompting/fibo-2.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Text-to-image, img2img, mask inpaint (a latent blend over the init image), LoRA and reference editing
@@ -59,15 +87,21 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is not null && variant.Is(Fibo2Variants.EditTurbo) ? EditTurboDefaults : FamilyDefaults;
+        variant is null ? FamilyDefaults
+        : variant.Is(Fibo2Variants.Rmbg3) ? Rmbg3Defaults
+        : variant.Is(Fibo2Variants.EditTurbo) ? EditTurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
-    /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id.</remarks>
+    /// <remarks>Matches the catalog id <c>fibo2-dev</c> as well, since the registry resolves a catalog entry by its id. The RMBG 3.0
+    /// ids are listed by name, not by the <see cref="CatalogFeatures.AlphaMatte"/> flag: a new matte entry must name its variant here
+    /// and in <see cref="Fibo2Variants"/>, otherwise it would run silently on the Dev defaults. <c>Rmbg3CatalogTests</c> pins this.</remarks>
     public bool Matches(string familyId) =>
         string.Equals(familyId, "fibo2", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "fibo2-dev-int8", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "fibo2-edit-turbo-int8", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(familyId, "fibo2-edit-turbo-int8", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "rmbg3", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "rmbg3-int8", StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -78,7 +112,11 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         try
         {
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            Logs.Info($"[Fibo2Recipe] DiT file: {context.CheckpointPath}");
             owned.Add(source);
+            // Hints are validated and their backends named here, before HalfPrecisionWeights drops them.
+            foreach (string backend in Fibo2AttentionHints.Requested(source.Weights))
+                Logs.Warning(Fibo2AttentionHints.Describe(backend));
             Dictionary<string, Tensor> dit = Fibo2WeightPreparation.HalfPrecisionWeights(source.Weights, owned);
             bool quantized = Fibo2WeightPreparation.HasPackedWeights(dit);
             // A packed int8 weight no executing device can read widens here, not inside the first GEMM.
@@ -104,6 +142,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             (Dictionary<string, Tensor> encoderWeights, CheckpointSource encoderSource) = ComponentLoader.Load(
                 encoderPath, "Fibo2Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             owned.Add(encoderSource);
+            Logs.Info($"[Fibo2Recipe] text encoder file: {encoderPath}");
             Fibo2WeightPreparation.WidenUnsupported(encoderWeights, [context.TextEncoderBackendOrDefault], DType.BF16, owned);
             LlamaStyleEncoderConfig encoderConfig = Fibo2TextEncoderConfig.FromWeights(encoderWeights);
             Fibo2TextEncoderConfig.ValidateFor(encoderConfig, config);
@@ -113,10 +152,11 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
 
             string vaePath = ModelFileLocator.RequireOrEnsure(context.Components?.Vae, SideModels.Fibo2Vae, "FLUX.2 VAE (Fibo 2.0)",
                 context.Cancel, "VAE", "vae");
+            Logs.Info($"[Fibo2Recipe] VAE file: {vaePath}");
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Fibo2Recipe");
             owned.Add(vae);
 
-            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae);
+            Fibo2EditSupport editSupport = new(encoder, encoderPath, vae, context.TextEncoderBackendOrDefault);
             owned.Add(editSupport);
             Fibo2Pipeline pipeline = new(context.Backend, encoder, transformer, vae.Decoder, vae.BnMean, vae.BnVar, config,
                 vaeEncoder: vae.Encoder);

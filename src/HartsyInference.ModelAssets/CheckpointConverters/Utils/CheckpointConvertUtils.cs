@@ -701,6 +701,100 @@ public static unsafe class CheckpointConvertUtils
         return ComfyQuantDescriptor.TryParse(bytes[..end]);
     }
 
+    /// <summary>Decodes every ComfyUI <c>asym_w4a8_int8</c> layer (4- or 6-bit, <see cref="W4A8ConvRotCodec"/>) and drops its
+    /// companions (<c>.weight_s_rel</c>, <c>.weight_s_channel</c>, <c>.weight_codebook</c>, <c>.weight_correction</c>,
+    /// <c>.comfy_quant</c>). A layer without a correction term becomes the INT8 grid it multiplies on, an I8 <c>.weight</c>
+    /// carrying <c>int8_tensorwise</c> <see cref="Tensor.QuantInfo"/> with <c>s_channel</c> as the row scale and the same
+    /// ConvRot group: that is the format's own weight at 1 byte per parameter, which a backend runs packed or widens like
+    /// any other int8 layer. A layer with a correction term has no int8 form and decodes to dense BF16. A dictionary
+    /// without such layers comes back unchanged.</summary>
+    /// <param name="allocated">Receives each decoded weight as it is created, so a caller can free what was built before a
+    /// later layer refused. Without it, this pass frees its own decodes when it throws.</param>
+    public static Dictionary<string, Tensor> DequantW4A8(Dictionary<string, Tensor> source, List<Tensor>? allocated = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        List<(string BaseKey, ComfyQuantDescriptor Descriptor)> layers = [];
+        foreach ((string key, Tensor blob) in source)
+        {
+            if (key.EndsWith(ComfyQuantDescriptor.Suffix, StringComparison.Ordinal)
+                && TryReadComfyQuant(blob) is { Format: W4A8ConvRotCodec.Format } descriptor)
+            {
+                layers.Add((key[..^ComfyQuantDescriptor.Suffix.Length], descriptor));
+            }
+        }
+        if (layers.Count == 0)
+            return source;
+
+        Dictionary<string, Tensor> result = new(source, StringComparer.Ordinal);
+        List<Tensor> decoded = [];
+        try
+        {
+            foreach ((string baseKey, ComfyQuantDescriptor descriptor) in layers)
+            {
+                string weightKey = baseKey + ".weight";
+                if (!result.TryGetValue(weightKey, out Tensor? packed)
+                    || !result.TryGetValue(weightKey + "_s_rel", out Tensor? sRel)
+                    || !result.TryGetValue(weightKey + "_s_channel", out Tensor? sChannel))
+                {
+                    throw new InvalidDataException(
+                        $"'{baseKey}' declares {W4A8ConvRotCodec.Format} but lacks its weight, weight_s_rel or weight_s_channel.");
+                }
+                result.TryGetValue(weightKey + "_codebook", out Tensor? codebook);
+                result.TryGetValue(weightKey + "_correction", out Tensor? correction);
+                int groupSize = descriptor.GroupSize > 0 ? descriptor.GroupSize : 16;
+                Tensor dense = correction is null && sChannel.DType == DType.F32
+                    ? DecodeW4A8ToInt8(baseKey, packed, sRel, sChannel, codebook, groupSize, descriptor)
+                    : W4A8ConvRotCodec.DequantToBf16(packed, sRel, sChannel, codebook, correction, groupSize,
+                        descriptor.ConvRotGroupSize);
+                decoded.Add(dense);
+                allocated?.Add(dense);
+                result[weightKey] = dense;
+                foreach (string suffix in (string[])["_s_rel", "_s_channel", "_codebook", "_correction"])
+                    result.Remove(weightKey + suffix);
+                result.Remove(baseKey + ComfyQuantDescriptor.Suffix);
+            }
+        }
+        catch
+        {
+            // A malformed layer can follow gigabytes of decoded ones. A caller that passed `allocated` frees them with
+            // the rest of what it owns; otherwise nothing else holds them.
+            if (allocated is null)
+            {
+                foreach (Tensor tensor in decoded)
+                    tensor.Dispose();
+            }
+            throw;
+        }
+        return result;
+    }
+
+    /// <summary>One correction-free W4A8 layer as the I8 grid with <c>int8_tensorwise</c> metadata. The row scale borrows
+    /// <paramref name="sChannel"/>, which lives as long as the checkpoint it came from, as every int8 layer's scale does.</summary>
+    private static Tensor DecodeW4A8ToInt8(string baseKey, Tensor packed, Tensor sRel, Tensor sChannel, Tensor? codebook,
+        int groupSize, ComfyQuantDescriptor descriptor)
+    {
+        if (sChannel.ElementCount != packed.Shape[0])
+        {
+            throw new InvalidDataException(
+                $"'{baseKey}.weight_s_channel' holds {sChannel.ElementCount} scales for {packed.Shape[0]} rows.");
+        }
+        Tensor grid = W4A8ConvRotCodec.DecodeToInt8(packed, sRel, codebook, groupSize);
+        int rotation = descriptor.ConvRotGroupSize;
+        if (rotation > 0 && (!Int8ConvRotCodec.IsValidGroupSize(rotation) || grid.Shape[1] % rotation != 0))
+        {
+            grid.Dispose();
+            throw new InvalidDataException($"'{baseKey}' declares ConvRot group {rotation}, which does not fit {grid.Shape[1]} columns.");
+        }
+        grid.QuantInfo = new QuantWeightInfo
+        {
+            Format = "int8_tensorwise",
+            RowScale = sChannel,
+            ConvRotGroupSize = rotation,
+            FullPrecisionMatMul = descriptor.FullPrecisionMatMul,
+        };
+        return grid;
+    }
+
     /// <summary>Moves ComfyUI's <c>int8_tensorwise</c> companions — the <c>.weight_scale</c> per-output-row scale and the <c>.comfy_quant</c> descriptor — onto <see cref="Tensor.QuantInfo"/> of the I8 weight they belong to, and returns a dictionary without those companion keys. The weight itself is left <b>packed</b>: dequantizing here would turn LTX 2.5's 21.5 GB int8 DiT back into 42 GB, which is the whole reason the format exists.</summary>
     /// <remarks><para><see cref="ApplyFp8ScaledDequant"/> calls this first, because that pass drops <c>.weight_scale</c>/<c>.comfy_quant</c> unconditionally — an int8 weight that skipped this step would reach the backend as raw int8 with no scale at all. Every converter funnels through it, so no caller can lose the companions by forgetting a call.</para>
     /// <para>Idempotent: a weight that already carries <see cref="Tensor.QuantInfo"/> is skipped. The companion tensors are <b>borrowed</b> — the loader that produced them still owns their lifetime.</para></remarks>
@@ -839,6 +933,9 @@ public static unsafe class CheckpointConvertUtils
         IReadOnlyDictionary<string, string>? fileMetadata = null, bool honourFullPrecisionPolicy = true)
     {
         Lazy<HashSet<string>?> fileFullPrecision = new(() => Nvfp4LayoutNormalizer.FileLevelFullPrecisionLayers(fileMetadata));
+        // W4A8/W6A8 layers decode to dense BF16 first: their .comfy_quant names a format the passes below do not
+        // know, and their companions would otherwise be dropped as unknown scales.
+        source = DequantW4A8(source);
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
         source = AttachInt8QuantInfo(source);

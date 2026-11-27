@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -36,21 +37,19 @@ public static class SeedVr2VaeOps
     }
 
     /// <summary>Asymmetric zero pad (right/bottom only) on <c>[B,C,T,H,W]</c> — the diffusers
-    /// <c>Downsample2D(padding=0)</c> convention: <c>F.pad(x, (0,1,0,1))</c> before the stride-2 conv.
-    /// Device-resident via <see cref="IBackend.SeedVr2PadBottomRight"/> (host reference on CPU).</summary>
+    /// <c>Downsample2D(padding=0)</c> convention: <c>F.pad(x, (0,1,0,1))</c> before the stride-2 conv.</summary>
     public static Tensor PadBottomRight(IBackend backend, Tensor x)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         Tensor padded = new Tensor(new TensorShape([(long)b, c, t, h + 1, w + 1]), x.DType);
-        backend.SeedVr2PadBottomRight(padded, x);
+        backend.Pad(padded, x, new PadSpec(PadMode.Zero, [0, 0, 0, 0, 0], [0, 0, 0, 1, 1]));
         return padded;
     }
 
     /// <summary>MAGViT-style channel→space shuffle (reference Upsample3D):
     /// <c>b (x y z c) f h w → b c (f·z) (h·x) (w·y)</c> with x,y spatial and z temporal ratios, followed by
     /// <c>remove_head</c> when temporal (drops OUTPUT FRAME INDEX 1 — the duplicated half of frame 0 — giving
-    /// T→2T−1; note LTX drops index 0, the conventions differ). Device-resident via
-    /// <see cref="IBackend.SeedVr2PixelShuffle"/> (host reference on CPU).</summary>
+    /// T→2T−1; note LTX drops index 0, the conventions differ).</summary>
     public static Tensor PixelShuffle(IBackend backend, Tensor x, int spatialRatio, int temporalRatio)
     {
         int b = (int)x.Shape[0], cIn = (int)x.Shape[1], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
@@ -61,7 +60,8 @@ public static class SeedVr2VaeOps
         int fOut = f * temporalRatio;
         int fFinal = temporalRatio > 1 ? fOut - 1 : fOut;
         Tensor output = new Tensor(new TensorShape([(long)b, c, fFinal, h * spatialRatio, w * spatialRatio]), x.DType);
-        backend.SeedVr2PixelShuffle(output, x, spatialRatio, temporalRatio);
+        PixelShuffles.DepthToSpace(backend, output, x, new ShuffleSpec(ShuffleLayout.ChannelsFirst, ShuffleLayout.ChannelsFirst, b, f, h, w, c,
+            temporalRatio, spatialRatio, spatialRatio, ChannelOrder.HWTC, DropDuplicateFrame: temporalRatio > 1));
         return output;
     }
 

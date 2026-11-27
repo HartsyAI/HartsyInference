@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
 using HartsyInference.Diffusion.Prompting;
@@ -62,6 +62,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         };
         plan = ApplyH3VsaReleaseGate(plan);
         plan = ApplyH3ExpansionReleaseGate(plan, plannedRequest);
+        plan = ApplySeparateVocalsGate(plan, plannedRequest);
         if (!plan.IsValid)
         {
             return VideoRequestExecutionBinding.BindPlan(plan);
@@ -76,14 +77,9 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             {
                 sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
             }
-            // Constructing the backend is part of the probe, so its construction failures are probe failures: a
-            // Vulkan loader present with no compatible device throws VulkanException, and an out-of-range ordinal
-            // throws ArgumentOutOfRangeException. Left unlisted they fault planning instead of producing the
-            // video.vsa.backend_unsupported issue this block exists to produce. Adding a backend package means
-            // adding its construction exception here, until the backend registry makes the probe generic.
-            catch (Exception error) when (error is CudaException or VulkanException or DllNotFoundException
-                or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
-                or NotSupportedException or ArgumentOutOfRangeException)
+            // Left uncaught, a probe failure faults planning instead of producing the video.vsa.backend_unsupported
+            // issue this block exists to produce.
+            catch (Exception error) when (IsBackendProbeFailure(error))
             {
                 RecordSparseBackendFailure(error);
             }
@@ -112,7 +108,130 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             };
             plan = plan with { Issues = issues };
         }
+        if (plan.IsValid && recipe is IVideoDeviceCheck check)
+        {
+            plan = ApplyDeviceCheck(plan, check);
+        }
         return VideoRequestExecutionBinding.BindPlan(plan);
+    }
+
+    /// <summary>What constructing or asking the engine's backend can throw. Constructing the backend is part of a plan-time probe, so its
+    /// construction failures are probe failures: a Vulkan loader present with no compatible device throws VulkanException, and an out-of-range
+    /// ordinal throws ArgumentOutOfRangeException. Adding a backend package means adding its construction exception here, until the backend
+    /// registry makes the probe generic.</summary>
+    private static bool IsBackendProbeFailure(Exception error) => error is CudaException or VulkanException or DllNotFoundException
+        or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException or NotSupportedException
+        or ArgumentOutOfRangeException;
+
+    /// <summary>Adds the recipe's refusal of this engine's device. A checkpoint that is not on disk yet adds nothing, and neither does a backend
+    /// that does not construct or a checkpoint whose headers do not read (both logged): generation reports those itself, and the recipe asks
+    /// again when it loads.</summary>
+    private VideoPlan ApplyDeviceCheck(VideoPlan plan, IVideoDeviceCheck check)
+    {
+        if (plan.Model.LocalPath is not { Length: > 0 } path || !(File.Exists(path) || Directory.Exists(path)))
+        {
+            return plan;
+        }
+        string? refusal;
+        try
+        {
+            refusal = check.DeviceRefusal(_engine.Backend, path);
+        }
+        catch (Exception error) when (IsBackendProbeFailure(error) || error is IOException or UnauthorizedAccessException
+            or InvalidDataException or System.Text.Json.JsonException or HartsyInference.Core.Exceptions.HartsyInferenceException)
+        {
+            Logs.Warning($"[VideoPlan] The device check of '{plan.Profile.FamilyId}' did not run: {error.Message}");
+            return plan;
+        }
+        if (refusal is null)
+        {
+            return plan;
+        }
+        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues)
+        {
+            new VideoPlanIssue
+            {
+                Code = "video.memory.weights_do_not_fit",
+                Severity = VideoPlanIssueSeverity.Error,
+                Message = refusal,
+                Field = "backend",
+            },
+        };
+        return plan with { Issues = issues };
+    }
+
+    /// <summary>Refuses <see cref="VideoRequest.SeparateDrivingVocals"/> when there is no driving audio to separate.</summary>
+    internal static VideoPlan ApplySeparateVocalsGate(VideoPlan plan, VideoRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(request);
+        VideoPlanIssue? issue = SeparateVocalsIssue(request);
+        if (issue is null)
+        {
+            return plan;
+        }
+        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues) { issue };
+        return plan with { Issues = issues };
+    }
+
+    /// <summary>The planning error for a vocal-separation request that has no driving audio; null when the request is fine.</summary>
+    internal static VideoPlanIssue? SeparateVocalsIssue(VideoRequest request) =>
+        request.SeparateDrivingVocals && request.VideoAudioReference is null
+            && request.Speakers is not ({ First.Audio: not null } or { Second.Audio: not null })
+            ? new VideoPlanIssue
+            {
+                Code = "video.separate_vocals.no_driving_audio",
+                Severity = VideoPlanIssueSeverity.Error,
+                Message = "Vocal separation applies to the driving audio, and this request has none.",
+                Field = nameof(VideoRequest.SeparateDrivingVocals),
+            }
+            : null;
+
+    /// <summary>Replaces the driving audio with its separated vocals (44.1 kHz stereo) so the recipe conditions on speech alone.</summary>
+    private async Task<VideoRequest> SeparateDrivingVocalsAsync(VideoRequest request, CancellationToken cancel)
+    {
+        if (request.Speakers is { } speakers)
+        {
+            // Each speaker is separated on its own, over the same length; the recording stays on the speaker for the soundtrack.
+            VideoSpeaker first = await SeparateSpeakerAsync(speakers.First, "first", request, cancel).ConfigureAwait(false);
+            VideoSpeaker second = await SeparateSpeakerAsync(speakers.Second, "second", request, cancel).ConfigureAwait(false);
+            return request with { Speakers = speakers with { First = first, Second = second }, SeparateDrivingVocals = false };
+        }
+        AudioClip driving = request.VideoAudioReference
+            ?? throw new ArgumentException("SeparateDrivingVocals needs VideoAudioReference.", nameof(request));
+        double? seconds = DrivingAudioSeconds(request);
+        Logs.Info("[VideoAudio] Separating the driving audio's vocals on the CPU before generation"
+            + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
+        SeparatedVocals vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, seconds, cancel).ConfigureAwait(false);
+        return request with { VideoAudioReference = vocals.Stem, SeparatedSpeech16k = vocals.Speech16k, SeparateDrivingVocals = false };
+    }
+
+    /// <summary>The speaker with its separated 16 kHz speech beside its recording; a silent speaker comes back as it is.</summary>
+    private async Task<VideoSpeaker> SeparateSpeakerAsync(VideoSpeaker speaker, string which, VideoRequest request, CancellationToken cancel)
+    {
+        if (speaker.Audio is not { } recording)
+        {
+            return speaker;
+        }
+        double? seconds = DrivingAudioSeconds(request);
+        Logs.Info($"[VideoAudio] Separating the {which} speaker's vocals on the CPU before generation"
+            + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
+        SeparatedVocals vocals = await _engine.FxInternal.SeparateVocalsClipAsync(recording, seconds, cancel).ConfigureAwait(false);
+        return speaker with { SeparatedSpeech16k = vocals.Speech16k };
+    }
+
+    /// <summary>Seconds of driving audio the clip can use: its frame total over its rate, plus one second of margin as LongCat adds. Null when either is unknown, which separates the whole track.</summary>
+    internal static double? DrivingAudioSeconds(VideoRequest request)
+    {
+        // A total at or under Frames generates one chunk, so the clip is never shorter than Frames.
+        int? total = request.ChainTotalFrames ?? request.AnimateTotalFrames;
+        int? frames = total is null ? request.Frames : Math.Max(request.Frames ?? 0, total.Value);
+        if (frames is not > 0 || request.Fps is not > 0)
+        {
+            return null;
+        }
+        // The one second is LongCat's own margin; the separator also processes one extra chunk past the target when it crops.
+        return frames.Value / (double)request.Fps.Value + 1d;
     }
 
     /// <summary>Blocks VSA execution in published builds until its real-weight, memory, and performance gates pass.
@@ -272,6 +391,14 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             features |= VideoFeatures.LongFormChain;
         }
+        if (request.VideoContinuation is not null)
+        {
+            features |= VideoFeatures.VideoContinuation;
+        }
+        if (request.Speakers is not null)
+        {
+            features |= VideoFeatures.MultiSpeaker;
+        }
         return features;
     }
 
@@ -295,6 +422,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         executionPlan.ThrowIfInvalid();
         VideoRequest effectiveRequest = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
+        if (effectiveRequest.SeparateDrivingVocals)
+        {
+            effectiveRequest = await SeparateDrivingVocalsAsync(effectiveRequest, cancel).ConfigureAwait(false);
+        }
 
         return await Task.Run(
             () =>
@@ -305,8 +436,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
                 using IDisposable settingsScope = KnobProfileScope.Push(effectiveRequest.Settings?.Resolve());
                 VideoArtifactFileBinding.RequireUnchanged(executionPlan);
-                IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
-                    executionPlan.Model, effectiveRequest, executionPlan);
+                LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(
+                    executionPlan.Model, effectiveRequest, executionPlan, cancel);
+                using IDisposable videoLease = leased.Lease;
+                IVideoRecipePipeline pipeline = leased.Pipeline;
                 VideoGenerationResult result = pipeline.Generate(effectiveRequest, executionPlan.EffectiveSettings, progress, cancel);
                 // An explicit request fps always wins; else a pipeline-pinned rate (e.g. a decoded driving clip's,
                 // so motion speed matches the driving video); else the family default the resolver applied.
@@ -355,45 +488,22 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequest resolved = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
         VideoArtifactFileBinding.RequireUnchanged(executionPlan);
-        IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
-            executionPlan.Model, resolved, executionPlan);
+        LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(executionPlan.Model, resolved, executionPlan, cancel);
+        // The stream takes the lease: its producer releases it when it finishes, so eviction waits for the whole stream.
+        IDisposable videoLease = leased.Lease;
+        IVideoRecipePipeline pipeline = leased.Pipeline;
         if (!pipeline.SupportsStreaming)
         {
+            videoLease.Dispose();
             throw new NotSupportedException(
                 $"Video model family '{InferenceEngine.FamilyIdFor(executionPlan.Model)}' does not support streaming generation.");
         }
-        // Bridges the pipeline's own IAsyncEnumerable (whose first MoveNextAsync blocks synchronously through the
-        // whole denoise loop — there's no await point until the VAE decode phase starts yielding groups) onto a
-        // background thread via a bounded channel, so the calling thread (an ASP.NET request handler when the
-        // extension awaits this) isn't pinned for the denoise duration. Mirrors GenerateAsync's Task.Run, but
-        // needs a channel instead of a single Task<T> because this method yields incrementally rather than once.
-        Channel<VideoFrame> channel = Channel.CreateBounded<VideoFrame>(
-            new BoundedChannelOptions(4) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
-        Task producer = Task.Run(async () =>
-        {
-            try
-            {
-                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, executionPlan.EffectiveSettings, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
-                {
-                    await channel.Writer.WriteAsync(frame, cancel).ConfigureAwait(false);
-                }
-                channel.Writer.TryComplete();
-            }
-            catch (Exception ex)
-            {
-                channel.Writer.TryComplete(ex);
-            }
-        }, cancel);
-
-        await foreach (VideoFrame frame in channel.Reader.ReadAllAsync(cancel).ConfigureAwait(false))
+        // Frames come from a background producer that owns the lease; see VideoFrameStream.
+        await foreach (VideoFrame frame in VideoFrameStream.Produce(pipeline, resolved, executionPlan.EffectiveSettings, progress, videoLease, cancel)
+            .ConfigureAwait(false))
         {
             yield return frame;
         }
-        // Observes the producer's result: rethrows whatever TryComplete(ex) captured (the channel reader itself
-        // already threw that same exception via ReadAllAsync above, but awaiting here also surfaces a producer-side
-        // failure that happened AFTER the channel completed successfully — there isn't one today, but this is the
-        // same "don't let a background Task's fault go unobserved" discipline as GenerateAsync's Task.Run).
-        await producer.ConfigureAwait(false);
     }
 
     /// <summary>Builds an exact H3 execution summary. Generic video families still perform family-specific

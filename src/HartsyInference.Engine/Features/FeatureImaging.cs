@@ -1,3 +1,4 @@
+using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Vision.Codec;
@@ -32,6 +33,62 @@ public static class FeatureImaging
         for (int i = 0; i < resized.Length; i++)
         {
             dst[i] = (byte)Math.Clamp(MathF.Round(resized[i]), 0f, 255f);
+        }
+        return dst;
+    }
+
+    /// <summary>Resizes RGB24 with the PIL Lanczos filter used by ComfyUI's <c>common_upscale(..., "lanczos", "disabled")</c>.
+    /// This is intentionally separate from the engine-wide bicubic default because reference adapters can be trained against a
+    /// particular pixel preprocessing path.</summary>
+    public static byte[] ResizeRgb24Lanczos(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), $"Target size must be positive; got {width}x{height}.");
+        long expected = (long)image.Width * image.Height * 3;
+        if (image.Rgb.LongLength < expected)
+            throw new InvalidOperationException($"Image has {image.Rgb.LongLength} bytes, expected {expected} for {image.Width}x{image.Height} RGB24.");
+        if (image.Width == width && image.Height == height)
+        {
+            byte[] copy = new byte[expected];
+            Array.Copy(image.Rgb, copy, expected);
+            return copy;
+        }
+        float[] resized = new float[(long)width * height * 3];
+        Resample.LanczosHwc8(image.Rgb, image.Width, image.Height, 3, resized, width, height);
+        byte[] dst = new byte[resized.Length];
+        for (int i = 0; i < resized.Length; i++)
+            dst[i] = (byte)Math.Clamp(MathF.Round(resized[i]), 0f, 255f);
+        return dst;
+    }
+
+    /// <summary>Resizes RGB24 like diffusers' <c>VaeImageProcessor</c> with <c>resize_mode="crop"</c>, the init-image preparation of the LongCat
+    /// avatar reference (<c>pipeline_longcat_video_avatar.py</c> <c>preprocess</c> at line 1148, <c>resize_mode</c> default "crop" at line 1012): the
+    /// image is scaled by the larger of the two factors (integer floor arithmetic in <c>_resize_and_crop</c>, diffusers image_processor.py 435-466),
+    /// Lanczos-resampled, and centre-cropped to the target size. Unlike <see cref="CoverCrop"/>, this keeps the reference's filter and arithmetic.</summary>
+    public static byte[] ResizeCropRgb24Lanczos(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), $"Target size must be positive; got {width}x{height}.");
+        double ratio = width / (double)height;
+        double sourceRatio = image.Width / (double)image.Height;
+        int sourceW = ratio > sourceRatio ? width : (int)((long)image.Width * height / image.Height);
+        int sourceH = ratio <= sourceRatio ? height : (int)((long)image.Height * width / image.Width);
+        byte[] resized = ResizeRgb24Lanczos(image, sourceW, sourceH);
+        // The reference pastes the scaled image at (w//2 - sw//2, h//2 - sh//2) on a blank canvas; the part outside the canvas is cropped away.
+        int left = width / 2 - sourceW / 2, top = height / 2 - sourceH / 2;
+        byte[] dst = new byte[(long)width * height * 3];
+        for (int y = 0; y < height; y++)
+        {
+            int sy = y - top;
+            if (sy < 0 || sy >= sourceH) continue;
+            for (int x = 0; x < width; x++)
+            {
+                int sx = x - left;
+                if (sx < 0 || sx >= sourceW) continue;
+                Array.Copy(resized, ((long)sy * sourceW + sx) * 3, dst, ((long)y * width + x) * 3, 3);
+            }
         }
         return dst;
     }

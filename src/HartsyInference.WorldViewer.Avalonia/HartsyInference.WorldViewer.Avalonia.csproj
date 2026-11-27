@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The window front end over HartsyInference.WorldViewer. Only this project references Avalonia. -->
+    <RootNamespace>HartsyInference.WorldViewer.Avalonia</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.WorldViewer.Avalonia.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.WorldViewer\HartsyInference.WorldViewer.csproj" />
+  </ItemGroup>
+
+</Project>

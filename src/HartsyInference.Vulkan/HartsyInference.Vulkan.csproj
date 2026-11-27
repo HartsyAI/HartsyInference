@@ -8,12 +8,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\HartsyInference.Gpu\HartsyInference.Gpu.csproj" />
-    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Vulkan.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
   </ItemGroup>
 
   <!-- SPIR-V kernel files shipped as content, loaded from disk at runtime.

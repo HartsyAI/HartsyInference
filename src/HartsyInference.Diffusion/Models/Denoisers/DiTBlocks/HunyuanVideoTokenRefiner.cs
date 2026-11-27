@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -163,41 +164,40 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             // gates = adaLN(SiLU(temb)) → [B, 2*hidden].
             Tensor tAct = new(temb.Shape, DType.F32); backend.Silu(tAct, temb);
             Tensor mod = new(new TensorShape(b, 2 * _hidden), DType.F32); backend.Linear(mod, tAct, _modW!, _modB!); tAct.Dispose();
-            (Tensor gateMsa, Tensor gateMlp) = SplitCols2(mod, b, _hidden); mod.Dispose();
+            (Tensor gateMsa, Tensor gateMlp) = SplitCols2(backend, mod, b, _hidden); mod.Dispose();
 
             // Self-attention.
-            Tensor norm1 = LayerNormAffine(x, _n1W!, _n1B!, b, L, _hidden);
+            Tensor norm1 = LayerNormAffine(backend, x, _n1W!, _n1B!);
             TensorShape sh = new(b, L, _hidden);
             Tensor attn = _attention!.Forward(backend, norm1, norm1, new AttentionCallContext { ReleaseInputs = true });
 
-            Tensor x1 = AdaLNModulation.ApplyGatedResidual(x, attn, gateMsa, b, L, _hidden);
+            Tensor x1 = GatedResidual(backend, x, attn, gateMsa);
             attn.Dispose(); gateMsa.Dispose();
 
             // MLP.
-            Tensor norm2 = LayerNormAffine(x1, _n2W!, _n2B!, b, L, _hidden);
+            Tensor norm2 = LayerNormAffine(backend, x1, _n2W!, _n2B!);
             Tensor m0 = new(new TensorShape(b, L, _mlpDim), DType.F32); backend.Linear(m0, norm2, _mlp0W!, _mlp0B!); norm2.Dispose();
             Tensor m0a = new(m0.Shape, DType.F32); backend.Silu(m0a, m0); m0.Dispose();
             Tensor m2 = new(sh, DType.F32); backend.Linear(m2, m0a, _mlp2W!, _mlp2B!); m0a.Dispose();
 
-            Tensor x2 = AdaLNModulation.ApplyGatedResidual(x1, m2, gateMlp, b, L, _hidden);
+            Tensor x2 = GatedResidual(backend, x1, m2, gateMlp);
             m2.Dispose(); gateMlp.Dispose(); x1.Dispose();
             return x2;
         }
 
-        /// <summary>Affine LayerNorm over the last dim (eps 1e-6): <c>(x-μ)/σ · w + b</c>.</summary>
-        private static Tensor LayerNormAffine(Tensor x, Tensor weight, Tensor bias, int b, int L, int d)
+        /// <summary>Affine LayerNorm over the last dim (eps 1e-6): <c>(x-μ)/σ · w + b</c>, on the backend.</summary>
+        private static Tensor LayerNormAffine(IBackend backend, Tensor x, Tensor weight, Tensor bias)
         {
             Tensor outT = new(x.Shape, DType.F32);
-            float* xp = (float*)x.DataPointer; float* op = (float*)outT.DataPointer;
-            float* wp = (float*)weight.DataPointer; float* bp = (float*)bias.DataPointer;
-            for (long row = 0; row < (long)b * L; row++)
-            {
-                float* xr = xp + row * d; float* or_ = op + row * d;
-                double mean = 0; for (int c = 0; c < d; c++) mean += xr[c]; mean /= d;
-                double var = 0; for (int c = 0; c < d; c++) { double dd = xr[c] - mean; var += dd * dd; } var /= d;
-                float inv = (float)(1.0 / Math.Sqrt(var + 1e-6));
-                for (int c = 0; c < d; c++) or_[c] = ((float)(xr[c] - mean)) * inv * wp[c] + bp[c];
-            }
+            backend.LayerNorm(outT, x, weight, bias, 1e-6f);
+            return outT;
+        }
+
+        /// <summary><c>residual + gate·value</c> on the backend, with the gate <c>[B, hidden]</c> broadcast over the L tokens of each batch row.</summary>
+        private static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor gate)
+        {
+            Tensor outT = new(residual.Shape, DType.F32);
+            backend.GatedResidualLastDim(outT, residual, value, gate);
             return outT;
         }
 
@@ -218,15 +218,12 @@ public sealed unsafe class HunyuanVideoTokenRefiner
             { float* dp = (float*)dst.DataPointer; Buffer.MemoryCopy(src, dp, n * 4, n * 4); }
         }
 
-        private static (Tensor A, Tensor B) SplitCols2(Tensor mod, int b, int hidden)
+        /// <summary>The two gates: the first and second <c>hidden</c> columns of <c>[B, 2·hidden]</c>, each a device column slice.</summary>
+        private static (Tensor A, Tensor B) SplitCols2(IBackend backend, Tensor mod, int b, int hidden)
         {
             Tensor a = new(new TensorShape(b, hidden), DType.F32), bb = new(new TensorShape(b, hidden), DType.F32);
-            float* sp = (float*)mod.DataPointer; float* ap = (float*)a.DataPointer; float* bp = (float*)bb.DataPointer;
-            for (int i = 0; i < b; i++)
-            {
-                Buffer.MemoryCopy(sp + (long)i * 2 * hidden, ap + (long)i * hidden, (long)hidden * 4, (long)hidden * 4);
-                Buffer.MemoryCopy(sp + (long)i * 2 * hidden + hidden, bp + (long)i * hidden, (long)hidden * 4, (long)hidden * 4);
-            }
+            StridedCopies.SliceAxis(backend, a, mod, 1, 0, hidden);
+            StridedCopies.SliceAxis(backend, bb, mod, 1, hidden, hidden);
             return (a, bb);
         }
     }

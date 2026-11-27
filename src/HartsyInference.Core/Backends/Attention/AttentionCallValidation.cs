@@ -1,0 +1,126 @@
+using HartsyInference.Core.Tensors;
+
+namespace HartsyInference.Core.Backends.Attention;
+
+/// <summary>Validates the common attention-call boundary before a backend plans or writes output.</summary>
+/// <remarks>Every malformed-call check runs before any unsupported-format check, so a call that is both malformed and
+/// refused reports the malformation. Per-head sinks and ALiBi slopes follow the documented <c>[Hq]</c> F32 contract;
+/// a different dtype or count is malformed, as the CUDA flash contract has always treated it.</remarks>
+internal static class AttentionCallValidation
+{
+    /// <summary>Checks geometry, addressability, logit terms, mask windows, output ownership and numerical refusals.</summary>
+    /// <exception cref="ArgumentException">The call is malformed.</exception>
+    /// <exception cref="AttentionUnsupportedException">The call is well formed but stores a refused or unread format.</exception>
+    public static void Validate(in AttentionCall call)
+    {
+        if (!float.IsFinite(call.Scale))
+            throw new ArgumentOutOfRangeException(nameof(call), "Attention scale must be finite.");
+        if (!float.IsFinite(call.Logits.Softcap) || call.Logits.Softcap < 0f)
+            throw new ArgumentOutOfRangeException(nameof(call), "Attention softcap must be finite and non-negative.");
+        AttentionMask mask = call.Mask;
+        if (mask.WindowLeft < 0 || mask.WindowRight < 0 || mask.BlockSize < 0)
+            throw new ArgumentOutOfRangeException(nameof(call),
+                $"Attention windows and block size must be non-negative; got left={mask.WindowLeft}, right={mask.WindowRight}, block={mask.BlockSize}.");
+        if (!call.Positions.OnDevice && call.Positions.QueryOffset < 0)
+            throw new ArgumentOutOfRangeException(nameof(call), $"Attention query offset {call.Positions.QueryOffset} is negative.");
+
+        AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
+        if (q.Batch <= 0 || q.Heads <= 0 || q.Tokens <= 0 || q.HeadDim <= 0 || k.Heads <= 0 || k.Tokens <= 0 || v.HeadDim <= 0)
+            throw new ArgumentException($"Attention operands need positive extents; got Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}.");
+        if (q.Heads % k.Heads != 0)
+            throw new ArgumentException($"Query heads ({q.Heads}) must be a multiple of key/value heads ({k.Heads}).");
+        if (k.HeadDim != q.HeadDim || v.Heads != k.Heads || v.Tokens != k.Tokens || o.HeadDim != v.HeadDim
+            || o.Heads != q.Heads || o.Tokens != q.Tokens || k.Batch != q.Batch || v.Batch != q.Batch || o.Batch != q.Batch)
+            throw new ArgumentException(
+                $"Attention operands disagree: Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}, O={Describe(o)}.");
+        if (call.ValidKvLength < 0 || call.ValidKvLength > k.Tokens)
+            throw new ArgumentException($"Valid key length {call.ValidKvLength} is outside the key operand's {k.Tokens} rows.");
+        foreach (AttentionOperand x in (ReadOnlySpan<AttentionOperand>)[q, k, v, o])
+            if (x.Offset < 0 || x.BatchStride < 0 || x.HeadStride < 0 || x.TokenStride < 0 || x.Extent > x.Storage.ElementCount)
+                throw new ArgumentException($"Operand {Describe(x)} addresses past its {x.Storage.ElementCount}-element tensor.");
+        if (ReferenceEquals(o.Storage, q.Storage) || ReferenceEquals(o.Storage, k.Storage) || ReferenceEquals(o.Storage, v.Storage))
+            throw new ArgumentException("Attention output must not alias an input.", nameof(call));
+        if (mask.Bias is { } bias && !BiasBroadcasts(bias.Shape, q, k))
+            throw new ArgumentException($"Bias {bias.Shape} does not broadcast to [{q.Batch},{q.Heads},{q.Tokens},{k.Tokens}].");
+        ValidatePerHead(call.Logits.Sinks, q.Heads, "Sinks");
+        ValidatePerHead(call.Logits.AlibiSlopes, q.Heads, "ALiBi slopes");
+        if (call.KvPages is { } pages) ValidatePages(in call, pages);
+        if (call.SequenceLengths is { } lengths) ValidateSequenceLengths(in call, lengths);
+        if (call.Lse is { } lse) ValidateLse(in call, lse);
+
+        if (mask.Bias is { } unread && unread.DType != DType.F32)
+            throw new AttentionUnsupportedException($"Attention reads F32 additive bias, not {unread.DType}.");
+        AttentionFormats refused = call.Numerics.Refused & AttentionNumerics.OperandFormats(in call);
+        if (refused != AttentionFormats.None)
+            throw new AttentionUnsupportedException($"The call refuses {refused}, and an operand or the output is stored in it.");
+    }
+
+    /// <summary>The host reference's broadcast rule: rank 2–4, every axis either 1 or the full extent. The legacy GPU kernels
+    /// accept a narrower set (the key axis must be <c>Skv</c>); their rows decline the rest after this boundary.</summary>
+    private static bool BiasBroadcasts(TensorShape s, AttentionOperand query, AttentionOperand key)
+    {
+        int rank = s.Rank;
+        return rank is >= 2 and <= 4 && (s[rank - 1] == 1 || s[rank - 1] == key.Tokens)
+            && (s[rank - 2] == 1 || s[rank - 2] == query.Tokens)
+            && (rank < 3 || s[rank - 3] == 1 || s[rank - 3] == query.Heads)
+            && (rank < 4 || s[0] == 1 || s[0] == query.Batch);
+    }
+
+    /// <summary>A paged call names one sequence's pages inside plain head-major page buffers, states its valid key length on
+    /// the host, and lists only pages the buffers hold.</summary>
+    private static void ValidatePages(in AttentionCall call, AttentionKvPages pages)
+    {
+        AttentionOperand k = call.Key, v = call.Value;
+        if (pages.PageSize <= 0 || pages.Table.DType != DType.I32)
+            throw new ArgumentException($"A page table is I32 with a positive page size; got {pages.Table.DType}, page size {pages.PageSize}.");
+        if (k.Layout != AttentionLayout.HeadMajor || v.Layout != AttentionLayout.HeadMajor || !k.IsPlain || !v.IsPlain || k.Batch != 1)
+            throw new ArgumentException($"Paged keys and values are one sequence's plain head-major page buffers; got K={Describe(k)}, V={Describe(v)}.");
+        if (call.Positions.OnDevice || !call.Positions.Bounded)
+            throw new ArgumentException("A paged call states its valid key length on the host.");
+        int kvLen = call.Positions.KvLength;
+        int used = (kvLen + pages.PageSize - 1) / pages.PageSize;
+        if (used > pages.Pages)
+            throw new ArgumentException($"{kvLen} valid keys need {used} pages of {pages.PageSize} rows; the page table lists {pages.Pages}.");
+        if (k.Tokens % pages.PageSize != 0)
+            throw new ArgumentException($"Page buffers of {k.Tokens} rows do not hold whole pages of {pages.PageSize}.");
+        // The value operand has the key operand's rows (checked above), so one bound covers both.
+        int held = k.Tokens / pages.PageSize;
+        if ((uint)pages.HighestPage >= (uint)held)
+            throw new ArgumentException($"The page table reaches page {pages.HighestPage}; the page buffers hold pages 0 to {held - 1}.");
+    }
+
+    /// <summary>A call with a length per sequence gives one per batch item and leaves the shared positions unset. Each
+    /// sequence takes its position from its own length, so the only position rule it carries is the causal one: a window, a
+    /// block size, a bias, a softcap, sinks and ALiBi are refused, as are paged keys and values.</summary>
+    private static void ValidateSequenceLengths(in AttentionCall call, int[] lengths)
+    {
+        if (lengths.Length != call.Batch)
+            throw new ArgumentException($"There are {lengths.Length} sequence lengths for a batch of {call.Batch}.");
+        if (call.Positions.Bounded || call.Positions.OnDevice || call.Positions.QueryOffset != 0)
+            throw new ArgumentException("A call with sequence lengths leaves its shared positions unset, the query offset included.");
+        if (call.KvPages is not null) throw new AttentionUnsupportedException("Sequence lengths over paged keys and values are not defined.");
+        AttentionMask mask = call.Mask;
+        if (mask.WindowLeft is not null || mask.WindowRight is not null || mask.BlockSize > 0 || mask.Bias is not null || call.Logits.Any)
+            throw new AttentionUnsupportedException(
+                "A call with sequence lengths takes the causal rule or no mask: no window, block size, bias, softcap, sinks or ALiBi.");
+    }
+
+    private static void ValidateLse(in AttentionCall call, Tensor lse)
+    {
+        TensorShape expected = new(call.Batch, call.Heads, call.QueryTokens);
+        if (lse.DType != DType.F32 || lse.Shape != expected)
+            throw new ArgumentException($"The LSE output is F32 [B, Hq, Sq] = {expected}; got {lse.DType} {lse.Shape}.");
+        if (ReferenceEquals(lse, call.Output.Storage) || ReferenceEquals(lse, call.Query.Storage) || ReferenceEquals(lse, call.Key.Storage)
+            || ReferenceEquals(lse, call.Value.Storage))
+            throw new ArgumentException("The LSE output must not alias an operand.", nameof(call));
+    }
+
+    private static void ValidatePerHead(Tensor? tensor, int heads, string name)
+    {
+        if (tensor is not null && (tensor.DType != DType.F32 || tensor.ElementCount != heads))
+            throw new ArgumentException($"{name} must be F32 with exactly {heads} values; got {tensor.DType} {tensor.Shape}.");
+    }
+
+    private static string Describe(in AttentionOperand x) =>
+        $"{x.Layout}[b{x.Batch} h{x.Heads} s{x.Tokens} d{x.HeadDim}] of {x.Storage.Shape}";
+}

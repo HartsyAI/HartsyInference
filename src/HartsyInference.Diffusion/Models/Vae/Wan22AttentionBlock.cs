@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -64,17 +65,20 @@ public sealed unsafe class Wan22AttentionBlock
         backend.Conv2D(qkv, frames, _qkvW!, _qkvB, 1, 1, 0, 0);
         frames.Dispose();
 
-        // q,k,v: [BT, 1, HW, C]
+        // q,k,v: [BT, 1, HW, C], each one channel-plane slot of qkv [BT, 3·C, HW] transposed to tokens-major.
         Tensor q = new Tensor(new TensorShape(bt, 1, hw, c), DType.F32);
         Tensor k = new Tensor(new TensorShape(bt, 1, hw, c), DType.F32);
         Tensor v = new Tensor(new TensorShape(bt, 1, hw, c), DType.F32);
-        backend.SplitVaeQkv(q, k, v, qkv, bt, c, hw);
+        StridedView planes = StridedView.Of(qkv.Shape).Reshape([bt, 3, c, hw]);
+        backend.CopyStrided(q, qkv, StridedCopySpec.Gather(planes.Select(1, 0).Permute([0, 2, 1])));
+        backend.CopyStrided(k, qkv, StridedCopySpec.Gather(planes.Select(1, 1).Permute([0, 2, 1])));
+        backend.CopyStrided(v, qkv, StridedCopySpec.Gather(planes.Select(1, 2).Permute([0, 2, 1])));
         qkv.Dispose();
 
         Tensor attn = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
 
         Tensor attn4d = new Tensor(new TensorShape(bt, c, h, w), DType.F32);
-        backend.VaeTokensToFrame(attn4d, attn, bt, c, hw);
+        backend.CopyStrided(attn4d, attn, StridedCopySpec.Gather(StridedView.Of(attn.Shape).Reshape([bt, hw, c]).Permute([0, 2, 1])));
         attn.Dispose();
 
         Tensor proj = new Tensor(new TensorShape(bt, c, h, w), DType.F32);

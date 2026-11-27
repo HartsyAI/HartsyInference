@@ -39,10 +39,11 @@ internal sealed unsafe class SConvTranspose1d
         Bias = bias;
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    /// <inheritdoc cref="SConv1d.LoadWeights"/>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, bool keepStoredWeight = false)
     {
         // Outer is SConvTranspose1d's .convtr = NormConvTranspose1d; inner is .convtr = nn.ConvTranspose1d.
-        _weight = WhisperOps.EnsureF32(w[$"{prefix}.convtr.convtr.weight"]);
+        _weight = keepStoredWeight ? w[$"{prefix}.convtr.convtr.weight"] : WhisperOps.EnsureF32(w[$"{prefix}.convtr.convtr.weight"]);
         if (Bias) _bias = WhisperOps.EnsureF32(w[$"{prefix}.convtr.convtr.bias"]);
     }
 

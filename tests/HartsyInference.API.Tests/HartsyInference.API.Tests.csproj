@@ -4,8 +4,9 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <RootNamespace>HartsyInference.API.Tests</RootNamespace>
-    <!-- Server targets net10 only (ASP.NET Core 10), so the test project does too. -->
-    <TargetFrameworks>net10.0</TargetFrameworks>
+    <!-- The API project targets net10.0 only (ASP.NET Core 10). -->
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
@@ -13,12 +14,32 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="coverlet.collector" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Route tests host the real endpoint mapping on a loopback Kestrel port; no test-host package is needed. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Shared\RealWeightsFactAttribute.cs" Link="Shared\RealWeightsFactAttribute.cs" />
+    <!-- The synthetic Duo release the engine tests build, with the checkpoint writers it uses. -->
+    <Compile Include="..\HartsyInference.Engine.Tests\Duo\DuoReleaseFixture.cs" Link="Shared\DuoReleaseFixture.cs" />
+    <Compile Include="..\HartsyInference.ModelAssets.Tests\Duo\DcpFixture.cs" Link="Shared\DcpFixture.cs" />
+    <Compile Include="..\HartsyInference.ModelAssets.Tests\Duo\PickleBuilder.cs" Link="Shared\PickleBuilder.cs" />
+    <!-- The tiny LongCat avatar release and side-model stand-ins the recipe tests use. -->
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatTestData.cs" Link="Shared\LongCatTestData.cs" />
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatLoraFixture.cs" Link="Shared\LongCatLoraFixture.cs" />
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatRecipeStandIns.cs" Link="Shared\LongCatRecipeStandIns.cs" />
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatTinyAvatarRelease.cs" Link="Shared\LongCatTinyAvatarRelease.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.API\HartsyInference.API.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>
 
 </Project>

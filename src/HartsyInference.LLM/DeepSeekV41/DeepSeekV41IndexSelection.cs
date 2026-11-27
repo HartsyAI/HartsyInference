@@ -1,3 +1,5 @@
+using HartsyInference.LLM.Transformer.Sparse;
+
 namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Per-query selection over indexer scores: level-one candidate blocks and the final sorted top-k of compressed positions.</summary>
@@ -28,7 +30,7 @@ public static class DeepSeekV41IndexSelection
         if (compressLen > 0) scores[Math.Min((compressLen - 1) / blockSize, blocks - 1)] = float.PositiveInfinity;
 
         bool[] keep = new bool[blocks];
-        int[] order = TopIndices(scores, Math.Min(topkBlocks, blocks));
+        int[] order = SparseTopK.Best(scores, Math.Min(topkBlocks, blocks));
         foreach (int b in order) keep[b] = scores[b] > float.NegativeInfinity;
         for (int i = 0; i < width; i++) mask[i] = keep[i / blockSize];
     }
@@ -40,25 +42,6 @@ public static class DeepSeekV41IndexSelection
     /// <param name="offset">Added to kept positions so they index after the window slots.</param>
     /// <param name="dest">Receives <c>min(indexTopk, scores.Length)</c> entries.</param>
     /// <returns>The number of entries written.</returns>
-    public static int SelectTopK(ReadOnlySpan<float> scores, int compressLen, int indexTopk, int offset, Span<int> dest)
-    {
-        int k = Math.Min(indexTopk, scores.Length);
-        if (dest.Length < k) throw new ArgumentException("dest is too small.", nameof(dest));
-        int[] picked = TopIndices(scores.ToArray(), k);
-        Array.Sort(picked);
-        for (int i = 0; i < k; i++) dest[i] = picked[i] < compressLen ? picked[i] + offset : -1;
-        return k;
-    }
-
-    private static int[] TopIndices(float[] values, int k)
-    {
-        int[] idx = new int[values.Length];
-        for (int i = 0; i < idx.Length; i++) idx[i] = i;
-        Array.Sort(idx, (a, b) =>
-        {
-            int c = values[b].CompareTo(values[a]);
-            return c != 0 ? c : a.CompareTo(b);
-        });
-        return idx.AsSpan(0, k).ToArray();
-    }
+    public static int SelectTopK(ReadOnlySpan<float> scores, int compressLen, int indexTopk, int offset, Span<int> dest) =>
+        SparseTopK.SelectSorted(scores, compressLen, indexTopk, offset, dest);
 }

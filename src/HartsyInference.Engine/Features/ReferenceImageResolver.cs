@@ -62,7 +62,9 @@ public static class ReferenceImageResolver
                 ImageData reference = policy.FitTo is { } fit ? FeatureImaging.CoverCrop(source, fit.Width, fit.Height) : source;
                 (int latentW, int latentH) = LatentSize(reference.Width, reference.Height, policy);
                 ImageData latentSource = policy.FitTo is null ? reference : FeatureImaging.CoverCrop(reference, latentW, latentH);
-                byte[] latentRgb = FeatureImaging.ResizeRgb24(latentSource, latentW, latentH);
+                byte[] latentRgb = policy.LatentResize == ReferenceResizeMethod.Lanczos
+                    ? FeatureImaging.ResizeRgb24Lanczos(latentSource, latentW, latentH)
+                    : FeatureImaging.ResizeRgb24(latentSource, latentW, latentH);
                 latent.Add(FeatureImaging.RgbToTensorMinusOneOne(latentRgb, latentW, latentH));
                 if (policy.VisionTargetArea <= 0)
                     continue;

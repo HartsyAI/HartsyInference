@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Utilities;
@@ -881,7 +882,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
     private readonly StepGraphFailureBudget _captureFailures = new();
 
     /// <summary>Routes a fresh packed latent into the step-graph's FIXED latent buffer (the address the captured
-    /// graph reads and the pipeline's in-place <c>CfgEulerStep</c> updates). Returns the fixed tensor —
+    /// graph reads and the pipeline's in-place <c>GuidedEulerStep</c> updates). Returns the fixed tensor —
     /// transformer-owned; the pipeline must not dispose it or read its DataPointer (snapshot via
     /// <see cref="SnapshotGraphLatent"/>). A shape change resets the graph.</summary>
     public Tensor PrepareGraphLatent(IBackend backend, Tensor freshPackedLatent)

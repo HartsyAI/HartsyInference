@@ -135,6 +135,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Profile =
         Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.");
 
+    /// <summary>Enables the model stage timer (<see cref="Backends.StageProfiler"/>), which syncs the device around each stage. Independent of
+    /// <see cref="Profile"/>, so turning the per-op table on does not add those syncs.</summary>
+    public static readonly Knob<bool> StageProfile =
+        Bool("diagnostics.stageProfile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the device-synced model stage timer (StageProfiler), which syncs the device around each model stage.");
+
     /// <summary>Dumps the accumulated per-op profile table at every backend Sync (per generation) to diagnostics.profileOut.</summary>
     public static readonly Knob<bool> ProfileEach =
         Bool("diagnostics.profileEach", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Dumps the accumulated per-op profile table at every backend Sync (per generation) to diagnostics.profileOut.");
@@ -187,9 +192,67 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> WanDebug =
         Bool("diagnostics.wanDebug", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Logs per-step velocity/latent stats and free-VRAM for the Wan video and Wan-S2V pipelines.");
 
-    /// <summary>File path to append per-block free-VRAM readings to during the Wan video transformer forward.</summary>
+    /// <summary>File path to append per-block device-memory readings to during the Wan video transformer forward;
+    /// <see cref="VramTrace"/> covers the same points.</summary>
     public static readonly Knob<string?> WanVram =
-        Str("diagnostics.wanVram", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append per-block free-VRAM readings to during the Wan video transformer forward.");
+        Str("diagnostics.wanVram", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append per-block device-memory readings to during the Wan video transformer forward; diagnostics.vramTrace covers the same points.");
+
+    /// <summary>File path to append labelled device-memory readings to: driver free and used bytes, the allocator pool's reserved
+    /// and used bytes, and the resident weight and activation bytes, each after a device sync. Unset disables the trace.</summary>
+    public static readonly Knob<string?> VramTrace =
+        Str("diagnostics.vramTrace", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append labelled device-memory readings to (driver free/used, allocator pool reserved/used, resident weights and activations), each after a device sync, at the phase, step and block points a model records (SANA-WM, Wan); unset disables it.");
+
+    /// <summary>A float32 C-order <c>.npy</c> that replaces the seeded starting noise of a Fibo 2.0 generation, for the diffusers parity check.
+    /// Diagnostic only: the file's shape, dtype and order are checked, a mismatch fails the run, and each use logs a warning.</summary>
+    public static readonly Knob<string?> Fibo2NoiseNpy =
+        Str("diagnostics.fibo2NoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Path to a float32 C-order .npy that replaces the seeded starting noise of Fibo 2.0 generations (diffusers parity). Unset draws the seeded noise.");
+
+    /// <summary>A float32 C-order <c>.npy</c> that replaces the initial noise of a LongCat video or avatar generation, for reference comparisons.
+    /// A path containing <c>{segment}</c> names one file per segment of an avatar chain, 0 the first, and every one is required. A later segment's
+    /// file holds its whole run, <c>[1, C, 1 + context + new latents, H, W]</c>; the reference and context frames at its front are overwritten by
+    /// the conditioning.</summary>
+    public static readonly Knob<string?> LongCatNoiseNpy =
+        Str("diagnostics.longcatNoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain); with {segment} in the path, one file per segment, later ones holding the whole run (reference and context frames included). Unset draws the seeded noise.");
+
+    /// <summary>Directory where a LongCat avatar generation writes its step-0 conditioning as float32 .npy under the reference's names (text_embeddings_step00,
+    /// text_mask_step00, audio_embedding_step00, input_latent_step00, speech_16k_mono_step00). The last generation's files overwrite the earlier ones.
+    /// Unset writes nothing.</summary>
+    public static readonly Knob<string?> LongCatConditioningDump =
+        Str("diagnostics.longcatConditioningDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar's step-0 conditioning as float32 .npy (text_embeddings_step00, text_mask_step00, audio_embedding_step00, "
+            + "input_latent_step00, speech_16k_mono_step00); unset writes nothing.");
+
+    /// <summary>Directory whose reference-named .npy files replace the matching step-0 conditioning of a LongCat avatar generation; a file that is absent
+    /// keeps the engine's tensor. The element count of each file must match the engine's tensor; its shape may differ.</summary>
+    public static readonly Knob<string?> LongCatConditioningSubstitute =
+        Str("diagnostics.longcatConditioningSubstitute", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory of float32 .npy files (text_embeddings_step00, text_mask_step00, audio_embedding_step00, input_latent_step00, "
+            + "speech_16k_mono_step00) that replace the matching step-0 conditioning of LongCat avatar generations; absent files keep the engine's tensor.");
+
+    /// <summary>Directory for the LongCat avatar DiT's probe tensors of the first denoise step of the first call; unset writes nothing.</summary>
+    public static readonly Knob<string?> LongCatProbeDump =
+        Str("diagnostics.longcatProbeDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar DiT's probe tensors at the first denoise step of the first call: call00_probe_<name>.npy for the embedders, "
+            + "the RoPE tables, every block's output (block{i}.out) and, for the blocks named by diagnostics.longcatProbeBlocks, each stage. Unset writes nothing.");
+
+    /// <summary>Block indices (comma-separated, e.g. <c>0,1,47</c>) whose every stage is dumped by <c>diagnostics.longcatProbeDump</c>; the block
+    /// outputs are always dumped. Unset dumps no stage inside a block.</summary>
+    public static readonly Knob<string?> LongCatProbeBlocks =
+        Str("diagnostics.longcatProbeBlocks", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Comma-separated block indices whose every probe stage is dumped by diagnostics.longcatProbeDump; unset dumps only the block outputs.");
+
+    /// <summary>Pins the resident prefix (blocks kept on the device) of a streaming scope to this count instead of the free-memory sizing; a
+    /// diagnostic for comparing a resident run with a streamed one. Unset keeps the planner's sizing.</summary>
+    public static readonly Knob<int?> StreamResidentPrefix =
+        IntOverride("diagnostics.streamResidentPrefix", KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Pins the streaming scope's resident prefix to this block count (clamped to the block count) instead of the free-memory sizing; unset keeps the sizing.");
+
+    /// <summary>Directory for the per-step dump of the LongCat avatar denoise loop; unset writes nothing and reads nothing back.</summary>
+    public static readonly Knob<string?> LongCatStepDump =
+        Str("diagnostics.longcatStepDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar denoise loop's per-step .npy dump (call{n}_step{i}_t, _noise, _latent); unset writes nothing.");
 
     /// <summary>Directory for a safetensors dump of every YuE decode-stage intermediate, for Python reference parity.</summary>
     public static readonly Knob<string?> YueDump =

@@ -1,6 +1,11 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
@@ -63,6 +68,22 @@ public sealed partial class AttentionLayer
 
     /// <summary>The layer's configuration.</summary>
     public AttentionLayerConfig Config => _config;
+
+    /// <summary>The projection, bias and norm tensors the layer was built with. They are borrowed, so this lists them for a residency
+    /// owner to preload or free; nothing is copied or disposed.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_weights is null)
+            yield break;
+        foreach (Tensor? t in new[]
+                 {
+                     _weights.Query, _weights.Key, _weights.Value, _weights.Qkv, _weights.QkvBias, _weights.Output,
+                     _weights.QueryBias, _weights.KeyBias, _weights.ValueBias, _weights.OutputBias, _weights.Gate, _weights.GateBias,
+                     _weights.QueryNorm, _weights.KeyNorm,
+                 })
+            if (t is not null)
+                yield return t;
+    }
 
     /// <summary>Attention of <paramref name="qInput"/> <c>[B, S, C]</c> or <c>[S, C]</c> over <paramref name="kvInput"/> (the same
     /// tensor for self-attention). Returns the output projection, shaped like the query input with the output width; the caller
@@ -128,7 +149,7 @@ public sealed partial class AttentionLayer
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
     /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout); rank-2
-    /// <c>[S, heads·D]</c> operands are one batch item.</summary>
+    /// <c>[S, heads·D]</c> operands are one batch item. As in <see cref="Attend"/>, all three are taken over and disposed.</summary>
     public Tensor AttendFlat(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
         if (_config.QkNorm is not (AttentionQkNorm.None or AttentionQkNorm.FullWidthRms))
@@ -353,12 +374,25 @@ public sealed partial class AttentionLayer
     }
 
     /// <summary>The permute back to <paramref name="flatShape"/> (<c>[B, S, heads·D]</c>) of a branch's head-major output, which is
-    /// disposed; the caller owns the result.</summary>
+    /// disposed, also when the permute throws (the new tensor is then disposed too, and the exception propagates); the caller owns
+    /// the result.</summary>
     public Tensor MergeHeads(IBackend backend, Tensor attnMh, TensorShape flatShape)
     {
         Tensor flat = new(flatShape, attnMh.DType);
-        backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
-        attnMh.Dispose();
+        try
+        {
+            backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attnMh.Dispose();
+        }
+
         return flat;
     }
 
@@ -626,7 +660,8 @@ public sealed partial class AttentionLayer
         }
         else if (context.QueryRotation.Kind == QkRotationKind.RotateHalfPaired)
         {
-            backend.ApplyRope(q, k, context.QueryRotation.Cos!, context.QueryRotation.Sin!);
+            backend.Rotary(RotaryCall.TokenMajor(q, context.QueryRotation.Cos!, context.QueryRotation.Sin!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+            backend.Rotary(RotaryCall.TokenMajor(k, context.QueryRotation.Cos!, context.QueryRotation.Sin!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
         }
         else
         {
@@ -676,13 +711,13 @@ public sealed partial class AttentionLayer
             case QkRotationKind.None:
                 break;
             case QkRotationKind.InterleavedPairs:
-                backend.WanRopeInterleaved(x, rotation.Cos!, rotation.Sin!, rotation.Tokens, heads, _config.HeadDim);
+                backend.Rotary(RotaryCall.Rows(x, rotation.Cos!, rotation.Sin!, rotation.Tokens, heads, _config.HeadDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
                 break;
             case QkRotationKind.InterleavedPairsPerHead:
-                backend.WanRopeInterleavedPerHead(x, rotation.Cos!, rotation.Sin!, rotation.Tokens, heads, _config.HeadDim);
+                backend.Rotary(RotaryCall.RowsPerHead(x, rotation.Cos!, rotation.Sin!, rotation.Tokens, heads, _config.HeadDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
                 break;
             case QkRotationKind.RotateHalf:
-                backend.ApplyRopeSingle(x, rotation.Cos!, rotation.Sin!);
+                backend.Rotary(RotaryCall.TokenMajor(x, rotation.Cos!, rotation.Sin!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
                 break;
             default:
                 throw new NotSupportedException($"A {rotation.Kind} rotation runs only with the full-width QK norm.");
@@ -745,29 +780,29 @@ public sealed partial class AttentionLayer
         backend.Permute0213(vMh, v, skv, kvHeads, d);
         if (ownsKv) v.Dispose();
         context.HeadMajorRotation?.RotateHeadMajor(backend, qMh, kMh, batch, heads, kvHeads, sq);
-        if (kvHeads != heads)
-        {
-            int group = heads / kvHeads;
-            Tensor kRep = new(new TensorShape(batch, heads, skv, d), kMh.DType);
-            backend.RepeatKvHeads(kRep, kMh, kvHeads, group);
-            kMh.Dispose();
-            kMh = kRep;
-            Tensor vRep = new(new TensorShape(batch, heads, skv, d), vMh.DType);
-            backend.RepeatKvHeads(vRep, vMh, kvHeads, group);
-            vMh.Dispose();
-            vMh = vRep;
-        }
         return RunHeadMajor(backend, qMh, kMh, vMh, sq, act, flatShape, in context);
     }
 
-    /// <summary>The head-major call over permuted, head-repeated operands, then the permute back to <paramref name="flatShape"/>.</summary>
+    /// <summary>The head-major call over permuted operands, then the permute back to <paramref name="flatShape"/>. When that permute
+    /// throws, the attention output and the new tensor are disposed and the exception propagates.</summary>
     private Tensor RunHeadMajor(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, int sq, DType act, TensorShape flatShape,
         in AttentionCallContext context)
     {
         Tensor attn = RunAttention(backend, qMh, kMh, vMh, act, in context, OperandOwnership.All);
         Tensor flat = new(flatShape, act);
-        backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
-        attn.Dispose();
+        try
+        {
+            backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attn.Dispose();
+        }
         return flat;
     }
 
@@ -849,8 +884,7 @@ public sealed partial class AttentionLayer
             return headMajor;
         }
         Tensor o = new(new TensorShape(1, _config.Heads, s, _config.HeadDim), act);
-        backend.Ltx2QkNormRopeHeadMajor(o, src, normWeight, TableCos(rotation), TableSin(rotation), s, _config.Heads, _config.HeadDim,
-            _config.FullWidthNormEps);
+        backend.RmsNormRotary(o, src, normWeight, _config.FullWidthNormEps, TableCos(rotation), TableSin(rotation), RotaryViews.SplitRows(s, _config.Heads, _config.HeadDim));
         src.Dispose();
         return o;
     }
@@ -867,8 +901,7 @@ public sealed partial class AttentionLayer
             RotateFullWidth(backend, o, rotation);
             return o;
         }
-        backend.Ltx2QkNormRopeTokenMajor(o, src, normWeight, TableCos(rotation), TableSin(rotation), s, _config.Heads, _config.HeadDim,
-            _config.FullWidthNormEps);
+        backend.RmsNormRotary(o, src, normWeight, _config.FullWidthNormEps, TableCos(rotation), TableSin(rotation), RotaryViews.SplitRows(s, _config.Heads, _config.HeadDim));
         src.Dispose();
         return o;
     }
@@ -876,7 +909,7 @@ public sealed partial class AttentionLayer
     /// <summary>Interleaved pairs over the full inner width of <c>[S, inner]</c> <paramref name="x"/>.</summary>
     private void RotateFullWidth(IBackend backend, Tensor x, in QkRotation rotation)
     {
-        backend.WanRopeInterleaved(x, rotation.Cos!, rotation.Sin!, (int)x.Shape[0], 1, _config.InnerDim);
+        backend.Rotary(RotaryCall.Rows(x, rotation.Cos!, rotation.Sin!, x.Shape[0], 1, _config.InnerDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     private static Tensor? TableCos(in QkRotation rotation) => rotation.Kind == QkRotationKind.None ? null : rotation.Cos;
@@ -913,7 +946,7 @@ public sealed partial class AttentionLayer
             case AttentionGate.PerHeadDoubledSigmoid:
             {
                 Tensor gatedOut = new(outShape, act);
-                backend.LinearHeadGated(gatedOut, flat, w.Output!, w.OutputBias, gate!, _config.Heads, _config.HeadDim);
+                backend.LinearFused(gatedOut, flat, w.Output!, w.OutputBias, LinearFusion.HeadGated(gate!, _config.Heads, _config.HeadDim));
                 gate!.Dispose();
                 flat.Dispose();
                 return gatedOut;

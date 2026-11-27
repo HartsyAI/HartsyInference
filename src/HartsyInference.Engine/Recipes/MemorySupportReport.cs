@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -13,12 +13,14 @@ public static class MemorySupportReport
 {
     /// <summary>Logs one line per configured-but-unhonoured capability for <paramref name="recipeName"/>.</summary>
     /// <param name="declared">What the recipe says it wires (<see cref="IArchitectureRecipe.MemorySupports"/>).</param>
-    public static void Report(string recipeName, RecipeContext context, MemoryCapabilities declared)
+    /// <param name="refusesUnhonoured">The family refuses the CFG-parallel, DiT-shard and context-parallel placements, which UnhonouredBackends already
+    /// refused; its component warning is that refusal's, so it is not repeated here.</param>
+    public static void Report(string recipeName, RecipeContext context, MemoryCapabilities declared, bool refusesUnhonoured = false)
     {
         ArgumentNullException.ThrowIfNull(recipeName);
         ArgumentNullException.ThrowIfNull(context);
         ReportResolvedPolicy(recipeName, context, declared);
-        ReportPlacement(recipeName, context, declared);
+        ReportPlacement(recipeName, context, declared, refusesUnhonoured);
         ReportPolicy(recipeName, context, declared);
         ReportBackend(recipeName, context, declared);
     }
@@ -57,7 +59,7 @@ public static class MemorySupportReport
     }
 
     /// <summary>Placement devices the operator paid for (a whole second GPU) that this family will not touch.</summary>
-    private static void ReportPlacement(string recipeName, RecipeContext context, MemoryCapabilities declared)
+    private static void ReportPlacement(string recipeName, RecipeContext context, MemoryCapabilities declared, bool refusesUnhonoured)
     {
         if (context.CpBackends is { Count: > 0 } && !declared.HasFlag(MemoryCapabilities.ContextParallel))
         {
@@ -65,7 +67,8 @@ public static class MemorySupportReport
         }
         if (context.CfgParallelBackend is not null && !declared.HasFlag(MemoryCapabilities.CfgParallel))
         {
-            Warn(recipeName, "CFG-parallel", "the unconditional branch runs sequentially on the primary backend");
+            Warn(recipeName, "CFG-parallel", "this family does not declare it: a family that refuses the placement fails at construction, "
+                + "and any other runs the unconditional branch on the primary backend");
         }
         if ((context.DitShardBackend is not null || context.DitShardBackends is { Count: > 0 })
             && !declared.HasFlag(MemoryCapabilities.DitSharding))
@@ -74,7 +77,7 @@ public static class MemorySupportReport
         }
         bool componentsPlaced = (context.TextEncoderBackend is not null && !ReferenceEquals(context.TextEncoderBackend, context.Backend))
             || (context.VaeBackend is not null && !ReferenceEquals(context.VaeBackend, context.Backend));
-        if (componentsPlaced && !declared.HasFlag(MemoryCapabilities.ComponentPlacement))
+        if (componentsPlaced && !refusesUnhonoured && !declared.HasFlag(MemoryCapabilities.ComponentPlacement))
         {
             Warn(recipeName, "Component placement", "the text encoder and VAE run on the primary backend anyway");
         }
@@ -114,7 +117,8 @@ public static class MemorySupportReport
             pending.Add("phase unload");
         if (policy.Caches == CachePrecision.Half) pending.Add("half-precision caches");
         if (policy.ActivationOffload == LeverState.On) pending.Add("activation offload");
-        if (policy.QuantizedCompute == LeverState.On) pending.Add("quantized compute");
+        if (policy.QuantizedCompute == LeverState.On && !declared.HasFlag(MemoryCapabilities.QuantizedCompute))
+            pending.Add("quantized compute");
         if (policy.FreeAfterGeneration == LeverState.On) pending.Add("free-after-generation");
         if (policy.MultiGpuSpill == LeverState.On) pending.Add("multi-GPU spill");
         if (policy.ChunkScale < 1.0f && !declared.HasFlag(MemoryCapabilities.Chunking))

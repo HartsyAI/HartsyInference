@@ -1,7 +1,7 @@
+using HartsyInference.Core.Backends.Cpu.Moe;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Moe.Residency;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu.Moe;
 
 namespace HartsyInference.Cuda;
 
@@ -38,6 +38,30 @@ public static class CudaMoeOffload
             PackedExpertHostRunner runner = new(hidden, intermediate, key => offload!.Resolve(key));
             offload = new MoeExpertOffload(cache, runner, new DecayedLfuHysteresisPolicy(ScoreDecayPerAccess, VictimHysteresis));
             return offload;
+        }
+        catch
+        {
+            cache.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Creates an offload with no CPU runner: the cache holds the experts it can, and every miss runs on the device from a copy
+    /// uploaded for that call. For experts the packed CPU kernels cannot read, such as block-FP8 ones, or an activation they do not run.
+    /// Every expert tensor is kept out of the backend's auto-promotion, as in <see cref="Create"/>.</summary>
+    /// <param name="backend">The device the cache lives on.</param>
+    /// <param name="budgetBytes">Device bytes the cache may hold.</param>
+    /// <param name="expertTensors">Every routed expert projection of the model.</param>
+    public static MoeExpertOffload CreateDeviceOnly(CudaBackend backend, long budgetBytes, IEnumerable<Tensor> expertTensors)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(expertTensors);
+        CudaExpertCache cache = new(backend, budgetBytes);
+        try
+        {
+            if (backend.StreamingCache is CudaStreamingWeightCache streaming)
+                streaming.ExcludeFromAutoPromotion(expertTensors);
+            return new MoeExpertOffload(cache, host: null, new DecayedLfuHysteresisPolicy(ScoreDecayPerAccess, VictimHysteresis));
         }
         catch
         {

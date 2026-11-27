@@ -1,0 +1,467 @@
+using System.Globalization;
+using System.Reflection;
+using System.Security.Cryptography;
+using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tools.WeightsMirror;
+
+const string HelpText = """
+WeightsMirror - repack pickle checkpoints to safetensors for hosting, and prove the repack equals its source.
+
+  The pickle is read only by the safe-subset reader (nothing in it is executed), one tensor at a time. The output keeps the
+  source's tensor names, order, shapes, dtypes and bytes. Sources are only read; nothing is written next to them.
+
+  This is not CheckpointRepacker. That tool stamps model identity metadata, merges, casts and quantizes, and loads a whole
+  pickle; this one stages a byte-faithful repack of a file that will be hosted, one tensor at a time, and records the proof.
+
+USAGE
+  WeightsMirror inspect <checkpoint> [--recursive]
+      Lists tensor count, storage entries, dtypes with their bytes, the first tensors and the top-level key names.
+  WeightsMirror run --plan <mirror-plan.json> --models-root <dir> --staging <dir> [--only id,id] [--force] [--whole-below <bytes>]
+      For each plan item: hash the local pickle against the upstream pin, repack it into <staging>/<output>, verify the repack
+      tensor for tensor, hash it, and record everything in <staging>/manifest.json. The staging folder must be outside the
+      models root and outside the repository. A source up to --whole-below bytes (default 2 GiB) is verified through the
+      whole-file pickle reader, which does not share the byte-reading code of the tensor-by-tensor reader that wrote the repack.
+  WeightsMirror verify --plan <mirror-plan.json> --models-root <dir> --staging <dir> [--only id,id] [--whole-below <bytes>]
+      Verifies already staged repacks against their sources again, without repacking, and updates the manifest.
+  WeightsMirror annotate --staging <dir> --ids id,id --text <what was checked>
+      Records a check made outside this tool (for example a comparison through another loader) on those manifest entries.
+  WeightsMirror check --staging <dir>
+      Re-hash every file the manifest lists and compare sizes and sha256.
+  WeightsMirror notices --staging <dir>
+      Writes <staging>/<model>/CHANGES.txt for each model folder: the change notice the Tencent licences require on a modified file.
+  WeightsMirror licenses --staging <dir>
+      Checks that each model folder holds the licence and notice files its licence needs (<staging>/<model>/<name>, fetched by
+      hand from the URLs in manifest.json) by comparing each file's git blob SHA-1 with the one recorded; lists what is missing.
+""";
+
+if (args.Length == 0 || args[0] is "-h" or "--help")
+{
+    Console.WriteLine(HelpText);
+    return 0;
+}
+Dictionary<string, string> options = new(StringComparer.Ordinal);
+List<string> positionals = [];
+for (int i = 1; i < args.Length; i++)
+{
+    if (!args[i].StartsWith("--", StringComparison.Ordinal))
+    {
+        positionals.Add(args[i]);
+    }
+    else if (args[i] is "--recursive" or "--force")
+    {
+        options[args[i]] = "true";
+    }
+    else if (i + 1 < args.Length)
+    {
+        options[args[i]] = args[++i];
+    }
+    else
+    {
+        return Fail($"{args[i]} needs a value.");
+    }
+}
+return args[0] switch
+{
+    "inspect" => positionals.Count == 1 ? Inspect(positionals[0], options.ContainsKey("--recursive")) : Fail("inspect takes one checkpoint path."),
+    "run" => Run(options, repack: true),
+    "verify" => Run(options, repack: false),
+    "annotate" => Annotate(options),
+    "check" => Check(options),
+    "notices" => Notices(options),
+    "licenses" => Licenses(options),
+    _ => Fail($"Unknown command '{args[0]}'."),
+};
+
+static int Fail(string message)
+{
+    Console.Error.WriteLine(message);
+    return 1;
+}
+
+static string Sha256Of(string path)
+{
+    using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20);
+    return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+}
+
+static int Inspect(string path, bool recursive)
+{
+    using PytorchPickleLoader loader = new();
+    loader.OpenLazy(path, recursive);
+    Dictionary<string, (int Count, long Bytes)> dtypes = new(StringComparer.Ordinal);
+    foreach (PytorchTensorDescriptor d in loader.Descriptors.Values)
+    {
+        (int count, long bytes) = dtypes.GetValueOrDefault(d.DType.Name);
+        dtypes[d.DType.Name] = (count + 1, bytes + d.DType.ComputeByteCount(d.Shape.ElementCount));
+    }
+    Console.WriteLine($"{path}: {loader.Descriptors.Count} tensors, {loader.Descriptors.Values.Select(d => d.StorageKey).Distinct().Count()} storage entries");
+    foreach ((string name, (int count, long bytes)) in dtypes)
+    {
+        Console.WriteLine($"  {name}: {count} tensors, {bytes:N0} bytes");
+    }
+    foreach (PytorchTensorDescriptor d in loader.Descriptors.Values.Take(6))
+    {
+        Console.WriteLine($"  {d.Name} {d.DType.Name} {d.Shape} storage {d.StorageKey}+{d.StorageByteOffset}");
+    }
+    string[] roots = [.. loader.Descriptors.Keys.Select(k => k.Split('.')[0]).Distinct().Take(12)];
+    Console.WriteLine($"  key roots: {string.Join(", ", roots)}");
+    return 0;
+}
+
+static bool IsUnder(string path, string root)
+{
+    string relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
+    return relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) && !Path.IsPathRooted(relative);
+}
+
+static string? RepoRootOf(string start)
+{
+    for (DirectoryInfo? dir = new DirectoryInfo(Path.GetFullPath(start)); dir is not null; dir = dir.Parent)
+    {
+        if (Directory.Exists(Path.Combine(dir.FullName, ".git")) || File.Exists(Path.Combine(dir.FullName, ".git")))
+        {
+            return dir.FullName;
+        }
+    }
+    return null;
+}
+
+static int Run(Dictionary<string, string> options, bool repack)
+{
+    if (!options.TryGetValue("--plan", out string? planPath) || !options.TryGetValue("--models-root", out string? modelsRoot)
+        || !options.TryGetValue("--staging", out string? staging))
+    {
+        return Fail("This command needs --plan, --models-root and --staging.");
+    }
+    long wholeBelow = 2L << 30;
+    if (options.TryGetValue("--whole-below", out string? limit) && !long.TryParse(limit, CultureInfo.InvariantCulture, out wholeBelow))
+    {
+        return Fail("--whole-below takes a byte count.");
+    }
+    string staged = Path.GetFullPath(staging);
+    if (IsUnder(staged, modelsRoot) || IsUnder(modelsRoot, staged))
+    {
+        return Fail($"The staging folder '{staged}' must be outside the models root '{modelsRoot}'.");
+    }
+    foreach (string start in new[] { Directory.GetCurrentDirectory(), Path.GetDirectoryName(Path.GetFullPath(planPath)) ?? "." })
+    {
+        if (RepoRootOf(start) is string repo && IsUnder(staged, repo))
+        {
+            return Fail($"The staging folder '{staged}' must be outside the repository '{repo}'.");
+        }
+    }
+    MirrorPlan plan = MirrorPlan.Load(planPath);
+    HashSet<string>? only = options.TryGetValue("--only", out string? ids) ? [.. ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)] : null;
+    if (only is not null && only.Except(plan.Items.Select(i => i.Id)).FirstOrDefault() is string unknown)
+    {
+        return Fail($"The plan has no item '{unknown}'.");
+    }
+    Directory.CreateDirectory(staged);
+    string manifestPath = Path.Combine(staged, "manifest.json");
+    MirrorManifest manifest = MirrorManifest.LoadOrNew(manifestPath);
+    string tool = "WeightsMirror " + (Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0");
+    int failures = 0;
+    foreach (MirrorItem item in plan.Items.Where(i => only is null || only.Contains(i.Id)))
+    {
+        try
+        {
+            MirrorManifestItem done = repack
+                ? RunItem(plan, item, modelsRoot, staged, tool, options.ContainsKey("--force"), wholeBelow, manifest.Items.FirstOrDefault(m => m.Id == item.Id)?.License.TextFiles)
+                : VerifyItem(item, modelsRoot, staged, manifest, wholeBelow);
+            manifest.Items = [.. manifest.Items.Where(m => m.Id != item.Id), done];
+            manifest.Save(manifestPath);
+            Console.WriteLine($"[{item.Id}] ok: {done.Repack.Size:N0} bytes, sha256 {done.Repack.Sha256}");
+        }
+        // One failed item must not stop the rest: any error here is that item's. A failed repack leaves no valid file, so the manifest stops listing it.
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            failures++;
+            Console.Error.WriteLine($"[{item.Id}] FAILED: {ex.Message}");
+            if (repack && manifest.Items.RemoveAll(m => m.Id == item.Id) > 0)
+            {
+                manifest.Save(manifestPath);
+            }
+        }
+    }
+    return failures == 0 ? 0 : 1;
+}
+
+static string MethodOf(bool wholeSource) => wholeSource
+    ? "names and order, shapes, dtypes and bytes: the pickle through the whole-file safe-subset reader (not the tensor-by-tensor reader that wrote the repack), the repack through the safetensors loader"
+    : "names and order, shapes, dtypes and bytes: the pickle through the tensor-by-tensor safe-subset reader (the one that wrote the repack), the repack through the safetensors loader";
+
+static MirrorManifestItem VerifyItem(MirrorItem item, string modelsRoot, string staged, MirrorManifest manifest, long wholeBelow)
+{
+    MirrorManifestItem existing = manifest.Items.FirstOrDefault(m => m.Id == item.Id) ?? throw new InvalidDataException("The manifest has no entry for it; run it first.");
+    string source = Path.GetFullPath(Path.Combine(modelsRoot, item.LocalSource));
+    string output = Path.GetFullPath(Path.Combine(staged, item.Output));
+    bool whole = new FileInfo(source).Length <= wholeBelow;
+    Console.WriteLine($"[{item.Id}] verifying against the source ({(whole ? "whole-file reader" : "tensor-by-tensor reader")})");
+    PickleRepackVerification verification = StreamingPickleRepack.Verify(source, output, item.Recursive, whole);
+    if (!verification.Equal)
+    {
+        throw new InvalidDataException($"The repack differs from its source: {string.Join("; ", verification.Differences)}");
+    }
+    return new MirrorManifestItem
+    {
+        Id = existing.Id, Model = existing.Model, DateUtc = existing.DateUtc, Tool = existing.Tool, Source = existing.Source, Repack = existing.Repack, License = existing.License, Notes = existing.Notes,
+        Verification = new ManifestVerification
+        {
+            Equal = true, TensorsCompared = verification.TensorCount, Method = MethodOf(whole), ExternalChecks = existing.Verification.ExternalChecks,
+        },
+    };
+}
+
+static int Annotate(Dictionary<string, string> options)
+{
+    if (!options.TryGetValue("--staging", out string? staging) || !options.TryGetValue("--ids", out string? ids) || !options.TryGetValue("--text", out string? text))
+    {
+        return Fail("annotate needs --staging, --ids and --text.");
+    }
+    string path = Path.Combine(staging, "manifest.json");
+    MirrorManifest manifest = MirrorManifest.LoadOrNew(path);
+    HashSet<string> wanted = [.. ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+    if (wanted.Except(manifest.Items.Select(i => i.Id)).FirstOrDefault() is string unknown)
+    {
+        return Fail($"The manifest has no entry '{unknown}'.");
+    }
+    foreach (MirrorManifestItem item in manifest.Items.Where(i => wanted.Contains(i.Id)))
+    {
+        item.Verification.ExternalChecks.Add(text);
+    }
+    manifest.Save(path);
+    return 0;
+}
+
+static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string modelsRoot, string staged, string tool, bool force, long wholeBelow,
+    IReadOnlyList<MirrorLicenseFile>? recordedTexts)
+{
+    string source = Path.GetFullPath(Path.Combine(modelsRoot, item.LocalSource));
+    if (!File.Exists(source))
+    {
+        throw new FileNotFoundException($"The local source '{item.LocalSource}' is not under the models root.");
+    }
+    long size = new FileInfo(source).Length;
+    if (size != item.SourceSize)
+    {
+        throw new InvalidDataException($"The local source is {size:N0} bytes; upstream lists {item.SourceSize:N0}.");
+    }
+    string output = Path.GetFullPath(Path.Combine(staged, item.Output));
+    if (!IsUnder(output, staged))
+    {
+        throw new InvalidDataException($"The output '{item.Output}' leaves the staging folder.");
+    }
+    if (File.Exists(output) && !force)
+    {
+        throw new IOException($"'{item.Output}' already exists in the staging folder; pass --force to replace it.");
+    }
+    Console.WriteLine($"[{item.Id}] hashing the local source ({size:N0} bytes)");
+    string sourceSha = Sha256Of(source);
+    if (!string.Equals(sourceSha, item.SourceSha256, StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidDataException($"The local source hashes to {sourceSha}; upstream pins {item.SourceSha256}.");
+    }
+    Dictionary<string, string> metadata = new(StringComparer.Ordinal)
+    {
+        ["format"] = "pt",
+        ["hartsy.converter"] = "HartsyInference.StreamingPickleRepack",
+        ["hartsy.source_repo"] = item.SourceRepo,
+        ["hartsy.source_path"] = item.SourcePath,
+        ["hartsy.source_revision"] = item.Revision,
+        ["hartsy.source_sha256"] = item.SourceSha256,
+    };
+    Console.WriteLine($"[{item.Id}] repacking");
+    PickleRepackSummary summary = StreamingPickleRepack.Repack(source, output, item.Recursive, metadata);
+    bool whole = size <= wholeBelow;
+    Console.WriteLine($"[{item.Id}] verifying {summary.TensorCount} tensors against the source ({(whole ? "whole-file reader" : "tensor-by-tensor reader")})");
+    PickleRepackVerification verification = StreamingPickleRepack.Verify(source, output, item.Recursive, whole);
+    if (!verification.Equal)
+    {
+        File.Delete(output);
+        throw new InvalidDataException($"The repack differs from its source: {string.Join("; ", verification.Differences)}");
+    }
+    using SafeTensorsLoader loader = new();
+    loader.Load(output);
+    Dictionary<string, int> dtypes = loader.Descriptors.Values.GroupBy(d => d.DType.Name).OrderBy(g => g.Key, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count());
+    MirrorLicense license = plan.LicenseOf(item);
+    return new MirrorManifestItem
+    {
+        Id = item.Id,
+        Model = item.Model,
+        DateUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+        Tool = tool,
+        Source = new ManifestSource
+        {
+            Repo = item.SourceRepo, Path = item.SourcePath, Revision = item.Revision, Url = item.SourceUrl, Size = item.SourceSize, Sha256 = sourceSha,
+            LocalCopyMatchesUpstream = true,
+        },
+        Repack = new ManifestRepack
+        {
+            Path = item.Output.Replace('\\', '/'), Size = new FileInfo(output).Length, Sha256 = Sha256Of(output), TensorCount = summary.TensorCount,
+            TensorBytes = summary.TensorBytes, Dtypes = dtypes, Streamed = summary.Streamed,
+        },
+        Verification = new ManifestVerification
+        {
+            Equal = true, TensorsCompared = verification.TensorCount, Method = MethodOf(whole),
+        },
+        License = new ManifestLicense
+        {
+            Id = license.Id, Name = license.Name, Spdx = license.Spdx, HostObligations = license.HostObligations,
+            // Copies, not the plan's objects, carrying over the hash and time the licenses command already recorded for a text file.
+            TextFiles = [.. license.TextFiles.Select(f =>
+            {
+                MirrorLicenseFile? known = recordedTexts?.FirstOrDefault(r => r.Name == f.Name && r.GitBlobSha1 == f.GitBlobSha1);
+                return new MirrorLicenseFile
+                {
+                    Name = f.Name, Url = f.Url, Size = f.Size, GitBlobSha1 = f.GitBlobSha1, Sha256 = known?.Sha256 ?? "", VerifiedUtc = known?.VerifiedUtc ?? "",
+                };
+            })],
+        },
+        Notes = item.Notes,
+    };
+}
+
+static int Check(Dictionary<string, string> options)
+{
+    if (!options.TryGetValue("--staging", out string? staging))
+    {
+        return Fail("check needs --staging.");
+    }
+    if (LoadRequired(staging) is not MirrorManifest manifest)
+    {
+        return 1;
+    }
+    int bad = 0;
+    foreach (MirrorManifestItem item in manifest.Items)
+    {
+        string path = Path.Combine(staging, item.Repack.Path);
+        bool ok = File.Exists(path) && new FileInfo(path).Length == item.Repack.Size && Sha256Of(path) == item.Repack.Sha256;
+        Console.WriteLine($"[{item.Id}] {(ok ? "ok" : "MISMATCH")} {item.Repack.Path}");
+        bad += ok ? 0 : 1;
+    }
+    Console.WriteLine($"{manifest.Items.Count - bad} of {manifest.Items.Count} files match the manifest.");
+    return bad == 0 ? 0 : 1;
+}
+
+// A missing or empty manifest is a failed check, not a pass: a mistyped --staging must not look like a clean folder.
+static MirrorManifest? LoadRequired(string staging)
+{
+    string path = Path.Combine(staging, "manifest.json");
+    MirrorManifest manifest = MirrorManifest.LoadOrNew(path);
+    if (!File.Exists(path) || manifest.Items.Count == 0)
+    {
+        Console.Error.WriteLine($"'{path}' is missing or lists no files; give the staging folder the run wrote.");
+        return null;
+    }
+    return manifest;
+}
+
+static int Notices(Dictionary<string, string> options)
+{
+    if (!options.TryGetValue("--staging", out string? staging))
+    {
+        return Fail("notices needs --staging.");
+    }
+    if (LoadRequired(staging) is not MirrorManifest manifest)
+    {
+        return 1;
+    }
+    foreach (IGrouping<string, MirrorManifestItem> model in manifest.Items.GroupBy(i => i.Model, StringComparer.Ordinal))
+    {
+        System.Text.StringBuilder text = new();
+        text.AppendLine("CHANGE NOTICE");
+        text.AppendLine();
+        text.AppendLine("The files listed here are modified copies of the files named as their source. They were changed by HartsyInference");
+        text.AppendLine("(https://github.com/HartsyAI/HartsyInference, tools/WeightsMirror): the container format only, from a PyTorch pickle to safetensors.");
+        text.AppendLine("Tensor names, their order, shapes, dtypes and values are unchanged for every tensor written (compared tensor for tensor), and a");
+        text.AppendLine("metadata entry in the safetensors header names the source. Where a note below says that data of the source was left out, it says what.");
+        text.AppendLine("They remain subject to the licence below.");
+        foreach (MirrorManifestItem item in model.OrderBy(i => i.Repack.Path, StringComparer.Ordinal))
+        {
+            text.AppendLine();
+            text.AppendLine($"File:      {item.Repack.Path[(model.Key.Length + 1)..]}");
+            text.AppendLine($"Source:    {item.Source.Repo} {item.Source.Revision}, {item.Source.Path} ({item.Source.Size:N0} bytes, sha256 {item.Source.Sha256})");
+            text.AppendLine($"This file: {item.Repack.Size:N0} bytes, sha256 {item.Repack.Sha256}");
+            text.AppendLine($"Licence:   {item.License.Name}");
+            if (!string.IsNullOrWhiteSpace(item.Notes))
+            {
+                text.AppendLine($"Note:      {item.Notes}");
+            }
+        }
+        string path = Path.Combine(staging, model.Key, "CHANGES.txt");
+        File.WriteAllText(path, text.ToString().ReplaceLineEndings("\n"), new System.Text.UTF8Encoding(false));
+        Console.WriteLine($"[{model.Key}] wrote CHANGES.txt");
+    }
+    return 0;
+}
+
+static int Licenses(Dictionary<string, string> options)
+{
+    if (!options.TryGetValue("--staging", out string? staging))
+    {
+        return Fail("licenses needs --staging.");
+    }
+    if (LoadRequired(staging) is not MirrorManifest manifest)
+    {
+        return 1;
+    }
+    int bad = 0;
+    int total = 0;
+    bool changed = false;
+    foreach (IGrouping<string, MirrorManifestItem> model in manifest.Items.GroupBy(i => i.Model, StringComparer.Ordinal).OrderBy(g => g.Key, StringComparer.Ordinal))
+    {
+        // Every licence of the model's files counts, so a folder that mixed licences would need all their texts.
+        foreach (MirrorLicenseFile file in model.SelectMany(i => i.License.TextFiles).DistinctBy(f => (f.Name, f.GitBlobSha1)))
+        {
+            total++;
+            string path = Path.Combine(staging, model.Key, file.Name);
+            if (!File.Exists(path))
+            {
+                bad++;
+                Console.WriteLine($"[{model.Key}] MISSING {file.Name}  fetch {file.Url}  ({file.Size:N0} bytes, git blob {file.GitBlobSha1})");
+                continue;
+            }
+            byte[] content = File.ReadAllBytes(path);
+            byte[] header = System.Text.Encoding.ASCII.GetBytes($"blob {content.Length}\0");
+            string blob = Convert.ToHexString(SHA1.HashData([.. header, .. content])).ToLowerInvariant();
+            string sha = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+            List<MirrorLicenseFile> copies = [.. model.SelectMany(i => i.License.TextFiles).Where(f => f.Name == file.Name && f.GitBlobSha1 == file.GitBlobSha1)];
+            string? problem = null;
+            if (!string.Equals(blob, file.GitBlobSha1, StringComparison.OrdinalIgnoreCase))
+            {
+                problem = $"git blob {blob}, expected {file.GitBlobSha1}";
+            }
+            else if (copies.FirstOrDefault(c => c.Sha256.Length > 0 && !string.Equals(c.Sha256, sha, StringComparison.OrdinalIgnoreCase)) is MirrorLicenseFile recorded)
+            {
+                problem = $"recorded sha256 {recorded.Sha256}";
+            }
+            if (problem is not null)
+            {
+                bad++;
+                Console.WriteLine($"[{model.Key}] MISMATCH ({problem}) {file.Name}  {content.Length:N0} bytes  sha256 {sha}");
+                continue;
+            }
+            foreach (MirrorLicenseFile copy in copies.Where(c => c.Sha256.Length == 0))
+            {
+                // The first verified copy fixes the hash and the time.
+                copy.Sha256 = sha;
+                copy.VerifiedUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+                changed = true;
+            }
+            Console.WriteLine($"[{model.Key}] ok {file.Name}  {content.Length:N0} bytes  sha256 {sha}  from {file.Url}");
+        }
+        if (!File.Exists(Path.Combine(staging, model.Key, "CHANGES.txt")))
+        {
+            bad++;
+            Console.WriteLine($"[{model.Key}] MISSING CHANGES.txt  run the notices command");
+        }
+    }
+    // A run that found a problem records nothing: the hashes it would save are not known to be of the right files.
+    if (changed && bad == 0)
+    {
+        manifest.Save(Path.Combine(staging, "manifest.json"));
+    }
+    Console.WriteLine(bad == 0 ? $"All {total} licence files are in place." : $"{bad} licence or notice file(s) missing or different.");
+    return bad == 0 ? 0 : 1;
+}

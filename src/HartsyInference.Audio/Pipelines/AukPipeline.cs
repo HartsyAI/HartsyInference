@@ -5,7 +5,6 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.QwenOmni;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -96,6 +95,7 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         ArgumentNullException.ThrowIfNull(auk);
         ArgumentNullException.ThrowIfNull(vae);
         ArgumentNullException.ThrowIfNull(omni);
+        _loaded = false;
         // Every stage's LoadWeights below replaces its Tensor fields, orphaning any device-resident cache keyed by the old ones.
         if (_residentBackend is not null && _residentBytes > 0)
         {

@@ -1,6 +1,11 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -10,12 +15,12 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// text branch through attention (joint attention needs it) but skips text mlp/ada — <c>vid_only</c>.
 /// <para>Device-resident: tokens stay <c>[L, C]</c> backend tensors end-to-end — RMS/modulate/gate via the
 /// DiT glue kernels, fused QKV split + per-head RMS qk-norm, window-local rope via
-/// <c>WanRopeInterleaved</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
-/// gather/scatter via <c>RowGather</c>/<c>RowScatterAdd</c> index tensors, same-shape windows batched into
+/// <c>the interleaved rotary (RotaryCall.Rows)</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
+/// gather/scatter via <c>GatherRows</c>/<c>ScatterAddRows</c> index tensors, same-shape windows batched into
 /// one SDPA call. Text is REPLICATED into every window and MEAN-pooled across windows afterwards
 /// (fixed-order <c>MoeCombine</c> sum + 1/N scale). The emb+ada modulation vectors are additive constants per
 /// timestep, combined once and cached (<see cref="PrepareMod"/>).</para></summary>
-public sealed class SeedVr2DitBlock
+public sealed class SeedVr2DitBlock : IStreamingBlock
 {
     private readonly SeedVr2Config _config;
     private readonly bool _shared;
@@ -51,8 +56,6 @@ public sealed class SeedVr2DitBlock
 
     /// <summary>Whether this block uses the shifted window partition (odd layers).</summary>
     public int Parity => _shifted ? 1 : 0;
-
-    internal AttentionLayer AttentionStage => _attention;
 
     /// <summary>Binds <c>blocks.{i}.*</c> checkpoint keys (verbatim names via the near-identity converter).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, int index)
@@ -310,6 +313,10 @@ public sealed class SeedVr2DitBlock
 
     /// <summary>GEMM weights for backend preload/free (mod vectors and qk-norm affines are plan-lifetime
     /// weight-cache entries, not phase-staged — excluded here).</summary>
+    /// <summary>Device footprint of this block's weights, sized for the streaming window.</summary>
+    public long EstimatedWeightBytes => WeightBytes.Sum(EnumerateWeights());
+
+    /// <inheritdoc/>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         yield return _qkvVidW;
@@ -349,12 +356,12 @@ public sealed class SeedVr2DitBlock
         Tensor tk = new Tensor(new TensorShape(lt, c), DType.F32);
         Tensor tv = new Tensor(new TensorShape(lt, c), DType.F32);
         backend.QkvSplitNorm(tq, tk, tv, txtQkv, normQTxt, normKTxt, 1e-5f);
-        backend.WanRopeInterleaved(vq, part.VidCos, part.VidSin, lv, heads, hd);
-        backend.WanRopeInterleaved(vk, part.VidCos, part.VidSin, lv, heads, hd);
+        backend.Rotary(RotaryCall.Rows(vq, part.VidCos, part.VidSin, lv, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(vk, part.VidCos, part.VidSin, lv, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         if (plan.TxtCos is not null)
         {
-            backend.WanRopeInterleaved(tq, plan.TxtCos, plan.TxtSin!, lt, heads, hd);
-            backend.WanRopeInterleaved(tk, plan.TxtCos, plan.TxtSin!, lt, heads, hd);
+            backend.Rotary(RotaryCall.Rows(tq, plan.TxtCos, plan.TxtSin!, lt, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+            backend.Rotary(RotaryCall.Rows(tk, plan.TxtCos, plan.TxtSin!, lt, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         }
 
         Tensor catQ = Concat0(backend, vq, tq);
@@ -395,7 +402,7 @@ public sealed class SeedVr2DitBlock
             backend.Split([vidRows, txtRows], back, dim: 1);
             back.Dispose();
 
-            backend.RowScatterAdd(vidOut, vidRows, group.VidIndices, g * wt, c);
+            backend.ScatterAddRows(vidOut, vidRows, group.VidIndices);
             // Every window repeats the text rows: sum them in window order, never by scatter (it is not atomic).
             backend.MoeCombine(txtOut, txtRows, group.TxtSlots, group.TxtWeights, g, accumulate: true);
             vidRows.Dispose();
@@ -412,11 +419,11 @@ public sealed class SeedVr2DitBlock
         return output;
     }
 
-    // [g, s, c] groups: RowGather and RowScatterAdd read only m and channels, never the tensor shape.
+    // [g, s, c] groups: the gather sees groups · windowRows rows of channels elements.
     private static Tensor Gather(IBackend backend, Tensor src, Tensor indices, int groups, int windowRows, int channels)
     {
         Tensor output = new Tensor(new TensorShape(groups, windowRows, channels), DType.F32);
-        backend.RowGather(output, src, indices, (int)((long)groups * windowRows), channels);
+        backend.GatherRows(output, src, indices);
         return output;
     }
 }

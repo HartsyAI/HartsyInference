@@ -112,7 +112,7 @@ public static unsafe class MiniMaxH3Latents
     {
         ArgumentNullException.ThrowIfNull(latent);
         ArgumentNullException.ThrowIfNull(config);
-        int c = config.AudioLatentsDim;
+        int c = config.AudioChannels;
         int channels = (int)latent.Shape[2], audioT = (int)latent.Shape[3];
         if ((int)latent.Shape[1] != c)
         {
@@ -141,7 +141,7 @@ public static unsafe class MiniMaxH3Latents
     {
         ArgumentNullException.ThrowIfNull(rows);
         ArgumentNullException.ThrowIfNull(config);
-        int c = config.AudioLatentsDim, channels = (int)rows.Shape[0] / Math.Max(1, audioT);
+        int c = config.AudioChannels, channels = (int)rows.Shape[0] / Math.Max(1, audioT);
         Tensor outT = new Tensor(new TensorShape(1, c, channels, audioT), DType.F32);
         float* src = (float*)rows.DataPointer;
         float* dst = (float*)outT.DataPointer;

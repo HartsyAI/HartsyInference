@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Contracts;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -280,7 +281,7 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
 
         // Sampler selection (2026-08-20). SD3 is flow-matching, so it had no user-selectable sampler at all before
         // this. The predictor hands back the RAW cond/uncond pair — the fused device op applies uncond-anchored CFG at
-        // the real scale, exactly as the direct CfgEulerStep call did — and everything family-specific (the branch
+        // the real scale, exactly as the direct GuidedEulerStep call did — and everything family-specific (the branch
         // order, the step-cache gates) stays inside the closure.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "SD3",
             startsFromNoisedInit: startStep > 0);

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>The legacy entry point a call came through. A pinned call is planned over that entry's rows only, so a
 /// migrated call keeps the kernel it had until its own bounded A/B moves it.</summary>
@@ -58,6 +58,27 @@ public readonly record struct AttentionCall
     /// <summary>The legacy entry point the call is pinned to; <see cref="AttentionRoute.Auto"/> plans freely.</summary>
     public AttentionRoute Route { get; init; }
 
+    /// <summary>Set when the keys and values are paged: <see cref="Key"/> and <see cref="Value"/> are then a layer's page
+    /// buffers and a row is found through this table. Null for contiguous keys and values. Only a row that declares
+    /// <see cref="AttentionKernelCapability.PagedKv"/> reads such a call; every other row would take the page buffers for a
+    /// contiguous cache.</summary>
+    public AttentionKvPages? KvPages { get; init; }
+
+    /// <summary>Set when each sequence of the batch has its own valid key length (docs/ATTENTION_CONTRACT.md §2): sequence
+    /// <c>b</c> attends the first <c>SequenceLengths[b]</c> rows of its keys, clamped to the rows present, and under a causal
+    /// mask its query rows are its last ones. <see cref="Positions"/> is then left unset. Null for one length shared by the
+    /// batch. Only a row that declares <see cref="AttentionKernelCapability.SequenceLengths"/> reads such a call.</summary>
+    public int[]? SequenceLengths { get; init; }
+
+    /// <summary>When set, receives every row's natural-log LSE (§3) as F32 <c>[B, Hq, Sq]</c>. Only a row that declares
+    /// <see cref="AttentionKernelCapability.Lse"/> writes it.</summary>
+    public Tensor? Lse { get; init; }
+
+    /// <summary>True for a call no legacy entry point carries: it has a length per sequence or an LSE output, and is pinned
+    /// to the flash route, which is how <see cref="FromDecodeWithLengths"/> builds one. A GPU backend plans its flash rows
+    /// directly for such a call, where only a row that declares what the call uses covers it.</summary>
+    public bool PlansFlashRowsDirectly => (SequenceLengths is not null || Lse is not null) && Route == AttentionRoute.Flash;
+
     /// <summary>Batch.</summary>
     public int Batch => Query.Batch;
 
@@ -96,6 +117,9 @@ public readonly record struct AttentionCall
 
     private string? Gap(bool operands)
     {
+        if (KvPages is not null) return "paged keys and values";
+        if (SequenceLengths is not null) return "per-sequence key lengths";
+        if (Lse is not null) return "an LSE output";
         AttentionMask m = Mask;
         AttentionLayout layout = Route is AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa
             ? AttentionLayout.TokenMajor : AttentionLayout.HeadMajor;
@@ -173,6 +197,18 @@ public readonly record struct AttentionCall
             Route = kvHeads == heads ? AttentionRoute.TokenMajor : AttentionRoute.TokenMajorGqa,
         };
 
+    /// <summary>Checks a legacy <c>kvGroup</c> against the operands it describes: the call derives <see cref="KvGroup"/> as
+    /// <c>Hq / Hkv</c>, so the raw value a caller passes must agree with the shapes (0 and below read as 1). Returns the group.</summary>
+    /// <exception cref="ArgumentException">The operands are not rank-4 head-major tensors with <c>Hq = kvGroup × Hkv</c>.</exception>
+    public static int ValidateFlashGroup(Tensor query, Tensor key, int kvGroup)
+    {
+        int group = kvGroup <= 0 ? 1 : kvGroup;
+        if (query.Shape.Rank != 4 || key.Shape.Rank != 4 || key.Shape[1] <= 0 || query.Shape[1] != (long)group * key.Shape[1])
+            throw new ArgumentException(
+                $"FlashAttention needs [B,Hq,S,D] operands with Hq = kvGroup × Hkv; got Q={query.Shape}, K={key.Shape}, kvGroup={kvGroup}.");
+        return group;
+    }
+
     /// <summary>A <c>FlashAttention</c> call: head-major Q/O, a head-major K/V cache whose first <paramref name="kvLen"/>
     /// rows are valid, query row 0 at <paramref name="qOffset"/>.</summary>
     public static AttentionCall FromFlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, bool causal,
@@ -183,6 +219,33 @@ public readonly record struct AttentionCall
             Scale = scale, Mask = AttentionMask.FromFlash(causal, slidingWindow), Positions = AttentionPositions.Host(kvLen, qOffset),
             Logits = new(softcap, sink, alibiSlopes), Route = AttentionRoute.Flash,
         };
+
+    /// <summary>A <see cref="FromFlashAttention"/> call whose keys and values are paged: <paramref name="keyPages"/> and
+    /// <paramref name="valuePages"/> are one layer's page buffers, and the first <paramref name="kvLen"/> rows of the sequence
+    /// are found through <paramref name="pages"/>.</summary>
+    public static AttentionCall FromPagedFlashAttention(Tensor output, Tensor query, Tensor keyPages, Tensor valuePages,
+        AttentionKvPages pages, int kvLen, bool causal, int qOffset, float scale, float softcap, Tensor? sink, int slidingWindow,
+        Tensor? alibiSlopes) =>
+        FromFlashAttention(output, query, keyPages, valuePages, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes)
+            with { KvPages = pages };
+
+    /// <summary>A decode over a cache whose sequences have their own lengths (<see cref="SequenceLengths"/>): head-major Q
+    /// <c>[B, Hq, S, D]</c>, cache K and V <c>[B, Hkv, capacity, D]</c>, the output <c>[B, S, Hq × D]</c>, and each row's
+    /// LSE in <paramref name="lse"/> when one is given. The lengths are copied, so the call keeps the ones it was built with.</summary>
+    /// <exception cref="ArgumentException">The operands are not of those ranks, or the output does not hold whole rows.</exception>
+    public static AttentionCall FromDecodeWithLengths(Tensor output, Tensor query, Tensor key, Tensor value, int[] lengths, bool causal,
+        float scale, Tensor? lse = null)
+    {
+        if (query.Shape.Rank != 4 || key.Shape.Rank != 4 || value.Shape.Rank != 4)
+            throw new ArgumentException($"A decode takes Q [B, H, S, D] and K, V [B, Hkv, capacity, D]; got Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+        return new()
+        {
+            Query = AttentionOperand.HeadMajor(query), Key = AttentionOperand.HeadMajor(key), Value = AttentionOperand.HeadMajor(value),
+            Output = AttentionOperand.TokenMajor(output, (int)query.Shape[1], (int)value.Shape[3], (int)query.Shape[0]),
+            Scale = scale, Mask = AttentionMask.FromFlash(causal, 0), SequenceLengths = (int[])lengths.Clone(), Lse = lse,
+            Route = AttentionRoute.Flash,
+        };
+    }
 
     /// <summary>A <c>FlashAttentionDev</c> call: as <see cref="FromFlashAttention"/>, positions read from
     /// <paramref name="devicePos"/> (the host values are the eager fallback's).</summary>

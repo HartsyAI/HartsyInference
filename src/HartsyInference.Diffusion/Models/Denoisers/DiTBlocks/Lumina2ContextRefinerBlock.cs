@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -124,9 +125,9 @@ public sealed unsafe class Lumina2ContextRefinerBlock
         Tensor qMh = new Tensor(qMhShape, DType.F32);
         Tensor kMh = new Tensor(kvMhShape, DType.F32);
         Tensor vMh = new Tensor(kvMhShape, DType.F32);
-        ReshapeToMultiHead(qMh, qN, batch, seqLen, _numHeads, _headDim);
-        ReshapeToMultiHead(kMh, kN, batch, seqLen, _numKvHeads, _headDim);
-        ReshapeToMultiHead(vMh, v, batch, seqLen, _numKvHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(qMh, qN, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(kMh, kN, batch, seqLen, _numKvHeads, _headDim);
+        DiTUtils.ReshapeToMultiHead(vMh, v, batch, seqLen, _numKvHeads, _headDim);
         qN.Dispose();
         kN.Dispose();
         v.Dispose();
@@ -143,8 +144,8 @@ public sealed unsafe class Lumina2ContextRefinerBlock
             int groupSize = _numHeads / _numKvHeads;
             kFull = new Tensor(qMhShape, DType.F32);
             vFull = new Tensor(qMhShape, DType.F32);
-            RepeatKvHeads(kFull, kMh, batch, _numKvHeads, groupSize, seqLen, _headDim);
-            RepeatKvHeads(vFull, vMh, batch, _numKvHeads, groupSize, seqLen, _headDim);
+            StridedCopies.RepeatInterleave(backend, kFull, kMh, 1, groupSize);
+            StridedCopies.RepeatInterleave(backend, vFull, vMh, 1, groupSize);
             kMh.Dispose();
             vMh.Dispose();
         }
@@ -163,7 +164,7 @@ public sealed unsafe class Lumina2ContextRefinerBlock
 
         TensorShape qFlatShape = new TensorShape(batch, seqLen, _qDim);
         Tensor attnFlat = new Tensor(qFlatShape, DType.F32);
-        ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
+        DiTUtils.ReshapeFromMultiHead(attnFlat, attnOut, batch, seqLen, _numHeads, _headDim);
         attnOut.Dispose();
 
         Tensor projected = new Tensor(shape, x.DType);
@@ -221,61 +222,5 @@ public sealed unsafe class Lumina2ContextRefinerBlock
         gated.Dispose();
 
         return output;
-    }
-
-    private static void ReshapeToMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    int outOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    private static void ReshapeFromMultiHead(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int s = 0; s < seqLen; s++)
-            {
-                for (int h = 0; h < numHeads; h++)
-                {
-                    int inOffset = ((b * numHeads + h) * seqLen + s) * headDim;
-                    int outOffset = (b * seqLen + s) * (numHeads * headDim) + h * headDim;
-                    Buffer.MemoryCopy(inPtr + inOffset, outPtr + outOffset, headDim * sizeof(float), headDim * sizeof(float));
-                }
-            }
-        }
-    }
-
-    private static void RepeatKvHeads(Tensor output, Tensor input, int batch, int kvHeads, int groupSize, int seqLen, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long perHead = (long)seqLen * headDim;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < kvHeads; h++)
-            {
-                long srcOff = ((long)b * kvHeads + h) * perHead;
-                for (int g = 0; g < groupSize; g++)
-                {
-                    int qHead = h * groupSize + g;
-                    long dstOff = ((long)b * (kvHeads * groupSize) + qHead) * perHead;
-                    Buffer.MemoryCopy(inPtr + srcOff, outPtr + dstOff, perHead * sizeof(float), perHead * sizeof(float));
-                }
-            }
-        }
     }
 }

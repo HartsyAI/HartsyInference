@@ -24,6 +24,9 @@ public enum KnobDomain
 
     /// <summary>Filesystem locations for native libraries and assets.</summary>
     Paths,
+
+    /// <summary>How a LoRA stack treats a unit it cannot apply.</summary>
+    Lora,
 }
 
 /// <summary>One declared engine setting: its id, type, default, scope and domain, resolved through <see cref="KnobStore"/>.</summary>

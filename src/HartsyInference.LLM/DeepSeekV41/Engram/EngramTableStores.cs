@@ -1,4 +1,3 @@
-using HartsyInference.Core.Engram;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.IO;
 

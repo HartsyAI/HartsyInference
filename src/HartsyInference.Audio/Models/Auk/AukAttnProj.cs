@@ -1,5 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Auk;
@@ -13,15 +15,15 @@ public sealed class AukAttnProj
     private int _headDim;
 
     public void Load(IReadOnlyDictionary<string, Tensor> weights, string prefix, string qkvName, string qNormName, string kNormName,
-        string outName, int dim, int heads)
+        string outName, int dim, int heads, ICollection<Tensor> owned)
     {
         int headDim = dim / heads;
-        _qkvW = AukOps.Take(weights, $"{prefix}.{qkvName}.weight", 3 * dim, dim);
-        _qkvB = AukOps.Take(weights, $"{prefix}.{qkvName}.bias", 3 * dim);
-        _qNorm = AukOps.Take(weights, $"{prefix}.{qNormName}.weight", headDim);
-        _kNorm = AukOps.Take(weights, $"{prefix}.{kNormName}.weight", headDim);
-        _outW = AukOps.Take(weights, $"{prefix}.{outName}.weight", dim, dim);
-        _outB = AukOps.Take(weights, $"{prefix}.{outName}.bias", dim);
+        _qkvW = AukOps.Take(weights, $"{prefix}.{qkvName}.weight", owned, 3 * dim, dim);
+        _qkvB = AukOps.Take(weights, $"{prefix}.{qkvName}.bias", owned, 3 * dim);
+        _qNorm = AukOps.Take(weights, $"{prefix}.{qNormName}.weight", owned, headDim);
+        _kNorm = AukOps.Take(weights, $"{prefix}.{kNormName}.weight", owned, headDim);
+        _outW = AukOps.Take(weights, $"{prefix}.{outName}.weight", owned, dim, dim);
+        _outB = AukOps.Take(weights, $"{prefix}.{outName}.bias", owned, dim);
         _dim = dim;
         _heads = heads;
         _headDim = headDim;
@@ -37,8 +39,8 @@ public sealed class AukAttnProj
         Tensor v = new(packed, DType.F32);
         backend.SliceLastDim(v, qkv, 2 * _dim);
         qkv.Dispose();
-        backend.WanRopeInterleaved(q, cos, sin, n, _heads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, n, _heads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, n, _heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, n, _heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         return (q, k, v);
     }
 

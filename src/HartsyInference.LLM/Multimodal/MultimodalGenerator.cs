@@ -78,7 +78,7 @@ public sealed class MultimodalGenerator
     }
 
     /// <summary>Generates a reply to <paramref name="question"/> about the image given by normalized <paramref name="pixelValues"/> <c>[1, 3, imageSize, imageSize]</c>: builds the family-specific multimodal prompt, splices the image embeddings, and greedy-decodes.</summary>
-    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    public unsafe VisionGeneration Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
         // Greedy decode on small quantized VLMs is repetition-prone; default to a light sampler.
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
@@ -150,7 +150,7 @@ public sealed class MultimodalGenerator
             pos++;
             token = SampleLast(model, h, 1, sampler, history);
         }
-        return sb.ToString();
+        return new VisionGeneration(sb.ToString(), StoppedOnToken: stops.Contains(token));
     }
 
     /// <summary>The hidden-state forward for one step: staged across the placement (plain embeds handoff, no cross-stage copy beyond the existing host-staged boundary) when sharded, else the plain single-backend path.</summary>

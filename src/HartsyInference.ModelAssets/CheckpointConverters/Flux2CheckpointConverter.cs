@@ -8,6 +8,9 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <param name="mlpInner">Per-block MLP inner dimension (= hiddenSize × mlp_ratio). 9216 for Klein 4B (ratio 3.0), etc.</param>
 public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
 {
+    /// <summary>Iris-Z's modality embedding <c>[modalities, hidden]</c>; the key is the same before and after conversion.</summary>
+    public const string ModalityEmbeddingKey = "modality_in.weight";
+
     /// <summary>Result of converting a single-file Flux.2 checkpoint.</summary>
     public sealed class ConvertedWeights
     {
@@ -22,6 +25,8 @@ public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
     public Dictionary<string, Tensor> ConvertTransformer(IReadOnlyDictionary<string, Tensor> allWeights)
     {
         CheckpointConvertUtils.RequireFoldedCompanions(allWeights, nameof(Flux2CheckpointConverter));
+        if (IsDiffusersLayout(allWeights.Keys))
+            return ConvertDiffusersTransformer(allWeights);
         Dictionary<string, Tensor> output = new(allWeights.Count + 100);
 
         foreach (KeyValuePair<string, Tensor> kvp in allWeights)
@@ -36,6 +41,54 @@ public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
             ConvertKey(key, tensor, output);
         }
 
+        return output;
+    }
+
+    /// <summary>True for a diffusers <c>Flux2Transformer2DModel</c> checkpoint (the layout the Open Vision Banana release
+    /// ships): it names the input projection <c>x_embedder</c>, which no BFL file does.</summary>
+    public static bool IsDiffusersLayout(IEnumerable<string> keys)
+    {
+        foreach (string key in keys)
+        {
+            if (key == "x_embedder.weight" || key == "context_embedder.weight")
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Converts a diffusers-layout checkpoint. Its names already are the canonical ones; only the two fused
+    /// projections split: a single block's <c>attn.to_qkv_mlp_proj</c> (BFL's <c>linear1</c>, same row order) and a
+    /// double block's <c>ff.linear_in</c> / <c>ff_context.linear_in</c> (the fused SwiGLU input). The final layer is
+    /// already in diffusers' [scale, shift] order, so unlike BFL's it is not swapped.</summary>
+    private Dictionary<string, Tensor> ConvertDiffusersTransformer(IReadOnlyDictionary<string, Tensor> allWeights)
+    {
+        Dictionary<string, Tensor> output = new(allWeights.Count + 100);
+        foreach (KeyValuePair<string, Tensor> kvp in allWeights)
+        {
+            string key = kvp.Key;
+            Tensor tensor = kvp.Value;
+            int fusedSingle = key.IndexOf(".attn.to_qkv_mlp_proj.", StringComparison.Ordinal);
+            if (key.StartsWith("single_transformer_blocks.", StringComparison.Ordinal) && fusedSingle > 0)
+            {
+                string prefix = key[..fusedSingle];
+                if (key.EndsWith(".weight", StringComparison.Ordinal))
+                    SplitSingleLinear1Weight(tensor, prefix, output);
+                else if (key.EndsWith(".bias", StringComparison.Ordinal))
+                    SplitSingleLinear1Bias(tensor, prefix, output);
+                continue;
+            }
+            if (key.StartsWith("transformer_blocks.", StringComparison.Ordinal)
+                && (key.Contains(".ff.linear_in.", StringComparison.Ordinal) || key.Contains(".ff_context.linear_in.", StringComparison.Ordinal)))
+            {
+                int ffAt = key.IndexOf(".ff", StringComparison.Ordinal);
+                int nameEnd = key.IndexOf(".linear_in.", ffAt, StringComparison.Ordinal);
+                string prefix = key[..ffAt];
+                string ffName = key[(ffAt + 1)..nameEnd];
+                SplitSwiGluLinearIn(tensor, prefix, ffName, output, hasBias: key.EndsWith(".bias", StringComparison.Ordinal));
+                continue;
+            }
+            output[key] = tensor;
+        }
         return output;
     }
 
@@ -100,6 +153,12 @@ public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
         if (bflKey.StartsWith("single_blocks.", StringComparison.Ordinal))
         {
             ConvertSingleBlock(bflKey["single_blocks.".Length..], tensor, output);
+            return;
+        }
+        if (bflKey == ModalityEmbeddingKey)
+        {
+            // Iris-Z's modality embedding has no diffusers name; it keeps its own.
+            output[bflKey] = tensor;
             return;
         }
         // Unknown keys are silently dropped (allows the same checkpoint to carry text-encoder

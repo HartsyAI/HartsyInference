@@ -19,10 +19,14 @@ public static partial class KnobProfiles
     /// outside its reach: SDPA still auto-tiles under memory pressure regardless of <c>sdpaForceTiled</c>, and
     /// <c>vram.h3ChunkRows</c> decides from free VRAM, so H3 parity runs must pin it per run.</para></remarks>
     private static readonly KnobProfile ReferenceProfile = KnobProfile.Create("reference")
+        // TODO(ernie5): production precision (TF32 and F16 GEMM) is not measured for ERNIE-5.5; this profile pins the faithful arm. Finish it by running
+        // the ERNIE-5.5 quality and speed check under the production arm and recording the result beside these pins.
         // Bypass skips the checkpoint's LlmAdapter and feeds raw Qwen-3 hiddens to DiT cross-attn; a diagnostic, not the model path.
         .With(EngineKnobs.AnimaBypassLlmAdapter, false)
         // Pinned: the reference nn.GELU() is exact erf, and tanh drifts from it.
         .With(EngineKnobs.AnimaExactGelu, true)
+        // Pinned: reference runs keep Anima's attention in F32, the exact route the parity runs were recorded on.
+        .With(EngineKnobs.AnimaF16, false)
         // cuDNN 1D-as-2D audio convs compute F32 output via TF32 tensor cores, corr 0.9999 vs the direct kernel it replaces.
         .With(EngineKnobs.AudioConvCudnn, false)
         // AudioLmQuantPolicy maps "off" to AudioLmQuant.Off (no weight quant); unset applies Q4_K on a single device.
@@ -43,6 +47,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.FlashSplitForce, false)
         // Keeps attention on the monolithic single-accumulator reduction; the split merge is only claimed exact, never bit-identical.
         .With(EngineKnobs.FlashSplitOff, true)
+        // Narrows the TRELLIS.2 / Pixal3D flows' linear weights to F16 (relative L2 about 2.6e-4 against F32 weights); F32 is the reference arm.
+        .With(EngineKnobs.FlowF16Weights, false)
         // Enables an FP8 GEMM with F16 accumulate, narrowing both the operands and the accumulator.
         .With(EngineKnobs.Fp8F16, false)
         // Enables the FP8 GEMM path; operands are still quantized to e4m3 even though the accumulator stays F32.
@@ -61,7 +67,7 @@ public static partial class KnobProfiles
         .With(EngineKnobs.HighPrecisionGemm, true)
         .With(EngineKnobs.Krea2FullPrecision, true)
         // Backend doc says it changes numerics: the tiled kernel is an online softmax over the tile's union window, not one dense pass.
-        .With(EngineKnobs.Ltx25Na3dTiled, false)
+        .With(EngineKnobs.NeighborhoodAttentionTiled, false)
         // F16 rope tables cost a measured real output change (SSIM 0.9956 across the clip); F32 tables are the faithful arm.
         .With(EngineKnobs.Ltx2Ropef16, false)
         // Detours a token-major SDPA call through a permute pair into the INT8 SageAttention kernel.

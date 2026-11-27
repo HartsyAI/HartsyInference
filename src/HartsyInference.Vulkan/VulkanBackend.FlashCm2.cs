@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -31,36 +32,33 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int headDim, float scale, bool allowF16 = false) =>
-        ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16);
+        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16,
+            batch: 1));
 
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
-        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false) =>
+        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16,
+            batch: 1));
+
+    private void ExecuteTokenMajorAttention(in AttentionCall call)
     {
         using OpScope _op = EnterOp();
-        long qWidth = (long)heads * headDim;
-        long kvWidth = (long)kvHeads * headDim;
+        Tensor query = call.Query.Storage, key = call.Key.Storage, value = call.Value.Storage, output = call.Output.Storage;
+        long qWidth = (long)call.Heads * call.QkHeadDim;
+        long kvWidth = (long)call.KvHeads * call.QkHeadDim;
         if (qWidth <= 0 || kvWidth <= 0 || query.ElementCount % qWidth != 0 || key.ElementCount % kvWidth != 0
             || value.ElementCount != key.ElementCount || output.ElementCount != query.ElementCount)
         {
             throw new ArgumentException(
-                $"Token-major attention needs Q/output as [S, {heads}*{headDim}] and K/V as [S, {kvHeads}*{headDim}]; got "
+                $"Token-major attention needs Q/output as [S, {call.Heads}*{call.QkHeadDim}] and K/V as [S, {call.KvHeads}*{call.QkHeadDim}]; got "
                 + $"Q {query.Shape}, K {key.Shape}, V {value.Shape}, out {output.Shape}.");
         }
-        int sq = (int)(query.ElementCount / qWidth);
-        int skv = (int)(key.ElementCount / kvWidth);
-        if (mask is not null) _ = AttentionMaskLayout.Of(mask, 1, heads, sq, skv);
-        // Vulkan reads a token-major operand as one sequence whatever its rank, so the call is described that way.
-        AttentionCall call = new()
-        {
-            Query = new(query, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
-            Key = new(key, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
-            Value = new(value, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
-            Output = new(output, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
-            Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
-            Route = AttentionRoute.TokenMajor,
-        };
-        RunAttentionRows(TokenMajorAttentionRows, in call);
+        if (call.Mask.Bias is not null)
+            _ = AttentionMaskLayout.Of(call.Mask.Bias, 1, call.Heads, call.QueryTokens, call.KeyTokens);
+        // Vulkan records grouped calls on its single token-major row set.
+        AttentionCall planned = call with { Route = AttentionRoute.TokenMajor };
+        RunAttentionRows(TokenMajorAttentionRows, in planned);
     }
 
     /// <summary>Smallest query count worth a 64-row cooperative-matrix tile; decode (one row) and short chunks stay on the scalar kernel.</summary>
@@ -91,8 +89,8 @@ public sealed partial class VulkanBackend
         if (!FlashCm2PrefillPolicy.MaskFits(sq, kvLen)) return false;
 
         long kvCap = key.Shape[2];
-        AttnStrides qs = new((uint)headDim, (uint)(sq * headDim), (uint)((long)sq * headDim * hq));
-        AttnStrides ks = new((uint)headDim, (uint)(kvCap * headDim), (uint)(kvCap * headDim * hkv));
+        OperandStrides qs = new((uint)headDim, (uint)(sq * headDim), (uint)((long)sq * headDim * hq));
+        OperandStrides ks = new((uint)headDim, (uint)(kvCap * headDim), (uint)(kvCap * headDim * hkv));
         DispatchFlashCm2Causal(output, query, key, value, scale, batch: 1, hq, hkv, sq, kvLen, headDim,
             qs, ks, ks, qs, new CausalWindow(qOffset, slidingWindow));
         FlashCm2PrefillDispatches++;
@@ -101,17 +99,30 @@ public sealed partial class VulkanBackend
 
     /// <summary>Shapes the cooperative-matrix-2 kernel does not serve: permute to [1,H,S,D], attend, permute back.</summary>
     private void AttendTokenMajorViaHeadMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
-        int heads, int kvHeads, int headDim, int sq, int skv, float scale, bool allowF16)
+        int heads, int kvHeads, int headDim, int sq, int skv, float scale, AttentionNumerics numerics)
     {
         if (query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16)
         {
             // The permutes have no BF16 kernel, and BF16 has more range than F16: permute F32 copies and compute in F32.
             Tensor q32 = F32Copy(query), k32 = F32Copy(key), v32 = F32Copy(value);
             Tensor o32 = output.DType == DType.F32 ? output : new Tensor(output.Shape, DType.F32);
+            if (AttentionEvidence.Enabled)
+            {
+                bool q = !ReferenceEquals(q32, query), k = !ReferenceEquals(k32, key), v = !ReferenceEquals(v32, value);
+                long elements = (q ? query.ElementCount : 0) + (k ? key.ElementCount : 0) + (v ? value.ElementCount : 0);
+                if (elements > 0)
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "vulkan.permute.bf16.inputs", elements * sizeof(float),
+                        (q ? 1 : 0) + (k ? 1 : 0) + (v ? 1 : 0));
+            }
             try
             {
-                AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale, allowF16: false);
-                if (!ReferenceEquals(o32, output)) CastToBf16(output, o32);
+                AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale,
+                    numerics with { LegacyAssertedBounded = false });
+                if (!ReferenceEquals(o32, output))
+                {
+                    CastToBf16(output, o32);
+                    AttentionEvidence.Payload(AttentionEvidenceKind.Cast, "vulkan.permute.bf16.output", output);
+                }
             }
             finally
             {
@@ -131,7 +142,8 @@ public sealed partial class VulkanBackend
         Permute0213(qMh, query, sq, heads, headDim);
         Permute0213(kMh, key, skv, kvHeads, headDim);
         Permute0213(vMh, value, skv, kvHeads, headDim);
-        ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, allowF16);
+        ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, allowF16: false)
+            with { Numerics = numerics });
         Permute0213(output, attnMh, heads, sq, headDim);
     }
 
@@ -166,9 +178,10 @@ public sealed partial class VulkanBackend
     /// are in elements. The causal prefill has its own entry, <see cref="DispatchFlashCm2Causal"/>, so a mask and a causal
     /// window cannot be passed together.</summary>
     private void DispatchFlashCm2(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os)
+        int batch, int hq, int hkv, int sq, int skv, int headDim, OperandStrides qs, OperandStrides ks, OperandStrides vs, OperandStrides os)
     {
         using Tensor? expanded = WithRowsForCm2(mask, batch, hq, sq, skv);
+        if (expanded is not null) AttentionEvidence.Payload(AttentionEvidenceKind.ExpandMask, "vulkan.cm2.mask", expanded);
         mask = expanded ?? mask;
         Span<byte> pc = stackalloc byte[(mask is null ? 17 : 20) * 4];
         WriteFlashCm2Common(pc, hq, hkv, sq, skv, scale, qs, ks, vs, os);
@@ -177,7 +190,7 @@ public sealed partial class VulkanBackend
             AttentionMaskLayout m = AttentionMaskLayout.Of(mask, batch, hq, sq, skv);
             // A one-row mask still gets a real row stride: only row 0 is in bounds, and no layout stride is ever 0.
             uint rowStride = m.RowStride == 0 ? (uint)skv : (uint)m.RowStride;
-            WriteStrides(pc, 68, new AttnStrides(rowStride, (uint)m.HeadStride, (uint)m.BatchStride));
+            WriteOperandStrides(pc, 68, new OperandStrides(rowStride, (uint)m.HeadStride, (uint)m.BatchStride));
         }
         RunFlashCm2(output, query, key, value, mask, mask is null ? "sdpa_flash_cm2" : "sdpa_flash_cm2_mask", pc,
             batch, hq, sq, headDim);
@@ -186,7 +199,7 @@ public sealed partial class VulkanBackend
     /// <summary>Runs <c>sdpa_flash_cm2_causal</c>: the kernel computes the causal and sliding-window mask from
     /// <paramref name="causal"/>, so there is no mask buffer to pass.</summary>
     private void DispatchFlashCm2Causal(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
-        int batch, int hq, int hkv, int sq, int skv, int headDim, AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os,
+        int batch, int hq, int hkv, int sq, int skv, int headDim, OperandStrides qs, OperandStrides ks, OperandStrides vs, OperandStrides os,
         CausalWindow causal)
     {
         Span<byte> pc = stackalloc byte[19 * 4];
@@ -198,17 +211,17 @@ public sealed partial class VulkanBackend
 
     /// <summary>The 17 push-constant words every cm2 kernel reads: head and row counts, the scale and the Q/K/V/O strides.</summary>
     private static void WriteFlashCm2Common(Span<byte> pc, int hq, int hkv, int sq, int skv, float scale,
-        AttnStrides qs, AttnStrides ks, AttnStrides vs, AttnStrides os)
+        OperandStrides qs, OperandStrides ks, OperandStrides vs, OperandStrides os)
     {
         BinaryWriteUInt(pc, 0, (uint)hq);
         BinaryWriteUInt(pc, 4, (uint)hkv);
         BinaryWriteUInt(pc, 8, (uint)sq);
         BinaryWriteUInt(pc, 12, (uint)skv);
         BinaryWriteFloat(pc, 16, scale);
-        WriteStrides(pc, 20, qs);
-        WriteStrides(pc, 32, ks);
-        WriteStrides(pc, 44, vs);
-        WriteStrides(pc, 56, os);
+        WriteOperandStrides(pc, 20, qs);
+        WriteOperandStrides(pc, 32, ks);
+        WriteOperandStrides(pc, 44, vs);
+        WriteOperandStrides(pc, 56, os);
     }
 
     /// <summary>Casts Q/K/V to F16 where they are not, dispatches <paramref name="kernelName"/> over the query row tiles and the
@@ -221,6 +234,7 @@ public sealed partial class VulkanBackend
         (VulkanBuffer vRes, VulkanBuffer? vOwned) = CastIfNeeded(value, GetBuffer(value), DType.F16, saturate: true);
         VulkanBuffer? maskBuf = mask is null ? null : GetBuffer(mask);
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * DType.F16.SizeInBytes));
+        RecordAttentionCasts("vulkan.cm2", DType.F16, query, qOwned, key, kOwned, value, vOwned, workspaceSite: "vulkan.cm2.casts");
         try
         {
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
@@ -236,6 +250,7 @@ public sealed partial class VulkanBackend
                 : stackalloc ulong[] { qRes.Handle, kRes.Handle, vRes.Handle, maskBuf!.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, (uint)((sq + FlashCm2QueryTile - 1) / FlashCm2QueryTile), (uint)hq, (uint)batch);
             CacheOutputCastingFrom(output, outBuf, DType.F16, "sdpa_flash_cm2");
+            RecordAttentionOutputCast("vulkan.cm2", DType.F16, output);
         }
         catch (Exception ex)
         {
@@ -250,14 +265,4 @@ public sealed partial class VulkanBackend
             if (vOwned is not null) _xfer.FreeDevice(vOwned);
         }
     }
-
-    private static void WriteStrides(Span<byte> pc, int offset, AttnStrides s)
-    {
-        BinaryWriteUInt(pc, offset, s.Row);
-        BinaryWriteUInt(pc, offset + 4, s.Head);
-        BinaryWriteUInt(pc, offset + 8, s.Batch);
-    }
-
-    /// <summary>Element strides between consecutive sequence rows, heads and batch items.</summary>
-    private readonly record struct AttnStrides(uint Row, uint Head, uint Batch);
 }

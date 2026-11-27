@@ -52,6 +52,7 @@ public static class HartsyInferenceServiceExtensions
             new InferenceQueue(options.MaxLongRunningConcurrency, options.MaxLongRunningQueueDepth));
 
         services.AddSingleton(new WorldSessionRegistry(TimeSpan.FromMinutes(options.WorldSessionIdleTimeoutMinutes)));
+        services.AddSingleton(new RealtimeSessionRegistry(TimeSpan.FromMinutes(options.RealtimeSessionIdleTimeoutMinutes)));
 
         // The wake listener is a peer of the HTTP surface, not a route: satellites hold one long-lived TCP
         // connection each rather than making requests. It deliberately bypasses InferenceQueue — see WakeWorker.
@@ -204,15 +205,22 @@ public static class HartsyInferenceServiceExtensions
         // Body binding occurs after middleware but before a minimal-API handler. Set the feature here so a base64
         // guide/control clip is bounded while it is still streaming in, rather than checking ContentLength after
         // ASP.NET has already buffered/deserialized it. Chunked requests are covered by the same server feature.
+        // Chat completions is covered too: a video_url part carries a base64 clip (up to 128 MiB decoded) that Kestrel's 30 MB default
+        // would refuse with a bare 413.
         app.Use(async (ctx, next) =>
         {
-            if (ctx.Request.Path.StartsWithSegments("/v1/native/video"))
+            // The mesh file routes take a base64 model file, which a textured result can make tens of MB.
+            long? cap = ctx.Request.Path.StartsWithSegments("/v1/native/video") || ctx.Request.Path.StartsWithSegments("/v1/chat/completions")
+                ? options.MaxVideoRequestBodyBytes
+                : ctx.Request.Path.StartsWithSegments("/v1/native/mesh/convert") || ctx.Request.Path.StartsWithSegments("/v1/native/mesh/thumbnail") || ctx.Request.Path.StartsWithSegments("/v1/native/mesh/operate")
+                    ? options.MaxMeshFileRequestBodyBytes
+                    : null;
+            if (cap is long maxBytes)
             {
-                if (ctx.Request.ContentLength is long contentLength
-                    && contentLength > options.MaxVideoRequestBodyBytes)
+                if (ctx.Request.ContentLength is long contentLength && contentLength > maxBytes)
                 {
                     await WriteErrorAsync(ctx, StatusCodes.Status413PayloadTooLarge,
-                        $"Native video request body exceeds the configured {options.MaxVideoRequestBodyBytes}-byte limit.",
+                        $"Request body exceeds the configured {maxBytes}-byte limit.",
                         "invalid_request_error");
                     return;
                 }
@@ -220,7 +228,7 @@ public static class HartsyInferenceServiceExtensions
                     ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
                 if (limit is not null && !limit.IsReadOnly)
                 {
-                    limit.MaxRequestBodySize = options.MaxVideoRequestBodyBytes;
+                    limit.MaxRequestBodySize = maxBytes;
                 }
             }
             await next();
@@ -277,6 +285,7 @@ public static class HartsyInferenceServiceExtensions
         });
 
         app.UseRateLimiter();
+        app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
 
         app.MapHealthEndpoints();
         app.MapSettingsEndpoints();
@@ -292,6 +301,8 @@ public static class HartsyInferenceServiceExtensions
         app.MapRecipeEndpoints();
         app.MapRestoreEndpoints();
         app.MapWorldEndpoints();
+        app.MapRealtimeEndpoints();
+        app.MapDuplexEndpoints();
         app.MapCompatEndpoints();
 
         // Observability/discovery surface. Neither is a liveness/readiness probe, so both stay behind the same

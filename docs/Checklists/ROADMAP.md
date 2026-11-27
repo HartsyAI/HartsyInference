@@ -46,7 +46,7 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
 - [ ] gpt2-medium Q4_K_M segfaults on Vulkan and runs on CUDA. Not the quantization: Qwen3-4B Q4_K_M is fine, so
   it is specific to the GPT-2 architecture. Per-model verdicts are in [VULKAN_STATUS.md](VULKAN_STATUS.md).
 - [ ] SDXL's Vulkan output diverges from CUDA's from the same seed, and the gap grows with step count. The
-  batched convolution, the batch-independence of GroupNorm/Silu/Linear/SDPA, `CfgEulerStep` and TF32 are all
+  batched convolution, the batch-independence of GroupNorm/Silu/Linear/SDPA, `GuidedEulerStep` and TF32 are all
   ruled out; attention and the GEMM dtype path are untested. A cross-backend SSIM gate cannot be set until this
   is understood — for scale, toggling TF32 inside CUDA alone costs ~2% over 20 steps.
 - [x] Subgroup-size pinning (to the device default; `sdpa_flash` passes no spec constants and is not pinned),
@@ -97,7 +97,7 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] SSM recurrence profiling and long-context/quantized quality checks; per-architecture gaps are in LLM status.
 - [ ] Voice session (`HartsyInference.Voice`) follow-ups: partial transcripts need a streaming recognizer
   (`PartialTranscripts` is rejected until then); after a barge-in the history keeps the generated text rather than
-  what the caller heard. Design in [voice session](../Research/VOICE_AGENT_SESSION.md).
+  what the caller heard.
 - [x] KV reuse across turns (`perf/llm-voice-prefix-reuse`, #217): opt-in prefix-KV reuse in
   `TextGenerationPipeline`/`TextService` (`TextRequest.PrefixCacheKey`, `RetainedSequence`/`RetainedSequenceStore`),
   wired into the voice session per call plus a call-start priming request. 4090 VRAM also addressed
@@ -144,6 +144,9 @@ Model-specific SDXL refiner/segment gaps belong in [image status](MODEL_STATUS_I
   `IInferenceEngine.Recipes`, speech and transcription recipes.
 
 - [ ] 3D and world-model UI extensions, thin over Engine.
+- [ ] Swarm surfaces for vision outputs (metric depth, geometry, pose, matting, face, tracking) and frame
+  interpolation. These were deferred on 2026-11-01: the [Comfy-Org rollout](COMFY_ORG_ROLLOUT.md) ships them through
+  CLI and HTTP API first.
 - [ ] Validate package/extension compatibility for newly exposed features; H3 gates live in video status.
 
 ## 9. CLI / API
@@ -175,7 +178,8 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 
 ## 12. Cleanup follow-ups
 
-- [ ] TensorPool: adopt on a demonstrated hot path or retire (no established production usage).
+- [ ] Plain `qwen35` / `qwen35moe` GGUFs whose value heads may be stored tiled (converter-version dependent, 9B-class and Clef): decide the detection signal, then un-tile at load or refuse. Until then the output is suspected wrong for those files (TROUBLESHOOTING).
+- [ ] Qwen3.5-VL image input squashes every image to the tower's fixed 768x768 (`VlmImagePreprocessor`) where transformers uses `smart_resize`; the M-RoPE grid is already read from the encoded pixels, so only the preprocessor needs an aspect-ratio path. A non-Qwen3-VL mmproj on the SSM backbone is refused at load (text-only).
 - [ ] Re-run analyzer diagnostics before acting on the historical snapshot; judge config/API mirrors individually.
 - [ ] LtGemmExecutor consolidation only after Fp4 block-scale attributes are supported.
 - [ ] Vulkan spec/push-constant builders only if parameterization improves the actual differing contracts.
@@ -185,4 +189,57 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 - [ ] Review remaining MixContract/SplitContract, CFG-step, and interleaved-RoPE duplication with numerical gates.
 - [ ] CLI repeated settings/runner helpers only where behavior actually matches.
 - [ ] VideoRequest.VideoModel/VideoFormat: check extension consumers before altering public DTOs.
-- [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across `AttentionReference.cs` and more). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
+- [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across several attention files). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
+
+## 13. Comfy-Org rollout shared infrastructure
+
+These are the shared blocks the [Comfy-Org rollout](COMFY_ORG_ROLLOUT.md) needs before its consumers. Each one lands
+with its first consumer and is removed here once it ships.
+
+- [ ] Vision contracts. All of these are additive:
+  - a `VisionBatchRequest` for multi-view input, and for frames with timestamps or fps;
+  - new `VisionMode` values with per-mode validation;
+  - structured `VisionResult` outputs: depth kind, point map, normals, camera, poses, faces, intrinsic maps, tracks;
+  - bounded per-frame streaming with cancellation and cleanup;
+  - the OpenCV camera convention;
+  - `.npy`/JSON for the CLI and base64 arrays for the API.
+- [ ] Layered image output: `ImageFeatures.LayeredOutput` plus a nullable `ImageResult.Layers`.
+  - Layers run back to front with straight alpha; `Rgb`/`Alpha` stay the composite.
+  - Resize and crop apply to every layer.
+  - Background removal, refiner, recomposite and crop-to-mask are refused.
+- [x] A ByT5-small text preset and a byte tokenizer: Hunyuan-Image-2.1 glyphs (`infra/byt5`; real-weight check
+  pending). Hunyuan-Video-1.5 reuses them in P8.
+- [ ] A Stable Audio CFG path, a v-prediction EDM sampler and the `seconds_start` timing token: Open 1.0, then 3.
+- [ ] A generalized `ControlNetBaseModel`/`DetectMode` (the extension mirror included) and a ComfyUI `model_patches`
+  loader: SD3.5 ControlNet, DiffSynth, USO, T2I-Adapter, MiniMax-H3 Fun ControlNet.
+- [ ] An SD2 path: SD2.1, unCLIP, Lotus and SDPose.
+  - `UNetConfig` presets for 768-v, 512 and 512-inpaint.
+  - An OpenCLIP-H text preset.
+  - v-prediction in the SD pipelines.
+  - `.ckpt` loading through the safe-pickle parser.
+- [ ] Generalize `AnimaConfig`/`AnimaTransformer` into a Cosmos MiniTrainDIT with an optional `llm_adapter`, a T5-11B
+  path and 14B: Cosmos-Predict2 and Anima-LLLite.
+- [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Consumers: RIFE,
+  FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
+- [ ] ViT 2D RoPE, QK-norm and view-grouped alternating attention, consumed by Depth-Anything-3 and DINOv3.
+  - DINOv3 ViT-L/16 patch RoPE is in `Vision/Dinov3` (a 448 px encoder with real-weight parity). Still open: QK-norm,
+    view-grouped attention and Depth-Anything-3.
+  - "Local" means per view and "global" means across views; neither is spatial windowing.
+  - Tests: a reshape-equivalence test with identical positions, and a test of the real paths against the official code.
+- [ ] A causal frame KV cache for Causal-Forcing (MatrixGame2 after it). This starts as an investigation, because
+  `ReferenceKvCache` holds a fixed prepass reference.
+  - Settle append/eviction, positions across chunks, masks, timestep validity and request isolation.
+  - Gate it on cached-vs-uncached parity.
+- [ ] A Jina-CLIP-v2 tower (XLM-R with RoPE, 250k Unigram tokenizer) for NewBie.
+- [ ] DINOv3 on the ViT RoPE block: TRELLIS.2, Pixal3D and sam-3d-body (Idol's ViT-H+ is done).
+- [ ] Comfy `comfy_quant` w4a8/w6a8 as W4A16/W6A16 first, plus AWQ `pre_quant_scale` folding: Qwen3.8-27B, the
+  Ming-Image text encoder, MiniMax-H3.
+- [ ] A BailingMoeV2 safetensors config factory for `GenericTransformer` + `MoeFeedForward` (the Ming-Image text
+  encoder).
+
+## 14. Audio front ends
+
+- [ ] Re-run Chatterbox and IndexTTS-2 reference-conditioning parity on real weights. Their recorded `soxr_hq` stand-in figures ([PARITY_VERIFICATION](PARITY_VERIFICATION.md))
+  predate the 2026-11-26 filter, which was measured at the resampler only ([KIM_VOCAL2_SEPARATOR](../Research/KIM_VOCAL2_SEPARATOR.md)). The parity tests and dump
+  scripts they cite are no longer in the tree. `AudioClipCodec.DecodeStereoSoxrHq`, the separator's input resampling from any source rate, uses the same filter and
+  was likewise measured at the resampler only.

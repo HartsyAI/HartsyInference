@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Kokoro;
@@ -11,7 +12,7 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// <para>Both blocks load a single <c>fc</c> Linear from style_dim → 2*features. The
 /// fc output is split into <c>(gamma, beta)</c> halves and passed to either
 /// <see cref="IBackend.AdaInstanceNorm1d"/> (channel-axis InstanceNorm + affine) or
-/// <see cref="IBackend.LayerNormModulate"/>.</para>
+/// <see cref="IBackend.NormModulate"/>.</para>
 ///
 /// <para>Every tensor helper here is a backend op: the tensors flowing through the predictor and decoder stay
 /// device-resident, and none of them reads a <c>DataPointer</c> (each such read is a stream drain).</para></summary>
@@ -55,7 +56,7 @@ internal static class KokoroOps
 
     /// <summary>AdaLayerNorm: LayerNorm over the last (channel) dim of a <c>[B, T, C]</c>
     /// channels-last tensor (no affine), then the style-conditioned affine
-    /// <c>(1 + gamma) * x_hat + beta</c> per channel — exactly <see cref="IBackend.LayerNormModulate"/>.
+    /// <c>(1 + gamma) * x_hat + beta</c> per channel — exactly <see cref="IBackend.NormModulate"/>.
     /// <paramref name="gamma"/> and <paramref name="beta"/> are both <c>[B, C]</c> (broadcast over T).
     /// This is the operator inside Kokoro's DurationEncoder.</summary>
     public static Tensor ApplyAdaLayerNorm(IBackend backend, Tensor x, Tensor gamma, Tensor beta, int t, int c, float eps = 1e-5f)
@@ -64,7 +65,7 @@ internal static class KokoroOps
         if (x.Shape.Rank != 3 || (int)x.Shape[1] != t || (int)x.Shape[2] != c)
             throw new ArgumentException($"ApplyAdaLayerNorm expects [{batch}, {t}, {c}], got {x.Shape}.");
         Tensor output = new(x.Shape, DType.F32);
-        backend.LayerNormModulate(output, x, gamma, beta, eps);
+        backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, eps).WithModulation(ModulationSpec.Broadcast(x, gamma, beta, ScaleMode.OnePlus)));
         return output;
     }
 

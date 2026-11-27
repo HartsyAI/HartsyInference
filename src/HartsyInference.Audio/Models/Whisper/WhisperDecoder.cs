@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -177,7 +178,13 @@ public sealed unsafe class WhisperDecoder : IDisposable
 
     /// <summary>Runs the decoder for a single new token position; on first call pass the full prompt sequence (e.g. <c>[SOT, lang, transcribe, notimestamps]</c>) and on subsequent calls pass either the full sequence so far or just the newly appended token — the decoder uses positions <c>[CurrentPos, CurrentPos + len(tokenIds))</c> of the cache.</summary>
     /// <returns>Logits over the vocabulary <c>[1, vocabSize]</c> for the LAST token in <paramref name="tokenIds"/>.</returns>
-    public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state)
+    public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state) => DecodeStep(backend, tokenIds, state, null);
+
+    /// <summary>As <see cref="DecodeStep(IBackend, ReadOnlySpan{int}, DecodeState)"/>, also recording the
+    /// cross-attention of the probe's alignment heads for every position in <paramref name="tokenIds"/>; meant for
+    /// one teacher-forced pass over a whole sequence.</summary>
+    /// <returns>Logits over the vocabulary <c>[1, vocabSize]</c> for the LAST token in <paramref name="tokenIds"/>.</returns>
+    public Tensor DecodeStep(IBackend backend, ReadOnlySpan<int> tokenIds, DecodeState state, WhisperAttentionProbe? probe)
     {
         ThrowIfDisposed();
         int newCount = tokenIds.Length;
@@ -203,7 +210,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
                 Tensor next = _layers[i].Forward(backend, hidden,
                     state.SelfKey[i], state.SelfValue[i],
                     state.CrossKey[i], state.CrossValue[i],
-                    posStart, newCount, causalMask);
+                    posStart, newCount, causalMask, probe is not null && probe.WantsLayer(i) ? probe : null, i);
                 hidden.Dispose();
                 hidden = next;
             }
@@ -359,7 +366,7 @@ internal sealed unsafe class WhisperDecoderLayer
     /// <summary>Forward pass for a chunk of <paramref name="newCount"/> new positions starting at absolute position <paramref name="posStart"/>; updates the self-attn KV cache slots [posStart, posStart+newCount). <paramref name="causalMask"/> is <see cref="BuildIncrementalCausalMask"/> for these positions.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden,
         Tensor selfK, Tensor selfV, Tensor crossK, Tensor crossV,
-        int posStart, int newCount, Tensor causalMask)
+        int posStart, int newCount, Tensor causalMask, WhisperAttentionProbe? probe = null, int layerIndex = 0)
     {
         int d = _cfg.HiddenSize;
         int totalPos = posStart + newCount;
@@ -390,8 +397,8 @@ internal sealed unsafe class WhisperDecoderLayer
         // always did, through the same kernel.
         Tensor kCached = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
         Tensor vCached = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
-        backend.SliceTimeRange(kCached, selfK, 0, totalPos);
-        backend.SliceTimeRange(vCached, selfV, 0, totalPos);
+        StridedCopies.SliceAxis(backend, kCached, selfK, 2, 0, totalPos);
+        StridedCopies.SliceAxis(backend, vCached, selfV, 2, 0, totalPos);
 
         // The mask is a tensor even at newCount == 1, where it is all zeros: it is never null.
         Tensor attnOut = _selfAttn.AttendHeadMajorOperands(backend, qMh, kCached, vCached, new AttentionCallContext { Bias = causalMask });
@@ -405,6 +412,7 @@ internal sealed unsafe class WhisperDecoderLayer
         Tensor normed2 = new(inShape, DType.F32);
         backend.LayerNorm(normed2, res1, _crossLnW!, _crossLnB!, _cfg.LayerNormEps);
         Tensor crossQMh = _crossAttn!.ProjectQueryHeadMajor(backend, normed2, releaseInput: true, default);
+        probe?.Capture(backend, layerIndex, crossQMh, crossK, newCount, 1f / MathF.Sqrt(headDim));
         Tensor crossAttn = _crossAttn.AttendHeadMajorOperands(backend, crossQMh, crossK, crossV, default, OperandOwnership.Query);
         Tensor crossMerged = _crossAttn.MergeHeads(backend, crossAttn, inShape);
         Tensor crossProj = _crossAttn.ProjectOutput(backend, crossMerged);

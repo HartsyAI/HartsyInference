@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -419,7 +420,7 @@ public sealed unsafe class Sd3Transformer : IDisposable
             // One backend operation preserves the exact AdaLN contract while keeping hidden/modulation device-resident:
             // modulated = (1 + scale) * LayerNormNoAffine(hidden, eps=1e-6) + shift.
             modulated = new Tensor(hidShape, DType.F32);
-            backend.LayerNormModulate(modulated, hidden, scale, shift, 1e-6f);
+            backend.NormModulate(NormModulateCall.Rows(modulated, hidden, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(hidden, scale, shift, ScaleMode.OnePlus)));
             Sd3DebugDump.Dump("norm_out", modulated);
 
             projected = new Tensor(new TensorShape(batch, seqLen, outDim), DType.F32);

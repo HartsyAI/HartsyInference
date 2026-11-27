@@ -12,10 +12,18 @@ public static unsafe class Flux2PosEmbed
     /// <param name="txtSeqLen">Number of text tokens (typically 512 for Klein).</param>
     /// <param name="latentHPacked">Patchified latent height (= image_height / 16).</param>
     /// <param name="latentWPacked">Patchified latent width (= image_width / 16).</param>
-    public static Tensor BuildPositionIds(int txtSeqLen, int latentHPacked, int latentWPacked)
+    public static Tensor BuildPositionIds(int txtSeqLen, int latentHPacked, int latentWPacked) =>
+        BuildGridPositionIds(txtSeqLen, latentHPacked, latentWPacked, [0f]);
+
+    /// <summary>Position IDs for <c>[text, grid 0, grid 1, ...]</c>: every grid covers the same
+    /// <paramref name="latentHPacked"/> × <paramref name="latentWPacked"/> patches and sits at its own T coordinate
+    /// from <paramref name="gridTimes"/>. Output shape is <c>[txtSeqLen + grids·H·W, 4]</c>.</summary>
+    public static Tensor BuildGridPositionIds(int txtSeqLen, int latentHPacked, int latentWPacked, ReadOnlySpan<float> gridTimes)
     {
-        int imgSeqLen = latentHPacked * latentWPacked;
-        int totalSeqLen = txtSeqLen + imgSeqLen;
+        if (gridTimes.IsEmpty)
+            throw new ArgumentException("At least one image grid is required.", nameof(gridTimes));
+        int gridTokens = latentHPacked * latentWPacked;
+        int totalSeqLen = txtSeqLen + gridTimes.Length * gridTokens;
         TensorShape shape = new TensorShape(totalSeqLen, NumAxes);
         Tensor posIds = new Tensor(shape, DType.F32);
         float* ptr = (float*)posIds.DataPointer;
@@ -28,15 +36,19 @@ public static unsafe class Flux2PosEmbed
             ptr[i * NumAxes + 3] = i;
         }
 
-        for (int row = 0; row < latentHPacked; row++)
+        for (int grid = 0; grid < gridTimes.Length; grid++)
         {
-            for (int col = 0; col < latentWPacked; col++)
+            int gridStart = txtSeqLen + grid * gridTokens;
+            for (int row = 0; row < latentHPacked; row++)
             {
-                int idx = txtSeqLen + row * latentWPacked + col;
-                ptr[idx * NumAxes + 0] = 0f;
-                ptr[idx * NumAxes + 1] = row;
-                ptr[idx * NumAxes + 2] = col;
-                ptr[idx * NumAxes + 3] = 0f;
+                for (int col = 0; col < latentWPacked; col++)
+                {
+                    int idx = gridStart + row * latentWPacked + col;
+                    ptr[idx * NumAxes + 0] = gridTimes[grid];
+                    ptr[idx * NumAxes + 1] = row;
+                    ptr[idx * NumAxes + 2] = col;
+                    ptr[idx * NumAxes + 3] = 0f;
+                }
             }
         }
 

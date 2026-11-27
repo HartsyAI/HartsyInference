@@ -65,7 +65,7 @@ public sealed class LoopedTransformerModel : IGenerationModel, IGraphDecodable
         {
             if (options.Pool.NumLayers < slots)
                 throw new ArgumentException($"The KV pool has {options.Pool.NumLayers} slots; this model needs {slots}.", nameof(options));
-            return new LoopedSequenceState(new PagedKvCache(options.Pool), loops);
+            return new LoopedSequenceState(new PagedKvCache(options.Pool, options.MaxSequenceTokens), loops);
         }
         DType kvDtype = KvCaches.F16For(_backend) ? DType.F16 : DType.F32;
         return new LoopedSequenceState(new FixedKvCache(slots, 1, Config.NumKvHeads, Config.HeadDim, options.MaxSequenceTokens, kvDtype), loops);

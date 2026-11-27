@@ -1,5 +1,4 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Mert2;
@@ -16,44 +15,8 @@ internal static unsafe class Mert2Ops
     /// file, which is correct for this checkpoint but only safe if a differently shaped one fails loudly.
     /// <see cref="IBackend.Linear"/> derives its row count from the element count, so an unchecked weight of the
     /// wrong width would be silently mis-read instead of rejected.</para></summary>
-    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned, int d0)
-        => Load(weights, key, owned, [d0]);
-
-    /// <inheritdoc cref="Load(IReadOnlyDictionary{string, Tensor}, string, List{Tensor}, int)"/>
-    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned, int d0, int d1)
-        => Load(weights, key, owned, [d0, d1]);
-
-    /// <inheritdoc cref="Load(IReadOnlyDictionary{string, Tensor}, string, List{Tensor}, int)"/>
-    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned,
-        int d0, int d1, int d2)
-        => Load(weights, key, owned, [d0, d1, d2]);
-
-    private static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned,
-        ReadOnlySpan<int> expected)
-    {
-        if (!weights.TryGetValue(key, out Tensor? source))
-            throw new HartsyInferenceException($"MERT2 checkpoint is missing '{key}'.");
-        RequireShape(source, key, expected);
-        if (source.DType == DType.F32)
-        {
-            return source;
-        }
-        Tensor converted = source.CastTo(DType.F32);
-        owned.Add(converted);
-        return converted;
-    }
-
-    /// <summary>Rejects a tensor whose shape is not exactly what the hardcoded geometry expects.</summary>
-    public static void RequireShape(Tensor tensor, string key, ReadOnlySpan<int> expected)
-    {
-        bool matches = tensor.Shape.Rank == expected.Length;
-        for (int i = 0; matches && i < expected.Length; i++)
-        {
-            matches = (int)tensor.Shape[i] == expected[i];
-        }
-        if (!matches)
-            throw new HartsyInferenceException($"MERT2 '{key}' is {tensor.Shape}, expected [{string.Join(", ", expected.ToArray())}].");
-    }
+    public static Tensor Load(IReadOnlyDictionary<string, Tensor> weights, string key, List<Tensor> owned, params long[] shape) =>
+        CheckpointTensors.RequireF32(weights, "MERT2", key, owned, shape);
 
     /// <summary>ConvNeXt-V2 GlobalResponseNorm over <c>x [frames, channels]</c>:
     /// <c>out = weight·(x·n) + bias + x</c>, where <c>n</c> is each channel's L2 norm across the WHOLE time axis
@@ -94,7 +57,7 @@ internal static unsafe class Mert2Ops
     }
 
     /// <summary>Fills the split-half RoPE tables <c>[1, tokens, headDim]</c>, each half holding the same
-    /// <c>headDim/2</c> values so <see cref="IBackend.ApplyRope"/>'s rotate-half indexing lines up.
+    /// <c>headDim/2</c> values so the <see cref="Core.Rope.RopeTableLayout.RotateHalf"/> indexing lines up.
     ///
     /// <para>The angle is accumulated in single precision on purpose. The released model builds it as a float32
     /// product of position and inverse frequency, and by token 7499 an exact angle has drifted a few times 1e-4

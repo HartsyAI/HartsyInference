@@ -262,16 +262,22 @@ extern "C" __global__ void lm_flash_attn_f32_combine_q8_1(
     float l = 0.0f, acc = 0.0f;
     for (unsigned int g = 0; g < G; g++) {
         float mg = partialM[idx * G + g];
-        float w = (mg <= -INF_FC) ? 0.0f : __expf(mg - m);
+        float w = (partialL[idx * G + g] == 0.0f) ? 0.0f : __expf(mg - m);
         l += partialL[idx * G + g] * w;
         if (tid < D) acc += partialAcc[(size_t)(idx * G + g) * D + tid] * w;
     }
 
     if (tid < D) {
         size_t qBase = (size_t)idx * D;
-        const float o = l > 0.0f ? acc / l : 0.0f;
+        const float o = l > 0.0f ? acc / l : (isnan(l) ? l : 0.0f);
         out[qBase + tid] = o;
         const size_t blk = (qBase + tid) >> 5;
+        const unsigned hasNaN = __ballot_sync(0xffffffffu, isnan(o));
         fast_quantize_block(xq + blk * 32, xd + blk, xs + blk, o, tid & 31u);
+        // Integer codes cannot carry NaN; poison the scale consumed by the next projection.
+        if (hasNaN && (tid & 31u) == 0) {
+            xd[blk] = __int_as_float(0x7fc00000);
+            xs[blk] = __int_as_float(0x7fc00000);
+        }
     }
 }

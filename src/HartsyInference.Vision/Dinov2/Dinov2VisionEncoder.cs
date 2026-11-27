@@ -30,6 +30,9 @@ public sealed unsafe class Dinov2VisionEncoder
 
     public Dinov2VisionEncoder(Dinov2Preset preset)
     {
+        ArgumentNullException.ThrowIfNull(preset);
+        if (preset.UsesRotaryPositionEmbedding)
+            throw new ArgumentException("DINOv3 presets use RoPE and key names this encoder does not read; use Dinov3VisionEncoder.", nameof(preset));
         _preset = preset;
         _layers = new Dinov2Layer[preset.NumLayers];
         for (int i = 0; i < preset.NumLayers; i++)
@@ -312,33 +315,25 @@ internal sealed unsafe class Dinov2Layer
         TensorShape shape = new(batch, seq, _hidden);
 
         Tensor n1 = new(shape, DType.F32); backend.LayerNorm(n1, x, _n1W!, _n1B!, _eps);
-        Tensor attn = LayerScale(backend, _attn!.Forward(backend, n1, n1, default), _ls1, batch, seq); n1.Dispose();
+        Tensor attn = LayerScale(backend, _attn!.Forward(backend, n1, n1, default), _ls1); n1.Dispose();
         Tensor r1 = new(shape, DType.F32); backend.Add(r1, x, attn); attn.Dispose();
 
         Tensor n2 = new(shape, DType.F32); backend.LayerNorm(n2, r1, _n2W!, _n2B!, _eps);
-        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2, batch, seq); n2.Dispose();
+        Tensor mlp = LayerScale(backend, Mlp(backend, n2, batch, seq), _ls2); n2.Dispose();
         Tensor r2 = new(shape, DType.F32); backend.Add(r2, r1, mlp); r1.Dispose(); mlp.Dispose();
         return r2;
     }
 
     // GPU-resident LayerScale: t[b,s,c] *= gamma[c]. Was a host DataPointer loop that drained the compute stream
     // every block (2×/block × NumLayers → the DINOv2-giant conditioner's dominant cost). AffineBroadcastLastDim
-    // (scale-only, shift=null) broadcasts gamma[hidden] over the (b,s) rows on-device. Batch>1 keeps the host
-    // path (the affine kernel indexes scale[b·dim+d], valid for the B=1 conditioning use here).
-    private Tensor LayerScale(IBackend backend, Tensor t, Tensor? gamma, int batch, int seq)
+    // (scale-only, shift=null) takes a [D] gamma and applies it to every (b,s) row on-device, for any batch.
+    private static Tensor LayerScale(IBackend backend, Tensor t, Tensor? gamma)
     {
         if (gamma is null) return t; // no LayerScale (plain DINO) → identity
-        if (batch == 1)
-        {
-            Tensor o = new(t.Shape, DType.F32);
-            backend.AffineBroadcastLastDim(o, t, gamma, null);
-            t.Dispose();
-            return o;
-        }
-        float* tp = (float*)t.DataPointer; float* g = (float*)gamma.DataPointer;
-        for (long i = 0; i < (long)batch * seq; i++)
-            for (int c = 0; c < _hidden; c++) tp[i * _hidden + c] *= g[c];
-        return t;
+        Tensor o = new(t.Shape, DType.F32);
+        backend.AffineBroadcastLastDim(o, t, gamma, null);
+        t.Dispose();
+        return o;
     }
 
     private Tensor Mlp(IBackend backend, Tensor input, int batch, int seq)

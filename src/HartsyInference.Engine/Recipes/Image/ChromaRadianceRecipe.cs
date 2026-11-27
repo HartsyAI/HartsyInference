@@ -4,13 +4,14 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Chroma Radiance recipe (<c>lodestones/Chroma-Radiance</c>) — the pixel-space, VAE-free Chroma variant: same T5-XXL conditioning and checkpoint converter as <see cref="ChromaRecipe"/>, but the transformer carries a NeRF-style pixel decoder head (<c>nerf_image_embedder.*</c>) and outputs RGB directly, so there is NO VAE to resolve. Lifted from the SwarmUI backend's <c>ChromaRadianceLoader</c> and driven through <see cref="ChromaRadianceRecipePipeline"/>.</summary>
@@ -18,6 +19,12 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "chroma-radiance";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["t5"], Guide = "docs/prompting/chroma.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Chroma Radiance is pixel-space (NeRF decode head), so img2img noises the source pixels directly with no VAE.</remarks>

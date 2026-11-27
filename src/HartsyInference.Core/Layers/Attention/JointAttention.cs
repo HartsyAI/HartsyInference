@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
@@ -110,9 +111,6 @@ public sealed class JointAttention
 
     /// <summary>The joint attention's configuration.</summary>
     public JointAttentionConfig Config => _config;
-
-    /// <summary>Number of streams.</summary>
-    public int StreamCount => _streams.Length;
 
     /// <summary>Runs the projections, norms, concatenation, attention and split. <paramref name="inputs"/> are the streams'
     /// <c>[B, S_i, C_i]</c> inputs in stream index order; <paramref name="attended"/>[i] receives stream i's rows of the

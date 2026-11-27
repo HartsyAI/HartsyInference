@@ -1,5 +1,5 @@
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -12,6 +12,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -20,6 +21,13 @@ public sealed class Sd3Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "sd3";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip", "t5"], Format = "text", Negative = "separate",
+        Supports = ["weights", "break", "regions", "text-rendering"], Guide = "docs/prompting/sd3.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>SD3's VAE encoder is constructed alongside the decoder, and Sd3Pipeline implements the blend-on-vanilla masked path.</remarks>

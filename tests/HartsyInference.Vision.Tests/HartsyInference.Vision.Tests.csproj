@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <RootNamespace>HartsyInference.Vision.Tests</RootNamespace>
@@ -14,22 +15,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
-    <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Include="Fixtures\Attention\**\*" CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <!-- Test fixture: small RGB PNG (Ultralytics' bus.jpg → PNG). Used by PngDecoderTests and the
-       YOLO end-to-end test for a real-image inference path. -->
-  <ItemGroup>
-    <Content Include="TestData\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.Quant;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
@@ -59,6 +60,9 @@ public sealed class MiniMaxH3CheckpointConverter
     {
         ArgumentNullException.ThrowIfNull(key);
         if (key.EndsWith(".scaled_fp8", StringComparison.Ordinal) || key == "scaled_fp8")
+            return (MiniMaxH3Bucket.Drop, null);
+        // ComfyUI's attention hint blob (a JSON string in U8), not a weight; dropped like the scaled_fp8 marker.
+        if (ComfyAttentionHint.IsHint(key) && key.EndsWith(".attn.comfy_attention.config", StringComparison.Ordinal))
             return (MiniMaxH3Bucket.Drop, null);
 
         // Dotted-prefix order is load-bearing: "audio_vae." before "vae.", and the diffusion prefix before the bare

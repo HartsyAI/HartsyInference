@@ -1,6 +1,9 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -14,8 +17,8 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
     public sealed class Settings : PlacementCliSettings
     {
         /// <summary>The video description.</summary>
-        [CommandArgument(0, "<prompt>")]
-        [Description("The video description.")]
+        [CommandArgument(0, "[prompt]")]
+        [Description("The video description. Required, except for a Duo run, which takes its condition from --duo-run-folder.")]
         public string Prompt { get; init; } = "";
 
         /// <summary>Model id (catalog) or path. Optional when <c>--model-path</c> is given.</summary>
@@ -120,6 +123,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Path to the driving motion video (Wan-Animate); its pose skeleton and face crop are auto-derived unless overridden.")]
         public string? DrivingVideo { get; init; }
 
+        /// <summary>The clip a continuation extends (LongCat-Video's video continuation).</summary>
+        [CommandOption("--continue-video")]
+        [Description("Path to a clip to continue (LongCat-Video, base build only): the output begins with the whole clip, sampled to 15 fps, and its last 13 sampled frames condition the generated frames after them. Leave width and height unset; the result is 15 fps.")]
+        public string? ContinueVideo { get; init; }
+
         /// <summary>Pre-rendered pose/skeleton video overriding the pose branch's auto-preprocess.</summary>
         [CommandOption("--pose-video")]
         [Description("Path to a pre-rendered pose/skeleton video for the pose branch (overrides auto-preprocessing).")]
@@ -170,6 +178,45 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Audio track (WAV) to lock the soundtrack to so the video is generated against it (lip-sync). "
             + "Longer tracks are trimmed to the clip, shorter ones zero-padded.")]
         public string? DrivingAudio { get; init; }
+
+        /// <summary>Separate the driving audio's vocals before using it.</summary>
+        [CommandOption("--separate-vocals")]
+        [Description("Run --driving-audio through the Kim_Vocal_2 vocal separator first, so the video follows the vocals only. "
+            + "Runs on the CPU and is slow: minutes for a clip of a few seconds.")]
+        public bool SeparateVocals { get; init; }
+
+        /// <summary>The first speaker's speech in a two-person clip (LongCat-Video-Avatar).</summary>
+        [CommandOption("--speaker1-audio")]
+        [Description("Speech (WAV) of the first of two people in --init-image (LongCat-Video-Avatar); instead of --driving-audio. "
+            + "Leave one speaker without audio to keep that person silent.")]
+        public string? Speaker1Audio { get; init; }
+
+        /// <summary>The second speaker's speech.</summary>
+        [CommandOption("--speaker2-audio")]
+        [Description("Speech (WAV) of the second person in --init-image.")]
+        public string? Speaker2Audio { get; init; }
+
+        /// <summary>Where the first speaker is.</summary>
+        [CommandOption("--speaker1-box")]
+        [Description("The first speaker's region of --init-image as y_min,x_min,y_max,x_max in its pixels. Give both boxes or neither; "
+            + "with neither the first speaker is on the left half and the second on the right.")]
+        public string? Speaker1Box { get; init; }
+
+        /// <summary>Where the second speaker is.</summary>
+        [CommandOption("--speaker2-box")]
+        [Description("The second speaker's region of --init-image as y_min,x_min,y_max,x_max.")]
+        public string? Speaker2Box { get; init; }
+
+        /// <summary>Other people in the picture, who stay silent.</summary>
+        [CommandOption("--silent-box")]
+        [Description("Region of another person who stays silent, as y_min,x_min,y_max,x_max; repeat for more. Needs both speaker boxes.")]
+        public string[]? SilentBoxes { get; init; }
+
+        /// <summary>Whether the speakers talk at once or in turn.</summary>
+        [CommandOption("--speaker-timing")]
+        [Description("parallel (default): both speak from the start and the soundtrack adds the two. sequential: the second speaker starts when "
+            + "the first recording ends.")]
+        public string? SpeakerTiming { get; init; }
 
         /// <summary>Arbitrary image guides expressed as FRAME=PATH.</summary>
         [CommandOption("--guide-image")]
@@ -303,6 +350,16 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Restore target-area height (default 720).")]
         public int? RestoreHeight { get; init; }
 
+        /// <summary>The folder a Duo run reads its Intent rows, reference latent and noise from.</summary>
+        [CommandOption("--duo-run-folder")]
+        [Description("Duo only: folder with manifest.json naming the Intent rows, reference latent and noise. Use with no prompt; --frames is 17 per block.")]
+        public string? DuoRunFolder { get; init; }
+
+        /// <summary>The Duo history window in frames.</summary>
+        [CommandOption("--duo-window-frames")]
+        [Description("Duo only: history window in frames, counting the current 17-frame block (default 144; -1 keeps all). Bounds device memory.")]
+        public int? DuoWindowFrames { get; init; }
+
         /// <summary>Directory to write the frame sequence into.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to write the frame sequence into (defaults to the output root).")]
@@ -322,7 +379,15 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (!CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out int exitCode))
+        // Refused here, before any file is looked for or offered for download.
+        string family = ModelSelector.Parse(settings.Model).Id;
+        if (DuoCliGate.Refusal(family, settings.DuoRunFolder, settings.DuoWindowFrames) is { } refusal)
+        {
+            AnsiConsole.MarkupLine($"[red]{refusal}[/]");
+            return 1;
+        }
+        int exitCode;
+        if (!DuoCliGate.IsDuo(family) && !CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out exitCode))
             return exitCode;
 
         if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
@@ -353,6 +418,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("end-frame", settings.EndFrame);
         parameters.PutIfSet("driving-video", settings.DrivingVideo);
+        parameters.PutIfSet("continue-video", settings.ContinueVideo);
         parameters.PutIfSet("pose-video", settings.PoseVideo);
         parameters.PutIfSet("face-video", settings.FaceVideo);
         if (settings.NoAutoPreprocess)
@@ -362,6 +428,8 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("swap-model", settings.SwapModel);
         parameters.PutIfSet("swap-percent", settings.SwapPercent);
         parameters.PutIfSet("preview-output", settings.PreviewOutput);
+        parameters.PutIfSet("duo-run-folder", settings.DuoRunFolder);
+        parameters.PutIfSet("duo-window-frames", settings.DuoWindowFrames);
         // Repeatable options collapse to one newline-joined value: the parameter bag is flat strings, and a path
         // cannot contain a newline.
         if (settings.ReferenceImages is { Length: > 0 })
@@ -381,6 +449,19 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
         }
         parameters.PutIfSet("driving-audio", settings.DrivingAudio);
+        parameters.PutIfSet("speaker1-audio", settings.Speaker1Audio);
+        parameters.PutIfSet("speaker2-audio", settings.Speaker2Audio);
+        parameters.PutIfSet("speaker1-box", settings.Speaker1Box);
+        parameters.PutIfSet("speaker2-box", settings.Speaker2Box);
+        parameters.PutIfSet("speaker-timing", settings.SpeakerTiming);
+        if (settings.SilentBoxes is { Length: > 0 })
+        {
+            parameters.Put("silent-boxes", string.Join('\n', settings.SilentBoxes));
+        }
+        if (settings.SeparateVocals)
+        {
+            parameters.Put("separate-vocals", "true");
+        }
         if (settings.GuideImages is { Length: > 0 })
         {
             parameters.Put("guide-images", string.Join('\n', settings.GuideImages));
@@ -424,16 +505,60 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             parameters.PutIfSet("restore-height", settings.RestoreHeight);
         }
 
+        ModelSelector selector = ModelSelector.Parse(settings.Model);
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Video);
         if (!string.IsNullOrWhiteSpace(settings.ModelProfile))
         {
             spec = spec with { ProfileId = settings.ModelProfile };
         }
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);
+        if (LongCatAvatarGate.ConsentNotice(selector.Id, settings.Quiet) is string consent)
+        {
+            AnsiConsole.MarkupLine($"[yellow]Consent:[/] {Markup.Escape(consent)}");
+        }
 
         (int? gpu, EngineOptions? engineOptions) = PlacementCli.Build(settings, settings.Backend,
             HartsyInference.Engine.Modality.Video, PlacementCli.TryModelBytes(settings.Model));
         return CommandRunner.Run(Modality.Video, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false, gpu, engineOptions);
     }
+}
+
+/// <summary>Keeps the Duo run options on the Duo recipe, so another family cannot be run without a prompt by passing one.</summary>
+internal static class DuoCliGate
+{
+    /// <summary>True when <paramref name="family"/> resolves to the Duo recipe.</summary>
+    internal static bool IsDuo(string? family) =>
+        !string.IsNullOrEmpty(family) && VideoRecipeRegistry.Resolve(family) is DuoRecipe;
+
+    /// <summary>Why the run options do not fit <paramref name="family"/>, or null when they do: Duo needs a run folder, and no other family
+    /// takes the options.</summary>
+    internal static string? Refusal(string? family, string? runFolder, int? windowFrames)
+    {
+        if (IsDuo(family))
+        {
+            return string.IsNullOrWhiteSpace(runFolder) ? "Duo takes no prompt; it needs --duo-run-folder." : null;
+        }
+        return runFolder is null && windowFrames is null
+            ? null
+            : "--duo-run-folder and --duo-window-frames need a Duo model: -m duo-v1-causal, duo-v1-2-causal or duo-v1-distill.";
+    }
+}
+
+/// <summary>The LongCat-Video-Avatar gates the video command applies. Keyed on the family the request resolves to through the recipe
+/// registry, so a request reaches the same rules whether it names a catalog row or a family token.</summary>
+internal static class LongCatAvatarGate
+{
+    private const string Family = "longcat-avatar";
+
+    /// <summary>The consent line a likeness generator shows on every run that is not quiet.</summary>
+    internal const string ConsentText = "LongCat-Video-Avatar makes a talking likeness of a real person. "
+        + "Use it only with the consent of the person depicted.";
+
+    /// <summary>True when <paramref name="family"/> resolves to the avatar recipe.</summary>
+    internal static bool IsAvatar(string? family) =>
+        !string.IsNullOrEmpty(family) && VideoRecipeRegistry.Resolve(family)?.Name == Family;
+
+    /// <summary>The consent line for a non-quiet run of the avatar recipe, or null.</summary>
+    internal static string? ConsentNotice(string? family, bool quiet) => !quiet && IsAvatar(family) ? ConsentText : null;
 }

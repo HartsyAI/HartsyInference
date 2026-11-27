@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Mert2;
@@ -178,7 +180,8 @@ internal sealed class Mert2ConformerLayer
         backend.Linear(scratch.Value, scratch.Normed, _valueWeight!, _valueBias);
 
         // Split-half rotary on Q and K only; V is left alone, as in the released module.
-        backend.ApplyRope(scratch.Query, scratch.Key, scratch.RopeCos, scratch.RopeSin);
+        backend.Rotary(RotaryCall.TokenMajor(scratch.Query, scratch.RopeCos, scratch.RopeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        backend.Rotary(RotaryCall.TokenMajor(scratch.Key, scratch.RopeCos, scratch.RopeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
 
         backend.Permute0213(scratch.QueryHeads, scratch.Query, tokens, heads, headDim);
         backend.Permute0213(scratch.KeyHeads, scratch.Key, tokens, heads, headDim);

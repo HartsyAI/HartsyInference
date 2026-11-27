@@ -52,4 +52,10 @@ public interface ITextService
     /// reported <see cref="DeploymentUnloadOutcome.AlreadyGone"/>, and its device keeps the model it holds now. Default: not supported, like <see cref="DeployAsync"/>.</summary>
     DeploymentUnloadOutcome UnloadDeployment(string deploymentId)
         => throw new NotSupportedException("This text service does not support deployments.");
+
+    /// <summary>Loads <paramref name="spec"/>'s model and opens a live vision-language session on it. The session holds the device's text slot
+    /// until it is disposed. Default: not supported, so other implementations keep compiling unchanged.</summary>
+    /// <exception cref="NotSupportedException">The model is not a streaming vision-language model.</exception>
+    Task<IRealtimeVlmSession> OpenRealtimeAsync(ModelSpec spec, RealtimeVlmRequest request, CancellationToken cancel = default)
+        => throw new NotSupportedException("This text service does not serve live vision sessions.");
 }

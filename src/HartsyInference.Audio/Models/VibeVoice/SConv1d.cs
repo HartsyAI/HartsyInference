@@ -45,12 +45,15 @@ internal sealed unsafe class SConv1d
         Bias = bias;
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    /// <param name="keepStoredWeight">Keeps the convolution weight in the dtype it is stored in instead of widening it to F32 (half the memory for a
+    /// BF16 checkpoint). Only for a backend whose convolution casts a half-precision weight on the device, which gives the same values as the
+    /// widened weight; the CPU kernels read F32 only.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, bool keepStoredWeight = false)
     {
         // Python layout: SConv1d wraps NormConv1d which wraps nn.Conv1d. The state dict key is
         // f"{prefix}.conv.conv.weight" (the outer is SConv1d's `.conv` = NormConv1d, the inner
         // is NormConv1d's `.conv` = nn.Conv1d).
-        _weight = WhisperOps.EnsureF32(w[$"{prefix}.conv.conv.weight"]);
+        _weight = keepStoredWeight ? w[$"{prefix}.conv.conv.weight"] : WhisperOps.EnsureF32(w[$"{prefix}.conv.conv.weight"]);
         if (Bias) _bias = WhisperOps.EnsureF32(w[$"{prefix}.conv.conv.bias"]);
     }
 

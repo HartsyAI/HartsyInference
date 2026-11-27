@@ -1,9 +1,13 @@
 # Attention contract
 
 The semantics every attention kernel, planner row and model-side layer in this engine implements. It is normative:
-`AttentionHostReference` (`src/HartsyInference.Core/Backends/Attention/`, the default `IBackend.Attention`) is its
+`AttentionHostReference` (`src/HartsyInference.Core/Backends/Attention/`, invoked explicitly by the caller) is its
 executable form, and a kernel that disagrees with it beyond the tolerance of the precision it was permitted is wrong,
 whatever any model's output looks like. Code comments point here instead of restating it.
+
+The [support and admission contract](ATTENTION_SUPPORT.md) distinguishes mandatory common cases, optional
+backend capabilities and current implementation gaps. Normative semantics do not assert that every feature is
+represented by the current API or already verified on every backend.
 
 ## 1. Operands and shapes
 
@@ -41,6 +45,44 @@ computed from the valid lengths, never from `Skv`, a capacity or a bucket size.
 
 KV storage is either **dense** (one contiguous `Skv` per sequence plus `kvLen`) or **paged** (a page table, a page
 size and `kvLen`); the two are distinct representations, not one with a flag.
+
+A paged call (`AttentionCall.KvPages`) passes one layer's page buffers as its key and value operands, `[1, Hkv, pages ×
+pageSize, D]`, and an I32 page table: row `r` of the sequence is buffer row `table[r / pageSize] × pageSize + r mod
+pageSize`. It holds one sequence and states `kvLen` on the host. The owner replaces the table tensor whenever the table
+changes and states its highest page, so the call is checked against the buffers without reading the table back. Only a
+row that declares `PagedKv` reads such a call. Every other row excludes it, a backend without such a row refuses it,
+and the host reference refuses it, because each would take the page buffer for a contiguous cache. A caller asks
+`IBackend.AdmitsPagedAttention` first and, when the answer is no, gathers the rows into a contiguous buffer and issues
+a dense call: the gather is the caller's, recorded as `PrefixGather`, never a backend's silent choice.
+
+A call may give **a length per sequence** (`AttentionCall.SequenceLengths`) in place of one shared `kvLen`: sequence
+`b` attends the first `lengths[b]` rows of its keys, with a length below zero read as zero and one above `Skv` as `Skv`,
+and the rows past that are never read. It is then one call per sequence. Under the causal rule the `Sq` query rows are
+the sequence's last positions, so row `j` sits at `lengths[b] − Sq + j`; a row below position zero attends nothing.
+Without the causal rule every row attends all `lengths[b]` keys. Such a call leaves the shared positions unset and
+carries no other position-dependent or additive term: a window, a block size, a bias, a softcap, sinks and ALiBi are
+refused, and so are paged keys and values. A call may also name an **LSE output** (`AttentionCall.Lse`, F32
+`[B, Hq, Sq]`, §3). Only a row that declares `SequenceLengths`, or `Lse`, takes a call that uses it; every other row
+excludes the call, and a GPU backend without such a row refuses it. The host reference runs both, and the CPU backend
+takes such a call through it. On CUDA and on Vulkan one row declares both, `flash.decode.lengths`: F32 head-major Q and
+the `[B, Sq, Hq × D]` output over a head-major cache. CUDA takes an F32, F16 or BF16 cache, head dim 64, 128 or 256
+(256 where the device gives a block the shared memory its tiles need: 83,456 bytes for an F32 cache, 50,432 for a
+half type) and at most 16 query heads per key head; Vulkan an F32, F16 or BF16 cache, a head dim of one to eight
+subgroup widths up to 256 (eight widths at 32 lanes), and at most 8 query heads per key head. Each
+takes only calls with sequence lengths, so an LSE on a call with one shared length is still refused on a GPU. Both
+kernels cut the keys into chunks sized from the longest sequence of the call, so the order a sequence's keys are summed
+in, and with it the last bits of its result, depends on the other sequences' lengths. Each result stays within the
+kernel's tolerance of the host reference; it is not bit-equal to the same sequence run alone.
+
+The **speculative-decode merge** is not an `AttentionCall`. It is a backend primitive, `IBackend.DecodeTreeMerge`,
+defined by `DecodeMergeReference`, and `IBackend.HasDecodeMerge` says whether a backend runs it; one that does not
+refuses the call. A verify step of `S` rows (at most 32) first attends the committed prefix alone, as a decode with
+sequence lengths, without the causal rule, that names an LSE. The merge then folds the step's own keys and values into
+that result: row `j` attends the step rows its mask entry names, one bit a row, and the two softmaxes are joined through
+the prefix LSE, which is negative infinity for a row whose prefix was empty. A row with no key at all is zero. Every
+operand is F32: the prefix output and the merged output `[B, S, Hq × D]` (they may be one tensor), the prefix LSE
+`[B, Hq, S]`, Q `[B, Hq, S, D]`, and the step's K and V `[B, Hkv, S, D]`. The CPU backend runs the reference; CUDA and
+Vulkan each have one kernel. It records no `Execution` evidence and has no planner row, because no kernel is chosen.
 
 A position held on the device (graph decode) that exceeds the storage it indexes is clamped so no kernel reads out
 of bounds, and the kernel sets a device status word. The next host synchronization point that owns the call (the end
@@ -121,7 +163,9 @@ allow, never add them:
 | `int8` | `f16`, plus INT8 Q/K with per-row or finer scales and K smoothing, plus the P/V format the model's gate selected |
 
 A call may also refuse a multiply format (`AttentionNumerics.Refused`, per layer `AttentionLayerConfig.RefusedFormats`): every
-row that declares that format is excluded, whatever the call grants or asserts.
+row that declares that format is excluded, whatever the call grants or asserts. An operand or the output in a refused format
+excludes every row, since a row that widens it still reads it narrow. `AttentionNumerics.WideRange` is the F32-or-BF16 demand
+of a model whose values overflow F16.
 
 K smoothing (subtracting one vector `μ` from every key) shifts each query row's scores by `cᵢ = α qᵢ · μ`. Plain
 softmax, additive bias and exclusions are invariant to that shift; a softcap is not (`tanh(x − c)` is not a shift of
@@ -151,6 +195,13 @@ Failures are classed:
 | Unsupported | no row covers the call | raised at planning, before any work |
 | Recoverable | a plan build refused, an engine configuration rejected, a workspace too small | the next row runs; no state changed |
 | Sticky | an illegal address, a launch failure, anything raised after output writes began | the context is poisoned and nothing retries |
+
+An admitted row must not raise `AttentionUnsupportedException`: it declines by returning false. If every admitted
+row declines, the planner raises `AttentionRecoverableException`. Any exception a row raises is sticky and propagates
+unchanged rather than being converted into a decline. A GPU backend runs the host reference only through a declared
+row: one named in the plan and the execution evidence, with `HostReference` lowering, that warns once per gap. Vulkan declares one for `FlashAttention` (C.1);
+CUDA declares none. Otherwise host execution is the caller's explicit choice through `AttentionHostReference.Run`, and
+a backend without rows refuses `IBackend.Attention`.
 
 A failure while a stream is capturing is never recorded as a permanent property of a head dim or a kernel.
 
@@ -192,7 +243,8 @@ unsmoothed one.
 
 The planner reproduces these until the row that owns each is rewritten.
 
-- A fully excluded row gives the mean of V on CUDA's cuDNN and materialized F32 paths, and zero on the flash kernels.
+- CPU dense SIMD softmax still produces NaN for a fully excluded row. PR 02's executed CUDA materialized and
+  cuDNN 9.21 controls return zero; that cohort-specific evidence does not verify every cuDNN release.
 - A sliding window without `Causal` keeps every later key on CUDA and excludes them on Vulkan.
 - CUDA's token-major permute fallback refuses key-only masks, masks with `B ≠ 1` and `B ≠ 1` operands; its cuDNN rows and its
   head-major entry accept them.
@@ -204,25 +256,96 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's equal-head token-major entry has no SageAttention row: a call its head-major entry runs through Sage (F16, head
   dim 64 or 128, unmasked, both sequences at `numerics.sageF16MinSkv`) runs on cuDNN unless `numerics.ltx2SageTokenmajor`
   permutes it into the head-major entry. A layer whose config sets `HeadMajorForSage` keeps such calls head-major.
+- CUDA's dense cuDNN rows read grouped K/V natively, and the generic layer preserves grouped heads through its head-major
+  transform. Two rows repeat K/V and re-enter dense planning with the original mask, scale and numerical permissions:
+  `widen.preferred`, ahead of cuDNN, for a grouped call whose equal-head form INT8 v2, Sage or the F16 flash kernel takes
+  (the routes those calls had when the caller widened), and `widen.dense`, after cuDNN, when no native row completes. The
+  grouped token-major row yields the same calls to its permute row, which uses that dense planner. Execution evidence
+  reports `WidenKv` and the repeats only when a widening row runs. Whether widening for Sage beats native grouped cuDNN
+  is unmeasured; calibrated routing decides it.
 - CUDA's INT8 attention v2 rows (S.17 and M.4; with `numerics.int8AttnV2F16Pv`, S.18 and M.5) run only with
   `numerics.int8AttnV2`: unmasked, equal heads, head dim 128, F16 or F32 views with 16-byte aligned rows and an output
   covering its tensor, both sequences at `numerics.int8AttnV2MinTokens`. They take F32 whatever `allowF16` says, the
-  grouped token-major row yields to them through its widening, and a layer keeps a call token-major for M.4 only when
-  the backend says M.4 takes it now (a capture its workspace does not fit goes to Sage). K is quantized per key: a scale
+  grouped token-major row yields to them through `widen.preferred`, and a layer keeps a call token-major for
+  M.4 only when the backend says M.4 takes it now (a capture its workspace does not fit goes to Sage). K is quantized per key: a scale
   shared by several keys lets one outlier key move the winner of a near-argmax row. u8 P rounds each key against its
   128-key tile's maximum, so a key below 1/510 of it is dropped, and a tile whose whole mass sits below that step loses
   it; the F16 PV keeps it. V scales default to one per channel per tile (`numerics.int8AttnV2VTile`), at or below the
-  per-sequence error on every synthetic and captured call measured.
+  per-sequence error on every synthetic and captured call measured. With `numerics.int8AttnV2Rotate` (off by default)
+  the rows rotate Q and the centered K before quantizing them, by the pinned rule at head dim 128: the 4-point
+  Hadamard up to 256 keys, the signed 128-point one past that. A fourth launch between the quant and attention
+  launches rewrites the Q and K bytes and scales; V is not rotated. The rows decline when the knob is set and that
+  launch's kernel is not loaded, so a call asked to rotate never runs unrotated. A captured graph replays the launches chosen when it was captured,
+  whatever the knob says later. No model sets the knob.
 - CUDA runs F32 attention GEMMs in TF32 unless `numerics.sdpaNoTf32` is set (read when the backend is constructed; the
   `reference` profile sets it; `numerics.noTf32` does not reach them), and `FlashAttention`'s F32 prefill narrows to F16
   without a permission.
 - CUDA's materialized F32→F16 cast does not saturate; cuDNN's does.
-- CUDA chooses between the materialized and tiled paths, the tile height, and cuDNN or FA2 prefill from free VRAM.
-- CUDA's materialized row addresses at most 2^32 score elements (B·H·Sq·Skv; its softmax forms row offsets in 32 bits), and
-  so does each query tile. Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
+- CUDA chooses between the materialized and tiled paths, the tile height, and cuDNN or FA2 prefill from free VRAM. The tile holds about a
+  quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
+  does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back after a run of calls that fit at it), because `cuMemGetInfo` reads far too low on a card a process has filled past about
+  8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
+- With `numerics.tileFromDevice` on (default off), the tile height is the device's fixed rung over the row bytes: 1 GiB when the card's total VRAM
+  is 20 GiB or more (binary; a 20 GB card reports about 18.6 GiB and gets 512 MiB), else 512 MiB. The rung sets the height only. The tiling,
+  BF16-cast and causal-mask gates share one budget. While a streaming scope is open it is `min(total/2, headroom/2)`, where the headroom is
+  the scope's `HeadroomBytes` (model- and token-derived, what the planner leaves free; noted when the scope is constructed, cleared when it
+  is disposed). With no scope open it is the device's tile rung (1 GiB at 20 GiB total or more, else 512 MiB). The budget reads no free
+  memory, so the gate path does not move with the free reading. A failed allocation is not retried at a smaller height under this knob: it
+  raises OutOfVram, so a run never changes path mid-run. The remembered cap is recorded but not read under this knob, so later calls do not
+  start from a shrunken height. The gate is pinned by `SdpaTileFromDeviceTests` (budget as a function of total and headroom) and the
+  on-card A/B `SdpaTileFromDeviceGpuTests` (bit-identical output across two free readings with the knob on; knob off differs at rounding). A/B on RTX 4090 at 93 frames, seed 1234, knob
+  `c3a55333c` vs main `712ea2ca7`: 832x480 knob steps 92.7 / 92.0 s, peaks 19585 / 19718 MiB; main steps 90.7 / 91.7 s, peaks
+  20175 / 20051 MiB; the knob reproduces its output (two runs, same sha `6182eb4a`); main does not. These rows were measured on the
+  previous gate (the rung), so the 832x480 and 640x368 A/B must be re-run on this gate before default-on.
+- Reading the free-memory log (`numerics.tileFromDevice` A/B). Two switches, set together for a run:
+  `HARTSY_GPU_TEST_KNOBS=numerics.tileFromDevice=true` turns the knob on for a GpuIntegration test run (test projects only), and
+  `HARTSY_TILE_FREE_LOG=<file>` names the file each process appends its summary to (any run: the CLI generation or a test host). The
+  variable is read only when the knob is on, so an ordinary run writes nothing. The file gets one block per process: a `# pid=… utc=…` line,
+  then one `tileFromDevice row=<id> executed=…` line per executed attention row, which is the count to read as calls; then the
+  `tileFromDevice: calls=… halved=… totalMiB=… freeMiB min/max=… tileRows=[…]` line (every tiled score-tile call); then one
+  `tileFromDevice gate=<tiles|bf16cast|cast.score|causal> decisions=… over=…` line per budget gate. A gate's `decisions` includes
+  planner probes (PlansBatch to PlanAttention, Cheaper, Explain) and rows that never ran, so it is not a call count. `over` counts decisions
+  whose bytes exceeded the gate's budget (the tiled or fallback side). The gate line no longer reports free VRAM: under the knob the budget
+  is the scope headroom or the tile rung, so free is not part of any gate's decision. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted; `cast.score` skips
+  forced calls for the same reason. A tile line at
+  `halved>0` means an OOM halved that call's tile. Stderr also shows the summary, but `dotnet test` at default verbosity hides a test
+  host's stderr, so read the file.
+- CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
+  attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
+  Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
   unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
-- Vulkan's scalar kernel reads a per-head or per-batch mask as one `[Sq,Skv]` block, and its naive kernel mis-addresses
-  a per-batch one.
-- `AttentionReference.FlashAttention` adds ALiBi before the softcap; the orders differ only when a call sets both.
-- `FlashAttention` runs on the host on Vulkan when the call has a softcap, sinks, ALiBi or a head dim above 128, and on
-  CUDA when the head dim is above 1024.
+- Vulkan's dense head-major entry tries four rows in order: `cm2.flash` (F16 compute: head dim 64 or 128, with the F16
+  permission or F16 operands, no BF16), `flash.scalar` (head dim up to 128), `tiled.f32` (operands and output all F32,
+  head dim up to 256) and `naive` (materializes the scores, and tiles the query axis for an unmasked call whose scores
+  pass 1 GiB). `numerics.vkTiledAttention` decides which calls `flash.scalar` yields to `tiled.f32`. By default (`auto`)
+  that is every all-F32 call up to head dim 128, and at head dims 129 to 256 only a call with a bias whose score matrix
+  passes that 1 GiB, which `naive` would hold whole. `all` gives `tiled.f32` every call it serves and `off` none. A
+  token-major call the cooperative-matrix row does not take re-enters these rows after a permute, BF16 operands widened
+  to F32 first. The comparison behind the default is the
+  [tiled F32 A/B](../benchmarks/attention/reports/vulkan-tiled-f32-ab.md), taken on one card.
+- Vulkan's scalar/tiled mask shaders carry batch/head/query bias strides; the naive path uses the same layout to
+  offset each block and expands key-only masks. Source indexing is not a complete executed mask-conformance campaign.
+- Vulkan `FlashAttention` runs its declared host-reference row (C.1) when neither its scalar admission nor its
+  restricted wide-sink row admits the call: softcap, causal sinks, ALiBi, or a head dim past the flash tile. Gemma-2
+  (decoder and text encoder), GPT-OSS and ALiBi models take it. The wide row covers unmasked F32 sinks with optional
+  softcap, no ALiBi, up to D1024. CUDA refuses Flash above D1024.
+- **General Sol-Attn** is not an `AttentionCall`. It is a backend primitive, `IBackend.SolAttention`, defined by
+  `SolAttentionReference`, and `IBackend.HasSolAttention` says whether a backend runs it. The CPU backend runs the
+  reference; CUDA and Vulkan each run it as five kernels, seven with the coarse gate, in F32, with every option the
+  reference has. Which key blocks a query block reads is the same as the reference's on CUDA, and on Vulkan wherever
+  the driver keeps subnormals; the output is compared by tolerance. The Vulkan routing stages take their divides and
+  their square root through `divRn` and `sqrtRn` (`Shaders/div_rn.glsl`, `sqrt_rn.glsl`), because a device's own
+  need not be correctly rounded and on an RTX 3060 are not: about a third of sampled quotients and a quarter of sampled
+  roots differ from the rounded result. An operand that is itself subnormal is read as zero by that device, helpers
+  included, and no routing test covers a subnormal sum or spread, so the match with the reference stays conditional
+  on that.
+  The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
+  so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
+  has it. No model calls the primitive yet, and it has no timing.
+- **Block-sparse attention** over a 3D token grid is not an `AttentionCall` either: which keys a query reads depends on
+  the operands, so no mask, planner row or `Execution` evidence describes it. It is the backend primitive
+  `IBackend.BlockSparseAttention`, defined by `BlockSparseAttentionReference` and specified in
+  [backend op contracts](BACKEND_OPS.md#blocksparseattention). It keeps this contract's head-major `[B, H, S, D]`
+  operands, its plain scale multiplier and its zero row for a token with no key; it takes no mask, no grouped K/V and no
+  numerical permissions. The CPU backend runs the reference in F32; CUDA and Vulkan have no kernel and refuse the call by
+  name. No model calls it yet, and it has no timing.

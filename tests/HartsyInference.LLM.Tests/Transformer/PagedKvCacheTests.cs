@@ -1,0 +1,499 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
+
+namespace HartsyInference.LLM.Tests.Transformer;
+
+/// <summary>The paged cache presents the same keys and values as a contiguous <see cref="FixedKvCache"/> fed the same
+/// appends, through prefill, decode, rollback, reset and a rewrite of the same position, and it copies each row out of its
+/// pages once instead of on every call.</summary>
+[Collection("AttentionSemantics")]
+public sealed class PagedKvCacheTests
+{
+    private const int KvHeads = 2, PageSize = 4, MaxPages = 64, MaxTokens = PageSize * MaxPages;
+    private static readonly int[] HeadDims = [4, 6, 4];
+
+    /// <summary>A paged cache and a contiguous reference driven with identical data.</summary>
+    private sealed class Pair : IDisposable
+    {
+        public readonly CpuBackend Backend;
+        public readonly PagedKvPool Pool;
+        public readonly PagedKvCache Paged;
+        public readonly FixedKvCache Fixed;
+        private readonly Random _random;
+        private readonly bool _ownsPool;
+
+        public Pair(int expectedTokens = 0, int maxPages = MaxPages)
+        {
+            Backend = new CpuBackend();
+            Pool = new PagedKvPool(HeadDims.Length, KvHeads, HeadDims, PageSize, maxPages);
+            _ownsPool = true;
+            _random = new Random(1234);
+            Paged = new PagedKvCache(Pool, expectedTokens);
+            Fixed = new FixedKvCache(HeadDims.Length, 1, KvHeads, HeadDims, PageSize * maxPages, DType.F32);
+        }
+
+        /// <summary>A second sequence in <paramref name="first"/>'s pool, fed different rows.</summary>
+        public Pair(Pair first, int seed)
+        {
+            Backend = first.Backend;
+            Pool = first.Pool;
+            _random = new Random(seed);
+            Paged = new PagedKvCache(Pool);
+            Fixed = new FixedKvCache(HeadDims.Length, 1, KvHeads, HeadDims, PageSize * Pool.MaxPages, DType.F32);
+        }
+
+        /// <summary>Appends <paramref name="tokens"/> new rows to one layer of both caches, without advancing.</summary>
+        public void Append(int layer, int tokens)
+        {
+            using Tensor k = Rows(HeadDims[layer], tokens), v = Rows(HeadDims[layer], tokens);
+            Paged.AppendStep(Backend, layer, k, v);
+            Fixed.AppendStep(Backend, layer, k, v);
+        }
+
+        /// <summary>One step in which every layer appends to its pages and is read through them, as a backend with a
+        /// paged kernel reads it: nothing goes into the contiguous copy, and the length advances.</summary>
+        public void PagedStep(int tokens)
+        {
+            for (int layer = 0; layer < HeadDims.Length; layer++)
+            {
+                using Tensor k = Rows(HeadDims[layer], tokens), v = Rows(HeadDims[layer], tokens);
+                Paged.AppendKvPages(Backend, layer, k, v);
+                Fixed.AppendStep(Backend, layer, k, v);
+                Assert.True(Paged.TryGetPages(layer, Paged.CurrentLength + tokens, out _, out _, out _));
+                Paged.PagesServed(layer);
+            }
+            Paged.AdvanceLength(tokens);
+            Fixed.AdvanceLength(tokens);
+        }
+
+        /// <summary>One model step: every layer appends, attends over its prefix (checked here), then the length advances.</summary>
+        public void Step(int tokens)
+        {
+            for (int layer = 0; layer < HeadDims.Length; layer++)
+            {
+                Append(layer, tokens);
+                AssertLayerMatches(layer, Paged.CurrentLength + tokens);
+            }
+            Paged.AdvanceLength(tokens);
+            Fixed.AdvanceLength(tokens);
+        }
+
+        public void Truncate(int length)
+        {
+            Paged.Truncate(length);
+            Fixed.Truncate(length);
+        }
+
+        public void Reset()
+        {
+            Paged.Reset();
+            Fixed.Reset();
+        }
+
+        public void AssertLayerMatches(int layer, int validRows)
+        {
+            AssertSameRows(Paged.KeyPrefix(layer), Fixed.KeyPrefix(layer), validRows, HeadDims[layer], $"layer {layer} keys");
+            AssertSameRows(Paged.ValuePrefix(layer), Fixed.ValuePrefix(layer), validRows, HeadDims[layer], $"layer {layer} values");
+        }
+
+        /// <summary>Reads every committed row of every layer straight from the pool, through the page table, and compares it
+        /// with the contiguous reference: what a reader that follows the table sees.</summary>
+        public void AssertPagesMatch()
+        {
+            for (int layer = 0; layer < HeadDims.Length; layer++)
+            {
+                AssertPages(Pool.KeyPages(layer), Fixed.KeyPrefix(layer), HeadDims[layer], $"layer {layer} key pages");
+                AssertPages(Pool.ValuePages(layer), Fixed.ValuePrefix(layer), HeadDims[layer], $"layer {layer} value pages");
+            }
+        }
+
+        private void AssertPages(Tensor pages, Tensor contiguous, int headDim, string what)
+        {
+            ReadOnlySpan<float> actual = pages.AsReadOnlySpan<float>(), expected = contiguous.AsReadOnlySpan<float>();
+            int poolRows = (int)pages.Shape[2], contiguousRows = (int)contiguous.Shape[2];
+            IReadOnlyList<int> table = Paged.PageTable;
+            for (int head = 0; head < KvHeads; head++)
+                for (int row = 0; row < Paged.CurrentLength; row++)
+                {
+                    int poolRow = Pool.FirstRow(table[row / PageSize]) + row % PageSize;
+                    Assert.True(
+                        actual.Slice((head * poolRows + poolRow) * headDim, headDim).SequenceEqual(expected.Slice((head * contiguousRows + row) * headDim, headDim)),
+                        $"{what}: head {head}, row {row} (pool row {poolRow}) differs.");
+                }
+        }
+
+        private Tensor Rows(int headDim, int tokens)
+        {
+            Tensor tensor = new(new TensorShape(1, KvHeads, tokens, headDim), DType.F32);
+            Span<float> values = tensor.AsSpan<float>();
+            for (int i = 0; i < values.Length; i++) values[i] = (float)_random.NextDouble();
+            return tensor;
+        }
+
+        public void Dispose()
+        {
+            Paged.Dispose();
+            Fixed.Dispose();
+            if (!_ownsPool) return;
+            Pool.Dispose();
+            Backend.Dispose();
+        }
+    }
+
+    /// <summary>True when the table is not the pages 0, 1, 2, ... in order, the one table a reader that ignored it would still get right.</summary>
+    private static bool IsScattered(IReadOnlyList<int> table)
+    {
+        for (int i = 0; i < table.Count; i++)
+            if (table[i] != i) return true;
+        return false;
+    }
+
+    private static void AssertSameRows(Tensor paged, Tensor contiguous, int validRows, int headDim, string what)
+    {
+        Assert.True(paged.Shape[2] >= validRows, $"{what}: the paged prefix holds {paged.Shape[2]} rows, fewer than the {validRows} valid ones.");
+        ReadOnlySpan<float> actual = paged.AsReadOnlySpan<float>(), expected = contiguous.AsReadOnlySpan<float>();
+        int pagedRows = (int)paged.Shape[2], contiguousRows = (int)contiguous.Shape[2];
+        for (int head = 0; head < KvHeads; head++)
+            for (int row = 0; row < validRows; row++)
+                Assert.True(
+                    actual.Slice((head * pagedRows + row) * headDim, headDim).SequenceEqual(expected.Slice((head * contiguousRows + row) * headDim, headDim)),
+                    $"{what}: head {head}, row {row} of {validRows} differs.");
+    }
+
+    [Fact]
+    public void PrefillThenDecodeMatchesAContiguousCache()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        for (int step = 0; step < 30; step++) pair.Step(1);
+        Assert.Equal(40, pair.Paged.CurrentLength);
+    }
+
+    [Fact]
+    public void ThePagesHoldEveryRowThroughPrefillDecodeAndRollback()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        pair.AssertPagesMatch();
+        for (int step = 0; step < 9; step++) pair.Step(1);
+        pair.AssertPagesMatch();
+        pair.Truncate(6);
+        pair.Step(3);
+        pair.Step(1);
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void TheBuffersGrowWithThePagesHandedOutAndKeepTheirRows()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        // Three pages are in use; the buffers hold those and four pages of headroom, not the pool's 64.
+        Assert.Equal(7 * PageSize, pair.Pool.KeyPages(0).Shape[2]);
+        for (int step = 0; step < 30; step++) pair.Step(1);
+        // The eighth page regrew every layer's buffers, and the rows written before that moved with them.
+        Assert.Equal(12 * PageSize, pair.Pool.KeyPages(0).Shape[2]);
+        Assert.Equal(12 * PageSize, pair.Pool.ValuePages(2).Shape[2]);
+        pair.AssertPagesMatch();
+        pair.Step(MaxTokens - 40);
+        Assert.Equal(MaxTokens, pair.Pool.KeyPages(1).Shape[2]);
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void APrefixReadOfALayerThatWroteNothingReturnsAnEmptyPrefix()
+    {
+        using Pair pair = new();
+        // Only layer 0 appends; layers 1 and 2 have no pages in the pool yet.
+        pair.Append(0, 3);
+        Assert.Equal(PageSize, pair.Paged.KeyPrefix(1).Shape[2]);
+        Assert.Equal(PageSize, pair.Paged.ValuePrefix(2).Shape[2]);
+    }
+
+    [Fact]
+    public void TwoSequencesInOnePoolKeepTheirOwnRows()
+    {
+        using Pair a = new();
+        using Pair b = new(a, seed: 77);
+        // Alternating growth interleaves the two sequences' pages in the pool.
+        a.Step(5);
+        b.Step(9);
+        for (int step = 0; step < 14; step++)
+        {
+            a.Step(1);
+            b.Step(1);
+        }
+        a.Step(7);
+        b.Step(6);
+        Assert.True(IsScattered(a.Paged.PageTable) && IsScattered(b.Paged.PageTable), "The sequences' pages were meant to interleave.");
+        Assert.Empty(a.Paged.PageTable.Intersect(b.Paged.PageTable));
+        a.AssertPagesMatch();
+        b.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void PagesASequenceGaveBackAreReusedWithoutLeakingItsRows()
+    {
+        using Pair a = new();
+        using Pair b = new(a, seed: 77);
+        a.Step(18);
+        int[] held = [.. a.Paged.PageTable];
+        // Rolling back frees the pages past the cut; the other sequence takes them and writes its own rows there.
+        a.Truncate(3);
+        b.Step(22);
+        Assert.NotEmpty(b.Paged.PageTable.Intersect(held.Skip(1)));
+        a.Step(11);
+        a.Step(1);
+        b.Step(1);
+        Assert.True(IsScattered(a.Paged.PageTable), "The regrown sequence was meant to take pages out of order.");
+        a.AssertPagesMatch();
+        b.AssertPagesMatch();
+        // A reset gives every page back; a new sequence on those pages still matches its own rows.
+        b.Reset();
+        b.Step(13);
+        a.AssertPagesMatch();
+        b.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void RollbackAndResetMatchAContiguousCache()
+    {
+        using Pair pair = new();
+        pair.Step(9);
+        for (int step = 0; step < 12; step++) pair.Step(1);
+        pair.Truncate(13);
+        for (int step = 0; step < 5; step++) pair.Step(1);
+        pair.Truncate(3);
+        pair.Step(6);
+        pair.Reset();
+        pair.Step(7);
+        pair.Step(1);
+        Assert.Equal(8, pair.Paged.CurrentLength);
+    }
+
+    [Fact]
+    public void APrefillLongerThanThePrefixKeptAcrossAResetMatchesAContiguousCache()
+    {
+        using Pair pair = new();
+        pair.Step(5);
+        pair.Reset();
+        // The eight-row prefix survives the reset; this prefill starts at row 0 and needs a larger one.
+        pair.Step(21);
+        pair.Step(1);
+        Assert.Equal(22, pair.Paged.CurrentLength);
+    }
+
+    [Fact]
+    public void RewritingTheSamePositionReplacesWhatWasThere()
+    {
+        using Pair pair = new();
+        pair.Step(6);
+        // A step that runs twice before the length advances (a rejected draft, a retried round) writes the same rows again.
+        for (int layer = 0; layer < HeadDims.Length; layer++)
+        {
+            pair.Append(layer, 2);
+            pair.AssertLayerMatches(layer, 8);
+        }
+        for (int layer = 0; layer < HeadDims.Length; layer++)
+        {
+            pair.Append(layer, 2);
+            pair.AssertLayerMatches(layer, 8);
+        }
+        for (int layer = 0; layer < HeadDims.Length; layer++)
+        {
+            pair.Append(layer, 1);
+            pair.AssertLayerMatches(layer, 7);
+        }
+        pair.Paged.AdvanceLength(1);
+        pair.Fixed.AdvanceLength(1);
+        pair.Step(1);
+    }
+
+    [Fact]
+    public void ALayerReadBeforeLaterLayersAppendSeesItsOwnRows()
+    {
+        using Pair pair = new();
+        pair.Step(5);
+        // The layer loop interleaves append and attend: layer 0 reads its prefix while layers 1 and 2 still hold last step's rows.
+        pair.Append(0, 1);
+        pair.AssertLayerMatches(0, 6);
+        pair.AssertLayerMatches(1, 5);
+        pair.Append(1, 1);
+        pair.AssertLayerMatches(1, 6);
+        pair.Append(2, 1);
+        pair.AssertLayerMatches(2, 6);
+        pair.Paged.AdvanceLength(1);
+        pair.Fixed.AdvanceLength(1);
+        for (int layer = 0; layer < HeadDims.Length; layer++) pair.AssertLayerMatches(layer, 6);
+    }
+
+    /// <summary>Bytes one row of every layer's keys and values takes.</summary>
+    private static long RowBytes => HeadDims.Sum(headDim => 2L * KvHeads * headDim * sizeof(float));
+
+    private static long GatheredBytes(AttentionEvidenceSession evidence, int from) =>
+        evidence.Snapshot().Skip(from).Where(e => e.Kind == AttentionEvidenceKind.PrefixGather).Sum(e => e.Bytes);
+
+    [Fact]
+    public void ADecodeStepCopiesOnlyItsNewRow()
+    {
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(5);
+        Assert.Equal(5 * RowBytes, GatheredBytes(evidence, 0));
+
+        int before = evidence.Snapshot().Length;
+        pair.Step(1);
+
+        // Six rows are valid and they fit the eight-row buffer: only the new row leaves the pages.
+        Assert.Equal(RowBytes, GatheredBytes(evidence, before));
+    }
+
+    [Fact]
+    public void ALayerReadThroughItsPagesCopiesNothing()
+    {
+        using Pair pair = new();
+        pair.Step(10);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        for (int step = 0; step < 12; step++) pair.PagedStep(1);
+        Assert.Equal(0, GatheredBytes(evidence, 0));
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void ALayerReadBothWaysRebuildsItsCopyOnceThenAddsOnlyNewRows()
+    {
+        // A token bound sizes the copy once, so no regrowth is counted below.
+        using Pair pair = new(expectedTokens: 64);
+        pair.Step(10);
+        // Reading through the pages drops the contiguous copy.
+        for (int step = 0; step < 5; step++) pair.PagedStep(1);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+
+        // The first contiguous read after that rebuilds all 15 rows from the pages, plus the row this step appends.
+        pair.Step(1);
+        Assert.Equal(16 * RowBytes, GatheredBytes(evidence, 0));
+
+        // From here the layers are read both ways: paged reads no longer drop the copy, and a contiguous read copies in
+        // only the rows written since the last one.
+        int before = evidence.Snapshot().Length;
+        for (int step = 0; step < 3; step++) pair.PagedStep(1);
+        Assert.Equal(0, GatheredBytes(evidence, before));
+        pair.Step(1);
+        Assert.Equal(4 * RowBytes, GatheredBytes(evidence, before));
+        pair.AssertPagesMatch();
+    }
+
+    [Fact]
+    public void PagesAreNotHandedOutForRowsTheLayerHasNotWritten()
+    {
+        using Pair pair = new();
+        Assert.False(pair.Paged.TryGetPages(0, 1, out _, out _, out _));
+        pair.Append(0, 3);
+        Assert.True(pair.Paged.TryGetPages(0, 3, out _, out _, out AttentionKvPages pages));
+        Assert.Equal(PageSize, pages.PageSize);
+        Assert.Equal(1, pages.Pages);
+        // Layer 1 wrote nothing this step, and layer 0 wrote three rows, not four.
+        Assert.False(pair.Paged.TryGetPages(1, 3, out _, out _, out _));
+        Assert.False(pair.Paged.TryGetPages(0, 4, out _, out _, out _));
+    }
+
+    [Fact]
+    public void GrowingTheBufferCopiesTheOldRowsOnceAndNotFromThePages()
+    {
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(8);
+        int before = evidence.Snapshot().Length;
+
+        // The ninth row needs a larger buffer: the eight held rows move across in one copy, then the new row is added.
+        pair.Step(1);
+
+        Assert.Equal(9 * RowBytes, GatheredBytes(evidence, before));
+        Assert.Equal(2 * HeadDims.Length, evidence.Snapshot().Skip(before).Count(e => e.Kind == AttentionEvidenceKind.PrefixGather));
+    }
+
+    [Fact]
+    public void ALongDecodeCopiesFarLessThanRebuildingEveryStep()
+    {
+        const int prompt = 16, steps = 200;
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(1 << 16);
+        pair.Step(prompt);
+        for (int step = 0; step < steps; step++) pair.Step(1);
+
+        // Rebuilding the prefix on every step copied every valid row each time.
+        long rebuilt = RowBytes * (prompt + Enumerable.Range(1, steps).Sum(step => (long)(prompt + step)));
+        // Now: each row once, plus the held rows whenever the buffer grows by a page.
+        long growthCopies = Enumerable.Range(1, steps).Where(step => (prompt + step - 1) % PageSize == 0).Sum(step => (long)(prompt + step - 1));
+        Assert.Equal(RowBytes * (prompt + steps + growthCopies), GatheredBytes(evidence, 0));
+        Assert.True(GatheredBytes(evidence, 0) * 3 < rebuilt);
+    }
+
+    [Fact]
+    public void ARollbackCopiesOnlyTheRowsWrittenAfterIt()
+    {
+        using Pair pair = new();
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(6);
+        pair.Step(1);
+        pair.Truncate(5);
+        int before = evidence.Snapshot().Length;
+
+        pair.Step(2);
+
+        Assert.Equal(2 * RowBytes, GatheredBytes(evidence, before));
+    }
+
+    [Fact]
+    public void AKnownTokenBoundSizesThePrefixOnceAndNeverRegrowsIt()
+    {
+        const int prompt = 10, steps = 30;
+        using Pair pair = new(expectedTokens: prompt + steps + 1);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(4096);
+        pair.Step(prompt);
+        long rows = pair.Paged.KeyPrefix(0).Shape[2];
+        for (int step = 0; step < steps; step++) pair.Step(1);
+
+        // 41 tokens round up to 44 rows, inside the 256-row look-ahead, so the first buffer already holds the whole sequence.
+        Assert.Equal(44, rows);
+        for (int layer = 0; layer < HeadDims.Length; layer++)
+        {
+            Assert.Equal(rows, pair.Paged.KeyPrefix(layer).Shape[2]);
+            Assert.Equal(rows, pair.Paged.ValuePrefix(layer).Shape[2]);
+        }
+        // Every row is copied once and nothing moves again.
+        Assert.Equal(RowBytes * (prompt + steps), GatheredBytes(evidence, 0));
+    }
+
+    [Fact]
+    public void ALongSequenceRegrowsItsPrefixAFewTimesWithinItsBound()
+    {
+        const int prompt = 4, steps = 700, bound = prompt + steps + 1;
+        using Pair pair = new(expectedTokens: bound, maxPages: 256);
+        using AttentionEvidenceSession evidence = AttentionEvidence.Begin(1 << 16);
+        pair.Step(prompt);
+        HashSet<long> capacities = [pair.Paged.KeyPrefix(0).Shape[2]];
+        for (int step = 0; step < steps; step++)
+        {
+            pair.Step(1);
+            capacities.Add(pair.Paged.KeyPrefix(0).Shape[2]);
+        }
+
+        // 256 rows ahead of the prompt, then 256 ahead of row 261, then the bound: three buffers for 704 rows.
+        Assert.Equal([260L, 520L, 708L], capacities.Order());
+        // Each row is written once, and the held rows move when the buffer grows: 260 of them, then 520.
+        Assert.Equal(RowBytes * (prompt + steps + 260 + 520), GatheredBytes(evidence, 0));
+    }
+
+    [Fact]
+    public void ASequenceThatOutgrowsItsBoundStillWorks()
+    {
+        using Pair pair = new(expectedTokens: 8);
+        pair.Step(6);
+        for (int step = 0; step < 20; step++) pair.Step(1);
+        Assert.Equal(26, pair.Paged.CurrentLength);
+    }
+}

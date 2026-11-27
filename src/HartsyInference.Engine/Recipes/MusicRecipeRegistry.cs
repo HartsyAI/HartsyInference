@@ -52,6 +52,7 @@ public static class MusicRecipeRegistry
         new Music.HeartMulaMusicRecipe(),
         new Music.MiniMaxMusic3MusicRecipe(),
         new Music.StableAudioMusicRecipe(),
+        new Music.StableAudioOpen1MusicRecipe(),
         new Music.ControlFoleyMusicRecipe(),
     };
 }

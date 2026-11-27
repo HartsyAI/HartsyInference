@@ -80,6 +80,10 @@ public sealed class ParamState
     public string? GetStringOrNull(string key) =>
         _values.TryGetValue(key, out string? v) && v.Length > 0 ? v : null;
 
+    /// <summary>Gets a tunable as a bool, or null when the user never set it (or it does not parse) — the engine then applies the model's own default.</summary>
+    public bool? GetBoolOrNull(string key) =>
+        _values.TryGetValue(key, out string? v) && bool.TryParse(v, out bool b) ? b : null;
+
     /// <summary>Gets a tunable as a bool, falling back when unset or unparseable.</summary>
     public bool GetBool(string key, bool fallback) =>
         _values.TryGetValue(key, out string? v) && bool.TryParse(v, out bool b) ? b : fallback;
@@ -177,8 +181,10 @@ public sealed class ParamState
                 _values["seed"] = "-1";
                 break;
             case Modality.World:
-                _values["frames"] = "16";
-                _values["steps"] = "10";
+                // Unset: the engine's world plan applies the model's own defaults (Oasis 16 frames and 10 steps,
+                // SANA-WM 161 frames and 60 steps). A seeded value here would read as a request and override them.
+                _values["frames"] = "";
+                _values["steps"] = "";
                 _values["seed"] = "-1";
                 break;
             case Modality.VoiceConvert:

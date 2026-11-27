@@ -7,6 +7,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -15,6 +16,13 @@ public sealed class Sd15Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "sd15";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip"], Format = "tags", Negative = "separate",
+        Supports = ["weights", "break", "regions"], Guide = "docs/prompting/sd1-sd2.md",
+    };
 
     /// <inheritdoc/>
     public ImageFeatures Supports =>

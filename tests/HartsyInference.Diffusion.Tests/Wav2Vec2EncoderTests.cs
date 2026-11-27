@@ -1,117 +1,179 @@
-using Xunit;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Tiny-config smoke test for the Wav2Vec2 audio feature extractor (S2V's Phase S0 front-end): a strided
-/// Conv1d feature encoder → projection → grouped positional conv → transformer, harvesting all hidden states
-/// <c>[T, numStates, hidden]</c>. Numerics validation-pending (structural).</summary>
-public unsafe class Wav2Vec2EncoderTests
+/// <summary>The LongCat Avatar 1.0 options of <see cref="Wav2Vec2Encoder"/> on a tiny random-weight model: the feature-rate
+/// hook, the exact-GELU and biased-variance switches, and that the defaults the S2V presets use are untouched.</summary>
+public sealed class Wav2Vec2EncoderTests
 {
-    [Fact]
-    public void EncodeAllLayers_ProducesStackedHiddenStates()
+    private static Wav2Vec2EncoderConfig Tiny => new()
     {
-        CpuBackend backend = new();
-        Wav2Vec2EncoderConfig cfg = new()
-        {
-            ConvDims = [8, 8, 8], ConvStrides = [5, 2, 2], ConvKernels = [10, 3, 3], ConvBias = false,
-            GroupNormFirstConvOnly = true, Hidden = 16, NumLayers = 2, NumHeads = 2, Intermediate = 32,
-            PosConvKernel = 8, PosConvGroups = 2,
-        };
-        Wav2Vec2Encoder enc = new(cfg);
-        enc.LoadWeights(BuildWeights(cfg));
+        ConvDims = [8, 8, 8],
+        ConvStrides = [2, 2, 2],
+        ConvKernels = [3, 3, 2],
+        Hidden = 16,
+        NumLayers = 2,
+        NumHeads = 2,
+        Intermediate = 32,
+        PosConvKernel = 4,
+        PosConvGroups = 2,
+        NormalizeInput = true,
+    };
 
-        float[] waveform = new float[400];
-        Random rng = new(31);
-        for (int i = 0; i < waveform.Length; i++) waveform[i] = (float)(rng.NextDouble() * 2 - 1);
-
-        Tensor states = enc.EncodeAllLayers(backend, waveform);
-
-        Assert.Equal(3, states.Shape.Rank);
-        Assert.Equal(cfg.NumHiddenStates, (int)states.Shape[1]);   // 2 layers + 1 = 3
-        Assert.Equal(cfg.Hidden, (int)states.Shape[2]);
-        Assert.True((int)states.Shape[0] > 0);
-        float* p = (float*)states.DataPointer;
-        for (long i = 0; i < states.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
-    }
-
-    [Fact]
-    public void EncodeAllLayers_StableLayerNorm_ProducesStackedHiddenStates()
+    private static (Wav2Vec2Encoder Encoder, List<Tensor> Owned) Build(Wav2Vec2EncoderConfig cfg)
     {
-        CpuBackend backend = new();
-        // The wav2vec2-large (S2V) variant: per-conv LayerNorm, pre-norm layers, normalized input.
-        Wav2Vec2EncoderConfig cfg = new()
-        {
-            ConvDims = [8, 8, 8], ConvStrides = [5, 2, 2], ConvKernels = [10, 3, 3], ConvBias = true,
-            GroupNormFirstConvOnly = false, StableLayerNorm = true, NormalizeInput = true,
-            Hidden = 16, NumLayers = 2, NumHeads = 2, Intermediate = 32,
-            PosConvKernel = 8, PosConvGroups = 2,
-        };
-        Wav2Vec2Encoder enc = new(cfg);
-        enc.LoadWeights(BuildWeights(cfg));
-
-        float[] waveform = new float[400];
-        Random rng = new(37);
-        for (int i = 0; i < waveform.Length; i++) waveform[i] = (float)(rng.NextDouble() * 2 - 1);
-
-        Tensor states = enc.EncodeAllLayers(backend, waveform);
-        Assert.Equal(cfg.NumHiddenStates, (int)states.Shape[1]);
-        Assert.Equal(cfg.Hidden, (int)states.Shape[2]);
-        float* p = (float*)states.DataPointer;
-        for (long i = 0; i < states.Shape.ElementCount; i++) Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
-    }
-
-    private static Dictionary<string, Tensor> BuildWeights(Wav2Vec2EncoderConfig c)
-    {
+        Random rng = new(11);
+        List<Tensor> owned = [];
         Dictionary<string, Tensor> w = new();
-        int prevC = 1;
-        for (int i = 0; i < c.ConvDims.Length; i++)
+
+        void Make(string name, params long[] dims)
         {
-            w[$"feature_extractor.conv_layers.{i}.conv.weight"] = R([c.ConvDims[i], prevC, c.ConvKernels[i]]);
-            if (c.ConvBias) w[$"feature_extractor.conv_layers.{i}.conv.bias"] = R([c.ConvDims[i]]);
-            prevC = c.ConvDims[i];
+            Tensor t = new(new TensorShape(dims), DType.F32);
+            Span<float> s = t.AsSpan<float>();
+            for (int i = 0; i < s.Length; i++) s[i] = (float)(rng.NextDouble() - 0.5) * 0.5f;
+            w[name] = t;
+            owned.Add(t);
         }
-        if (c.GroupNormFirstConvOnly)
+
+        void Norm(string name, long d)
         {
-            w["feature_extractor.conv_layers.0.layer_norm.weight"] = R([c.ConvDims[0]]);
-            w["feature_extractor.conv_layers.0.layer_norm.bias"] = R([c.ConvDims[0]]);
+            Make(name + ".weight", d);
+            w[name + ".weight"].AsSpan<float>().Fill(1f);
+            Make(name + ".bias", d);
+            w[name + ".bias"].AsSpan<float>().Clear();
         }
-        else
+
+        int prev = 1;
+        for (int i = 0; i < cfg.ConvDims.Length; i++)
         {
-            for (int i = 0; i < c.ConvDims.Length; i++)
-            {
-                w[$"feature_extractor.conv_layers.{i}.layer_norm.weight"] = R([c.ConvDims[i]]);
-                w[$"feature_extractor.conv_layers.{i}.layer_norm.bias"] = R([c.ConvDims[i]]);
-            }
+            Make($"feature_extractor.conv_layers.{i}.conv.weight", cfg.ConvDims[i], prev, cfg.ConvKernels[i]);
+            prev = cfg.ConvDims[i];
         }
-        w["feature_projection.layer_norm.weight"] = R([c.ConvDims[^1]]); w["feature_projection.layer_norm.bias"] = R([c.ConvDims[^1]]);
-        w["feature_projection.projection.weight"] = R([c.Hidden, c.ConvDims[^1]]); w["feature_projection.projection.bias"] = R([c.Hidden]);
-        w["encoder.pos_conv_embed.conv.weight"] = R([c.Hidden, c.Hidden / c.PosConvGroups, c.PosConvKernel]);
-        w["encoder.pos_conv_embed.conv.bias"] = R([c.Hidden]);
-        w["encoder.layer_norm.weight"] = R([c.Hidden]); w["encoder.layer_norm.bias"] = R([c.Hidden]);
-        for (int i = 0; i < c.NumLayers; i++)
+        Norm("feature_extractor.conv_layers.0.layer_norm", cfg.ConvDims[0]);
+        Norm("feature_projection.layer_norm", prev);
+        Make("feature_projection.projection.weight", cfg.Hidden, prev);
+        Make("feature_projection.projection.bias", cfg.Hidden);
+        Make("encoder.pos_conv_embed.conv.weight", cfg.Hidden, cfg.Hidden / cfg.PosConvGroups, cfg.PosConvKernel);
+        Make("encoder.pos_conv_embed.conv.bias", cfg.Hidden);
+        Norm("encoder.layer_norm", cfg.Hidden);
+        for (int i = 0; i < cfg.NumLayers; i++)
         {
             string p = $"encoder.layers.{i}";
-            foreach (string a in new[] { "q_proj", "k_proj", "v_proj", "out_proj" })
-            { w[$"{p}.attention.{a}.weight"] = R([c.Hidden, c.Hidden]); w[$"{p}.attention.{a}.bias"] = R([c.Hidden]); }
-            w[$"{p}.layer_norm.weight"] = R([c.Hidden]); w[$"{p}.layer_norm.bias"] = R([c.Hidden]);
-            w[$"{p}.feed_forward.intermediate_dense.weight"] = R([c.Intermediate, c.Hidden]); w[$"{p}.feed_forward.intermediate_dense.bias"] = R([c.Intermediate]);
-            w[$"{p}.feed_forward.output_dense.weight"] = R([c.Hidden, c.Intermediate]); w[$"{p}.feed_forward.output_dense.bias"] = R([c.Hidden]);
-            w[$"{p}.final_layer_norm.weight"] = R([c.Hidden]); w[$"{p}.final_layer_norm.bias"] = R([c.Hidden]);
+            foreach (string proj in new[] { "q_proj", "k_proj", "v_proj", "out_proj" })
+            {
+                Make($"{p}.attention.{proj}.weight", cfg.Hidden, cfg.Hidden);
+                Make($"{p}.attention.{proj}.bias", cfg.Hidden);
+            }
+            Norm($"{p}.layer_norm", cfg.Hidden);
+            Make($"{p}.feed_forward.intermediate_dense.weight", cfg.Intermediate, cfg.Hidden);
+            Make($"{p}.feed_forward.intermediate_dense.bias", cfg.Intermediate);
+            Make($"{p}.feed_forward.output_dense.weight", cfg.Hidden, cfg.Intermediate);
+            Make($"{p}.feed_forward.output_dense.bias", cfg.Hidden);
+            Norm($"{p}.final_layer_norm", cfg.Hidden);
         }
-        return w;
+
+        Wav2Vec2Encoder encoder = new(cfg);
+        encoder.LoadWeights(w);
+        return (encoder, owned);
     }
 
-    private static int _seed = 1000;
-    private static Tensor R(int[] dims)
+    private static float[] Speech(int n)
     {
-        long[] d = Array.ConvertAll(dims, x => (long)x);
-        Tensor t = new Tensor(new TensorShape(d), DType.F32);
-        float* p = (float*)t.DataPointer;
-        Random rng = new(_seed++);
-        for (long i = 0; i < t.Shape.ElementCount; i++) p[i] = (float)(rng.NextDouble() * 0.1 - 0.05);
-        return t;
+        float[] s = new float[n];
+        for (int i = 0; i < n; i++) s[i] = 0.4f * MathF.Sin(i * 0.05f) + 0.1f * MathF.Sin(i * 0.31f) + 0.05f;
+        return s;
+    }
+
+    private static float[] Encode(Wav2Vec2EncoderConfig cfg, float[] speech, int featureFrames, out long[] shape)
+    {
+        (Wav2Vec2Encoder encoder, List<Tensor> owned) = Build(cfg);
+        using CpuBackend backend = new();
+        using Tensor states = encoder.EncodeAllLayers(backend, speech, featureFrames);
+        shape = [states.Shape[0], states.Shape[1], states.Shape[2]];
+        float[] result = states.AsReadOnlySpan<float>().ToArray();
+        foreach (Tensor t in owned) t.Dispose();
+        return result;
+    }
+
+    // Conv frames of the tiny stack: ((n-3)/2+1 -3)/2+1 -2)/2+1.
+    private static int ConvFrames(int samples)
+    {
+        int t = (samples - 3) / 2 + 1;
+        t = (t - 3) / 2 + 1;
+        return (t - 2) / 2 + 1;
+    }
+
+    [Fact]
+    public void FeatureFrames_AtTheConvRate_IsTheDefaultPath()
+    {
+        float[] speech = Speech(400);
+        int natural = ConvFrames(speech.Length);
+
+        float[] plain = Encode(Tiny, speech, 0, out long[] plainShape);
+        float[] same = Encode(Tiny, speech, natural, out _);
+
+        Assert.Equal([natural, 3, 16], plainShape);
+        Assert.Equal(plain, same);
+    }
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(40)]
+    public void FeatureFrames_SetsTheOutputRate(int frames)
+    {
+        float[] states = Encode(Tiny, Speech(400), frames, out long[] shape);
+
+        Assert.Equal([frames, 3, 16], shape);
+        Assert.All(states, v => Assert.True(float.IsFinite(v)));
+    }
+
+    [Fact]
+    public void ExactGelu_ChangesTheOutputByTheTanhApproximationGapOnly()
+    {
+        float[] speech = Speech(400);
+        float[] tanh = Encode(Tiny, speech, 0, out _);
+        float[] erf = Encode(Tiny with { ExactGelu = true }, speech, 0, out _);
+
+        Assert.NotEqual(tanh, erf);
+        double sumSq = 0, errSq = 0;
+        for (int i = 0; i < tanh.Length; i++)
+        {
+            sumSq += (double)erf[i] * erf[i];
+            errSq += (double)(tanh[i] - erf[i]) * (tanh[i] - erf[i]);
+        }
+        Assert.True(Math.Sqrt(errSq / sumSq) < 0.05, $"relRMS {Math.Sqrt(errSq / sumSq)}");
+    }
+
+    [Fact]
+    public void BiasedVariance_DiffersFromUnbiasedOnlyByTheSampleCountFactor()
+    {
+        float[] speech = Speech(400);
+        float[] unbiased = Encode(Tiny, speech, 0, out _);
+        float[] biased = Encode(Tiny with { BiasedNormalizeVariance = true }, speech, 0, out _);
+
+        Assert.NotEqual(unbiased, biased);
+        double sumSq = 0, errSq = 0;
+        for (int i = 0; i < unbiased.Length; i++)
+        {
+            sumSq += (double)unbiased[i] * unbiased[i];
+            errSq += (double)(unbiased[i] - biased[i]) * (unbiased[i] - biased[i]);
+        }
+        Assert.True(Math.Sqrt(errSq / sumSq) < 0.02, $"relRMS {Math.Sqrt(errSq / sumSq)}");
+    }
+
+    [Fact]
+    public void TheAvatarV10Preset_IsTheBaseShapeWithTheHfFrontEndOptions()
+    {
+        Wav2Vec2EncoderConfig preset = Wav2Vec2EncoderConfig.LongCatAvatarV10;
+
+        Assert.Equal(768, preset.Hidden);
+        Assert.Equal(12, preset.NumLayers);
+        Assert.True(preset.NormalizeInput && preset.BiasedNormalizeVariance && preset.ExactGelu);
+        Assert.False(Wav2Vec2EncoderConfig.Base.ExactGelu);
+        Assert.False(Wav2Vec2EncoderConfig.Large.ExactGelu);
+        Assert.False(Wav2Vec2EncoderConfig.Large.BiasedNormalizeVariance);
     }
 }

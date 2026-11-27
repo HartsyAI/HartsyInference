@@ -22,6 +22,12 @@ public static class ModelArchitectureDetector
             || k.HasPair("diffusion_model.video_patch_proj.", "diffusion_model.audio_patch_proj.")
             || k.HasPair("model.diffusion_model.video_patch_proj.",
                 "model.diffusion_model.audio_patch_proj.")),
+        // The image build is the same DiT without the audio projection; the video rule above needs audio, so the
+        // two never overlap.
+        (ModelArchitecture.MiniMaxH3Image, k =>
+            IsMiniMaxH3Image(k, string.Empty)
+            || IsMiniMaxH3Image(k, "diffusion_model.")
+            || IsMiniMaxH3Image(k, "model.diffusion_model.")),
 
         // ── SDXL family (LDM single-file) ────────────────────────────────
         // Base has both CLIP embedders; refiner has only embedder 0 + ADM label_emb.
@@ -80,6 +86,17 @@ public static class ModelArchitectureDetector
         (ModelArchitecture.AuraFlow, k =>
             k.HasPrefixAfterOptional("model.", "double_layers.") &&
             k.HasPrefixAfterOptional("model.", "single_layers.")),
+
+        // ── Z-Image (NextDiT) ────────────────────────────────────────────
+        // The refiner stacks alone are shared with Lumina-Image-2.0 (NextDiT) and Zeta-Chroma (which adds a dec_net
+        // head). Z-Image's own markers are its learned padding tokens and its t_embedder MLP, which Lumina replaces
+        // with time_caption_embed.*.
+        (ModelArchitecture.ZImage, k =>
+            k.HasPrefixAfterOptional("model.diffusion_model.", "noise_refiner.") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "context_refiner.") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "cap_pad_token") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "t_embedder.mlp.0.weight") &&
+            !k.HasPrefixAfterOptional("model.diffusion_model.", "dec_net.")),
     ];
 
     /// <summary>Detects the architecture from a set of tensor keys.</summary>
@@ -112,6 +129,11 @@ public static class ModelArchitectureDetector
     /// block modulation and output head) would otherwise depend on which shard was picked.</para></remarks>
     public static ModelArchitecture DetectFromFile(string checkpointPath) =>
         Detect(HfCheckpointDirectory.IndexedTensorNames(checkpointPath) ?? CheckpointHeader.Read(checkpointPath).Descriptors.Keys);
+
+    /// <summary>H3 image signature: video and condition projections present, audio projection absent.</summary>
+    private static bool IsMiniMaxH3Image(KeySet k, string wrap) =>
+        k.HasPrefix(wrap + "video_patch_proj.") && k.HasPrefix(wrap + "condition_proj.")
+        && !k.HasPrefix(wrap + "audio_patch_proj.");
 
     /// <summary>Lightweight prefix-membership probe over a checkpoint's key set. Sorted once so prefix hits are a single binary search rather than a full scan per query.</summary>
     private sealed class KeySet

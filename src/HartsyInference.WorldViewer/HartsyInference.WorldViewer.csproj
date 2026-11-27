@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Toolkit-free live playback core: steering, pacing and the frame stream. A window front end (HartsyInference.WorldViewer.Avalonia)
+         or a web front end reuses it; keep Avalonia and any UI types out of this project. -->
+    <RootNamespace>HartsyInference.WorldViewer</RootNamespace>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.WorldViewer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
+  </ItemGroup>
+
+</Project>

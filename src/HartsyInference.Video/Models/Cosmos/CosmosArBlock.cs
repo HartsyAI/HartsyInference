@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -36,25 +38,25 @@ public sealed unsafe class CosmosArBlock
     /// (e.g. <c>layers.3</c>). Norms are forced F32; projections keep their loaded dtype for the matmul backend.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _attnNorm = EnsureF32(w[$"{prefix}.attention_norm.weight"]);
+        _attnNorm = TensorCasts.EnsureF32(w[$"{prefix}.attention_norm.weight"]);
         _wq = w[$"{prefix}.attention.wq.weight"];
         _wk = w[$"{prefix}.attention.wk.weight"];
         _wv = w[$"{prefix}.attention.wv.weight"];
         _wo = w[$"{prefix}.attention.wo.weight"];
         if (_cfg.QkNorm)
         {
-            _qNorm = EnsureF32(w[$"{prefix}.attention.q_norm.weight"]);
-            _kNorm = EnsureF32(w[$"{prefix}.attention.k_norm.weight"]);
+            _qNorm = TensorCasts.EnsureF32(w[$"{prefix}.attention.q_norm.weight"]);
+            _kNorm = TensorCasts.EnsureF32(w[$"{prefix}.attention.k_norm.weight"]);
         }
         if (_hasCross)
         {
-            _crossNorm = EnsureF32(w[$"{prefix}.cross_attention_norm.weight"]);
+            _crossNorm = TensorCasts.EnsureF32(w[$"{prefix}.cross_attention_norm.weight"]);
             _cwq = w[$"{prefix}.cross_attention.wq.weight"];
             _cwk = w[$"{prefix}.cross_attention.wk.weight"];
             _cwv = w[$"{prefix}.cross_attention.wv.weight"];
             _cwo = w[$"{prefix}.cross_attention.wo.weight"];
         }
-        _ffnNorm = EnsureF32(w[$"{prefix}.ffn_norm.weight"]);
+        _ffnNorm = TensorCasts.EnsureF32(w[$"{prefix}.ffn_norm.weight"]);
         _w1 = w[$"{prefix}.feed_forward.w1.weight"];
         _w2 = w[$"{prefix}.feed_forward.w2.weight"];
         _w3 = w[$"{prefix}.feed_forward.w3.weight"];
@@ -101,8 +103,8 @@ public sealed unsafe class CosmosArBlock
             k.Dispose(); k = kN;
         }
 
-        backend.ApplyRopeSingle(q, cos, sin, d);
-        backend.ApplyRopeSingle(k, cos, sin, d);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
 
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, q, t, hq, d);
         Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32); backend.Permute0213(kMh, k, t, hkv, d);
@@ -195,6 +197,4 @@ public sealed unsafe class CosmosArBlock
     // decoder's internal projection dispatch, which is assembly-internal and not reachable across the package edge.
     private static void Project(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias)
         => backend.Linear(output, input, weight, bias);
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 }

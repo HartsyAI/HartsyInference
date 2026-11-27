@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# The custom attention kernels (VSA, SageAttention INT8). Kernel lists only — the build itself is ../build_common.sh.
+# The custom attention kernels (VSA, SageAttention INT8, neighborhood attention). Kernel lists only — the build itself is ../build_common.sh.
 set -euo pipefail
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
+    "attention_softmax"
     "flash_attn_f16"
     "h3_vsa"
     "sage_attn_int8"
     "int8_attn_v2"
+    "int8_attn_v2_rot"
+    "neighborhood_attention"
+    "sol_attn_f32"
 )
 # CUDA 13.0.88 nvcc output: the ptxas register and spill check needs the toolchain the PTX came from.
 NVCC_BUILT=("int8_attn_v2")

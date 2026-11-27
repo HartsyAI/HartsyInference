@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.ModelAssets.Registry;
 using Spectre.Console;
@@ -17,6 +18,11 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
         [CommandArgument(0, "<model>")]
         [Description("HuggingFace repo id or local path to download and cache.")]
         public string Model { get; init; } = "";
+
+        /// <summary>Catalog variant to pull instead of the default asset set.</summary>
+        [CommandOption("--variant <ID>")]
+        [Description("Catalog variant to download (for example nf4 or fp8 for moss-vl-realtime) instead of the default set.")]
+        public string? Variant { get; init; }
     }
 
     /// <inheritdoc/>
@@ -27,6 +33,7 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
 
         using CancellationTokenSource cts = new CancellationTokenSource();
         using IDisposable cancelBinding = CommandRunner.BindCancelKey(cts);
+        using IDisposable granted = DownloadPermission.Grant();
 
         // Catalog ids first ("chroma", "qwen-image", ...): pull the pinned asset set into the Models tree —
         // the same flow `hartsy image -m <id>` uses, minus the confirmation prompt (pull IS the confirmation).
@@ -34,7 +41,14 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
         CatalogEntry? catalogEntry = ModelCatalog.Find(settings.Model);
         if (catalogEntry is not null && catalogEntry.Assets.Count > 0)
         {
+            if (!string.IsNullOrWhiteSpace(settings.Variant))
+                return await PullVariantAsync(catalogEntry, settings.Variant, cts.Token).ConfigureAwait(false);
             return await PullCatalogAsync(catalogEntry, cts.Token).ConfigureAwait(false);
+        }
+        if (!string.IsNullOrWhiteSpace(settings.Variant))
+        {
+            AnsiConsole.MarkupLine("[red]--variant applies to catalog ids only.[/]");
+            return 2;
         }
 
         using ModelRegistry registry = new ModelRegistry();
@@ -85,16 +99,68 @@ public sealed class PullCommand : AsyncCommand<PullCommand.Settings>
         }
     }
 
+    /// <summary>Downloads one catalog variant (a folder of shards at a pinned revision, or the default set for a single-file variant).</summary>
+    private static async Task<int> PullVariantAsync(CatalogEntry cat, string variantId, CancellationToken ct)
+    {
+        try
+        {
+            CatalogVariant variant = ModelDownloader.FindVariant(cat, variantId);
+            IReadOnlyList<ModelAsset> files = ModelDownloader.VariantAssets(cat, variant.Id);
+            List<ModelAsset> missing = [.. files.Where(a => !File.Exists(ModelDownloader.TargetPath(a)))];
+            if (missing.Count == 0)
+            {
+                AnsiConsole.MarkupLine($"[green]✓[/] [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] variant {Markup.Escape(variant.Id)} already present.");
+                return 0;
+            }
+            AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] variant [{CliTheme.Accent}]{Markup.Escape(variant.Id)}[/] "
+                + $"[#9aa4af]needs {missing.Count} file(s), about {variant.Source.TotalBytes / (1024.0 * 1024 * 1024):0.0} GB:[/]");
+            ModelAcquisition.ListMissingAssets(missing, showTargetDir: true);
+            await AnsiConsole.Progress()
+                .Columns(new TaskDescriptionColumn(), new ProgressBarColumn(), new PercentageColumn(), new SpinnerColumn())
+                .StartAsync(async ctx =>
+                {
+                    Dictionary<string, ProgressTask> tasks = new(StringComparer.Ordinal);
+                    foreach (ModelAsset a in missing)
+                        tasks[a.FileName] = ctx.AddTask(Markup.Escape(a.FileName), maxValue: 1.0);
+                    await ModelDownloader.DownloadVariantAsync(cat, variant.Id, (a, fraction) =>
+                    {
+                        if (tasks.TryGetValue(a.FileName, out ProgressTask? task)) task.Value = fraction;
+                    }, ct).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+            AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] ({Markup.Escape(variant.Id)})");
+            string? where = ModelDownloader.VariantFolder(cat, variant.Id) ?? ModelDownloader.PrimaryLocalPath(cat);
+            if (where is not null)
+                AnsiConsole.MarkupLine($"  [#9aa4af]path:[/] {Markup.Escape(where)}");
+            return 0;
+        }
+        catch (OperationCanceledException)
+        {
+            AnsiConsole.MarkupLine("[yellow]Pull cancelled.[/]");
+            return 130;
+        }
+        catch (ArgumentException ex)
+        {
+            AnsiConsole.MarkupLine($"[red]{Markup.Escape(ex.Message)}[/]");
+            return 2;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Variant pull failed for '{cat.Id}' ({variantId})", ex);
+            AnsiConsole.MarkupLine($"[red]Pull failed:[/] {Markup.Escape(ex.Message)}");
+            return 1;
+        }
+    }
+
     /// <summary>Downloads a catalog entry's missing assets (transformer + side models) into the Models tree.</summary>
     private static async Task<int> PullCatalogAsync(CatalogEntry cat, CancellationToken ct)
     {
         try
         {
             // Audio-cache-backed entries load via AudioModelCache at runtime — pulling them into the
-            // Models tree would double-download. Same branch EnsurePresent takes, minus the confirm.
+            // Models tree would double-download. Same branch EnsurePresent takes, minus the confirm, so it cannot be declined.
             if (ModelAcquisition.UsesAudioCache(cat, cat.Modality))
             {
-                if (!ModelAcquisition.EnsureAudioAssetsPresent(cat, cat.Modality, confirm: false, ct))
+                if (!ModelAcquisition.EnsureAudioAssetsPresent(cat, cat.Modality, out _, confirm: false, ct))
                     return 1;
                 AnsiConsole.MarkupLine($"[green]✓[/] pulled [{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/]");
                 return 0;

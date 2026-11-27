@@ -1,5 +1,5 @@
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes.Video;
 
@@ -78,6 +78,23 @@ public sealed record VideoRequest
     /// <summary>Optional reference audio driving audio-conditioned video (e.g. speech-to-video).</summary>
     public AudioClip? VideoAudioReference { get; init; }
 
+    /// <summary>Two people in the init image, each with their own speech (LongCat-Video-Avatar's multi-speaker mode); null otherwise. A request
+    /// gives either this or <see cref="VideoAudioReference"/>, and a family without multi-speaker support refuses it at planning.</summary>
+    public VideoSpeakers? Speakers { get; init; }
+
+    /// <summary>Set by the engine's vocal pre-step: the separated speech as 16 kHz mono taken from the float stem, so a speech encoder does not
+    /// decode the 16-bit <see cref="VideoAudioReference"/> and resample it a second way. Null outside that step.</summary>
+    internal float[]? SeparatedSpeech16k { get; init; }
+
+    /// <summary>Runs <see cref="VideoAudioReference"/> through the Kim_Vocal_2 vocal separator first and drives the video with the vocals
+    /// alone (44.1 kHz stereo; the recipe decodes it to the rate it needs). Needs driving audio; a recipe without driving-audio support
+    /// refuses the request as it does for the audio itself. Runs on the CPU before generation and can take minutes (logged, not reported
+    /// through step progress); only the first clip-length of audio plus a second is separated when the frame total and fps are known. A
+    /// soundtrack the recipe attaches from the driving clip is then the separated vocals, not the original mix. With
+    /// <see cref="Speakers"/> each speaker's recording is separated on its own for the video to follow, and the soundtrack stays the mix
+    /// of the recordings, as the reference's multi-speaker demo does.</summary>
+    public bool SeparateDrivingVocals { get; init; }
+
     /// <summary>Reference images a reference-conditioned family should carry identity/style from; null for none. Distinct from <see cref="InitImage"/>, which pins an actual frame rather than describing subject matter.</summary>
     public IReadOnlyList<ImageData>? ReferenceImages { get; init; }
 
@@ -107,6 +124,12 @@ public sealed record VideoRequest
 
     /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling <see cref="InitImage"/> across frames.</summary>
     public VideoClip? DrivingVideo { get; init; }
+
+    /// <summary>The clip a continuation extends (LongCat-Video's video continuation, the base build only). The clip is stride-sampled to 15 fps; its
+    /// last 13 sampled frames condition the generation. The result is the sampled clip followed by the generated frames after the 13-frame
+    /// context: its size is the clip's own size, its frame rate is 15 fps, and its frame count is the sampled clip's count plus the recipe's
+    /// frame count minus 13. Width and height must be unset, and fps must be unset or 15. Null for an ordinary generation.</summary>
+    public VideoClip? VideoContinuation { get; init; }
 
     /// <summary>Pre-rendered pose/skeleton driving video; overrides auto-preprocessing for the pose branch.</summary>
     public VideoClip? DrivingPoseVideo { get; init; }

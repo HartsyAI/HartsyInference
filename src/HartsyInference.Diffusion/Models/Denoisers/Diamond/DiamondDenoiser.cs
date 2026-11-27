@@ -53,7 +53,7 @@ public sealed unsafe class DiamondDenoiser
         skip.Dispose(); outp.Dispose();
         if (quantize)
         {
-            Tensor q = new(noisy.Shape, DType.F32); backend.PixelQuantize(q, d);  // clamp[-1,1] + 256-level quantize
+            Tensor q = new(noisy.Shape, DType.F32); backend.FakeQuantizeUniform(q, d, -1f, 1f, 256);  // clamp[-1,1] + 256-level quantize
             d.Dispose();
             return q;
         }

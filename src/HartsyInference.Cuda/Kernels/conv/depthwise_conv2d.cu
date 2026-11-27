@@ -1,6 +1,6 @@
 // Depthwise Conv2D: groups == channels, so each output channel convolves exactly one input channel.
 // Weight layout is the fixed [C, 1, kH, kW] the IBackend.Conv2dDepthwise contract mandates; bias is
-// [C] and optional (hasBias flag). One thread per output element, FP32 accumulation even for FP16 I/O.
+// [C] and optional (hasBias flag). One thread per output element, FP32 accumulation even for FP16/BF16 I/O.
 // Matches the CPU reference in IBackend.Conv2dDepthwise exactly.
 //
 //   out[n,c,oy,ox] = bias[c] + sum_{ky,kw} w[c,0,ky,kw] * in[n,c, oy*strideH+ky-padH, ox*strideW+kw-padW]
@@ -13,6 +13,7 @@
 //   cp src/HartsyInference.Cuda/Kernels/conv/depthwise_conv2d.ptx src/HartsyInference.Cuda/Ptx/
 
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 extern "C" {
 
@@ -64,6 +65,18 @@ __global__ void depthwise_conv2d_f16(
     unsigned int padH, unsigned int padW)
 {
     DEPTHWISE_CONV2D_BODY(__half)
+}
+
+__global__ void depthwise_conv2d_bf16(
+    __nv_bfloat16* __restrict__ output, const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ weight, const __nv_bfloat16* __restrict__ bias, int hasBias,
+    unsigned int n, unsigned int channels, unsigned int inH, unsigned int inW,
+    unsigned int outH, unsigned int outW,
+    unsigned int kH, unsigned int kW,
+    unsigned int strideH, unsigned int strideW,
+    unsigned int padH, unsigned int padW)
+{
+    DEPTHWISE_CONV2D_BODY(__nv_bfloat16)
 }
 
 } // extern "C"

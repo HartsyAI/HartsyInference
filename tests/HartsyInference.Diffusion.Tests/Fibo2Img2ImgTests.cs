@@ -1,6 +1,6 @@
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
@@ -135,10 +135,9 @@ public sealed class Fibo2Img2ImgTests
         for (int i = 0; i < varianceValues.Length; i++)
             varianceValues[i] = 0.5f + i * 0.02f;
 
-        using Tensor normalized = Fibo2Pipeline.NormalizeVaeLatent(vae, config, mean, variance, 1e-5f);
-        using Tensor patched = Flux2LatentOps.Patchify(normalized, 128, config.PatchSize);
-        using Tensor unnormalized = Flux2LatentOps.BnUnNormalize(patched, mean, variance, 1e-5f);
-        using Tensor restored = Flux2LatentOps.Unpatchify(unnormalized, config.InChannels, config.PatchSize);
+        using HartsyInference.Core.Backends.IBackend backend = new CpuBackend();
+        using Tensor normalized = Fibo2Pipeline.NormalizeVaeLatent(backend, vae, config, mean, variance, 1e-5f);
+        using Tensor restored = Flux2LatentOps.UnnormalizePatchified(backend, normalized, mean, variance, 1e-5f, config.PatchSize);
 
         ReadOnlySpan<float> expected = vae.AsReadOnlySpan<float>();
         ReadOnlySpan<float> actual = restored.AsReadOnlySpan<float>();

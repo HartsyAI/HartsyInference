@@ -11,8 +11,9 @@ namespace HartsyInference.Audio.Models.FishAudio;
 /// written one tensor at a time, and the reported re-quantization error says what the conversion cost.</summary>
 public static class FishAudioDrama3Weights
 {
-    /// <summary>Bumped whenever the cached layout or policy changes, so an older cache is never read as a newer one.</summary>
-    public const int CacheVersion = 1;
+    /// <summary>Bumped whenever the cached layout or policy changes, so an older cache is never read as a newer one. Version 2: the
+    /// cache holds only the converted weights; the rest are borrowed from the checkpoint.</summary>
+    public const int CacheVersion = 2;
 
     private static readonly string[] DenseProjections =
     [
@@ -83,72 +84,19 @@ public static class FishAudioDrama3Weights
         return target;
     }
 
-    /// <summary>True when every weight is used exactly as stored, so nothing needs converting.</summary>
-    public static bool UsesStoredWeights(HfQuantCheckpoint checkpoint, FishAudioDrama3Precision precision)
-    {
-        ArgumentNullException.ThrowIfNull(checkpoint);
-        foreach (HfQuantWeight weight in checkpoint.Weights.Values)
-        {
-            if (weight.Storage != HfWeightStorage.Plain || TargetDType(weight, precision) != weight.StoredDType) return false;
-        }
-        return true;
-    }
-
-    /// <summary>The checkpoint's weights as stored, borrowed from its mapping (which must outlive them); every weight must be plain.</summary>
-    public static Dictionary<string, Tensor> Borrow(HfQuantCheckpoint checkpoint)
-    {
-        ArgumentNullException.ThrowIfNull(checkpoint);
-        Dictionary<string, Tensor> weights = new(checkpoint.Weights.Count, StringComparer.Ordinal);
-        foreach (string name in checkpoint.Weights.Keys) weights[name] = checkpoint.Borrow(name);
-        return weights;
-    }
-
-    /// <summary>One lazy cache entry per weight at <paramref name="precision"/>, quantizations folding their error into <paramref name="error"/>.</summary>
-    public static IEnumerable<GgufCacheEntry> CacheEntries(HfQuantCheckpoint checkpoint, FishAudioDrama3Precision precision, GgufQuantError error)
-    {
-        ArgumentNullException.ThrowIfNull(checkpoint);
-        ArgumentNullException.ThrowIfNull(error);
-        foreach ((string name, HfQuantWeight weight) in checkpoint.Weights.OrderBy(static w => w.Key, StringComparer.Ordinal))
-        {
-            DType target = TargetDType(weight, precision);
-            yield return new GgufCacheEntry(name, weight.Shape, target, () => checkpoint.Produce(name, target, error));
-        }
-    }
-
-    /// <summary>The weights at <paramref name="precision"/>: borrowed from <paramref name="checkpoint"/> when nothing changes, else mapped
-    /// from the cache at <paramref name="cachePath"/>, written first when missing. The returned owner keeps whichever mapping backs
-    /// the weights alive; dispose it with the model.</summary>
+    /// <summary>The weights at <paramref name="precision"/>: borrowed from <paramref name="checkpoint"/> where nothing changes, the rest
+    /// mapped from the cache at <paramref name="cachePath"/> (written first when missing, see <see cref="HfQuantWeightCache"/>). The
+    /// returned owner keeps whatever backs the weights alive; dispose it with the model.</summary>
     public static (IReadOnlyDictionary<string, Tensor> Weights, IDisposable Owner) Load(HfQuantCheckpoint checkpoint,
         FishAudioDrama3Precision precision, string cachePath)
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
-        if (UsesStoredWeights(checkpoint, precision))
-        {
-            return (Borrow(checkpoint), checkpoint);
-        }
-        GgufQuantError error = new();
         Dictionary<string, object> identity = new(StringComparer.Ordinal)
         {
             ["hartsy.drama3.cache_version"] = CacheVersion,
             ["hartsy.drama3.precision"] = precision.ToString(),
-            ["hartsy.drama3.source"] = checkpoint.SourceIdentity,
         };
-        GgufLoader loader = GgufQuantCache.Open(cachePath, () => CacheEntries(checkpoint, precision, error), "fish-drama3",
-            "[Audio][Drama3]", identity);
-        if (error.Count > 0)
-        {
-            Logs.Info($"[Audio][Drama3] Re-quantization to {precision}: {error}.");
-        }
-        try
-        {
-            Dictionary<string, Tensor> weights = GgufQuantCache.ReadBack(loader, CacheEntries(checkpoint, precision, error));
-            checkpoint.Dispose();
-            return (weights, loader);
-        }
-        catch
-        {
-            loader.Dispose();
-            throw;
-        }
+        return HfQuantWeightCache.Load(checkpoint, w => TargetDType(w, precision), cachePath, "fish-drama3", "[Audio][Drama3]", identity,
+            produceAhead: GgufQuantCache.ParallelProduceAhead);
     }
 }

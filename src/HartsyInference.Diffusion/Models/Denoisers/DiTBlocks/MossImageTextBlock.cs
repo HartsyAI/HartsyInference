@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -99,7 +101,7 @@ public sealed class MossImageTextBlock(int hidden, int numHeads, int ffnHidden, 
         up.Dispose();
         gate.Dispose();
         Tensor activated = new(ffn, DType.F32);
-        backend.SituGlu(activated, pair);
+        backend.Glu(activated, pair, GluSpec.Situ);
         pair.Dispose();
         Tensor down = new(flat, DType.F32);
         backend.Linear(down, activated, _ffnDown!, _ffnDownBias);

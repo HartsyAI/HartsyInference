@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Prompting;
@@ -70,7 +71,7 @@ public static class ComfyBlend
             // for w == 1 the delta is multiplied by exactly 0, so those rows come back bit-for-bit unchanged.
             backend.Scale(negatedEmpty, empty, -1f);
             backend.Add(delta, hidden, negatedEmpty);
-            backend.MaskRows(weightedDelta, delta, mask);
+            backend.GroupScale(weightedDelta, delta, mask, GroupScaleSpec.PerRow());
             backend.Add(result, hidden, weightedDelta);
             // Same reason as CondTokenWeights.ScaleRightAligned: land it on the host before the encoder stage's
             // activation sweep can reclaim a device buffer the denoise loop still needs.

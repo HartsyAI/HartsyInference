@@ -1,0 +1,149 @@
+using HartsyInference.Core.Configuration;
+using HartsyInference.Cuda;
+using HartsyInference.Tests.Shared;
+using Xunit;
+
+namespace HartsyInference.Core.Tests.Backends;
+
+/// <summary>The device-sized query tile (<c>numerics.tileFromDevice</c>): the same shape and device give the same tile whatever the free memory was,
+/// and the knob is off unless set.</summary>
+[Collection(GlobalKnobStore.Name)]
+public sealed class SdpaTileFromDeviceTests
+{
+    private const long Heads = 12, Tokens = 32528;
+    private const ulong Card24Gb = 24UL << 30, Card8Gb = 8UL << 30;
+
+    [Fact]
+    public void TheKnobIsOffUnlessSet()
+    {
+        // A whole-run lane that names the knob (HARTSY_GPU_TEST_KNOBS) turns it on for every test in the run, so then the knob is on by design.
+        if (Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar) is { } run && run.Contains("numerics.tileFromDevice", StringComparison.Ordinal))
+        {
+            Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+            return;
+        }
+        Assert.Null(EngineKnobs.TileFromDevice.Value);
+    }
+
+    [Fact]
+    public void TheRowsFollowTheDeviceRungAndNotFreeMemory()
+    {
+        long perRow = Heads * Tokens * sizeof(float);
+        Assert.Equal((1L << 30) / perRow, CudaBackend.TileRowsFromDevice(Card24Gb, Heads, Tokens, Tokens, forced: null));
+        Assert.Equal((512L << 20) / perRow, CudaBackend.TileRowsFromDevice(Card8Gb, Heads, Tokens, Tokens, forced: null));
+    }
+
+    [Fact]
+    public void AForcedHeightAndTheQueryRowsStillBound()
+    {
+        Assert.Equal(256, CudaBackend.TileRowsFromDevice(Card24Gb, Heads, Tokens, Tokens, forced: 256));
+        Assert.Equal(100, CudaBackend.TileRowsFromDevice(Card24Gb, Heads, 100, Tokens, forced: null));
+    }
+
+    [Fact]
+    public void WhileAScopeIsOpenTheBudgetIsHalfItsHeadroomCappedAtHalfTheTotal()
+    {
+        // Free-independent: a function of the device total and the scope's headroom only.
+        Assert.Equal(1UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
+        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 40UL << 30));
+    }
+
+    [Fact]
+    public void TheBudgetDoesNotDependOnThePrefixCountAndNeverExceedsTheHeadroom()
+    {
+        // The budget takes no prefix argument; for any headroom it is at most half of that headroom (so within it).
+        foreach (ulong headroom in new[] { 512UL << 20, 2UL << 30, 6UL << 30, 12UL << 30 })
+        {
+            ulong budget = CudaBackend.PlannedGateBudget(Card24Gb, headroom);
+            Assert.True(budget <= headroom);
+            Assert.Equal(budget, CudaBackend.PlannedGateBudget(Card24Gb, headroom));
+        }
+    }
+
+    [Fact]
+    public void WithNoScopeOpenTheBudgetIsTheDeviceTileRung()
+    {
+        // Headroom 0 means no open scope (cleared on dispose): the budget is the device's rung, never unbounded or zero.
+        Assert.Equal(1L << 30, (long)CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 0));
+        Assert.Equal(512L << 20, (long)CudaBackend.PlannedGateBudget(Card8Gb, headroomBytes: 0));
+    }
+
+    [Fact]
+    public void TheGateBudgetIsNotTheTileRung()
+    {
+        // A 1 GiB rung on a 24 GB card: a 2 GiB score matrix is under the gate, so it stays materialized.
+        Assert.Equal(1L << 30, CudaBackend.TileRungBytes(Card24Gb));
+        Assert.True(1UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
+    }
+
+    [Fact]
+    public void TheFreeLogCountsAHalvedCallAndNamesItsHeights()
+    {
+        using IDisposable isolated = TileFreeLog.Isolate();
+        TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 50);
+        TileFreeLog.Record(10UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
+
+        // Two calls: one halved from 100 to 50 rows, one at 100. Free ranged 6 to 10 GiB; total 24 GiB.
+        Assert.Equal("tileFromDevice: calls=2 halved=1 totalMiB=24576 freeMiB min=6144 max=10240 tileRows=[50,100]", TileFreeLog.Summary());
+        using (TileFreeLog.Isolate())
+        {
+            Assert.Equal("tileFromDevice: no tiled calls, gate decisions or executed rows this process.", TileFreeLog.Summary());
+        }
+    }
+
+    [Fact]
+    public void TheFreeLogNamesEachGateAndItsDecisions()
+    {
+        using IDisposable isolated = TileFreeLog.Isolate();
+        // Free no longer enters a gate's line: the decisions and the over count are what is logged.
+        TileFreeLog.RecordGate("bf16cast", 6UL << 30, 24UL << 30, over: true);
+        TileFreeLog.RecordGate("bf16cast", 20UL << 30, 24UL << 30, over: false);
+        TileFreeLog.RecordGate("causal", 20UL << 30, 24UL << 30, over: true);
+
+        Assert.Equal("tileFromDevice gate=bf16cast decisions=2 over=1\ntileFromDevice gate=causal decisions=1 over=1",
+            TileFreeLog.Summary());
+    }
+
+    [Fact]
+    public void TheFreeLogAppendsOneBlockPerProcessToItsFile()
+    {
+        using IDisposable isolated = TileFreeLog.Isolate();
+        TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
+        string path = Path.Combine(Path.GetTempPath(), "tile-free-log-" + Guid.NewGuid().ToString("N") + ".log");
+        try
+        {
+            TileFreeLog.AppendTo(path);
+            string text = File.ReadAllText(path);
+            Assert.Contains("# pid=", text, StringComparison.Ordinal);
+            Assert.Contains("tileFromDevice: calls=1 halved=0 totalMiB=24576 freeMiB min=6144 max=6144 tileRows=[100]", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void TheRowLinesPrintBeforeTheTileAndGateLines()
+    {
+        using IDisposable isolated = TileFreeLog.Isolate();
+        TileFreeLog.RecordRow("tiled.f32");
+        TileFreeLog.RecordRow("tiled.f32");
+        TileFreeLog.Record(6UL << 30, 24UL << 30, plannedRows: 100, finalRows: 100);
+        TileFreeLog.RecordGate("causal", 20UL << 30, 24UL << 30, over: false);
+
+        string[] lines = TileFreeLog.Summary().Split('\n');
+        Assert.Equal("tileFromDevice row=tiled.f32 executed=2", lines[0]);
+        Assert.StartsWith("tileFromDevice: calls=1 ", lines[1], StringComparison.Ordinal);
+        Assert.StartsWith("tileFromDevice gate=causal ", lines[2], StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(20UL << 30, 1L << 30)]
+    [InlineData((20UL << 30) - 1, 512L << 20)]
+    [InlineData(18_000_000_000UL, 512L << 20)]
+    public void TheRungBoundaryIs20GiB(ulong total, long expected)
+    {
+        Assert.Equal(expected, CudaBackend.TileRungBytes(total));
+    }
+}

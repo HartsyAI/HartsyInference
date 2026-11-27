@@ -7,7 +7,7 @@ namespace HartsyInference.Video.Models.Cosmos;
 /// Seeded from the Qwen-VL <c>Multimodal3DRope</c> but with the Cosmos convention: <c>head_dim/2</c> is split into
 /// three <b>contiguous</b> frequency ranges (temporal, height, width), each channel drawing its rotation angle
 /// from its axis's latent coordinate. The built cos/sin use the duplicated-half layout consumed by
-/// <see cref="IBackend.ApplyRopeSingle"/> (Llama <c>rotate_half</c>), so the rotation reuses the existing
+/// <c>RotaryCall.TokenMajor</c> (Llama <c>rotate_half</c>), so the rotation reuses the existing
 /// per-backend kernel — no new op. Reusable by any video-AR/diffusion model needing 3D positional rotation.
 ///
 /// <para><b>Integration-pending numerics</b>: the exact per-axis range sizes and whether H/W share one frequency
@@ -48,7 +48,7 @@ public sealed unsafe class Cosmos3DRoPE
 
     /// <summary>Builds cos/sin tables <c>[1, T·H·W, head_dim]</c> for the full latent grid, tokens in row-major
     /// <c>(t, h, w)</c> order (<c>idx = t·H·W + h·W + w</c>), in the duplicated-half layout
-    /// <see cref="IBackend.ApplyRopeSingle"/> expects. Built once at prefill; a decode step slices its token row.</summary>
+    /// <c>RotaryCall.TokenMajor</c> expects. Built once at prefill; a decode step slices its token row.</summary>
     public (Tensor Cos, Tensor Sin) BuildTable(int latentT, int latentH, int latentW)
     {
         int seq = latentT * latentH * latentW;

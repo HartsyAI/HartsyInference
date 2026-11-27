@@ -45,6 +45,14 @@
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.5.0" />
   </ItemGroup>
 
+  <!-- World viewer window (HartsyInference.WorldViewer.Avalonia): Avalonia is the pure-managed cross-platform .NET UI toolkit with
+       key-down and key-up events and headless test hosting. Version pinned to the one already in the NuGet cache. -->
+  <ItemGroup>
+    <PackageVersion Include="Avalonia" Version="11.3.22" />
+    <PackageVersion Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageVersion Include="Avalonia.Headless.XUnit" Version="11.3.22" />
+  </ItemGroup>
+
   <!-- Benchmarking -->
   <ItemGroup>
     <PackageVersion Include="BenchmarkDotNet" Version="0.14.0" />

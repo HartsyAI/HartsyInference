@@ -281,7 +281,7 @@ as follow-up, not yet added.
 **Update 2026-07-30 — denoise-loop graph capture attempted, does not close the gap for Krea2.** The
 `VulkanStepGraph` mechanism (Phase 6e/7, see `TROUBLESHOOTING.md`) was built and wired into Krea2 via
 `HARTSY_DIT_GRAPH=1`. Four real CLI runs each hit a distinct capture-illegal op (fixed permanently:
-`CfgEulerStep`, `Concat`, `AddScalar` — all three now have real GPU-resident overrides, not just
+`GuidedEulerStep`, `Concat`, `AddScalar` — all three now have real GPU-resident overrides, not just
 capture-time shims, so they also close real per-step D2H syncs in the EAGER path Krea2 actually runs) before
 run 4 hit a structural OOM: capture retains every transient buffer touched during recording, but Krea2's
 `CacheWeightCasts=false` strategy depends on freeing each block's transient fp8→F16 weight casts

@@ -1,0 +1,7 @@
+SamFlexiCubesData.cs carries lookup tables (dmc_table, num_vd_table, check_table) taken as data from NVIDIA's FlexiCubes,
+https://github.com/nv-tlabs/FlexiCubes, commit 4cc7d6c3d0cee83c011ce36721b81adff0dd7db6, file tables.py (sha256 de9535d097dc7df266a8e8098efbe6f46d923287536d5f7f7ee924171267c442).
+
+Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Licensed under the Apache License, Version 2.0; the licence text is in FLEXICUBES-LICENSE-Apache-2.0.txt (a copy of the repository's LICENSE.txt, sha256
+58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd). The upstream repository ships no NOTICE file. The tables were transcribed by a script from the parsed
+tables.py (never executed); only the three tables the inference path reads are carried.

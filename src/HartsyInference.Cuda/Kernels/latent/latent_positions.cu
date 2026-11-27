@@ -8,24 +8,6 @@
 //   Prefill (startPos == 0): row r sees positions max(r-W+1,0)..r. Decode: the whole ring oldest first, slots past
 //   startPos empty. One thread per output element; mirrors WindowIndicesReference.Slot.
 
-extern "C" __global__ void rope_interleaved_offset_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cosTable,
-    const float* __restrict__ sinTable,
-    long long positions, int heads, int dim, int half, int dimOffset)
-{
-    const long long u = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (u >= positions * heads * half) return;
-    const long long ph = u / half;                // pos * heads + head
-    const int i = (int)(u % half);
-    const long long pos = ph / heads;
-    const float c = cosTable[pos * half + i], s = sinTable[pos * half + i];
-    float* v = x + ph * dim + dimOffset;
-    const float even = v[2 * i], odd = v[2 * i + 1];
-    v[2 * i] = __fsub_rn(__fmul_rn(even, c), __fmul_rn(odd, s));
-    v[2 * i + 1] = __fadd_rn(__fmul_rn(even, s), __fmul_rn(odd, c));
-}
-
 extern "C" __global__ void window_indices_i32(
     int* __restrict__ indices,
     int windowSize, int startPos, int rows, int cols)

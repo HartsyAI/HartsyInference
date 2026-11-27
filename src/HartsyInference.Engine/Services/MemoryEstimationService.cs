@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Host;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Dispatch;
@@ -43,6 +44,12 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         CancellationToken cancel = default)
     {
         cancel.ThrowIfCancellationRequested();
+        if (spec.Modality == Modality.Mesh)
+        {
+            string id = MeshService.IdOf(spec);
+            return Task.FromResult(MeshMemoryProfile.Estimate(id, new MeshRequest())
+                ?? throw new NotSupportedException($"No device-memory peak is recorded for 3D model '{id}', so there is no estimate."));
+        }
         if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
         {
             return Task.FromResult(TextMemoryProfile.Estimate(spec.LocalPath!));
@@ -56,6 +63,8 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         cancel.ThrowIfCancellationRequested();
         IBackend backend = _engine.Backend;
         VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
+        if (spec.Modality == Modality.Mesh)
+            return Task.FromResult(AssessMesh(MeshService.IdOf(spec), new MeshRequest(), request.Vram));
         if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
             return Task.FromResult(TextFit(spec.LocalPath!, policy));
         if (spec.Modality == Modality.Text && GgufPlacementDevice(spec.LocalPath) is string device)
@@ -81,13 +90,37 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
             primary + PooledShardBytes(placement, profile.Capabilities), OnPrimary(placement, profile.Capabilities)));
     }
 
+    /// <summary>Whether a 3D request fits this engine's device by the peak recorded for it: <see cref="MemoryFitVerdict.Unknown"/> when the model has no recorded peak or the device reports no memory.</summary>
+    internal MemoryFit AssessMesh(string id, MeshRequest request, VramOverrides? vram = null)
+    {
+        IBackend backend = _engine.Backend;
+        VramTier tier = VramPolicyRegistry.Resolve(backend, vram).Tier;
+        MemoryEstimate? estimate = MeshMemoryProfile.Estimate(id, request);
+        if (estimate is null)
+        {
+            return new MemoryFit { Verdict = MemoryFitVerdict.Unknown, EffectiveTier = tier, Reason = $"No device-memory peak is recorded for '{id}'." };
+        }
+        long totalBytes = TotalBytes(backend);
+        if (totalBytes <= 0)
+        {
+            return new MemoryFit
+            {
+                Verdict = MemoryFitVerdict.Unknown,
+                Estimate = estimate,
+                EffectiveTier = tier,
+                Reason = $"{backend.Capabilities.Name} does not report its memory.",
+            };
+        }
+        return MeshMemoryProfile.Judge(estimate, totalBytes, tier);
+    }
+
     /// <summary>A language model's fit: its checkpoint's residency plan against free host RAM, read from headers before anything is mapped.</summary>
     private static MemoryFit TextFit(string path, VramPolicy policy)
     {
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(path);
         MemoryEstimate estimate = TextMemoryProfile.Estimate(checkpoint);
-        long availableBytes = HostMemoryInfo.AvailableBytes() ?? 0;
-        if (availableBytes <= 0)
+        // Null is unreadable; zero is a full cgroup, a known fit question the planner answers.
+        if (HostMemoryInfo.AvailableBytes() is not { } availableBytes)
         {
             return new MemoryFit
             {

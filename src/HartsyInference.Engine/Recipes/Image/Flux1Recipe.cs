@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -15,6 +16,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -23,6 +25,17 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "flux1";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip", "t5"], Format = "text", Negative = "none",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/flux-1.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(Flux1Variants.OneReward) ? Prompt!.ArchitectureOnly() : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Wiring the VAE encoder also makes FLUX.1 Fill reachable: <see cref="FluxPipeline"/> requires a mask for
@@ -42,7 +55,28 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase);
+    /// <remarks>Matches the Fill catalog ids as well: the registry resolves a catalog entry by its id, and Fill transformers
+    /// (FLUX.1 Fill and its OneReward fine-tune) run through this recipe.</remarks>
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase)
+        || FillCatalogIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The catalog ids of the Fill transformers this recipe runs.</summary>
+    internal static readonly string[] FillCatalogIds = ["flux1-fill", "onereward-fill", "onereward-fill-fp8"];
+
+    /// <summary>The distilled guidance of the Dev family.</summary>
+    internal const float DevGuidance = 3.5f;
+
+    /// <summary>The OneReward fine-tune's reference distilled guidance, from ComfyUI's OneReward template.</summary>
+    internal const float OneRewardGuidance = 30f;
+
+    /// <summary>Whether a catalog id runs a Fill transformer, whose masks regenerate the masked area.</summary>
+    public static bool IsFillCatalogId(string? catalogId) =>
+        catalogId is not null && FillCatalogIds.Contains(catalogId, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The distilled guidance a checkpoint of <paramref name="variant"/> runs at unless the request names one.</summary>
+    internal static float DistilledGuidanceFor(ModelVariant? variant) =>
+        variant?.Id == Flux1Variants.OneReward.Id ? OneRewardGuidance : DevGuidance;
 
     /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024; a Schnell checkpoint narrows this to 4 steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
@@ -125,14 +159,16 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             FluxConfig config = hasGuidance ? FluxConfig.Dev : FluxConfig.Schnell;
             Logs.Info($"[Flux1Recipe] Architecture: {doubleBlocks} double, {singleBlocks} single, guidance={hasGuidance} ({(hasGuidance ? "Dev" : "Schnell")}).");
 
-            // fp8 checkpoints on hardware without native FP8 GEMM (Ampere and below) cast each fp8 weight to F16/BF16
-            // on first use; caching those casts roughly doubles VRAM per fp8 tensor and OOMs a 12 GB card partway
-            // through Flux text encoding. Keep the weights fp8-resident with a transient per-GEMM dequant instead.
-            // Applied to EVERY placement backend: with the T5 on its own device, that device's backend needs the
-            // same flag or it re-inflates the fp8 encoder there.
+            // An fp8 Linear that casts to F16/BF16 on first use caches that cast by default. The cache roughly doubles
+            // VRAM per fp8 tensor and OOMs a 12 GB card partway through Flux text encoding, so keep the weights
+            // fp8-resident with a transient per-GEMM dequant instead. The DiT casts on every card unless
+            // numerics.fp8Native=true (see FluxTransformer.LoadWeights), so the cache stays on only for that native
+            // path, which casts nothing. Applied to EVERY placement backend: with the T5 on its own device, that
+            // device's backend needs the same flag or it re-inflates the fp8 encoder there.
+            bool ditCastsFp8 = EngineKnobs.Fp8Native.Value != true;
             if (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights))
             {
-                RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: true);
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: !ditCastsFp8);
             }
 
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
@@ -192,7 +228,8 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);
             Logs.Info($"[Flux1Recipe] Flux.1 ready (Dev={hasGuidance}).");
-            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend);
+            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend,
+                devGuidance: DistilledGuidanceFor(context.ResolveVariant(Flux1Variants.Catalog).Variant));
         }
         catch (Exception ex)
         {

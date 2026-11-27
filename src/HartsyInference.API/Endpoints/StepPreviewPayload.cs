@@ -24,6 +24,18 @@ internal sealed class StepPreviewPayload
     /// <summary>Preview height in pixels.</summary>
     public int PreviewHeight { get; init; }
 
+    /// <summary>The stage name of a multi-stage generation (3D), or null.</summary>
+    public string? Stage { get; init; }
+
+    /// <summary>The 1-based stage position, or 0 when unknown.</summary>
+    public int StageIndex { get; init; }
+
+    /// <summary>The number of stages, or 0 when unknown.</summary>
+    public int StageCount { get; init; }
+
+    /// <summary>Overall progress in [0, 1] that does not reset between stages, or null.</summary>
+    public float? OverallFraction { get; init; }
+
     /// <summary>Builds a transport-safe payload by encoding the engine's raw RGB24 buffers.</summary>
     public static StepPreviewPayload Create(StepPreview preview)
     {
@@ -50,6 +62,10 @@ internal sealed class StepPreviewPayload
             Total = preview.TotalSteps,
             PreviewPng = staticPng,
             PreviewFramesPng = framePngs,
+            Stage = preview.Stage,
+            StageIndex = preview.StageIndex,
+            StageCount = preview.StageCount,
+            OverallFraction = preview.OverallFraction,
             PreviewWidth = staticPng is null && framePngs is null ? 0 : width,
             PreviewHeight = staticPng is null && framePngs is null ? 0 : height,
         };

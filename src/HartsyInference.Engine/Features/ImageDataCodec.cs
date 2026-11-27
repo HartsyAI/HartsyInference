@@ -6,24 +6,34 @@ namespace HartsyInference.Engine.Features;
 /// <summary>Decodes an encoded image (PNG today) into the raw RGB24 <see cref="ImageData"/> the request contract carries. Every transport needs this: the contract is deliberately raster-only so the Engine has no host image dependency, but a CLI has a file path and an HTTP client has base64 — neither has loose RGB bytes.</summary>
 public static class ImageDataCodec
 {
-    /// <summary>Decodes PNG bytes. Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
+    /// <summary>Decodes PNG or baseline JPEG bytes (the format is read from the leading bytes). Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
     public static ImageData Decode(ReadOnlySpan<byte> encoded)
     {
-        if (encoded.Length < 8)
+        if (JpegDecoder.IsJpeg(encoded))
         {
-            throw new ArgumentException($"Image data is too short to identify ({encoded.Length} bytes).", nameof(encoded));
+            (byte[] jpg, int jw, int jh) = JpegDecoder.Decode(encoded);
+            return new ImageData { Rgb = jpg, Width = jw, Height = jh };
         }
-        if (!IsPng(encoded))
-        {
-            throw new NotSupportedException(
-                $"Unsupported image format (leading bytes {Describe(encoded)}). The engine decodes PNG; re-encode the image as PNG.");
-        }
+        RequirePng(encoded);
         (byte[] rgb, int width, int height) = PngDecoder.Decode(encoded);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
 
     /// <summary>Decodes a base64 payload, tolerating a <c>data:image/png;base64,</c> prefix since browser clients send data URIs verbatim.</summary>
-    public static ImageData DecodeBase64(string base64)
+    public static ImageData DecodeBase64(string base64) => Decode(Base64Payload(base64));
+
+    /// <summary>Decodes a base64 PNG and keeps its alpha as <see cref="ImageData.Alpha"/>, so a matte-aware consumer (HairDeck) can use the mask.
+    /// An opaque PNG yields a null alpha plane.</summary>
+    public static ImageData DecodeBase64WithAlpha(string base64)
+    {
+        byte[] bytes = Base64Payload(base64);
+        if (JpegDecoder.IsJpeg(bytes)) return Decode(bytes);   // JPEG has no alpha plane
+        RequirePng(bytes);
+        DecodedPng png = PngDecoder.DecodeWithAlpha(bytes);
+        return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
+    }
+
+    private static byte[] Base64Payload(string base64)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(base64);
         string payload = base64.Trim();
@@ -32,16 +42,27 @@ public static class ImageDataCodec
         {
             payload = payload[(comma + 1)..];
         }
-        byte[] bytes;
         try
         {
-            bytes = Convert.FromBase64String(payload);
+            return Convert.FromBase64String(payload);
         }
         catch (FormatException ex)
         {
             throw new ArgumentException("Image is not valid base64.", nameof(base64), ex);
         }
-        return Decode(bytes);
+    }
+
+    private static void RequirePng(ReadOnlySpan<byte> encoded)
+    {
+        if (encoded.Length < 8)
+        {
+            throw new ArgumentException($"Image data is too short to identify ({encoded.Length} bytes).", nameof(encoded));
+        }
+        if (!IsPng(encoded))
+        {
+            throw new NotSupportedException(
+                $"Unsupported image format (leading bytes {Describe(encoded)}). The engine decodes PNG and baseline JPEG; re-encode the image as one of them.");
+        }
     }
 
     private static bool IsPng(ReadOnlySpan<byte> data) =>

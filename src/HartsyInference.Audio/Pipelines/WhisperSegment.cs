@@ -1,9 +1,8 @@
 namespace HartsyInference.Audio.Pipelines;
 
 /// <summary>One timestamped chunk of a Whisper transcript, delimited by a pair of native <c>&lt;|t|&gt;</c> tokens.
-/// Granularity is whatever the model emitted — an utterance/phrase span, NOT a single word: true word-level
-/// alignment needs cross-attention DTW, which <c>WhisperDecoder</c> does not expose (it runs fused SDPA and never
-/// returns attention weights). Times are the raw token times in seconds (0.02 s grid, 0..30 s within the chunk).</summary>
+/// Granularity is whatever the model emitted — an utterance/phrase span, NOT a single word; for words use
+/// <see cref="WhisperPipeline.AlignWords"/>. Times are the raw token times in seconds (0.02 s grid, 0..30 s within the chunk).</summary>
 public sealed record WhisperSegment
 {
     /// <summary>Decoded text between the opening and closing timestamp tokens, trimmed.</summary>

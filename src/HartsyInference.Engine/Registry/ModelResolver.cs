@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.IO;
@@ -43,6 +44,13 @@ public static class ModelResolver
                 variant = selector.Variant;
             }
         }
+        // longcat-avatar:1.6 (or avatar-1.6) is the 1.6 INT8 row, for every caller: the family's 1.5 row carries the 1.5 weights.
+        if (modality == Modality.Video && catalog?.Id == "longcat-avatar" && variant is not null
+            && LongCatAvatarVariants.IsOnePointSix(variant) && ModelCatalog.Find(LongCatAvatarVariants.Avatar16FamilyId) is CatalogEntry row)
+        {
+            catalog = row;
+            variant = null;
+        }
         string? local = LocateLocal(modelArg, modelPathArg, catalog, modality);
         return new ModelSpec
         {
@@ -78,7 +86,7 @@ public static class ModelResolver
         // per-modality guess below ("Image"/"Video"). Prefer the authoritative asset path when it's actually on
         // disk; only fall through to the guess for catalog-less entries or ones with no defined Assets.
         if (catalog is { Assets.Count: > 0 } && ModelDownloader.PrimaryAsset(catalog) is ModelAsset asset
-            && ModelDownloader.FindExisting(asset, ignoreCase) is string primary)
+            && (ModelDownloader.FindExisting(asset, ignoreCase) ?? ModelDownloader.FindRepacked(asset)) is string primary)
         {
             return Path.GetFullPath(primary);
         }

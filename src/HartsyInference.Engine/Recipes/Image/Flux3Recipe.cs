@@ -1,5 +1,5 @@
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -22,6 +23,9 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <see cref="Flux3Variants"/>). Drives through <see cref="Flux3RecipePipeline"/>.</summary>
 public sealed class Flux3Recipe : IArchitectureRecipe
 {
+    /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
+    public bool RefusesUnhonouredPlacements => true;
+
     /// <summary>The full build's sampling settings (ComfyUI template): 25 steps at true-CFG 3.5, 1024². The <c>er_sde</c> sampler
     /// is SwarmUI core's for Flux 3 Image (<c>WorkflowGenerator.cs</c>; <c>Model Support.md</c>, Flux 3 Image). The distilled
     /// build keeps the pipeline's sampler: its flow-map step targets the sampler's own sigmas.</summary>
@@ -32,6 +36,18 @@ public sealed class Flux3Recipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => "flux3";
+
+    /// <inheritdoc/>
+    /// <remarks>The guide documents the <c>yxyx-1000</c> layout form for FLUX 3 Image, the API flagship, and applies it to Klein only
+    /// as an inference, so neither Klein build claims boxes. It gives no negative guidance for Base, so only the distilled build says none.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["text-rendering"], Guide = "docs/prompting/flux-3.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(Flux3Variants.Distilled) ? Prompt! with { Negative = "none" } : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Regional prompts become the model's own layout table (<see cref="LayoutPromptBuilder"/>) rather than an
@@ -70,6 +86,7 @@ public sealed class Flux3Recipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
+        UnhonouredBackends.Refuse(context, "FLUX.3", warn: false);
         string fileName = Path.GetFileName(context.CheckpointPath);
         ResolvedModelVariant variant = context.ResolveVariant(Flux3Variants.Catalog);
         List<IDisposable> owned = new List<IDisposable>();
@@ -78,6 +95,7 @@ public sealed class Flux3Recipe : IArchitectureRecipe
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath, CheckpointOpenOptions.ForNvfp4Consumer(context.Backend));
             owned.Add(source);
             Dictionary<string, Tensor> converted = Flux3CheckpointConverter.ConvertTransformer(source.Weights);
+            // context.TransformerBackends is the primary alone: UnhonouredBackends.Refuse above rejected every other transformer placement.
             owned.Add(QuantizedWeightPolicy.PrepareForBackends(converted, context.TransformerBackends));
             Flux3Config config = Flux3Config.FromWeights(converted);
             Logs.Info($"[Flux3Recipe] {variant.Variant.DisplayName} ({variant.Source}): {fileName}, hidden={config.HiddenSize}, "

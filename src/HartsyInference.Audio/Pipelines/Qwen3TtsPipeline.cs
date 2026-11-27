@@ -7,9 +7,9 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using MimiModel = HartsyInference.Audio.Models.Codecs.Mimi.Mimi;
+using HartsyInference.Core.Pipelines;
 
 namespace HartsyInference.Audio.Pipelines;
 

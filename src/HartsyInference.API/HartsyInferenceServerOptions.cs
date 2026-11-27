@@ -33,8 +33,15 @@ public sealed class HartsyInferenceServerOptions
     /// <summary>Maximum native-video JSON body size; defaults to 256 MiB to accommodate base64 guide/control clips.</summary>
     public long MaxVideoRequestBodyBytes { get; set; } = 256L * 1024 * 1024;
 
+    /// <summary>Maximum JSON body size of the mesh file routes (<c>/v1/native/mesh/convert</c>, <c>/thumbnail</c>, <c>/operate</c>), which carry a base64 model file; defaults to 256 MiB because a textured result is tens of MB.</summary>
+    public long MaxMeshFileRequestBodyBytes { get; set; } = 256L * 1024 * 1024;
+
     /// <summary>How long an interactive world session may sit with no action/stream activity before the server evicts it and releases its backend resources.</summary>
     public int WorldSessionIdleTimeoutMinutes { get; set; } = 10;
+
+    /// <summary>How long a live vision session may go with no frame, prompt or connected stream before the server closes it and frees its
+    /// device slot.</summary>
+    public int RealtimeSessionIdleTimeoutMinutes { get; set; } = 10;
 
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }

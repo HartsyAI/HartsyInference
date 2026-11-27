@@ -1,9 +1,9 @@
 using HartsyInference.Audio.Models.Zonos;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Audio.Phonemizer.Espeak;
+using HartsyInference.Core.Pipelines;
 
 namespace HartsyInference.Audio.Pipelines;
 

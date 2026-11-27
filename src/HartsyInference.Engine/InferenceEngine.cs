@@ -2,8 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
@@ -14,6 +14,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Registry;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.Engine;
 
@@ -30,11 +31,21 @@ public sealed class InferenceEngine : IInferenceEngine
     /// the device release, and a teardown stops the job at its next op and waits as long again.</summary>
     internal TimeSpan DeviceReleaseWait { get; set; } = TimeSpan.FromSeconds(120);
 
+    /// <summary>How long a model switch or memory release waits for a request to finish with a pipeline before failing by name.</summary>
+    internal TimeSpan PipelineLeaseWait { get; set; } = TimeSpan.FromMinutes(10);
+
     /// <summary>What the registered recipes declare about each family, without loading weights.</summary>
     public IRecipeCatalog Recipes { get; } = new RecipeCatalog();
 
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _pipelineCacheLock = new();
+    // One miss at a time chooses victims, builds and publishes, so no choice is made from a cache another miss is about to change.
+    private readonly SemaphoreSlim _constructionGate = new(1, 1);
+    private const string ConstructionTurnKey = "construction-turn";
+    private readonly Dictionary<string, int> _pipelineLeases = new(StringComparer.OrdinalIgnoreCase);
+    // Device bytes each cached pipeline held once built, measured under the device gate. Guarded by _pipelineCacheLock.
+    private readonly Dictionary<string, long> _residentBytes = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
     private IBackend? _backend;
     private readonly EngineOptions? _options;
@@ -95,6 +106,8 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<VisionService> _vision;
     private readonly Lazy<RestoreService> _restore;
     private readonly Lazy<MeshService> _mesh;
+    private readonly Lazy<MeshPlanningService> _meshPlanning;
+    private readonly Lazy<MeshPreparationService> _meshPreparation;
     private readonly Lazy<WorldService> _world;
     private readonly Lazy<EmbeddingService> _embeddings;
     private readonly Lazy<DecisionService> _decisions;
@@ -120,6 +133,8 @@ public sealed class InferenceEngine : IInferenceEngine
         _vision = new Lazy<VisionService>(() => new VisionService(this));
         _restore = new Lazy<RestoreService>(() => new RestoreService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
+        _meshPreparation = new Lazy<MeshPreparationService>(() => new MeshPreparationService(this));
+        _meshPlanning = new Lazy<MeshPlanningService>(() => new MeshPlanningService(_memoryEstimation.Value, MeshAssets));
         _world = new Lazy<WorldService>(() => new WorldService(this));
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
         _decisions = new Lazy<DecisionService>(() => new DecisionService(this));
@@ -196,6 +211,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IFxService Fx => _fx.Value;
 
+    /// <summary>The concrete audio-effects service, for engine-internal steps that need more than <see cref="IFxService"/>.</summary>
+    internal FxService FxInternal => _fx.Value;
+
     /// <inheritdoc/>
     public IModelPrefetchService ModelPrefetch => _modelPrefetch.Value;
 
@@ -211,6 +229,32 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IMeshService Mesh => _mesh.Value;
+
+    /// <inheritdoc/>
+    public IMeshPlanningService MeshPlanning => _meshPlanning.Value;
+
+    /// <inheritdoc/>
+    public IMeshAssetService MeshAssets { get; } = new MeshAssetService();
+
+    /// <inheritdoc/>
+    public IMeshPreparationService MeshPreparation => _meshPreparation.Value;
+
+    /// <inheritdoc/>
+    public IMeshConversionService MeshConversion { get; } = new MeshConversionService();
+
+    /// <inheritdoc/>
+    public IMeshOperationService MeshOperations { get; } = new MeshOperationService();
+
+    /// <inheritdoc/>
+    public IMeshThumbnailService MeshThumbnails { get; } = new MeshThumbnailService();
+
+    /// <inheritdoc/>
+    public IMeshLifecycleService MeshLifecycle => _mesh.Value;
+
+    internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;
+
+    /// <summary>The preparation service when it exists; listing or freeing memory does not create it.</summary>
+    internal MeshPreparationService? MeshPreparationIfCreated => _meshPreparation.IsValueCreated ? _meshPreparation.Value : null;
 
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
@@ -276,6 +320,14 @@ public sealed class InferenceEngine : IInferenceEngine
     /// (or returns a cached) pipeline. Throws when no recipe is registered for the detected family yet.</summary>
     internal IRecipePipeline GetOrConstructRecipe(ModelSpec spec, ImageRequest? request = null, string? alsoKeepPath = null, CancellationToken cancel = default)
     {
+        LeasedRecipe leased = GetOrConstructRecipeLeased(spec, request, alsoKeepPath, cancel);
+        leased.Lease.Dispose();
+        return leased.Pipeline;
+    }
+
+    /// <summary>Like <see cref="GetOrConstructRecipe"/>, but the pipeline stays leased until the caller disposes the lease.</summary>
+    internal LeasedRecipe GetOrConstructRecipeLeased(ModelSpec spec, ImageRequest? request = null, string? alsoKeepPath = null, CancellationToken cancel = default)
+    {
         if (string.IsNullOrEmpty(spec.LocalPath))
         {
             throw NoCheckpoint(spec);
@@ -289,8 +341,13 @@ public sealed class InferenceEngine : IInferenceEngine
         string? referenceAdapter = request is not null && recipe is IReferenceAdapterRecipe ? ReferenceAdapterSettings.RequestedAdapter(request) : null;
         string referenceKey = referenceAdapter is null ? "" : $"refadapter:{referenceAdapter};";
         string key = $"recipe:{spec.LocalPath}|{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{referenceKey}{_placement.CacheKey()}";
-        if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
-            return cached;
+        lock (_pipelineCacheLock)
+        {
+            if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
+            {
+                return new LeasedRecipe(cached, AcquireLeaseUnderLock(key));
+            }
+        }
 
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
@@ -313,15 +370,61 @@ public sealed class InferenceEngine : IInferenceEngine
         };
         // Reported BEFORE construction, so a request that then runs out of VRAM has already said which of the
         // operator's memory settings this family was never going to act on.
-        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () =>
+        if (recipe.RefusesUnhonouredPlacements) UnhonouredBackends.Refuse(context, recipe.Name);
+        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports, recipe.RefusesUnhonouredPlacements);
+        // Victims leave the cache before the device gate is taken. A leased pipeline must never be disposed, and that
+        // check runs outside ConstructWithVramCleanup, whose failure path frees every device buffer.
+        using IDisposable constructionTurn = TakeConstructionTurn(spec.LocalPath, alsoKeepPath, cancel,
+            () => _recipePipelines.ContainsKey(key), out EvictedPipelines victims);
+        lock (_pipelineCacheLock)
         {
-            // Other checkpoints' resident weights (vram.keepModels) can't share the card; evict under the device gate.
-            EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
-            return recipe.Construct(context);
-        });
-        _recipePipelines[key] = pipeline;
-        return pipeline;
+            // Another request may have built this key while this one waited for its turn.
+            if (_recipePipelines.TryGetValue(key, out IRecipePipeline? built))
+            {
+                return new LeasedRecipe(built, AcquireLeaseUnderLock(key));
+            }
+        }
+        bool victimsReleased = false;
+        long residentBytes = 0;
+        IRecipePipeline pipeline;
+        try
+        {
+            pipeline = ConstructWithVramCleanup(backend, spec, () =>
+            {
+                // Other checkpoints' resident weights (vram.keepModels) can't share the card; dispose them under the device gate.
+                victimsReleased = true;
+                ReleaseEvicted(victims);
+                lock (_pipelineCacheLock)
+                {
+                    // Another request may have built this key while this one waited for the device gate.
+                    if (_recipePipelines.TryGetValue(key, out IRecipePipeline? raced))
+                    {
+                        return raced;
+                    }
+                }
+                long freeBeforeBuild = FreeAfterTrim(backend);
+                IRecipePipeline constructed = recipe.Construct(context);
+                residentBytes = Math.Max(0, freeBeforeBuild - FreeAfterTrim(backend));
+                return constructed;
+            });
+        }
+        finally
+        {
+            // Removed victims are unreachable once they leave the cache, so they are disposed even if construction never ran.
+            if (!victimsReleased)
+            {
+                ReleaseEvicted(victims);
+            }
+        }
+        lock (_pipelineCacheLock)
+        {
+            _recipePipelines[key] = pipeline;
+            if (residentBytes > 0)
+            {
+                _residentBytes[key] = residentBytes;
+            }
+            return new LeasedRecipe(pipeline, AcquireLeaseUnderLock(key));
+        }
     }
 
     /// <summary>Runs a generation and, when it fails for lack of VRAM, releases every device buffer the engine holds
@@ -417,7 +520,15 @@ public sealed class InferenceEngine : IInferenceEngine
             Logs.Error($"[Engine] Recipe construction failed for '{spec.LocalPath}' — releasing device memory it had already allocated.", ex);
             try
             {
-                backend.FreeAllDeviceMemory();
+                // A cached pipeline keeps its weights on this device, and a full free would take them away: then only the pool is trimmed.
+                if (HasCachedPipelines())
+                {
+                    backend.TrimMemoryPool();
+                }
+                else
+                {
+                    backend.FreeAllDeviceMemory();
+                }
             }
             catch (Exception cleanupEx)
             {
@@ -446,8 +557,11 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
     /// registry lookup the construction path uses.</summary>
-    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec) =>
-        ResolveRecipe(spec).PromptWeighting;
+    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec)
+    {
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return recipe.PromptWeightingFor(RecipeResolution.ResolveVariant(recipe.Variants, spec));
+    }
 
     /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
     internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
@@ -479,10 +593,22 @@ public sealed class InferenceEngine : IInferenceEngine
     internal IVideoRecipePipeline GetOrConstructVideoRecipe(ModelSpec spec, VideoRequest? request = null,
         VideoPlan? plan = null)
     {
+        LeasedVideoRecipe leased = GetOrConstructVideoRecipeLeased(spec, request, plan);
+        leased.Lease.Dispose();
+        return leased.Pipeline;
+    }
+
+    /// <summary>Like <see cref="GetOrConstructVideoRecipe"/>, but the pipeline stays leased until the caller disposes the lease.</summary>
+    internal LeasedVideoRecipe GetOrConstructVideoRecipeLeased(ModelSpec spec, VideoRequest? request = null,
+        VideoPlan? plan = null, CancellationToken cancel = default)
+    {
         if (string.IsNullOrEmpty(spec.LocalPath))
         {
             throw NoCheckpoint(spec);
         }
+
+        // Pair the catalog's low-noise expert before the cache key is built, so the key carries the swap model it runs with.
+        request = WithCatalogSwapExpert(spec, request);
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
         // the same rule the image path already follows. Without this a LoRA request reuses the un-merged pipeline.
@@ -492,8 +618,13 @@ public sealed class InferenceEngine : IInferenceEngine
             ?? throw new RecipeNotRegisteredException(Modality.Video, familyId, VideoRecipeRegistry.RegisteredNames);
         string planKey = plan is null ? "" : plan.CacheIdentity;
         string key = $"video-recipe:{spec.LocalPath}|{planKey}{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
-        if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
-            return cached;
+        lock (_pipelineCacheLock)
+        {
+            if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
+            {
+                return new LeasedVideoRecipe(cached, AcquireLeaseUnderLock(key));
+            }
+        }
 
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
@@ -515,14 +646,86 @@ public sealed class InferenceEngine : IInferenceEngine
             VideoSwapPercent = request?.VideoSwapPercent,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
-        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () =>
+        if (recipe.RefusesUnhonouredPlacements) UnhonouredBackends.Refuse(context, recipe.Name);
+        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports, recipe.RefusesUnhonouredPlacements);
+        using IDisposable constructionTurn = TakeConstructionTurn(spec.LocalPath, alsoKeepPath: null, cancel,
+            () => _videoRecipePipelines.ContainsKey(key), out EvictedPipelines victims);
+        lock (_pipelineCacheLock)
         {
-            EvictOtherCheckpointPipelines(spec.LocalPath);
-            return recipe.Construct(context);
-        });
-        _videoRecipePipelines[key] = pipeline;
-        return pipeline;
+            // Another request may have built this key while this one waited for its turn.
+            if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? built))
+            {
+                return new LeasedVideoRecipe(built, AcquireLeaseUnderLock(key));
+            }
+        }
+        bool victimsReleased = false;
+        long residentBytes = 0;
+        IVideoRecipePipeline pipeline;
+        try
+        {
+            pipeline = ConstructWithVramCleanup(backend, spec, () =>
+            {
+                victimsReleased = true;
+                ReleaseEvicted(victims);
+                lock (_pipelineCacheLock)
+                {
+                    if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? raced))
+                    {
+                        return raced;
+                    }
+                }
+                long freeBeforeBuild = FreeAfterTrim(backend);
+                IVideoRecipePipeline constructed = recipe.Construct(context);
+                residentBytes = Math.Max(0, freeBeforeBuild - FreeAfterTrim(backend));
+                return constructed;
+            });
+        }
+        finally
+        {
+            if (!victimsReleased)
+            {
+                ReleaseEvicted(victims);
+            }
+        }
+        lock (_pipelineCacheLock)
+        {
+            _videoRecipePipelines[key] = pipeline;
+            if (residentBytes > 0)
+            {
+                _residentBytes[key] = residentBytes;
+            }
+            return new LeasedVideoRecipe(pipeline, AcquireLeaseUnderLock(key));
+        }
+    }
+
+    /// <summary><paramref name="request"/> with its swap model set to the catalog entry's
+    /// <see cref="ModelAsset.LowNoiseExpertRole"/> asset (Wan 2.2 A14B). Returned unchanged when the caller already names a
+    /// swap model, when the entry has no expert asset, or when <paramref name="spec"/> runs a file other than the entry's
+    /// own primary asset: an override says nothing about which expert pairs with it.</summary>
+    internal static VideoRequest? WithCatalogSwapExpert(ModelSpec spec, VideoRequest? request) =>
+        WithCatalogSwapExpert(spec, request, File.Exists);
+
+    /// <summary><see cref="WithCatalogSwapExpert(ModelSpec, VideoRequest?)"/> with the on-disk check injected. Throws when
+    /// the expert is missing, rather than letting the high-noise expert run every step.</summary>
+    internal static VideoRequest? WithCatalogSwapExpert(ModelSpec spec, VideoRequest? request, Func<string, bool> fileExists)
+    {
+        if (request is null || !string.IsNullOrWhiteSpace(request.VideoSwapModel) || spec.Catalog is null
+            || string.IsNullOrWhiteSpace(spec.LocalPath))
+            return request;
+        ModelAsset? expert = spec.Catalog.Assets.FirstOrDefault(a => a.Role == ModelAsset.LowNoiseExpertRole);
+        if (expert is null)
+            return request;
+        string? primary = ModelDownloader.PrimaryLocalPath(spec.Catalog);
+        if (primary is null || !FileSystemPathIdentity.SamePath(primary, spec.LocalPath))
+            return request;
+        string expertPath = ModelDownloader.TargetPath(expert);
+        if (!fileExists(expertPath))
+        {
+            throw new FileNotFoundException(
+                $"{spec.Catalog.DisplayName} runs with its low-noise expert '{expertPath}', which is not on disk. Let the "
+                + "catalog fetch it first, or pass a swap model.", expertPath);
+        }
+        return request with { VideoSwapModel = expertPath };
     }
 
     /// <summary>Names the unresolved selection instead of letting a null path reach a loader that can only report
@@ -568,6 +771,8 @@ public sealed class InferenceEngine : IInferenceEngine
             ModelArchitecture.AuraFlow => "auraflow",
             ModelArchitecture.Chroma => "chroma",
             ModelArchitecture.MiniMaxH3 => "minimax-h3",
+            // Explicit: the fallback would lowercase to "minimaxh3image", which no recipe matches.
+            ModelArchitecture.MiniMaxH3Image => "minimax-h3-image",
             // Needs an explicit case: the fallback lowercases the enum name to "qwenimage21", which no recipe
             // matches, so a bare --model-path would report the family as unsupported instead of routing.
             ModelArchitecture.QwenImage21 => "qwen-image-2.1",
@@ -756,46 +961,200 @@ public sealed class InferenceEngine : IInferenceEngine
     private static string CanonicalSelector(string selector) =>
         BackendFactory.WithOrdinal(BackendFactory.Resolve(selector), BackendFactory.ParseOrdinal(selector));
 
-    /// <summary>Disposes every cached image/video pipeline bound to a checkpoint OTHER than
-    /// <paramref name="keepPath"/> and returns their device memory to the driver. Called on a cache miss
-    /// before constructing the incoming model, so a model SWITCH can never stack resident weight sets until
-    /// the card OOMs (and poisons the session with cuDNN/VAE fallbacks). Pipelines for the SAME checkpoint
-    /// (LoRA/component variants) are kept. Deliberately does NOT touch the other services (Text/Audio/…)
-    /// — their memory is managed by their own slots, and <see cref="FreeMemory"/> remains the full sweep.</summary>
-    /// <param name="keepPath">The incoming checkpoint — never evicted.</param>
-    /// <param name="alsoKeepPath">Optional second survivor. The generic refiner sets this in both directions
-    /// (base keeps refiner, refiner keeps base): without it every refined generation ping-pongs two full
-    /// pipeline loads — the base's construct evicts the refiner, the refine evicts the base — which besides the
-    /// load time churns a fresh host-side weight copy per swap.</param>
-    private void EvictOtherCheckpointPipelines(string keepPath, string? alsoKeepPath = null)
+    /// <summary>Removes from the cache the pipelines a model switch may evict. Other checkpoints always go. Same-checkpoint
+    /// variants (LoRA and component variants) stay cached while the card has room for them beside the incoming model, and
+    /// go when it does not. A pipeline still serving a request is never removed: the switch waits for that request, and
+    /// fails by name past <see cref="PipelineLeaseWait"/>. Deliberately does NOT touch the other services (Text/Audio/…).</summary>
+    /// <param name="keepPath">The incoming checkpoint.</param>
+    /// <param name="alsoKeepPath">Optional second survivor. The generic refiner sets this in both directions (base keeps
+    /// refiner, refiner keeps base): without it every refined generation ping-pongs two full pipeline loads.</param>
+    private IDisposable TakeConstructionTurn(string keepPath, string? alsoKeepPath, CancellationToken cancel,
+        Func<bool> alreadyCached, out EvictedPipelines victims)
     {
-        string keepImagePrefix = $"recipe:{keepPath}|";
-        string keepVideoPrefix = $"video-recipe:{keepPath}|";
-        string? keepImagePrefix2 = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
-        string? keepVideoPrefix2 = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
-        List<string> imageVictims = _recipePipelines.Keys
-            .Where(k => !k.StartsWith(keepImagePrefix, StringComparison.OrdinalIgnoreCase)
-                && (keepImagePrefix2 is null || !k.StartsWith(keepImagePrefix2, StringComparison.OrdinalIgnoreCase))).ToList();
-        List<string> videoVictims = _videoRecipePipelines.Keys
-            .Where(k => !k.StartsWith(keepVideoPrefix, StringComparison.OrdinalIgnoreCase)
-                && (keepVideoPrefix2 is null || !k.StartsWith(keepVideoPrefix2, StringComparison.OrdinalIgnoreCase))).ToList();
-        if (imageVictims.Count == 0 && videoVictims.Count == 0)
+        string imageKeep = $"recipe:{keepPath}|";
+        string videoKeep = $"video-recipe:{keepPath}|";
+        string? imageAlso = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
+        string? videoAlso = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
+        // The budget decision, the cached variants it was made for, and whether the last wait ended on a lease release.
+        bool evictSameCheckpoint = false, leaseReleased = false;
+        List<string>? decidedFor = null;
+        DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
+        while (true)
+        {
+            // A cancelled request stops here, so it cannot hold the other requests behind it for the whole lease wait.
+            cancel.ThrowIfCancellationRequested();
+            IDisposable turn = AcquireConstructionTurn(cancel);
+            try
+            {
+                List<string> sameCheckpoint;
+                long residentBytes = 0;
+                lock (_pipelineCacheLock)
+                {
+                    if (alreadyCached())
+                    {
+                        // Another request built this key while this one waited for its turn, so nothing is evicted for it.
+                        victims = new EvictedPipelines([], []);
+                        return turn;
+                    }
+                    sameCheckpoint = _recipePipelines.Keys.Where(k => k.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase))
+                        .Concat(_videoRecipePipelines.Keys.Where(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
+                    foreach ((string cachedKey, long measured) in _residentBytes)
+                    {
+                        if (cachedKey.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase)
+                            || cachedKey.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase))
+                        {
+                            residentBytes = Math.Max(residentBytes, measured);
+                        }
+                    }
+                }
+                // Read under the turn, and again once a lease is released or the cached variants change. Not on each one-second
+                // cancellation poll: every read trims the pool while the lease holder is still generating.
+                if (decidedFor is null || leaseReleased || !decidedFor.SequenceEqual(sameCheckpoint, StringComparer.OrdinalIgnoreCase))
+                {
+                    evictSameCheckpoint = sameCheckpoint.Count > 0 && SameCheckpointBudgetTight(keepPath, residentBytes);
+                    decidedFor = sameCheckpoint;
+                }
+                lock (_pipelineCacheLock)
+                {
+                    List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
+                    List<string> videoVictims = PipelineEvictionPolicy.SelectVictims(_videoRecipePipelines.Keys, videoKeep, videoAlso, evictSameCheckpoint);
+                    string? busy = imageVictims.Concat(videoVictims).FirstOrDefault(IsLeasedUnderLock);
+                    if (busy is null)
+                    {
+                        victims = RemoveVictims(imageVictims, videoVictims);
+                        return turn;
+                    }
+                    // The turn is given back before waiting. The request holding this pipeline may need the turn to build a model of its
+                    // own, and holding it across the wait would stall both requests until the lease wait ran out.
+                    turn.Dispose();
+                    TimeSpan remaining = deadline - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        throw new HartsyInferenceException($"Pipeline '{busy}' is still serving a request, so this model switch cannot evict it. Retry when that request finishes.");
+                    }
+                    // Wakes at least once a second, so a cancellation is seen even when no lease is released. The lease check and the wait
+                    // share one lock hold, so a release between them cannot be missed.
+                    leaseReleased = Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
+                }
+            }
+            catch
+            {
+                turn.Dispose();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Takes the one construction turn every miss shares. Waiting for it ends when the request is cancelled.</summary>
+    private IDisposable AcquireConstructionTurn(CancellationToken cancel)
+    {
+        _constructionGate.Wait(cancel);
+        return new PipelineLease(ConstructionTurnKey, _ => _constructionGate.Release());
+    }
+
+    /// <summary>Whether any image or video pipeline is cached.</summary>
+    private bool HasCachedPipelines()
+    {
+        lock (_pipelineCacheLock)
+        {
+            return _recipePipelines.Count > 0 || _videoRecipePipelines.Count > 0;
+        }
+    }
+
+    /// <summary>Takes the chosen victims out of the cache. Runs under <see cref="_pipelineCacheLock"/>.</summary>
+    private EvictedPipelines RemoveVictims(List<string> imageVictims, List<string> videoVictims)
+    {
+        List<KeyValuePair<string, IRecipePipeline>> images = new(imageVictims.Count);
+        foreach (string victim in imageVictims)
+        {
+            images.Add(new KeyValuePair<string, IRecipePipeline>(victim, _recipePipelines[victim]));
+            _recipePipelines.Remove(victim);
+            _residentBytes.Remove(victim);
+        }
+        List<KeyValuePair<string, IVideoRecipePipeline>> videos = new(videoVictims.Count);
+        foreach (string victim in videoVictims)
+        {
+            videos.Add(new KeyValuePair<string, IVideoRecipePipeline>(victim, _videoRecipePipelines[victim]));
+            _videoRecipePipelines.Remove(victim);
+            _residentBytes.Remove(victim);
+        }
+        return new EvictedPipelines(images, videos);
+    }
+
+    /// <summary>Whether the free device memory is too small to keep another variant of this checkpoint cached.</summary>
+    private bool SameCheckpointBudgetTight(string checkpointPath, long measuredResidentBytes)
+    {
+        long checkpointBytes = File.Exists(checkpointPath) ? new FileInfo(checkpointPath).Length : 0;
+        long estimatedBytes = PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes, checkpointBytes);
+        long freeBytes = FreeAfterTrim(EnsureBackend());
+        bool fits = PipelineEvictionPolicy.FitsBesideCached(freeBytes, estimatedBytes);
+        string basis = measuredResidentBytes > 0 ? "measured" : "from the checkpoint file";
+        Logs.Info($"[Engine] Pipeline cache: {ByteFormat.Mb(freeBytes)} free, a variant needs about {ByteFormat.Mb(estimatedBytes)} ({basis}) — "
+            + (fits ? "keeping cached variants of it." : "evicting idle variants of it."));
+        return !fits;
+    }
+
+    /// <summary>Free device memory after the pool hands back its cached blocks, so a reading shows what is actually held.</summary>
+    private static long FreeAfterTrim(IBackend backend)
+    {
+        backend.TrimMemoryPool();
+        return backend.FreeMemoryBytes();
+    }
+
+    /// <summary>Takes a lease on a cached pipeline. Runs under <see cref="_pipelineCacheLock"/>.</summary>
+    private IDisposable AcquireLeaseUnderLock(string key)
+    {
+        _pipelineLeases[key] = _pipelineLeases.TryGetValue(key, out int held) ? held + 1 : 1;
+        return new PipelineLease(key, ReleasePipelineLease);
+    }
+
+    private void ReleasePipelineLease(string key)
+    {
+        lock (_pipelineCacheLock)
+        {
+            if (!_pipelineLeases.TryGetValue(key, out int held))
+            {
+                return;
+            }
+            if (held <= 1)
+            {
+                _pipelineLeases.Remove(key);
+            }
+            else
+            {
+                _pipelineLeases[key] = held - 1;
+            }
+            Monitor.PulseAll(_pipelineCacheLock);
+        }
+    }
+
+    private bool IsLeasedUnderLock(string key) => _pipelineLeases.TryGetValue(key, out int held) && held > 0;
+
+    /// <summary>Disposes evicted pipelines. A victim that throws is still dropped: left cached half-disposed, every later switch would pick it again.</summary>
+    private void DisposeVictims(EvictedPipelines victims, ref List<Exception>? failures)
+    {
+        foreach (KeyValuePair<string, IRecipePipeline> victim in victims.Images)
+        {
+            ReleaseLogged($"pipeline '{victim.Key}'", victim.Value.Dispose, ref failures);
+        }
+        foreach (KeyValuePair<string, IVideoRecipePipeline> victim in victims.Videos)
+        {
+            ReleaseLogged($"pipeline '{victim.Key}'", victim.Value.Dispose, ref failures);
+        }
+    }
+
+    /// <summary>Disposes the pipelines a model switch removed from the cache, then returns their device memory to the driver. The
+    /// caller holds the device gate: a model switch runs inside its construction, so the device release needs no gate of its own.</summary>
+    private void ReleaseEvicted(EvictedPipelines victims)
+    {
+        if (victims.Count == 0)
         {
             return;
         }
 
-        // A victim that throws is still dropped: left cached half-disposed, every later switch would pick it again.
         List<Exception>? failures = null;
-        foreach (string victim in imageVictims)
-        {
-            ReleaseLogged($"pipeline '{victim}'", _recipePipelines[victim].Dispose, ref failures);
-            _recipePipelines.Remove(victim);
-        }
-        foreach (string victim in videoVictims)
-        {
-            ReleaseLogged($"pipeline '{victim}'", _videoRecipePipelines[victim].Dispose, ref failures);
-            _videoRecipePipelines.Remove(victim);
-        }
+        DisposeVictims(victims, ref failures);
         // Disposal only drops the PIPELINE's references — the backend's device weight cache still holds the
         // promoted copies (keyed by Tensor, strong refs), so Dispose+GC+Trim alone freed ~nothing (measured
         // 2026-07-23: Z-Image still at 0.4% free after "evicting" Krea2's 13 GB). When the switch leaves NO
@@ -843,36 +1202,64 @@ public sealed class InferenceEngine : IInferenceEngine
         // Host side: the victims' weight buffers are freed by now, but glibc keeps their arena heaps resident,
         // so family rotation ratchets anon RSS into the cgroup cap. See HostMemory.Trim.
         HostMemory.TrimAndLog("model-switch eviction");
-        Logs.Info($"[Engine] Model switch: evicted {imageVictims.Count + videoVictims.Count} resident pipeline(s) for other checkpoints.");
+        Logs.Info($"[Engine] Model switch: evicted {victims.Count} resident pipeline(s).");
     }
 
     /// <inheritdoc/>
-    public void FreeMemory() => ReleaseLoaded(disposeBackend: false);
+    public void FreeMemory()
+    {
+        // A free between jobs never waits on a recipe request and never disposes a pipeline one holds. While any pipeline is leased, the
+        // free is skipped and logged; the next free after that request finishes releases everything. The device release below
+        // keeps its own timed gate, so a job that outlasts that wait keeps its device memory. The 3D service is the exception: it
+        // waits for its own running generations before it disposes their pipelines (see MeshService.Free).
+        EvictedPipelines taken;
+        lock (_pipelineCacheLock)
+        {
+            if (_pipelineLeases.Count > 0)
+            {
+                Logs.Warning("[Engine] Free memory skipped: a request is still using a loaded pipeline. Retry when it finishes.");
+                return;
+            }
+            taken = RemoveVictims(_recipePipelines.Keys.ToList(), _videoRecipePipelines.Keys.ToList());
+        }
+        List<Exception>? failures = null;
+        DisposeVictims(taken, ref failures);
+        // The cache was emptied above, so ReleaseLoaded must not walk it again: a pipeline built after this point belongs to a request.
+        ReleaseLoaded(disposeBackend: false, disposePipelines: false);
+    }
 
     private void DisposeLoaded() => ReleaseLoaded(disposeBackend: true);
 
     /// <summary>Drops every loaded model across all modalities. With <paramref name="disposeBackend"/> the device goes
     /// too (teardown / backend switch); without it the backend survives and just has its device memory released, which
     /// is the "free memory" a host asks for between jobs.</summary>
-    private void ReleaseLoaded(bool disposeBackend)
+    private void ReleaseLoaded(bool disposeBackend, bool disposePipelines = true)
     {
         // Every step runs even when an earlier one throws: a failed dispose must not strand the device memory, the
         // services or the backend behind it.
         List<Exception>? failures = null;
-        foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
-            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
-        _recipePipelines.Clear();
-        foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
-            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
-        _videoRecipePipelines.Clear();
+        if (disposePipelines)
+        {
+            foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
+                ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
+            _recipePipelines.Clear();
+            foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
+                ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
+            _videoRecipePipelines.Clear();
+            _residentBytes.Clear();
+        }
         // IsValueCreated throughout, so releasing memory never forces a service (and its caches) into existence.
         if (_vision.IsValueCreated)
             ReleaseLogged("the vision service", _vision.Value.Dispose, ref failures);
         // RestoreService caches the SeedVR2 pipeline + mmap-backed weight loaders bound to the backend.
         if (_restore.IsValueCreated)
             ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
+        // A restore placed on another device keeps its weights and its device context in that service; the teardown below disposes them.
+        // The mesh service first: a TRELLIS.2 or Pixal3D run it waits for can still load the shared matting model, which the preparation service releases after.
         if (_mesh.IsValueCreated)
             ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
+        if (_meshPreparation.IsValueCreated)
+            ReleaseLogged("the mesh image preparation", _meshPreparation.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
             ReleaseLogged("the world service", _world.Value.Dispose, ref failures);
         // TextService owns its own per-device backends and multi-GB dequantized host buffers, so it must be released
@@ -889,6 +1276,10 @@ public sealed class InferenceEngine : IInferenceEngine
         // it was constructed against. Other engines' resident audio models are untouched.
         if (_audioRuntime is not null)
             ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll(AudioUnloadWaitSeconds), ref failures);
+        // Before the teardown gate: a restore holds its service's slot and then the device gate, so waiting on the slot while
+        // holding the gate would deadlock with it.
+        if (disposeBackend && _restore.IsValueCreated)
+            ReleaseLogged("the restore devices", _restore.Value.DisposeDeviceBackends, ref failures);
         if (disposeBackend)
         {
             using (IDisposable gate = AcquireForTeardown())
@@ -935,7 +1326,11 @@ public sealed class InferenceEngine : IInferenceEngine
     }
 
     /// <summary>The primary and every placement backend this engine has already built, without building any.</summary>
-    private IEnumerable<IBackend?> OwnedBackends() => [_backend, .. _placementBackends.Values];
+    private IEnumerable<IBackend?> OwnedBackends() => [_backend, .. _placementBackends.Values, .. RestoreDeviceBackends()];
+
+    /// <summary>The backends SeedVR restores placed on other devices, when the restore service exists.</summary>
+    private IEnumerable<IBackend> RestoreDeviceBackends() =>
+        _restore.IsValueCreated ? _restore.Value.DeviceBackends : Array.Empty<IBackend>();
 
     /// <summary>Returns every owned backend's device memory, under the device gate every job holds.</summary>
     /// <remarks>Services and audio runners are released before this, and a request that arrives after them runs under
@@ -973,6 +1368,18 @@ public sealed class InferenceEngine : IInferenceEngine
                     Logs.Warning($"[Engine] Releasing a placement backend's device memory failed: {ex.Message}");
                 }
             }
+            foreach (IBackend restoreDevice in RestoreDeviceBackends())
+            {
+                try
+                {
+                    restoreDevice.FreeAllDeviceMemory();
+                    restoreDevice.TrimMemoryPool();
+                }
+                catch (Exception ex)
+                {
+                    Logs.Warning($"[Engine] Releasing a restore device's memory failed: {ex.Message}");
+                }
+            }
         }
     }
 
@@ -991,5 +1398,15 @@ public sealed class InferenceEngine : IInferenceEngine
     }
 
     /// <inheritdoc/>
-    public void Dispose() => DisposeLoaded();
+    public void Dispose()
+    {
+        try
+        {
+            DisposeLoaded();
+        }
+        finally
+        {
+            _constructionGate.Dispose();
+        }
+    }
 }

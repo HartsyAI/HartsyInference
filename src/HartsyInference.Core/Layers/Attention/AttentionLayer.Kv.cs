@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Layers.Attention;
@@ -8,9 +9,13 @@ public sealed partial class AttentionLayer
     /// <summary>Appends head-major K/V to <paramref name="source"/> (a null <paramref name="kMh"/> reads <paramref name="kvLayer"/> as a donor), then
     /// attends <paramref name="qMh"/> over its buffers; without a source it attends over <paramref name="kMh"/>/<paramref name="vMh"/>. Disposes the operands
     /// <paramref name="consume"/> names once read. Returns the head-major output; the caller owns it.</summary>
+    /// <remarks>A paged source (<see cref="IPagedAttentionKvSource"/>) is read through its page table when the backend admits
+    /// that call, and no contiguous copy is made or kept current for it. Every other call over a paged source is lowered: the
+    /// rows go into the source's contiguous buffers, which the call then reads.</remarks>
     public Tensor AttendOverKvHeadMajor(IBackend backend, Tensor qMh, Tensor? kMh, Tensor? vMh, IAttentionKvSource? source,
         int layer, int kvLayer, in KvAttentionCall call, OperandOwnership consume = OperandOwnership.All)
     {
+        using AttentionEvidenceContext evidence = AttentionEvidence.Context("attention.kv", layer);
         bool ownQ = (consume & OperandOwnership.Query) != 0;
         bool ownK = kMh is not null && (consume & OperandOwnership.Key) != 0;
         bool ownV = vMh is not null && (consume & OperandOwnership.Value) != 0;
@@ -27,12 +32,30 @@ public sealed partial class AttentionLayer
             }
             else
             {
+                IPagedAttentionKvSource? paged = source as IPagedAttentionKvSource;
                 if (kMh is not null)
                 {
                     if (vMh is null) throw new ArgumentException("A key without a value cannot be appended.", nameof(vMh));
-                    source.AppendKv(backend, layer, kMh, vMh);
+                    if (paged is null) source.AppendKv(backend, layer, kMh, vMh);
+                    else paged.AppendKvPages(backend, layer, kMh, vMh);
+                }
+                if (paged is not null && backend.HasPagedAttention)
+                {
+                    attn = new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
+                    if (AttendPaged(backend, attn, qMh, paged, kvLayer, in call))
+                    {
+                        if (ownQ) { qMh.Dispose(); ownQ = false; }
+                        if (ownK) { kMh!.Dispose(); ownK = false; }
+                        if (ownV) { vMh!.Dispose(); ownV = false; }
+                        return attn;
+                    }
+                }
+                // Lowered: the call reads the contiguous buffers, so the rows just appended go into them too.
+                if (paged is not null && kMh is not null) paged.AppendKvContiguous(backend, layer, kMh, vMh!);
+                if (kMh is not null)
+                {
                     if (ownK) { kMh.Dispose(); ownK = false; }
-                    if (ownV) { vMh.Dispose(); ownV = false; }
+                    if (ownV) { vMh!.Dispose(); ownV = false; }
                 }
                 keys = source.KeyBuffer(kvLayer);
                 values = source.ValueBuffer(kvLayer);
@@ -40,7 +63,7 @@ public sealed partial class AttentionLayer
             CheckKvOperands(qMh, keys);
             if (call.KvLength > keys.Shape[2] || call.KvLength > values.Shape[2])
                 throw new ArgumentException($"{call.KvLength} keys do not fit buffers of {keys.Shape[2]} and {values.Shape[2]} rows.", nameof(call));
-            attn = new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
+            attn ??= new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
             AttentionCall flash = AttentionCall.FromFlashAttention(attn, qMh, keys, values, call.KvLength, !call.Bidirectional,
                 call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes);
             using Tensor? widened = call.Bias is null ? null : WidenToKeyRows(call.Bias, keys.Shape[2]);
@@ -64,6 +87,22 @@ public sealed partial class AttentionLayer
         }
     }
 
+    /// <summary>Attends <paramref name="qMh"/> over <paramref name="paged"/>'s pages into <paramref name="attn"/> when the
+    /// backend has a kernel that follows the page table for this call; false, with nothing written, when it does not.</summary>
+    private bool AttendPaged(IBackend backend, Tensor attn, Tensor qMh, IPagedAttentionKvSource paged, int kvLayer, in KvAttentionCall call)
+    {
+        if (call.Bias is not null
+            || !paged.TryGetPages(kvLayer, call.KvLength, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages))
+            return false;
+        CheckKvOperands(qMh, keyPages);
+        AttentionCall flash = AttentionCall.FromPagedFlashAttention(attn, qMh, keyPages, valuePages, pages, call.KvLength, !call.Bidirectional,
+            call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes);
+        if (!backend.AdmitsPagedAttention(in flash)) return false;
+        backend.Attention(in flash);
+        paged.PagesServed(kvLayer);
+        return true;
+    }
+
     /// <summary>The bias widened with −∞ columns to the key buffer's <paramref name="keyRows"/> (a fixed-capacity cache holds more rows than keys in use), or null when it already matches or is a single column.</summary>
     private static Tensor? WidenToKeyRows(Tensor bias, long keyRows)
     {
@@ -81,6 +120,7 @@ public sealed partial class AttentionLayer
         to.Fill(float.NegativeInfinity);
         long rowCount = from.Length / width;
         for (long r = 0; r < rowCount; r++) from.Slice((int)(r * width), (int)width).CopyTo(to.Slice((int)(r * keyRows), (int)width));
+        AttentionEvidence.Payload(AttentionEvidenceKind.ExpandMask, "attention.kv.bias", widened);
         return widened;
     }
 

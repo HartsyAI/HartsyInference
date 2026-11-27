@@ -1,0 +1,392 @@
+using System.Buffers.Binary;
+using System.Text;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.ThreeD.Document;
+using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Render;
+
+namespace HartsyInference.ThreeD.Tests.Render;
+
+/// <summary>The software renderer: placement, depth, views, up axis, textures, colours, the point renderer and the splat reader, all on small synthetic models.</summary>
+public sealed class MeshRenderTests
+{
+    private static readonly MeshRenderOptions Front = new() { Width = 64, Height = 64, Viewpoint = MeshViewpoint.Named("front"), Background = [10, 20, 30], Samples = 1 };
+
+    private static MeshDocument Doc(Mesh mesh, MeshMaterial? material = null) => new()
+    {
+        Primitives = [new MeshPrimitive { Geometry = mesh, Material = material is null ? -1 : 0 }],
+        Materials = material is null ? [] : [material],
+    };
+
+    private static Mesh Quad(float z = 0, float size = 1) => new()
+    {
+        Vertices = [0, 0, z, size, 0, z, size, size, z, 0, size, z],
+        Indices = [0, 1, 2, 0, 2, 3],
+        Uvs = [0, 1, 1, 1, 1, 0, 0, 0],
+    };
+
+    private static Mesh Box(float x, float y, float z) => new()
+    {
+        Vertices = [0, 0, 0, x, 0, 0, x, y, 0, 0, y, 0, 0, 0, z, x, 0, z, x, y, z, 0, y, z],
+        Indices = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5],
+    };
+
+    private static (byte R, byte G, byte B) Pixel(TextureImage image, int x, int y)
+    {
+        int o = (y * image.Width + x) * image.Channels;
+        return (image.Pixels[o], image.Pixels[o + 1], image.Pixels[o + 2]);
+    }
+
+    private static (int Left, int Right, int Top, int Bottom) Extent(TextureImage image)
+    {
+        int left = image.Width, right = -1, top = image.Height, bottom = -1;
+        for (int y = 0; y < image.Height; y++)
+        {
+            for (int x = 0; x < image.Width; x++)
+            {
+                if (image.Pixels[(y * image.Width + x) * 4 + 3] == 0)
+                    continue;
+                left = Math.Min(left, x);
+                right = Math.Max(right, x);
+                top = Math.Min(top, y);
+                bottom = Math.Max(bottom, y);
+            }
+        }
+        return (left, right, top, bottom);
+    }
+
+    [Fact]
+    public void AModelIsDrawnInTheMiddleOnTheBackgroundAndKeepsItsMarginAtTheEdges()
+    {
+        MeshRender render = MeshRenderer.Render(Doc(Box(1, 1, 1)), Front);
+
+        Assert.Equal((10, 20, 30), Pixel(render.Image, 0, 0));
+        Assert.Equal((10, 20, 30), Pixel(render.Image, 63, 63));
+        (byte r, byte g, byte b) = Pixel(render.Image, 32, 32);
+        Assert.NotEqual((10, 20, 30), (r, g, b));
+        Assert.Equal(3, render.Image.Channels);
+    }
+
+    [Fact]
+    public void AnImageWithoutABackgroundIsRgbaWithCoverageAsAlpha()
+    {
+        MeshRender render = MeshRenderer.Render(Doc(Box(1, 1, 1)), Front with { Background = null, Samples = 2 });
+
+        Assert.Equal(4, render.Image.Channels);
+        Assert.Equal(0, render.Image.Pixels[3]);
+        Assert.Equal(255, render.Image.Pixels[(32 * 64 + 32) * 4 + 3]);
+        Assert.Equal((64, 64), (render.Image.Width, render.Image.Height));
+    }
+
+    [Fact]
+    public void ANearerSurfaceHidesAFartherOneAndAViewFromTheOtherSideSeesTheOther()
+    {
+        MeshMaterial red = new() { BaseColorFactor = [1, 0, 0, 1] }, blue = new() { BaseColorFactor = [0, 0, 1, 1] };
+        MeshDocument document = new()
+        {
+            Primitives = [new MeshPrimitive { Geometry = Quad(0), Material = 0 }, new MeshPrimitive { Geometry = Quad(1), Material = 1 }],
+            Materials = [red, blue],
+        };
+
+        (byte r, byte g, byte b) frontPixel = Pixel(MeshRenderer.Render(document, Front).Image, 32, 32);
+        (byte r, byte g, byte b) backPixel = Pixel(MeshRenderer.Render(document, Front with { Viewpoint = MeshViewpoint.Named("back") }).Image, 32, 32);
+
+        Assert.True(frontPixel.b > frontPixel.r, "The quad at z=1 is nearer the front camera.");
+        Assert.True(backPixel.r > backPixel.b, "The quad at z=0 is nearer the back camera.");
+    }
+
+    [Fact]
+    public void ATexturedQuadShowsEachTexelInItsCornerWithTheFileOriginAtTheTopLeft()
+    {
+        MeshImage texture = new("image/png", PngTextureEncoder.Encode(new TextureImage(2, 2, 3,
+            [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255])));
+        MeshDocument document = Doc(Quad(), new MeshMaterial { BaseColor = texture });
+
+        TextureImage image = MeshRenderer.Render(document, Front with { FovDegrees = 30 }).Image;
+
+        (byte r, byte g, byte b) topLeft = Pixel(image, 24, 24), topRight = Pixel(image, 40, 24), bottomLeft = Pixel(image, 24, 40);
+        Assert.True(topLeft.r > topLeft.g && topLeft.r > topLeft.b, "top-left texel is red");
+        Assert.True(topRight.g > topRight.r && topRight.g > topRight.b, "top-right texel is green");
+        Assert.True(bottomLeft.b > bottomLeft.r && bottomLeft.b > bottomLeft.g, "bottom-left texel is blue");
+    }
+
+    [Fact]
+    public void WithoutTexturesTheMaterialColourIsDrawnAndAJpegIsNotedNotFailed()
+    {
+        MeshImage jpeg = new("image/jpeg", [0xFF, 0xD8, 0xFF]);
+        MeshDocument document = Doc(Quad(), new MeshMaterial { BaseColor = jpeg, BaseColorFactor = [0, 1, 0, 1] });
+
+        MeshRender render = MeshRenderer.Render(document, Front);
+
+        (byte r, byte g, byte b) = Pixel(render.Image, 32, 32);
+        Assert.True(g > r && g > b);
+        Assert.Contains(render.Notes, n => n.Contains("JPEG"));
+        Assert.Empty(MeshRenderer.Render(document, Front with { Textured = false }).Notes);
+    }
+
+    [Fact]
+    public void VertexColoursTintTheSurface()
+    {
+        Mesh quad = Quad();
+        quad.VertexColors = [1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0];
+
+        (byte r, byte g, byte b) = Pixel(MeshRenderer.Render(Doc(quad), Front).Image, 32, 32);
+
+        Assert.True(r > g + 40 && r > b + 40);
+    }
+
+    [Fact]
+    public void AZUpModelStandsUpOnlyWhenItIsToldItIsZUp()
+    {
+        MeshDocument tall = Doc(Box(1, 1, 4));
+        MeshRenderOptions options = Front with { Background = null, Samples = 1 };
+
+        (int l, int r, int t, int b) zUp = Extent(MeshRenderer.Render(tall, options with { Up = MeshUpAxis.Z }).Image);
+        (int l, int r, int t, int b) yUp = Extent(MeshRenderer.Render(tall, options with { Up = MeshUpAxis.Y }).Image);
+
+        Assert.True(zUp.b - zUp.t > zUp.r - zUp.l, "Z-up: the long axis is vertical.");
+        Assert.True(yUp.r - yUp.l <= yUp.b - yUp.t + 2 && yUp.b - yUp.t < zUp.b - zUp.t, "Y-up: the long axis points at the camera, so it is shorter on screen.");
+    }
+
+    [Fact]
+    public void TheViewsLookFromDifferentSidesAndAnUnknownNameNamesTheValidOnes()
+    {
+        MeshDocument document = Doc(Box(1, 1, 3));
+        MeshRenderOptions options = Front with { Background = null };
+
+        (int, int, int, int) front = Extent(MeshRenderer.Render(document, options).Image);
+        (int, int, int, int) top = Extent(MeshRenderer.Render(document, options with { Viewpoint = MeshViewpoint.Named("top") }).Image);
+        (int, int, int, int) iso = Extent(MeshRenderer.Render(document, options with { Viewpoint = MeshViewpoint.Named("iso") }).Image);
+
+        Assert.NotEqual(front, top);
+        Assert.NotEqual(front, iso);
+        ArgumentException error = Assert.Throws<ArgumentException>(() => MeshViewpoint.Named("sideways"));
+        Assert.Contains("front, back, left, right, top, bottom, iso", error.Message);
+    }
+
+    [Theory]
+    [InlineData(8, 64, 2, 30f)]
+    [InlineData(64, 4096, 2, 30f)]
+    [InlineData(64, 64, 0, 30f)]
+    [InlineData(64, 64, 5, 30f)]
+    [InlineData(64, 64, 2, 5f)]
+    public void OutOfRangeOptionsAreRefused(int width, int height, int samples, float fov)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => MeshRenderer.Render(Doc(Quad()), new MeshRenderOptions { Width = width, Height = height, Samples = samples, FovDegrees = fov }));
+    }
+
+    [Fact]
+    public void ThePointRendererDrawsDotsWithTheirColoursAndHidesTheFarOnes()
+    {
+        PointCloud cloud = new()
+        {
+            Positions = [-1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1],
+            Colors = [1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0],
+        };
+
+        TextureImage image = PointCloudRenderer.Render(cloud, Front with { PointSize = 5, Background = [0, 0, 0] }).Image;
+
+        (byte r, byte g, byte b) centre = Pixel(image, 32, 32);
+        Assert.True(centre.b > 200 && centre.r < 50, "The point at z=1 is nearest the front camera and hides the one behind it.");
+        Assert.True(Enumerable.Range(0, 64).Any(x => Pixel(image, x, 32).R > 200), "The red point is drawn.");
+    }
+
+    [Fact]
+    public void ASplatPlyIsReadAsPointsWithColoursFromItsDcTermsAndFaintSplatsAreDropped()
+    {
+        byte[] ply = SplatPly([(0f, 0f, 0f, 1f, 10f), (1f, 0f, 0f, -1f, -10f), (0f, 1f, 0f, 0f, 3f)]);
+
+        PointPlyReader.Result result = PointPlyReader.Read(ply);
+
+        Assert.True(result.IsSplat);
+        Assert.Equal(2, result.Cloud.Count);
+        Assert.Equal(1, result.Dropped);
+        Assert.Equal(0.5f + 0.28209479f, result.Cloud.Colors![0], 4);
+        Assert.Equal(0.5f, result.Cloud.Colors[3], 4);
+    }
+
+    [Fact]
+    public void AnAsciiPlyWithByteColoursIsReadAndABadFileIsADomainError()
+    {
+        byte[] ascii = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n0 0 0 255 0 0\n1 1 1 0 0 255\n");
+
+        PointPlyReader.Result result = PointPlyReader.Read(ascii);
+
+        Assert.False(result.IsSplat);
+        Assert.Equal([1f, 0f, 0f, 0f, 0f, 1f], result.Cloud.Colors!);
+        Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read([1, 2, 3]));
+        Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(ascii[..^10]));
+    }
+
+    private static byte[] BinaryPly(string properties, params float[] values)
+    {
+        int perVertex = properties.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        byte[] head = Encoding.ASCII.GetBytes($"ply\nformat binary_little_endian 1.0\nelement vertex {values.Length / perVertex}\n{properties}end_header\n");
+        byte[] data = new byte[head.Length + values.Length * 4];
+        head.CopyTo(data, 0);
+        for (int i = 0; i < values.Length; i++)
+            BinaryPrimitives.WriteSingleLittleEndian(data.AsSpan(head.Length + i * 4), values[i]);
+        return data;
+    }
+
+    private const string Xyz = "property float x\nproperty float y\nproperty float z\n";
+
+    [Theory]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    public void ABinaryPlyWithANonFiniteCoordinateIsADomainErrorLikeTheAsciiPath(float bad)
+    {
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(BinaryPly(Xyz, 0, 0, 0, bad, 1, 1)));
+
+        Assert.Contains("not a finite number", error.Message);
+    }
+
+    [Fact]
+    public void AHeaderCountFarBeyondTheFileIsRefusedBeforeAnythingIsSizedFromIt()
+    {
+        byte[] head = Encoding.ASCII.GetBytes($"ply\nformat binary_little_endian 1.0\nelement vertex 2000000000\n{Xyz}end_header\n");
+        byte[] ply = [.. head, .. new byte[24]];
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(ply));
+
+        Assert.Contains("holds only", error.Message);
+    }
+
+    [Fact]
+    public void ATruncatedBinaryPlyAndAVertexElementThatIsNotFirstAreDomainErrors()
+    {
+        byte[] whole = BinaryPly(Xyz, 0, 0, 0, 1, 1, 1, 2, 2, 2);
+        byte[] late = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement face 1\nproperty list uchar int vertex_indices\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n");
+
+        Assert.Contains("shorter than its header", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(whole[..^5])).Message);
+        Assert.Contains("comes before the vertex element", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(late)).Message);
+    }
+
+    [Fact]
+    public void SixteenBitPlyColoursAreScaledByTheirRangeNotSaturated()
+    {
+        byte[] head = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty ushort red\nproperty ushort green\nproperty ushort blue\nend_header\n0 0 0 65535 32768 0\n");
+
+        float[] colours = PointPlyReader.Read(head).Cloud.Colors!;
+
+        Assert.Equal([1f, 32768f / 65535f, 0f], colours);
+    }
+
+    [Fact]
+    public void ADocumentWithNothingToDrawIsADomainErrorNotABlankPicture()
+    {
+        MeshDocument empty = new() { Primitives = [new MeshPrimitive { Geometry = new Mesh { Vertices = [], Indices = [] } }] };
+
+        Assert.Throws<HartsyInferenceException>(() => MeshRenderer.Render(empty, Front));
+    }
+
+    [Fact]
+    public void ARenderThatWouldHoldMoreThanTheSampleCapIsRefusedAndACancelledOneStops()
+    {
+        MeshRenderOptions huge = new() { Width = 2048, Height = 2048, Samples = 3 };
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => MeshRenderer.Render(Doc(Quad()), huge));
+        Assert.Throws<OperationCanceledException>(() => MeshRenderer.Render(Doc(Quad()), Front, cancelled.Token));
+        Assert.Null(Record.Exception(() => MeshRenderer.Render(Doc(Quad()), new MeshRenderOptions { Width = 2048, Height = 2048, Samples = 2 })));
+    }
+
+    private static byte[] PngWith(int width, int height, byte[] inflated)
+    {
+        using MemoryStream png = new();
+        png.Write([0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        void Chunk(string type, byte[] body)
+        {
+            byte[] length = new byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(length, body.Length);
+            png.Write(length);
+            png.Write(Encoding.ASCII.GetBytes(type));
+            png.Write(body);
+            png.Write(new byte[4]);
+        }
+        byte[] header = new byte[13];
+        BinaryPrimitives.WriteInt32BigEndian(header, width);
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(4), height);
+        header[8] = 8;
+        header[9] = 2;
+        Chunk("IHDR", header);
+        using MemoryStream compressed = new();
+        using (System.IO.Compression.ZLibStream zlib = new(compressed, System.IO.Compression.CompressionLevel.SmallestSize, leaveOpen: true))
+            zlib.Write(inflated);
+        Chunk("IDAT", compressed.ToArray());
+        Chunk("IEND", []);
+        return png.ToArray();
+    }
+
+    [Theory]
+    [InlineData(60000, 60000, 64)]
+    [InlineData(2, 2, 64 * 1024 * 1024)]
+    public void ATextureThatClaimsAHugeSizeOrInflatesBeyondItsHeaderIsRefusedWithoutBeingHeld(int width, int height, int inflatedBytes)
+    {
+        MeshDocument document = Doc(Quad(), new MeshMaterial { BaseColor = new MeshImage("image/png", PngWith(width, height, new byte[inflatedBytes])) });
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        MeshRender render = MeshRenderer.Render(document, Front with { Width = 32, Height = 32, Samples = 1 });
+
+        Assert.Contains(render.Notes, n => n.Contains("PNG texture could not be decoded"));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32L * 1024 * 1024, "The decoder allocated far more than the header promised.");
+    }
+
+    [Fact]
+    public void AValueThatIsFiniteAsADoubleButNotAsAFloatIsRefusedInBothPlyEncodings()
+    {
+        byte[] head = Encoding.ASCII.GetBytes("ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty double x\nproperty double y\nproperty double z\nend_header\n");
+        byte[] binary = new byte[head.Length + 24];
+        head.CopyTo(binary, 0);
+        BinaryPrimitives.WriteDoubleLittleEndian(binary.AsSpan(head.Length), 1e300);
+        byte[] ascii = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n1e300 0 0\n");
+
+        Assert.Contains("float range", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(binary)).Message);
+        Assert.Contains("float range", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(ascii)).Message);
+    }
+
+    [Fact]
+    public void BoundsThatOverflowTheCameraAreADomainErrorNotABlankPicture()
+    {
+        Mesh wide = new() { Vertices = [-3e38f, 0, 0, 3e38f, 0, 0, 0, 1, 0], Indices = [0, 1, 2] };
+
+        Assert.Contains("too large to frame", Assert.Throws<HartsyInferenceException>(() => MeshRenderer.Render(Doc(wide), Front)).Message);
+    }
+
+    [Fact]
+    public void TexturesPastTheRendersPixelBudgetAreDrawnWithTheirColourAndANote()
+    {
+        MeshImage Uniform(byte value) => new("image/png", PngTextureEncoder.Encode(new TextureImage(8, 8, 3, [.. Enumerable.Repeat(value, 8 * 8 * 3)])));
+        MeshDocument document = new()
+        {
+            Primitives = [.. Enumerable.Range(0, 3).Select(i => new MeshPrimitive { Geometry = Quad(i * 0.01f), Material = i })],
+            Materials = [.. Enumerable.Range(0, 3).Select(i => new MeshMaterial { BaseColor = Uniform((byte)(50 + i)) })],
+        };
+
+        MeshRender render = MeshRenderer.Render(document, Front with { TexturePixelBudget = 8 * 8 * 2 });
+
+        Assert.Contains(render.Notes, n => n.StartsWith("The textures together hold more than 128 pixels"));
+        Assert.DoesNotContain(render.Notes, n => n.Contains("could not be decoded"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MeshRenderer.Render(document, Front with { TexturePixelBudget = 0 }));
+    }
+
+    private static byte[] SplatPly((float X, float Y, float Z, float Dc, float Opacity)[] splats)
+    {
+        string header = $"ply\nformat binary_little_endian 1.0\nelement vertex {splats.Length}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nproperty float opacity\nproperty float scale_0\nend_header\n";
+        byte[] head = Encoding.ASCII.GetBytes(header);
+        byte[] data = new byte[head.Length + splats.Length * 9 * 4];
+        head.CopyTo(data, 0);
+        int o = head.Length;
+        foreach ((float x, float y, float z, float dc, float opacity) in splats)
+        {
+            foreach (float v in new[] { x, y, z, 0f, dc, 0f, 0f, opacity, 0f })
+            {
+                BinaryPrimitives.WriteSingleLittleEndian(data.AsSpan(o), v);
+                o += 4;
+            }
+        }
+        return data;
+    }
+}

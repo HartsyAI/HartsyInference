@@ -1,6 +1,7 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -41,6 +42,28 @@ public static class ImageEndpoints
                 writer.TryWrite(SseHelpers.Event("complete", ToResponse(result, Persist(req, result, req.Request.Prompt)), jsonOptions));
             }, ct);
         });
+
+        // The people-removal recipe (PeopleRemoval): the caller sends a photo and a mask, and nothing else.
+        app.MapPost("/v1/native/images/remove-people", async (RemovePeopleRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
+        {
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(PeopleRemoval.ModelId(req.Precision), null, Modality.Image);
+                HartsyInference.Engine.Requests.ImageData image = ImageDataCodec.DecodeBase64(req.InitImageBase64);
+                HartsyInference.Engine.Requests.ImageData mask = ImageDataCodec.DecodeBase64(req.MaskBase64);
+                if (mask.Width != image.Width || mask.Height != image.Height)
+                {
+                    return Results.BadRequest(new { error = $"The mask is {mask.Width}x{mask.Height} but the photo is {image.Width}x{image.Height}. They must match." });
+                }
+                ImageRequest request = PeopleRemoval.Build(image, mask, req.Seed ?? -1);
+                ImageResult result = await GenerateAsync(engine, queue, spec, request, progress: null, ct);
+                return Results.Ok(ToResponse(result, Persist(req, result, PeopleRemoval.Prompt)));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
     }
 
     /// <summary>Folds the envelope's base64 init image / mask conveniences into the native request. Returns the request untouched when none are set, so a client that populates <c>request.img2img</c> with raw RGB24 directly keeps working.</summary>
@@ -75,6 +98,11 @@ public static class ImageEndpoints
         queue.EnqueueAsync(() => engine.Images.GenerateAsync(spec, request, progress, ct), ct);
 
     /// <summary>PNG-encodes the raw RGB result for HTTP transport (base64 JSON — the native contract carries no codec of its own), and reports where it was saved.</summary>
+    /// <remarks>A layered result also carries <c>layers</c>: <c>{ index, name, png }</c> per layer, bottom first, each an
+    /// RGBA PNG with straight alpha; <c>png</c> stays the composite. The OpenAI-compatible route returns the composite only.
+    /// A result with depth beside its image (Iris-Z <c>rgbd</c>) carries <c>depthPng</c>, the colour-coded depth map.
+    /// <para>For a request seed of 2^31 or more, <c>seed</c> is the 31-bit alias that drove the noise, and <c>meta.seed</c>
+    /// carries the full request seed. Send <c>meta.seed</c> back to reproduce the image.</para></remarks>
     internal static object ToResponse(ImageResult result, string? savedPath = null) => new
     {
         png = Convert.ToBase64String(EncodePng(result)),
@@ -83,6 +111,14 @@ public static class ImageEndpoints
         result.Seed,
         result.Meta,
         savedPath,
+        depthPng = DepthImage.Companion(result) is { } depthRgb
+            ? Convert.ToBase64String(PngEncoder.Encode(depthRgb, null, result.Width, result.Height)) : null,
+        layers = result.Layers?.Select(l => new
+        {
+            index = l.Index,
+            name = l.Name,
+            png = Convert.ToBase64String(PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height)),
+        }).ToList(),
     };
 
     /// <summary>Persists the PNG unless the request opted out; null when nothing was written.</summary>

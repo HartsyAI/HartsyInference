@@ -22,6 +22,10 @@ public sealed record ComfyQuantDescriptor
     /// <remarks>ComfyUI honours this per layer (<c>ops.py</c> <c>_full_precision_mm_config</c>); MiniMax-H3's <c>mlp.fc2</c> is the known case, and dropping it silently costs accuracy with no error.</remarks>
     public bool FullPrecisionMatMul { get; init; }
 
+    /// <summary>Weights per scale group for grouped formats (<c>asym_w4a8_int8</c>: <c>group_size</c>), or 0 when the
+    /// descriptor names none.</summary>
+    public int GroupSize { get; init; }
+
     /// <summary>Parses the blob, or returns null when it is not a descriptor tensor or its JSON is unreadable.</summary>
     public static ComfyQuantDescriptor? TryParse(ReadOnlySpan<byte> json)
     {
@@ -45,6 +49,7 @@ public sealed record ComfyQuantDescriptor
                 Format = format,
                 ConvRotGroupSize = convrot ? ReadInt(root, parameters, "convrot_groupsize", 256) : 0,
                 FullPrecisionMatMul = ReadBool(root, parameters, "full_precision_matrix_mult"),
+                GroupSize = ReadInt(root, parameters, "group_size", 0),
             };
         }
         catch (JsonException)
@@ -69,6 +74,7 @@ public sealed record ComfyQuantDescriptor
             Format = format,
             ConvRotGroupSize = convrot ? ReadInt(root, parameters, "convrot_groupsize", 256) : 0,
             FullPrecisionMatMul = ReadBool(root, parameters, "full_precision_matrix_mult"),
+            GroupSize = ReadInt(root, parameters, "group_size", 0),
         };
     }
 
@@ -128,6 +134,7 @@ public sealed record ComfyQuantDescriptor
             fields["convrot_groupsize"] = ConvRotGroupSize;
         }
         if (FullPrecisionMatMul) fields["full_precision_matrix_mult"] = true;
+        if (GroupSize > 0) fields["group_size"] = GroupSize;
         return System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(fields);
     }
 }

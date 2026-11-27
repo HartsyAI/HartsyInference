@@ -26,7 +26,8 @@ public sealed class SsmLanguageModel : IDisposable
     public static bool IsSsmArchitecture(string architecture) => GgufLanguageModel.SsmArchitectures.Contains(architecture);
 
     /// <summary>Loads the GGUF at <paramref name="path"/>, whose <c>general.architecture</c> is <paramref name="architecture"/> (caller already knows this from a cheap metadata peek — see <see cref="IsSsmArchitecture"/>).</summary>
-    public static SsmLanguageModel Load(string path, string architecture)
+    /// <param name="dequantizeToF32">For the Qwen3.5 family: expand the quantized weights to F32 at load (a backend without a quantized multiply).</param>
+    public static SsmLanguageModel Load(string path, string architecture, bool dequantizeToF32 = false)
     {
         ISsmModel model = architecture switch
         {
@@ -34,7 +35,7 @@ public sealed class SsmLanguageModel : IDisposable
             "mamba" => MambaModel.Load(path),
             "rwkv7" => Rwkv7Model.Load(path),
             "rwkv6" or "rwkv" => RwkvModel.Load(path),
-            "qwen35" or "qwen35moe" => Qwen35Model.Load(path),
+            "qwen35" or "qwen35moe" or "sensenova_loop" => Qwen35Model.Load(path, dequantizeToF32: dequantizeToF32),
             _ => throw new NotSupportedException($"'{architecture}' is not a supported SSM architecture."),
         };
         try

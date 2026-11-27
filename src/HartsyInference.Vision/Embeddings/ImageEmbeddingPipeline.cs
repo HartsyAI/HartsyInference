@@ -1,17 +1,15 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Clip;
+using HartsyInference.Vision.Pipelines;
 
 namespace HartsyInference.Vision.Embeddings;
 
 /// <summary>High-level façade for CLIP image embedding. Combines a
 /// <see cref="ClipImagePreprocessor"/> with a <see cref="ClipImageEncoder"/> so callers can hand
 /// in raw RGB pixels and receive a ready-to-score <see cref="ImageEmbedding"/>.
-/// <para>Implements <see cref="IVisionPipeline"/> for registration in the Server / SwarmUI layers.
-/// Does not implement the byte-stream <see cref="IEmbeddingPipeline"/> yet — the engine has no
-/// image codec (PNG/JPEG decoder), so the public surface here is the raw-pixel one. A future
-/// codec wrapper can adapt this pipeline to <see cref="IEmbeddingPipeline"/>.</para></summary>
+/// <para>Implements <see cref="IVisionPipeline"/> for registration in the Server / SwarmUI layers. The engine has no
+/// image codec (PNG/JPEG decoder), so the public surface here is the raw-pixel one.</para></summary>
 public sealed class ImageEmbeddingPipeline : IVisionPipeline
 {
     private readonly IBackend _backend;

@@ -11,6 +11,9 @@ namespace HartsyInference.Engine.Services;
 /// <param name="PrimaryPath">The model's entrypoint artifact — the file whose presence means "this model is installed", and the one a caller attaches identity metadata to. Null when unsupported. Stated explicitly because the position of the primary within <paramref name="Files"/> is an ordering detail, not a contract.</param>
 public sealed record ModelPrefetchResult(bool Supported, string Message, IReadOnlyList<string> Files, string? PrimaryPath = null)
 {
+    /// <summary>Files a prefetch could not fetch (gated, placed by hand, no catalog files), each with what the user does; empty when nothing was blocked. Set for 3D models.</summary>
+    public IReadOnlyList<Planning.MeshAssetBlocker> Blockers { get; init; } = [];
+
     /// <summary>Result for a family this build cannot prefetch.</summary>
     public static ModelPrefetchResult Unsupported(string id, string reason)
         => new(false, $"'{id}' cannot be pre-downloaded by this build: {reason}. Its weights are fetched on first use.", []);

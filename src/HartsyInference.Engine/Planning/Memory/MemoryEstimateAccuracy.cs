@@ -9,4 +9,7 @@ public enum MemoryEstimateAccuracy
     /// <summary>Weight bytes come from the checkpoint header; activations are a generic pixel-scaled allowance
     /// because the family has not described its own. Trust the weights, treat the activations as a guess.</summary>
     HeaderOnly,
+
+    /// <summary>The peak is a whole-card figure recorded from a real run of the model at this geometry, not computed. Appended last so the other values keep theirs.</summary>
+    Measured,
 }

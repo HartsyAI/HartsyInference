@@ -1,4 +1,6 @@
 using HartsyInference.LLM.DeepSeekV41.Engram;
+using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Mhc;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -11,8 +13,8 @@ public sealed class DeepSeekV41Block
     private readonly int _dim;
     private readonly int _hc;
     private readonly float _normEps;
-    private readonly DeepSeekV41HyperConnection _hcAttn;
-    private readonly DeepSeekV41HyperConnection _hcFfn;
+    private readonly HyperConnection _hcAttn;
+    private readonly HyperConnection _hcFfn;
     private readonly float[] _attnNorm;
     private readonly float[] _ffnNorm;
     private readonly DeepSeekV41Attention _attention;
@@ -37,7 +39,7 @@ public sealed class DeepSeekV41Block
     /// <param name="ffn">The routed feed-forward layer.</param>
     /// <param name="engram">The Engram module, or null on a layer without one.</param>
     /// <param name="engramSlot">This layer's position in <c>engram_layer_ids</c>, which selects its hash ids.</param>
-    public DeepSeekV41Block(int dim, int hc, float normEps, DeepSeekV41HyperConnection hcAttn, DeepSeekV41HyperConnection hcFfn, float[] attnNorm,
+    public DeepSeekV41Block(int dim, int hc, float normEps, HyperConnection hcAttn, HyperConnection hcFfn, float[] attnNorm,
         float[] ffnNorm, DeepSeekV41Attention attention, DeepSeekV41MoeLayer ffn, DeepSeekV41EngramModule? engram = null, int engramSlot = 0)
     {
         ArgumentNullException.ThrowIfNull(hcAttn);
@@ -131,7 +133,7 @@ public sealed class DeepSeekV41Block
 
         _hcAttn.Mixes(x, tokens, aPre, aPost, aComb);
         _hcAttn.Collapse(x, preMix, tokens, sublayerIn);
-        DeepSeekV41HostMath.RmsNormRows(sublayerIn, _attnNorm, _dim, _normEps);
+        HostMath.RmsNormRows(sublayerIn, _attnNorm, _dim, _normEps);
         Probe?.Invoke("attn_in", sublayerIn.ToArray());
         _attention.Forward(sublayerIn, tokens, startPos, state, shared, sublayerOut);
         Probe?.Invoke("attn_out", sublayerOut.ToArray());
@@ -139,7 +141,7 @@ public sealed class DeepSeekV41Block
 
         _hcFfn.Mixes(mid, tokens, fPre, fPost, fComb);
         _hcFfn.Collapse(mid, aPre, tokens, sublayerIn);
-        DeepSeekV41HostMath.RmsNormRows(sublayerIn, _ffnNorm, _dim, _normEps);
+        HostMath.RmsNormRows(sublayerIn, _ffnNorm, _dim, _normEps);
         Probe?.Invoke("ffn_in", sublayerIn.ToArray());
         _ffn.Forward(sublayerIn, tokens, imageTokens, sublayerOut);
         Probe?.Invoke("ffn_out", sublayerOut.ToArray());

@@ -10,6 +10,7 @@ KERNELS=(
     "latent_quant"
     "hc_mix"
     "latent_positions"
+    "sparse_index"
 )
 
 # shellcheck source=../build_common.sh

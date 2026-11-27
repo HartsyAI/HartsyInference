@@ -1,3 +1,4 @@
+using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Geometry;
 
@@ -9,11 +10,14 @@ public static unsafe class TrellisGaussianRepresentation
     private const int NumGaussians = 32, Resolution = 64;
     private const float VoxelSize = 1.5f, MinKernel = 0.0009f;
 
-    public static GaussianSplatCloud Build(SparseTensor netOut)
+    /// <param name="netOut">The decoder's <c>[voxels, 448]</c> output.</param>
+    /// <param name="rotationScale">The decoder config's <c>lr</c> for <c>_rotation</c>, which upstream multiplies the raw rotation channels by before adding the identity quaternion (SAM 3D's
+    /// <c>slat_decoder_gs.yaml</c> gives 0.1). 1 keeps the raw channels, which is what the TRELLIS pipeline has always passed.</param>
+    public static GaussianSplatCloud Build(SparseTensor netOut, float rotationScale = 1f)
     {
         int nv = netOut.Count;
         int splats = nv * NumGaussians;
-        float scaleBias = SoftplusInverse(0.004f);          // ≈ −5.52
+        float scaleBias = GaussianSplatActivations.SoftplusInverse(0.004f);   // ≈ −5.52
         float opacityBias = MathF.Log(0.1f / 0.9f);          // logit(0.1) ≈ −2.197
         float offScale = 0.5f * VoxelSize / Resolution;      // tanh(offset)·this
 
@@ -29,8 +33,6 @@ public static unsafe class TrellisGaussianRepresentation
         float* f = (float*)netOut.Feats.DataPointer;
         // layout ranges: _xyz [0,96) _features_dc [96,192) _scaling [192,288) _rotation [288,416) _opacity [416,448)
         const int rXyz = 0, rDc = 96, rScl = 192, rRot = 288, rOp = 416;
-        // y-up→z-up quaternion (90° about X): q_R = [cos45, sin45, 0, 0].
-        const float c45 = 0.70710678f;
         for (int v = 0; v < nv; v++)
         {
             float* row = f + (long)v * 448;
@@ -48,13 +50,12 @@ public static unsafe class TrellisGaussianRepresentation
                 // features_dc (SH DC, 3), stored raw.
                 for (int c = 0; c < 3; c++) sh[s * 3 + c] = row[rDc + g * 3 + c];
                 // scaling: log(sqrt(softplus(_scaling+bias)² + min²)).
-                for (int c = 0; c < 3; c++) { float sp = Softplus(row[rScl + g * 3 + c] + scaleBias); scl[s * 3 + c] = 0.5f * MathF.Log(sp * sp + MinKernel * MinKernel); }
+                for (int c = 0; c < 3; c++) scl[s * 3 + c] = GaussianSplatActivations.LogScale(row[rScl + g * 3 + c], scaleBias, MinKernel);
                 // opacity: logit = _opacity + bias.
                 op[s] = row[rOp + g] + opacityBias;
-                // rotation: (_rotation + [1,0,0,0]) rotated by q_R (y-up transform).
-                float qw = row[rRot + g * 4 + 0] + 1f, qx = row[rRot + g * 4 + 1], qy = row[rRot + g * 4 + 2], qz = row[rRot + g * 4 + 3];
-                rot[s * 4 + 0] = c45 * qw - c45 * qx; rot[s * 4 + 1] = c45 * qx + c45 * qw;
-                rot[s * 4 + 2] = c45 * qy + c45 * qz; rot[s * 4 + 3] = c45 * qz - c45 * qy;   // q_R ⊗ q
+                // rotation: (_rotation + [1,0,0,0]) turned with the positions: q_R ⊗ q, the covariance of the same splat in the y-up frame.
+                float qw = row[rRot + g * 4 + 0] * rotationScale + 1f, qx = row[rRot + g * 4 + 1] * rotationScale, qy = row[rRot + g * 4 + 2] * rotationScale, qz = row[rRot + g * 4 + 3] * rotationScale;
+                (rot[s * 4 + 0], rot[s * 4 + 1], rot[s * 4 + 2], rot[s * 4 + 3]) = GaussianSplatActivations.TurnToYUp(qw, qx, qy, qz);
             }
         }
 
@@ -66,8 +67,6 @@ public static unsafe class TrellisGaussianRepresentation
     }
 
 
-    private static float Softplus(float x) => x > 20f ? x : MathF.Log(1f + MathF.Exp(x));
-    private static float SoftplusInverse(float x) => x + MathF.Log(1f - MathF.Exp(-x));   // = x + log(−expm1(−x))
     private static float Atanh(float x) => 0.5f * MathF.Log((1f + x) / (1f - x));
     private static float RadicalInverse(int baseN, int n)
     {

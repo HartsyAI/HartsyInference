@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -45,16 +46,24 @@ public sealed unsafe class LtxVaeUpsampler3d
     /// checkpoint's config rather than from weight shapes.</summary>
     internal string DescribeFlags() => $"residual{(_residual ? 1 : 0)},reflect{(_spatialReflectPad ? 1 : 0)}";
 
-    public Tensor Forward(IBackend backend, Tensor x)
+    /// <summary>Upsamples <c>[B, C, F, H, W]</c>. A whole clip, and the first chunk of a stream, drop the leading
+    /// <c>st0 − 1</c> frames of the temporal shuffle (the first frame has no earlier frame to pair with); a later chunk of a
+    /// stream keeps them, so every input frame yields <c>st0</c> output frames.</summary>
+    /// <param name="cache">The stream's causal state when <paramref name="x"/> is one chunk of a stream (batch 1); null runs a
+    /// whole clip.</param>
+    public Tensor Forward(IBackend backend, Tensor x, CausalStreamCache? cache = null)
     {
         int b = (int)x.Shape[0], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         int st0 = _stride.T, st1 = _stride.H, st2 = _stride.W;
         int stProd = st0 * st1 * st2;
         int outC = (_inC * stProd) / _upscale;            // conv output channels
         int xOut = outC / stProd;                          // final channels (= inC / upscale)
+        if (cache is not null && b != 1)
+            throw new ArgumentException($"A stream is upsampled one batch item at a time; got batch {b}.", nameof(x));
+        int trim = cache is null || st0 == 1 || cache.NextFirstUse() ? st0 - 1 : 0;
 
-        Tensor conv = _conv!.Forward(backend, x);          // [B, outC, F, H, W]
-        Tensor main = b == 1 ? PixelShuffleDevice(backend, conv, xOut, f, h, w, st0, st1, st2)
+        Tensor conv = _conv!.ForwardStreaming(backend, x, cache);   // [B, outC, F, H, W]
+        Tensor main = b == 1 ? PixelShuffleDevice(backend, conv, xOut, f, h, w, st0, st1, st2, trim)
             : PixelShuffle(conv, b, outC, xOut, f, h, w, st0, st1, st2);
         conv.Dispose();
 
@@ -65,7 +74,7 @@ public sealed unsafe class LtxVaeUpsampler3d
         int repeats = stProd / _upscale;                   // y*repeats == xOut
         if (b == 1)
         {
-            Tensor resShufDev = PixelShuffleDevice(backend, x, y, f, h, w, st0, st1, st2);
+            Tensor resShufDev = PixelShuffleDevice(backend, x, y, f, h, w, st0, st1, st2, trim);
             Tensor residualDev = RepeatChannelsDevice(backend, resShufDev, repeats);
             resShufDev.Dispose();
             backend.Add(main, main, residualDev);
@@ -85,9 +94,10 @@ public sealed unsafe class LtxVaeUpsampler3d
     }
 
     /// <summary>B=1 device pixel-shuffle: decomposes the channel→(t,h,w) scatter <c>[x·s0·s1·s2, F, H, W] → [1, x, F·st0−(st0−1), H·st1, W·st2]</c> into batched <see cref="IBackend.Permute0213"/> adjacent-group swaps plus one <see cref="IBackend.SliceRows"/> for the leading temporal-pad drop, so the tensor never leaves the GPU (the host loop D2H-drained the conv output and re-uploaded for the next stage). Identity swaps (stride-1 axes) are skipped.</summary>
-    private static Tensor PixelShuffleDevice(IBackend backend, Tensor src, int xOut, int f, int h, int w, int st0, int st1, int st2)
+    private static Tensor PixelShuffleDevice(IBackend backend, Tensor src, int xOut, int f, int h, int w, int st0, int st1, int st2,
+        int trim)
     {
-        int outF = f * st0 - (st0 - 1);
+        int outF = f * st0 - trim;
         int outH = h * st1, outW = w * st2;
         int hw = h * w;
         int sg = st1 * st2;                                // spatial sub-channel group (s1·s2)
@@ -108,11 +118,14 @@ public sealed unsafe class LtxVaeUpsampler3d
             cur = PermuteStep(backend, cur, owned, st0, f, rest, new TensorShape([(long)xOut, f, st0, rest]));
             cur = PermuteStep(backend, cur, true, xOut, f * st0, rest, new TensorShape([(long)f * st0, xOut, rest]));
             owned = true;
-            // (d) drop the leading (st0−1) temporal-pad frames of the fused (F·s0) axis
-            Tensor sliced = new Tensor(new TensorShape([(long)outF, xOut, (long)sg * h, w]), cur.DType);
-            backend.SliceRows(sliced, cur, (st0 - 1) * xOut * sg * h);
-            cur.Dispose();
-            cur = sliced;
+            // (d) drop the leading temporal-pad frames of the fused (F·s0) axis; a later chunk of a stream keeps them
+            if (trim > 0)
+            {
+                Tensor sliced = new Tensor(new TensorShape([(long)outF, xOut, (long)sg * h, w]), cur.DType);
+                backend.SliceRows(sliced, cur, trim * xOut * sg * h);
+                cur.Dispose();
+                cur = sliced;
+            }
         }
         // (e1) [.., (s1·s2), H, W] → [.., H, (s1·s2), W]; (e2) [.., s2, W] → [.., W, s2]; (e3) [F', x, ..] → [x, F', ..]
         if (sg > 1)

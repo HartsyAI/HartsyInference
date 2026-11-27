@@ -12,6 +12,7 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -20,6 +21,13 @@ public sealed class SdxlRefinerRecipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "sdxl-refiner";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["clip"], Format = "tags", Negative = "separate",
+        Supports = ["weights", "break", "regions"], Guide = "docs/prompting/sdxl.md",
+    };
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "sdxl-refiner", StringComparison.OrdinalIgnoreCase);

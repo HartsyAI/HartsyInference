@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -201,7 +202,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Empirical-mu schedule ──────────────────────────────
-        float mu = ComputeEmpiricalMu(imgSeqLen, steps);
+        float mu = FlowMatchEulerDiscreteScheduler.EmpiricalMu(imgSeqLen, steps);
         float shift = MathF.Exp(mu);
         Logs.Info($"Lens empirical_mu={mu:F4} → shift={shift:F4} (seq_len={imgSeqLen}, steps={steps})");
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift);
@@ -225,12 +226,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             // Exact inverse of the decode chain below (unpack → BN un-normalize → unpatchify → decode), so the
             // source enters the loop in the same representation the loop integrates in.
             Tensor sourceLatent32 = VaeEncoder!.Encode(Backend, img2imgReq.SourceImage);
-            Tensor sourcePatched = Flux2LatentOps.Patchify(sourceLatent32, _config.InChannels, _config.PatchSize);
+            Tensor sourcePacked = Flux2LatentOps.ToPackedTokensHost(sourceLatent32, _bnMean, _bnVar, _bnEps, _config.PatchSize);
             sourceLatent32.Dispose();
-            Tensor sourceBn = Flux2LatentOps.BnNormalize(sourcePatched, _bnMean, _bnVar, _bnEps);
-            sourcePatched.Dispose();
-            Tensor sourcePacked = Flux2LatentOps.Pack(sourceBn);
-            sourceBn.Dispose();
 
             Tensor noised = new Tensor(packedShape, DType.F32);
             scheduler.AddNoise(noised, sourcePacked, packedLatent, startStep);
@@ -261,7 +258,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         //
         // Lens applies its OWN CFG (ApplyNormRescaledCfg, which is not the linear uncond-anchored combine), so the
         // already-combined velocity goes back as BOTH halves of the pair at guidance 1.0: the sampler's fused combine
-        // degenerates to identity, exactly as the direct CfgEulerStep(z, v, v, 1.0f, dt) call did. No step graph, no
+        // degenerates to identity, exactly as the direct GuidedEulerStep(z, v, v, GuidedEulerSpec.Lerp(1.0f, dt)) call did. No step graph, no
         // step cache and no host/reference loop here, so there is nothing else to narrow for a non-default sampler.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Lens",
             startsFromNoisedInit: startStep > 0);
@@ -306,7 +303,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
                     return new DenoisePrediction(combined, combined);
                 });
             // Flow-match Euler stays ONE in-place device op (`v == pos == neg`, guidance 1 ⇒ z += v·dt), so the
-            // latent never leaves the GPU between steps — EulerSampler.Step IS that same fused CfgEulerStep call.
+            // latent never leaves the GPU between steps — EulerSampler.Step IS that same fused GuidedEulerStep call.
             if (i == startStep)
             {
                 sampler.Reset(packedLatent.Shape);
@@ -341,12 +338,8 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             Logs.Debug($"Step {i + 1}/{steps} (sigma={sigma:F4}) done in {stepSw.ElapsedMilliseconds}ms");
             if (onProgress is not null)
             {
-                Tensor previewPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
-                Tensor previewUnnormalized = Flux2LatentOps.BnUnNormalize(previewPatched, _bnMean, _bnVar, _bnEps);
-                previewPatched.Dispose();
-                Tensor previewLatent = Flux2LatentOps.Unpatchify(
-                    previewUnnormalized, _config.OutChannels, _config.PatchSize);
-                previewUnnormalized.Dispose();
+                Tensor previewLatent = Flux2LatentOps.FromPackedTokens(Backend, packedLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+                    _config.OutChannels, _config.PatchSize);
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                 {
                     Latent = previewLatent,
@@ -360,17 +353,10 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Backend.Sync();
         Backend.FreeWeights(_transformer.EnumerateWeights());
 
-        // ── 5. Unpack [B, S, 128] → [B, 128, patH, patW] ──────────
-        Tensor unpackedPatched = Flux2LatentOps.Unpack(packedLatent, patH, patW);
+        // ── 5–7. BN un-normalize (per-channel mean/var), unpack and 2×2 unpatchify: [B, S, 128] → [B, 32, latH, latW] ──
+        Tensor latent32 = Flux2LatentOps.FromPackedTokens(Backend, packedLatent, patH, patW, _bnMean, _bnVar, _bnEps,
+            _config.OutChannels, _config.PatchSize);
         packedLatent.Dispose();
-
-        // ── 6. BN un-normalize on the 128-channel patchified latent (per-channel mean/var)──
-        Tensor unBn = Flux2LatentOps.BnUnNormalize(unpackedPatched, _bnMean, _bnVar, _bnEps);
-        unpackedPatched.Dispose();
-
-        // ── 7. 2×2 unpatchify: [B, 128, patH, patW] → [B, 32, latH, latW] ──
-        Tensor latent32 = Flux2LatentOps.Unpatchify(unBn, _config.OutChannels, _config.PatchSize);
-        unBn.Dispose();
 
         // ── 8. VAE decode ─────────────────────────────────────────
         Logs.Verbose("Decoding latents (tiled F32 path)...");
@@ -399,21 +385,6 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         return (rgbData, imgW, imgH, seed);
     }
 
-    /// <summary>Empirical-mu schedule from <c>lens/pipeline.py:compute_empirical_mu</c>. Piecewise linear in image_seq_len for short sequences (≤4300), single linear regression for long ones.</summary>
-    private static float ComputeEmpiricalMu(int imageSeqLen, int numSteps)
-    {
-        const double a1 = 8.73809524e-05, b1 = 1.89833333;
-        const double a2 = 0.00016927, b2 = 0.45666666;
-        if (imageSeqLen > 4300)
-            return (float)(a2 * imageSeqLen + b2);
-
-        double m200 = a2 * imageSeqLen + b2;
-        double m10 = a1 * imageSeqLen + b1;
-        double a = (m200 - m10) / 190.0;
-        double b = m200 - 200.0 * a;
-        return (float)(a * numSteps + b);
-    }
-
     /// <summary>Applies upstream's norm-rescaled CFG: <c>comb = uncond + cfg * (cond - uncond)</c>, then per-token L2-norm rescale <c>noise = comb * (||cond|| / max(||comb||, 1e-12))</c>. Operates on packed-token tensors <c>[B, S, C]</c>; the norm is over the channel dim. Runs entirely through <see cref="IBackend"/> ops so the two velocity predictions never leave the device — the host <c>float*</c> version this replaces D2H-synced and evicted both of them (2 syncs + two 2 MB round-trips) on every step.</summary>
     /// <remarks>Both tensors share <c>C</c>, so the L2 ratio equals the RMS ratio and the whole rescale is
     /// <c>RmsNorm(comb) · rms(cond)</c>. <c>rms(cond)</c> is recovered as a full-width tensor — the shape a plain
@@ -439,11 +410,11 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Backend.Linear(condRms, condScaledSq, _rescaleChannelMean!, null);
         condScaledSq.Dispose();
 
-        // comb = (1 - cfg)·uncond + cfg·cond. CfgEulerStep with pos == neg is `z += pos·delta`, which supplies
+        // comb = (1 - cfg)·uncond + cfg·cond. GuidedEulerStep with pos == neg is `z += pos·delta`, which supplies
         // the second term in place on top of the scaled uncond.
         Tensor comb = new Tensor(cond.Shape, DType.F32);
         Backend.Scale(comb, uncond, 1.0f - cfgScale);
-        Backend.CfgEulerStep(comb, cond, cond, 1.0f, cfgScale);
+        Backend.GuidedEulerStep(comb, cond, cond, GuidedEulerSpec.Lerp(1.0f, cfgScale));
 
         Tensor combUnit = new Tensor(cond.Shape, DType.F32);
         Backend.RmsNorm(combUnit, comb, _rescaleOnes!, eps);

@@ -7,7 +7,6 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
-using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
@@ -16,12 +15,17 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Flux.2 recipe (BFL; Klein 4B / Klein 9B / Dev). Variant comes from <see cref="Flux2Variants"/>, which reads the transformer's hidden size (3072 → Klein 4B, 4096 → Klein 9B, 6144 → Dev). Lifted from the SwarmUI backend's <c>Flux2Loader</c>: the checkpoint is the transformer; the matching text encoder — Qwen3-4B (<see cref="SideModels.Qwen3_4B"/>), Qwen3-8B (<see cref="SideModels.Qwen3_8B_Fp4Mixed"/>), or Mistral-Small-3 (<see cref="SideModels.MistralSmallFlux2"/>) — and the Flux.2 VAE (<see cref="SideModels.Flux2Vae"/>, 32-channel latent + BatchNorm stats) resolve as side models. Constructs and drives through <see cref="Flux2RecipePipeline"/>.</summary>
 public sealed class Flux2Recipe : IArchitectureRecipe
 {
+    /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
+    public bool RefusesUnhonouredPlacements => true;
+
     /// <summary>Flux.2 Dev system prompt — verbatim from ComfyUI <c>comfy/text_encoders/flux.py</c> (the newline mid-sentence is in the original).</summary>
     private const string MistralDevSystemPrompt =
         "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.";
@@ -29,6 +33,21 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "flux2";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/flux-2.md",
+    };
+
+    /// <inheritdoc/>
+    /// <remarks>The guide's negative evidence is the diffusers Klein pipeline, which passes an empty negative, and the Klein builds are
+    /// the engine's guidance-free ones. It states nothing for Dev, nor for a Base Klein run with guidance, so only Klein 4B and 9B say none.</remarks>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : Flux2Variants.IsIrisZ(variant) || Flux2Variants.IsOpenVisionBanana(variant) ? Prompt!.ArchitectureOnly()
+        : variant.Is(Flux2Variants.Klein4B) || variant.Is(Flux2Variants.Klein9B) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <inheritdoc/>
     /// <remarks>Flux.2's BN-style latent normalization is applied at the pipeline boundary; the encode-side inverse already lives in Flux2Pipeline.
@@ -48,7 +67,45 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
+    /// <remarks>Open Vision Banana's task prompts carry parentheses, brackets and braces as text and reach the encoder verbatim, so it
+    /// applies no weighting and must not advertise it.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ResolvedModelVariant? variant) =>
+        Flux2Variants.IsOpenVisionBanana(variant) ? Diffusion.Prompting.PromptWeightingMode.None : PromptWeighting;
+
+    /// <inheritdoc/>
+    /// <remarks>Matches the catalog id <c>flux2-klein-4b</c> as well: the registry resolves a catalog entry by its id, and the
+    /// variant still comes from the transformer's hidden size.</remarks>
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "flux2-klein-4b", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, Flux2Variants.OpenVisionBanana4B.Id, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, Flux2Variants.OpenVisionBanana9B.Id, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "iris-z-small", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "iris-z-big", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>What the Iris-Z builds apply: the init image is a given grid (the photo for <c>depth</c>, the depth map for
+    /// <c>paint</c>), never a noised start, and LoRAs merge as for their FLUX.2 bases. Image-to-image, inpaint, regions,
+    /// prompt scheduling and the refiner are not part of the model.</summary>
+    public const ImageFeatures IrisZSupports = ImageFeatures.RefEdit | ImageFeatures.Lora;
+
+    /// <summary>Iris-Z-small's official generation settings (speridlabs/iris-z model card): 50 steps, true CFG 4.0.</summary>
+    public static ImageDefaults IrisZSmallDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 4.0f, Width = 1024, Height = 1024 };
+
+    /// <summary>Iris-Z-big's official generation settings (speridlabs/iris-z model card): 50 steps, true CFG 3.5.</summary>
+    public static ImageDefaults IrisZBigDefaults { get; } = new ImageDefaults { Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
+
+    /// <inheritdoc/>
+    public ImageFeatures SupportsFor(ResolvedModelVariant? variant) =>
+        Flux2Variants.IsIrisZ(variant) ? IrisZSupports : Flux2Variants.IsOpenVisionBanana(variant) ? OpenVisionBananaSupports : Supports;
+
+    /// <summary>What Open Vision Banana applies: the photo is a reference the DiT reads at full strength (never a noised start),
+    /// and LoRAs merge as for Klein. Image-to-image, inpaint, regions, prompt scheduling and the refiner are not part of it,
+    /// and its prompts reach the encoder verbatim, so no prompt tag is honoured.</summary>
+    public const ImageFeatures OpenVisionBananaSupports = ImageFeatures.RefEdit | ImageFeatures.Lora;
+
+    /// <summary>Open Vision Banana's published sampling: 28 steps, CFG 3.5, seed 0, input size capped at 1 MP (README quickstart,
+    /// FunAILab/Open-Vision-Banana). Perception outputs carry no creative variation, so these are the values every task uses.</summary>
+    public static ImageDefaults OpenVisionBananaDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
     /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (SwarmUI <c>Model Support.md</c>, Flux.2: Flux Guidance defaults to 3.5, 4 is the optional tweak); the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };
@@ -66,41 +123,67 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Keyed on the variant's guidance embedding, the property that makes Klein guidance-free, so a variant added
     /// to <see cref="Flux2Variants"/> gets the right defaults without a second list here.</remarks>
-    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is null || Flux2Variants.ConfigFor(variant).GuidanceEmbed ? FamilyDefaults : KleinDefaults;
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant)
+    {
+        if (variant is null)
+        {
+            return FamilyDefaults;
+        }
+        if (Flux2Variants.IsIrisZ(variant))
+        {
+            return variant.Is(Flux2Variants.IrisZSmall) ? IrisZSmallDefaults : IrisZBigDefaults;
+        }
+        if (Flux2Variants.IsOpenVisionBanana(variant))
+        {
+            return OpenVisionBananaDefaults;
+        }
+        return Flux2Variants.ConfigFor(variant).GuidanceEmbed ? FamilyDefaults : KleinDefaults;
+    }
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
+        UnhonouredBackends.Refuse(context, "FLUX.2", warn: false);
         // TODO(E-IMG-4/5): split-file / user overrides from ImageRequest.Components, and img2img are deferred —
         // this ports the text-to-image core.
         // IDisposable, not SafeTensorsLoader: the text encoder now opens through CheckpointSource. Same widening
         // a66afece made for MiniMax-H3 — a foreach over the narrower type compiles and throws at teardown.
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
+        // Handed to the recipe pipeline on success; released here when construction fails part-way.
+        MergedLoraStack? loraStack = null;
+        Flux2Transformer? transformer = null;
+        LlamaStyleEncoder? encoder = null;
+        Qwen3Tokenizer? qwenTokenizer = null;
+        ErnieTokenizer? mistralTokenizer = null;
         try
         {
             // One container for either format: a Flux.2 GGUF is a repack of this same file and keeps its BFL key
             // names, so nothing below needs to know which one arrived. Quantized tensors stay packed and dequantize
             // transiently per GEMM.
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            // A sharded release (Iris-Z ships a transformer index and its shards) opens as one key set.
+            IReadOnlyList<string> files = HfCheckpointDirectory.CheckpointFiles(context.CheckpointPath);
+            CheckpointSource source = files.Count == 1 ? CheckpointSource.Open(files[0]) : CheckpointSource.OpenShards(files);
             checkpoint = source;
             // Pre-cast BF16 → F16 on CPU (F16 keeps the same footprint as BF16 and F16↔F32 is supported on every op).
             // Quantized tensors stay native — they dequant transiently per-GEMM elsewhere, and a plain CastTo throws
             // for quantized dtypes (needs GgufDequantizer instead).
+            // Resolved before the cast: Open Vision Banana ships fp32 shards, which would sit at twice the bf16 footprint.
+            ResolvedModelVariant variant = context.ResolveVariant(Flux2Variants.Catalog);
             Dictionary<string, Tensor> castWeights = new Dictionary<string, Tensor>(source.Weights.Count);
             foreach (KeyValuePair<string, Tensor> kvp in source.Weights)
             {
-                castWeights[kvp.Key] = kvp.Value.DType == DType.BF16 ? kvp.Value.CastTo(DType.F16) : kvp.Value;
+                castWeights[kvp.Key] = NarrowOnLoad(variant, kvp.Value);
             }
 
-            Flux2Config config = Flux2Variants.ConfigFor(context.ResolveVariant(Flux2Variants.Catalog));
+            Flux2Config config = Flux2Variants.ConfigFor(variant);
             Logs.Info($"[Flux2Recipe] Architecture: hidden={config.HiddenSize}, depth={config.Depth} double + {config.DepthSingleBlocks} single → {DescribeConfig(config)}.");
 
             int mlpInner = (int)(config.HiddenSize * config.MlpRatio);
             Flux2CheckpointConverter converter = new Flux2CheckpointConverter(config.HiddenSize, mlpInner);
             Dictionary<string, Tensor> converted = converter.ConvertTransformer(castWeights);
             castWeights.Clear();
+            // context.TransformerBackends is the primary alone: UnhonouredBackends.Refuse above rejected every other transformer placement.
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
             // first GEMM, minutes into a generation.
             QuantizedWeightPolicy.PreparedWeights prepared =
@@ -109,10 +192,20 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             // leaving them to the finalizer.
             checkpoint = new CompositeDisposable(source, prepared);
 
-            Flux2Transformer transformer = new Flux2Transformer(config);
+            // The release's empty-prompt tensor loads first: it can need a download, and nothing heavier exists yet to strand.
+            Tensor? irisEmptyPrompt = Flux2Variants.IsIrisZ(variant) ? LoadIrisZEmptyPrompt(context, variant, loaders) : null;
+
+            transformer = new Flux2Transformer(config);
+            if (irisEmptyPrompt is not null || Flux2Variants.IsOpenVisionBanana(variant))
+            {
+                // An Iris-Z or Open Vision Banana transformer is released with the loaders: neither captures a step graph, so
+                // nothing outlives the pipeline. The plain FLUX.2 pipelines keep theirs alive as before: its fixed buffers back
+                // a captured step graph.
+                loaders.Add(transformer);
+            }
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            loraStack = RecipeLoraMerge.Apply(
                 context,
                 new LoraMergeTargets { Transformer = converted },
                 "Flux2Recipe");
@@ -133,7 +226,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
 
             // LoadWeights runs the raw dict through TextEncoderQuantNormalizer (folds fp8 weight_scale companions,
             // dequantizes U8-packed NVFP4, drops .comfy_quant blobs) — hand it the RAW dict, do not pre-cast.
-            LlamaStyleEncoder encoder = new LlamaStyleEncoder(encoderConfig);
+            encoder = new LlamaStyleEncoder(encoderConfig);
             encoder.LoadWeights(qwenRaw);
 
             // Flux.2 VAE (distinct from Flux.1's ae): 32-channel latent + BatchNorm running stats stored alongside.
@@ -142,8 +235,6 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             loaders.Add(vae);
 
             // Tokenizer: Klein → embedded Qwen3 vocab/merges; Dev → Mistral tekken (HF tokenizer.json).
-            Qwen3Tokenizer? qwenTokenizer = null;
-            ErnieTokenizer? mistralTokenizer = null;
             if (config.TextEncoderType == Flux2TextEncoderType.Mistral)
             {
                 string mistralTokPath = EnsureMistralTokenizerJson();
@@ -153,6 +244,35 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             else
             {
                 qwenTokenizer = new Qwen3Tokenizer(maxLength: 512);
+            }
+
+            if (irisEmptyPrompt is not null)
+            {
+                if (vae.Encoder is null)
+                {
+                    throw new NotSupportedException("Iris-Z needs the FLUX.2 VAE encoder; the VAE file found is decode-only.");
+                }
+                IrisZPipeline irisPipeline = new IrisZPipeline(
+                    context.Backend, encoder, transformer, vae.Decoder, vae.Encoder, vae.BnMean, vae.BnVar, config, irisEmptyPrompt,
+                    IrisZSkyCeiling(variant), TextEncoderLayers(config));
+                Logs.Info($"[Flux2Recipe] Iris-Z ready ({DescribeConfig(config)}).");
+                return new IrisZRecipePipeline(irisPipeline,
+                    new Flux2PromptTokenizer(config, qwenTokenizer, mistralTokenizer, MistralDevSystemPrompt), IrisZSkyCeiling(variant),
+                    variant.Id, qwenTokenizer, mistralTokenizer, encoder, loaders, checkpoint, loraStack);
+            }
+
+            if (Flux2Variants.IsOpenVisionBanana(variant))
+            {
+                if (vae.Encoder is null)
+                {
+                    throw new NotSupportedException("Open Vision Banana reads the photo through the FLUX.2 VAE encoder; the VAE file found is decode-only.");
+                }
+                // bnEps is the VAE's batch_norm_eps (1e-4 in the FLUX.2 VAE config), which diffusers' pipeline reads.
+                Flux2EditPipeline editPipeline = new Flux2EditPipeline(
+                    context.Backend, encoder, transformer, vae.Decoder, vae.Encoder, vae.BnMean, vae.BnVar, config,
+                    TextEncoderLayers(config), bnEps: 1e-4f);
+                Logs.Info($"[Flux2Recipe] Open Vision Banana ready ({DescribeConfig(config)}, {variant.Id}).");
+                return new Flux2EditRecipePipeline(editPipeline, qwenTokenizer!, variant.Id, encoder, loaders, checkpoint, loraStack);
             }
 
             Flux2Pipeline pipeline = new Flux2Pipeline(
@@ -166,13 +286,22 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[Flux2Recipe] Construction failed.", ex);
-            foreach (IDisposable loader in loaders)
-            {
-                loader.Dispose();
-            }
-            checkpoint?.Dispose();
+            // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
+            new CompositeDisposable([qwenTokenizer, mistralTokenizer, encoder, transformer, .. loaders, checkpoint, loraStack]).Dispose();
             throw;
         }
+    }
+
+    /// <summary>The dtype a checkpoint tensor is held in after load: BF16 narrows to F16 (same footprint, supported by every op),
+    /// and an Open Vision Banana FP32 tensor does too, since its release is fp32 and was trained and evaluated in bf16, so a 4B
+    /// DiT stays 7.75 GB resident instead of 15.5 GB. Everything else, quantized tensors included, is kept as read.</summary>
+    internal static DType LoadedDType(ResolvedModelVariant variant, DType stored) =>
+        stored == DType.BF16 || (stored == DType.F32 && Flux2Variants.IsOpenVisionBanana(variant)) ? DType.F16 : stored;
+
+    private static Tensor NarrowOnLoad(ResolvedModelVariant variant, Tensor tensor)
+    {
+        DType target = LoadedDType(variant, tensor.DType);
+        return target == tensor.DType ? tensor : tensor.CastTo(target);
     }
 
     /// <summary>Picks the LlamaStyleEncoder preset + side-model asset for the variant. Klein 4B → Qwen3-4B; Klein 9B → Qwen3-8B (nvfp4-mixed, dequantized at load); Dev → Mistral-Small-3.</summary>
@@ -188,8 +317,44 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         };
     }
 
+    /// <summary>The sky ceiling each Iris-Z build was trained with (its <c>config.json</c>): Iris-Z-big keeps the top of
+    /// the range for sky, Iris-Z-small has no sky class.</summary>
+    private static float IrisZSkyCeiling(ResolvedModelVariant variant) => variant.Is(Flux2Variants.IrisZBig) ? 0.95f : 1.0f;
+
+    /// <summary>The text-encoder taps the reference uses: 10/20/30 for Mistral-Small-3, 9/18/27 for Qwen3.</summary>
+    private static int[] TextEncoderLayers(Flux2Config config) =>
+        config.TextEncoderType == Flux2TextEncoderType.Mistral ? [10, 20, 30] : [9, 18, 27];
+
+    /// <summary>Loads the release's <c>empty_prompt</c> tensor as F32: the file beside the checkpoint when it is there, the
+    /// variant's side model otherwise. Whatever keeps it alive joins <paramref name="loaders"/>.</summary>
+    private static Tensor LoadIrisZEmptyPrompt(RecipeContext context, ResolvedModelVariant variant, List<IDisposable> loaders)
+    {
+        ModelAsset asset = variant.Is(Flux2Variants.IrisZBig) ? SideModels.IrisZBigEmptyPrompt : SideModels.IrisZSmallEmptyPrompt;
+        string? folder = Directory.Exists(context.CheckpointPath) ? context.CheckpointPath : Path.GetDirectoryName(context.CheckpointPath);
+        string beside = Path.Combine(folder ?? "", asset.FileName);
+        string path = File.Exists(beside)
+            ? beside
+            : ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        CheckpointSource source = CheckpointSource.Open(path);
+        loaders.Add(source);
+        if (!source.Weights.TryGetValue("empty_prompt", out Tensor? stored))
+        {
+            throw new InvalidDataException($"'{path}' has no 'empty_prompt' tensor.");
+        }
+        Tensor emptyPrompt = TensorCasts.EnsureF32(stored);
+        if (!ReferenceEquals(emptyPrompt, stored))
+        {
+            loaders.Add(emptyPrompt);
+        }
+        return emptyPrompt;
+    }
+
     private static string DescribeConfig(Flux2Config config)
     {
+        if (config.ModalityCount > 0)
+        {
+            return config.HiddenSize == 4096 ? "Iris-Z-small" : "Iris-Z-big";
+        }
         return config.HiddenSize switch
         {
             3072 => "Klein 4B",

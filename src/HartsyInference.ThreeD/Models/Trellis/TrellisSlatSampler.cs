@@ -1,4 +1,6 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
@@ -23,10 +25,10 @@ public sealed unsafe class TrellisSlatSampler
             if (tc >= cfgLo && tc <= cfgHi)
             {
                 SparseTensor vu = flow.Forward(backend, x, tModel, negCond);
-                backend.CfgEulerStep(x.Feats, vc.Feats, vu.Feats, 1f + cfg, delta);
+                backend.GuidedEulerStep(x.Feats, vc.Feats, vu.Feats, GuidedEulerSpec.Lerp(1f + cfg, delta));
                 vu.Feats.Dispose();
             }
-            else backend.CfgEulerStep(x.Feats, vc.Feats, vc.Feats, 1f, delta);
+            else backend.GuidedEulerStep(x.Feats, vc.Feats, vc.Feats, GuidedEulerSpec.Lerp(1f, delta));
             vc.Feats.Dispose();
         }
         return x;

@@ -56,6 +56,9 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   verification, an arbitrary local file pays one visible exact-hash pass first.
 - Planning errors and non-bypassable release gates return before backend probing or model construction, and
   execution rechecks planned artifact stamps, so a replaced checkpoint needs a new plan.
+- A recipe may refuse the engine's device for an otherwise valid plan whose checkpoint is on disk
+  (`IVideoDeviceCheck`; `video.memory.weights_do_not_fit`), and asking constructs the backend. A backend that does not
+  construct, or headers that do not read, add no issue, so such a recipe checks again when it loads.
 
 ## Recipe Contract
 - A recipe is the only owner of a family's defaults. `Defaults` (and a video recipe's `Constraints`) are abstract
@@ -66,7 +69,15 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
 - No pipeline and no host decides an omitted user-configurable parameter. Architecture constants stay in model
   configs; capability limits go in `Constraints`, not defaults.
 - A default that differs from SwarmUI's documented one, or comes from upstream where SwarmUI has none, carries a
-  one-line comment saying why. Design and the per-family ledger: [RECIPE_CONTRACT.md](../Research/RECIPE_CONTRACT.md).
+  one-line comment saying why. Design and the per-family ledger: RECIPE_CONTRACT.md.
+- A recipe may declare a `Prompt` (`PromptProfile`) for what shapes its prompt text: `kind`, `encoders`, `format`, `negative`,
+  `supports`, a `boxes` form such as `yxyx-1000`, `maxTokens` and a `guide` path. It is never a generation setting. The values
+  are plain strings from one closed vocabulary (`PromptVocabulary`, the one the SwarmUI-LLMAssistant extension reads) and the
+  registry validator rejects anything outside it. An unset field means the fact was not established, not "no"; `supports`
+  lists only what a reviewed prompting guide affirms, weak or limited included, and is not `PromptWeighting`, which says what
+  the pipeline applies. Put a difference between variants in `PromptFor`, not in extra families. The descriptor routes return
+  it as `prompt`, and `ArtifactMetadata` writes it into the primary weights as `modelspec.prompt_*` when the identity carries
+  it (`RecipePrompts.Find` supplies it from the recipe).
 - Changing any value in a defaults record bumps its `Revision`. For image and video the revision travels into the
   plan's `RecipeIdentity`, so output made under old and new values stays distinguishable; music results do not carry
   it yet.
@@ -123,6 +134,44 @@ The engine resolves once per construction and passes the result as `RecipeContex
 pipeline cache key and feeds `SupportsFor` / `DefaultsFor`. Hosts query the same answer through `IInferenceEngine.Recipes`.
 A recipe reached by delegation calls `context.ResolveVariant(itsCatalog)`. A variant with its own registered contract
 sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a file-name guess must not impose.
+
+## Vision Contracts
+
+- **Requests.** A single image goes in a `VisionRequest`. Several images go in a `VisionBatchRequest`, either `Views`
+  (one scene, no time order) or `Frames` (time order, with `TimestampsSeconds` or `Fps`). `VisionRequestValidator`
+  holds the per-mode rules, and the service, CLI and API all call it before any model loads:
+  - `Track` and `Interpolate` take frames only. `MetricDepth` takes frames too (video depth), as well as one image or
+    views.
+  - Only `Depth`, `MetricDepth` and `Geometry` take views.
+  - Each model then refuses what it cannot do itself, for example a single-view depth model given views.
+  - `FocalLengthPx` applies to `MetricDepth` only. The focal length the model used, given or estimated, comes back in
+    `VisionResult.Camera`. Depth Pro 2 views run as one unordered set through its cross-frame attention and share one
+    focal length; it takes at most 16 views, and a frame window of at most 16.
+  - `FrameWindow`, `FrameOverlap` and `FrameBuffering` apply to `MetricDepth` frames only. Overlap is below the window
+    and buffered only. A video without a given focal length keeps the estimate over its first window.
+- **Results.** Structured fields on `VisionResult` are init-only and nullable; existing fields keep their meaning.
+  - **Depth:** a float map with a `VisionDepthKind` and an optional validity mask.
+  - **Point maps and normals:** H×W×3.
+  - **Matte:** H×W.
+  - **Camera:** intrinsics plus an optional world-to-camera 3×4.
+  - **Poses, faces and tracks:** one record each.
+  - **Multi-view:** one `VisionResult` per view in `Views`.
+- **Streams.** A frame model returns `IAsyncEnumerable<VisionFrameResult>` built with `VisionFrameStream.Run`. The
+  producer may run at most `capacity` frames ahead. A model that finishes frames a clip at a time (buffered video
+  depth) sets the capacity to at least its window. Breaking out, cancelling or a producer error stops the producer,
+  awaits it, and disposes its state (tracker memory, frame buffers) before the enumerator ends. Refusals throw before
+  the stream starts. Interpolated frames carry their exact output time.
+- **Conventions.** These apply to every structured field:
+  - The camera frame is OpenCV's: x right, y down, z forward.
+  - Pixel centres are at +0.5.
+  - Boxes, keypoints and intrinsics are in pixels; metric depth, points and camera translation are in metres.
+  - Arrays are float32, row-major, last dimension fastest.
+- **Formats.** One encoding (`VisionArrayCodec`) serves both outputs, so a CLI file and an API response decode to the
+  same array bytes.
+  - **CLI:** a `.npy` per array, a PNG preview per map, and a `result.json` sidecar. Frame runs also write `frames.json`
+    with each frame's time.
+  - **API:** each array as `{ dtype: "float32", shape, data: base64 little-endian }`, plus a `conventions` object.
+    `/v1/native/vision/sequence` answers views with one JSON result and frames with SSE `frame` events, then `complete`.
 
 ## GPU Activation Cache Rules
 - Every `CudaBackend` op calls `CacheActivation(output)` to keep results on GPU. No per-op

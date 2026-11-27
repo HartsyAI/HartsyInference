@@ -7,19 +7,45 @@ git preserves removed history.
 | Need | Read |
 |---|---|
 | Coding rules | [CODE_STYLE.md](CODE_STYLE.md) |
-| Architecture, task routing, PR workflow | [Agents/AGENTS.md](Agents/AGENTS.md) |
-| Tensor, CUDA, planning and pipeline patterns | [Agents/ENGINE_PATTERNS.md](Agents/ENGINE_PATTERNS.md) |
-| Model defaults: who owns them, how a request is planned, each family's values and sources | [Research/RECIPE_CONTRACT.md](Research/RECIPE_CONTRACT.md) |
 | Attention semantics, numerical permissions and kernel planning | [ATTENTION_CONTRACT.md](ATTENTION_CONTRACT.md) |
+| Attention compatibility adapters and their removal evidence | [ATTENTION_COMPATIBILITY.md](ATTENTION_COMPATIBILITY.md) |
+| Mandatory common attention cases, optional backend capabilities and current admission gaps | [ATTENTION_SUPPORT.md](ATTENTION_SUPPORT.md) |
+| Generic layout ops: strided views, strided copy and accumulate, pad | [BACKEND_OPS.md](BACKEND_OPS.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
 | Vulkan LLM and MoE: measured gap to CUDA and the port plan | [VULKAN_MOE_PLAN.md](VULKAN_MOE_PLAN.md) |
 | Cross-cutting open work | [Checklists/ROADMAP.md](Checklists/ROADMAP.md) |
+| Comfy-Org repo rollout: pinned inventory, phases, target and current state per repo | [Checklists/COMFY_ORG_ROLLOUT.md](Checklists/COMFY_ORG_ROLLOUT.md) |
 | Real-weight numerical evidence | [Checklists/PARITY_VERIFICATION.md](Checklists/PARITY_VERIFICATION.md) |
-| DeepSeek-V4.1-Flash rented-GPU runbook and frozen gates | [Checklists/DSV41_RENTAL_RUNBOOK.md](Checklists/DSV41_RENTAL_RUNBOOK.md), [Checklists/DSV41_CAMPAIGN_FREEZE.md](Checklists/DSV41_CAMPAIGN_FREEZE.md) |
+| DeepSeek-V4.1-Flash rented-GPU runbook and frozen gates | [Checklists/DSV41_RENTAL_RUNBOOK.md](Checklists/DSV41_RENTAL_RUNBOOK.md) |
+| ERNIE-5.5-Flash-Base one-pod real-weight run: pod, volume, pinned download, checks, expected output | [Checklists/ERNIE55_POD_RUNBOOK.md](Checklists/ERNIE55_POD_RUNBOOK.md) |
+| FastFrames rented-GPU runbook: hardware per run, weights and hashes, the pod script, what to return | [Checklists/FASTFRAMES_GPU_RUNBOOK.md](Checklists/FASTFRAMES_GPU_RUNBOOK.md) |
+| CoLa3D geometry decoder and prompt inputs: key groups, shape VAE relation, unverified prompt conventions | [Research/COLA3D_GEOMETRY_DECODER.md](Research/COLA3D_GEOMETRY_DECODER.md) |
+| World live viewer (`--view`): pacing, control schemes, adding one for a new world model | [Research/WORLD_LIVE_VIEWER.md](Research/WORLD_LIVE_VIEWER.md) |
+| Hunyuan3D-2.1 shape model: source spike, MoE and reuse map, licence | [Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md](Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md) |
+| Hunyuan3D shape models: pins, licence terms, upstream-to-C# stage map, findings | [Research/HUNYUAN3D_ARCHITECTURE.md](Research/HUNYUAN3D_ARCHITECTURE.md) |
+| Hunyuan3D Paint (texturing): pins, hashes, licence, 2.5D UNet, renderer and bake, reuse map | [Research/HUNYUAN3D_PAINT_ARCHITECTURE.md](Research/HUNYUAN3D_PAINT_ARCHITECTURE.md) |
+| Hunyuan3D Part (P3-SAM segmentation, X-Part decomposition): pins, weights, licence, reuse map | [Research/HUNYUAN3D_PART_ARCHITECTURE.md](Research/HUNYUAN3D_PART_ARCHITECTURE.md) |
+| Haru-4B (full-duplex speech-to-speech): pins, constants, frame loop, codec key map, reuse map, evidence | [Research/HARU_ARCHITECTURE.md](Research/HARU_ARCHITECTURE.md) |
+| Duo v1 weights (inclusionAI): pins and hashes, distributed-checkpoint format, qkv and fc1 layout traps, merge numerics, AdaLN tables, licence terms | [Research/DUO_V1_WEIGHTS.md](Research/DUO_V1_WEIGHTS.md) |
+| Kim_Vocal_2 vocal separator (UVR MDX-Net): pins, graph, pipeline constants, licence status, engine surface | [Research/KIM_VOCAL2_SEPARATOR.md](Research/KIM_VOCAL2_SEPARATOR.md) |
+| Inworld Voice Isolator (48 kHz speech isolation, offline and realtime): pins, hashes, licence, network, stream semantics, engine surface | [Research/VOICE_ISOLATOR_ARCHITECTURE.md](Research/VOICE_ISOLATOR_ARCHITECTURE.md) |
+| Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
+| Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
+| 3D weights inventory: which files are linked, repacked and self-hosted, with the licence terms that bind a host | [Research/WEIGHTS_HOSTING_3D.md](Research/WEIGHTS_HOSTING_3D.md) |
+| Hosting the repacked 3D weights: the upload set with hashes, the licence files, the checks and the steps | [../tools/WeightsMirror/README.md](../tools/WeightsMirror/README.md) |
+| Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
+| What a 3D host needs from the engine: today's mesh contract, the additive API proposal | [Research/HARTSY3D_ENGINE_PREREQS.md](Research/HARTSY3D_ENGINE_PREREQS.md) |
+| MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
+| Bria RMBG 3.0 (background removal as a Fibo 2.0 edit): pins, weights layout, fixed instruction, dynamic shift, licence, why VRMBG-3.0 is out | [Research/RMBG3_ARCHITECTURE.md](Research/RMBG3_ARCHITECTURE.md) |
+| Idol, Idol-turbo and Budget3D (image to Gaussian splats, token budget): pins, files and hashes, pipeline constants, licences, settled reference questions | [Research/IDOL_BUDGET3D_ARCHITECTURE.md](Research/IDOL_BUDGET3D_ARCHITECTURE.md) |
+| SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
+| Hy4 Flash (Tencent, 220B MoE with Engram, iHC and indexed attention): pins, licence terms, architecture constants, weight sizes, key map, open questions | [Research/HY4_FLASH_ARCHITECTURE.md](Research/HY4_FLASH_ARCHITECTURE.md) |
+| Sage S2.1 Flash (`glm5_next`: KDA + NoPE compressed-pool DSA layers under mHC, 288-expert clamped-SwiGLU MoE, MTP, vision, SciPerception projectors): pins, licence, key layout traps, FP8 quantized set | [Research/SAGE_S21_FLASH_ARCHITECTURE.md](Research/SAGE_S21_FLASH_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
-| Upstream constants, formats, methods, unresolved research | [Research/](Research/) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
+| Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |
+| Proving a numerical change on a GPU: op fixtures and generation captures | [VERIFICATION.md](VERIFICATION.md) |
 | Settings: where they live, how to change them | [SETTINGS.md](SETTINGS.md) |
 | Reproducible community performance | [Benchmark guide](../benchmarks/README.md) |
 
@@ -27,6 +53,10 @@ git preserves removed history.
 
 - Read only the relevant document or section; search before loading a long reference. One fact, one home — link
   to measurements instead of copying them into a README or plan.
+- Agent files (`AGENTS.md`, `docs/Agents/`, skills under `docs/Agents/skills/`) target current Claude models. Write them
+  to the [Claude prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices):
+  state the goal and the reason for each rule, phrase rules positively, separate sections with XML tags, and drop
+  CRITICAL or MUST emphasis, which current models tend to over-apply.
 - Status rows carry a verdict and a details link. Evidence records checkpoint/variant, backend, reference,
   metric/tolerance, date and limitations. A coherent output is not full numerical parity.
 - Quote a measurement as an absolute number against an external baseline ("1.671 s/step against ComfyUI's
@@ -37,5 +67,5 @@ git preserves removed history.
   implementation walkthroughs after the code ships, keep exact constants, layouts, source links and
   disagreements, and keep unresolved questions explicit.
 - Research dates describe the source snapshot, not implementation status: check code and status before treating
-  an old build plan as open work. New research follows [RESEARCH.md](Agents/RESEARCH.md).
+  an old build plan as open work.
 - Generated reports, local run artifacts, tokenizer data and fixtures are not agent onboarding material.

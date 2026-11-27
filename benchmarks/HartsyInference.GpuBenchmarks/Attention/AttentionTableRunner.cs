@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.GpuBenchmarks.Attention;
@@ -19,6 +21,7 @@ public static unsafe class AttentionTableRunner
     /// [--oracle-rows 64] [--outlier] [--seed 1234]</c>.</summary>
     public static int Run(string[] args)
     {
+        if (args.Contains("--fixture", StringComparer.Ordinal)) return AttentionEvidenceRunner.Run(args);
         Dictionary<string, string> o = ParseArgs(args);
         AttentionBenchShape s = AttentionBenchShape.Load(o["shapes"]).SingleOrDefault(x => x.Id == o["shape"])
             ?? throw new ArgumentException($"shape '{o["shape"]}' not in {o["shapes"]}");
@@ -141,8 +144,8 @@ public static unsafe class AttentionTableRunner
                 Tensor kr = kh, vr = vh;
                 if (g > 1)
                 {
-                    kr = new(kvRep, arm.Dtype); be.RepeatKvHeads(kr, kh, s.Hkv, g); kh.Dispose();
-                    vr = new(kvRep, arm.Dtype); be.RepeatKvHeads(vr, vh, s.Hkv, g); vh.Dispose();
+                    kr = new(kvRep, arm.Dtype); StridedCopies.RepeatInterleave(be, kr, kh, 1, g); kh.Dispose();
+                    vr = new(kvRep, arm.Dtype); StridedCopies.RepeatInterleave(be, vr, vh, 1, g); vh.Dispose();
                 }
                 Tensor oh = new(qMh, arm.Dtype);
                 HeadMajor(be, oh, qh, kr, vr, mask, scale, arm);
@@ -156,8 +159,8 @@ public static unsafe class AttentionTableRunner
         // Head-major grouped-query: repeat K/V heads on the device, then SDPA.
         return () =>
         {
-            Tensor kr = new(kvRep, arm.Dtype); be.RepeatKvHeads(kr, k, s.Hkv, g);
-            Tensor vr = new(kvRep, arm.Dtype); be.RepeatKvHeads(vr, v, s.Hkv, g);
+            Tensor kr = new(kvRep, arm.Dtype); StridedCopies.RepeatInterleave(be, kr, k, 1, g);
+            Tensor vr = new(kvRep, arm.Dtype); StridedCopies.RepeatInterleave(be, vr, v, 1, g);
             Tensor o = new(qMh, arm.Dtype);
             HeadMajor(be, o, q, kr, vr, mask, scale, arm);
             kr.Dispose(); vr.Dispose();

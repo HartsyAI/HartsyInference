@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -58,6 +60,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         if (cfg.AttnSink) unsupported.Add("attention sink");
         if (cfg.Indexer is not null) unsupported.Add("sparse-attention indexer");
         if (cfg.Activation == ActivationKind.SwigluOai) unsupported.Add("clamped alpha-SwiGLU");
+        if (cfg.Activation == ActivationKind.Situ) unsupported.Add("SiTU-GLU");
         if (cfg.AlibiMaxBias > 0f) unsupported.Add("ALiBi");
         if (cfg.ParallelResidual) unsupported.Add("parallel residual");
         if (cfg.AbsolutePositionEmbeddings) unsupported.Add("absolute position embeddings");
@@ -414,13 +417,13 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
 
         if (_cfg.Rope == RopeStyle.Interleaved)
         {
-            backend.ApplyRopeInterleaved(q, cos, sin, _cfg.RotaryDim);
-            backend.ApplyRopeInterleaved(k, cos, sin, _cfg.RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
         }
         else
         {
-            backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
-            backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
         }
 
         // GQA group is degree-invariant: (hq/deg) / (hkv/deg) == KvGroup, so each rank's Q-head slice reads
@@ -462,19 +465,7 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
     }
 
     /// <summary>Gate activation (elementwise, so column-parallel slices activate identically to the full tensor) — mirrors <c>GenericTransformer.Layer.Activate</c>.</summary>
-    private void Activate(IBackend backend, Tensor outp, Tensor inp)
-    {
-        switch (_cfg.Activation)
-        {
-            case ActivationKind.GeluTanh: backend.Gelu(outp, inp); break;
-            case ActivationKind.Relu: backend.Clamp(outp, inp, 0f, float.PositiveInfinity); break;
-            case ActivationKind.ReluSquared:
-                backend.Clamp(outp, inp, 0f, float.PositiveInfinity);
-                backend.Mul(outp, outp, outp);
-                break;
-            default: backend.Silu(outp, inp); break;
-        }
-    }
+    private void Activate(IBackend backend, Tensor outp, Tensor inp) => GatedFfn.Activate(backend, _cfg.Activation, outp, inp);
 
     /// <summary>Column-parallel slice: rank <paramref name="rank"/>'s contiguous OUT-row range of a row-major <c>[out, in]</c> weight (or <c>[out]</c> bias-shaped vector); a contiguous byte copy for any dtype since GGUF quant blocks run along IN, so every OUT row is a whole number of blocks and a row range never splits a block.</summary>
     internal static Tensor SliceOutRows(Tensor w, int rank, int degree, string name)

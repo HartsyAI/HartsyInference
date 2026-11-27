@@ -2,7 +2,6 @@ using HartsyInference.Core.Logging;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
-using HartsyInference.Core.Memory;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
@@ -16,6 +15,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.Engine.Recipes.Image;
 

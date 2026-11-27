@@ -97,7 +97,7 @@ public sealed unsafe class DiaDecoder : IDisposable
     }
 
     /// <summary>Builds the GPU-resident <c>[1,1,headDim]</c> cos/sin slice for one decode step's absolute
-    /// position, duplicated into both halves to match <see cref="IBackend.ApplyRope"/>'s split-half contract
+    /// position, duplicated into both halves to match the rotate-half <see cref="Core.Rope.RopeTableLayout.RotateHalf"/> table contract
     /// (<c>cos[i] == cos[i+half]</c>) — reads the same half-width host table the host path uses via
     /// <see cref="DiaWeights.RopeSplitHalfInPlace"/>, so both paths rotate by the identical angle.</summary>
     private unsafe (Tensor cos, Tensor sin) BuildResidentRopeStep(int posStart)

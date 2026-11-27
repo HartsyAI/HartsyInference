@@ -24,13 +24,14 @@
 
   <!-- NuspecFile mode does NOT auto-fill $token$ placeholders from MSBuild properties (that's
        only legacy nuget.exe csproj-pack behavior) — NuspecProperties must be supplied explicitly.
-       Set it in a BeforePack target, not a plain PropertyGroup, because $(PackageVersion) isn't
-       resolved yet at ordinary property-evaluation time (it's computed from
-       VersionPrefix+VersionSuffix by NuGet's own targets during the pack pipeline). -->
-  <Target Name="SetNuspecVersionToken" BeforeTargets="GenerateNuspec">
-    <PropertyGroup>
-      <NuspecProperties>version=$(PackageVersion)</NuspecProperties>
-    </PropertyGroup>
-  </Target>
+       Build the version from VersionPrefix and VersionSuffix at evaluation time instead of reading
+       $(PackageVersion) in a BeforeTargets="GenerateNuspec" target: the .NET 11 SDK reads the nuspec
+       for the package id and version before that target runs, saw an empty $version$ and failed the
+       pack with "Value cannot be null or an empty string". VersionSuffix is also what publish-nuget.yml
+       overrides on the command line, so the packed version still follows it. -->
+  <PropertyGroup>
+    <NuspecProperties Condition="'$(VersionSuffix)' != ''">version=$(VersionPrefix)-$(VersionSuffix)</NuspecProperties>
+    <NuspecProperties Condition="'$(VersionSuffix)' == ''">version=$(VersionPrefix)</NuspecProperties>
+  </PropertyGroup>
 
 </Project>

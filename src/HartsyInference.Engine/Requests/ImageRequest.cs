@@ -1,5 +1,5 @@
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Requests;
 
@@ -23,6 +23,15 @@ public sealed record ImageRequest
 
     /// <summary>Classifier-free guidance scale; null uses the family's officially recommended scale (1.0 for distilled models).</summary>
     public float? CfgScale { get; init; }
+
+    /// <summary>Distilled guidance for a FLUX.1 Dev-family checkpoint, the FluxGuidance node's value. It is separate from
+    /// <see cref="CfgScale"/> because Swarm sends CFG 1 for Flux; null uses the variant's default (3.5, or 30 for the OneReward
+    /// fine-tune). Schnell has no guidance, so the value is ignored there.</summary>
+    public float? FluxGuidance { get; init; }
+
+    /// <summary>Diffusers-style true CFG for a FLUX.1 checkpoint: with a negative prompt, a second unconditional pass each step is
+    /// combined at this scale. Null or at most 1 turns it off; it applies on top of <see cref="FluxGuidance"/>.</summary>
+    public float? TrueCfgScale { get; init; }
 
     /// <summary>CFG-Rescale strength, 0..1; null/0 = off. Pulls a high-CFG guided prediction back toward the conditional's magnitude to reduce oversaturation/burnt highlights. Only consumed by recipes that wire it in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
     public float? CfgRescale { get; init; }
@@ -62,6 +71,11 @@ public sealed record ImageRequest
 
     /// <summary>Cut the subject out of the finished image: RMBG-1.4's matte lands in <see cref="ImageResult.Alpha"/> and the RGB pixels are left untouched, so the caller composites it wherever it likes. Runs after every other stage (refiner, segment refinement) and is family-independent — no recipe has to declare it.</summary>
     public bool? RemoveBackground { get; init; }
+
+    /// <summary>Which matter <see cref="RemoveBackground"/> uses: <c>rmbg</c> (RMBG-1.4, the default when null), <c>rmbg3</c> or
+    /// <c>rmbg3-int8</c> (Bria RMBG 3.0, an 8 B model that runs after the generating pipeline is released). Setting it without
+    /// <see cref="RemoveBackground"/> is refused.</summary>
+    public string? RemoveBackgroundModel { get; init; }
 
     /// <summary>Number of images to generate in one batch.</summary>
     public int Batch { get; init; } = 1;

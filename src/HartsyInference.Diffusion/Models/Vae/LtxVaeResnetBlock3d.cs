@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -64,7 +66,8 @@ public sealed unsafe class LtxVaeResnetBlock3d
     }
 
     /// <summary>Forward over <c>[B, inC, T, H, W]</c>. <paramref name="temb"/> (<c>[4·C]</c>, B=1) is required iff the block is timestep-conditioned.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor? temb)
+    /// <param name="cache">The left context of the causal convs when <paramref name="x"/> is one chunk of a stream; null runs a whole clip.</param>
+    public Tensor Forward(IBackend backend, Tensor x, Tensor? temb, CausalStreamCache? cache = null)
     {
         // Compute the 4 modulation vectors once (each [C]) when timestep-conditioned.
         float[]? shift1 = null, scale1 = null, shift2 = null, scale2 = null;
@@ -76,14 +79,14 @@ public sealed unsafe class LtxVaeResnetBlock3d
         Tensor h = _timestepCond ? ChannelRms(x, _inC) : ChannelRmsDevice(backend, x);
         if (_timestepCond) ApplyShiftScale(h, scale1!, shift1!);
         Silu(backend, h);
-        Tensor c1 = _conv1!.Forward(backend, h);
+        Tensor c1 = _conv1!.ForwardStreaming(backend, h, cache);
         h.Dispose();
 
         Tensor h2 = _timestepCond ? ChannelRms(c1, _outC) : ChannelRmsDevice(backend, c1);
         c1.Dispose();
         if (_timestepCond) ApplyShiftScale(h2, scale2!, shift2!);
         Silu(backend, h2);
-        Tensor c2 = _conv2!.Forward(backend, h2);
+        Tensor c2 = _conv2!.ForwardStreaming(backend, h2, cache);
         h2.Dispose();
 
         // Residual (with optional norm3 + shortcut conv).
@@ -121,7 +124,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
         return (o[0], o[1], o[2], o[3]);
     }
 
-    /// <summary>Device channel RMS via the shared <see cref="IBackend.WanRmsNormChannel"/> op (same math to float
+    /// <summary>Device channel RMS via the shared <see cref="IBackend.NormModulate"/> channel L2 norm (same math to float
     /// rounding: <c>x·sqrt(C)/max(L2_C, eps)</c> vs <c>x/sqrt(mean_C(x²)+eps)</c>), keeping the activation
     /// GPU-resident between the convs. The timestep-conditioned path stays on the host loop because
     /// <see cref="ApplyShiftScale"/> mutates the host buffer in place — done to a GPU-cached tensor that would
@@ -129,7 +132,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
     private static Tensor ChannelRmsDevice(IBackend backend, Tensor x)
     {
         Tensor outT = new Tensor(x.Shape, x.DType);
-        backend.WanRmsNormChannel(outT, x, null, NormEps);
+        backend.NormModulate(NormModulateCall.Channel(outT, x, NormKind.L2Norm, NormEps));
         return outT;
     }
 

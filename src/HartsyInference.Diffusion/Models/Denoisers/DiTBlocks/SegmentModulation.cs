@@ -1,10 +1,11 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>adaLN shift/scale/gate that differ per <see cref="TokenSegment"/> group: one F32 table row per group, gathered
-/// per token by <see cref="IBackend.AffineBroadcastRowIndexed"/> and <see cref="IBackend.GatedResidualRowIndexed"/>
+/// per token by a row-indexed <see cref="IBackend.NormModulate"/> and <see cref="IBackend.GatedResidualRowIndexed"/>
 /// through the layout's row index instead of materializing <c>[S, D]</c> rows. Used where reference tokens take a
 /// different timestep's modulation than the live tokens. Operands are F32: Vulkan serves the row-indexed ops in F32 only.
 /// The layout is borrowed; the tables are owned.</summary>
@@ -55,8 +56,18 @@ public sealed class SegmentModulation : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         RequireRows(normed);
         Tensor output = new(normed.Shape, DType.F32);
-        backend.AffineBroadcastRowIndexed(output, normed, Scale, Shift, _layout.RowIndex);
+        backend.NormModulate(NormModulateCall.Rows(output, normed, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(normed, Scale, Shift, _layout.RowIndex, ScaleMode.OnePlus)));
         return output;
+    }
+
+    /// <summary>Returns <c>LayerNorm(x)·(1 + scale[g]) + shift[g]</c> per token, F32.</summary>
+    public Tensor NormAffine(IBackend backend, Tensor x, float eps)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        RequireRows(x);
+        using Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, eps);
+        return Affine(backend, normed);
     }
 
     /// <summary>Returns <c>residual + gate[g]·value</c> per token, F32.</summary>
@@ -84,6 +95,24 @@ public sealed class SegmentModulation : IDisposable
         Tensor table = new(shape, DType.F32);
         backend.Concat(table, parts, 0);
         return table;
+    }
+
+    /// <summary>Wraps shift, scale and gate tables that are already F32 <c>[groups, D]</c>, one row per layout group (for example the six
+    /// projections of one batched adaLN). The result takes ownership: disposing it disposes the three tables.</summary>
+    public static SegmentModulation FromTables(Tensor shift, Tensor scale, Tensor gate, TokenSegmentLayout layout)
+    {
+        ArgumentNullException.ThrowIfNull(shift);
+        ArgumentNullException.ThrowIfNull(scale);
+        ArgumentNullException.ThrowIfNull(gate);
+        ArgumentNullException.ThrowIfNull(layout);
+        foreach (Tensor table in new[] { shift, scale, gate })
+        {
+            if (table.Shape.Rank != 2 || table.DType != DType.F32)
+                throw new ArgumentException($"Modulation tables must be F32 [groups, D]; got {table.Shape} {table.DType}.", nameof(shift));
+            if (table.Shape[0] != layout.GroupCount || table.Shape[1] != shift.Shape[1])
+                throw new ArgumentException($"Modulation tables must be [{layout.GroupCount}, {shift.Shape[1]}]; got {table.Shape}.", nameof(shift));
+        }
+        return new SegmentModulation(shift, scale, gate, layout);
     }
 
     /// <inheritdoc/>

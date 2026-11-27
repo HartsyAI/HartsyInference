@@ -1,5 +1,5 @@
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -11,6 +11,7 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -24,6 +25,19 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
 {
     /// <inheritdoc/>
     public string Name => "qwen-image-2.1";
+
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm"], Format = "text", Supports = ["text-rendering"],
+        Guide = "docs/prompting/qwen-image.md",
+    };
+
+    /// <inheritdoc/>
+    public PromptProfile? PromptFor(ResolvedModelVariant? variant) =>
+        variant is null ? Prompt
+        : variant.Is(QwenImage21Variants.Turbo) ? Prompt! with { Negative = "none" }
+        : Prompt;
 
     /// <summary>The system turn Qwen-Image 2.1 wraps every prompt in. Dropped from the conditioning afterwards, but
     /// present during encoding — the encoder is causal, so it shapes the rows that are kept.</summary>

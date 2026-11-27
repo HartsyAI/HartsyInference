@@ -3,7 +3,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Host;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Audio;
 
@@ -55,6 +56,12 @@ internal sealed class AudioRuntime
     /// <summary>Resident Demucs stem-separation pipelines, keyed by model name.</summary>
     internal AudioRunnerCache<DemucsRunner> Demucs { get; }
 
+    /// <summary>Resident MDX-Net vocal separators (Kim_Vocal_2), keyed by weights path or model id.</summary>
+    internal AudioRunnerCache<MdxVocalRunner> Mdx { get; }
+
+    /// <summary>Resident Inworld Voice Isolators, keyed by weights path or model id.</summary>
+    internal AudioRunnerCache<VoiceIsolatorRunner> Isolator { get; }
+
     /// <summary>Resident Resemble-Enhance pipelines.</summary>
     internal AudioRunnerCache<EnhanceRunner> Enhance { get; }
 
@@ -66,7 +73,9 @@ internal sealed class AudioRuntime
         Vc = new AudioRunnerCache<IVcRunner>("vc");
         Demucs = new AudioRunnerCache<DemucsRunner>("fx:demucs");
         Enhance = new AudioRunnerCache<EnhanceRunner>("fx:enhance");
-        _caches = [Tts, Stt, Music, Vc, Demucs, Enhance];
+        Mdx = new AudioRunnerCache<MdxVocalRunner>("fx:mdx");
+        Isolator = new AudioRunnerCache<VoiceIsolatorRunner>("fx:isolator");
+        _caches = [Tts, Stt, Music, Vc, Demucs, Enhance, Mdx, Isolator];
     }
 
     /// <summary>Drops every resident audio pipeline of THIS engine, pinned ones included, and revokes every open lease. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one — a pin protects a runner from memory pressure, not from losing its device. Waits up to <paramref name="waitSeconds"/> in total for an in-flight generation and for lease calls in flight, so the release does not dispose a pipeline out from under either; on timeout it proceeds anyway — teardown must never hang.</summary>
@@ -95,9 +104,11 @@ internal sealed class AudioRuntime
     }
 
     /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when the switch would not fit, retries once after evicting every other unpinned model when the work still runs out of VRAM, then frees leftover activations and trims the pool so a finished generation leaves nothing behind. <paramref name="job"/> names the cache and bare key the work is about to load through <c>GetOrLoadAsync</c>, so the eviction sweep can keep exactly that runner.</summary>
-    /// <remarks><paramref name="work"/> can therefore run twice, so it must release whatever it acquires itself.</remarks>
+    /// <remarks><paramref name="work"/> can therefore run twice, so it must release whatever it acquires itself. Set
+    /// <paramref name="callerFallsBackFromOutOfVram"/> when the caller runs the work elsewhere if it still ends out of VRAM: that
+    /// failure is then logged as a warning. Any other failure is logged as an error.</remarks>
     internal async Task<T> RunAsync<T>(IBackend backend, AudioJob job, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
-        IReadOnlyList<IBackend>? stageBackends = null)
+        IReadOnlyList<IBackend>? stageBackends = null, bool callerFallsBackFromOutOfVram = false)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(work);
@@ -118,7 +129,7 @@ internal sealed class AudioRuntime
             {
                 result = await work(cancel).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ShouldRetry(ex, cancel))
+            catch (Exception ex) when (IsUncancelledOutOfVram(ex, cancel))
             {
                 EvictForRetry(backend, job, ex);
                 probe = probe.Restart(backend);
@@ -130,6 +141,12 @@ internal sealed class AudioRuntime
         catch (OperationCanceledException)
         {
             Logs.Debug($"[Audio] '{job.ModelKey}' was cancelled.");
+            throw;
+        }
+        catch (Exception ex) when (callerFallsBackFromOutOfVram && IsUncancelledOutOfVram(ex, cancel))
+        {
+            Logs.Warning($"[Audio] '{job.ModelKey}' failed out of VRAM, and its caller falls back: {FindOutOfVram(ex)?.Message}");
+            Logs.Debug($"[Audio] '{job.ModelKey}' out-of-VRAM failure: {ex}");
             throw;
         }
         catch (Exception ex)
@@ -173,7 +190,7 @@ internal sealed class AudioRuntime
                 {
                     more = await items.MoveNextAsync().ConfigureAwait(false);
                 }
-                catch (Exception ex) when (!yielded && !retried && ShouldRetry(ex, cancel))
+                catch (Exception ex) when (!yielded && !retried && IsUncancelledOutOfVram(ex, cancel))
                 {
                     retried = true;
                     IAsyncEnumerator<T> failed = items;
@@ -337,7 +354,7 @@ internal sealed class AudioRuntime
         }
         long availableKb = ReadAvailableMemoryKb();
         (long freeVramBytes, long totalVramBytes) = SafeVramInfo(backend);
-        bool hostLow = availableKb > 0 && availableKb < EvictBelowAvailableKb;
+        bool hostLow = availableKb >= 0 && availableKb < EvictBelowAvailableKb;
         // Gated on the TOTAL, not on free being non-zero: a backend that reports honestly can say zero free, and
         // testing free itself skipped eviction in precisely the case it was written for.
         long needBytes = totalVramBytes > 0 ? EstimateNeedBytes(job) : 0;
@@ -398,8 +415,9 @@ internal sealed class AudioRuntime
         return evicted;
     }
 
-    /// <summary>Whether a failed attempt earns the one retry: it ran out of VRAM and nobody cancelled it.</summary>
-    private static bool ShouldRetry(Exception error, CancellationToken cancel) =>
+    /// <summary>Whether <paramref name="error"/> is an out-of-VRAM failure that nobody cancelled: what earns the one retry, and what a
+    /// caller with a fallback acts on.</summary>
+    internal static bool IsUncancelledOutOfVram(Exception error, CancellationToken cancel) =>
         !cancel.IsCancellationRequested && FindOutOfVram(error) is not null;
 
     /// <summary>Clears the device for the retry after <paramref name="error"/>: every other unpinned runner goes, whether
@@ -457,25 +475,14 @@ internal sealed class AudioRuntime
     private static string Describe(IReadOnlyList<string> evicted) =>
         evicted.Count == 0 ? "nothing (no other unpinned model was resident)" : string.Join(", ", evicted);
 
-    /// <summary>MemAvailable from <c>/proc/meminfo</c> in KiB, or 0 when unavailable (non-Linux → no host eviction).</summary>
+    /// <summary>Free host memory in KiB on Linux (<see cref="HostMemoryInfo.AvailableBytes"/>, capped by the cgroup), or -1 elsewhere or
+    /// when unreadable (no host eviction). Zero is a known, exhausted budget and counts as low.</summary>
     private static long ReadAvailableMemoryKb()
     {
-        try
-        {
-            foreach (string line in File.ReadLines("/proc/meminfo"))
-            {
-                if (line.StartsWith("MemAvailable:", StringComparison.Ordinal))
-                {
-                    string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    return parts.Length > 1 && long.TryParse(parts[1], out long kb) ? kb : 0;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Debug($"[Audio] Could not read /proc/meminfo ({ex.Message}) — host-memory eviction disabled.");
-        }
-        return 0;
+        if (!OperatingSystem.IsLinux()) return -1;
+        long? bytes = HostMemoryInfo.AvailableBytes();
+        if (bytes is null) Logs.Debug("[Audio] Free host memory is unreadable; host-memory eviction disabled.");
+        return bytes is { } b ? b / 1024 : -1;
     }
 
     /// <summary>Free and total device memory, or <c>(0, 0)</c> when this backend does not report it.</summary>

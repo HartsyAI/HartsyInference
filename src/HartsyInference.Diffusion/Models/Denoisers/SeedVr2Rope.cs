@@ -1,6 +1,6 @@
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>SeedVR2 window-local 3-axis RoPE table builders for the <c>WanRopeInterleaved</c> kernel's
+/// <summary>SeedVR2 window-local 3-axis RoPE table builders for the <c>the interleaved rotary (RotaryCall.Rows)</c> kernel's
 /// <c>[S, headDim]</c> interleaved layout (duplicated cos/sin per adjacent pair — NeoX-style, not
 /// half-split; identical rotation math in both architectures). Positions restart at zero inside every
 /// window; tables are built per token in GLOBAL token order by <see cref="SeedVr2DevicePlan"/>, with

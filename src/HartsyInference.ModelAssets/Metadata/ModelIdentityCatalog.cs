@@ -62,7 +62,11 @@ public static class ModelIdentityCatalog
             Image("sdxl", "stable-diffusion-xl-v1-base", "Stable Diffusion XL 1.0", "Stability AI", "openrail++", "1024x1024"),
             Image("sd3", "stable-diffusion-v3-medium", "Stable Diffusion 3 Medium", "Stability AI", "other", "1024x1024"),
             Image("flux1", "Flux.1-dev", "Flux.1 Dev", "Black Forest Labs", "other", "1024x1024", "black-forest-labs/FLUX.1-dev"),
+            Image("minimax-h3-image", "minimax-h3-image", "MiniMax-H3-Image", "MiniMax", "other", "2048x2048"),
             Image("flux2", "flux.2-dev", "Flux.2 Dev", "Black Forest Labs", "other", "1024x1024"),
+            // Iris-Z has no SwarmUI core class; the Hartsy extension registers these ids. FLUX non-commercial licence.
+            Image("iris-z-small", "iris-z-small", "Iris-Z-small", "Sperid Labs", "FLUX Non-Commercial License", "1024x1024", "speridlabs/iris-z"),
+            Image("iris-z-big", "iris-z-big", "Iris-Z-big", "Sperid Labs", "FLUX Non-Commercial License", "1024x1024", "speridlabs/iris-z"),
             // One SwarmUI class covers the full and the step-distilled build; the weights tell them apart.
             Image("flux3", "flux.3-klein", "Flux.3 Klein", "Black Forest Labs", "other", "1024x1024",
                 "black-forest-labs/flux-3-image-klein-comfy"),
@@ -108,6 +112,7 @@ public static class ModelIdentityCatalog
             Video("ltx-2.5-distilled", "lightricks-ltx-video-2-5", "LTX-2.5 Distilled", "Lightricks", "other", "960x960"),
             Video("wan", "wan-2_2-ti2v-5b", "Wan 2.2 TI2V 5B", "Alibaba Wan", "apache-2.0", "960x960"),
             Video("hunyuan-video", "hunyuan-video", "HunyuanVideo", "Tencent", "other", "720x720"),
+            Video("movieroll", "movieroll", "MovieRoll", "Tencent", "other", "864x480"),
             Video("minimax-h3", "minimax-h3", "MiniMax-H3", "MiniMax", "other", "960x960"),
             Video("kandinsky5-video", "kandinsky5-video-lite", "Kandinsky 5 Video Lite", "Sber AI", "apache-2.0", "640x640"),
             Video("lance-video", "lance-t2v", "Lance (Video)", "Lance", "other", "640x640"),
@@ -177,6 +182,7 @@ public static class ModelIdentityCatalog
             // Neither has a HuggingFace license id, so both are "other".
             Audio("fishaudio", "fishaudio_tts", "Fish Audio S2 Pro", "Fish Audio", "other", "tts", "fishaudio/s2-pro"),
             Audio("fishaudio-drama3", "fishaudio_drama3_tts", "Fish Audio Drama 3", "Fish Audio", "other", "tts", "fishaudio/drama-3"),
+            Audio("haru", "haru_s2s", "Haru-4B", "higurashi.ai", "apache-2.0", "tts", "higurashi-ai/Haru-4B"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),
             // Breeze TTS 2 and IndexTTS 2 ship under their own model licenses, which have no HuggingFace license id, so
             // both are "other". IndexTTS 2 names no upstream repo: 2.0 and 2.5 are separate releases, so each repack
@@ -189,6 +195,11 @@ public static class ModelIdentityCatalog
             Audio("rvc", "rvc_clone", "RVC v2", "RVC-Project", "mit", "clone"),
             Audio("openvoice", "openvoice_clone", "OpenVoice V2", "MyShell", "mit", "clone"),
             Audio("demucs", "demucs_fx", "Demucs", "Meta", "mit", "fx"),
+            // Kim_Vocal_2 states no licence anywhere it is distributed (the UVR GUI code is MIT; nothing says the weights are), so it is
+            // "other" until the terms are confirmed with the UVR project.
+            Audio("kim-vocal-2", "kim_vocal_2_fx", "Kim_Vocal_2", "Ultimate Vocal Remover", "other", "fx", "meituan-longcat/LongCat-Video-Avatar-1.6"),
+            Audio("voice-isolator", "voice_isolator_fx", "Inworld Voice Isolator", "Inworld", "apache-2.0", "fx", "inworld/voice-isolator"),
+            Audio("voice-isolator-realtime", "voice_isolator_realtime_fx", "Inworld Voice Isolator (realtime)", "Inworld", "apache-2.0", "fx", "inworld/voice-isolator"),
             Audio("resemble-enhance", "resemble_enhance_fx", "Resemble-Enhance", "Resemble AI", "mit", "fx"),
         ];
         Dictionary<string, ArtifactIdentity> byId = new(rows.Length, StringComparer.OrdinalIgnoreCase);

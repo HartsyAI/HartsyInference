@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -84,8 +87,8 @@ internal sealed class MiniMaxH3VideoVaeVitBlock
         backend.SliceLastDim(v, qkv, 2 * hd);
         backend.RmsNorm(qn, q, qkNormOnes, _config.Eps);
         backend.RmsNorm(kn, k, qkNormOnes, _config.Eps);
-        backend.ApplyRopeSingle(qn, cos, sin, _config.RopeDim);
-        backend.ApplyRopeSingle(kn, cos, sin, _config.RopeDim);
+        backend.Rotary(RotaryCall.TokenMajor(qn, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _config.RopeDim));
+        backend.Rotary(RotaryCall.TokenMajor(kn, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _config.RopeDim));
 
         TensorShape bhsd = new TensorShape(1, heads, seq, hd);
         using Tensor qh = new Tensor(bhsd, DType.F32);
@@ -110,7 +113,7 @@ internal sealed class MiniMaxH3VideoVaeVitBlock
         using Tensor gateUp = new Tensor(new TensorShape(seq, 2L * inner), DType.F32);
         backend.Linear(gateUp, x, _w1W!, _w1B);
         using Tensor act = new Tensor(new TensorShape(seq, inner), DType.F32);
-        backend.GluActivate(act, gateUp, inner, gelu: false);
+        backend.Glu(act, gateUp, GluSpec.SwiGlu);
         Tensor outT = new Tensor(new TensorShape(seq, _config.Dim), DType.F32);
         backend.Linear(outT, act, _w2W!, _w2B);
         return outT;

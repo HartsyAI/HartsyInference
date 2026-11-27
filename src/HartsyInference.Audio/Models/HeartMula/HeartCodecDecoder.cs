@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Whisper;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -299,7 +300,7 @@ public sealed unsafe class HeartCodecDecoder : IDisposable
             backend.SliceRows(uncond, dphi, 0);      // dphi batch 0
             backend.SliceRows(cond, dphi, t2);       // dphi batch 1
             dphi.Dispose();
-            backend.CfgEulerStep(x, cond, uncond, Guidance, dt);   // pos=cond, neg=uncond
+            backend.GuidedEulerStep(x, cond, uncond, GuidedEulerSpec.Lerp(Guidance, dt));   // pos=cond, neg=uncond
             uncond.Dispose(); cond.Dispose();
             tcur += dt;
         }

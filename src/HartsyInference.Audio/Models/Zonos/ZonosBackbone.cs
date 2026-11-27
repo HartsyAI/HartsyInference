@@ -66,7 +66,7 @@ public sealed unsafe class ZonosBackbone : IDisposable
     public Tensor ForwardResident(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache)
     {
         // Interleaved-RoPE angle tables for absolute positions [posStart, posStart+t), shaped [1, t, headDim] with
-        // the first headDim/2 lanes populated (matching ApplyRopeInterleaved's cp[pos*headDim + i], i<half).
+        // the first headDim/2 lanes populated (matching the interleaved rotary (RotaryCall.TokenMajor)'s cp[pos*headDim + i], i<half).
         Tensor cosGpu = BuildRopeSlice(_cos!, posStart, t);
         Tensor sinGpu = BuildRopeSlice(_sin!, posStart, t);
         try

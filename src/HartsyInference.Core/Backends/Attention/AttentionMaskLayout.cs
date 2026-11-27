@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>Where element <c>(b, h, q, k)</c> of an additive attention mask lives, in elements: <c>b·Batch + h·Head +
 /// q·Row + k</c>, a stride of 0 on a broadcast axis. Every backend accepts the same shapes, F32 only:

@@ -12,18 +12,16 @@ public sealed unsafe class Hunyuan3DShapeVae
     private readonly Hunyuan3DVaeResBlock[] _resblocks;
     private readonly Hunyuan3DGeoDecoder _geo;
     private Tensor? _postKlW, _postKlB;
-    private readonly int _fourierDim;
 
     public Hunyuan3DConfig Config => _cfg;
-    public int FourierDim => _fourierDim;
 
     public Hunyuan3DShapeVae(Hunyuan3DConfig cfg)
     {
         _cfg = cfg;
         _resblocks = new Hunyuan3DVaeResBlock[cfg.VaeDepth];
         for (int i = 0; i < cfg.VaeDepth; i++) _resblocks[i] = new Hunyuan3DVaeResBlock(cfg.VaeWidth, cfg.VaeNumHeads);
-        _fourierDim = 3 * (2 * cfg.FourierBands + 1);   // include_input + sin/cos: 3·(1+2·8) = 51
-        _geo = new Hunyuan3DGeoDecoder(cfg.VaeWidth, cfg.VaeNumHeads, cfg.FourierBands, _fourierDim);
+        _geo = new Hunyuan3DGeoDecoder(cfg.VaeWidth / cfg.GeoDownsample, cfg.VaeNumHeads / cfg.GeoDownsample, cfg.FourierBands,
+            cfg.VaeWidth, cfg.GeoMlpRatio, cfg.GeoLnPost);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
@@ -62,7 +60,7 @@ public sealed unsafe class Hunyuan3DShapeVae
     /// <summary>Full grid decode: process latents once, then chunk the <paramref name="resolution"/>³ query grid over <c>[-bound,bound]</c> into occupancy → <see cref="ScalarField3D"/>.</summary>
     // chunkSize bounds the geo-decoder cross-attn scores buffer (H·chunk·Nlatent floats): 4096 → ~1.6 GB at
     // heads 16 / 3072 latents. Larger values (e.g. 32768 → ~6 GB) OOM alongside the weights on a 24 GB card.
-    public ScalarField3D Decode(IBackend backend, Tensor latent, int resolution, float bound, int chunkSize = 4096)
+    public ScalarField3D Decode(IBackend backend, Tensor latent, int resolution, float bound, int chunkSize = 4096, CancellationToken cancel = default)
     {
         if (latent.Shape.Rank != 3 || latent.Shape[0] != 1)
             throw new ArgumentException($"latent must be [1,N,C]; got {latent.Shape}.", nameof(latent));
@@ -72,10 +70,49 @@ public sealed unsafe class Hunyuan3DShapeVae
         if (EngineKnobs.Hy3dVaeChunk.Value is int envChunk && envChunk > 0)
             chunkSize = envChunk;
 
+        cancel.ThrowIfCancellationRequested();
         Tensor processed = ProcessLatents(backend, latent);
         (Tensor kNorm, Tensor v) kv = _geo.PrepareKv(backend, processed);
         processed.Dispose();
+        try
+        {
+            return DecodeGrid(resolution, bound, chunkSize, (ReadOnlySpan<float> coords, int count, Span<float> logits) =>
+            {
+                // Host coords → device tensor (uploaded once per chunk); FourierEmbed then runs on-device.
+                Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
+                try
+                {
+                    coords[..(count * 3)].CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
+                    Tensor occ = DecodePoints(backend, kv, coordsT, count);
+                    try
+                    {
+                        Tensor occF = TensorCasts.EnsureF32(occ);
+                        new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(logits);
+                        if (!ReferenceEquals(occF, occ)) occF.Dispose();
+                    }
+                    finally
+                    {
+                        occ.Dispose();
+                    }
+                }
+                finally
+                {
+                    coordsT.Dispose();   // after the occ readback (which drains the stream) → the coords upload is safely complete
+                }
+            }, cancel);
+        }
+        finally
+        {
+            kv.kNorm.Dispose(); kv.v.Dispose();
+        }
+    }
 
+    internal delegate void ChunkQuery(ReadOnlySpan<float> coordinates, int count, Span<float> logits);
+
+    /// <summary>The query grid in chunks: <paramref name="query"/> gets <c>count</c> points of the <paramref name="resolution"/>³ grid over <c>[-bound, bound]</c> (x fastest, so <c>Values[x + res * (y + res * z)]</c>) and writes their logits.
+    /// <paramref name="cancel"/> is checked before every chunk, so a cancelled decode stops within one chunk.</summary>
+    internal static ScalarField3D DecodeGrid(int resolution, float bound, int chunkSize, ChunkQuery query, CancellationToken cancel = default)
+    {
         int res = resolution;
         long total = (long)res * res * res;
         float[] values = new float[total];
@@ -85,6 +122,7 @@ public sealed unsafe class Hunyuan3DShapeVae
         long done = 0;
         while (done < total)
         {
+            cancel.ThrowIfCancellationRequested();
             int count = (int)Math.Min(chunkSize, total - done);
             for (int i = 0; i < count; i++)
             {
@@ -96,24 +134,61 @@ public sealed unsafe class Hunyuan3DShapeVae
                 coordBuf[i * 3 + 1] = -bound + iy * step;
                 coordBuf[i * 3 + 2] = -bound + iz * step;
             }
-            // Host coords → device tensor (uploaded once per chunk); FourierEmbed then runs on-device.
-            Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
-            new ReadOnlySpan<float>(coordBuf, 0, count * 3).CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
-            Tensor occ = DecodePoints(backend, kv, coordsT, count);
-            Tensor occF = TensorCasts.EnsureF32(occ);
-            new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(values.AsSpan((int)done, count));
-            if (!ReferenceEquals(occF, occ)) occF.Dispose();
-            occ.Dispose();
-            coordsT.Dispose();   // after occ readback (which drains the stream) → coords upload safely complete
+
+            query(coordBuf, count, values.AsSpan((int)done, count));
             done += count;
         }
-        kv.kNorm.Dispose(); kv.v.Dispose();
 
         return new ScalarField3D
         {
             Values = values, ResX = res, ResY = res, ResZ = res,
             Min = (-bound, -bound, -bound), Max = (bound, bound, bound),
         };
+    }
+
+    /// <summary>FlashVDM decode: processes the latents once, then evaluates a coarse grid and only a band around the surface at each finer level.</summary>
+    /// <returns>A field whose unevaluated points are NaN; its resolution follows <see cref="Hunyuan3DFlashVdm.Resolutions"/>, not <paramref name="octreeResolution"/>.</returns>
+    public ScalarField3D DecodeFlashVdm(IBackend backend, Tensor latent, int octreeResolution, float bound, float mcLevel = 0f, CancellationToken cancel = default)
+    {
+        if (latent.Shape.Rank != 3 || latent.Shape[0] != 1)
+            throw new ArgumentException($"latent must be [1,N,C]; got {latent.Shape}.", nameof(latent));
+        cancel.ThrowIfCancellationRequested();
+        Tensor processed = ProcessLatents(backend, latent);
+        (Tensor kNorm, Tensor v) kv = _geo.PrepareKv(backend, processed);
+        processed.Dispose();
+        try
+        {
+            Hunyuan3DKvHost host = new(kv.kNorm, kv.v);
+            int latents = host.Latents;
+            int topK = latents == 3072 ? 1024 : latents == 512 ? 256 : latents / 3;
+            return Hunyuan3DFlashVdm.Decode((ReadOnlySpan<float> coords, int count, int stride, Span<float> logits) =>
+            {
+                Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
+                try
+                {
+                    coords[..(count * 3)].CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
+                    Tensor occ = _geo.QueryTopK(backend, kv, host, coordsT, count, stride, topK);
+                    try
+                    {
+                        Tensor occF = TensorCasts.EnsureF32(occ);
+                        new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(logits);
+                        if (!ReferenceEquals(occF, occ)) occF.Dispose();
+                    }
+                    finally
+                    {
+                        occ.Dispose();
+                    }
+                }
+                finally
+                {
+                    coordsT.Dispose();
+                }
+            }, octreeResolution, bound, mcLevel, cancel: cancel);
+        }
+        finally
+        {
+            kv.kNorm.Dispose(); kv.v.Dispose();
+        }
     }
 
     internal static Tensor F32(Tensor t) => TensorCasts.EnsureF32(t);

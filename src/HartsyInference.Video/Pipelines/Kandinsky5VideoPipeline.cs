@@ -259,7 +259,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
             // re-pin, the first-frame normalization and the VAE handoff below reading the tensor they were given.
             sampler.Step(Backend, noisy, predictor, i);
 
-            // The step now lands on the DEVICE (CfgEulerStep is in-place and leaves the latent GPU-resident), while
+            // The step now lands on the DEVICE (GuidedEulerStep is in-place and leaves the latent GPU-resident), while
             // the FreeActivations sweep at the bottom of the loop reclaims device buffers WITHOUT a D2H sync-back.
             // Materialize the latent here so the sweep cannot silently discard the step. Costs nothing net: the
             // pre-sampler loop kept the latent host-side and materialized the velocity instead.

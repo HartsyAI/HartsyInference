@@ -1,0 +1,149 @@
+# MOSS-VL-Realtime
+
+OpenMOSS's open-weights vision-language model for realtime video understanding (arXiv 2608.15045). Realtime means the
+model reads frames as they arrive, emits text incrementally, and can stay silent with `<|silence|>` when nothing needs a
+reply. It is **not** the full-duplex speech system MOSS-Live (API-only, no weights). ASR, TTS and memory come from the
+demo layer, not the model.
+
+## Sources (snapshot 2026-11-08)
+
+- Weights: `OpenMOSS-Team/MOSS-VL-Realtime-SGLANG` (sha `3d6407cc`, not gated, Apache-2.0). Five BF16 shards,
+  22,672,742,416 bytes in total, 895 tensors. Quantized builds (all Apache-2.0, not gated; checked 2026-11-08):
+  - `OpenMOSS-Team/MOSS-VL-Realtime-NF4`: bitsandbytes NF4, three shards, 11,841,998,136 bytes (about 11.8 GB). Layers 0–3 and
+    44–47, cross-attention, vision and `lm_head` stay BF16.
+  - `OpenMOSS-Team/MOSS-VL-Realtime-FP8`: compressed-tensors FP8, four shards, 15,729,921,752 bytes (about 15.7 GB). Quantizes
+    the self-attention and MLP linears of the 36 self-attention layers (per-channel FP8 weights, dynamic per-token FP8
+    activations). Cross-attention, vision, merger and `lm_head` stay BF16.
+  - `SkyContact/MOSS-VL-Realtime-GGUF`: third-party GGUF `Moss-VL-Realtime-q4k.gguf`, 8,423,234,016 bytes (about 8.4 GB). Its
+    tags name the NF4 repo as base. The first 8 MiB of the header show text blocks with cross-attention, the vision blocks,
+    the four-stream merger (`mm.ln0`–`ln3`), `mm.separator` and `general.architecture = moss_vl`. Provenance and per-tensor
+    quant types are not checked yet.
+- Code: `modeling_moss_vl.py` (4,773 lines, transformers 5.12.1 style), `configuration_moss_vl.py`, `processing_moss_vl.py`,
+  `video_processing_moss_vl.py`, `inference.md`. Downloaded to `Models/LLM/moss-vl-realtime/` (gitignored).
+- Hashes and file sizes come from the Hub's LFS listing. The shard sha256 values match the listing.
+
+## Verified facts (from `config.json`, the index and the shard headers)
+
+| item | value |
+|---|---|
+| text decoder | 48 layers, hidden 4096, 32 heads, 8 KV heads, head_dim 128, FFN 12288, vocab 151936 |
+| cross-attention layers | `[2, 6, 10, …, 46]`, 12 of them; the other 36 are self-attention |
+| RoPE | theta 5,000,000; interleaved M-RoPE, sections `[24, 20, 20]` |
+| norms and bias | RMSNorm eps 1e-6; per-head Q/K RMSNorm on every layer; no attention bias |
+| embeddings | `tie_word_embeddings: false`; `lm_head.weight` separate |
+| ViT | 27 blocks, hidden 1152, FFN 4304, 16 heads, patch 16, merge 2, temporal patch 1, 2304 learned positions |
+| deepstack | taps at blocks 8, 16, 24; merger input = 4 × 4608 = 18432 (last block plus three taps) |
+| merger out | 4096 (the decoder width); cross-attention reads these features |
+| special tokens | image 151655, video 151656, vision start 151652, vision end 151653, separator is a learned parameter |
+| dtype | all 895 tensors BF16 |
+| checkpoint layout | HF transformers names (`model.language_model.*`, `model.visual.*`) |
+
+Checkpoint keys match the config exactly: 552 text-decoder keys (396 self-attention, 156 cross-attention), 324 ViT keys,
+12 merger keys, 2 patch-embed keys, 1 position key, 4 embedding/head keys, plus `model.separator_token`.
+
+Cross-attention layers store their two gates as **layer-level** names (`layers.N.cross_attn_attn_gate`, not `.weight`).
+These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
+
+## Architecture (from `modeling_moss_vl.py`)
+
+- **Vision.** Qwen3-VL-style ViT: conv patch embed, learned absolute positions interpolated to the grid, 2-D RoPE,
+  LayerNorm blocks with fused `attn.qkv`, GELU-tanh MLP. The merger LayerNorms each of the 4 streams separately,
+  concatenates them, then runs a 2-layer MLP to 4096.
+- **Text self-attention.** GQA with per-head Q/K RMSNorm, then interleaved M-RoPE. Causal.
+- **Cross-attention layer.** `h = x + tanh(attn_gate) · o(attn(q_norm(q_proj(rms(x))) rope, k_norm(k_proj(v)) rope, v_proj(v)))`,
+  `out = h + tanh(mlp_gate) · mlp(rms(h))`. Vision keys and values are not causal. Unlike Mllama, the **query is
+  RoPE-rotated** too (`query_position_embeddings`), and the keys carry the vision RoPE once, when they are first
+  computed. The cache holds rotated keys.
+- **Realtime.** A session queues frames and text. Each cycle drains the queues, encodes new frames, appends their
+  features to the cross-attention cache, then decodes. `<|silence|>` as the sampled token ends the cycle and waits for
+  new input. A separator embedding is inserted between segments. Realtime M-RoPE is computed per segment
+  (`_compute_realtime_mrope_for_segment`).
+
+## Reuse map
+
+| need | existing owner | fit |
+|---|---|---|
+| text decoder stack, GQA, RMSNorm, SwiGLU, KV cache | `LLM/Transformer/GenericTransformer` with `TransformerConfig` | direct. Config reader is `Models/MossVl/MossVlConfig` (new). |
+| gated cross-attention layer | `LLM/Multimodal/MllamaCrossAttentionLayer` | same weights and gates; **gap:** no query/key RoPE (it already has Q/K RMSNorm) |
+| cross-attention plumbing (`crossStates`, stage handoff) | `GenericTransformer.ForwardEmbeds*` | direct |
+| interleaved M-RoPE tables | `Core/Rope` (`MRopePositions`, `MRopePairAxes`, `MRopeTable`) | direct for Qwen-VL; check it matches `[24,20,20]` interleaved |
+| Qwen3-VL ViT | `Diffusion/Models/TextEncoders/Qwen3VlVisionEncoder` (safetensors), `LLM/Multimodal/Qwen3VlEncoder` (GGUF) | **gap:** neither has the deepstack merger (input 4× wide). Both are missing it per the code comments |
+| merger | none | new, but small |
+| tokenizer | `ModelAssets/Tokenizers` (`tokenizer.json`) | direct |
+| HF loader dispatch | `Engine/Services/HfTextDirectoryLoader` (`RequireSupported`) | add MOSS-VL to the Text path only after a text-only path exists; multimodal goes through the vision path |
+
+## Gaps and open items
+
+Done since the first snapshot: cross-attention query/key RoPE, the deepstack merger, multi-image prompts, raw-pixel
+preprocessing, stored-precision loads, the GGUF vision tower, and the Engine/CLI route (`hartsy text -m moss-vl-realtime -i …`).
+
+1. Realtime session loop: done. `RealtimeVlmSession` (generic, `LLM/Multimodal/Streaming`) follows the reference
+   `_real_time_sample`: frames and prompts are spliced in after each token, `<|silence|>` idles with a 20 ms poll, a cycle with
+   prompts and frames gets a spliced `<|silence|>`, and a prompt appends a new turn (the stream never truncates). The reference has
+   no visual-KV window; a session that reaches its vision cap is refused by name. Engine `OpenRealtimeAsync`, CLI `--realtime`,
+   and SSE routes under `/v1/native/realtime/sessions`.
+2. Video input: done. Offline video uses one timed vision block per the processor; frames are sized by the reference video
+   smart-resize.
+3. NF4 (bitsandbytes double-quant) and FP8 (compressed-tensors per-channel) checkpoints: done. They load through
+   `HfQuantCheckpoint` and a one-time GGUF cache, NF4 as Q4_K and FP8 as Q8_0 where the backend keeps those packed
+   (`DenseTextWeightPolicy`). Against the BF16 checkpoint, NF4 decodes at 9.3% relative RMS (12.2% after Q4_K) and FP8 at 2.7%
+   (2.7% after Q8_0). NF4 as Q4_0 (12.9%) was tried first and produced garbage: hidden-state drift against the F16 stack reached
+   18% by layer 16 (Q4_K: 1.8%), driven by the stack's large outlier activations. `--precision` (a GGUF type) re-quantizes the BF16
+   projections a release leaves unquantized; with it both releases run on a 12 GB card (NF4 + q8_0: 28.8 tok/s, FP8 + q4_k:
+   9.7 tok/s on Vulkan).
+4. Performance (alpha.415): each cross-attention image group attends only its own rows, so a video's prefill no longer grows with
+   frames squared (64 frames: 378 s to 10.2 s on Vulkan). The vision tower (about 325 ms per 256×256 frame on Vulkan) bounds a live
+   session near 3 frames per second; decode slows past about 32 frames held (20 tok/s at 64). Neither is optimized yet.
+5. CUDA has not run here: cuBLAS 13 is missing (the cuBLAS autofetch, `paths.cublasAutofetch`, downloads it on first CUDA use; it
+   has not been run against the real redist). Full BF16 generation needs about 21 GB of device memory; the 12 GB RTX 3060 runs the GGUF.
+6. The GGUF embeds no tokenizer; `tokenizer.json` must sit beside it (the catalog fetches it). Its `config.json` is optional:
+   `MossVlConfig.FromGguf` reads the `moss_vl.*` metadata and matches `config.json` exactly.
+7. Host integration (alpha.420), for an app that lists and drives local models without a CLI:
+   - `TextService.InputCapabilities(path)` reads a GGUF header or a checkpoint folder's `config.json` and answers
+     `(Images, Video, RealtimeSession)`; MOSS-VL is all three with no `mmproj` sidecar. It loads nothing and never throws.
+   - `TextService.LoadedPlacements` lists a loaded MOSS-VL model (a single-device placement made for the purpose) so a host's
+     "loaded, and where" badge works the same as for a GGUF the planner placed.
+   - Variants are downloadable: `ModelDownloader.DownloadVariantAsync(entry, "nf4" | "fp8" | "bf16" | "gguf-q4k", progress, ct)`,
+     `hartsy pull moss-vl-realtime --variant nf4`, or `POST /admin/models/pull {"model":"moss-vl-realtime","variant":"nf4"}`. A
+     folder variant is fetched at its pinned revision into `LLM/moss-vl-realtime-<variant>/` (each folder apart, since a folder
+     holding both a GGUF and a shard index is ambiguous), every file SHA-256-verified, and every shard its index names is checked.
+   - Video decode needs ffmpeg and ffprobe: on `PATH`, or in the folder named by `paths.ffmpegDir`. A caller that decodes video
+     itself can pass `TextMessage.VideoFrames` and skip ffmpeg.
+
+## Status
+
+- Config reader: `src/HartsyInference.LLM/Models/MossVl/MossVlConfig.cs`. Unit tests on the real config.
+- Layout check: `tests/HartsyInference.LLM.Tests/MossVlCheckpointTests.cs` (`Category=Integration`, `HARTSY_MOSS_VL_INDEX`).
+  Passes on the real index: 895 keys, exact match with the config-derived set.
+- Vision tower: `src/HartsyInference.Diffusion/Models/TextEncoders/MossVlVisionTower.cs`, which reuses
+  `Qwen3VlVisionEncoder` and adds the `UnifiedDeepstackMerger` mode (per-stream LayerNorm, concatenate, one MLP).
+  Parity against `tests/python-reference/dump_moss_vl_vision.py` on the real weights, grid 1×16×24:
+  max|diff| 7.5e-4 on max|ref| 279, relative 2.7e-6 (`MossVlVisionParityTests`, `HARTSY_MOSS_VL_INDEX` +
+  `HARTSY_MOSS_VL_REF`). The reference is a numpy transcription of `modeling_moss_vl.py`, not the official code executed.
+- Cross-attention RoPE: `MllamaCrossAttentionLayer.Forward` takes an optional `MultimodalRope` (text cos/sin for the queries,
+  vision cos/sin for the keys, and a per-row mask). `GenericTransformer.ForwardEmbeds` takes the same tables; null keeps the mllama path.
+- Text model: `src/HartsyInference.LLM/Models/MossVl/MossVlTextDecoder.cs` (`GenericTransformer` with `lm_head`, and the separator) and
+  `MossVlPositions.cs` (single-image positions per `compute_position_ids` and `compute_vision_position_ids`, interleaved M-RoPE).
+  Parity: `tests/python-reference/dump_moss_vl_text.py` against `MossVlTextParityTests` (layers 0–2, real weights). The cross
+  layer's delta matches at relative 5e-7. The checkpoint's gates are about 1e-2, so the full hidden state alone would not catch a
+  cross-attention error; the test checks the delta.
+- Logits and decode: `MossVlDecodeSession` (`src/HartsyInference.LLM/Models/MossVl/MossVlGenerator.cs`) runs prefill and KV-cached
+  steps, with the decode token at the prompt's next position and the same vision features read by the cross layers. Parity
+  against the numpy recompute: relative ~1e-6, same greedy token. Reuses `GenericTransformer.ProjectLogits`, `SamplerChain` and
+  `VlmDecodeOps`, and `HfTokenizerJson` for `tokenizer.json`.
+- GGUF text source: `MossVlTextDecoder.OpenGguf` with `MossVlKeyMapper` (`moss_vl`). Q4_K and Q6_K projections stay packed
+  (`keepQuantized`). CPU parity on layers 0–2 against the BF16 reference: relative 5.0e-3, cross-layer delta 6.5e-3. Vulkan
+  parity matches the CPU result. CUDA has not run here (cuBLAS 13 missing).
+- Test generation (`MossVlGenerateTests`, Vulkan, all 48 layers, packed quant): the reply was "A static, full-frame image of a
+  television test pattern with multicolored vertical bars and a grainy texture." The image features come from the numpy vision
+  dump, not a fresh run of the vision tower. The reply has not been checked against that image beyond this one run.
+- Backend-aware loads: `MossVlLoadOptions.Backend` keeps BF16 on a BF16 backend, casts it once to F16 on Vulkan (refusing values
+  beyond F16's range by name), and keeps GGUF quants packed where the backend has a kernel (shared `DenseWeightCasts`,
+  `QuantizedWeightPolicy`). Layers 0–2 on Vulkan from the BF16 checkpoint: relative 2.9e-5.
+- GGUF vision tower: `MossVlVisionTower.OpenGguf` maps `v.*`/`mm.*` to `model.visual.*` and removes the converter's qkv padding
+  (q and k per rotary half, 36 to 40 rows; v per head, 72 to 80). CPU parity 1.9e-6; Vulkan 5e-4.
+- Pixels: `MossVlImageProcessor` (Qwen2-VL smart resize, PIL bicubic on 8-bit, batch pixel budget) over `Core.Imaging`. Grids match
+  `transformers` exactly; 0.2–0.3% of values differ by one 8-bit level.
+- Engine: `TextService` routes a `moss_vl` GGUF or checkpoint folder to `MossVlRuntime` (decoder and tower on the slot backend,
+  weights preloaded), streams the reply, and refuses a request without an image. On Vulkan through the CLI, a synthetic red disc
+  and blue square were named correctly at about 29 tok/s decode.

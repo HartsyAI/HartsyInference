@@ -36,9 +36,9 @@ internal sealed unsafe class IndexTtsBigVganResBlock : IDisposable
         for (int i = 0; i < _dilations.Length; i++)
         {
             _convs1W[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.convs1.{i}"));
-            _convs1B[i] = EnsureF32(w[$"{prefix}.convs1.{i}.bias"]);
+            _convs1B[i] = TensorCasts.EnsureF32(w[$"{prefix}.convs1.{i}.bias"]);
             _convs2W[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.convs2.{i}"));
-            _convs2B[i] = EnsureF32(w[$"{prefix}.convs2.{i}.bias"]);
+            _convs2B[i] = TensorCasts.EnsureF32(w[$"{prefix}.convs2.{i}.bias"]);
         }
         for (int i = 0; i < _activations.Length; i++) _activations[i].LoadWeights(w, $"{prefix}.activations.{i}");
     }
@@ -75,8 +75,6 @@ internal sealed unsafe class IndexTtsBigVganResBlock : IDisposable
         }
         return cur;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private Tensor Own(Tensor t)
     {

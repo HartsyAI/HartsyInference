@@ -1,9 +1,11 @@
+using HartsyInference.LLM.Transformer;
+
 namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Interleaved-pair rotary tables for one V4.1 attention layer: cos and sin, row-major <c>[length, rotaryDim / 2]</c>.</summary>
 /// <remarks>Matches upstream <c>precompute_freqs_cis</c>, whose YaRN floors and ceils the correction range and applies
 /// no mscale, so it cannot reuse the shared <c>RopeFrequencyBuilder</c> (which does neither).</remarks>
-public sealed class DeepSeekV41RopeTable
+public sealed class DeepSeekV41RopeTable : IRopeRowSource
 {
     /// <summary>Half the rotary width: one angle per adjacent element pair.</summary>
     public int HalfDim { get; }

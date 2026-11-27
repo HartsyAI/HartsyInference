@@ -59,6 +59,8 @@ internal static class TtsCatalog
         ["fishaudio"] = FishAudioS2Model.Descriptor,
         ["fishaudio-drama3"] = FishAudioDrama3Model.Descriptor,
         ["drama3"] = FishAudioDrama3Model.Descriptor,
+        ["haru"] = HaruModel.Descriptor,
+        ["haru-4b"] = HaruModel.Descriptor,
         ["breeze"] = BreezeTtsModel.Descriptor,
         ["cosyvoice"] = CosyVoiceModel.Descriptor,
         ["f5"] = F5TtsModel.Descriptor,

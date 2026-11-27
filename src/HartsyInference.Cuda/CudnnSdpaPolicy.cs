@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
@@ -96,10 +97,6 @@ internal sealed class CudnnSdpaHealth
 
     public int RefusedShapeCount => _refused.Count;
 
-    /// <summary>Consecutive failures, permanence and retry time per signature.</summary>
-    public IReadOnlyDictionary<CudnnSdpaSignature, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> Diagnostics =>
-        _state.ToDictionary(kv => kv.Key, kv => Describe(kv.Value));
-
     /// <summary>The same snapshot folded per head dim: the highest count, permanent if any signature is.</summary>
     public IReadOnlyDictionary<long, (int ConsecutiveFailures, bool Permanent, DateTimeOffset? NextRetryAt)> DimDiagnostics =>
         _state.GroupBy(kv => (long)kv.Key.HeadDim).ToDictionary(g => g.Key, g =>
@@ -166,9 +163,9 @@ internal static class CudnnSdpaRows
     /// <summary>Every layout: the rows read each operand through its strides, and Q, K, V and the output may differ.</summary>
     internal const AttentionLayouts AnyView = AttentionLayouts.HeadMajor | AttentionLayouts.TokenMajor | AttentionLayouts.PackedRows;
 
-    /// <summary>Head dims 32–256, any bias, F16 (and BF16 when <paramref name="types"/> has it). <paramref name="gqa"/> only where the
-    /// row's entry can carry grouped K/V: the dense and token-major entries take equal head counts. <paramref name="strided"/> rows
-    /// read offset and strided views; the F32 row reads whole tensors only.</summary>
+    /// <summary>Head dims 32–256, any bias, F16 (and BF16 when <paramref name="types"/> has it). <paramref name="gqa"/> declares
+    /// native grouped K/V where the row's entry carries it; the equal-head token-major entry leaves it off. <paramref name="strided"/>
+    /// rows read offset and strided views; the F32 row reads whole tensors only.</summary>
     internal static AttentionKernelCapability Capability(string id, AttentionRoute entry, AttentionDTypes types, AttentionLayouts layouts,
         bool gqa = false, bool strided = true) => new()
     {

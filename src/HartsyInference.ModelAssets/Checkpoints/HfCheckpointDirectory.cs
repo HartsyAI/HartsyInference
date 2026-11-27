@@ -76,14 +76,17 @@ public static class HfCheckpointDirectory
 
     /// <summary>The files holding the checkpoint <paramref name="path"/> names: a folder's <see cref="WeightFiles"/>, and
     /// for a file, the whole shard set of the index in its folder that names it (so picking any one shard of a diffusers
-    /// component loads all of them), else the file alone.</summary>
+    /// component loads all of them). With no index naming it, a file named as a shard (<c>stem-00001-of-00004</c>) brings
+    /// its siblings by name, since a model downloader that fetches only weights leaves the index behind; any other file
+    /// stands alone.</summary>
+    /// <exception cref="FileNotFoundException">The file is named as a shard and one of its siblings is missing.</exception>
     public static IReadOnlyList<string> CheckpointFiles(string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         if (Directory.Exists(path))
             return WeightFiles(path);
         string file = Path.GetFullPath(path);
-        return IndexNaming(file) is { } found ? Shards(found.Index, found.Map) : [file];
+        return IndexNaming(file) is { } found ? Shards(found.Index, found.Map) : ShardSetDiscovery.Resolve(file);
     }
 
     /// <summary>Every tensor name the shard index of the checkpoint holding <paramref name="file"/> maps, or null when

@@ -1,14 +1,18 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
 /// <summary>Block/page-based KV cache for ONE sequence, backed by a shared <see cref="PagedKvPool"/>: unlike <see cref="FixedKvCache"/> (one contiguous per-layer buffer sized to a worst-case max sequence length, hard-restricted to a single sequence per instance), this allocates fixed-size pages from the pool on demand as the sequence grows and returns them on <see cref="Dispose"/>/<see cref="Reset"/>, so VRAM isn't reserved per-sequence for a worst case and a finished sequence's pages are immediately reusable.</summary>
 /// <remarks>
-/// <para><b>Design: "physically paged, logically contiguous."</b> <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> gather this sequence's pages into a contiguous scratch tensor each call (via <see cref="IBackend.SliceTimeRange"/> + <see cref="IBackend.KvCacheAppend"/>, page by page) so <c>FlashAttention</c>'s existing contiguous-buffer contract is unchanged — this gets the memory-management win without a new paged-attention kernel. A true paged-attention kernel that reads pages directly (no gather) is a natural follow-up once this is correctness-proven — see docs/Checklists/LLM_DECODE_PERF_GRIND.md.</para>
+/// <para><b>Design: "physically paged, contiguous on request."</b> The pages hold every row. A layer also keeps a contiguous copy of its keys and of its values while something reads it: <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> return it after copying in only the rows that layer wrote since the last call, and a write at a position (a decode step, a rollback, a retried round) marks it stale from that position on. While the copy exists a pooled sequence holds those rows twice; the pool budget counts the pages only.</para>
+/// <para><b>Reading the pages directly.</b> As an <see cref="IPagedAttentionKvSource"/> the cache hands an attention call its page buffers and page table. A layer that a call has read that way drops its contiguous copy (<see cref="PagesServed"/>) and stops maintaining it; a later <see cref="KeyPrefix"/> rebuilds it from the pages. A layer whose copy had to be rebuilt after being dropped is read both ways, so from then on it keeps the copy, and each contiguous read copies in only the rows written since the last one.</para>
 /// <para><b>Backend capture:</b> <see cref="IKvCache.KeyPrefix"/>/<see cref="IKvCache.ValuePrefix"/> don't receive an <see cref="IBackend"/> parameter (matching the existing interface), but gathering pages requires issuing backend calls, so this cache captures the <see cref="IBackend"/> passed to the most recent <see cref="AppendStep"/> and reuses it for the gather; every caller in this codebase uses exactly one backend instance per session, so this holds in practice without a wider interface change.</para>
 /// </remarks>
-public sealed class PagedKvCache : IKvCache
+public sealed class PagedKvCache : IKvCache, IPagedAttentionKvSource
 {
     private readonly PagedKvPool _pool;
     private readonly List<int> _blockTable = [];
@@ -16,9 +20,23 @@ public sealed class PagedKvCache : IKvCache
     private int _physicallyWritten;  // tokens actually present in pages; >= _currentLength, catches up to it via AdvanceLength
     private IBackend? _lastBackend;
     private int _disposed;
+    // The page table as a tensor, for a call that reads the pages; rebuilt after the table changes.
+    private Tensor? _pageTableTensor;
+    private int _highestPage;
+    // Per layer: a paged read dropped the contiguous copy, and a contiguous read then needed it again (so it is kept).
+    // A kept copy holds that layer's rows a second time, outside the pool's budget, until the cache is reset or disposed.
+    private readonly bool[] _copyDropped;
+    private readonly bool[] _copyKept;
 
     private readonly Tensor?[] _scratchK;
     private readonly Tensor?[] _scratchV;
+    // Per layer: rows this layer has written to its pages, and how many leading rows of each contiguous prefix already
+    // equal those pages. A prefix call copies only the rows past its watermark; a write at a position lowers it to there.
+    private readonly int[] _written;
+    // Rows the prefix may be sized ahead to (the caller's token bound, page-rounded); 0 when no bound was given.
+    private readonly int _reserveRows;
+    private readonly int[] _currentK;
+    private readonly int[] _currentV;
 
     public int NumLayers => _pool.NumLayers;
     public int CurrentLength { get { ThrowIfDisposed(); return _currentLength; } }
@@ -32,14 +50,96 @@ public sealed class PagedKvCache : IKvCache
     /// <summary>Pages currently held by this sequence (for observability/logging).</summary>
     public int PagesHeld { get { ThrowIfDisposed(); return _blockTable.Count; } }
 
-    public PagedKvCache(PagedKvPool pool)
+    /// <summary>The sequence's page table: entry <c>i</c> is the pool page that holds rows <c>[i × PageSize, (i + 1) × PageSize)</c>.
+    /// It changes when the sequence grows, rolls back or resets, and a page it no longer lists may already belong to another
+    /// sequence, so a reader takes it afresh for each use.</summary>
+    public IReadOnlyList<int> PageTable { get { ThrowIfDisposed(); return _blockTable; } }
+
+    /// <param name="pool">The page pool this sequence draws from.</param>
+    /// <param name="expectedTokens">The most tokens the sequence will hold (prompt plus generation), when the caller knows
+    /// it. The contiguous prefix is then sized ahead in steps up to this bound, so it is not regrown every page; 0 keeps
+    /// it at the valid length rounded up to a page.</param>
+    public PagedKvCache(PagedKvPool pool, int expectedTokens = 0)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(expectedTokens);
         _pool = pool;
+        _reserveRows = expectedTokens == 0 ? 0 : RoundUpToPage(expectedTokens);
         _scratchK = new Tensor?[pool.NumLayers];
         _scratchV = new Tensor?[pool.NumLayers];
+        _written = new int[pool.NumLayers];
+        _currentK = new int[pool.NumLayers];
+        _currentV = new int[pool.NumLayers];
+        _copyDropped = new bool[pool.NumLayers];
+        _copyKept = new bool[pool.NumLayers];
     }
 
     public void AppendStep(IBackend backend, int layer, Tensor newK, Tensor newV)
+    {
+        AppendKvPages(backend, layer, newK, newV);
+        AppendKvContiguous(backend, layer, newK, newV);
+    }
+
+    /// <inheritdoc/>
+    public void AppendKvContiguous(IBackend backend, int layer, Tensor k, Tensor v)
+    {
+        ThrowIfDisposed();
+        int tNew = (int)k.Shape[2];
+        AppendToPrefix(backend, layer, isKey: true, k, _currentLength, tNew);
+        AppendToPrefix(backend, layer, isKey: false, v, _currentLength, tNew);
+    }
+
+    /// <inheritdoc/>
+    public bool TryGetPages(int layer, int rows, out Tensor keyPages, out Tensor valuePages, out AttentionKvPages pages)
+    {
+        ThrowIfDisposed();
+        // A layer that has not written every row the call reads would be read past its own rows.
+        if (rows <= 0 || _written[layer] < rows)
+        {
+            keyPages = valuePages = null!;
+            pages = default;
+            return false;
+        }
+        if (_pageTableTensor is null)
+        {
+            Tensor table = new(new TensorShape(_blockTable.Count), DType.I32);
+            Span<int> entries = table.AsSpan<int>();
+            int highest = 0;
+            for (int i = 0; i < entries.Length; i++)
+            {
+                entries[i] = _blockTable[i];
+                highest = Math.Max(highest, _blockTable[i]);
+            }
+            _pageTableTensor = table;
+            _highestPage = highest;
+        }
+        keyPages = _pool.KeyPages(layer);
+        valuePages = _pool.ValuePages(layer);
+        pages = new AttentionKvPages(_pageTableTensor, _pool.PageSize, _highestPage);
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public void PagesServed(int layer)
+    {
+        ThrowIfDisposed();
+        // A layer read both ways keeps its copy: dropping it again would rebuild all of it at the next contiguous read.
+        if (_copyKept[layer]) return;
+        _copyDropped[layer] = true;
+        _scratchK[layer]?.Dispose();
+        _scratchV[layer]?.Dispose();
+        _scratchK[layer] = _scratchV[layer] = null;
+        _currentK[layer] = _currentV[layer] = 0;
+    }
+
+    /// <summary>The page table changed: a call must not read the tensor built from the old one.</summary>
+    private void PageTableChanged()
+    {
+        _pageTableTensor?.Dispose();
+        _pageTableTensor = null;
+    }
+
+    /// <inheritdoc/>
+    public void AppendKvPages(IBackend backend, int layer, Tensor newK, Tensor newV)
     {
         ThrowIfDisposed();
         _lastBackend = backend;
@@ -53,38 +153,38 @@ public sealed class PagedKvCache : IKvCache
         int target = _currentLength + tNew;
         GrowBlockTableIfNeeded(target);
         if (_physicallyWritten < target) _physicallyWritten = target;
+        if (_written[layer] < target) _written[layer] = target;
+        // The rows from here on are being (re)written, so neither contiguous prefix can be trusted past this position.
+        if (_currentK[layer] > _currentLength) _currentK[layer] = _currentLength;
+        if (_currentV[layer] > _currentLength) _currentV[layer] = _currentLength;
 
+        _pool.Prepare(backend, layer);
+        Tensor kPages = _pool.KeyPages(layer), vPages = _pool.ValuePages(layer);
         int pos = _currentLength;
         int remaining = tNew;
         int srcOffset = 0;
         while (remaining > 0)
         {
-            int pageSlot = pos / _pool.PageSize;
-            int withinPage = pos % _pool.PageSize;
-            int roomInPage = _pool.PageSize - withinPage;
-            int chunkLen = Math.Min(remaining, roomInPage);
-            int physicalPage = _blockTable[pageSlot];
-            Tensor kPage = _pool.KPage(layer, physicalPage);
-            Tensor vPage = _pool.VPage(layer, physicalPage);
-
+            // Rows that sit next to each other in the pool are written in one copy: a decode step's single row, and a
+            // prefill's whole run of pages when the pool handed them out in order.
+            int chunkLen = AdjacentRows(pos, remaining);
+            int poolRow = PoolRow(pos);
             if (chunkLen == tNew)
             {
-                // Common case (every decode step: tNew=1 always fits in one page-write, no slice needed).
-                backend.KvCacheAppend(kPage, newK, withinPage);
-                backend.KvCacheAppend(vPage, newV, withinPage);
+                backend.KvCacheAppend(kPages, newK, poolRow);
+                backend.KvCacheAppend(vPages, newV, poolRow);
             }
             else
             {
-                // Multi-page-spanning append (prefill: tNew = prompt length). Slice the chunk destined for
-                // THIS page out of newK/newV first.
+                // The appended rows land in more than one place in the pool: slice out the rows for this run.
                 Tensor kChunk = new(new TensorShape(1, _pool.NumKvHeads, chunkLen, headDim), DType.F32);
                 Tensor vChunk = new(new TensorShape(1, _pool.NumKvHeads, chunkLen, headDim), DType.F32);
                 try
                 {
-                    backend.SliceTimeRange(kChunk, newK, srcOffset, chunkLen);
-                    backend.SliceTimeRange(vChunk, newV, srcOffset, chunkLen);
-                    backend.KvCacheAppend(kPage, kChunk, withinPage);
-                    backend.KvCacheAppend(vPage, vChunk, withinPage);
+                    StridedCopies.SliceAxis(backend, kChunk, newK, 2, srcOffset, chunkLen);
+                    StridedCopies.SliceAxis(backend, vChunk, newV, 2, srcOffset, chunkLen);
+                    backend.KvCacheAppend(kPages, kChunk, poolRow);
+                    backend.KvCacheAppend(vPages, vChunk, poolRow);
                 }
                 finally
                 {
@@ -99,6 +199,112 @@ public sealed class PagedKvCache : IKvCache
         }
     }
 
+    /// <summary>The row of the pool's per-layer buffers that holds the sequence's row <paramref name="pos"/>.</summary>
+    private int PoolRow(int pos) => _pool.FirstRow(_blockTable[pos / _pool.PageSize]) + pos % _pool.PageSize;
+
+    /// <summary>How many of the <paramref name="wanted"/> rows from <paramref name="pos"/> on sit next to each other in the
+    /// pool: the rest of that row's page, plus each following page whose pool page is the next one.</summary>
+    private int AdjacentRows(int pos, int wanted)
+    {
+        int slot = pos / _pool.PageSize;
+        int rows = _pool.PageSize - pos % _pool.PageSize;
+        while (rows < wanted && slot + 1 < _blockTable.Count && _blockTable[slot + 1] == _blockTable[slot] + 1)
+        {
+            rows += _pool.PageSize;
+            slot++;
+        }
+        return Math.Min(rows, wanted);
+    }
+
+    private int RoundUpToPage(int rows) => ((Math.Max(rows, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
+
+    /// <summary>Rows a new prefix buffer gets when it must hold <paramref name="len"/> valid rows. Without a token bound that
+    /// is the length rounded up to a page, the count the per-call rebuild produced. With one, the buffer is sized ahead
+    /// by an eighth of the length (at least 256 rows) and never past the bound, so a sequence regrows its prefix a
+    /// handful of times instead of once a page, and a prefill usually allocates it once.</summary>
+    private int PrefixCapacity(int len)
+    {
+        int needed = RoundUpToPage(len);
+        if (_reserveRows == 0) return needed;
+        int ahead = RoundUpToPage(len + Math.Max(256, len / 8));
+        return Math.Max(needed, Math.Min(_reserveRows, ahead));
+    }
+
+    /// <summary>Adds the rows just written at <paramref name="pos"/> to the layer's contiguous prefix, straight from the
+    /// appended tensor, when the prefix is current up to there. A prefix that is behind is left for the next prefix call,
+    /// which catches up from the pages.</summary>
+    private void AppendToPrefix(IBackend backend, int layer, bool isKey, Tensor rows, int pos, int tNew)
+    {
+        Tensor?[] scratchArr = isKey ? _scratchK : _scratchV;
+        int[] currentRows = isKey ? _currentK : _currentV;
+        if (currentRows[layer] != pos) return;
+        int headDim = _pool.HeadDimPerLayer[layer];
+        int len = _physicallyWritten;
+        Tensor? scratch = scratchArr[layer];
+        bool grow = scratch is null || scratch.Shape[2] < len;
+        int capacity = grow ? PrefixCapacity(len) : (int)scratch!.Shape[2];
+        long copiedRows = tNew;
+        if (pos == 0 && grow)
+        {
+            // Nothing to keep: the new rows, padded out to the capacity, are the buffer. Built as an op's output, only the
+            // padding rows are uploaded from the host, not the whole buffer.
+            scratch?.Dispose();
+            scratch = new Tensor(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
+            scratchArr[layer] = scratch;
+            if (capacity == tNew)
+            {
+                backend.Concat(scratch, [rows], 2);
+            }
+            else
+            {
+                using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - tNew, headDim), DType.F32);
+                backend.Concat(scratch, [rows, pad], 2);
+            }
+        }
+        else
+        {
+            if (grow)
+            {
+                scratch = GrowPrefix(backend, scratch, pos, capacity, headDim, out int movedRows);
+                scratchArr[layer] = scratch;
+                copiedRows += movedRows;
+            }
+            backend.KvCacheAppend(scratch!, rows, pos);
+        }
+        currentRows[layer] = pos + tNew;
+        AttentionEvidence.Observed(AttentionEvidenceKind.PrefixGather, isKey ? "paged.keys" : "paged.values",
+            _pool.NumKvHeads * copiedRows * headDim * sizeof(float), layer: layer);
+    }
+
+    /// <summary>A buffer of <paramref name="capacity"/> rows that starts with the <paramref name="keepRows"/> rows
+    /// <paramref name="old"/> holds. It is a concatenation's output: the old buffer's rows move on the device and only the
+    /// padding rows are uploaded. With nothing to keep, the buffer is returned unwritten and its first device use uploads
+    /// it whole; that is the order where a prefix is read before anything was appended to it.</summary>
+    /// <param name="movedRows">Rows the concatenation moved: all of <paramref name="old"/>, which can be more than
+    /// <paramref name="keepRows"/> when it was sized ahead.</param>
+    private Tensor GrowPrefix(IBackend backend, Tensor? old, int keepRows, int capacity, int headDim, out int movedRows)
+    {
+        Tensor grown = new(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
+        movedRows = 0;
+        if (old is not null && keepRows > 0)
+        {
+            movedRows = (int)old.Shape[2];
+            using Tensor pad = new(new TensorShape(1, _pool.NumKvHeads, capacity - movedRows, headDim), DType.F32);
+            try
+            {
+                backend.Concat(grown, [old, pad], 2);
+            }
+            catch
+            {
+                // The caller still holds the old buffer; only the new one is this method's to release.
+                grown.Dispose();
+                throw;
+            }
+        }
+        old?.Dispose();
+        return grown;
+    }
+
     public Tensor KeyPrefix(int layer) { ThrowIfDisposed(); return Gather(layer, isKey: true); }
     public Tensor ValuePrefix(int layer) { ThrowIfDisposed(); return Gather(layer, isKey: false); }
 
@@ -109,51 +315,50 @@ public sealed class PagedKvCache : IKvCache
         IBackend backend = _lastBackend;
         int len = _physicallyWritten;
         int headDim = _pool.HeadDimPerLayer[layer];
+        if (_copyDropped[layer]) _copyKept[layer] = true;
         Tensor?[] scratchArr = isKey ? _scratchK : _scratchV;
+        int[] currentRows = isKey ? _currentK : _currentV;
         Tensor? scratch = scratchArr[layer];
-        // Grow-only capacity (mirrors FixedKvCache's oversized-buffer-plus-explicit-valid-length pattern —
-        // GenericTransformer's attention call already passes the valid key count separately and never trusts
-        // this tensor's own shape for it, see its "kFull/vFull may be a fixed-capacity buffer" comment). The
-        // loop below always re-copies every valid position from the pool's pages regardless of whether
-        // `scratch` was just (re)allocated, so nothing needs preserving across a resize — only grow when the
-        // existing buffer is too small. `len` advances by exactly 1 every decode step, so reallocating
-        // whenever it merely CHANGED (the previous check) meant a full GPU tensor allocation every single
-        // round for every active sequence; rounding up to a page boundary cuts that to once per PageSize
-        // tokens instead, at the cost of at most one page's worth of unused VRAM per sequence per layer.
+        long copiedRows = 0;
+        // Grow-only capacity (mirrors FixedKvCache's oversized-buffer-plus-explicit-valid-length pattern: the attention
+        // call passes the valid key count separately and never trusts this tensor's own shape for it). A larger buffer
+        // starts from the old one's rows, so growth does not send the copy back to the pages. In the usual order (append,
+        // then read) the append has already added this step's rows and there is nothing left to copy here.
         if (scratch is null || scratch.Shape[2] < len)
         {
-            scratch?.Dispose();
-            int capacity = ((Math.Max(len, 1) + _pool.PageSize - 1) / _pool.PageSize) * _pool.PageSize;
-            scratch = new Tensor(new TensorShape(1, _pool.NumKvHeads, capacity, headDim), DType.F32);
+            scratch = GrowPrefix(backend, scratch, currentRows[layer], PrefixCapacity(len), headDim, out int movedRows);
+            copiedRows += movedRows;
             scratchArr[layer] = scratch;
         }
-        if (len == 0) return scratch;   // nothing written yet; caller shouldn't reach here in practice
 
-        int fullPages = len / _pool.PageSize;
-        int rem = len % _pool.PageSize;
-        int dstOffset = 0;
-        for (int i = 0; i < fullPages; i++)
+        // Only the rows this layer wrote since the last call come from the pages.
+        int target = Math.Min(_written[layer], len);
+        int pos = Math.Min(currentRows[layer], target);
+        copiedRows += target - pos;
+        // Taken only when there are rows to copy: a layer that has written nothing has no pages yet.
+        Tensor? pages = pos < target ? (isKey ? _pool.KeyPages(layer) : _pool.ValuePages(layer)) : null;
+        while (pos < target)
         {
-            Tensor page = isKey ? _pool.KPage(layer, _blockTable[i]) : _pool.VPage(layer, _blockTable[i]);
-            // Full page — every slot is valid, so no slice needed, just copy it whole into scratch at dstOffset.
-            backend.KvCacheAppend(scratch, page, dstOffset);
-            dstOffset += _pool.PageSize;
-        }
-        if (rem > 0)
-        {
-            Tensor lastPage = isKey ? _pool.KPage(layer, _blockTable[fullPages]) : _pool.VPage(layer, _blockTable[fullPages]);
-            // Last page is only partially occupied — slice down to the valid prefix before copying.
-            Tensor sliced = new(new TensorShape(1, _pool.NumKvHeads, rem, headDim), DType.F32);
+            // One copy per run of rows that sit next to each other in the pool.
+            int chunk = AdjacentRows(pos, target - pos);
+            Tensor sliced = new(new TensorShape(1, _pool.NumKvHeads, chunk, headDim), DType.F32);
             try
             {
-                backend.SliceTimeRange(sliced, lastPage, 0, rem);
-                backend.KvCacheAppend(scratch, sliced, dstOffset);
+                StridedCopies.SliceAxis(backend, sliced, pages!, 2, PoolRow(pos), chunk);
+                backend.KvCacheAppend(scratch, sliced, pos);
             }
             finally
             {
                 sliced.Dispose();
             }
+            pos += chunk;
         }
+        // An append never moves a watermark past the rows its layer wrote, so catching up can only raise it.
+        System.Diagnostics.Debug.Assert(currentRows[layer] <= target, "A prefix watermark is ahead of the rows its layer wrote.");
+        currentRows[layer] = target;
+        if (copiedRows > 0)
+            AttentionEvidence.Observed(AttentionEvidenceKind.PrefixGather, isKey ? "paged.keys" : "paged.values",
+                _pool.NumKvHeads * copiedRows * headDim * sizeof(float), layer: layer);
         return scratch;
     }
 
@@ -163,6 +368,7 @@ public sealed class PagedKvCache : IKvCache
         while (_blockTable.Count < pagesNeeded)
         {
             _blockTable.Add(_pool.AllocatePage());
+            PageTableChanged();
         }
     }
 
@@ -183,19 +389,38 @@ public sealed class PagedKvCache : IKvCache
         {
             _pool.FreePage(_blockTable[^1]);
             _blockTable.RemoveAt(_blockTable.Count - 1);
+            PageTableChanged();
         }
         _physicallyWritten = newLength;
         _currentLength = newLength;
+        ForgetRowsFrom(newLength);
     }
 
-    /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike <see cref="FixedKvCache.Reset"/> (which just zeroes a counter over its still-owned fixed buffer), this actually frees VRAM back to the shared pool for reuse by other sequences.</summary>
+    /// <summary>Returns every held page to the pool and resets to an empty sequence — unlike <see cref="FixedKvCache.Reset"/> (which just zeroes a counter over its still-owned fixed buffer), this actually frees VRAM back to the shared pool for reuse by other sequences.
+    /// The contiguous prefix buffers are kept for the next sequence this cache holds; they are outside the pool's budget and are freed on <see cref="Dispose"/>.</summary>
     public void Reset()
     {
         ThrowIfDisposed();
         foreach (int page in _blockTable) _pool.FreePage(page);
         _blockTable.Clear();
+        PageTableChanged();
         _currentLength = 0;
         _physicallyWritten = 0;
+        ForgetRowsFrom(0);
+        // The next sequence shows for itself how its layers are read.
+        Array.Clear(_copyDropped);
+        Array.Clear(_copyKept);
+    }
+
+    /// <summary>Rows at and past <paramref name="length"/> no longer exist: no layer has written them and no prefix holds them.</summary>
+    private void ForgetRowsFrom(int length)
+    {
+        for (int layer = 0; layer < _written.Length; layer++)
+        {
+            if (_written[layer] > length) _written[layer] = length;
+            if (_currentK[layer] > length) _currentK[layer] = length;
+            if (_currentV[layer] > length) _currentV[layer] = length;
+        }
     }
 
     private void ThrowIfDisposed()
@@ -208,6 +433,7 @@ public sealed class PagedKvCache : IKvCache
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (int page in _blockTable) _pool.FreePage(page);
         _blockTable.Clear();
+        _pageTableTensor?.Dispose();
         foreach (Tensor? t in _scratchK) t?.Dispose();
         foreach (Tensor? t in _scratchV) t?.Dispose();
     }

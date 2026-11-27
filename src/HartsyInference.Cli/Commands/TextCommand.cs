@@ -44,8 +44,8 @@ public sealed class TextCommand : Command<TextCommand.Settings>
 
         /// <summary>Sampling temperature; &lt;= 0 selects greedy decoding.</summary>
         [CommandOption("--temperature")]
-        [Description("Sampling temperature; 0 or less means greedy.")]
-        public float Temperature { get; init; } = 0.7f;
+        [Description("Sampling temperature; 0 or less means greedy. Default 0.7 (a --realtime run is greedy unless this is given).")]
+        public float? Temperature { get; init; }
 
         /// <summary>Nucleus sampling cutoff.</summary>
         [CommandOption("--top-p")]
@@ -66,6 +66,52 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [CommandOption("-i|--image")]
         [Description("Attach an image (PNG/BMP) for vision-language models. Repeat for multiple images.")]
         public string[] Image { get; init; } = [];
+
+        /// <summary>A video file to attach, for video-capable models (decoded with ffmpeg and sampled per the model's settings).</summary>
+        [CommandOption("--video")]
+        [Description("Attach a video file for video-capable models (MOSS-VL-Realtime). Needs ffmpeg on PATH.")]
+        public string? Video { get; init; }
+
+        /// <summary>A folder of PNG/BMP frames to attach as a video, in name order, at <see cref="FrameFps"/>.</summary>
+        [CommandOption("--frames-dir")]
+        [Description("Attach a folder of PNG/BMP frames (sorted by name) as a video; no ffmpeg needed. See --frame-fps.")]
+        public string? FramesDir { get; init; }
+
+        /// <summary>Frames per second of a <see cref="FramesDir"/> video, which sets each frame's timestamp.</summary>
+        [CommandOption("--frame-fps")]
+        [Description("Frame rate of a --frames-dir video (frame i is at i / fps seconds). Default 1.")]
+        public double FrameFps { get; init; } = 1.0;
+
+        /// <summary>Frames sampled per second from a <see cref="Video"/>; unset keeps the model's setting.</summary>
+        [CommandOption("--video-fps")]
+        [Description("Frames sampled per second from --video; unset keeps the model's setting (MOSS-VL: 1).")]
+        public double? VideoFps { get; init; }
+
+        /// <summary>The most frames sampled from a <see cref="Video"/>; unset keeps the model's setting.</summary>
+        [CommandOption("--video-max-frames")]
+        [Description("Most frames sampled from --video; unset keeps the model's setting (MOSS-VL: 256).")]
+        public int? VideoMaxFrames { get; init; }
+
+        /// <summary>Runs a live session: <see cref="Video"/> or <see cref="FramesDir"/> is replayed at its own pace, the prompt opens the chat,
+        /// and each stdin line is a further prompt.</summary>
+        [CommandOption("--realtime")]
+        [Description("Live session (MOSS-VL-Realtime): replay --video or --frames-dir at its pace; each stdin line is a new prompt. Greedy unless --temperature > 0 is given explicitly.")]
+        public bool Realtime { get; init; }
+
+        /// <summary>Seconds of silence after the last frame that end a <see cref="Realtime"/> run.</summary>
+        [CommandOption("--idle-exit")]
+        [Description("With --realtime: end the run after this many seconds of model silence once every frame is in. Default 3.")]
+        public double? IdleExit { get; init; }
+
+        /// <summary>Caps the live decode rate.</summary>
+        [CommandOption("--tokens-per-second")]
+        [Description("With --realtime: the most tokens decoded per second; unset is unpaced.")]
+        public double? TokensPerSecond { get; init; }
+
+        /// <summary>Prints the model's silence markers in a live run.</summary>
+        [CommandOption("--show-silence")]
+        [Description("With --realtime: print [silence] when the model stays quiet, and its other control markers (e.g. [response]).")]
+        public bool ShowSilence { get; init; }
 
         /// <summary>Top-K sampling cutoff; unset uses the model default.</summary>
         [CommandOption("--top-k")]
@@ -106,6 +152,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [CommandOption("--low-vram-quant")]
         [Description("Keep weights compressed at their on-disk quant to reduce VRAM use.")]
         public bool LowVramQuant { get; init; }
+
+        /// <summary>Re-quantizes a checkpoint folder's plain float projections on load.</summary>
+        [CommandOption("--precision")]
+        [Description("For a checkpoint folder: re-quantize its plain BF16 projections to q8_0, q6_k, q5_k, q4_k or q4_0 on load (cached on disk). NF4/FP8 folders load packed either way.")]
+        public string? Precision { get; init; }
 
         /// <summary>Where the model is placed when this run loads it.</summary>
         [CommandOption("--placement")]
@@ -162,8 +213,20 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             }
             prompt = File.ReadAllText(promptFile);
         }
-        if (!CommandRunner.RequireNonEmpty(prompt, "A prompt is required.", out int exitCode))
+        int exitCode;
+        // A live session may open with an empty prompt (the reference's default) and take its questions from stdin.
+        if (!settings.Realtime && !CommandRunner.RequireNonEmpty(prompt, "A prompt is required.", out exitCode))
             return exitCode;
+        if (settings.Realtime && settings.Video is null && settings.FramesDir is null)
+        {
+            AnsiConsole.MarkupLine("[red]--realtime needs --video or --frames-dir to replay.[/]");
+            return 1;
+        }
+        if (settings.Realtime && settings.Image.Length > 0)
+        {
+            AnsiConsole.MarkupLine("[red]--realtime takes frames from --video or --frames-dir, not --image.[/]");
+            return 1;
+        }
         if (settings.TeacherForce is { Length: > 0 } && settings.ScoresOut is not { Length: > 0 })
         {
             AnsiConsole.MarkupLine("[red]--teacher-force needs --scores-out to write the scores of the forced tokens.[/]");
@@ -188,7 +251,28 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             }
         }
 
-        float temperature = settings.Temperature;
+        if (settings.Video is { } videoPath && !File.Exists(videoPath))
+        {
+            AnsiConsole.MarkupLine($"[red]Video not found:[/] {videoPath}");
+            return 1;
+        }
+        if (settings.FramesDir is { } framesDir && !Directory.Exists(framesDir))
+        {
+            AnsiConsole.MarkupLine($"[red]Frames folder not found:[/] {framesDir}");
+            return 1;
+        }
+        if (settings.Video is not null && settings.FramesDir is not null)
+        {
+            AnsiConsole.MarkupLine("[red]--video and --frames-dir are mutually exclusive.[/]");
+            return 1;
+        }
+        if (settings.FrameFps <= 0)
+        {
+            AnsiConsole.MarkupLine("[red]--frame-fps must be positive.[/]");
+            return 1;
+        }
+
+        float temperature = settings.Temperature ?? 0.7f;
         if (settings.GraphDecode && temperature > 0f)
         {
             AnsiConsole.MarkupLine("[yellow]--graph-decode requires greedy sampling; forcing --temperature to 0.[/]");
@@ -198,7 +282,16 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         ParamState parameters = new ParamState(Modality.Text) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         if (settings.Device is { Length: > 0 } device) parameters.Put("device", device);
         parameters.Put("max-tokens", settings.MaxTokens.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
+        // A live run is greedy like the reference unless a temperature is asked for; the one-shot default (0.7) does not apply.
+        if (!settings.Realtime || settings.Temperature is not null || settings.GraphDecode)
+            parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
+        if (settings.Realtime)
+        {
+            parameters.Put("realtime", "true");
+            parameters.PutIfSet("idle-exit", settings.IdleExit);
+            parameters.PutIfSet("tokens-per-second", settings.TokensPerSecond);
+            parameters.Put("show-silence", settings.ShowSilence ? "true" : "false");
+        }
         parameters.Put("top-p", settings.TopP.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("graph-decode", settings.GraphDecode ? "true" : "false");
@@ -206,6 +299,14 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("system", system);
         if (settings.Image.Length > 0)
             parameters.Put("image", string.Join('\n', settings.Image));
+        if (settings.Video is { } video) parameters.Put("video", video);
+        if (settings.FramesDir is { } frames)
+        {
+            parameters.Put("frames-dir", frames);
+            parameters.Put("frame-fps", settings.FrameFps.ToString(CultureInfo.InvariantCulture));
+        }
+        parameters.PutIfSet("video-fps", settings.VideoFps);
+        parameters.PutIfSet("video-max-frames", settings.VideoMaxFrames);
         parameters.PutIfSet("top-k", settings.TopK);
         parameters.PutIfSet("min-p", settings.MinP);
         parameters.PutIfSet("repetition-penalty", settings.RepetitionPenalty);
@@ -225,6 +326,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("loops", loops.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         parameters.Put("low-vram-quant", settings.LowVramQuant ? "true" : "false");
+        if (settings.Precision is { Length: > 0 } precision) parameters.Put("precision", precision);
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
         if (settings.Placement is { Length: > 0 } placement)
             parameters.Put("placement", placement);

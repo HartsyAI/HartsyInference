@@ -1,6 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -172,7 +175,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         Tensor gateMsa = new Tensor(modShape, DType.F32);
         Tensor scaleMlp = new Tensor(modShape, DType.F32);
         Tensor gateMlp = new Tensor(modShape, DType.F32);
-        backend.ModulationSplit4(scaleMsa, gateMsa, scaleMlp, gateMlp, proj);
+        backend.ChunkActivate([scaleMsa, gateMsa, scaleMlp, gateMlp], proj, [ChunkActivation.OnePlus, ChunkActivation.Tanh, ChunkActivation.OnePlus, ChunkActivation.Tanh]);
         proj.Dispose();
 
         // ── Attention sublayer: attn = attention(norm1(x) * scale_msa); x += gate_msa * norm2(attn) ──

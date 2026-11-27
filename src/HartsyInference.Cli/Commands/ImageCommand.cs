@@ -72,6 +72,16 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Guidance scale (default: the model family's recommended scale; 1.0 for distilled/turbo models).")]
         public float? Cfg { get; init; }
 
+        /// <summary>Distilled guidance for a FLUX.1 Dev-family checkpoint; unset uses the variant's default.</summary>
+        [CommandOption("--flux-guidance")]
+        [Description("Distilled guidance for FLUX.1 Dev-family checkpoints (default 3.5; 30 for OneReward). Not CFG; unused by Schnell.")]
+        public float? FluxGuidance { get; init; }
+
+        /// <summary>Diffusers-style true CFG for FLUX.1; needs a negative prompt and runs a second pass per step.</summary>
+        [CommandOption("--true-cfg")]
+        [Description("True CFG for FLUX.1 (diffusers true_cfg_scale): needs --negative and runs two passes per step. Default off.")]
+        public float? TrueCfg { get; init; }
+
         /// <summary>Sampler name; unset uses the family's canonical sampler.</summary>
         [CommandOption("--sampler")]
         [Description("Sampler name, e.g. euler, ddim, dpmpp_2m, lcm (default: the model family's sampler).")]
@@ -111,6 +121,42 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [CommandOption("--init-image-mode")]
         [Description("How to consume --init-image: denoise (strength-based img2img), reference (in-context edit), or auto.")]
         public string? InitImageMode { get; init; }
+
+        /// <summary>The Iris-Z task.</summary>
+        [CommandOption("--iris-task")]
+        [Description("Iris-Z task: image (prompt to image), rgbd (prompt to image + depth.png), depth (--init-image photo to its "
+            + "depth map) or paint (--init-image depth map to an image). Default: depth with --init-image, image without.")]
+        public string? IrisTask { get; init; }
+
+        /// <summary>How an Iris-Z depth result is rendered.</summary>
+        [CommandOption("--iris-depth-format")]
+        [Description("Iris-Z depth output: colours (default; near red, far blue), depth (grey, bright is far) or disparity.")]
+        public string? IrisDepthFormat { get; init; }
+
+        /// <summary>How an Iris-Z paint input encodes depth.</summary>
+        [CommandOption("--iris-input-depth-format")]
+        [Description("Iris-Z paint input: depth (default, bright is far) or disparity (bright is near).")]
+        public string? IrisInputDepthFormat { get; init; }
+
+        /// <summary>Working size of the Iris-Z depth and paint tasks.</summary>
+        [CommandOption("--iris-resolution")]
+        [Description("Iris-Z depth/paint working size: 512 or 1024. Default: 1024 for paint; for depth, 512 under 0.5 MP.")]
+        public int? IrisResolution { get; init; }
+
+        /// <summary>Sampling steps of the Iris-Z depth task.</summary>
+        [CommandOption("--iris-depth-steps")]
+        [Description("Iris-Z depth sampling steps (default 4); --steps applies to generation only.")]
+        public int? IrisDepthSteps { get; init; }
+
+        /// <summary>Seeds the Iris-Z depth task combines.</summary>
+        [CommandOption("--iris-depth-seeds")]
+        [Description("Iris-Z depth: how many seeds to combine (default 1).")]
+        public int? IrisDepthSeeds { get; init; }
+
+        /// <summary>Returns the joint depth of an Iris-Z rgbd run.</summary>
+        [CommandOption("--iris-joint-depth")]
+        [Description("Iris-Z rgbd: true returns the jointly generated depth instead of re-estimating it from the image.")]
+        public string? IrisJointDepth { get; init; }
 
         /// <summary>Extra reference images for an edit family, in the order the prompt refers to them.</summary>
         [CommandOption("--reference-image")]
@@ -283,6 +329,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Cut the subject out with RMBG-1.4 after generation; the saved PNG carries a real alpha channel.")]
         public bool RemoveBackground { get; init; }
 
+        [CommandOption("--remove-background-model")]
+        [Description("Matter for --remove-background: rmbg (RMBG-1.4, default), rmbg3 or rmbg3-int8 (Bria RMBG 3.0, non-commercial). "
+            + "RMBG 3.0 runs after the generator is released, so each image reloads both models unless the VRAM policy keeps them.")]
+        public string? RemoveBackgroundModel { get; init; }
+
         [CommandOption("-o|--output")]
         [Description("Directory to save the image (defaults to the output root).")]
         public string? Output { get; init; }
@@ -306,6 +357,13 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         {
             parameters.Put("reference-images", string.Join('\n', settings.ReferenceImages));
         }
+        parameters.PutIfSet("iris-task", settings.IrisTask);
+        parameters.PutIfSet("iris-depth-format", settings.IrisDepthFormat);
+        parameters.PutIfSet("iris-input-depth-format", settings.IrisInputDepthFormat);
+        parameters.PutIfSet("iris-resolution", settings.IrisResolution);
+        parameters.PutIfSet("iris-depth-steps", settings.IrisDepthSteps);
+        parameters.PutIfSet("iris-depth-seeds", settings.IrisDepthSeeds);
+        parameters.PutIfSet("iris-joint-depth", settings.IrisJointDepth);
         parameters.PutIfSet("reference-kv-cache", settings.ReferenceKvCache);
         parameters.PutIfSet("reference-max-pixels", settings.ReferenceMaxPixels);
         parameters.PutIfSet("reference-vision-pixels", settings.ReferenceVisionPixels);
@@ -341,6 +399,8 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("height", settings.Height);
         parameters.PutIfSet("steps", settings.Steps);
         parameters.PutIfSet("cfg", settings.Cfg);
+        parameters.PutIfSet("flux-guidance", settings.FluxGuidance);
+        parameters.PutIfSet("true-cfg", settings.TrueCfg);
         parameters.PutIfSet("sampler", settings.Sampler);
         parameters.PutIfSet("scheduler", settings.Scheduler);
         parameters.PutIfSet("sigma-shift", settings.SigmaShift);
@@ -371,10 +431,11 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("slg-start", settings.SlgStart);
         parameters.PutIfSet("slg-stop", settings.SlgStop);
         parameters.PutIfSet("preview-output", settings.PreviewOutput);
-        if (settings.RemoveBackground)
+        if (settings.RemoveBackground || !string.IsNullOrWhiteSpace(settings.RemoveBackgroundModel))
         {
             parameters.Put("remove-background", "true");
         }
+        parameters.PutIfSet("remove-background-model", settings.RemoveBackgroundModel);
         if (settings.NoModelEnhancements)
         {
             parameters.Put("no-model-enhancements", "true");

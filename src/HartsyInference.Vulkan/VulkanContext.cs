@@ -19,7 +19,7 @@ public static class VulkanContext
     ///
     /// <para>A <see cref="VkPhysicalDeviceType.Cpu"/> device is excluded rather than counted. That type is a
     /// software rasterizer (Mesa lavapipe, SwiftShader), which is a CPU implementation of Vulkan and therefore
-    /// slower than running on <c>HartsyInference.Cpu</c> directly. Counting it would make <c>auto</c> prefer the
+    /// slower than running on <c>CpuBackend</c> directly. Counting it would make <c>auto</c> prefer the
     /// slow path over the fast one, and would do it silently on exactly the machines least able to afford it:
     /// Linux CI images ship lavapipe routinely.</para></summary>
     public static int GetDeviceCount()

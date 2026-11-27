@@ -27,11 +27,11 @@ namespace HartsyInference.Audio.Models.Codecs;
 public static unsafe class Fsq
 {
     /// <summary>Vocabulary size for the given per-axis level configuration.</summary>
-    public static int VocabSize(ReadOnlySpan<int> levels) => Core.Codecs.Fsq.VocabSize(levels);
+    public static int VocabSize(ReadOnlySpan<int> levels) => Core.Numerics.Fsq.VocabSize(levels);
 
-    /// <summary>Quantizes a continuous latent into integer codes. Input <paramref name="z"/> is channels-last <c>[B, T, D]</c>; output <paramref name="codes"/> is <c>[B, T]</c> Int32; <paramref name="levels"/> length must equal <c>D</c>. Delegates to the canonical <see cref="Core.Codecs.Fsq.Quantize"/> — the tanh-bound + mixed-radix index packing is byte-identical to the shared implementation.</summary>
+    /// <summary>Quantizes a continuous latent into integer codes. Input <paramref name="z"/> is channels-last <c>[B, T, D]</c>; output <paramref name="codes"/> is <c>[B, T]</c> Int32; <paramref name="levels"/> length must equal <c>D</c>. Delegates to the canonical <see cref="Core.Numerics.Fsq.Quantize"/> — the tanh-bound + mixed-radix index packing is byte-identical to the shared implementation.</summary>
     public static void Quantize(Tensor codes, Tensor z, ReadOnlySpan<int> levels)
-        => Core.Codecs.Fsq.Quantize(codes, z, levels);
+        => Core.Numerics.Fsq.Quantize(codes, z, levels);
 
     /// <summary>Inverse — turns integer codes back into the continuous quantized vector <paramref name="zHat"/>, normalized to <c>[-1, 1]</c> per axis: integer digit <c>k ∈ [0, L)</c> maps to <c>(k - L/2) / halfL</c>. Useful when the decoder consumes the continuous quantized vector rather than the integer code itself.</summary>
     public static void Dequantize(Tensor zHat, Tensor codes, ReadOnlySpan<int> levels)

@@ -40,4 +40,24 @@ public static class MeshOps
         mesh.Normals = n;
         return mesh;
     }
+
+    /// <summary>The length of the diagonal of the bounding box of <paramref name="positions"/> (x, y, z interleaved); 0 for none.</summary>
+    public static double BoundingBoxDiagonal(float[] positions)
+    {
+        ArgumentNullException.ThrowIfNull(positions);
+        if (positions.Length < 3)
+            return 0;
+        float[] min = [float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity];
+        float[] max = [float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity];
+        for (int i = 0; i + 2 < positions.Length; i += 3)
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                min[c] = Math.Min(min[c], positions[i + c]);
+                max[c] = Math.Max(max[c], positions[i + c]);
+            }
+        }
+        double dx = max[0] - min[0], dy = max[1] - min[1], dz = max[2] - min[2];
+        return Math.Sqrt(dx * dx + dy * dy + dz * dz);
+    }
 }

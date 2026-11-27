@@ -9,7 +9,7 @@
 // (GPT-OSS sink and BLOOM/jina-bert ALiBi stay on the proven monolithic kernel). Soft-cap is a per-logit
 // transform (cap·tanh(score/cap), identical to the monolithic kernel); a sliding window only narrows the
 // per-query valid key range to [qPos−window+1, qPos] — chunks wholly below the window start simply produce
-// an empty partial (m = −INF), which the combine already weighs as zero. Both were added 2026-07-22 after
+// an empty partial (l = 0), which the combine already weighs as zero. Both were added 2026-07-22 after
 // gemma3-1b measured 5.4× slower than llama.cpp: its 4 decode query-heads put FOUR blocks on a 28-SM GPU
 // through the monolithic path, since window>0 used to force-exclude split-K. Splitting is numerically
 // EXACT: each chunk computes the same per-key scores as the monolithic loop, just over a sub-range, and
@@ -102,7 +102,7 @@ __device__ __forceinline__ void flashAttnSplitBody(
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
         float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float corr = (l == 0.0f) ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? kvLoad(V, kvBase + tid) : 0.0f;
@@ -182,7 +182,7 @@ extern "C" __global__ void lm_flash_attn_f32_combine(
     for (unsigned int g = 0; g < G; g++)
     {
         float mg = partialM[idx * G + g];
-        float w = (mg <= -INF_F) ? 0.0f : __expf(mg - m);
+        float w = (partialL[idx * G + g] == 0.0f) ? 0.0f : __expf(mg - m);
         l += partialL[idx * G + g] * w;
         if (tid < D) acc += partialAcc[(size_t)(idx * G + g) * D + tid] * w;
     }
@@ -190,6 +190,6 @@ extern "C" __global__ void lm_flash_attn_f32_combine(
     if (tid < D)
     {
         size_t qBase = (size_t)idx * D;
-        out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
+        out[qBase + tid] = l > 0.0f ? acc / l : (isnan(l) ? l : 0.0f);
     }
 }

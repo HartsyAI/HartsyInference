@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Features;
 using HartsyInference.ModelAssets.Lora;

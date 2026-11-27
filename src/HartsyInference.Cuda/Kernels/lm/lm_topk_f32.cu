@@ -3,7 +3,7 @@
 //   input [rows,n] F32, validLengths [rows] I32 (optional)  ->  values [rows,k] F32, indices [rows,k] I32
 //
 // Each row keeps the k largest of its first validLength entries. Ties go to the lowest index, NaN ranks below
-// every number, and -0 equals +0, all matching TopKReference. The result is value-descending, or index-ascending
+// every number, and -0 equals +0, all matching the host top-k semantics the sampler expects. The result is value-descending, or index-ascending
 // when sortByIndex is set. Slots past the valid length hold index -1 and value -inf.
 //
 // How: keys are order-preserving uint32 images of the floats. Four 8-bit histogram passes find the k-th largest

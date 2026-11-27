@@ -70,6 +70,34 @@ public interface IInferenceEngine : IDisposable
     /// <summary>3D mesh generation.</summary>
     IMeshService Mesh { get; }
 
+    /// <summary>The files a 3D model needs and which are on disk; fetch them through <see cref="ModelPrefetch"/>.</summary>
+    IMeshAssetService MeshAssets =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh asset status.");
+
+    /// <summary>Which 3D pipelines are resident, and freeing them (a 3D model does not unload on its own).</summary>
+    IMeshLifecycleService MeshLifecycle =>
+        throw new NotSupportedException("This inference-engine implementation does not expose 3D lifecycle control.");
+
+    /// <summary>The input preparation a 3D model applies (matte, framing, compositing), as an image a host can show.</summary>
+    IMeshPreparationService MeshPreparation =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh image preparation.");
+
+    /// <summary>Converting a 3D model file (glb, obj) to another format (glb, obj with its MTL and images, ply, stl), whichever model made it.</summary>
+    IMeshConversionService MeshConversion =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh conversion.");
+
+    /// <summary>Editing a 3D model file (decimate, fill holes, remove floaters, smooth, normals, recentre, rescale), whichever model made it.</summary>
+    IMeshOperationService MeshOperations =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh operations.");
+
+    /// <summary>A server-drawn picture of a model file (glb, obj, ply or splat ply), with no GPU, whichever model made it.</summary>
+    IMeshThumbnailService MeshThumbnails =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh thumbnails.");
+
+    /// <summary>3D preflight: what each 3D model accepts, and whether one request would run, without loading weights.</summary>
+    IMeshPlanningService MeshPlanning =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh planning.");
+
     /// <summary>Interactive world sessions.</summary>
     IWorldService World { get; }
 

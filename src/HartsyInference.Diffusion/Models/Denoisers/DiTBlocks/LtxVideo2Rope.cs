@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -155,9 +157,12 @@ public sealed unsafe class LtxVideo2Rope
 
     /// <summary>Builds video cos/sin <c>[F·H·W, cosWidth]</c> (row-major <c>(f,h,w)</c>). For the temporal-only (cross)
     /// flavor each token's single coordinate is its frame midpoint; otherwise all three axes are written.</summary>
-    public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps)
+    /// <param name="firstFrame">The latent frame index of the first frame: a chunk of a longer video is built at its own
+    /// absolute frames <c>[firstFrame, firstFrame + numFrames)</c>.</param>
+    public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps, int firstFrame = 0)
     {
         if (_modality != Modality.Video) throw new InvalidOperationException("BuildVideo on an audio RoPE.");
+        ArgumentOutOfRangeException.ThrowIfNegative(firstFrame);
         int seq = numFrames * height * width;
         (Tensor cos, Tensor sin) = Alloc(seq);
         float* cp = (float*)cos.DataPointer;
@@ -166,7 +171,7 @@ public sealed unsafe class LtxVideo2Rope
         int sfH = _scaleFactors[1], sfW = _scaleFactors[2];
         for (int fi = 0; fi < numFrames; fi++)
         {
-            double normT = VideoTemporalNorm(fi, fps);
+            double normT = VideoTemporalNorm(firstFrame + fi, fps);
             for (int hi = 0; hi < height; hi++)
             {
                 double normH = (((double)hi + 0.5) * _patchSize * sfH) / _baseHeight;
@@ -277,12 +282,12 @@ public sealed unsafe class LtxVideo2Rope
         // Device-resident RoPE — a host loop here D2H's + re-uploads the [S,dim] Q/K on every attention, and on a
         // block-swap-bound checkpoint those re-uploads fight the weight stream for PCIe.
         //  - Interleaved: adjacent-pair (2j,2j+1) over the full dim, duplicated-pair cos[2j]==cos[2j+1] → the shared
-        //    wan_rope_interleaved kernel (headDim=dim, heads=1), identical to LtxRope / LTX-0.9.
+        //    the generic rotary kernel kernel (headDim=dim, heads=1), identical to LtxRope / LTX-0.9.
         //  - Split: rotate-half within each head, per-head cos[S,dim/2] with one angle per pair → the dedicated
         //    ltx2_split_rope kernel.
         if (_ropeType == RopeType.Interleaved)
-            backend.WanRopeInterleaved(x, cos, sin, seq, 1, _dim);
+            backend.Rotary(RotaryCall.Rows(x, cos, sin, seq, 1, _dim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         else
-            backend.Ltx2SplitRope(x, cos, sin, seq, _numHeads, _headDim);
+            backend.Rotary(RotaryCall.SplitRows(x, cos, sin, seq, _numHeads, _headDim));
     }
 }

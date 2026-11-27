@@ -1,7 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
+using HartsyInference.Core.Backends.Host;
 
 namespace HartsyInference.Cuda;
 
@@ -9,73 +10,6 @@ namespace HartsyInference.Cuda;
 // reference so the errors match the host default, and falls back to it when the module is absent.
 public sealed partial class CudaBackend
 {
-    /// <inheritdoc />
-    public void SituGlu(Tensor output, Tensor input)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("SituGlu");
-        (int inner, long rows) = SituGluReference.Validate(output, input);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (!_kernels!.HasDitNormActKernels)
-        {
-            SituGluReference.Apply(output, input);
-            return;
-        }
-        ulong pIn = 0, pOut = 0;
-        bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint bytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(bytes);
-            _kernels.LaunchSituGlu(pOut, pIn, inner, rows, input.DType == DType.F16, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, bytes);
-            cached = true;
-        }
-        finally
-        {
-            if (!cached) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    /// <inheritdoc />
-    public void RmsNormModulate(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? shift, float eps)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("RmsNormModulate");
-        (int dim, long rows, long rowsPerBatch) = RmsNormModulateReference.Validate(output, input, weight, scale, shift);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (!_kernels!.HasDitNormActKernels)
-        {
-            RmsNormModulateReference.Apply(output, input, weight, scale, shift, eps);
-            return;
-        }
-        ulong pIn = 0, pOut = 0, pW = 0, pScale = 0, pShift = 0;
-        bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pW = GpuTransferHelper.CopyToDevice(weight);
-            pScale = GpuTransferHelper.CopyToDevice(scale);
-            if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
-            nuint bytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(bytes);
-            _kernels.LaunchRmsNormModulate(pOut, pIn, pW, pScale, pShift, dim, checked((int)rows), checked((int)rowsPerBatch), eps,
-                input.DType == DType.F16, output.DType == DType.F16, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, bytes);
-            cached = true;
-        }
-        finally
-        {
-            if (!cached) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            GpuTransferHelper.FreeDevice(pW);
-            GpuTransferHelper.FreeDevice(pScale);
-            GpuTransferHelper.FreeDevice(pShift);
-        }
-    }
-
     /// <inheritdoc />
     public void SsmConvSplitPrefill(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
         int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)

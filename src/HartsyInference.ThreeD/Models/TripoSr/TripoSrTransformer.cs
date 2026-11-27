@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Geometry;
@@ -182,7 +183,7 @@ internal sealed unsafe class TripoSrBlock
         Tensor proj = new(new TensorShape(1, n, 2 * inner), DType.F32); backend.Linear(proj, src, _ffProjW!, _ffProjB!);
         Tensor gated = new(new TensorShape(1, n, inner), DType.F32);
         // out = first_half * gelu_erf(second_half), split along last dim — fused device pass (no host round-trip).
-        backend.GegluErf(gated, proj, n, inner);
+        backend.Glu(gated, proj, GluSpec.GeGluErf);
         proj.Dispose();
         Tensor f2 = new(new TensorShape(1, n, width), DType.F32); backend.Linear(f2, gated, _ffOutW!, _ffOutB!); gated.Dispose();
         return f2;

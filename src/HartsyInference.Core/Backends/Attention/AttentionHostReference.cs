@@ -1,11 +1,11 @@
 using System.Buffers;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
-/// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype: the default
-/// <see cref="IBackend.Attention"/> for a backend without kernel rows. It reads tensors through
-/// <see cref="Tensor.DataPointer"/> and never calls a legacy entry point, so it cannot recurse into a backend's wrappers.</summary>
+/// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype. Callers choose
+/// this path explicitly; <see cref="IBackend.Attention"/> refuses a backend without kernel rows. The reference reads
+/// tensors through <see cref="Tensor.DataPointer"/> and never calls a legacy entry point, so it cannot recurse.</summary>
 public static class AttentionHostReference
 {
     /// <summary>Runs <paramref name="call"/>. Device positions need a backend to read them and are refused.</summary>
@@ -13,16 +13,29 @@ public static class AttentionHostReference
     public static void Run(in AttentionCall call) => Run(in call, default);
 
     /// <summary>Runs <paramref name="call"/> and, when <paramref name="lse"/> is not empty, writes each row's natural-log LSE
-    /// (§3; −∞ for a fully excluded row) into it as <c>[B, Hq, Sq]</c>.</summary>
+    /// (§3; −∞ for a fully excluded row) into it as <c>[B, Hq, Sq]</c>. A call that names its own LSE output
+    /// (<see cref="AttentionCall.Lse"/>) has it written there, and takes no second one here.</summary>
     /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
     public static unsafe void Run(in AttentionCall call, Span<float> lse)
     {
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The host reference cannot read device positions.");
-        Validate(in call);
+        AttentionCallValidation.Validate(in call);
+        if (call.KvPages is not null)
+            throw new AttentionUnsupportedException("The host reference reads contiguous keys and values; gather a paged call's rows first.");
+        if (call.Lse is { } named)
+        {
+            if (!lse.IsEmpty) throw new ArgumentException("The call names its LSE output; pass no second one.", nameof(lse));
+            lse = named.AsSpan<float>();
+        }
         if (!lse.IsEmpty && lse.Length != (long)call.Batch * call.Heads * call.QueryTokens)
             throw new ArgumentException($"LSE holds {lse.Length} values; [B, Hq, Sq] needs {(long)call.Batch * call.Heads * call.QueryTokens}.",
                 nameof(lse));
+        if (call.SequenceLengths is { } lengths)
+        {
+            RunSequences(in call, lengths, lse);
+            return;
+        }
         AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
         int dqk = call.QkHeadDim, dv = call.ValueHeadDim, group = call.KvGroup;
         int kvLen = call.ValidKvLength;
@@ -43,6 +56,48 @@ public static class AttentionHostReference
             ArrayPool<double>.Shared.Return(acc);
         }
     }
+
+    /// <summary>A call with a length per sequence is one call per sequence (§2): its own queries, its own keys with its own
+    /// valid length, and its own position. Under the causal rule the query rows are the sequence's last ones, so row
+    /// <c>j</c> sits at <c>length − Sq + j</c>; a row below position zero attends nothing, and so does every row of an empty
+    /// sequence. Such rows are written as zeros with an LSE of −∞. Everything is checked before anything is written.</summary>
+    private static void RunSequences(in AttentionCall call, int[] lengths, Span<float> lse)
+    {
+        foreach (AttentionOperand x in (ReadOnlySpan<AttentionOperand>)[call.Query, call.Key, call.Value, call.Output])
+            if (x.DType != DType.F32 && x.DType != DType.F16 && x.DType != DType.BF16)
+                throw new AttentionUnsupportedException($"The host reference reads and writes F32, F16 and BF16, not {x.DType}.");
+        int heads = call.Heads, rows = call.QueryTokens, capacity = call.KeyTokens, dv = call.ValueHeadDim;
+        bool causal = call.Mask.Causal;
+        AttentionOperand output = call.Output;
+        float[] sequenceLse = lse.IsEmpty ? [] : new float[heads * rows];
+        for (int b = 0; b < call.Batch; b++)
+        {
+            int length = Math.Clamp(lengths[b], 0, capacity);
+            int first = causal ? Math.Clamp(rows - length, 0, rows) : length == 0 ? rows : 0;
+            for (int h = 0; h < heads; h++)
+                for (int r = 0; r < first; r++)
+                {
+                    for (int c = 0; c < dv; c++) Write(in output, b, h, r, c, 0f);
+                    if (!lse.IsEmpty) lse[(b * heads + h) * rows + r] = float.NegativeInfinity;
+                }
+            int live = rows - first;
+            if (live == 0) continue;
+            AttentionCall one = call with
+            {
+                Query = Sequence(call.Query, b, first, live), Key = Sequence(call.Key, b, 0, capacity), Value = Sequence(call.Value, b, 0, capacity),
+                Output = Sequence(output, b, first, live),
+                Positions = AttentionPositions.Host(length, causal ? length - rows + first : 0), SequenceLengths = null, Lse = null,
+            };
+            Span<float> callLse = lse.IsEmpty ? default : sequenceLse.AsSpan(0, heads * live);
+            Run(in one, callLse);
+            if (lse.IsEmpty) continue;
+            for (int h = 0; h < heads; h++) callLse.Slice(h * live, live).CopyTo(lse.Slice((b * heads + h) * rows + first, live));
+        }
+    }
+
+    /// <summary>Sequence <paramref name="b"/> of an operand, from token <paramref name="firstToken"/>.</summary>
+    private static AttentionOperand Sequence(AttentionOperand x, int b, int firstToken, int tokens) =>
+        x with { Batch = 1, Tokens = tokens, Offset = x.Offset + b * x.BatchStride + firstToken * x.TokenStride };
 
     private static unsafe void Compute(in AttentionCall call, AttentionOperand q, AttentionOperand k, AttentionOperand v,
         AttentionOperand o, int dqk, int dv, int group, int kvLen, in AttentionMask mask, BiasView bias, float* sinks, float* slopes,
@@ -89,43 +144,6 @@ public static class AttentionHostReference
                 }
             }
     }
-
-    /// <summary>The geometry the computation indexes by: shared heads that divide, matching extents, every operand inside
-    /// its tensor, a bias broadcastable on every axis.</summary>
-    /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
-    internal static void Validate(in AttentionCall call)
-    {
-        AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
-        if (q.Batch <= 0 || q.Heads <= 0 || q.Tokens <= 0 || q.HeadDim <= 0 || k.Heads <= 0 || k.Tokens <= 0 || v.HeadDim <= 0)
-            throw new ArgumentException($"Attention operands need positive extents; got Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}.");
-        if (q.Heads % k.Heads != 0)
-            throw new ArgumentException($"Query heads ({q.Heads}) must be a multiple of key/value heads ({k.Heads}).");
-        if (k.HeadDim != q.HeadDim || v.Heads != k.Heads || v.Tokens != k.Tokens || o.HeadDim != v.HeadDim
-            || o.Heads != q.Heads || o.Tokens != q.Tokens || k.Batch != q.Batch || v.Batch != q.Batch || o.Batch != q.Batch)
-            throw new ArgumentException(
-                $"Attention operands disagree: Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}, O={Describe(o)}.");
-        if (call.ValidKvLength < 0 || call.ValidKvLength > k.Tokens)
-            throw new ArgumentException($"Valid key length {call.ValidKvLength} is outside the key operand's {k.Tokens} rows.");
-        foreach (AttentionOperand x in (ReadOnlySpan<AttentionOperand>)[q, k, v, o])
-            if (x.Offset < 0 || x.Extent > x.Storage.ElementCount)
-                throw new ArgumentException($"Operand {Describe(x)} addresses past its {x.Storage.ElementCount}-element tensor.");
-        if (call.Mask.Bias is { } bias)
-        {
-            TensorShape s = bias.Shape;
-            int rank = s.Rank;
-            bool fits = rank is >= 2 and <= 4 && (s[rank - 1] == 1 || s[rank - 1] == k.Tokens) && (s[rank - 2] == 1 || s[rank - 2] == q.Tokens)
-                && (rank < 3 || s[rank - 3] == 1 || s[rank - 3] == q.Heads) && (rank < 4 || s[0] == 1 || s[0] == q.Batch);
-            if (!fits)
-                throw new ArgumentException($"Bias {s} does not broadcast to [{q.Batch},{q.Heads},{q.Tokens},{k.Tokens}].");
-        }
-        if (call.Logits.Sinks is { } sinks && sinks.ElementCount < q.Heads)
-            throw new ArgumentException($"Sinks hold {sinks.ElementCount} values for {q.Heads} heads.");
-        if (call.Logits.AlibiSlopes is { } slopes && slopes.ElementCount < q.Heads)
-            throw new ArgumentException($"ALiBi slopes hold {slopes.ElementCount} values for {q.Heads} heads.");
-    }
-
-    private static string Describe(in AttentionOperand x) =>
-        $"{x.Layout}[b{x.Batch} h{x.Heads} s{x.Tokens} d{x.HeadDim}] of {x.Storage.Shape}";
 
     private static bool Visible(in AttentionMask m, int qpos, int kpos)
     {

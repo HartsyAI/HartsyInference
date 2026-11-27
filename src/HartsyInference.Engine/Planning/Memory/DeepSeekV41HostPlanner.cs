@@ -1,4 +1,4 @@
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.DeepSeekV41;

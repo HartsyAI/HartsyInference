@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>The executable specification of INT8 attention v2 (docs/ATTENTION_CONTRACT.md §5): the kernel's stats pass,
 /// quant launch and online recurrence on the CPU. A kernel reproduces its bytes, scales, means and INT32 QK products bit for
@@ -73,12 +73,27 @@ public static class Int8AttentionV2Reference
                 }
                 Span<float> means = ops.KeyMeans.AsSpan(kvh * segments * dp, segments * dp);
                 if (scales is null && options.SmoothKeys)
-                    for (int s = 0; s < segments; s++)
-                        SegmentMean(k, dp, bounds[s], bounds[s + 1], means.Slice(s * dp, dp));
+                {
+                    if (options.KeyCenter == Int8KeyCenter.RepresentativeKey)
+                    {
+                        // The center is one of the head's own rows; with none, it stays zero and nothing is subtracted.
+                        int anchor = kvLen > 0 ? Int8RepresentativeKey.Detect(k, kvLen, dp) : -1;
+                        ops.RepresentativeKeys[kvh] = anchor;
+                        if (anchor >= 0) k.AsSpan(anchor * dp, dp).CopyTo(means);
+                    }
+                    else
+                    {
+                        for (int s = 0; s < segments; s++)
+                            SegmentMean(k, dp, bounds[s], bounds[s + 1], means.Slice(s * dp, dp));
+                    }
+                }
                 if (options.SmoothKeys)
                     for (int s = 0; s < segments; s++)
                         for (int j = bounds[s]; j < bounds[s + 1]; j++)
                             for (int c = 0; c < dp; c++) k[j * dp + c] -= means[s * dp + c];
+                // After the centering, as the pinned kernel does it; the scales come from the rotated rows.
+                if (ops.Rotation != Int8Rotation.None)
+                    for (int j = 0; j < kvLen; j++) Int8AttentionRotation.Apply(k.AsSpan(j * dp, dp), ops.Rotation);
                 QuantizeKeys(ops, kvh, k, scales is null);
                 QuantizeValues(ops, kvh, v, scales is null);
             }
@@ -93,16 +108,18 @@ public static class Int8AttentionV2Reference
                 {
                     int at = (b * call.Heads + h) * nRows + ri;
                     ReadRow(call.Query, b, h, ops.Rows[ri], q);
+                    // q · center is taken from the row as given: the center is not rotated either.
+                    if (options.SmoothKeys)
+                        for (int s = 0; s < segments; s++)
+                        {
+                            float dot = 0f;
+                            for (int c = 0; c < dp; c++) dot = MathF.FusedMultiplyAdd(q[c], means[s * dp + c], dot);
+                            ops.QueryMeanDots[at * segments + s] = dot;
+                        }
+                    Int8AttentionRotation.Apply(q, ops.Rotation);
                     if (scales is null) ops.QueryScales[at] = Scale(AbsMax(q), 127f);
                     float inv = 1f / ops.QueryScales[at];
                     for (int c = 0; c < dp; c++) ops.Queries[at * dp + c] = ToS8(q[c] * inv);
-                    if (!options.SmoothKeys) continue;
-                    for (int s = 0; s < segments; s++)
-                    {
-                        float dot = 0f;
-                        for (int c = 0; c < dp; c++) dot = MathF.FusedMultiplyAdd(q[c], means[s * dp + c], dot);
-                        ops.QueryMeanDots[at * segments + s] = dot;
-                    }
                 }
             }
         return ops;
@@ -139,31 +156,6 @@ public static class Int8AttentionV2Reference
         return dot;
     }
 
-    /// <summary>What query rows <c>[queryRow0, +queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>)
-    /// see of key slots <c>[key0, +keys)</c> under the causal and window bounds, the valid key length and the bias's
-    /// exclusions. Rows past Sq are dropped, as in a partial query tile; keys past the valid ones are masked.</summary>
-    /// <exception cref="ArgumentException">A malformed operand or bias, a negative tile bound, or (batch, head) outside
-    /// the call.</exception>
-    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 v2 does not run.</exception>
-    public static AttentionTileClass ClassifyTile(in AttentionCall call, int batch, int head, int queryRow0,
-        int queryRows, int key0, int keys)
-    {
-        Check(in call);
-        if ((uint)batch >= (uint)call.Batch)
-            throw new ArgumentOutOfRangeException(nameof(batch), batch, $"The call has {call.Batch} batches.");
-        if ((uint)head >= (uint)call.Heads)
-            throw new ArgumentOutOfRangeException(nameof(head), head, $"The call has {call.Heads} heads.");
-        if (queryRow0 < 0 || queryRows < 0 || key0 < 0 || keys < 0)
-            throw new ArgumentException(
-                $"Tile bounds are non-negative; got rows {queryRow0}+{queryRows}, keys {key0}+{keys}.");
-        int end = (int)Math.Min((long)key0 + keys, call.ValidKvLength);
-        bool[] excluded = new bool[Math.Max(0, end - key0)];
-        StageBias(in call, batch, head, key0, new float[excluded.Length], excluded);
-        int rowEnd = (int)Math.Min((long)queryRow0 + queryRows, call.QueryTokens);
-        return Classify(call.Mask, call.Positions.QueryOffset, call.ValidKvLength, queryRow0, rowEnd, key0, keys,
-            excluded);
-    }
-
     /// <summary>E4M3 rounded to nearest even and saturated to ±448, as <c>cvt.rn.satfinite</c>; NaN stays NaN.</summary>
     public static float RoundToE4M3(float x)
     {
@@ -198,11 +190,16 @@ public static class Int8AttentionV2Reference
         for (int i = 0; i < options.KeySegmentStarts.Count; i++)
             if (options.KeySegmentStarts[i] <= (i == 0 ? 0 : options.KeySegmentStarts[i - 1]))
                 throw new ArgumentException("Key segment starts must be positive and ascending.", nameof(options));
+        if (options.KeyCenter == Int8KeyCenter.RepresentativeKey && !options.SmoothKeys)
+            throw new ArgumentException("A representative key is a way of smoothing keys; SmoothKeys is off.", nameof(options));
+        if (options.KeyCenter == Int8KeyCenter.RepresentativeKey && options.KeySegmentStarts.Count > 0)
+            throw new ArgumentException("A representative key centers one key segment; key segment starts were given.", nameof(options));
+        Int8AttentionRotation.Resolve(options.Rotation, PaddedHeadDim(call.QkHeadDim), Math.Max(1, call.ValidKvLength));
     }
 
     private static void Check(in AttentionCall call)
     {
-        AttentionHostReference.Validate(in call);
+        AttentionCallValidation.Validate(in call);
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The INT8 attention v2 emulator reads host positions only.");
         if (call.QkHeadDim != call.ValueHeadDim)
@@ -249,6 +246,13 @@ public static class Int8AttentionV2Reference
             || from.KeyScales.Length != to.KeyScales.Length || from.ValueScales.Length != to.ValueScales.Length
             || !from.Rows.AsSpan().SequenceEqual(to.Rows))
             throw new ArgumentException("The supplied scales belong to another call, rows or variant.", nameof(from));
+        // Scales taken from rows rotated or centered another way fit in length and quantize to different bytes.
+        if (from.Rotation != to.Rotation || from.Options.SmoothKeys != to.Options.SmoothKeys
+            || (to.Options.SmoothKeys && from.Options.KeyCenter != to.Options.KeyCenter))
+            throw new ArgumentException(
+                $"The supplied scales were taken with rotation {from.Rotation} and key center "
+                + $"{(from.Options.SmoothKeys ? from.Options.KeyCenter.ToString() : "none")}; this call uses {to.Rotation} and "
+                + $"{(to.Options.SmoothKeys ? to.Options.KeyCenter.ToString() : "none")}.", nameof(from));
         (string, float[])[] supplied = [("Q", from.QueryScales), ("K", from.KeyScales), ("V", from.ValueScales)];
         foreach ((string name, float[] values) in supplied)
             for (int i = 0; i < values.Length; i++)
@@ -256,7 +260,11 @@ public static class Int8AttentionV2Reference
                     throw new ArgumentException($"Supplied {name} scale {i} is {values[i]}; a stats pass scale is NaN, "
                         + "+∞ or at least the smallest normal float.", nameof(from));
         from.QueryScales.CopyTo(to.QueryScales, 0);
-        if (to.Options.SmoothKeys) from.KeyMeans.CopyTo(to.KeyMeans, 0);
+        if (to.Options.SmoothKeys)
+        {
+            from.KeyMeans.CopyTo(to.KeyMeans, 0);
+            from.RepresentativeKeys.CopyTo(to.RepresentativeKeys, 0);
+        }
         from.KeyScales.CopyTo(to.KeyScales, 0);
         from.ValueScales.CopyTo(to.ValueScales, 0);
     }

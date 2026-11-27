@@ -1,5 +1,5 @@
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
@@ -9,6 +9,7 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -17,7 +18,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// (<c>transformer/</c>, <c>text_encoder/</c>, <c>tokenizer/</c>, <c>vae/</c>; the folder or any file in it), its
 /// ComfyUI export's <c>diffusion_models</c> file, or a GGUF of either. The encoder, tokenizer and VAE come from the
 /// folder when the checkpoint sits in one, else from the caller's component overrides, else the side models
-/// (<see cref="SideModels.Qwen35_9B"/>, which carries its tokenizer, and <see cref="SideModels.Flux2Vae"/>). Base vs SFT
+/// (<see cref="SideModels.Qwen35_9BBf16"/>, <see cref="SideModels.Qwen35Tokenizer"/> and <see cref="SideModels.Flux2VaeSmall"/>). Base vs SFT
 /// is <see cref="MossImageVariants"/>. Drives through <see cref="MossImageRecipePipeline"/>.</summary>
 public sealed class MossImageRecipe : IArchitectureRecipe
 {
@@ -29,6 +30,14 @@ public sealed class MossImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public string Name => "moss-image";
+
+    /// <inheritdoc/>
+    /// <remarks>Boxes are centred absolute pixels, not a 0-1000 grid, so no box form is declared.</remarks>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["llm"], Format = "text", Negative = "separate",
+        Supports = ["boxes", "text-rendering"], Guide = "docs/prompting/moss-image.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Regional prompts become the model's own layout JSON (<see cref="LayoutPromptBuilder.BuildSceneLayout"/>)
@@ -54,10 +63,14 @@ public sealed class MossImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public ModelVariantCatalog? Variants => MossImageVariants.Catalog;
 
+    /// <summary>The catalog ids of the Comfy-Org builds besides <see cref="Name"/>, which the registry resolves by id.</summary>
+    internal static readonly string[] BuildCatalogIds = ["moss-image-sft", "moss-image-int8", "moss-image-sft-int8"];
+
     /// <inheritdoc/>
     public bool Matches(string familyId) =>
         string.Equals(familyId, Name, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "moss_image", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(familyId, "moss_image", StringComparison.OrdinalIgnoreCase)
+        || BuildCatalogIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
@@ -86,7 +99,8 @@ public sealed class MossImageRecipe : IArchitectureRecipe
             transformer.LoadWeights(converted);
 
             string encoderPath = ResolveEncoderPath(context, root);
-            Qwen35TextEncoder encoder = Qwen35TextEncoder.Load(encoderPath, MossImageConfig.MaxTextTokens, "MOSS-Image");
+            Qwen35TextEncoder encoder = Qwen35TextEncoder.Load(encoderPath, MossImageConfig.MaxTextTokens, "MOSS-Image",
+                context.TextEncoderBackendOrDefault);
             owned.Add(encoder);
             ILlmTokenizer tokenizer = ResolveTokenizer(encoder, encoderPath, root, context.Cancel);
             VisionPlaceholderPrompt? placeholders = AttachVision(encoder, tokenizer, encoderPath, context.Components?.TextEncoderVision);

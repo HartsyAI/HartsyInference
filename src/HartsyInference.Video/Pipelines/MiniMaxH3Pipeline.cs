@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using System.Linq;
@@ -14,6 +15,8 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.MiniMaxH3;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Contracts;
 
 namespace HartsyInference.Video.Pipelines;
 
@@ -128,7 +131,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
         (int condVideoRows, int condAudioRows) = MiniMaxH3Conditioning.ConditioningRowCounts(layout);
         RequireConditioningRows(request.CondVideoRows, condVideoRows, _config.VideoPatchDim, "video");
-        RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioLatentsDim, "audio");
+        RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioChannels, "audio");
 
         (IReadOnlyList<float>? videoMaskRows, IReadOnlyList<float>? videoFeatureMaskValues) =
             NormalizeDenoiseMask(
@@ -138,7 +141,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         (IReadOnlyList<float>? audioMaskRows, IReadOnlyList<float>? audioFeatureMaskRows) =
             NormalizeDenoiseMask(
                 request.AudioDenoiseMaskRows, request.AudioDenoiseFeatureMaskRows,
-                request.AudioDenoiseSourceRows, audioRowCount, _config.AudioLatentsDim,
+                request.AudioDenoiseSourceRows, audioRowCount, _config.AudioChannels,
                 patchArea: 1, modality: "audio");
         bool hasDenoiseMask = videoFeatureMaskValues is not null || audioFeatureMaskRows is not null;
         if (request.Controls?.Any(static control => control.IsInpaint) == true && hasDenoiseMask)
@@ -164,7 +167,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             throw new NotSupportedException("MiniMax-H3 PDD is distilled to CFG 1; use CFG 1 with the PDD adapter.");
         }
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(videoRowCount, _config.VideoPatchDim), seed);
-        Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioLatentsDim), seed ^ 0x5D2B);
+        Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioChannels), seed ^ 0x5D2B);
         Tensor? videoFixedNoise = null;
         Tensor? videoInjection = null;
         Tensor? videoTokenMask = null;
@@ -992,13 +995,13 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// <summary><c>z += v * delta</c> in place.</summary>
     private void EulerStep(Tensor z, Tensor velocity, float delta)
     {
-        Backend.CfgEulerStep(z, velocity, velocity, 1f, delta);
+        Backend.GuidedEulerStep(z, velocity, velocity, GuidedEulerSpec.Lerp(1f, delta));
     }
 
-    /// <summary>CFG-fused Euler step: <c>z += (uncond + g·(cond − uncond))·delta</c>, the shared <see cref="IBackend.CfgEulerStep"/>.</summary>
+    /// <summary>CFG-fused Euler step: <c>z += (uncond + g·(cond − uncond))·delta</c>, the shared <see cref="IBackend.GuidedEulerStep"/>.</summary>
     private void EulerStep(Tensor z, Tensor cond, Tensor uncond, float guidance, float delta)
     {
-        Backend.CfgEulerStep(z, cond, uncond, guidance, delta);
+        Backend.GuidedEulerStep(z, cond, uncond, GuidedEulerSpec.Lerp(guidance, delta));
     }
 
     /// <summary>The shared <see cref="SamplerMath.CombineCfg"/> combine, for the masked path that advances from one velocity.</summary>

@@ -1,10 +1,10 @@
 using System.Diagnostics;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
-using HartsyInference.Core.Schedulers;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -725,7 +725,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         return latent;
     }
 
-    /// <summary>Drain-free denoise loop: cond+uncond run as ONE batch-2 UNet forward per step (halving host op-dispatch), the CFG combine + Euler update run in-place on the device-resident latent (<c>IBackend.CfgEulerStep</c>, dt = σ[i+1]−σ[i]), and the step-invariant conditioning (batched text embedding in the UNet dtype, ADM micro-conditioning embedding) is built once before the loop. Zero host round-trips per step — the host CFG/scheduler loops and the per-step conditioning re-slices of the reference path each forced a full GPU pipeline drain. Latent previews are throttled to every 4th step + final (each preview is a deliberate D2H sync). At <c>cfgScale ≤ 1</c> the uncond branch is skipped entirely (batch 1, guidance 1 ⇒ pure cond Euler step). The final latent is host-materialized before returning because the tiled VAE fallback slices it on the host.</summary>
+    /// <summary>Drain-free denoise loop: cond+uncond run as ONE batch-2 UNet forward per step (halving host op-dispatch), the CFG combine + Euler update run in-place on the device-resident latent (<c>IBackend.GuidedEulerStep</c>, dt = σ[i+1]−σ[i]), and the step-invariant conditioning (batched text embedding in the UNet dtype, ADM micro-conditioning embedding) is built once before the loop. Zero host round-trips per step — the host CFG/scheduler loops and the per-step conditioning re-slices of the reference path each forced a full GPU pipeline drain. Latent previews are throttled to every 4th step + final (each preview is a deliberate D2H sync). At <c>cfgScale ≤ 1</c> the uncond branch is skipped entirely (batch 1, guidance 1 ⇒ pure cond Euler step). The final latent is host-materialized before returning because the tiled VAE fallback slices it on the host.</summary>
     /// <summary>The fused loop's step body as an <see cref="IDenoisePredictor"/>: scale the latent for the noise level, run ONE batch-2 UNet forward carrying cond and uncond together, and slice the two halves back out.
     /// <para>Everything step-invariant (the batched text embedding already in the UNet dtype, the ADM
     /// micro-conditioning embedding) was built once by the caller and is borrowed here, not owned — this type disposes
@@ -798,7 +798,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
             if (!_useCfg)
             {
-                // Guidance-free: one tensor serves both halves, which CfgEulerStep explicitly allows.
+                // Guidance-free: one tensor serves both halves, which GuidedEulerStep explicitly allows.
                 return new DenoisePrediction(predF32, predF32);
             }
             Tensor uncond = new Tensor(_latentShape, DType.F32);
@@ -863,7 +863,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
 
             // The whole step body now lives behind IDenoisePredictor, and the update behind ISampler. For the default
             // EulerSampler this is exactly the previous instruction sequence — one batched UNet forward, one slice
-            // pair, one in-place CfgEulerStep on the device-resident latent — which is what makes the conversion
+            // pair, one in-place GuidedEulerStep on the device-resident latent — which is what makes the conversion
             // bit-identical rather than merely equivalent.
             sampler.Step(Backend, latent, predictor, i);
 
@@ -889,14 +889,14 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         if (!ReferenceEquals(admSource, pooledOutput)) admSource.Dispose();
         admEmb?.Dispose();
 
-        // The in-place CfgEulerStep keeps the latent device-resident; touching DataPointer syncs it
+        // The in-place GuidedEulerStep keeps the latent device-resident; touching DataPointer syncs it
         // back so the tiled-VAE host slicing (and any host consumer) sees the real final state.
         Backend.Sync();
         unsafe { _ = (nint)latent.DataPointer; }
         return latent;
     }
 
-    /// <summary>CFG-branch parallelism: the fused loop's batch=2 single-GPU forward split into two batch=1 forwards — cond on <see cref="DiffusionPipelineBase.Backend"/>, uncond concurrently on <see cref="DiffusionPipelineBase.CfgParallelBackend"/> via <see cref="CfgBranchRunner"/> — combined with the same in-place <c>CfgEulerStep</c> the fused loop uses. Weights are preloaded on both backends before this runs (see <see cref="TryPreloadCfgParallel"/>), so every in-loop weight read is a per-backend cache hit. The shared latent stays resident on <see cref="DiffusionPipelineBase.Backend"/> across the whole loop; <see cref="IBackend.CopyFromPeer"/> clones it onto the second backend once per step (device-resident hop, no host round trip) — the same hand-off <c>FluxPipeline</c>'s true-CFG concurrent branch uses.</summary>
+    /// <summary>CFG-branch parallelism: the fused loop's batch=2 single-GPU forward split into two batch=1 forwards — cond on <see cref="DiffusionPipelineBase.Backend"/>, uncond concurrently on <see cref="DiffusionPipelineBase.CfgParallelBackend"/> via <see cref="CfgBranchRunner"/> — combined with the same in-place <c>GuidedEulerStep</c> the fused loop uses. Weights are preloaded on both backends before this runs (see <see cref="TryPreloadCfgParallel"/>), so every in-loop weight read is a per-backend cache hit. The shared latent stays resident on <see cref="DiffusionPipelineBase.Backend"/> across the whole loop; <see cref="IBackend.CopyFromPeer"/> clones it onto the second backend once per step (device-resident hop, no host round trip) — the same hand-off <c>FluxPipeline</c>'s true-CFG concurrent branch uses.</summary>
     private Tensor RunDenoiseLoopCfgParallel(
         Tensor latent,
         TensorShape latentShape,
@@ -968,7 +968,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             velocityUncondRemoteF32.Dispose();
 
             Tensor condF32 = DtypeCastHelper.EnsureF32(Backend, velocityCond);
-            Backend.CfgEulerStep(latent, condF32, velocityUncondLocal, cfgScale, scheduler.StepDelta(i));
+            Backend.GuidedEulerStep(latent, condF32, velocityUncondLocal, GuidedEulerSpec.Lerp(cfgScale, scheduler.StepDelta(i)));
             condF32.Dispose();
             velocityUncondLocal.Dispose();
 
@@ -1007,7 +1007,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         condAdmEmb?.Dispose();
         uncondAdmEmb?.Dispose();
 
-        // The in-place CfgEulerStep keeps the latent device-resident; touching DataPointer syncs it back so the
+        // The in-place GuidedEulerStep keeps the latent device-resident; touching DataPointer syncs it back so the
         // tiled-VAE host slicing (and any host consumer) sees the real final state.
         Backend.Sync();
         unsafe { _ = (nint)latent.DataPointer; }

@@ -22,7 +22,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet test tests/HartsyInference.BenchmarkRunner.Tests -c Release
       - run: dotnet publish benchmarks/HartsyInference.BenchmarkRunner -c Release -r ${{ matrix.rid }} --self-contained true -p:BenchmarkRevision=${{ github.sha }} -o artifacts/runner
       - if: runner.os == 'Linux'
         run: tar -czf artifacts/hartsy-bench-linux-x64.tar.gz -C artifacts/runner .

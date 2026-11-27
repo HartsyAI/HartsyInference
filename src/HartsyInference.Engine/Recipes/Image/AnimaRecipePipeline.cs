@@ -209,6 +209,7 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
             LatentTargetArea = (int)settings.MaxPixels,
             LatentUpscale = true,
             LatentMultiple = 16,
+            LatentResize = ReferenceResizeMethod.Lanczos,
             Overflow = ReferenceOverflow.Refuse,
         };
         IReadOnlyList<ImageData> ordered = ReferenceImageResolver.Collect(initIsReference ? request.Img2Img!.InitImage : null,

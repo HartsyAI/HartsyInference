@@ -246,8 +246,8 @@ __device__ __forceinline__ void flash_attn_f16_core(
     }
 
     // ── Epilogue: O / l, stored as half2 at the C-fragment positions. ──
-    const float inv0 = l0 > 0.0f ? 1.0f / l0 : 0.0f;
-    const float inv1 = l1 > 0.0f ? 1.0f / l1 : 0.0f;
+    const float inv0 = l0 > 0.0f ? 1.0f / l0 : (isnan(l0) ? l0 : 0.0f);
+    const float inv1 = l1 > 0.0f ? 1.0f / l1 : (isnan(l1) ? l1 : 0.0f);
     const unsigned r0 = q0 + warp * 16 + g, r1 = r0 + 8;
     #pragma unroll
     for (unsigned dt = 0; dt < dTiles; dt++)

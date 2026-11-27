@@ -19,6 +19,14 @@ public static class VideoOutputWriter
         AudioBuffer? audio, int fps)
     {
         string dir = FrameWriter.WriteFrames(frames, width, height, baseDir, slug);
+        return Finish(dir, audio, fps);
+    }
+
+    /// <summary>Completes a frame directory whose frames are already written: <c>audio.wav</c> when
+    /// <paramref name="audio"/> carries a soundtrack, then <c>video.mp4</c> muxed from the frames on disk. A failed mux
+    /// still returns the directory — the frames are the durable output.</summary>
+    public static Written Finish(string dir, AudioBuffer? audio, int fps)
+    {
         string? audioPath = null;
         if (audio is not null && !audio.IsEmpty)
         {

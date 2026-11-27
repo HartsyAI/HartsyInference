@@ -52,22 +52,29 @@ public static class CudaLibraryResolver
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             dirs.Add(Path.Combine(home, ".local", "lib", "cuda13"));
         }
-        // cuDNN search dirs (provisioned/bundled): an explicit override, the per-user cache (per CUDA major — the
-        // driver isn't queried here to avoid a circular load during static init, so all common majors are listed;
-        // File.Exists filters), and a 'cudnn' folder beside the assembly. See CudnnRuntime.
+        // cuBLAS and cuDNN search dirs (provisioned/bundled): explicit overrides, the per-user caches (per CUDA major —
+        // the driver isn't queried here to avoid a circular load during static init, so all common majors are listed;
+        // File.Exists filters), and 'cublas'/'cudnn' folders beside the assembly. See CublasRuntime and CudnnRuntime.
+        string? cublasDir = EngineKnobs.CublasDir.Value;
+        if (!string.IsNullOrEmpty(cublasDir)) dirs.Add(cublasDir);
         string? cudnnDir = EngineKnobs.CudnnDir.Value;
         if (!string.IsNullOrEmpty(cudnnDir)) dirs.Add(cudnnDir);
         // NCCL commonly lives inside a torch venv (site-packages/nvidia/nccl/lib) rather than the loader
         // path; this override (or a copy/hardlink in any dir above) makes it resolvable without apt.
         string? ncclDir = EngineKnobs.NcclDir.Value;
         if (!string.IsNullOrEmpty(ncclDir)) dirs.Add(ncclDir);
-        foreach (int major in new[] { 13, 12, 11 }) dirs.Add(CudnnRuntime.CacheLibDir(major));
+        foreach (int major in CublasRuntime.KnownMajors) dirs.Add(CudaRedistProvisioner.CacheLibDir("cublas", major));
+        foreach (int major in CublasRuntime.KnownMajors) dirs.Add(CudnnRuntime.CacheLibDir(major));
+        dirs.Add(CudaRedistProvisioner.BundledDir("cublas"));
         dirs.Add(CudnnRuntime.BundledDir());
         return dirs.ToArray();
     }
 
     /// <summary>Tries each candidate soname in order, first as an absolute path under every probe dir, then via the default loader search (LD_LIBRARY_PATH / ldconfig / PATH).</summary>
-    private static bool TryLoadFirst(out nint handle, params string[] sonames)
+    private static bool TryLoadFirst(out nint handle, params string[] sonames) => TryLoadFirst(out handle, out _, sonames);
+
+    /// <summary>As <see cref="TryLoadFirst(out nint, string[])"/>, also reporting the file loaded (null when the OS loader found it by name).</summary>
+    internal static bool TryLoadFirst(out nint handle, out string? loadedFrom, params string[] sonames)
     {
         foreach (string soname in sonames)
         {
@@ -75,12 +82,19 @@ public static class CudaLibraryResolver
             {
                 string path = Path.Combine(dir, soname);
                 if (File.Exists(path) && NativeLibrary.TryLoad(path, out handle))
+                {
+                    loadedFrom = path;
                     return true;
+                }
             }
             if (NativeLibrary.TryLoad(soname, out handle))
+            {
+                loadedFrom = null;
                 return true;
+            }
         }
         handle = 0;
+        loadedFrom = null;
         return false;
     }
 
@@ -93,14 +107,53 @@ public static class CudaLibraryResolver
         return NativeLibrary.Load(sonames[0]);
     }
 
+    /// <summary>Loads cudnn64_9.dll from the first probe dir holding the complete cuDNN set, with that dir first on PATH: the
+    /// dispatcher loads its sub-libraries by bare name, not from its own folder, and exits the process when one is missing.</summary>
+    private static nint LoadCudnnWindows()
+    {
+        foreach (string dir in ProbeDirs)
+        {
+            if (!CudnnRuntime.HasLibraries(dir))
+            {
+                continue;
+            }
+            string? path = PathWithDirFirst(Environment.GetEnvironmentVariable("PATH"), dir);
+            if (path is not null)
+            {
+                Environment.SetEnvironmentVariable("PATH", path);
+            }
+            if (NativeLibrary.TryLoad(Path.Combine(dir, "cudnn64_9.dll"), out nint handle))
+            {
+                return handle;
+            }
+        }
+        // A system install keeps its folder on PATH, so its sub-libraries resolve beside it.
+        return NativeLibrary.Load("cudnn64_9.dll");
+    }
+
+    /// <summary><paramref name="path"/> with <paramref name="dir"/> as its first entry, or null when it already is.</summary>
+    internal static string? PathWithDirFirst(string? path, string dir)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return dir;
+        }
+        int end = path.IndexOf(Path.PathSeparator);
+        string first = (end < 0 ? path : path[..end]).Trim().TrimEnd('\\', '/');
+        if (string.Equals(first, dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return dir + Path.PathSeparator + path;
+    }
+
     /// <summary>Availability probe for <see cref="CudaContext.IsAvailable"/>: can cuBLAS be loaded (probe dirs included)? Keeps the availability check and the actual resolution on the SAME search logic — a duplicated bare-soname probe here previously reported CUDA unavailable whenever LD_LIBRARY_PATH was missing, even though the resolver could load everything from the probe dirs.</summary>
     public static bool CublasLoadable()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return TryLoadFirst(out _, "cublas64_13.dll", "cublas64_12.dll", "cublas64_11.dll");
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            return TryLoadFirst(out _, "libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
-        return false;
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            return false;
+        CublasRuntime.EnsureProbed();
+        return CublasRuntime.Available;
     }
 
     private static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
@@ -126,13 +179,13 @@ public static class CudaLibraryResolver
                 return LoadFirst("libnvToolsExt.so.1");
         }
 
-        if (libraryName == "cublas")
+        if (libraryName == "cublas" && (windows || linux))
         {
-            // Try newest first, then older toolkits
-            if (windows)
-                return LoadFirst("cublas64_13.dll", "cublas64_12.dll", "cublas64_11.dll");
-            else if (linux)
-                return LoadFirst("libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
+            // The same file CublasRuntime chose: newest major the driver can run, never a newer one.
+            string[] names = CublasRuntime.Sonames(lt: false);
+            if (CublasRuntime.LoadedPath is { } chosen && NativeLibrary.TryLoad(chosen, out nint loaded))
+                return loaded;
+            return LoadFirst(names);
         }
 
         // cuDNN (fused flash-attention SDPA fast path, numerics.sdpaCudnn). Ships only as a versioned soname
@@ -141,7 +194,7 @@ public static class CudaLibraryResolver
         if (libraryName == "cudnn")
         {
             if (windows)
-                return LoadFirst("cudnn64_9.dll");
+                return LoadCudnnWindows();
             else if (linux)
                 return LoadFirst("libcudnn.so.9");
         }
@@ -150,12 +203,17 @@ public static class CudaLibraryResolver
         // versioned soname — there is no unversioned libcublasLt.so — so the bare [LibraryImport("cublasLt")]
         // name fails to load without this case. Exercised by the epilogue-fusion, native-FP8, and general
         // Lt-GEMM paths (all default-off, which is why this was dormant until perf flags got turned on).
-        if (libraryName == "cublasLt")
+        if (libraryName == "cublasLt" && (windows || linux))
         {
-            if (windows)
-                return LoadFirst("cublasLt64_13.dll", "cublasLt64_12.dll", "cublasLt64_11.dll");
-            else if (linux)
-                return LoadFirst("libcublasLt.so.13", "libcublasLt.so.12", "libcublasLt.so.11");
+            // cuBLASLt must match the loaded cuBLAS: look beside it first, then only that major (any driver-allowed major when
+            // no cuBLAS loaded), so an OS-path cuBLAS 12 never pairs with a cached cuBLASLt 13.
+            string[] names = CublasRuntime.ResolvedMajor > 0
+                ? [CublasRuntime.Soname(CublasRuntime.ResolvedMajor, lt: true)]
+                : CublasRuntime.Sonames(lt: true);
+            if (CublasRuntime.LibDir is { } dir && CublasRuntime.ResolvedMajor > 0
+                && NativeLibrary.TryLoad(Path.Combine(dir, CublasRuntime.Soname(CublasRuntime.ResolvedMajor, lt: true)), out nint loaded))
+                return loaded;
+            return LoadFirst(names);
         }
 
         // NCCL (collective transport — context/tensor parallelism). Versioned soname only, no unversioned

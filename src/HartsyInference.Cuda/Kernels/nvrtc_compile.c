@@ -3,11 +3,26 @@
 // nvrtc API inline and dlopens libnvrtc so it needs no headers and no link-time CUDA toolkit.
 //
 // Build:  cc -O2 -o nvrtc_compile nvrtc_compile.c -ldl
+// Windows (VS developer shell): cl /O2 nvrtc_compile.c /Fe:nvrtc_compile.exe
 // Usage:  LD_LIBRARY_PATH=~/.local/lib/cuda13 ./nvrtc_compile in.cu out.ptx compute_80
+// Windows: put the toolkit bin/x64 directory on PATH, then use the same arguments.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#define RTLD_NOW 0
+#define dlopen(name, flags) ((void*)LoadLibraryA(name))
+#define dlsym(lib, name) ((void*)GetProcAddress((HMODULE)(lib), name))
+static const char* dlerror(void)
+{
+    static char message[64];
+    snprintf(message, sizeof(message), "LoadLibrary error %lu", GetLastError());
+    return message;
+}
+#else
 #include <dlfcn.h>
+#endif
 
 typedef int nvrtcResult;
 typedef void* nvrtcProgram;
@@ -19,6 +34,7 @@ typedef nvrtcResult (*fn_getptx)(nvrtcProgram, char*);
 typedef nvrtcResult (*fn_logsize)(nvrtcProgram, size_t*);
 typedef nvrtcResult (*fn_getlog)(nvrtcProgram, char*);
 typedef const char* (*fn_errstr)(nvrtcResult);
+typedef nvrtcResult (*fn_version)(int*, int*);
 
 static char* read_file(const char* path, size_t* outLen)
 {
@@ -42,10 +58,25 @@ int main(int argc, char** argv)
     const char* outPath = argv[2];
     const char* arch = argv[3];
 
-    void* lib = dlopen("libnvrtc.so", RTLD_NOW);
+    void* lib;
+#ifdef _WIN32
+    lib = dlopen("nvrtc64_130_0.dll", RTLD_NOW);
+    if (!lib) lib = dlopen("nvrtc64_120_0.dll", RTLD_NOW);
+#else
+    lib = dlopen("libnvrtc.so", RTLD_NOW);
     if (!lib) lib = dlopen("libnvrtc.so.13", RTLD_NOW);
     if (!lib) lib = dlopen("libnvrtc.so.12", RTLD_NOW);
+#endif
     if (!lib) { fprintf(stderr, "dlopen libnvrtc failed: %s\n", dlerror()); return 3; }
+
+    fn_version nvrtcVersion = (fn_version)dlsym(lib, "nvrtcVersion");
+    int major = 0, minor = 0;
+    if (!nvrtcVersion || nvrtcVersion(&major, &minor) != 0)
+    {
+        fprintf(stderr, "cannot query loaded NVRTC version\n");
+        return 3;
+    }
+    fprintf(stderr, "NVRTC %d.%d, target %s; exact compiler build is recorded in the emitted PTX header\n", major, minor, arch);
 
     fn_create  nvrtcCreateProgram   = (fn_create)  dlsym(lib, "nvrtcCreateProgram");
     fn_compile nvrtcCompileProgram  = (fn_compile) dlsym(lib, "nvrtcCompileProgram");

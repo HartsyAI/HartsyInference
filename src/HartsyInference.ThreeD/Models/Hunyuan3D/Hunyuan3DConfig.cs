@@ -1,6 +1,6 @@
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Hunyuan3D-2 shape-generation configuration for the VecSet flow-match DiT plus ShapeVAE decoder; dims marked in <c>docs/Research/HUNYUAN3D_2_ARCHITECTURE.md</c> are <b>validation-gated</b>.</summary>
+/// <summary>Hunyuan3D-2 shape-generation configuration for the VecSet flow-match DiT plus ShapeVAE decoder; dims are read from the checkpoint's <c>config.yaml</c> (see <c>docs/Research/HUNYUAN3D_ARCHITECTURE.md</c>).</summary>
 public sealed record Hunyuan3DConfig
 {
     // --- VecSet latent / DiT ---
@@ -50,6 +50,31 @@ public sealed record Hunyuan3DConfig
     /// <summary>ShapeVAE latent scale (config <c>scale_factor</c>); the sampled latent is divided by this before decode.</summary>
     public float VaeScaleFactor { get; init; } = 1.0f;
 
+    /// <summary>Geo-decoder width divisor (the turbo VAE halves it to 512 and projects the latents down first).</summary>
+    public int GeoDownsample { get; init; } = 1;
+
+    /// <summary>Geo-decoder MLP expansion (the turbo VAE uses 1).</summary>
+    public int GeoMlpRatio { get; init; } = 4;
+
+    /// <summary>Whether the geo-decoder applies <c>ln_post</c>; without it QK-norm is off too.</summary>
+    public bool GeoLnPost { get; init; } = true;
+
+    /// <summary>Set for the Hunyuan3D-2.1 <c>HunYuanDiTPlain</c> denoiser; null for the 2.0 Flux-style DiT.</summary>
+    public Hunyuan3DPlainDitConfig? PlainDit { get; init; }
+
+    // --- Distilled and multiview variants ---
+    /// <summary>The DiT adds a guidance embedding to the timestep vector and runs one forward per step instead of CFG (Fast, Turbo).</summary>
+    public bool GuidanceEmbed { get; init; }
+
+    /// <summary>Sigma schedule of the checkpoint's scheduler.</summary>
+    public Hunyuan3DScheduler Scheduler { get; init; } = Hunyuan3DScheduler.FlowMatchEuler;
+
+    /// <summary>The consistency scheduler's <c>pcm_timesteps</c>; read only when <see cref="Scheduler"/> is consistency.</summary>
+    public int PcmTimesteps { get; init; } = 50;
+
+    /// <summary>Number of conditioning views (4 for the multiview checkpoints, else 1).</summary>
+    public int ViewCount { get; init; } = 1;
+
     // --- Sampling / extraction defaults ---
     /// <summary>Default flow-match denoise steps.</summary>
     public int NumInferenceSteps { get; init; } = 50;
@@ -60,7 +85,7 @@ public sealed record Hunyuan3DConfig
     /// <summary>Flow-match timestep shift.</summary>
     public float FlowShift { get; init; } = 1.0f;
 
-    /// <summary>Default marching-cubes grid resolution per axis.</summary>
+    /// <summary>Default marching-cubes grid resolution per axis: the number of samples, one fewer than upstream's <c>octree_resolution + 1</c> for the same value.</summary>
     public int GridResolution { get; init; } = 256;
 
     /// <summary>Iso level for surface extraction from the decoded field.</summary>
@@ -69,7 +94,7 @@ public sealed record Hunyuan3DConfig
     /// <summary>Half-extent of the cubic query box in object space (grid spans [-Bound, Bound]³).</summary>
     public float BoundingBox { get; init; } = 1.01f;
 
-    /// <summary>Default config for the <c>tencent/Hunyuan3D-2</c> shape model; <b>all dims are validation-gated</b> against the checkpoint's <c>config.json</c>.</summary>
+    /// <summary>Default config for the <c>tencent/Hunyuan3D-2</c> shape model; dims match the checkpoint's <c>config.yaml</c>.</summary>
     public static Hunyuan3DConfig Hunyuan3D2 => new()
     {
         LatentTokens = 3072, LatentChannels = 64, Width = 1024, DepthDouble = 16, DepthSingle = 32, NumHeads = 16,

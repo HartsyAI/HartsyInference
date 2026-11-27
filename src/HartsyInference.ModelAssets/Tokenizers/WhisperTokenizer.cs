@@ -167,10 +167,17 @@ public sealed class WhisperTokenizer : IDisposable
     public int[] EncodeText(string text)
     {
         ThrowIfDisposed();
-        IReadOnlyList<int> ids = _bpe.EncodeToIds(text);
-        int[] result = new int[ids.Count];
-        for (int i = 0; i < ids.Count; i++) result[i] = ids[i];
-        return result;
+        // The vocabulary is spelled in GPT-2's byte-level alphabet (a space is 'Ġ'), so each regex piece is mapped
+        // into it before the merges run; handing the BPE raw text would drop every space.
+        List<int> ids = new();
+        foreach (Match piece in _gpt2PreTokenRegex.Matches(text))
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(piece.Value);
+            char[] mapped = new char[bytes.Length];
+            for (int i = 0; i < bytes.Length; i++) mapped[i] = _byteToUnicode[bytes[i]];
+            ids.AddRange(_bpe.EncodeToIds(new string(mapped), considerPreTokenization: false));
+        }
+        return ids.ToArray();
     }
 
     /// <summary>Builds the decoder prompt for this checkpoint. Multilingual layout: <c>[SOT, &lt;|lang|&gt;, transcribe/translate, &lt;|notimestamps|&gt;]</c>; pass <c>null</c> for <paramref name="language"/> to skip the language token. English-only layout: <c>[SOT, &lt;|notimestamps|&gt;]</c> — the prompt has no language or task slot (OpenAI's <c>sot_sequence</c> for <c>.en</c> models is SOT alone, HuggingFace's <c>forced_decoder_ids</c> is <c>[[1, notimestamps]]</c>), so <paramref name="language"/> and <paramref name="translate"/> are ignored.</summary>
@@ -202,7 +209,7 @@ public sealed class WhisperTokenizer : IDisposable
     }
 
     /// <summary>Normalizes a caller-supplied language code to the ISO-639-1 form Whisper's table uses: lowercases and strips any BCP-47 / locale region subtag, so <c>"en-US"</c>, <c>"en_US"</c>, and <c>"EN"</c> all map to <c>"en"</c>. Multi-letter codes without a separator (e.g. <c>"yue"</c>) pass through unchanged. Without this, a UI/API defaulting to a locale like <c>"en-US"</c> throws "Unknown Whisper language code".</summary>
-    private static string NormalizeLanguageCode(string code)
+    public static string NormalizeLanguageCode(string code)
     {
         if (string.IsNullOrWhiteSpace(code)) return code;
         string c = code.Trim().ToLowerInvariant();

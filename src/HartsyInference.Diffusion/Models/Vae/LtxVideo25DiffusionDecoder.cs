@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -379,7 +380,7 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
 
     /// <summary>Pixels <c>[1, 3, t, h·p, w·p]</c> → channels-last tokens <c>[t·h·w, 3·p²]</c>. The packed channel is
     /// <c>c·p² + r·p + q</c> with <c>q</c> the height sub-index and <c>r</c> the width sub-index — the reference's
-    /// <c>(c p r q)</c> ordering, which puts width outside height. <see cref="IBackend.UnpatchifyVae"/> uses the same
+    /// <c>(c p r q)</c> ordering, which puts width outside height. <see cref="PixelShuffles.DepthToSpace"/> with <see cref="ChannelOrder.CWHT"/> uses the same
     /// packing but a channels-first layout, so it cannot be reused here.</summary>
     private Tensor PatchifyPixels(Tensor pixels, int frames, int height, int width)
     {

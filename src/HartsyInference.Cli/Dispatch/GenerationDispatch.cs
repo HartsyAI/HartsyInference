@@ -1,14 +1,21 @@
 using System.Globalization;
 using System.Text;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Diagnostics;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Worlds;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.ThreeD.Io;
 using HartsyInference.Vision.Codec;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.WorldViewer;
+using HartsyInference.WorldViewer.Avalonia;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Cli.Dispatch;
 
@@ -17,6 +24,7 @@ namespace HartsyInference.Cli.Dispatch;
 /// per branch.</remarks>
 public static class GenerationDispatch
 {
+
     /// <summary>Runs one generation for <paramref name="spec"/>.</summary>
     /// <remarks><paramref name="prompt"/> is the text prompt for the generative modalities and an input file path for
     /// transcribe / vision / 3d / world. Frame sequences (video, world) are written under <paramref name="outputDir"/>
@@ -64,6 +72,8 @@ public static class GenerationDispatch
             Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
             CfgScale = parameters.GetFloatOrNull("cfg"),
+            FluxGuidance = parameters.GetFloatOrNull("flux-guidance"),
+            TrueCfgScale = parameters.GetFloatOrNull("true-cfg"),
             Sampler = parameters.GetStringOrNull("sampler"),
             Loras = BuildLoraStack(parameters),
             Scheduler = parameters.GetStringOrNull("scheduler"),
@@ -72,10 +82,11 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
             RemoveBackground = parameters.GetBool("remove-background", false) ? true : null,
+            RemoveBackgroundModel = parameters.GetStringOrNull("remove-background-model"),
             // SwarmUI's own default is on (UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)), so the
             // flag turns the extras OFF rather than on.
             ModelSpecificEnhancements = !parameters.GetBool("no-model-enhancements", false),
-            Img2Img = BuildImg2Img(parameters),
+            Img2Img = BuildImg2Img(parameters, spec),
             Inpaint = BuildInpaint(parameters),
             IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths
                 ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] } : null,
@@ -102,10 +113,12 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Image,
             FileBytes = PngEncoder.Encode(result.Rgb, result.HasAlpha ? result.Alpha : null, result.Width, result.Height),
             Extension = "png",
-            Text = $"{result.Width}x{result.Height} image (seed {result.Seed})",
+            Text = $"{result.Width}x{result.Height} image (seed {result.Seed})"
+                + (result.Layers is { Count: > 0 } layers ? $", {layers.Count} layers" : ""),
             PreviewRgb = result.Rgb,
             PreviewWidth = result.Width,
             PreviewHeight = result.Height,
+            Companions = Companions(result),
         };
         artifact.Meta["size"] = $"{result.Width}x{result.Height}";
         artifact.Meta["seed"] = result.Seed.ToString(CultureInfo.InvariantCulture);
@@ -113,6 +126,20 @@ public static class GenerationDispatch
         // to the family's official default inside the engine.
         CopyMeta(result.Meta, artifact);
         return artifact;
+    }
+
+    /// <summary>A layered result's layers as RGBA PNG companions <c>layer-00.png</c> (bottom) onward, written next to the
+    /// composite; empty for a single-layer result.</summary>
+    /// <remarks>A result with depth beside its image (Iris-Z <c>rgbd</c>) adds <c>depth.png</c>, the colour-coded depth map.</remarks>
+    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> Companions(ImageResult result)
+    {
+        List<(string Suffix, byte[] Bytes)> companions = result.Layers is not { Count: > 0 } layers ? []
+            : layers.Select(l => ($"layer-{l.Index:D2}.png", PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height))).ToList();
+        if (HartsyInference.Engine.Features.DepthImage.Companion(result) is { } depthRgb)
+        {
+            companions.Add(("depth.png", PngEncoder.Encode(depthRgb, null, result.Width, result.Height)));
+        }
+        return companions;
     }
 
     /// <summary>The token ids of a <c>--scores-out</c> TSV, in order (its <c>token_id</c> column).</summary>
@@ -140,6 +167,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> TextAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        if (parameters.GetBool("realtime", false))
+            return await RealtimeDispatch.RunAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false);
         float temperature = parameters.GetFloat("temperature", 0.7f);
         List<ImageData> images = [];
         if (parameters.GetStringOrNull("image") is { Length: > 0 } imagePaths)
@@ -154,7 +183,21 @@ public static class GenerationDispatch
             // "cuda:0" pins an ordinal; the composite "cuda:0+cuda:1" form requests the LLM layer split
             // (TextService.LoadSharded) — layers pooled across both cards by free VRAM.
             Device = parameters.GetStringOrNull("device"),
-            Messages = [new TextMessage { Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null }],
+            Messages =
+            [
+                new TextMessage
+                {
+                    Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null,
+                    Video = parameters.GetStringOrNull("video") is { } videoPath
+                        ? new VideoClip { Data = File.ReadAllBytes(videoPath), Format = Path.GetExtension(videoPath).TrimStart('.') }
+                        : null,
+                    VideoFrames = parameters.GetStringOrNull("frames-dir") is { } framesDir
+                        ? FolderFrames(framesDir, parameters.GetDoubleOrNull("frame-fps") ?? 1.0)
+                        : null,
+                },
+            ],
+            VideoFps = parameters.GetDoubleOrNull("video-fps"),
+            VideoMaxFrames = parameters.GetIntOrNull("video-max-frames"),
             SystemPrompt = parameters.GetStringOrNull("system"),
             MaxTokens = forced?.Count ?? parameters.GetInt("max-tokens", 256),
             ForcedTokenIds = forced,
@@ -173,6 +216,7 @@ public static class GenerationDispatch
             // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
+            WeightPrecision = parameters.GetStringOrNull("precision"),
             AlwaysFreeMemory = parameters.GetBool("always-free-memory", false) ? true : null,
             Placement = parameters.GetStringOrNull("placement"),
         };
@@ -234,6 +278,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> SpeechAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, CancellationToken cancel)
     {
+        if (parameters.GetBool("duplex", false))
+            return await DuplexDispatch.RunAsync(engine, spec, parameters, cancel).ConfigureAwait(false);
         double speed = parameters.GetFloat("speed", 1f);
         SpeechRequest request = new SpeechRequest
         {
@@ -463,32 +509,32 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> VisionAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
+        VisionMode visionMode = ParseVisionMode(parameters.Get("mode") ?? "embed");
+        string inputPath = prompt.Trim().Trim('"');
+        if (Directory.Exists(inputPath))
+        {
+            return await VisionBatchAsync(engine, spec, inputPath, visionMode, parameters, outputDir, cancel).ConfigureAwait(false);
+        }
+        if (parameters.Get("window") is not null || parameters.Get("overlap") is not null || parameters.Get("unbuffered") is not null)
+            throw new ArgumentException("--window, --overlap and --unbuffered apply to a folder of video frames (with --fps), not a single image.");
         ImageData image = LoadImage(prompt);
-        string mode = parameters.Get("mode") ?? "embed";
         VisionRequest request = new VisionRequest
         {
             Image = image,
-            Mode = mode.ToLowerInvariant() switch
-            {
-                "detect" => VisionMode.Detect,
-                "segment" => VisionMode.Segment,
-                "embed" => VisionMode.Embed,
-                "depth" => VisionMode.Depth,
-                "edge" => VisionMode.Edge,
-                "lineart" => VisionMode.Lineart,
-                "normal" => VisionMode.Normal,
-                "segmap" => VisionMode.SegMap,
-                "removebg" => VisionMode.BackgroundRemoval,
-                "upscale" => VisionMode.Upscale,
-                _ => throw new ArgumentException(
-                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, or upscale."),
-            },
+            Mode = visionMode,
             Prompt = parameters.Get("query"),
             Threshold = parameters.GetFloat("confidence", 0.25f),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
+            FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
         };
+        VisionRequestValidator.Validate(request);
         VisionResult result = await engine.Vision.RunAsync(spec, request, cancel).ConfigureAwait(false);
+
+        if (VisionOutputWriter.HasStructured(result))
+        {
+            return StructuredVisionArtifact(result, outputDir, inputPath);
+        }
 
         if (result.Masks is { Count: > 0 } masks)
         {
@@ -546,16 +592,113 @@ public static class GenerationDispatch
         return artifact;
     }
 
+    /// <summary>The CLI's <c>--mode</c> names for each <see cref="VisionMode"/>.</summary>
+    internal static VisionMode ParseVisionMode(string mode) => mode.ToLowerInvariant() switch
+    {
+        "detect" => VisionMode.Detect,
+        "segment" => VisionMode.Segment,
+        "embed" => VisionMode.Embed,
+        "depth" => VisionMode.Depth,
+        "edge" => VisionMode.Edge,
+        "lineart" => VisionMode.Lineart,
+        "normal" => VisionMode.Normal,
+        "segmap" => VisionMode.SegMap,
+        "removebg" => VisionMode.BackgroundRemoval,
+        "upscale" => VisionMode.Upscale,
+        "metric-depth" => VisionMode.MetricDepth,
+        "geometry" => VisionMode.Geometry,
+        "pose" => VisionMode.Pose,
+        "matting" => VisionMode.Matting,
+        "face" => VisionMode.Face,
+        "intrinsic" => VisionMode.Intrinsic,
+        "track" => VisionMode.Track,
+        "interpolate" => VisionMode.Interpolate,
+        _ => throw new ArgumentException(
+            $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, upscale, "
+            + "metric-depth, geometry, pose, matting, face, intrinsic, track, or interpolate."),
+    };
+
+    /// <summary>A folder input: its images (sorted by name) become the frames of a track, interpolate or video metric-depth run, or the
+    /// views of a multi-view depth/geometry run. Frame runs need <c>--fps</c> (which is also what makes a metric-depth folder a video);
+    /// interpolation needs <c>--factor</c> or <c>--target-fps</c>; tracking takes its text prompt from <c>--prompt</c> on the first frame.</summary>
+    private static async Task<GeneratedArtifact> VisionBatchAsync(IInferenceEngine engine, ModelSpec spec, string folder,
+        VisionMode mode, ParamState parameters, string? outputDir, CancellationToken cancel)
+    {
+        List<ImageData> images = VisionBatchInputs(folder).Select(LoadImage).ToList();
+        bool frames = VisionRequestValidator.IsSequenceOnly(mode) || mode == VisionMode.MetricDepth && parameters.GetDoubleOrNull("fps") is not null;
+        string? query = parameters.Get("query");
+        VisionBatchRequest request = new VisionBatchRequest
+        {
+            Images = images,
+            Mode = mode,
+            Kind = frames ? VisionSequenceKind.Frames : VisionSequenceKind.Views,
+            Fps = frames ? parameters.GetDoubleOrNull("fps") : null,
+            InterpolationFactor = parameters.GetIntOrNull("factor"),
+            TargetFps = parameters.GetDoubleOrNull("target-fps"),
+            Prompts = mode == VisionMode.Track && !string.IsNullOrWhiteSpace(query)
+                ? [new VisionFramePrompt { FrameIndex = 0, ObjectId = 1, Text = query }]
+                : null,
+            Threshold = parameters.GetFloat("confidence", 0.25f),
+            FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
+            FrameWindow = parameters.GetIntOrNull("window"),
+            FrameOverlap = parameters.GetIntOrNull("overlap"),
+            FrameBuffering = parameters.Get("unbuffered") == "true" ? VisionFrameBuffering.Unbuffered : null,
+        };
+        VisionRequestValidator.Validate(request);
+        string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), folder);
+        if (!frames)
+        {
+            VisionResult result = await engine.Vision.RunViewsAsync(spec, request, cancel).ConfigureAwait(false);
+            IReadOnlyList<string> files = VisionOutputWriter.WriteResult(result, dir);
+            return SelfWrittenVisionArtifact($"{images.Count} views → {files.Count} file(s) in {dir}", files.Count);
+        }
+        int written = await VisionOutputWriter.WriteFramesAsync(engine.Vision.RunFramesAsync(spec, request, cancel), dir, cancel)
+            .ConfigureAwait(false);
+        return SelfWrittenVisionArtifact($"{images.Count} input frames → {written} output frame(s) in {dir}", written);
+    }
+
+    /// <summary>A folder of PNG/BMP frames as a timed video: name order, frame <c>i</c> at <c>i / fps</c> seconds.</summary>
+    internal static IReadOnlyList<TimedImage> FolderFrames(string folder, double fps) =>
+        [.. VisionBatchInputs(folder).Select((path, i) => new TimedImage { Image = LoadImage(path), TimestampSeconds = i / fps })];
+
+    /// <summary>The images a folder input contributes, sorted by name: the formats <see cref="ImageIo.DecodeFile"/> reads
+    /// (.png, .bmp). Other files are skipped rather than failing the batch.</summary>
+    internal static string[] VisionBatchInputs(string folder)
+    {
+        string[] paths = Directory.EnumerateFiles(folder)
+            .Where(p => p.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        return paths.Length > 0 ? paths : throw new ArgumentException($"No .png or .bmp images in '{folder}'.");
+    }
+
+    /// <summary>Writes a single-image structured result (depth, geometry, pose, faces, matting, intrinsics) to a fresh run
+    /// folder and reports it.</summary>
+    private static GeneratedArtifact StructuredVisionArtifact(VisionResult result, string? outputDir, string inputPath)
+    {
+        string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), inputPath);
+        IReadOnlyList<string> files = VisionOutputWriter.WriteResult(result, dir);
+        return SelfWrittenVisionArtifact($"{files.Count} file(s) in {dir}", files.Count);
+    }
+
+    private static GeneratedArtifact SelfWrittenVisionArtifact(string text, int count)
+    {
+        GeneratedArtifact artifact = new GeneratedArtifact { Kind = ArtifactKind.Data, Extension = "json", Text = text, SelfWritten = true };
+        artifact.Meta["files"] = count.ToString(CultureInfo.InvariantCulture);
+        return artifact;
+    }
+
     /// <summary>Text-to-video through <see cref="IVideoService"/>; frames stream out and are written as a numbered PNG sequence.</summary>
     private static async Task<GeneratedArtifact> VideoAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
+        IReadOnlyDictionary<string, object> extra = BuildVideoExtra(parameters);
         VideoRequest request = new VideoRequest
         {
             Vram = ParseVramOverrides(parameters),
             Prompt = prompt,
-            NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative ? negative
-                : "blurry, low quality, distorted, watermark",
+            NegativePrompt = VideoNegativePrompt(parameters),
+            Extra = extra,
             Width = parameters.GetIntOrNull("width"),
             Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
@@ -565,7 +708,7 @@ public static class GenerationDispatch
             Sampler = parameters.GetStringOrNull("sampler"),
             Scheduler = parameters.GetStringOrNull("scheduler"),
             Frames = parameters.GetIntOrNull("frames"),
-            ChainTotalFrames = ResolveChainTotalFrames(parameters),
+            ChainTotalFrames = ResolveChainTotalFrames(parameters, spec),
             ChainContextFrames = parameters.GetIntOrNull("chain-context-frames")
                 ?? MiniMaxH3ChainPlanner.DefaultContextFrames,
             Fps = parameters.GetIntOrNull("fps"),
@@ -573,6 +716,7 @@ public static class GenerationDispatch
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
             VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
             DrivingVideo = parameters.GetStringOrNull("driving-video") is { } drivingPath ? LoadVideoClip(drivingPath) : null,
+            VideoContinuation = parameters.GetStringOrNull("continue-video") is { } continuePath ? LoadVideoClip(continuePath) : null,
             DrivingPoseVideo = parameters.GetStringOrNull("pose-video") is { } posePath ? LoadVideoClip(posePath) : null,
             DrivingFaceVideo = parameters.GetStringOrNull("face-video") is { } facePath ? LoadVideoClip(facePath) : null,
             DrivingAutoPreprocess = !parameters.GetBool("no-auto-preprocess", false),
@@ -588,6 +732,8 @@ public static class GenerationDispatch
                 ? LoadAudioClip(drivingAudio)
                     ?? throw new FileNotFoundException($"Driving audio not found: {drivingAudio}")
                 : null,
+            SeparateDrivingVocals = parameters.GetBool("separate-vocals", false),
+            Speakers = BuildSpeakers(parameters),
             Guides = VideoInputManifest.Guides(parameters),
             VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
             AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),
@@ -659,6 +805,33 @@ public static class GenerationDispatch
         return artifact;
     }
 
+    /// <summary>The family keys <c>hartsy video</c> adds to the request: the Duo run folder, made absolute, and its history window.</summary>
+    internal static IReadOnlyDictionary<string, object> BuildVideoExtra(ParamState parameters)
+    {
+        Dictionary<string, object> extra = new(StringComparer.Ordinal);
+        if (parameters.GetStringOrNull("duo-run-folder") is { } folder)
+        {
+            extra[DuoRecipePipeline.RunFolderKey] = Path.GetFullPath(folder);
+        }
+        if (parameters.GetIntOrNull("duo-window-frames") is { } window)
+        {
+            extra[DuoRecipePipeline.WindowFramesKey] = window;
+        }
+        return extra;
+    }
+
+    /// <summary>The negative prompt of a video run: the caller's, else a general one. A Duo run reads no prompt, so it gets none unless the
+    /// caller typed one, which the recipe then refuses by name.</summary>
+    internal static string? VideoNegativePrompt(ParamState parameters)
+    {
+        if (parameters.Get("negative") is { Length: > 0 } negative)
+        {
+            return negative;
+        }
+        bool duo = parameters.GetStringOrNull("duo-run-folder") is not null || parameters.GetIntOrNull("duo-window-frames") is not null;
+        return duo ? null : "blurry, low quality, distorted, watermark";
+    }
+
     /// <summary>The image component overrides from <c>--vae</c>, <c>--text-encoder</c> and <c>--vision-encoder</c>, or null.</summary>
     private static ComponentOverrides? BuildImageComponents(ParamState parameters)
     {
@@ -692,17 +865,56 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
-    /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>
+    private static string DescribePart(MeshPart part) =>
+        $"part {part.Id}: {part.FaceCount} faces, box [{string.Join(", ", part.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]";
+
+    /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d, a mesh to rig for unirig.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+        bool paint = MeshModelIds.PaintMesh.Contains(meshId);
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || MeshModelIds.XPartMesh.Contains(meshId) || paint;
+        string? imagePath = parameters.GetStringOrNull("image");
+        RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
+        if (paint && imagePath is null)
+            throw new ArgumentException($"3D model '{meshId}' textures a mesh from a reference image; pass the image with --image.");
+        // The paint models take their texture size as the request's grid; --texture-size names it for them when --grid is not given.
+        int grid = parameters.GetInt("grid", 0);
+        int textureSize = parameters.GetInt("texture-size", 0);
+        if (paint && textureSize != 0)
+        {
+            if (grid != 0 && grid != textureSize)
+                throw new ArgumentException($"3D model '{meshId}' takes its texture size from --grid or --texture-size; pass one of them.");
+            grid = textureSize;
+            textureSize = 0;
+        }
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = LoadImage(prompt),
+            Image = paint ? LoadMeshImage(imagePath!) : scene ? null : WithMask(LoadMeshImage(prompt), parameters.GetStringOrNull("mask"), meshId),
+            Views = LoadMeshViews(parameters.GetStringOrNull("view")),
+            SceneMesh = scene ? LoadSceneMesh(prompt) : null,
+            Control = LoadMeshControl(parameters),
+            ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
-            GridResolution = parameters.GetInt("grid", 0),
+            GridResolution = grid,
             Seed = parameters.GetInt("seed", -1),
+            FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
+            Guidance = parameters.GetDoubleOrNull("guidance"),
+            TokenBudget = parameters.GetDoubleOrNull("budget"),
+            SplatCount = parameters.GetInt("splats", 0),
+            Framing = ParseMeshFraming(parameters.GetStringOrNull("framing")),
+            Samples = parameters.GetInt("samples", 1),
+            Rigged = parameters.GetBool("rigged", false),
+            Colors = parameters.GetBool("no-colors", false) ? false : null,
+            Chains = parameters.GetBool("no-chains", false) ? false : null,
+            Texture = parameters.GetBool("texture", false),
+            Remesh = parameters.GetBoolOrNull("remesh"),
+            TextureSize = textureSize,
+            Mesh = parameters.GetBool("mesh", false),
+            Quality = ParseMeshQuality(parameters.GetStringOrNull("quality")),
+            Preprocess = ParseMeshPreprocess(parameters.GetStringOrNull("preprocess")),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -721,50 +933,249 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Mesh,
             FileBytes = result.Data,
             Extension = result.Format,
-            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)" + (result.Parts is { } found ? $", {found.Count} parts" : string.Empty),
+            SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
+        if (result.Parts is { } parts)
+        {
+            artifact.Meta["parts"] = string.Join("; ", parts.Select(DescribePart));
+            if (!quiet)
+            {
+                foreach (MeshPart part in parts)
+                    Console.WriteLine(DescribePart(part));
+            }
+        }
+        if (result.Warnings.Count > 0)
+        {
+            artifact.Meta["warnings"] = string.Join("; ", result.Warnings);
+            if (!quiet)
+            {
+                foreach (string warning in result.Warnings)
+                    Console.WriteLine($"warning: {warning}");
+            }
+        }
         return artifact;
     }
 
     /// <summary>World rollout through <see cref="IWorldService"/>: queues one action per frame, then drains the session's frame stream.</summary>
     /// <remarks>Actions come from <c>--actions</c> (cycled to fill the count) or a model-specific default demo plan.
     /// Oasis batches the queued plan into a single one-shot rollout; DIAMOND runs one real denoise per queued action
-    /// (see <see cref="DiamondWorldSession"/>).</remarks>
+    /// (see <see cref="DiamondWorldSession"/>). A model that takes an action-script camera (SANA-WM) reads <c>--actions</c> as
+    /// that script instead, and is sent no per-frame actions.</remarks>
     private static async Task<GeneratedArtifact> WorldAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
-        int totalFrames = Math.Max(2, parameters.GetInt("frames", 16));
-        WorldRequest request = new WorldRequest
+        bool scriptCamera = spec.Catalog?.World?.CameraModes.Contains(WorldCameraMode.ActionScript) == true;
+        string? actions = parameters.GetStringOrNull("actions");
+        bool view = parameters.GetBool("view", false);
+        bool interactive = parameters.GetBool("interactive", false);
+        WorldStageTimings.Reset();
+        if (view && interactive)
         {
-            Vram = ParseVramOverrides(parameters),
-            InitImage = LoadImage(prompt),
-            Steps = parameters.GetInt("steps", 10),
+            throw new ArgumentException("--view and --interactive both steer the run; use the window or the terminal, not both.");
+        }
+        WorldRequestOptions options = new WorldRequestOptions
+        {
+            Prompt = parameters.GetStringOrNull("world-prompt"),
+            Frames = parameters.GetIntOrNull("frames"),
+            Fps = parameters.GetIntOrNull("fps"),
+            Steps = parameters.GetIntOrNull("steps"),
+            Guidance = parameters.GetDoubleOrNull("cfg-scale"),
+            FlowShift = parameters.GetDoubleOrNull("flow-shift"),
             Seed = parameters.GetInt("seed", -1),
+            CameraPath = parameters.GetStringOrNull("camera"),
+            CameraScript = scriptCamera ? actions : null,
+            Intrinsics = parameters.GetStringOrNull("intrinsics"),
+            SequentialCfg = parameters.GetBool("sequential-cfg", false),
+            Refiner = parameters.GetBool("refiner", false),
+            // An unset --streaming leaves the mode to the model: a streaming-only model streams, a batch model does not.
+            Streaming = parameters.GetBool("streaming", false) || spec.Catalog?.World?.Streaming is { Only: true } ? true : null,
+            Unbounded = parameters.GetBool("unbounded", false),
         };
+        WorldRequest request = options.ToRequest(LoadImage(prompt), ParseVramOverrides(parameters));
+        WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
 
-        string[] actionPlan = ResolveActionPlan(parameters.GetStringOrNull("actions"), spec.Catalog?.Id);
+        // A live window steers from the keyboard, so it queues no demo plan: a per-step model is driven one action per frame.
+        IWorldControlScheme? scheme = spec.Catalog?.World?.LiveControls;
+        bool liveSteering = view && scheme is not null;
+        if (liveSteering && scheme is { Cadence: WorldControlCadence.PerStep } && actions is not null)
+        {
+            throw new ArgumentException($"--actions does not apply to '{spec.Catalog?.Id}' with --view; steer it with the keys.");
+        }
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("rollout");
+        string slug = Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"'));
+        // A streaming session writes each frame to disk as it arrives, so a long or unbounded run holds none of its pixels and keeps
+        // what it generated if it stops early. A batch rollout hands over all its frames at once, and they are collected.
+        // Disposed on every exit: a frame the writer has accepted is written before the process can end, even on a failure.
+        using StreamingFrameWriter? spool = plan.Streaming ? new StreamingFrameWriter(outputDir ?? RepoPaths.OutputRoot(), slug) : null;
         List<VideoFrame> frames = new List<VideoFrame>();
-        using IWorldSession session = engine.World.Open(spec, request);
-        for (int i = 0; i < totalFrames - 1; i++)
+        int received = 0;
+        using IWorldSession session = engine.World.Open(spec, plan.Request);
+        if (!scriptCamera && !(liveSteering && actions is null))
         {
-            session.SendAction(actionPlan[i % actionPlan.Length]);
+            string[] actionPlan = ResolveActionPlan(actions, spec.Catalog?.Id);
+            for (int i = 0; i < plan.ActionCount; i++)
+            {
+                session.SendAction(actionPlan[i % actionPlan.Length]);
+            }
         }
+        // A streaming session can be ended from the keyboard; what it generated up to then is still saved.
+        using CancellationTokenSource userStop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        Task? keyboard = plan.Streaming && interactive && !Console.IsInputRedirected
+            ? Task.Run(() => DriveWorldFromKeyboard(session, userStop), CancellationToken.None)
+            : null;
+        WorldSteering steering = new WorldSteering(session, scheme);
+        WorldPlayback? playback = null;
+        WorldViewerHost? viewer = null;
+        WorldRunPump? pump = null;
+        GeneratedArtifact artifact;
         try
         {
-            await foreach (VideoFrame frame in session.StreamAsync(cancel).ConfigureAwait(false))
+            IAsyncEnumerable<VideoFrame> stream;
+            if (view)
             {
-                frames.Add(frame);
-                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = totalFrames });
+                // The window plays frames at the plan's rate from a buffer: a full buffer holds generation back. Its size is the control
+                // lag, so a per-step stream gets a short one.
+                playback = new WorldPlayback(plan.Fps, WorldPlayback.DefaultBufferFrames(plan.Fps, scheme?.Cadence));
+                viewer = WorldViewerHost.Start(steering, playback, userStop);
+                stream = new WorldFrameStream(session, steering, plan.Unbounded ? 0 : plan.Frames).StreamAsync(userStop.Token);
             }
+            else
+            {
+                stream = session.StreamAsync(userStop.Token);
+            }
+            pump = new WorldRunPump(steering, playback, viewer);
+            try
+            {
+                await pump.RunAsync(stream, frame =>
+                {
+                    if (spool is not null)
+                    {
+                        long spoolStart = WorldStageTimings.Start();
+                        spool.Add(frame.Rgb, frame.Width, frame.Height);
+                        WorldStageTimings.Record(WorldStage.FrameSpoolHandoff, spoolStart);
+                    }
+                    else
+                    {
+                        frames.Add(frame);
+                    }
+                    received++;
+                    progress?.Report(new StepPreview { Step = received, TotalSteps = plan.Unbounded ? received : plan.Frames });
+                }, userStop.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (received > 0 && userStop.IsCancellationRequested
+                && (!cancel.IsCancellationRequested || plan.Unbounded))
+            {
+                // The stream was ended on purpose, so what it generated up to then is kept: from the keyboard (q), or with Ctrl+C when the
+                // run has no frame count to reach (--unbounded, which is stopped that way), or by closing the window.
+            }
+            catch when (spool is { Count: > 0 })
+            {
+                // A bounded run that is interrupted or fails part-way still has every frame it wrote on disk; say where. The writer is
+                // drained first, so the frames it accepted are on disk before the count is reported.
+                spool.Dispose();
+                Logs.Warning($"[World] The stream ended after {spool.Count} frames; they are saved in {spool.OutputDirectory}.");
+                throw;
+            }
+            finally
+            {
+                // Keys pressed after this change nothing, so the session is never steered once it is being torn down.
+                userStop.Cancel();
+                if (keyboard is not null)
+                {
+                    await keyboard.ConfigureAwait(false);
+                }
+                progress?.Finish();
+            }
+            if (spool is not null)
+            {
+                if (spool.Count == 0)
+                {
+                    throw new InvalidOperationException("The world pipeline produced no frames.");
+                }
+                long muxStart = WorldStageTimings.Start();
+                VideoOutputWriter.Written written = spool.Complete(null, plan.Fps);
+                WorldStageTimings.Record(WorldStage.Mux, muxStart);
+                artifact = DescribeFrames(spool.Count, spool.Width, spool.Height, spool.FirstFrame!, written, null);
+            }
+            else
+            {
+                artifact = FrameArtifact(frames, outputDir, slug, "world", null, plan.Fps);
+            }
+            // The files are written; a window still playing its buffer stays open until it is closed. A Ctrl+C here keeps the files
+            // and closes the window rather than reporting the run as cancelled.
+            await pump.WaitForCloseAsync(cancel).ConfigureAwait(false);
         }
         finally
         {
-            progress?.Finish();
+            // The window closes on every exit, and before userStop is disposed, since a window left open would cancel a disposed source.
+            pump?.Dispose();
         }
-        return FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world");
+        if (view || EngineKnobs.StageProfile.Value)
+        {
+            Logs.Info("[World] Where the time went:\n" + WorldStageTimings.Report());
+        }
+        artifact.Meta["fps"] = plan.Fps.ToString(CultureInfo.InvariantCulture);
+        artifact.Meta["seed"] = plan.Seed.ToString(CultureInfo.InvariantCulture);
+        // Planning adjustments (a truncated camera path, an expanded action script) are reported with the artifact.
+        for (int i = 0; i < plan.Notes.Count; i++)
+        {
+            artifact.Meta[$"note{i + 1}"] = plan.Notes[i];
+        }
+        return artifact;
+    }
+
+    /// <summary>Steers a streaming world session from the keyboard until <paramref name="stop"/> is cancelled. A terminal reports
+    /// key presses but not releases, so each of <c>wasdijkl</c> toggles its control (pressing one direction of an axis releases
+    /// the opposite one), space or <c>x</c> releases everything, and <c>q</c> or Esc cancels <paramref name="stop"/>. Every change
+    /// is sent as the key set now held, which the stream applies from its next chunk.</summary>
+    private static void DriveWorldFromKeyboard(IWorldSession session, CancellationTokenSource stop)
+    {
+        const string Controls = "wasdijkl";
+        const string Opposites = "sdwaklij";
+        List<char> held = [];
+        while (!stop.IsCancellationRequested)
+        {
+            if (!Console.KeyAvailable)
+            {
+                stop.Token.WaitHandle.WaitOne(20);
+                continue;
+            }
+            ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+            char pressed = char.ToLowerInvariant(key.KeyChar);
+            if (key.Key == ConsoleKey.Escape || pressed == 'q')
+            {
+                stop.Cancel();
+                return;
+            }
+            int control = Controls.IndexOf(pressed);
+            if (pressed == ' ' || pressed == 'x')
+            {
+                held.Clear();
+            }
+            else if (control >= 0)
+            {
+                if (!held.Remove(pressed))
+                {
+                    held.Remove(Opposites[control]);
+                    held.Add(pressed);
+                }
+            }
+            else
+            {
+                continue;
+            }
+            try
+            {
+                session.SendAction(held.Count == 0 ? "none" : new string(held.ToArray()));
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+        }
     }
 
     /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/>, else a per-model demo plan.</summary>
@@ -774,7 +1185,13 @@ public static class GenerationDispatch
     {
         if (!string.IsNullOrWhiteSpace(actionsOption))
         {
-            return actionsOption.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            string[] actions = actionsOption.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            // A value like "," names nothing, and a rollout indexes the plan modulo its length.
+            if (actions.Length == 0)
+            {
+                throw new ArgumentException($"--actions \"{actionsOption}\" names no action; give a comma-separated list such as \"w-24,d-24\".");
+            }
+            return actions;
         }
         return string.Equals(catalogId, "diamond", StringComparison.OrdinalIgnoreCase)
             ? ["fire", "right", "right", "right", "right", "left", "left", "left", "left"] : ["forward"];
@@ -797,6 +1214,7 @@ public static class GenerationDispatch
         RestoreRequest baseRequest = new RestoreRequest
         {
             Vram = ParseVramOverrides(parameters),
+            Device = parameters.GetStringOrNull("restore-device"),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
             ClipFrames = parameters.GetIntOrNull("clip-frames"),
@@ -860,20 +1278,26 @@ public static class GenerationDispatch
         }
         VideoOutputWriter.Written written = VideoOutputWriter.Write(
             pixels, width, height, outputDir ?? RepoPaths.OutputRoot(), slug, audio, fps);
+        return DescribeFrames(frames.Count, width, height, frames[0].Rgb, written, audio);
+    }
 
+    /// <summary>Describes a frame sequence already on disk, previewing its first frame inline.</summary>
+    private static GeneratedArtifact DescribeFrames(int count, int width, int height, byte[] firstFrame,
+        VideoOutputWriter.Written written, AudioBuffer? audio)
+    {
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Video,
             Extension = "png",
-            Text = $"{frames.Count} frames ({width}x{height}) → {written.Directory}"
+            Text = $"{count} frames ({width}x{height}) → {written.Directory}"
                 + (written.AudioPath is null ? "" : $" + {audio!.Seconds:0.0}s audio.wav")
                 + (written.Mp4Path is null ? "" : " + video.mp4"),
-            PreviewRgb = frames[0].Rgb,
+            PreviewRgb = firstFrame,
             PreviewWidth = width,
             PreviewHeight = height,
             SelfWritten = true,
         };
-        artifact.Meta["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
+        artifact.Meta["frames"] = count.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["size"] = $"{width}x{height}";
         if (written.Mp4Path is not null)
         {
@@ -982,7 +1406,7 @@ public static class GenerationDispatch
     }
 
     /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c> / <c>--init-image-mode</c>, or null for text-to-image.</summary>
-    private static Img2Img? BuildImg2Img(ParamState parameters)
+    private static Img2Img? BuildImg2Img(ParamState parameters, ModelSpec spec)
     {
         string? initPath = parameters.GetStringOrNull("init-image");
         if (initPath is null)
@@ -994,6 +1418,12 @@ public static class GenerationDispatch
         if (creativity is not null)
         {
             img2img = img2img with { Creativity = creativity.Value };
+        }
+        else if (parameters.GetStringOrNull("mask") is not null && Flux1Recipe.IsFillCatalogId(spec.Catalog?.Id))
+        {
+            // A Fill model conditions on the masked image and regenerates the masked area, so a mask starts it at full denoise.
+            // Other models keep their own default: 0.6 keeps part of the masked content.
+            img2img = img2img with { Creativity = 1.0 };
         }
         return parameters.GetStringOrNull("init-image-mode") switch
         {
@@ -1045,6 +1475,33 @@ public static class GenerationDispatch
         foreach ((string flag, string key) in slgNumbers)
         {
             if (parameters.GetDoubleOrNull(flag) is { } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisStrings =
+        [
+            ("iris-task", HartsyInference.Engine.Features.RequestExtras.IrisZTask),
+            ("iris-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZDepthFormat),
+            ("iris-input-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZInputDepthFormat),
+            ("iris-joint-depth", HartsyInference.Engine.Features.RequestExtras.IrisZJointDepth),
+        ];
+        foreach ((string flag, string key) in irisStrings)
+        {
+            if (parameters.GetStringOrNull(flag) is { Length: > 0 } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisInts =
+        [
+            ("iris-resolution", HartsyInference.Engine.Features.RequestExtras.IrisZResolution),
+            ("iris-depth-steps", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSteps),
+            ("iris-depth-seeds", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSeeds),
+        ];
+        foreach ((string flag, string key) in irisInts)
+        {
+            if (parameters.GetIntOrNull(flag) is { } value)
             {
                 extra[key] = value;
             }
@@ -1148,15 +1605,60 @@ public static class GenerationDispatch
 
     /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip; a missing entry leaves that clip silent rather than shifting the pairing.</summary>
     /// <summary>Total chain frames from either the frame or the seconds flag; seconds convert at H3's native rate.</summary>
-    private static int? ResolveChainTotalFrames(ParamState parameters)
+    private static int? ResolveChainTotalFrames(ParamState parameters, ModelSpec spec)
     {
         if (parameters.GetIntOrNull("chain-frames") is int frames)
         {
             return frames;
         }
+        // Seconds convert at the family's native rate: LongCat-Video-Avatar generates at 25 fps, MiniMax-H3 at its own rate.
+        bool longCatAvatar = spec.Catalog?.Id == "longcat-avatar" || spec.Requested.StartsWith("longcat-avatar", StringComparison.OrdinalIgnoreCase);
+        int nativeFps = longCatAvatar ? LongCatAvatarRecipe.OutputFps : MiniMaxH3Geometry.Fps;
         return parameters.GetDoubleOrNull("chain-seconds") is double seconds
-            ? (int)Math.Round(seconds * MiniMaxH3Geometry.Fps)
+            ? (int)Math.Round(seconds * nativeFps)
             : null;
+    }
+
+    /// <summary>The two speakers of a multi-speaker video, or null when no speaker option was passed. What a family cannot run is refused by the
+    /// engine's planning; only the option text is checked here.</summary>
+    internal static VideoSpeakers? BuildSpeakers(ParamState parameters)
+    {
+        string? firstAudio = parameters.GetStringOrNull("speaker1-audio"), secondAudio = parameters.GetStringOrNull("speaker2-audio");
+        string? firstBox = parameters.GetStringOrNull("speaker1-box"), secondBox = parameters.GetStringOrNull("speaker2-box");
+        string? timing = parameters.GetStringOrNull("speaker-timing");
+        string[]? silent = SplitPaths(parameters.GetStringOrNull("silent-boxes"));
+        if (firstAudio is null && secondAudio is null && firstBox is null && secondBox is null && timing is null && silent is null)
+        {
+            return null;
+        }
+        return new VideoSpeakers
+        {
+            First = new VideoSpeaker { Audio = LoadAudioClip(firstAudio), Box = ParseSpeakerBox(firstBox, "--speaker1-box") },
+            Second = new VideoSpeaker { Audio = LoadAudioClip(secondAudio), Box = ParseSpeakerBox(secondBox, "--speaker2-box") },
+            Timing = timing?.Trim().ToLowerInvariant() switch
+            {
+                null or "parallel" or "para" => VideoSpeakerTiming.Parallel,
+                "sequential" or "add" => VideoSpeakerTiming.Sequential,
+                _ => throw new ArgumentException($"--speaker-timing is parallel or sequential, not '{timing}'."),
+            },
+            SilentBoxes = silent?.Select(box => ParseSpeakerBox(box, "--silent-box")!).ToList(),
+        };
+    }
+
+    private static VideoSpeakerBox? ParseSpeakerBox(string? text, string option)
+    {
+        if (text is null)
+        {
+            return null;
+        }
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        int[] values = new int[4];
+        if (parts.Length != 4 || !parts.Select((part, i) => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out values[i]))
+            .ToArray().All(static parsed => parsed))
+        {
+            throw new ArgumentException($"{option} takes four whole numbers y_min,x_min,y_max,x_max, not '{text}'.");
+        }
+        return new VideoSpeakerBox { YMin = values[0], XMin = values[1], YMax = values[2], XMax = values[3] };
     }
 
     private static List<ReferenceVideo>? BuildReferenceVideos(ParamState parameters)
@@ -1199,6 +1701,181 @@ public static class GenerationDispatch
     private static string[]? SplitPaths(string? joined) =>
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
+    /// <summary>Reads the cola3d scene prompt from <c>--prompt-mask</c> or <c>--prompt-point</c>; null when neither is given.</summary>
+    private static SceneMeshPrompt? LoadScenePrompt(ParamState parameters)
+    {
+        string[]? maskPaths = SplitPaths(parameters.GetStringOrNull("prompt-mask"));
+        string[]? pointTexts = SplitPaths(parameters.GetStringOrNull("prompt-point"));
+        if (maskPaths is null && pointTexts is null)
+        {
+            return null;
+        }
+        if (maskPaths is not null && pointTexts is not null)
+        {
+            throw new ArgumentException("Give --prompt-mask or --prompt-point, not both.");
+        }
+        if (maskPaths is not null)
+        {
+            return new SceneMeshPrompt { Masks = maskPaths.Select(LoadPromptMask).ToList() };
+        }
+        return new SceneMeshPrompt { Points = pointTexts!.Select(ParseScenePoint).ToList() };
+    }
+
+    /// <summary>Reads one mask PNG; the red channel is the coverage.</summary>
+    private static ScenePromptMask LoadPromptMask(string path)
+    {
+        ImageData image = LoadImage(path);
+        byte[] coverage = new byte[image.Width * image.Height];
+        for (int i = 0; i < coverage.Length; i++)
+        {
+            coverage[i] = image.Rgb[i * 3];
+        }
+        return new ScenePromptMask { Coverage = coverage, Width = image.Width, Height = image.Height };
+    }
+
+    /// <summary>Parses <c>x,y,z</c> in the scene mesh's units.</summary>
+    private static ScenePoint ParseScenePoint(string text)
+    {
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length != 3 || !float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float x)
+            || !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float y)
+            || !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
+        {
+            throw new ArgumentException($"Prompt point '{text}' must be three numbers as x,y,z.");
+        }
+        return new ScenePoint(x, y, z);
+    }
+
+    /// <summary>The Hunyuan3D-Omni control from <c>--control</c>, <c>--control-file</c> and <c>--control-values</c>, or null when none is given (the engine then rejects a model that needs one, and any other model that was given one).</summary>
+    internal static MeshControl? LoadMeshControl(ParamState parameters)
+    {
+        string? kindText = parameters.GetStringOrNull("control"), file = parameters.GetStringOrNull("control-file"), values = parameters.GetStringOrNull("control-values");
+        if (kindText is null)
+        {
+            if (file is not null || values is not null)
+                throw new ArgumentException("--control-file and --control-values need --control point, voxel, bbox or pose.");
+            return null;
+        }
+        MeshControlKind kind = kindText.Trim().ToLowerInvariant() switch
+        {
+            "point" => MeshControlKind.Point,
+            "voxel" => MeshControlKind.Voxel,
+            "bbox" or "box" => MeshControlKind.BoundingBox,
+            "pose" => MeshControlKind.Pose,
+            _ => throw new ArgumentException($"Unknown control '{kindText}'. Expected point, voxel, bbox or pose."),
+        };
+        if (kind is MeshControlKind.Point or MeshControlKind.Voxel)
+        {
+            if (file is null || values is not null)
+                throw new ArgumentException($"A {kindText} control takes --control-file (not --control-values).");
+            string path = file.Trim().Trim('"');
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"Control file not found: {path}");
+            string format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+            return new MeshControl { Kind = kind, Geometry = new SceneMeshData { Data = File.ReadAllBytes(path), Format = format } };
+        }
+        if (kind == MeshControlKind.BoundingBox && file is not null)
+            throw new ArgumentException("A bbox control takes --control-values (length,height,width), not a file.");
+        if (file is not null && values is not null)
+            throw new ArgumentException($"A {kindText} control takes --control-file or --control-values, not both.");
+        string? posePath = file?.Trim().Trim('"');
+        if (posePath is not null && !File.Exists(posePath))
+            throw new FileNotFoundException($"Control file not found: {posePath}");
+        string text = values ?? (posePath is not null ? File.ReadAllText(posePath) : throw new ArgumentException($"A {kindText} control takes --control-values" + (kind == MeshControlKind.Pose ? " or --control-file." : ".")));
+        float[] numbers = [.. text.Split([',', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(n =>
+            float.TryParse(n, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : throw new ArgumentException($"'{n}' is not a number in the control."))];
+        return new MeshControl { Kind = kind, Values = numbers };
+    }
+
+    /// <summary>Reads a scene mesh (obj or glb) for the cola3d route; the format comes from its extension.</summary>
+    private static SceneMeshData LoadSceneMesh(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Input scene mesh not found: {path}");
+        }
+        return new SceneMeshData { Data = File.ReadAllBytes(path), Format = SceneMeshReader.FormatOf(path) };
+    }
+
+    /// <summary>The <see cref="MeshQuality"/> named by <c>--quality</c>; unset is <see cref="MeshQuality.Default"/>.</summary>
+    private static MeshQuality ParseMeshQuality(string? text) =>
+        text is null ? MeshQuality.Default
+        : Enum.TryParse(text, ignoreCase: true, out MeshQuality quality) && Enum.IsDefined(quality) ? quality
+        : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
+
+    /// <summary>The Idol framing named on the command line: <c>object</c> (the default) or <c>photo</c>.</summary>
+    internal static MeshFraming ParseMeshFraming(string? text) => string.IsNullOrWhiteSpace(text) ? MeshFraming.Object
+        : text.Trim().ToLowerInvariant() switch
+        {
+            "object" => MeshFraming.Object,
+            "photo" => MeshFraming.Photo,
+            _ => throw new ArgumentException($"--framing is object or photo; got '{text}'."),
+        };
+
+    /// <summary>The <c>--preprocess</c> value: none (the default) or auto.</summary>
+    internal static MeshPreprocess ParseMeshPreprocess(string? text) => string.IsNullOrWhiteSpace(text) ? MeshPreprocess.None
+        : !int.TryParse(text, out _) && Enum.TryParse(text, ignoreCase: true, out MeshPreprocess preprocess) && Enum.IsDefined(preprocess) ? preprocess
+        : throw new ArgumentException($"--preprocess must be none or auto; got '{text}'.");
+
+    /// <summary>The extra views from <c>--view side=path</c> (one per line), or null when none are given; the engine checks the sides are distinct and that the model takes views.</summary>
+    internal static IReadOnlyList<MeshViewImage>? LoadMeshViews(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+        List<MeshViewImage> views = [];
+        foreach (string entry in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int split = entry.IndexOf('=');
+            string side = split < 0 ? "" : entry[..split].Trim();
+            if (split < 0 || int.TryParse(side, out _) || !Enum.TryParse(side, ignoreCase: true, out MeshView view) || !Enum.IsDefined(view))
+                throw new ArgumentException($"--view takes side=path with side left, back or right; got '{entry}'.");
+            string path = entry[(split + 1)..].Trim().Trim('"');
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"--view {side}: no file at '{path}'.", path);
+            views.Add(new MeshViewImage { View = view, Image = LoadMeshImage(path) });
+        }
+        return views;
+    }
+
+    /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
+    private static ImageData LoadMeshImage(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        {
+            return LoadImage(promptPath);
+        }
+
+        DecodedPng png = PngDecoder.DecodeWithAlpha(File.ReadAllBytes(path));
+        return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
+    }
+
+    /// <summary>Fails when <c>--mask</c> is given for a model that does not read one, so it is never silently dropped (cola3d reads <c>--prompt-mask</c>, the paint models <c>--image</c>).</summary>
+    internal static void RejectMaskForOtherModels(string? maskPath, string meshId)
+    {
+        if (!string.IsNullOrWhiteSpace(maskPath) && meshId != MeshModelIds.Sam3dObjects)
+            throw new ArgumentException($"3D model '{meshId}' takes no --mask; the mask belongs to {MeshModelIds.Sam3dObjects}.");
+    }
+
+    /// <summary>
+    /// The image with <paramref name="maskPath"/>'s red channel as its alpha plane (the object mask of sam3d-objects); the image itself when there is no mask file.
+    /// </summary>
+    /// <exception cref="ArgumentException">A mask for a model that does not read one, a missing file, or a size that is not the image's.</exception>
+    internal static ImageData WithMask(ImageData image, string? maskPath, string meshId)
+    {
+        if (string.IsNullOrWhiteSpace(maskPath))
+            return image;
+        RejectMaskForOtherModels(maskPath, meshId);
+        string path = maskPath.Trim().Trim('"');
+        if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+            throw new ArgumentException($"The mask must be an existing PNG file: {path}");
+        DecodedPng mask = PngDecoder.DecodeWithAlpha(File.ReadAllBytes(path));
+        if (mask.Width != image.Width || mask.Height != image.Height)
+            throw new ArgumentException($"The mask is {mask.Width} x {mask.Height} but the image is {image.Width} x {image.Height}; they must match.");
+        return image with { Alpha = Sam3dObjectsRequestMapper.AlphaFromMask(mask.Rgb, mask.Width, mask.Height) };
+    }
+
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     private static ImageData LoadImage(string promptPath)
     {
@@ -1210,6 +1887,7 @@ public static class GenerationDispatch
         (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
+
     /// <summary>The per-run VRAM override from <c>--vram-mode</c>, or null when the caller did not ask for one.</summary>
     /// <remarks>Null rather than an explicit Auto: null means "follow the engine", which is a different statement
     /// from "pin Auto" once a host has configured a backend policy.</remarks>

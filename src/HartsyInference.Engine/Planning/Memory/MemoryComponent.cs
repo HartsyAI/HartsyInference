@@ -16,4 +16,7 @@ public enum MemoryComponent
     /// <summary>The whole decoder-only language model of a text checkpoint: backbone, experts and any memory-resident
     /// tables, held for the life of the session. Appended last so the diffusion components keep their values.</summary>
     LanguageModel,
+
+    /// <summary>One stage of a staged pipeline (a 3D shape flow, a decoder, a texture bake) that loads its own weights and frees them before the next stage. Appended last so the other components keep their values.</summary>
+    Stage,
 }

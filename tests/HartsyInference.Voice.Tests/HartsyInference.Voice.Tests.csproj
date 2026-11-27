@@ -20,7 +20,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Voice\HartsyInference.Voice.csproj" />
-    <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 
 </Project>

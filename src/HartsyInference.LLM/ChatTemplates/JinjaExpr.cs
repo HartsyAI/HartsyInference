@@ -168,6 +168,27 @@ internal static class Values
 
     public static bool IsNum(object? v) => v is long or double or int;
     public static double ToD(object? v) => v switch { long l => l, int i => i, double d => d, _ => 0 };
+    /// <summary>Python <c>str.format</c> for the positional forms chat templates use: <c>{}</c> takes the next argument, <c>{n}</c> the nth, and doubled braces are literal.</summary>
+    internal static string PyFormat(string format, IReadOnlyList<object?> values)
+    {
+        StringBuilder sb = new();
+        int next = 0;
+        for (int i = 0; i < format.Length; i++)
+        {
+            char c = format[i];
+            if (c == '{' && i + 1 < format.Length && format[i + 1] == '{') { sb.Append('{'); i++; continue; }
+            if (c == '}' && i + 1 < format.Length && format[i + 1] == '}') { sb.Append('}'); i++; continue; }
+            if (c != '{') { sb.Append(c); continue; }
+            int close = format.IndexOf('}', i);
+            if (close < 0) throw new FormatException("Single '{' encountered in format string.");
+            string field = format[(i + 1)..close];
+            int index = field.Length == 0 ? next++ : int.TryParse(field, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int n) ? n : throw new FormatException($"Unsupported format field '{field}'.");
+            if (index >= values.Count) throw new FormatException($"Format index {index} is out of range.");
+            sb.Append(Values.ToStr(values[index]));
+            i = close;
+        }
+        return sb.ToString();
+    }
 }
 
 // ── Literal / variable / unary / binary / ternary ──────────────────────────────────────────────────────
@@ -207,7 +228,12 @@ internal sealed class IndexExpr(Expr target, Expr index) : Expr
         object? t = target.Eval(scope);
         object? k = index.Eval(scope);
         if (t is Dictionary<string, object?> d) return d.TryGetValue(Values.ToStr(k), out object? v) ? v : null;
-        if (t is List<object?> l && k is long i && i >= 0 && i < l.Count) return l[(int)i];
+        // Python semantics: a negative index counts from the end, so split('</think>')[-1] is the last piece.
+        if (t is List<object?> l && k is long i)
+        {
+            long at = i < 0 ? i + l.Count : i;
+            if (at >= 0 && at < l.Count) return l[(int)at];
+        }
         return null;
     }
 }
@@ -325,6 +351,12 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "safe": return v;
             case "lower": return Values.ToStr(v).ToLowerInvariant();
             case "upper": return Values.ToStr(v).ToUpperInvariant();
+            case "capitalize":
+            {
+                // Python str.capitalize: first character upper, the rest lower.
+                string cap = Values.ToStr(v);
+                return cap.Length == 0 ? cap : char.ToUpperInvariant(cap[0]) + cap[1..].ToLowerInvariant();
+            }
             // length/count: char count for strings, element count for sequences/dicts (Jinja semantics).
             case "length": case "count":
                 return v is string sLen ? (long)sLen.Length : (long)Values.AsList(v).Count;
@@ -337,6 +369,10 @@ internal sealed class FilterExpr(Expr inner, string name, List<Expr> args) : Exp
             case "join":
                 { string sep = args.Count > 0 ? Values.ToStr(args[0].Eval(scope)) : "";
                   return string.Join(sep, Values.AsList(v).Select(Values.ToStr)); }
+            // Filter form of dict.items(): the template's tool_call.arguments|items.
+            case "items":
+                if (v is Dictionary<string, object?> dict) return dict.Select(kv => (object?)new List<object?> { kv.Key, kv.Value }).ToList();
+                throw new InvalidOperationException("Jinja filter 'items' needs a mapping.");
             case "tojson": return Values.ToJson(v);
             case "list": return Values.AsList(v);
             case "string": return Values.ToStr(v);
@@ -411,6 +447,7 @@ internal sealed class CallExpr(Expr callee, List<Expr> args) : Expr
                 "endswith" => s.EndsWith(Values.ToStr(Arg(0)), StringComparison.Ordinal),
                 "replace" => s.Replace(Values.ToStr(Arg(0)), Values.ToStr(Arg(1))),
                 "split" => SplitString(s, Arg(0)),
+                "format" => Values.PyFormat(s, [.. args.Select(a => a.Eval(scope))]),
                 "get" => target is Dictionary<string, object?> d ? (d.TryGetValue(Values.ToStr(Arg(0)), out object? gv) ? gv : Arg(1)) : Arg(1),
                 "items" => Mapping(target, m.Name).Select(kv => (object?)new List<object?> { kv.Key, kv.Value }).ToList(),
                 "keys" => Mapping(target, m.Name).Keys.Cast<object?>().ToList(),
@@ -602,8 +639,9 @@ internal static class ExprParser
         {
             if (t.TrySymbol("."))
             {
-                string name = t.ReadIdent();
-                e = new MemberExpr(e, name);
+                // Jinja also reads `list.0` as the item at that index.
+                if (t.TryNumber(out long item)) e = new IndexExpr(e, new LiteralExpr(item));
+                else e = new MemberExpr(e, t.ReadIdent());
             }
             else if (t.TrySymbol("["))
             {
@@ -900,4 +938,5 @@ internal sealed class Tokenizer
     }
 
     private static bool IsIdentChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
 }

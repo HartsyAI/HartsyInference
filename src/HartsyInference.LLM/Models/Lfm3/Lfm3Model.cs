@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -109,7 +111,7 @@ public sealed unsafe class Lfm3Model : ISsmModel
         Tensor logits = new(new TensorShape(1, 1, vocab), DType.F32);
         try
         {
-            backend.SliceTimeRange(last, normed.Reshape(new TensorShape(1, 1, seq, d)), seq - 1, 1);
+            StridedCopies.SliceAxis(backend, last, normed.Reshape(new TensorShape(1, 1, seq, d)), 2, seq - 1, 1);
             Tensor head = Config.TieWordEmbeddings ? W($"{Prefix}.embed_tokens.weight") : W("lm_head.weight");
             backend.Linear(logits, last, head, null);
             backend.Sync();
@@ -265,7 +267,7 @@ public sealed unsafe class Lfm3Model : ISsmModel
         Tensor joined = new(new TensorShape(1, total, d), DType.F32);
         backend.Concat(joined, [state.Reshape(new TensorShape(1, window, d)), b], 1);
         b.Dispose();
-        backend.SliceTimeRange(state, joined.Reshape(new TensorShape(1, 1, total, d)), seq, window);
+        StridedCopies.SliceAxis(backend, state, joined.Reshape(new TensorShape(1, 1, total, d)), 2, seq, window);
 
         Tensor channelsFirst = new(new TensorShape(1, d, total), DType.F32);
         backend.Transpose2D(channelsFirst, joined, total, d);
@@ -298,8 +300,8 @@ public sealed unsafe class Lfm3Model : ISsmModel
         Tensor cos = new(new TensorShape(1, seq, hd), DType.F32);
         Tensor sin = new(cos.Shape, DType.F32);
         BuildZeroTailRope(cos, sin, seq, i);
-        backend.ApplyRopeSingle(q, cos, sin);
-        backend.ApplyRopeSingle(k, cos, sin);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
         cos.Dispose();
         sin.Dispose();
 

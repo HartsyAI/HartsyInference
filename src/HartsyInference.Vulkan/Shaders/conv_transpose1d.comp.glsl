@@ -1,6 +1,6 @@
-// 1D transposed convolution for codec decoders (DAC / SNAC / EnCodec / Mimi).
+// 1D transposed convolution for codec decoders (DAC / SNAC / EnCodec / Mimi / Kokoro).
 // Operates on channels-first [B, C, T]. Weight layout (PyTorch ConvTranspose1d):
-// [C_in, C_out, K]. Bias: [C_out] (optional).
+// [C_in, C_out / groups, K]. Bias: [C_out] (optional). groups == C_in == C_out is depthwise.
 //
 // Each invocation computes one output element (b, oc, j_out). This uses an
 // output-driven gather formulation: for output position j_out we walk all input
@@ -47,6 +47,7 @@ layout(push_constant) uniform Push {
     uint stride;
     int  padLeft;
     uint dilation;
+    uint groups;
 } pc;
 
 void main() {
@@ -57,6 +58,13 @@ void main() {
     uint j = outFlat % pc.tOut;
     uint oc = (outFlat / pc.tOut) % pc.cOut;
     uint b = outFlat / (pc.tOut * pc.cOut);
+
+    // Output channel oc reads only the input channels of its own group; groups == 1 is dense.
+    uint outPerGroup = pc.cOut / pc.groups;
+    uint inPerGroup = pc.cIn / pc.groups;
+    uint group = oc / outPerGroup;
+    uint ocLocal = oc - group * outPerGroup;
+    uint icStart = group * inPerGroup;
 
     float acc = (HAS_BIAS == 1u) ? b_data[oc] : 0.0;
 
@@ -71,9 +79,10 @@ void main() {
         if (uint(num) % pc.stride != 0u) continue;
         uint i = uint(num) / pc.stride;
         if (i >= pc.tIn) continue;
-        for (uint ic = 0u; ic < pc.cIn; ic++) {
-            uint inIdx = (b * pc.cIn + ic) * pc.tIn + i;
-            uint wIdx = (ic * pc.cOut + oc) * pc.kernel + k;
+        for (uint ic = 0u; ic < inPerGroup; ic++) {
+            uint inCh = icStart + ic;
+            uint inIdx = (b * pc.cIn + inCh) * pc.tIn + i;
+            uint wIdx = (inCh * outPerGroup + ocLocal) * pc.kernel + k;
             acc += TO_F32(in_data[inIdx]) * TO_F32(w_data[wIdx]);
         }
     }

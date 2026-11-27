@@ -34,12 +34,12 @@ public static partial class EngineKnobs
 
     /// <summary>Enables the tensor-core GEMM path.</summary>
     public static readonly Knob<bool> TensorcoreGemm =
-        Bool("numerics.tensorcoreGemm", false, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.tensorcoreGemm", false, KnobScope.Construction, KnobDomain.Numerics,
             "Enables the tensor-core GEMM path.");
 
     /// <summary>Selects the high-precision GEMM path over the faster reduced-precision one.</summary>
     public static readonly Knob<bool> HighPrecisionGemm =
-        Bool("numerics.highPrecisionGemm", false, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.highPrecisionGemm", false, KnobScope.Construction, KnobDomain.Numerics,
             "Selects the high-precision GEMM path over the faster reduced-precision one.");
 
     /// <summary>Enables the FP8 GEMM path with F16 accumulate.</summary>
@@ -54,7 +54,7 @@ public static partial class EngineKnobs
 
     /// <summary>Opts out of TF32 tensor-core math for F32 GEMMs on Ampere+; TF32 is on by default there, matching PyTorch.</summary>
     public static readonly Knob<bool> NoTf32 =
-        Bool("numerics.noTf32", false, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.noTf32", false, KnobScope.Construction, KnobDomain.Numerics,
             "Opts out of TF32 tensor-core math for F32 GEMMs on Ampere+, where it is on by default.");
 
     /// <summary>Runs CUDA's F32 attention GEMMs (the materialized and query-tiled SDPA paths) in plain FP32 instead of TF32;
@@ -65,6 +65,6 @@ public static partial class EngineKnobs
 
     /// <summary>Enables the fast F16 GEMM path on Ampere+.</summary>
     public static readonly Knob<bool> GemmF16 =
-        Bool("numerics.gemmF16", false, KnobScope.Runtime, KnobDomain.Numerics,
+        Bool("numerics.gemmF16", false, KnobScope.Construction, KnobDomain.Numerics,
             "Enables the fast F16 GEMM path on Ampere+.");
 }

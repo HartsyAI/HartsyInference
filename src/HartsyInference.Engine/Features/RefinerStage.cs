@@ -119,6 +119,14 @@ public static class RefinerStage
                 + "img2img path to consume the base image with.");
         }
 
+        // Iris-Z declares RefEdit, but its init image is a photo or a depth map, never something to denoise. Refused
+        // here, before its checkpoint loads; the pipeline's own refusal is the backstop.
+        if (Recipes.Image.Flux2Variants.IsIrisZ(Catalog.RecipeResolution.ResolveVariant(refinerSpec)))
+        {
+            throw new NotSupportedException(
+                $"'{Path.GetFileName(spec.Model)}' is Iris-Z, which has no strength-based image-to-image and can't be used as a refiner.");
+        }
+
         if (!string.Equals(spec.Method, "PostApply", StringComparison.OrdinalIgnoreCase))
         {
             // True StepSwap needs a shared latent space mid-loop, which only the SDXL internal pair has. The pixel
@@ -179,7 +187,9 @@ public static class RefinerStage
 
         Logs.Info($"[Features][Refiner] Generic refine: base '{baseFamily}' {baseResult.Width}x{baseResult.Height} → "
             + $"'{refinerFamily}' at {width}x{height}, strength={spec.Strength:F2}, steps={spec.Steps}, cfg={spec.CfgScale}.");
-        IRecipePipeline refinerPipeline = engine.GetOrConstructRecipe(refinerSpec, refineRequest, alsoKeepPath: baseSpec.LocalPath, cancel: cancel);
+        LeasedRecipe refinerLeased = engine.GetOrConstructRecipeLeased(refinerSpec, refineRequest, alsoKeepPath: baseSpec.LocalPath, cancel: cancel);
+        using IDisposable refinerLease = refinerLeased.Lease;
+        IRecipePipeline refinerPipeline = refinerLeased.Pipeline;
         ImageRequest resolvedRefine = engine.DefaultsFor(refinerSpec).Apply(refineRequest) with
         {
             // Apply() may re-fill from family defaults; the refine geometry and budget are already decided above.

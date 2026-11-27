@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
@@ -42,7 +44,7 @@ public static class RecipeLoraMerge
         {
             return null;
         }
-        MergedLoraStack stack = new MergedLoraStack();
+        MergedLoraStack stack = new MergedLoraStack { PartialPolicy = PartialPolicyFromKnob() };
         try
         {
             foreach (LoraResolver.LoraSpec spec in loras ?? [])
@@ -64,7 +66,8 @@ public static class RecipeLoraMerge
                 clipGWeights: targets.ClipG,
                 textEncoder2Weights: targets.TextEncoder2,
                 transformerNativeNames: targets.TransformerNativeNames);
-            if (merged == 0)
+            // A LoRA whose only matches are at zero strength did match: zero means no effect, so it is not refused for that.
+            if (merged == 0 && stack.Report.ZeroStrengthMatched == 0)
             {
                 // A zero-match LoRA used to warn and proceed — a generation that succeeds and looks unaffected,
                 // which is the worst failure mode there is: the user thinks the LoRA is weak, not broken. Refuse
@@ -86,6 +89,14 @@ public static class RecipeLoraMerge
             throw;
         }
     }
+
+    /// <summary>The partial-application policy the <c>lora.partialApplication</c> knob names. An unknown value is refused, not guessed.</summary>
+    private static LoraPartialPolicy PartialPolicyFromKnob() => (EngineKnobs.LoraPartialApplication.Value ?? "allow") switch
+    {
+        "allow" => LoraPartialPolicy.Allow,
+        "refuse" => LoraPartialPolicy.Refuse,
+        string other => throw new HartsyInferenceException($"lora.partialApplication must be 'allow' or 'refuse', not '{other}'."),
+    };
 
     /// <summary>Shallow-copies a weight dict so LoRA replacement doesn't poison the cache's original. Tensor instances are referenced, not copied; the replacements written into the copy are owned by the stack from <see cref="Apply(RecipeContext, LoraMergeTargets, string)"/>.</summary>
     public static Dictionary<string, Tensor>? ShallowClone(IReadOnlyDictionary<string, Tensor>? source)

@@ -6,6 +6,7 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 KERNELS=(
     "channels_last"
     "depthwise_conv2d"
+    "depthwise_glu"
     "im2col_banded"
     "maxpool2d"
 )

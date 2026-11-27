@@ -1,0 +1,271 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Layers;
+using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Tensors;
+
+namespace HartsyInference.ThreeD.Models.TrellisV2;
+
+/// <summary>
+/// Upstream <c>ModulatedTransformerCrossBlock</c> / <c>ModulatedSparseTransformerCrossBlock</c> with shared modulation: the
+/// block's own <c>modulation</c> parameter is added to the model-wide adaLN output and chunked into shift, scale and gate for
+/// the self-attention and for the MLP. Self-attention (non-affine norm1, QK RMS norm, 3D RoPE) and the MLP (non-affine norm3,
+/// tanh GELU) are modulated and gated; the cross-attention to the image tokens (affine norm2, QK RMS norm) is ungated and
+/// has no rotation. In Pixal3D's projection mode the cross-attention output also gains <c>proj_linear(proj)</c>, a per-token
+/// linear of view-aligned image features. Borrows its weights from <see cref="Trellis2FlowWeights"/>.
+/// </summary>
+internal sealed class Trellis2FlowBlock : IDisposable
+{
+    private const float NormEps = 1e-6f;
+
+    private readonly int _width, _heads, _headDim, _mlpHidden;
+    private readonly AttentionLayer _attention;
+    private readonly HeadRmsNorm _headNorm;
+    private readonly Tensor _modulation;
+    private readonly Tensor _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B;
+    private readonly Tensor _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB, _mlp0W, _mlp0B, _mlp2W, _mlp2B;
+    private readonly Tensor? _projW, _projB;
+    private readonly Tensor? _selfQGamma, _selfKGamma, _crossQGamma, _crossKGamma;
+    private int _disposed;
+
+    internal Trellis2FlowBlock(Trellis2FlowWeights weights, int index)
+    {
+        Trellis2FlowConfig config = weights.Config;
+        string p = $"blocks.{index}.";
+        _width = config.ModelChannels;
+        _heads = config.NumHeads;
+        _headDim = config.HeadDim;
+        _mlpHidden = config.MlpHidden;
+        _attention = AttentionLayer.Shared(_heads, _headDim);   // scale 0 is 1/sqrt(headDim), no F16 permission: what the legacy call without a mask gave
+        _headNorm = new HeadRmsNorm(_headDim);
+        _modulation = weights[p + "modulation"].Reshape(new TensorShape(1, 6L * _width));
+        _qkvW = weights[p + "self_attn.to_qkv.weight"];
+        _qkvB = weights[p + "self_attn.to_qkv.bias"];
+        _outW = weights[p + "self_attn.to_out.weight"];
+        _outB = weights[p + "self_attn.to_out.bias"];
+        _norm2W = weights[p + "norm2.weight"];
+        _norm2B = weights[p + "norm2.bias"];
+        string cross = p + config.CrossAttentionScope + ".";
+        _qW = weights[cross + "to_q.weight"];
+        _qB = weights[cross + "to_q.bias"];
+        _kvW = weights[cross + "to_kv.weight"];
+        _kvB = weights[cross + "to_kv.bias"];
+        _crossOutW = weights[cross + "to_out.weight"];
+        _crossOutB = weights[cross + "to_out.bias"];
+        if (config.HasProjection)
+        {
+            _projW = weights[p + "cross_attn.proj_linear.weight"];
+            _projB = weights[p + "cross_attn.proj_linear.bias"];
+        }
+        _mlp0W = weights[p + "mlp.mlp.0.weight"];
+        _mlp0B = weights[p + "mlp.mlp.0.bias"];
+        _mlp2W = weights[p + "mlp.mlp.2.weight"];
+        _mlp2B = weights[p + "mlp.mlp.2.bias"];
+        if (config.QkRmsNorm)
+        {
+            _selfQGamma = weights[p + "self_attn.q_rms_norm.gamma"];
+            _selfKGamma = weights[p + "self_attn.k_rms_norm.gamma"];
+        }
+
+        if (config.QkRmsNormCross)
+        {
+            _crossQGamma = weights[cross + "q_rms_norm.gamma"];
+            _crossKGamma = weights[cross + "k_rms_norm.gamma"];
+        }
+    }
+
+    /// <summary>The tensors the block reads, for backend weight residency. The modulation is its reshaped view.</summary>
+    internal IEnumerable<Tensor> EnumerateWeights()
+    {
+        Tensor?[] all =
+        [
+            _headNorm.Ones, _modulation, _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B, _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB,
+            _mlp0W, _mlp0B, _mlp2W, _mlp2B, _projW, _projB, _selfQGamma, _selfKGamma, _crossQGamma, _crossKGamma,
+        ];
+        foreach (Tensor? t in all)
+        {
+            if (t is not null)
+                yield return t;
+        }
+    }
+
+    /// <summary>One block over <c>x [1, N, C]</c>. <paramref name="sharedMod"/> is the model-wide adaLN output <c>[1, 6C]</c> and
+    /// <paramref name="cond"/> the image tokens <c>[1, L, condChannels]</c>. <paramref name="proj"/> is the per-token feature rows
+    /// <c>[1, N, projChannels]</c> of a projection block and null otherwise. Returns a new tensor; borrows every input.</summary>
+    internal Tensor Forward(IBackend backend, Tensor x, Tensor sharedMod, Tensor cond, Tensor? proj, Trellis2RopeTable rope)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        int n = (int)x.Shape[1];
+        Tensor[] m = SplitModulation(backend, sharedMod);
+        try
+        {
+            // m: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp.
+            Tensor x1 = SelfAttention(backend, x, n, m[0], m[1], m[2], rope);
+            Tensor x2 = CrossAttention(backend, x1, n, cond, proj);
+            x1.Dispose();
+            Tensor x3 = FeedForward(backend, x2, n, m[3], m[4], m[5]);
+            x2.Dispose();
+            // A projection block queues a long run of operations with nothing waiting on them. Left unsynchronized, a 1024 flow over a real
+            // structure (16k tokens) did not finish a step in 400 s on a 12 GB card, with the card's memory climbing to 11.8 GB at full utilization;
+            // the same forward with a sync here takes 18 s. The cause is probably memory held by freed temporaries until the next sync (not proven).
+            if (_projW is not null)
+                backend.Sync();
+            return x3;
+        }
+        finally
+        {
+            foreach (Tensor t in m)
+                t.Dispose();
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        _headNorm.Dispose();
+    }
+
+    private Tensor[] SplitModulation(IBackend backend, Tensor sharedMod)
+    {
+        Tensor sum = new(new TensorShape(1, 6L * _width), DType.F32);
+        backend.Add(sum, _modulation, sharedMod);
+        Tensor[] parts = new Tensor[6];
+        try
+        {
+            for (int i = 0; i < parts.Length; i++)
+            {
+                parts[i] = new Tensor(new TensorShape(1, _width), DType.F32);
+                backend.SliceLastDim(parts[i], sum, i * _width);
+            }
+        }
+        catch
+        {
+            foreach (Tensor? t in parts)
+                t?.Dispose();
+            throw;
+        }
+        finally
+        {
+            sum.Dispose();
+        }
+
+        return parts;
+    }
+
+    private Tensor Modulated(IBackend backend, Tensor x, Tensor scale, Tensor shift)
+    {
+        Tensor h = new(x.Shape, DType.F32);
+        backend.NormModulate(NormModulateCall.Rows(h, x, NormKind.LayerNorm, NormEps)
+            .WithModulation(ModulationSpec.Broadcast(x, scale, shift, ScaleMode.OnePlus)));
+        return h;
+    }
+
+    private Tensor SelfAttention(IBackend backend, Tensor x, int n, Tensor shift, Tensor scale, Tensor gate, Trellis2RopeTable rope)
+    {
+        Tensor h = Modulated(backend, x, scale, shift);
+        Tensor qkv = new(new TensorShape(1, n, 3L * _width), DType.F32);
+        backend.Linear(qkv, h, _qkvW, _qkvB);
+        h.Dispose();
+        Tensor q = HeadMajor(backend, qkv, 0, n);
+        Tensor k = HeadMajor(backend, qkv, _width, n);
+        Tensor v = HeadMajor(backend, qkv, 2 * _width, n);
+        qkv.Dispose();
+        q = HeadNorm(backend, q, _selfQGamma);
+        k = HeadNorm(backend, k, _selfKGamma);
+        rope.Apply(backend, q);
+        rope.Apply(backend, k);
+        Tensor ctx = Attend(backend, q, k, v, n);
+        Tensor proj = Linear(backend, ctx, _outW, _outB, _width);
+        ctx.Dispose();
+        Tensor x1 = new(x.Shape, DType.F32);
+        backend.GatedResidualLastDim(x1, x, proj, gate);
+        proj.Dispose();
+        return x1;
+    }
+
+    // Cross-attention keys and values are recomputed per call because one block sees both the conditional and the
+    // unconditional tokens at every step.
+    private Tensor CrossAttention(IBackend backend, Tensor x, int n, Tensor cond, Tensor? projected)
+    {
+        int lc = (int)cond.Shape[1];
+        Tensor h = new(x.Shape, DType.F32);
+        backend.LayerNorm(h, x, _norm2W, _norm2B, NormEps);
+        Tensor qFlat = Linear(backend, h, _qW, _qB, _width);
+        h.Dispose();
+        Tensor q = HeadMajor(backend, qFlat, 0, n);
+        qFlat.Dispose();
+        Tensor kv = Linear(backend, cond, _kvW, _kvB, 2L * _width);
+        Tensor k = HeadMajor(backend, kv, 0, lc);
+        Tensor v = HeadMajor(backend, kv, _width, lc);
+        kv.Dispose();
+        q = HeadNorm(backend, q, _crossQGamma);
+        k = HeadNorm(backend, k, _crossKGamma);
+        Tensor ctx = Attend(backend, q, k, v, n);
+        Tensor proj = Linear(backend, ctx, _crossOutW, _crossOutB, _width);
+        ctx.Dispose();
+        if (_projW is not null && _projB is not null)
+            proj = AddProjection(backend, proj, projected, _projW, _projB);
+        Tensor sum = new(x.Shape, DType.F32);
+        backend.Add(sum, x, proj);
+        proj.Dispose();
+        return sum;
+    }
+
+    // Upstream sums proj_linear(proj) + cross_attn(x); a block with no projection weights ignores the features.
+    private Tensor AddProjection(IBackend backend, Tensor attended, Tensor? projected, Tensor weight, Tensor bias)
+    {
+        using Tensor owned = attended;
+        if (projected is null)
+            throw new ArgumentException("A projection block needs per-token projected features.", nameof(projected));
+        using Tensor lifted = Linear(backend, projected, weight, bias, _width);
+        Tensor sum = new(owned.Shape, DType.F32);
+        backend.Add(sum, lifted, owned);
+        return sum;
+    }
+
+    private Tensor FeedForward(IBackend backend, Tensor x, int n, Tensor shift, Tensor scale, Tensor gate)
+    {
+        Tensor h = Modulated(backend, x, scale, shift);
+        Tensor hidden = Linear(backend, h, _mlp0W, _mlp0B, _mlpHidden);
+        h.Dispose();
+        Tensor act = new(hidden.Shape, DType.F32);
+        backend.Gelu(act, hidden);
+        hidden.Dispose();
+        Tensor down = Linear(backend, act, _mlp2W, _mlp2B, _width);
+        act.Dispose();
+        Tensor x3 = new(x.Shape, DType.F32);
+        backend.GatedResidualLastDim(x3, x, down, gate);
+        down.Dispose();
+        return x3;
+    }
+
+    private static Tensor Linear(IBackend backend, Tensor x, Tensor weight, Tensor bias, long outDim)
+    {
+        Tensor o = new(new TensorShape(1, x.Shape[1], outDim), DType.F32);
+        backend.Linear(o, x, weight, bias);
+        return o;
+    }
+
+    /// <summary>Columns <c>[offset, offset + C)</c> of a packed <c>[1, tokens, k·C]</c> tensor as head-major <c>[1, H, tokens, D]</c>.</summary>
+    private Tensor HeadMajor(IBackend backend, Tensor packed, int offset, int tokens)
+    {
+        Tensor tokenMajor = new(new TensorShape(1, tokens, _heads, _headDim), DType.F32);
+        backend.SliceLastDim(tokenMajor, packed, offset);
+        Tensor o = new(new TensorShape(1, _heads, tokens, _headDim), DType.F32);
+        backend.Permute0213(o, tokenMajor, tokens, _heads, _headDim);
+        tokenMajor.Dispose();
+        return o;
+    }
+
+    /// <summary>Per-head <c>F.normalize(x) · gamma · sqrt(D)</c> with <c>gamma [H, D]</c>; consumes <paramref name="heads"/>; a null gamma means no norm.</summary>
+    private Tensor HeadNorm(IBackend backend, Tensor heads, Tensor? gamma)
+        => gamma is null ? heads : _headNorm.Apply(backend, heads, gamma);
+
+    /// <summary>Attention over head-major operands, returned flat as <c>[1, tokens, C]</c>; consumes q, k and v.</summary>
+    internal Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int tokens)
+    {
+        Tensor att = _attention.AttendHeadMajorOperands(backend, q, k, v, default);   // consumes q, k and v
+        return _attention.MergeHeads(backend, att, new TensorShape(1, tokens, _width));   // consumes att
+    }
+}

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -142,7 +143,7 @@ public sealed unsafe class Kandinsky5Rope : IQkRotation, IHeadMajorQkRotation
         }
     }
 
-    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the <c>[S, heads·headDim]</c> layout <see cref="IBackend.WanRopeInterleaved"/> expects) — the rotation math is the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The duplicated-pair cos/sin tables are built ONCE per Precompute and preloaded to the GPU weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
+    /// <summary>GPU-resident RoPE on a PRE-head-permute <c>[1, S, H, D]</c> Q/K pair (byte-identical to the <c>[S, heads·headDim]</c> layout <c>RotaryCall.Rows</c> expects) — the rotation math is the same interleaved GPT-J pairing, so the Wan kernel applies verbatim. Replaces the per-block host excursion (a full Q/K D2H → trig → H2D round trip per attention, the dominant per-step cost). The duplicated-pair cos/sin tables are built ONCE per Precompute and preloaded to the GPU weight cache. Requires batch 1; callers keep <see cref="Apply"/> as the batched fallback.</summary>
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, int seqLen)
     {
         if (_cosCache is null || _sinCache is null || _deviceTables is null || _signature is null)
@@ -153,8 +154,8 @@ public sealed unsafe class Kandinsky5Rope : IQkRotation, IHeadMajorQkRotation
 
         using RopeTableLease lease = _deviceTables.Acquire(backend, 0, seqLen, _signature);
         (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
-        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>Installs new host pairs and retires the device rows built from the previous ones.</summary>

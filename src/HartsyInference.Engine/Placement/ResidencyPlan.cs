@@ -1,4 +1,4 @@
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Planning.Memory;
 
 namespace HartsyInference.Engine.Placement;

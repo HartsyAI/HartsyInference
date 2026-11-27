@@ -50,16 +50,16 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string speakerEncoderPrefix)
     {
         _convPreW = Own(WeightNormFusion.Compose(w, $"{prefix}.conv_pre"));
-        _convPreB = EnsureF32(w[$"{prefix}.conv_pre.bias"]);
-        _condLayerW = EnsureF32(w[$"{prefix}.cond_layer.weight"]);
-        _condLayerB = EnsureF32(w[$"{prefix}.cond_layer.bias"]);
+        _convPreB = TensorCasts.EnsureF32(w[$"{prefix}.conv_pre.bias"]);
+        _condLayerW = TensorCasts.EnsureF32(w[$"{prefix}.cond_layer.weight"]);
+        _condLayerB = TensorCasts.EnsureF32(w[$"{prefix}.cond_layer.bias"]);
 
         for (int i = 0; i < _numStages; i++)
         {
             _upsW[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.ups.{i}.0"));
-            _upsB[i] = EnsureF32(w[$"{prefix}.ups.{i}.0.bias"]);
-            _condsW[i] = EnsureF32(w[$"{prefix}.conds.{i}.weight"]);
-            _condsB[i] = EnsureF32(w[$"{prefix}.conds.{i}.bias"]);
+            _upsB[i] = TensorCasts.EnsureF32(w[$"{prefix}.ups.{i}.0.bias"]);
+            _condsW[i] = TensorCasts.EnsureF32(w[$"{prefix}.conds.{i}.weight"]);
+            _condsB[i] = TensorCasts.EnsureF32(w[$"{prefix}.conds.{i}.bias"]);
             for (int j = 0; j < _resblocks[i].Length; j++)
                 _resblocks[i][j].LoadWeights(w, $"{prefix}.resblocks.{i * _resblocks[i].Length + j}");
         }
@@ -68,7 +68,7 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
         _activationPost = new AntiAliasedSnake(finalCh);
         _activationPost.LoadWeights(w, $"{prefix}.activation_post");
         _convPostW = Own(WeightNormFusion.Compose(w, $"{prefix}.conv_post"));
-        _convPostB = EnsureF32(w[$"{prefix}.conv_post.bias"]);
+        _convPostB = TensorCasts.EnsureF32(w[$"{prefix}.conv_post.bias"]);
 
         _speakerEncoder.LoadWeights(w, speakerEncoderPrefix);
     }
@@ -151,8 +151,6 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
             for (int i = 0; i < t; i++) row[i] += acc;
         }
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private Tensor Own(Tensor t)
     {

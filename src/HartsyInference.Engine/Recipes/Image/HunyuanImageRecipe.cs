@@ -6,7 +6,6 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Placement;
-using HartsyInference.Core.Memory;
 using HartsyInference.Core.Models;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -16,6 +15,8 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Core.Runtime;
+using HartsyInference.ModelAssets.Metadata;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -25,6 +26,12 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public string Name => "hunyuan-image";
 
+    /// <inheritdoc/>
+    public PromptProfile? Prompt { get; } = new()
+    {
+        Kind = "image", Encoders = ["vlm", "t5"], Format = "text", Negative = "separate",
+        Supports = ["regions", "text-rendering"], Guide = "docs/prompting/hunyuan-image.md",
+    };
 
     /// <inheritdoc/>
     /// <remarks>Img2img only. HunyuanImage integrates in token space after a one-time patchify, and the shared
@@ -124,13 +131,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
                     + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
-            SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
-            qwenLoader.Load(qwenPath);
-            loaders.Add(qwenLoader);
-            LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
-            llama.LoadWeights(qwenLoader.GetAllTensors());
-            HunyuanImageQwenTextEncoder qwenEncoder = new HunyuanImageQwenTextEncoder(llama);
+            (LlamaStyleEncoder llama, HunyuanImageQwenTextEncoder qwenEncoder) = HunyuanTextEncoders.LoadQwen25Vl(context, loaders);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanImageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
@@ -155,7 +156,13 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             };
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
-            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, checkpoint, loraStack);
+            // The glyph encoder loads on the first prompt that quotes text, and only for a checkpoint that has the ByT5
+            // projection (context_embedder_2) to read it.
+            Func<CancellationToken, (T5TextEncoder, IDisposable)>? glyphFactory = config.TextEmbedDim2 is null
+                ? null
+                : HunyuanTextEncoders.LoadGlyphByt5;
+            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, checkpoint, loraStack,
+                glyphFactory);
         }
         catch (Exception ex)
         {

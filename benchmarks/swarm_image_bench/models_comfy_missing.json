@@ -11,7 +11,7 @@
   },
   {
     "name": "HunyuanImage-2.1",
-    "model": "HunyuanImage2.1-Q4_K_M.gguf",
+    "model": "hunyuanimage2.1-q4_k_m.gguf",
     "params": { "width": 2048, "height": 2048, "steps": 20, "cfgscale": 3.5 }
   }
 ]

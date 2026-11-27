@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -56,6 +57,13 @@ internal sealed class LtxVideo25PixelShuffleUpsample
         Tensor result = new Tensor(new TensorShape((long)outT * outH * outW, outChannels), DType.F32);
         long bytesPerToken = (long)(_inChannels + _projChannels) * sizeof(float);
         int step = LtxVideo25TemporalChunks.FramesPerChunk(chunkBytes, plane, bytesPerToken, t);
+        if (dropped == 1 || step < t)
+        {
+            // Several scatters fill the result; start it as zeros on the device so no scatter uploads a stale host buffer.
+            using Tensor zero = new Tensor(new TensorShape(1), DType.F32);
+            zero.AsSpan<float>()[0] = 0f;
+            StridedCopies.FillFrom(backend, result, zero);
+        }
         for (int start = 0; start < t; start += step)
         {
             int count = Math.Min(step, t - start);
@@ -63,7 +71,8 @@ internal sealed class LtxVideo25PixelShuffleUpsample
             using Tensor? slice = count == t ? null : new Tensor(new TensorShape((long)count * plane, _inChannels), DType.F32);
             if (slice is not null) backend.SliceRowsGeneric(slice, x, checked((int)((long)start * plane)));
             backend.Linear(projected, slice ?? x, _projWeight!, _projBias);
-            backend.Ltx25PixelShuffle(result, projected, start, h, w, p1, p2, p3, outChannels, dropped, outH, outW);
+            PixelShuffles.DepthToSpace(backend, result, projected, new ShuffleSpec(ShuffleLayout.Tokens, ShuffleLayout.Tokens, 1, count, h, w, outChannels,
+                p1, p2, p3, ChannelOrder.CTHW, DropLeadingFrames: dropped, ChunkStartFrame: start, UnpackedFrames: outT));
         }
         return result;
     }

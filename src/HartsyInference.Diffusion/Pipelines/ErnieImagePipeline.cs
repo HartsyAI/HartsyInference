@@ -2,7 +2,7 @@ using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -246,7 +246,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         _ditResident = true;
 
         // Drain-free fast path (t2i / plain img2img): the latent stays device-resident across the whole
-        // loop; CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt
+        // loop; CFG combine + Euler run as ONE in-place device op (GuidedEulerStep: z += (neg + gw·(pos−neg))·dt
         // ≡ uncond + cfg·(cond−uncond) Euler, gw=1 degenerates to the plain step). The old host
         // scheduler.Step forced a velocity D2H + latent re-upload every step. Masked inpaint keeps the host
         // branch (its per-step blend reads/rebuilds the latent on the host).

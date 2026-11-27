@@ -1,3 +1,5 @@
+using HartsyInference.LLM.Transformer.Compression;
+
 namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>One attention layer's cache for one sequence: the sliding-window ring and, on a source layer, the compressed latents, partial group and index keys.</summary>
@@ -11,7 +13,7 @@ public sealed class DeepSeekV41AttentionState
     public float[]? CompressKv { get; }
 
     /// <summary>Partial pooling group; null unless this layer pools (ratio above 1).</summary>
-    public DeepSeekV41CompressorState? Compressor { get; }
+    public KvCompressorState? Compressor { get; }
 
     /// <summary>Index keys, <c>[rows, IndexHeadDim]</c>; null unless this layer owns them.</summary>
     public float[]? IndexKeys { get; }
@@ -25,7 +27,7 @@ public sealed class DeepSeekV41AttentionState
         if (settings.CompressRatio <= 0 || !settings.IsKvSource) return;
         int rows = (maxTokens + settings.CompressRatio - 1) / settings.CompressRatio;
         CompressKv = new float[rows * settings.HeadDim];
-        if (settings.CompressRatio > 1) Compressor = new DeepSeekV41CompressorState(settings.CompressRatio, settings.HeadDim);
+        if (settings.CompressRatio > 1) Compressor = new KvCompressorState(settings.CompressRatio, settings.HeadDim);
         if (settings.IsIndexSource) IndexKeys = new float[rows * settings.IndexHeadDim];
     }
 

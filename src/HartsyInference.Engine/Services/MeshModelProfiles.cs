@@ -1,0 +1,377 @@
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
+
+namespace HartsyInference.Engine.Services;
+
+/// <summary>The profiles of every described 3D model. The rules they state are the ones <see cref="MeshRequestValidator"/> enforces; a test walks the legal values and the first illegal ones of each field through the validator.</summary>
+internal static class MeshModelProfiles
+{
+    private const string Hunyuan2Terms = "Tencent Hunyuan 3D 2.0 Community License";
+    private const string SonataNonCommercial = "The Sonata backbone weights (facebook/sonata) are released under CC-BY-NC 4.0 (non-commercial), restricted by the non-commercial terms of datasets such as HM3D and ArkitScenes (github.com/facebookresearch/sonata)";
+
+    private const string SonataInheritance = "Whether the fine-tuned Hunyuan3D-Part checkpoints (P3-SAM, and the Sonata copy inside X-Part's conditioner) inherit the Sonata terms is not settled by either licence text: treat the Sonata-derived part as non-commercial unless the licensors say otherwise";
+
+    private static readonly string[] HunyuanRestrictions =
+    [
+        "Not licensed in the European Union, the United Kingdom or South Korea (use or display of the Works or Output there)",
+        "A product with more than 1 million monthly active users needs a separate Tencent licence",
+        "The Works and their Output may not be used to improve another AI model",
+    ];
+
+    private static readonly Dictionary<string, MeshModelProfile> Profiles = Build();
+
+    /// <summary>The profile of <paramref name="id"/>, or null when it has none.</summary>
+    public static MeshModelProfile? Find(string id) => Profiles.GetValueOrDefault(id);
+
+    private static Dictionary<string, MeshModelProfile> Build()
+    {
+        List<MeshModelProfile> all =
+        [
+            Profile("triposr", MeshInputKind.Image, MeshOutputKinds.Mesh,
+                [Ignored(nameof(MeshRequest.Steps), "TripoSR is one feed-forward pass."), Grid(null, null, 1, null, "Marching-cubes samples per axis; memory grows with its cube."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), IgnoredSeed("There is no sampler to seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence { Summary = "MIT (stabilityai/TripoSR)" },
+                new MeshCost { Basis = "Verified on CPU and an RTX 3060; no time or memory figure is recorded." },
+                note: "Expects the foreground cut out and composited on mid-gray."),
+            .. HunyuanShapeProfiles(),
+            Profile("trellis", MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("25", 1, null, "Sampler steps of both flows."), Ignored(nameof(MeshRequest.GridResolution), "The output is a splat cloud."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence { Summary = "MIT (TRELLIS-image-large)" },
+                new MeshCost { Basis = "No time or memory figure is recorded." },
+                note: "Returns Gaussian splats (ply), not a mesh."),
+            Profile(MeshModelIds.Trellis2, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.TexturedMesh,
+                [Steps(null, 0, 200, "Sampler steps of each flow; 0 takes the checkpoint's schedule."), Grid("1024", ["512", "1024", "1536"], null, null, "Final dual-grid resolution."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. TextureOptional()],
+                new MeshLicence { Summary = "MIT (TRELLIS.2, TRELLIS-image-large); DINOv3 under the DINOv3 License; BiRefNet-matting MIT" },
+                new MeshCost { PeakVramGiB = 11.9, TypicalSeconds = 930, Basis = "The cost figures are the default request, the 1024 cascade (11.9 GiB with F32 flows, about 15.5 minutes on an idle card). Whole-card peaks on the RTX 3060, textured: 512 7.4 GiB (6.2 GiB of our own plus about 1.2 GiB of desktop, 178 s); 1024 11.9 GiB with F32 flows and 11.7 GiB with numerics.flowF16Weights (about 15.5 minutes; 9 of 12 fine-flow steps ran at 33 to 36 s because Windows paged past about 8 GiB); 1536 11.4 GiB (1,668 s). Only 512 is planned from a figure: the other two sit at the card's limit and the plan would add the matting model on top and call them infeasible although they completed." },
+                peak: request => request.GridResolution == 512 ? 7.4 : null,
+                note: "Needs the foreground cut out: an image with alpha, or the BiRefNet matting checkpoint installed.",
+                presets: Presets(
+                    new MeshPreset { GridResolution = 1024, TextureSize = 4096, Basis = "Upstream's 1024 cascade (its default, so the preset only changes the texture) and the 4096 texture of its example.py. RTX 3060: the 1024 cascade took 564 s; a 4096 bake takes about 2.6 times the CPU post-process time of 2048 and adds about 11 MB to the GLB; a real 4096 run was not made." },
+                    new MeshPreset { GridResolution = 1536, TextureSize = 4096, Basis = "Upstream's largest cascade. RTX 3060: 1,668 s with a 11.6 GiB card total (past the 8 GiB Windows budget, so expect paging); a 4096 texture on top was not run." })),
+            Profile(MeshModelIds.Pixal3D, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.TexturedMesh,
+                [Steps(null, 0, 200, "Sampler steps of each flow; 0 takes the checkpoint's schedule."), Grid("1024", ["1024", "1536"], null, null, "Final dual-grid resolution; there is no 512 pipeline."),
+                    Used(nameof(MeshRequest.FieldOfViewRadians), "0.8575560450553894", 0, Math.PI / 2, "radians", "The photo's horizontal field of view, strictly between 0 and pi/2."),
+                    Seed(), .. NoHairDeck(), .. TextureOptional()],
+                new MeshLicence { Summary = "MIT (Pixal3D); DINOv3 under the DINOv3 License; the NAF weights' licence is not stated" },
+                new MeshCost { PeakVramGiB = 9.3, TypicalSeconds = 386, Basis = "RTX 3060, 1024 cascade, shape-only, 12 steps per flow, one image (a bust); 1536 peaks at 11.6." },
+                peak: request => request.GridResolution == 1536 ? 11.6 : 9.3,
+                note: "naf_release.pth is fetched from the NAF release with the other files (or place it, or its safetensors repack, in the model folder); needs the foreground cut out like TRELLIS.2.",
+                presets: Presets(
+                    new MeshPreset { GridResolution = 1024, TextureSize = 4096, Basis = "The 1024 cascade (RTX 3060: about 6.4 to 8.5 minutes shape-only, 9.3 GiB peak) with a 4096 texture, which was not run; the preset changes nothing without Texture, because 1024 is already the default." },
+                    new MeshPreset { GridResolution = 1536, TextureSize = 4096, Basis = "Upstream's default resolution. RTX 3060: shape-only 25.6 minutes at an 11.6 GiB peak; a textured 1536 run was not made. The planner adds the matting model (about 0.8 GiB) for an image without alpha, which puts the estimate over the 12 GB card, so supply an alpha image to plan it as resident." })),
+            Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats | MeshOutputKinds.Mesh,
+                [Steps("25", 0, null, "Steps of the structure flow and of the SLAT flow."), Rejected(nameof(MeshRequest.GridResolution)),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "SAM License (binds on use and redistribution)",
+                    Restrictions = ["Use ends for trade-controlled parties and for military, nuclear, espionage and weapons end uses; read the licence text fetched beside the weights"],
+                },
+                new MeshCost { TypicalSeconds = 450, Basis = "Splats: RTX 3060, F32 flows, one example image; the SLAT flow fills the card, so no peak is stated. Mesh: RTX 3060, F16 flow weights (numerics.flowF16Weights), one bust, 340 s and an 11.8 GiB peak of the 12 GiB card (F32 flows are not recorded for the mesh path)." },
+                peak: request => request.Mesh ? 11.8 : null,
+                note: "The image's alpha plane is the mask of the object to lift."),
+            Profile(MeshModelIds.Idol, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("50", 0, 1000, "Euler steps of the denoiser; each runs the 12k-token transformer twice (with and without the image) unless Guidance is 0."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Idol weights and idol-sdk, Sperid Labs); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { PeakVramGiB = 4.9, TypicalSeconds = 220, Basis = "The default request (50 steps, 262,144 splats, F16 blocks) through the CLI on an RTX 3060, one picture with alpha: 220 s, 4.1 s per step, a 4.9 GiB peak of the card (about 1.2 GiB of it the desktop). With F32 blocks a step is about 16 s." },
+                note: "Mattes (BiRefNet) an image without alpha, crops around the object, encodes it with DINOv3 ViT-H+ and the FLUX.2 VAE, denoises an 8192-token latent and decodes 262,144 Gaussians by default; returns a PLY."),
+            Profile(MeshModelIds.IdolTurbo, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("5", 0, 1000, "Euler steps; each runs the 12k-token transformer once, with the slow phase LoRA while the shifted time is 0.5 or more and the fast one below it. The distillation is for 4 to 8 steps."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Idol and the idol-turbo LoRAs, which are a derivative of Idol); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                note: "Idol with its guidance and most of its steps distilled into two phase LoRAs: 5 steps and no blank pass, so the denoiser runs 5 forwards instead of 100. Same preparation, decoders and PLY as idol; Guidance does not apply."),
+            Profile(MeshModelIds.BudgetIdol, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("50", 0, 1000, "Euler steps of the denoiser; each runs the transformer twice (with and without the image) on the budget's tokens unless Guidance is 0."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Budget3D-Idol weights, BudgetAny, a fine-tune of Idol; Budget3D code MIT); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                note: "Idol on an adaptive number of latent tokens: TokenBudget 1 is Idol's dense layout, smaller budgets merge the quiet regions of the object into larger tokens and expand them back with small refiners. Same preparation, decoders and PLY as idol."),
+            Profile(MeshModelIds.BudgetIdolTurbo, MeshInputKind.Image, MeshOutputKinds.Splats,
+                [Steps("5", 0, 1000, "Euler steps; each runs the transformer once on the budget's tokens, with the slow phase expert while the shifted time is 0.5 or more and the fast one below it."),
+                    Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the noise and the anchor draws; a negative value draws a random seed."),
+                    .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Apache-2.0 (Budget3D-Idol-Turbo weights, BudgetAny, a fine-tune of Idol-turbo; Budget3D code MIT); DINOv3 under the DINOv3 License (the ViT-H+/16 file is Comfy-Org's repack of Meta's gated weights); the FLUX.2 VAE (Apache-2.0 via FLUX.2-klein-4B)",
+                    Restrictions = ["DINOv3 License: read it before redistributing or shipping a product (Meta, custom; the original repository is gated)"],
+                },
+                new MeshCost { Basis = "Not yet timed through the engine on the 12 GB card." },
+                note: "Budget3D-Idol with the idol-turbo phase experts inside its checkpoint: 5 guidance-free steps on TokenBudget of the latent tokens, the layout rebuilt at every step. Guidance does not apply."),
+            Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
+                [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)),
+                    Seed(),
+                    new MeshFieldSpec { Name = nameof(MeshRequest.Samples), Access = MeshFieldAccess.Used, Default = "1", Values = ["1"], Note = "Only one sample per request." },
+                    Used(nameof(MeshRequest.Colors), "true", null, null, null, "Colour the cards with the colour model."),
+                    Used(nameof(MeshRequest.Chains), "true", null, null, null, "Also generate the spring-bone chains."),
+                    Used(nameof(MeshRequest.Rigged), "false", null, null, null, "Rigged output, skinned to the chains with head-motion clips; needs chains."),
+                    .. NoTexture()],
+                new MeshLicence { Summary = "HairDeck weights Apache-2.0; SAM 3 under the SAM License (gated); DINOv3 License (gated); BiRefNet-matting MIT" },
+                new MeshCost { Basis = "Run on one demo image on an RTX 3060; no time or memory figure is recorded." },
+                note: "Mattes the image with SAM 3 and BiRefNet before sampling."),
+            Profile("cola3d", MeshInputKind.SceneMesh, MeshOutputKinds.Mesh,
+                [Ignored(nameof(MeshRequest.Steps), "The decomposer is one forward pass."), Grid("256", null, 16, 1024, "Dual-grid voxels per axis, a multiple of 16; a point prompt defaults to 1024."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), IgnoredSeed("The decomposer is deterministic."), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence { Summary = "Not recorded in the engine's documents" },
+                new MeshCost { Basis = "No time or memory figure is recorded." },
+                note: "Takes a scene mesh and, optionally, a mask or point prompt in ScenePrompt."),
+            Profile("unirig", MeshInputKind.SceneMesh, MeshOutputKinds.RiggedMesh,
+                [Rejected(nameof(MeshRequest.Steps)), Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)),
+                    Seed(), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence { Summary = "MIT (code and weights); training data CC-BY-4.0" },
+                new MeshCost { Basis = "CPU F32 skinning of one mesh took 400 s; no GPU figure is recorded." },
+                note: "Skeleton and skin weights for a triangle mesh; the result is a rigged glb."),
+            Profile("hunyuan3d-part", MeshInputKind.SceneMesh, MeshOutputKinds.PartMesh,
+                [Rejected(nameof(MeshRequest.Steps)), Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)),
+                    Seed("Seeds the surface sampling."), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Tencent Hunyuan 3D-Part Community License; its Sonata backbone comes from facebook/sonata, whose weights are CC-BY-NC 4.0 (non-commercial)",
+                    Restrictions = [.. HunyuanRestrictions, SonataNonCommercial, SonataInheritance],
+                },
+                new MeshCost { PeakVramGiB = 4.7, TypicalSeconds = 53, Basis = "RTX 3060 through the CLI on a 1.0 M-face bust, peak 4.7." },
+                peak: _ => 4.7,
+                note: "Segments a mesh into parts; the labels and boxes come back in MeshResult.Parts."),
+            Profile("hunyuan3d-xpart", MeshInputKind.SceneMesh, MeshOutputKinds.PartMesh,
+                [Steps("50", 0, 1000, "Euler steps of the part flow; 0 takes 50."),
+                    Grid("256", null, 32, 512, "Marching-cubes grid per axis of each part, decoded densely (the host holds the cube: 0.5 GB at 512); 0 takes 256, upstream extracts on an octree at 512."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)),
+                    Seed("Fixes the surface samples, the part ids and the noise; a negative value draws a random seed."), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Tencent Hunyuan 3D-Part Community License; its Sonata backbone comes from facebook/sonata, whose weights are CC-BY-NC 4.0 (non-commercial)",
+                    Restrictions = [.. HunyuanRestrictions, SonataNonCommercial, SonataInheritance],
+                },
+                new MeshCost { PeakVramGiB = 9.5, TypicalSeconds = 385, Basis = "RTX 3060, a 40,080-face bust split into 3 parts, grid 256, 50 steps: P3-SAM 66 s, conditioning 21 s, flow 140 s, decode 141 s." },
+                peak: request => request.GridResolution is 0 or <= 256 ? 9.5 : null,
+                presets: Presets(
+                    new MeshPreset { GridResolution = 384, Basis = "Not run on the 3060: the dense decode grows with the grid's cube (141 s at 256 for 3 parts)." },
+                    new MeshPreset { GridResolution = 512, Basis = "Upstream's grid; not run on the 3060 (the host holds a 0.5 GB cube per part)." }),
+                note: "P3-SAM splits the mesh into parts and each part is generated again as a complete shape; the boxes and face counts come back in MeshResult.Parts. Decimate a dense mesh to about 40,000 faces first. The setting numerics.xpartFastDecode (off) decodes the parts with FlashVDM: about 113 s for three parts instead of 141 s, on a finer grid (504 cells), approximating the dense field."),
+            Profile(MeshModelIds.Omni, MeshInputKind.ImageAndControl, MeshOutputKinds.Mesh,
+                [Steps("50", 0, 1000, "Euler steps of the flow; 0 takes 50 (49 evaluations, each with and without the image)."),
+                    Grid("384", null, 32, 512, "Marching-cubes grid per axis, decoded densely (the host holds the cube: 0.5 GB at 512); 0 takes 384, upstream's script uses 512."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Tencent Hunyuan 3D Omni Community License; DINOv2 is Apache-2.0",
+                    Restrictions = [.. HunyuanRestrictions, "A product built on it must name its real provider and state that Tencent is not affiliated with, sponsoring or endorsing it"],
+                },
+                new MeshCost { PeakVramGiB = 9.1, TypicalSeconds = 394, Basis = "RTX 3060, a bust photo and a 2,048-point control, 50 steps, guidance 7.5, grid 384: load 27 s, flow 132 s, decode and marching cubes 235 s; grid 256 took 285 s and peaked at 8.9 GB." },
+                peak: request => request.GridResolution is 0 or <= 384 ? 9.1 : null,
+                presets: Presets(
+                    new MeshPreset { GridResolution = 512, Basis = "Upstream's script grid; grid 384 (the default) took 394 s at 9.1 GiB on the 3060, 512 was not run (the decode grows with the cube)." },
+                    new MeshPreset { GridResolution = 512, Basis = "The largest grid the engine takes; there is no finer setting upstream." }),
+                note: "The image guides appearance and the control guides shape: give the image's foreground on white (Preprocess Auto does it) and a control in the model's own frame. Guidance is 4.5, the value upstream's script uses."),
+            Paint("hunyuan3d-paint", "Tencent Hunyuan 3D 2.0 Community License", "Albedo only; metallic is 0 and roughness 1.",
+                new MeshCost { Basis = "A 30-step run was estimated at 175 s from a 12-step run on a card shared with another process; no isolated peak." }, peak: null),
+            Paint("hunyuan3d-paint21", "Tencent Hunyuan 3D 2.1 Community License", "PBR texture (base color, metallic, roughness).",
+                new MeshCost { PeakVramGiB = 9.8, TypicalSeconds = 330, Basis = "RTX 3060, 512 px views, 15 UniPC steps: 99 s on a 19,800-triangle mesh without the view upscaler; the default Real-ESRGAN upscaler adds about 220 s (a 2048 texture on upstream's penguin demo took about 330 s in all)." },
+                peak: _ => 9.8),
+        ];
+        return all.ToDictionary(profile => profile.Id, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<MeshModelProfile> HunyuanShapeProfiles()
+    {
+        foreach (string id in MeshModelIds.Hunyuan3D)
+        {
+            yield return Profile(id, MeshInputKind.Image, MeshOutputKinds.Mesh,
+                [Steps(null, 1, null, "Sampler steps; the build's own default (50 standard, 10 Fast, 5 Turbo) when unset."),
+                    Grid(null, null, 1, null, "Marching-cubes samples per axis; the checkpoint's default when unset."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence { Summary = Hunyuan2Terms, Restrictions = HunyuanRestrictions },
+                id == MeshModelIds.Hunyuan3DMultiView
+                    ? new MeshCost { TypicalSeconds = 120, Basis = "One RTX 3060 (12 GB) run at the defaults: 120 s from the front picture alone and 185 s with left, back and right added (each view lengthens the conditioning); peak memory not measured." }
+                    : new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
+                note: "Expects the foreground recentred on white at 512 px; Preprocess Auto prepares it.",
+                presets: Presets(
+                    new MeshPreset { GridResolution = 384, Basis = "The Gradio demo's High decoding mode; the default grid is 256. Not run at 384 on the 3060." },
+                    new MeshPreset { GridResolution = 512, Basis = "The largest grid the demo offers; not run on the 3060 (the FlashVDM and dense decodes both grow with the cube)." }));
+        }
+    }
+
+    private static MeshModelProfile Paint(string id, string terms, string note, MeshCost cost, Func<MeshRequest, double?>? peak) =>
+        Profile(id, MeshInputKind.SceneMeshAndImage, MeshOutputKinds.TexturedMesh,
+            [Steps(null, 0, null, "Sampler steps; 0 takes the checkpoint's default."),
+                Used(nameof(MeshRequest.GridResolution), "2048", 0, null, "texels", "The baked texture's edge, not a grid; 0 takes 2048."),
+                Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the multiview noise."),
+                .. NoHairDeck(), .. NoTexture()],
+            new MeshLicence
+            {
+                Summary = terms + "; the UNet is built on SD 2.1-base (CreativeML Open RAIL++-M)",
+                Restrictions = HunyuanRestrictions,
+            },
+            cost, peak, note + " The mesh and the reference image are both required.",
+            Presets(
+                new MeshPreset { GridResolution = 4096, Basis = "Upstream's texture size (hy3dpaint's config); the default is 2048. The multiview stage does not change, only the CPU bake and the PNGs; not run at 4096." },
+                new MeshPreset { GridResolution = 4096, Basis = "The largest texture upstream's pipeline bakes." }));
+
+    private static MeshModelProfile Profile(
+        string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
+        Func<MeshRequest, double?>? peak = null, string? note = null, IReadOnlyDictionary<MeshQuality, MeshPreset>? presets = null) =>
+        new()
+        {
+            Id = id,
+            Input = input,
+            Outputs = outputs,
+            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), GuidanceField(id), SplatCountField(id), FramingField(id), TokenBudgetField(id), .. OutputFields(outputs)],
+            Licence = licence,
+            Cost = cost,
+            PeakGiB = peak,
+            Note = note,
+            Presets = presets ?? new Dictionary<MeshQuality, MeshPreset>(),
+        };
+
+    private static Dictionary<MeshQuality, MeshPreset> Presets(MeshPreset quality, MeshPreset max) =>
+        new() { [MeshQuality.High] = quality, [MeshQuality.Max] = max };
+
+    private static MeshFieldSpec QualityField(IReadOnlyDictionary<MeshQuality, MeshPreset>? presets) => presets is { Count: > 0 }
+        ? new()
+        {
+            Name = nameof(MeshRequest.Quality),
+            Access = MeshFieldAccess.Used,
+            Default = nameof(MeshQuality.Default),
+            Values = [nameof(MeshQuality.Default), nameof(MeshQuality.High), nameof(MeshQuality.Max)],
+            Note = "High: the best settings known to fit a 12 GB card in under ten minutes; Max: the best the model can give whatever it costs (equal to High where the model has no finer setting). They fill Steps, GridResolution and TextureSize where the request leaves them at 0; the descriptor's Presets say what each sets.",
+        }
+        : Rejected(nameof(MeshRequest.Quality));
+
+    private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
+    {
+        if (outputs == MeshOutputKinds.Splats)
+        {
+            return
+            [
+                Ignored(nameof(MeshRequest.PreviewTriangles), "A splat result has no triangles to decimate."),
+                Ignored(nameof(MeshRequest.Frame), "A splat result is returned in the object's own frame."),
+            ];
+        }
+        return
+        [
+            Used(nameof(MeshRequest.PreviewTriangles), "0", 0, null, "triangles", "Also return a copy decimated to about this many triangles for a viewer; 0 returns none. The copy is geometry only."),
+            new MeshFieldSpec
+            {
+                Name = nameof(MeshRequest.Frame),
+                Access = MeshFieldAccess.Used,
+                Default = nameof(MeshFrame.Native),
+                Values = [nameof(MeshFrame.Native), nameof(MeshFrame.GltfYUpMetres)],
+                Note = "GltfYUpMetres centres the result, scales its longest side to 1 m and turns it to glTF's front where the model's front is known.",
+            },
+        ];
+    }
+
+    private static MeshFieldSpec MeshField(string id) => id == MeshModelIds.Sam3dObjects
+        ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (geometry-only GLB; the mesh decoder's vertex colours are noisy and not written) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
+        : Rejected(nameof(MeshRequest.Mesh));
+
+    private static MeshFieldSpec GuidanceField(string id) => id is MeshModelIds.Idol or MeshModelIds.BudgetIdol
+        ? Used(nameof(MeshRequest.Guidance), "3", 0, 20, null, "Classifier-free guidance strength w of the sampler: (1 + w)·v(image) - w·v(blank); 0 runs one pass per step instead of two.")
+        : Rejected(nameof(MeshRequest.Guidance));
+
+    private static MeshFieldSpec TokenBudgetField(string id) => MeshModelIds.IsBudget3D(id)
+        ? Used(nameof(MeshRequest.TokenBudget), "1", 0.0625, 1, "of the latent tokens", "The fraction of Idol's 8192 latent tokens the denoiser runs on, snapped to a count the octree can realise (512, or 519 to 8192). 1 is Idol's own dense layout; 0.5 about halves the work of a step, 0.0625 is 512 tokens. The layout follows the content: detailed regions keep their tokens.")
+        : Rejected(nameof(MeshRequest.TokenBudget));
+
+    private static MeshFieldSpec SplatCountField(string id) => MeshModelIds.IsIdol(id)
+        ? Used(nameof(MeshRequest.SplatCount), "262144", 32768, 1048576, "splats", "Gaussians in the result, a multiple of 32 (32 per anchor point); 0 takes 262,144. The decoders' cost grows with it.")
+        : Rejected(nameof(MeshRequest.SplatCount));
+
+    private static MeshFieldSpec FramingField(string id) => MeshModelIds.IsIdol(id)
+        ? new() { Name = nameof(MeshRequest.Framing), Access = MeshFieldAccess.Used, Default = nameof(MeshFraming.Object), Values = [nameof(MeshFraming.Object), nameof(MeshFraming.Photo)],
+            Note = "How tightly the picture is cropped around the object: Object (renders, generated pictures) leaves 20 %, Photo (photographs) 70 %." }
+        : Rejected(nameof(MeshRequest.Framing));
+
+    private static MeshFieldSpec ControlField(string id) => id == MeshModelIds.Omni
+        ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per distinct point, at most 8,192: a denser cloud is subsampled with the seed), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
+        : Rejected(nameof(MeshRequest.Control));
+
+    private static MeshFieldSpec ViewsField(string id) => id == MeshModelIds.Hunyuan3DMultiView
+        ? Used(nameof(MeshRequest.Views), "none", null, null, null, "Pictures of the subject's left, back and right besides the front Image, each at most once; the shape is built from all of them. The same subject, pose and framing in every picture, each prepared like the front (Preprocess Auto does it).")
+        : MeshModelIds.PaintMesh.Contains(id)
+            ? Used(nameof(MeshRequest.Views), "none", null, null, null, "Pictures of the subject's left, back and right besides the front Image, each at most once: with the reference projection on, each picture with alpha is baked onto the surfaces its camera sees (a picture that does not line up with the mesh's silhouette from there is left out with a warning). The generated views are conditioned on the front picture alone.")
+            : Rejected(nameof(MeshRequest.Views));
+
+    private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
+        ? new()
+        {
+            Name = nameof(MeshRequest.Preprocess),
+            Access = MeshFieldAccess.Used,
+            Default = nameof(MeshPreprocess.None),
+            Values = [nameof(MeshPreprocess.None), nameof(MeshPreprocess.Auto)],
+            Note = "Auto mattes an image without a usable alpha plane (BiRefNet, loaded before the model and kept until memory is freed; counted in the peak of a model that has one) and applies this model's framing; None uses the image as given.",
+        }
+        : Ignored(nameof(MeshRequest.Preprocess), "The model mattes and frames its own input, or takes no image.");
+
+    private static MeshFieldSpec Steps(string? defaultValue, double min, double? max, string note) =>
+        Used(nameof(MeshRequest.Steps), defaultValue, min, max, null, note);
+
+    private static MeshFieldSpec Grid(string? defaultValue, IReadOnlyList<string>? values, double? min, double? max, string note) =>
+        new() { Name = nameof(MeshRequest.GridResolution), Access = MeshFieldAccess.Used, Default = defaultValue, Values = values, Min = min, Max = max, Note = note };
+
+    private static MeshFieldSpec Seed(string? note = null) =>
+        Used(nameof(MeshRequest.Seed), "random", 0, MeshSeed.Max, null, note ?? "A negative value draws a random seed.");
+
+    private static MeshFieldSpec IgnoredSeed(string why) =>
+        new() { Name = nameof(MeshRequest.Seed), Access = MeshFieldAccess.Ignored, Max = MeshSeed.Max, Note = $"{why} A seed above {MeshSeed.Max} is still rejected, like for every model." };
+
+    private static MeshFieldSpec Used(string name, string? defaultValue, double? min, double? max, string? unit, string note) =>
+        new()
+        {
+            Name = name,
+            Access = MeshFieldAccess.Used,
+            Default = defaultValue,
+            Min = min,
+            Max = max,
+            Unit = unit,
+            Note = note,
+        };
+
+    private static MeshFieldSpec Ignored(string name, string note) => new() { Name = name, Access = MeshFieldAccess.Ignored, Note = note };
+
+    private static MeshFieldSpec Rejected(string name) => new() { Name = name, Access = MeshFieldAccess.Rejected, Default = DefaultOf(name) };
+
+    private static string DefaultOf(string name) => name switch
+    {
+        nameof(MeshRequest.Samples) => "1",
+        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) or nameof(MeshRequest.Remesh) => "false",
+        nameof(MeshRequest.Quality) => nameof(MeshQuality.Default),
+        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) or nameof(MeshRequest.Views) or nameof(MeshRequest.Guidance) => "unset",
+        nameof(MeshRequest.Framing) => nameof(MeshFraming.Object),
+        _ => "0",
+    };
+
+    private static MeshFieldSpec[] NoHairDeck() =>
+    [
+        Rejected(nameof(MeshRequest.Samples)), Rejected(nameof(MeshRequest.Colors)), Rejected(nameof(MeshRequest.Chains)), Rejected(nameof(MeshRequest.Rigged)),
+    ];
+
+    private static MeshFieldSpec[] NoTexture() => [Rejected(nameof(MeshRequest.Texture)), Rejected(nameof(MeshRequest.TextureSize)), Rejected(nameof(MeshRequest.Remesh))];
+
+    private static MeshFieldSpec[] TextureOptional() =>
+    [
+        Used(nameof(MeshRequest.Texture), "false", null, null, null, "Also generate the PBR texture; needs the texture checkpoints beside the shape ones."),
+        Used(nameof(MeshRequest.TextureSize), "2048", 16, 8192, "texels", "The baked texture's edge; needs Texture. 0 takes 2048."),
+        Used(nameof(MeshRequest.Remesh), "auto", null, null, null, "Leave unset (null) for the default, which is on with Texture at a grid of 512 or 1024 (off for shape-only output and at 1536; false turns it off; do not send true back unless you mean to force it): rebuilds the surface as a closed shell on the final grid before baking (upstream's remesh=True; CPU narrow-band dual contouring): far fewer UV charts and no holes, about 10 s and 3.6 GiB of host memory at 512, thin features thicken by a voxel."),
+    ];
+}

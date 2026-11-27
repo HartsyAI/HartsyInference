@@ -66,30 +66,47 @@ Desktop.ini
 
 ## Model files (large binary files — don't commit)
 *.safetensors
+!/tests/python-reference/hy4_flash/data/*.safetensors
+!/tests/python-reference/hy4_flash/data/fp8/*.safetensors
+!/tests/python-reference/hy4_flash/data/fp8_twin/*.safetensors
+!/tests/python-reference/hy4_flash/data/bf16/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioS2/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioDrama3/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/Haru/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/SenseNovaLoop/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MuseSpark/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Flint/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/tiny/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/sciperception/*/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Glm5Next/tiny_vision/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MiniMaxM3/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Maxwell/*.safetensors
 !/tests/HartsyInference.ModelAssets.Tests/Fixtures/GgmlCodecs/*.safetensors
 !/tests/HartsyInference.ModelAssets.Tests/Fixtures/MiniMaxM3/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/sana_wm_s4_*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoley/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClip/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClap/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyStyle/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Flux3/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/sana_wm_s1_*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Fibo2/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/MossImage/*.safetensors
+!/tests/HartsyInference.Vision.Tests/TestData/RealEsrgan/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/sana_wm_s2_*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/encoder/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/LtxVideo2VaeEncoder/*.safetensors
 *.gguf
 *.ckpt
 *.pt
 *.pth
 *.onnx
 *.bin
+# Idol's 98 KB token positions, an embedded resource of the ThreeD package
+!src/HartsyInference.ThreeD/Models/Idol/Resources/*.bin
 
 ## Generated output images (entire Output/ tree, including date-stamped subfolders and reference images)
 /Output/
@@ -136,7 +153,9 @@ appsettings.*.json
 /Models
 /benchmarks/.bench-venv
 /benchmarks/swarm_audio_bench/samples
-/scripts
+/scripts/*
+!/scripts/ernie55_pod_run.sh
+!/scripts/ernie55-flash-base-028544b2.manifest
 
 # CUDA kernel build intermediates — source is *.cu here; the shipped artifacts live in ../Ptx/
 src/HartsyInference.Cuda/Kernels/**/*.ptx

@@ -1,11 +1,12 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
 /// <summary>Hunyuan3D-2 shape DiT: a <b>Flux</b> transformer over a VecSet latent, image-conditioned via joint attention to DINOv2-giant tokens, with <b>no RoPE</b> since a VecSet is permutation-invariant.</summary>
-public sealed unsafe class Hunyuan3DDit
+public sealed unsafe class Hunyuan3DDit : IHunyuan3DDenoiser
 {
     // ── CUDA-graph step capture. The 48-block DiT forward is per-op-host-overhead-bound (GEMM_F16 = 0%);
     //    capturing the device-resident block loop once and replaying it with a single cuGraphLaunch per step
@@ -27,6 +28,8 @@ public sealed unsafe class Hunyuan3DDit
     private Tensor? _condInW, _condInB;        // CondDim → Width
     private Tensor? _timeIn1W, _timeIn1B;      // 256 → Width  (MLPEmbedder in_layer)
     private Tensor? _timeIn2W, _timeIn2B;      // Width → Width (MLPEmbedder out_layer)
+    private Tensor? _guidIn1W, _guidIn1B;      // guidance_in.in_layer (guidance-distilled checkpoints only)
+    private Tensor? _guidIn2W, _guidIn2B;      // guidance_in.out_layer
     private Tensor? _finalNormW;               // final_layer.adaLN_modulation.1 (Width → 2*Width)
     private Tensor? _finalNormB;
     private Tensor? _finalLinW, _finalLinB;    // final_layer.linear (Width → C)
@@ -49,6 +52,11 @@ public sealed unsafe class Hunyuan3DDit
         _condInW = F32(w[$"{p}cond_in.weight"]); _condInB = F32(w[$"{p}cond_in.bias"]);
         _timeIn1W = F32(w[$"{p}time_in.in_layer.weight"]); _timeIn1B = F32(w[$"{p}time_in.in_layer.bias"]);
         _timeIn2W = F32(w[$"{p}time_in.out_layer.weight"]); _timeIn2B = F32(w[$"{p}time_in.out_layer.bias"]);
+        if (_cfg.GuidanceEmbed)
+        {
+            _guidIn1W = F32(w[$"{p}guidance_in.in_layer.weight"]); _guidIn1B = F32(w[$"{p}guidance_in.in_layer.bias"]);
+            _guidIn2W = F32(w[$"{p}guidance_in.out_layer.weight"]); _guidIn2B = F32(w[$"{p}guidance_in.out_layer.bias"]);
+        }
         for (int i = 0; i < _double.Length; i++) _double[i].LoadWeights(w, $"{p}double_blocks.{i}");
         for (int i = 0; i < _single.Length; i++) _single[i].LoadWeights(w, $"{p}single_blocks.{i}");
         _finalNormW = F32(w[$"{p}final_layer.adaLN_modulation.1.weight"]); _finalNormB = F32(w[$"{p}final_layer.adaLN_modulation.1.bias"]);
@@ -58,15 +66,22 @@ public sealed unsafe class Hunyuan3DDit
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] head = [_latentInW, _latentInB, _condInW, _condInB, _timeIn1W, _timeIn1B, _timeIn2W, _timeIn2B,
-            _finalNormW, _finalNormB, _finalLinW, _finalLinB];
+            _finalNormW, _finalNormB, _finalLinW, _finalLinB, _guidIn1W, _guidIn1B, _guidIn2W, _guidIn2B];
         foreach (Tensor? t in head) if (t is not null) yield return t;
         foreach (Hunyuan3DDoubleBlock b in _double) foreach (Tensor t in b.EnumerateWeights()) yield return t;
         foreach (Hunyuan3DSingleBlock b in _single) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
     /// <summary>Predicts the flow velocity for <paramref name="latent"/> <c>[B,N,C]</c> at <paramref name="timestep"/> ∈ [0,1], conditioned on DINOv2-giant tokens <paramref name="cond"/>.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor cond, float timestep)
+    /// <param name="guidance">The guidance scale a guidance-distilled checkpoint embeds into the timestep vector; required for those checkpoints and refused for the others.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor cond, float timestep, float? guidance = null)
     {
+        if (_cfg.GuidanceEmbed != guidance.HasValue)
+        {
+            throw new ArgumentException(_cfg.GuidanceEmbed
+                ? "This checkpoint embeds the guidance scale; pass a guidance value."
+                : "This checkpoint has no guidance embedding; run classifier-free guidance instead.", nameof(guidance));
+        }
         int b = (int)latent.Shape[0], n = (int)latent.Shape[1], width = _cfg.Width;
 
         // latent_in: C → Width.
@@ -84,6 +99,17 @@ public sealed unsafe class Hunyuan3DDit
         Tensor t1 = new(new TensorShape(b, width), DType.F32); backend.Linear(t1, tSin, _timeIn1W!, _timeIn1B!); tSin.Dispose();
         Tensor t1a = new(t1.Shape, DType.F32); backend.Silu(t1a, t1); t1.Dispose();
         Tensor vec = new(new TensorShape(b, width), DType.F32); backend.Linear(vec, t1a, _timeIn2W!, _timeIn2B!); t1a.Dispose();
+        if (guidance.HasValue)
+        {
+            // guidance_in(timestep_embedding(guidance)) is added to the timestep vector with the same sinusoid as the time.
+            Tensor gSin = new(new TensorShape(b, _cfg.TimestepEmbedDim), DType.F32);
+            FluxTimestepEmbedding(gSin, guidance.Value, b, _cfg.TimestepEmbedDim, _cfg.TimeFactor);
+            Tensor g1 = new(new TensorShape(b, width), DType.F32); backend.Linear(g1, gSin, _guidIn1W!, _guidIn1B!); gSin.Dispose();
+            Tensor g1a = new(g1.Shape, DType.F32); backend.Silu(g1a, g1); g1.Dispose();
+            Tensor g2 = new(new TensorShape(b, width), DType.F32); backend.Linear(g2, g1a, _guidIn2W!, _guidIn2B!); g1a.Dispose();
+            Tensor summed = new(vec.Shape, DType.F32); backend.Add(summed, vec, g2); vec.Dispose(); g2.Dispose();
+            vec = summed;
+        }
 
         // ── Step-graph path: capture the 48-block loop + final layer once, replay per step. img/txt/vec (the only
         //    per-step-varying inputs, incl. the timestep) are refreshed into fixed buffers via CopyInto BEFORE each
@@ -189,12 +215,25 @@ public sealed unsafe class Hunyuan3DDit
 
         // final_layer (LastLayer): shift,scale = chunk(adaLN(vec)) — SHIFT FIRST; x=(1+scale)·norm(x)+shift; linear→C.
         Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width);   // fm[0]=shift, fm[1]=scale
-        Tensor modOut = new(latentOut.Shape, DType.F32); backend.LayerNormModulate(modOut, latentOut, fm[1], fm[0], 1e-6f);
+        Tensor modOut = new(latentOut.Shape, DType.F32); backend.NormModulate(NormModulateCall.Rows(modOut, latentOut, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(latentOut, fm[1], fm[0], ScaleMode.OnePlus)));
         latentOut.Dispose(); fm[0].Dispose(); fm[1].Dispose();
         Tensor velocity = new(new TensorShape(b, n, _cfg.LatentChannels), DType.F32);
         backend.Linear(velocity, modOut, _finalLinW!, _finalLinB!);
         modOut.Dispose();
         return velocity;
+    }
+
+    /// <summary>Drops the captured step graph. The graph holds the device addresses of the block weights, so it is stale once they are freed and uploaded again; the next forward captures a new one.</summary>
+    public void InvalidateStepGraph(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (ReferenceEquals(backend.StepGraphOwner, this))
+        {
+            backend.StepGraphReset();
+            backend.StepGraphOwner = null;
+        }
+        _graphSig = long.MinValue;
+        _graphSigCalls = 0;
     }
 
     /// <summary>Runs the block loop over the fixed input buffers and lands the velocity in a stable, non-graph-owned buffer so replay's output survives the graph-memory auto-free.</summary>

@@ -32,6 +32,19 @@ public static partial class EngineKnobs
         Bool("numerics.vkFlashDecodeSplit", true, KnobScope.Construction, KnobDomain.Numerics,
             "Splits single-row (decode) attention across workgroups and merges the partial softmax states; off keeps decode on the scalar sdpa_flash path.");
 
+    /// <summary>Which dense F32 attention calls on Vulkan take the query-tiled F32 flash kernel: <c>auto</c>, <c>all</c> or
+    /// <c>off</c>.</summary>
+    /// <remarks>Default <c>auto</c>: every call up to head dim 128 that the device can run the kernel for (its shared memory
+    /// and dispatch grid) takes it ahead of the scalar <c>sdpa_flash</c> route, and
+    /// a call at head dims 129 to 256 takes it only when it has a bias and a score matrix past 1 GiB, which the
+    /// <c>naive</c> row would have to hold whole; every other call there stays on <c>naive</c>. <c>all</c> takes it at every
+    /// head dim up to 256. <c>off</c> keeps the scalar route up to head dim 128 and <c>naive</c> above it. Only calls whose
+    /// operands and output are all F32 are affected. Any other value is rejected when the Vulkan backend starts. The
+    /// comparison behind the default is <c>benchmarks/attention/reports/vulkan-tiled-f32-ab.md</c>.</remarks>
+    public static readonly Knob<string?> VkTiledAttention =
+        Str("numerics.vkTiledAttention", "auto", KnobScope.Construction, KnobDomain.Numerics,
+            "Query-tiled F32 flash attention for dense F32 attention on Vulkan: auto (default) takes it up to head dim 128 where the device can run the kernel and, at head dims 129 to 256, only for a biased call whose scores pass 1 GiB; all takes it at every head dim up to 256; off keeps the scalar sdpa_flash route and the naive row.");
+
     /// <summary>Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.</summary>
     public static readonly Knob<bool> VkInt8 =
         Bool("numerics.vkInt8", false, KnobScope.Construction, KnobDomain.Numerics,
@@ -72,6 +85,12 @@ public static partial class EngineKnobs
         Bool("diagnostics.vkValidation", false, KnobScope.Construction, KnobDomain.Diagnostics,
             "Enables VK_LAYER_KHRONOS_validation when the layer is present.");
 
+    /// <summary>Holds one idle Vulkan instance for the life of the process, so destroying a backend never destroys the
+    /// process's last instance. Off is the behaviour before it, kept to reproduce the driver crash it avoids.</summary>
+    public static readonly Knob<bool> VkKeepInstance =
+        Bool("diagnostics.vkKeepInstance", true, KnobScope.Construction, KnobDomain.Diagnostics,
+            "Holds one idle Vulkan instance for the life of the process, so destroying a backend never destroys the process's last instance; off reproduces a driver crash on backend teardown.");
+
     /// <summary>Enables per-op host-side Vulkan timing and buffer create/destroy accounting.</summary>
     public static readonly Knob<bool> VkProfile =
         Bool("diagnostics.vkProfile", false, KnobScope.Construction, KnobDomain.Diagnostics,
@@ -91,6 +110,11 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> VkProfileFile =
         Str("diagnostics.vkProfileFile", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "File to write the Vulkan op profile to; an unopenable path falls back to stderr.");
+
+    /// <summary>Directory for the on-disk Vulkan pipeline cache; unset resolves under the user cache directory.</summary>
+    public static readonly Knob<string?> VkPipelineCacheDir =
+        Str("paths.vkPipelineCacheDir", null, KnobScope.Construction, KnobDomain.Paths,
+            "Directory for the on-disk Vulkan pipeline cache; unset resolves under the user cache directory.");
 
     // ── Derived defaults: null means "no opinion", the call site keeps its own resolution ──
 

@@ -17,7 +17,7 @@ public static partial class EngineKnobs
 
     /// <summary>Forces native FP8 tensor-core GEMMs on or off; unset follows the card (on for Ada SM 8.9+, off below).</summary>
     public static readonly Knob<bool?> Fp8Native =
-        BoolOverride("numerics.fp8Native", KnobScope.Runtime, KnobDomain.Numerics,
+        BoolOverride("numerics.fp8Native", KnobScope.Construction, KnobDomain.Numerics,
             "Forces native FP8 tensor-core GEMMs on or off; unset follows the card (on for Ada SM 8.9+, off below).");
 
     /// <summary>Native block-scaled (NVFP4/MXFP4/MXFP8) tensor-core GEMMs on Blackwell; unset is off until the path is validated on a card, after which it follows the card like <see cref="Fp8Native"/>.</summary>
@@ -50,6 +50,12 @@ public static partial class EngineKnobs
 
     // ── Override knobs: a positive value replaces a computed decision ──
 
+    /// <summary>MiniMax-H3 image VAE: decode the tiles block-major (each block's weights resident once for all tiles).
+    /// Off restores the tile-major order, which re-streams the weights for every tile when VRAM is tight.</summary>
+    public static readonly Knob<bool> VaeBlockMajorTiles =
+        Bool("vae.blockMajorTiles", true, KnobScope.Runtime, KnobDomain.Vram,
+            "MiniMax-H3 image VAE tiles decode block-major, so each block's weights cross the bus once per decode.");
+
     /// <summary>Forces MiniMax-H3 attention/MLP chunk rows; unset lets the policy size chunks from free VRAM.</summary>
     public static readonly Knob<int?> H3ChunkRows =
         IntOverride("vram.h3ChunkRows", KnobScope.Runtime, KnobDomain.Vram,
@@ -59,6 +65,23 @@ public static partial class EngineKnobs
     public static readonly Knob<int?> Hy3dVaeChunk =
         IntOverride("vram.hy3dVaeChunk", KnobScope.Runtime, KnobDomain.Vram,
             "Forces the Hunyuan3D shape-VAE decode chunk size; unset uses the caller's chunk size.");
+
+    /// <summary>Upscales each generated Paint 2.1 view 4x with Real-ESRGAN before it is baked, as upstream does. On by default: on the same views it sharpens letter edges, eyes
+    /// and outlines in the baked texture; it costs about 220 s on a 12 GB card.</summary>
+    public static readonly Knob<bool> PaintUpscaleViews =
+        Bool("numerics.paintUpscaleViews", true, KnobScope.Construction, KnobDomain.Numerics,
+            "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking, as upstream; on by default (sharper edges, about 220 s extra on a 12 GB card).");
+
+    /// <summary>Bakes the Paint reference picture itself onto the surfaces the front camera sees, at the picture's own resolution, so a face looks like the picture's instead of
+    /// the 512 px repaint (upstream has no such step and its faces melt). On by default; acts only when the reference carries alpha and its outline fits the mesh's front.</summary>
+    public static readonly Knob<bool> PaintProjectReference =
+        Bool("numerics.paintProjectReference", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Bakes the Paint reference picture onto the surfaces the front camera sees, at its own resolution (needs the picture's alpha); off paints the front from the generated views only, as upstream.");
+
+    /// <summary>Decodes each X-Part part with the hierarchical FlashVDM decoder instead of the dense grid. Off by default: upstream decodes densely, FlashVDM approximates that field (0.4 to 0.7 percent of the part's extent on the test bust).</summary>
+    public static readonly Knob<bool> XPartFastDecode =
+        Bool("numerics.xpartFastDecode", false, KnobScope.Runtime, KnobDomain.Numerics,
+            "Decodes each X-Part part with the hierarchical FlashVDM decoder (about 113 s for three parts at its finest grid of 504 cells, against 141 s for a dense 256 grid); approximates upstream's dense field and can leave small openings in thin parts; off by default.");
 
     /// <summary>Forces the HeartCodec scalar-decode chunk length in frames; unset uses the model's ChunkFrames.</summary>
     public static readonly Knob<int?> HeartcodecScalarChunk =
@@ -74,6 +97,12 @@ public static partial class EngineKnobs
     public static readonly Knob<int?> SdpaTile =
         IntOverride("numerics.sdpaTile", KnobScope.Runtime, KnobDomain.Numerics,
             "Overrides the flash-attention query tile (Br); the call site still floors it at the sequence length.");
+
+    /// <summary>Sizes the attention query tile and its path gates from the device's total VRAM (a fixed rung per device), not from free memory, so the
+    /// same shape makes the same tile on every run. Off unless set, until measured on the GPU.</summary>
+    public static readonly Knob<bool?> TileFromDevice =
+        BoolOverride("numerics.tileFromDevice", KnobScope.Runtime, KnobDomain.Numerics,
+            "Sizes the attention query tile and its path gates from the device total VRAM, not free memory; off unless set.");
 
     /// <summary>Overrides the INT8 GEMM column-chunk width; a non-positive value means no chunking at all.</summary>
     /// <remarks>Non-positive maps to <c>int.MaxValue</c> at the call site, so the mapping stays there rather than in a coercion.</remarks>
@@ -145,6 +174,20 @@ public static partial class EngineKnobs
     public static readonly Knob<long> AutopromoteHeadroomMb =
         Long("vram.autopromoteHeadroomMb", 1536L, KnobScope.Runtime, KnobDomain.Vram,
             "VRAM headroom in MB kept free when deciding whether to auto-promote a tensor to resident.");
+
+    /// <summary>VRAM headroom in MB that an explicit <c>PreloadWeights</c> leaves free, on Windows (where the per-process video-memory budget
+    /// collapses past about 8 GiB). A weight whose upload would take the free memory below it is not made resident and streams per op instead;
+    /// 0, or <c>vram.overcommitReliefMb</c> at 0, restores the unconditional preload. Other platforms preload everything.</summary>
+    public static readonly Knob<long> PreloadHeadroomMb =
+        Long("vram.preloadHeadroomMb", 2048L, KnobScope.Runtime, KnobDomain.Vram,
+            "Windows: VRAM headroom in MB that PreloadWeights leaves free; weights past it stream per op instead of becoming resident (0 = unconditional).");
+
+    /// <summary>Device memory in MB an explicit preload gives back when the card reports no free memory while the weights go on: the pool
+    /// and the activations of the forward that follows need that room, and without it the process stalls instead of failing. Windows only;
+    /// 0 turns the whole 8 GiB guard off (this relief, the preload headroom, the limit and the pool trim).</summary>
+    public static readonly Knob<long> OvercommitReliefMb =
+        Long("vram.overcommitReliefMb", 3072L, KnobScope.Runtime, KnobDomain.Vram,
+            "Windows: device memory in MB a preload releases when the device reports no free memory part-way through it (0 = guard off).");
 
     /// <summary>Cap in MB on the im2col banding buffer for convolutions.</summary>
     public static readonly Knob<long> Im2colBandMb =

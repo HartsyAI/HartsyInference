@@ -64,8 +64,13 @@ public static class VideoRecipeRegistry
         new Video.LanceVideoRecipe(),
         new Video.Kandinsky5VideoRecipe(),
         new Video.HunyuanVideoRecipe(),
-        // Registered ahead of its weights so the family resolves to a real explanation instead of "unknown
-        // architecture"; Construct() throws until MiniMax publish the checkpoint (docs/Research/MINIMAX_H3.md).
+        new Video.MovieRollRecipe(),
+        new Video.FastFramesRecipe(),
         new Video.MiniMaxH3Recipe(),
+        new Video.DuoRecipe(),
+        new Video.DuoRecipe(distilled: true),
+        new Video.LongCatVideoRecipe(),
+        new Video.LongCatVideoDistilledRecipe(),
+        new Video.LongCatAvatarRecipe(),
     };
 }
