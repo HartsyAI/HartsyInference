@@ -73,6 +73,41 @@ public sealed class LongCatAvatarRecipeEndToEndTests
         }
     }
 
+    [Fact]
+    public void AGgufRepackRunsTheRecipeAsItsDecodedWeightsDo()
+    {
+        // The 1.5 build with its distillation LoRA, whose fused qkv and kv modules land on the weights the loader joins from the repack's parts.
+        using IDisposable f32 = LongCatTestData.PinF32Dit();
+        Dictionary<string, Tensor> weights = LongCatTestData.AvatarWeights(LongCatTinyAvatarRelease.Config, seed: 71);
+        Dictionary<string, Tensor>? decoded = null;
+        try
+        {
+            HashSet<string> quantized = new(StringComparer.Ordinal);
+            List<(int Frames, float[] Values)> repack = Run(onePointSix: false, audioSeed: 1,
+                writeDit: directory => decoded = LongCatGgufTestData.Write(directory, weights, "Q8_0", "Q8_0", quantized: quantized)).Vae.Decoded;
+            // The CPU widens each block quant to BF16, so the dense run takes the same rounded values.
+            foreach (string key in quantized)
+                foreach (ref float value in decoded![key].AsSpan<float>())
+                    value = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(value));
+            List<(int Frames, float[] Values)> dense = Run(onePointSix: false, audioSeed: 1, dense: decoded).Vae.Decoded;
+            List<(int Frames, float[] Values)> original = Run(onePointSix: false, audioSeed: 1, dense: weights).Vae.Decoded;
+
+            Assert.Equal(dense.Count, repack.Count);
+            for (int segment = 0; segment < dense.Count; segment++)
+            {
+                double error = LongCatTestData.RelRms(repack[segment].Values, dense[segment].Values);
+                Assert.True(error < 1e-5, $"segment {segment}: relRMS {error}");
+                Assert.True(LongCatTestData.RelRms(repack[segment].Values, original[segment].Values) > 1e-5, "the repack is quantized");
+            }
+        }
+        finally
+        {
+            LongCatTestData.DisposeAll(weights);
+            if (decoded is not null)
+                LongCatTestData.DisposeAll(decoded);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -145,10 +180,11 @@ public sealed class LongCatAvatarRecipeEndToEndTests
 
     /// <summary>Runs the chain on the backend <paramref name="makeBackend"/> makes (CPU by default). Shared by the CPU tests above and the device parity tests.</summary>
     internal static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(float[] Speech, int Fps)> FeatureCalls) Run(bool onePointSix,
-        int audioSeed, Func<IBackend>? makeBackend = null, bool? int8 = null, Dictionary<string, Tensor>? dense = null, int seed = 3)
+        int audioSeed, Func<IBackend>? makeBackend = null, bool? int8 = null, Dictionary<string, Tensor>? dense = null, int seed = 3,
+        Action<string>? writeDit = null)
     {
         LongCatConfig config = LongCatTinyAvatarRelease.Config;
-        using LongCatTinyAvatarRelease release = new(onePointSix, int8, dense);
+        using LongCatTinyAvatarRelease release = new(onePointSix, int8, dense, writeDit);
         List<(float[] Speech, int Fps)> featureCalls = [];
 
         using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
