@@ -169,12 +169,25 @@ public sealed class BlockSparseAttentionGpuTests(ITestOutputHelper log)
         }
     }
 
+    /// <summary>12152 key blocks fill the selection's 48 KB of shared memory: 4 bytes a block beside 544 static ones.</summary>
+    [CudaFact]
+    public void TheMostKeyBlocksTheSelectionHoldsStillRun()
+    {
+        using CudaBackend cuda = Open();
+        BlockSparseAttentionOptions options = new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 12152), Sparsity = 0.999 };
+        Random random = new(23);
+        using Tensor query = Noise(random, 1, 1, 64, 16);
+        using Tensor key = Noise(random, 1, 1, (int)options.KeyGrid.Tokens, 16);
+        using Tensor value = Noise(random, 1, 1, (int)options.KeyGrid.Tokens, 16);
+        Compare(cuda, query, key, value, options, DType.F32, DType.F32, "12152 key blocks");
+    }
+
     [CudaFact]
     public void AnUncompiledHeadDimAndTooManyKeyBlocksAreRefusedBeforeAnyWrite()
     {
         using CudaBackend cuda = Open();
         Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 }, 24);
-        Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 12289), Sparsity = 0.9 }, 16);
+        Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 12153), Sparsity = 0.9 }, 16);
     }
 
     private static void Refused(CudaBackend cuda, BlockSparseAttentionOptions options, int dim)

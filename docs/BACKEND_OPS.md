@@ -369,8 +369,8 @@ the call by name.
   summation orders differ by. The reference sums a block mean in the block's raster order and a score in channel order,
   both in F32; a kernel that sums in another order can rank two blocks differently only where their scores differ by
   rounding alone.
-- CUDA (`block_sparse_attention.ptx`) takes head dim 16, 32, 64 or 128 and at most one key block per 4 bytes of a block's
-  default shared memory (12288 at 48 KB). Head dim 128 takes 83 KB of shared memory per kernel block, so there is no
+- CUDA (`block_sparse_attention.ptx`) takes head dim 16, 32, 64 or 128 and at most one key block per 4 bytes of what the
+  selection's 544 static bytes leave of a block's default shared memory (12152 at 48 KB). Head dim 128 takes 83 KB of shared memory per kernel block, so there is no
   Turing build. Any other call is refused by name, with no host fallback. Its means and scores are the reference's bit for
   bit (round-to-nearest intrinsics in the reference's order), so its selection is the reference's; the attention is an
   online softmax over chunks of 64 key rows. [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).

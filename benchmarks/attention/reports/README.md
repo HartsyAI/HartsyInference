@@ -52,5 +52,8 @@ comparison behind the default of `numerics.vkTiledAttention`, with the [workload
 [Blackwell rental campaign](blackwell-rental-campaign.md) is the stage plan and spending ceiling for the final
 hardware gate; nothing in it has been provisioned or run.
 
+[Block-sparse attention on an RTX 3060](block-sparse-3060.md) is the descriptive timing of `IBackend.BlockSparseAttention`
+beside dense attention; it is outside the PR 01 evidence program.
+
 The [internal duplicates audit](internal-duplicates.md) lists the internal attention code that plan item 18 could retire, with
 the callers and the evidence for each.

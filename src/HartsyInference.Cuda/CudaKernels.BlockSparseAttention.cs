@@ -12,6 +12,10 @@ public sealed partial class CudaKernels
     /// <summary>The threads of one attention block: a group of 4 query rows per warp, per half warp at head dim 16.</summary>
     private static uint BsaAttendThreads(int headDim) => headDim == 16 ? 256u : 512u;
 
+    /// <summary>The static shared memory bsa_select takes beside its keys: the query block's mean (BSA_MAX_DIM floats) and one
+    /// count per warp.</summary>
+    private const int BsaSelectStaticSharedBytes = (128 + BsaSelectThreads / 32) * sizeof(float);
+
     /// <summary>The head dims the attention entries are compiled for.</summary>
     private static readonly int[] BsaHeadDims = [16, 32, 64, 128];
 
@@ -24,9 +28,9 @@ public sealed partial class CudaKernels
     /// the file leaves this false, and block-sparse attention is then refused.</summary>
     public bool HasBlockSparseAttention => _bsaMeansF32 != 0 && _bsaMeansBf16 != 0 && _bsaSelect != 0 && Array.Exists(_bsaAttend, static f => f != 0);
 
-    /// <summary>The most key blocks one call may have: the selection keeps one 4-byte key per block in a block's default shared
-    /// memory.</summary>
-    internal int MaxBlockSparseKeyBlocks => DefaultDynamicSharedBytes / sizeof(uint);
+    /// <summary>The most key blocks one call may have: the selection keeps one 4-byte key per block in what its static arrays
+    /// leave of a block's default shared memory.</summary>
+    internal int MaxBlockSparseKeyBlocks => (DefaultDynamicSharedBytes - BsaSelectStaticSharedBytes) / sizeof(uint);
 
     /// <summary>Whether both operand types have an attention entry of this head dim on this card.</summary>
     internal bool SupportsBlockSparseHeadDim(int headDim) =>

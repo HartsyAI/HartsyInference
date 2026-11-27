@@ -17,8 +17,8 @@ public sealed partial class CudaBackend
     }
 
     /// <inheritdoc/>
-    /// <remarks>Head dim 16, 32, 64 or 128, and at most one key block per 4 bytes of a block's default shared memory (12288 where
-    /// that is 48 KB). The block means and scores are the reference's bit for bit, so the selection is the reference's; the attention
+    /// <remarks>Head dim 16, 32, 64 or 128, and at most one key block per 4 bytes of what 544 bytes leave of a block's default
+    /// shared memory (12152 where that is 48 KB). The block means and scores are the reference's bit for bit, so the selection is the reference's; the attention
     /// is F32 with an online softmax. Nothing waits for the device: the output and the selection report stay on it until read.</remarks>
     public unsafe void BlockSparseAttention(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
         Tensor? selected = null)
