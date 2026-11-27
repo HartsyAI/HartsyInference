@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -29,6 +30,8 @@ internal static class LongCatWeightFit
     public static (long Bytes, long Widened) HeldBytes(string directory, Func<Tensor, bool> supportsResidentQuant)
     {
         using ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, LongCatCheckpoint.IndexNameIn(directory));
+        // A dense F32 checkpoint is held as BF16 when the loader converts it (numerics.longcatDitBf16), so the device fit counts that size.
+        bool heldBf16 = !LongCatInt8Converter.IsInt8Layout(shards.Inventory.Keys) && EngineKnobs.LongCatDitBf16.Value;
         // The question a backend answers about a packed weight is its format, so one element stands for every INT8 weight of the release.
         using Tensor scale = new(new TensorShape(1), DType.F32);
         using Tensor probe = new(new TensorShape(1, 1), DType.I8);
@@ -44,7 +47,9 @@ internal static class LongCatWeightFit
             }
             else if (packed || !name.EndsWith(LongCatInt8Converter.ScaleSuffix, StringComparison.Ordinal))
             {
-                bytes += location.ByteLength;
+                bytes += heldBf16 && location.DType == DType.F32
+                    ? location.Shape.ElementCount * DType.BF16.SizeInBytes
+                    : location.ByteLength;
             }
         }
         return (bytes, widened);

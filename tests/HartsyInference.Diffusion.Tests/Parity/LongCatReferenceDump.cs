@@ -21,6 +21,7 @@ internal static class LongCatReferenceDump
     {
         using JsonDocument meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "meta.json")));
         using CpuBackend backend = new();
+        using IDisposable f32 = LongCatTestData.PinF32Dit();
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(Path.Combine(dir, "ckpt"));
         List<string> failures = [], passed = [];
 

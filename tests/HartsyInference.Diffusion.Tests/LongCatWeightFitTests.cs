@@ -63,6 +63,27 @@ public sealed class LongCatWeightFitTests : IDisposable
         Assert.Equal(int8 && !packed, widened > 0);
     }
 
+    [Fact]
+    public void TheDeviceFitCountsTheBf16HoldOfADenseF32Dit()
+    {
+        // A dense F32 checkpoint is held as BF16 by default (numerics.longcatDitBf16), so the fit counts half its stored bytes; pinned off, the F32 size.
+        string dir = Path.Combine(Path.GetTempPath(), "longcat-fit-f32-" + Guid.NewGuid().ToString("N"), "dit");
+        Dictionary<string, Tensor> weights = LongCatTestData.Weights(LongCatTestData.Tiny, 9);
+        try
+        {
+            Directory.CreateDirectory(dir);
+            LongCatTestData.WriteCheckpoint(dir, weights, writeConfig: true, storage: DType.F32);
+            long converted = LongCatWeightFit.HeldBytes(dir, static _ => false).Bytes;
+            using (LongCatTestData.PinF32Dit())
+                Assert.Equal(2 * converted, LongCatWeightFit.HeldBytes(dir, static _ => false).Bytes);
+        }
+        finally
+        {
+            LongCatTestData.DisposeAll(weights);
+            if (Directory.Exists(Path.GetDirectoryName(dir)!)) Directory.Delete(Path.GetDirectoryName(dir)!, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("longcat-video", false)]
     [InlineData("longcat-avatar-1.6", true)]

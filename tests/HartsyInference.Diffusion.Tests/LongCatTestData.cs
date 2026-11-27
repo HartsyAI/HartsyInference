@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Text.Json;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -8,6 +9,19 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>A tiny LongCat DiT (2 blocks, hidden 128, 4 heads of 32) with random weights under the reference key names.</summary>
 internal static class LongCatTestData
 {
+    /// <summary>Keeps a checkpoint's DiT in F32 for the scope: the tiny parity references are F32 runs, so their comparison pins the F32 load
+    /// (numerics.longcatDitBf16 is on by default, the reference's BF16 load). Restored on dispose.</summary>
+    public static IDisposable PinF32Dit()
+    {
+        KnobStore.Set(EngineKnobs.LongCatDitBf16, false);
+        return new KnobRestore();
+    }
+
+    private sealed class KnobRestore : IDisposable
+    {
+        public void Dispose() => KnobStore.Clear(EngineKnobs.LongCatDitBf16);
+    }
+
     public static LongCatConfig Tiny { get; } = new()
     {
         HiddenSize = 128, Depth = 2, NumHeads = 4, InChannels = 4, OutChannels = 4, CaptionChannels = 48, AdalnTembedDim = 64,

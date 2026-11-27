@@ -24,6 +24,7 @@ public sealed class LongCatPipelineParityTests
         string dir = Environment.GetEnvironmentVariable(EnvName)!;
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "meta.json")));
         JsonElement root = document.RootElement;
+        using IDisposable f32 = LongCatTestData.PinF32Dit();
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(Path.Combine(dir, "ckpt"));
         using LongCatTransformer transformer = new(checkpoint.Config);
         transformer.LoadWeights(checkpoint.Weights);

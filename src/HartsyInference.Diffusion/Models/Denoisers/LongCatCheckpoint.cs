@@ -1,3 +1,5 @@
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -18,13 +20,17 @@ public sealed class LongCatCheckpoint : IDisposable
 
     private readonly ShardedSafeTensorSet _shards;
 
-    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8)
+    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8,
+        List<Tensor> converted)
     {
         _shards = shards;
         Config = config;
         Weights = weights;
         IsInt8 = isInt8;
+        _converted = converted;
     }
+
+    private readonly List<Tensor> _converted;
 
     /// <summary>True for the per-row INT8 release: its linears are I8 tensors carrying <see cref="Tensor.QuantInfo"/>. Those need
     /// <c>QuantizedWeightPolicy.PrepareForBackends</c> (or a backend with a resident int8 path) before a forward.</summary>
@@ -35,6 +41,19 @@ public sealed class LongCatCheckpoint : IDisposable
 
     /// <summary>Every tensor by checkpoint key.</summary>
     public IReadOnlyDictionary<string, Tensor> Weights { get; }
+
+    /// <summary>An F32 tensor as BF16, each value rounded to nearest, ties to even (<see cref="BFloat16Bits"/>), as the reference's bf16 load rounds it.
+    /// <c>Tensor.CastTo</c> truncates, which is not what the reference does.</summary>
+    internal static Tensor ToBf16RoundToNearest(Tensor source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        Tensor bf16 = new(source.Shape, DType.BF16);
+        ReadOnlySpan<float> values = source.AsReadOnlySpan<float>();
+        Span<ushort> bits = bf16.AsSpan<ushort>();
+        for (int i = 0; i < values.Length; i++)
+            bits[i] = BFloat16Bits.FromFloat(values[i]);
+        return bf16;
+    }
 
     /// <summary>The index <see cref="Open"/> reads in <paramref name="directory"/>: the dense one when both are present, the INT8 one only in a
     /// folder that has no dense one.</summary>
@@ -81,7 +100,22 @@ public sealed class LongCatCheckpoint : IDisposable
                         + (int8 ? " and I8 .weight_int8 weights." : "."));
                 weights[name] = shards.GetTensor(name);
             }
-            return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8);
+            // The reference loads the DiT in BF16 (torch_dtype=bfloat16). A dense F32 checkpoint is converted here, so its 54.3 GB does not sit
+            // in host memory at F32 and stream at twice the bytes; the converted tensors are owned by the checkpoint and released with it.
+            List<Tensor> converted = [];
+            if (!int8 && EngineKnobs.LongCatDitBf16.Value)
+            {
+                foreach (string name in weights.Keys.ToList())
+                {
+                    Tensor source = weights[name];
+                    if (source.DType != DType.F32)
+                        continue;
+                    Tensor bf16 = ToBf16RoundToNearest(source);
+                    converted.Add(bf16);
+                    weights[name] = bf16;
+                }
+            }
+            return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8, converted);
         }
         catch
         {
@@ -176,5 +210,9 @@ public sealed class LongCatCheckpoint : IDisposable
     }
 
     /// <summary>Unmaps the shards; tensors from <see cref="Weights"/> are invalid afterwards.</summary>
-    public void Dispose() => _shards.Dispose();
+    public void Dispose()
+    {
+        foreach (Tensor tensor in _converted) tensor.Dispose();
+        _shards.Dispose();
+    }
 }
