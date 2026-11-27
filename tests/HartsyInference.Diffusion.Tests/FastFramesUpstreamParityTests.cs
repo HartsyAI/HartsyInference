@@ -147,6 +147,33 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             AssertClose(resident[f].Latent, streamed[f].Latent, $"streamed latent frame {f}", 1e-5);
     }
 
+    /// <summary>The F16 attention and FFN branches, the path L takes, on CUDA against the F32 CPU rollout of the same model. The test asserts
+    /// the F16 branch was chosen, so a pass cannot come from the F32 path. A CUDA fact.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void TheF16BranchRolloutOnCudaMatchesTheF32CpuRollout()
+    {
+        using TinyModel model = new(f16Branches: true);
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend cpu = new();
+        List<FastFramesFrame> expected = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+            .Rollout(prompt, noise, Frames).ToList();
+
+        using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
+        Assert.Equal(DType.F16, model.Transformer.BranchActivation(cuda, singleGroup: true));
+        FastFramesPipeline pipeline = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        List<FastFramesFrame> actual = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, actual.Count);
+        for (int f = 0; f < Frames; f++)
+            AssertClose(expected[f].Latent, actual[f].Latent, $"F16-branch latent frame {f}", 2e-2);
+    }
+
     /// <summary>The CUDA rollout (resident, TF32 default GEMMs) against the CPU rollout on the same tiny model and inputs. The tolerance
     /// is the TF32 lane's: a looser bound than the exact-GEMM decoder test, because the refiner and the blocks run the default GEMMs.</summary>
     [CudaDeviceFact]
@@ -365,7 +392,7 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
     {
         private readonly CheckpointSource _generator, _refinerSource, _decoderSource, _io;
 
-        public TinyModel()
+        public TinyModel(bool f16Branches = false)
         {
             string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fastframes_tiny");
             _generator = CheckpointSource.Open(Path.Combine(dir, "generator.safetensors"));
@@ -377,6 +404,7 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             {
                 NumHeads = 2, HeadDim = 32, NumLayers = 2, FfnDim = 32, InChannels = Channels, OutChannels = Channels,
                 VaeLatentChannels = Channels, TextDim = 16, FreqDim = 256, VaeSpatialCompression = 8,
+                F16Branches = f16Branches,
             };
             Transformer = new WanVideoTransformer(wan);
             Transformer.LoadWeights(WanVideoCheckpointConverter.Convert(_generator.Weights, _generator.Header.Metadata).Transformer);
