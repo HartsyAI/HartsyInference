@@ -141,6 +141,30 @@ public sealed class Hy4FlashTextPathTests : IDisposable
         Assert.Equal(first.Reasoning, second.Reasoning);
     }
 
+    // The route's split, on the Hy4 markers: the reasoning before the close is reasoning, the rest is the answer; a reply that never opened a block is all answer.
+    [Fact]
+    public void SplitVisionReasoning_SplitsOnTheHy4Markers()
+    {
+        string open = Hy4FlashChatTemplate.ReasoningMarkers[0], close = Hy4FlashChatTemplate.ReasoningMarkers[1];
+        (string reasoning, string answer) = TextService.SplitVisionReasoning($"plan it{close}the answer", reasoningOpen: true, stoppedOnToken: true, open, close);
+        Assert.Equal("plan it", reasoning);
+        Assert.Equal("the answer", answer);
+
+        (reasoning, answer) = TextService.SplitVisionReasoning($"{open}plan it{close}the answer", reasoningOpen: true, stoppedOnToken: true, open, close);
+        Assert.Equal("plan it", reasoning);
+        Assert.Equal("the answer", answer);
+
+        // Out of budget inside the block: the text is reasoning and there is no answer yet.
+        (reasoning, answer) = TextService.SplitVisionReasoning("still thinking", reasoningOpen: true, stoppedOnToken: false, open, close);
+        Assert.Equal("still thinking", reasoning);
+        Assert.Equal("", answer);
+
+        // No block opened: the whole text is the answer.
+        (reasoning, answer) = TextService.SplitVisionReasoning("plain answer", reasoningOpen: false, stoppedOnToken: true, open, close);
+        Assert.Equal("", reasoning);
+        Assert.Equal("plain answer", answer);
+    }
+
     [Fact]
     public void FileWithAMalformedConfig_IsRefusedWithTheFieldName()
     {
