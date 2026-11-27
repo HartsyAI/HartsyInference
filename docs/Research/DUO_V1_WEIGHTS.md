@@ -41,7 +41,7 @@ A generation takes `VideoRequest.Extra["DuoRunFolder"]`: `manifest.json` (`steps
 
     hartsy video -m duo-v1-causal --model-path <release> --duo-run-folder <run> --duo-window-frames 34 --frames 34 -o <out>
 
-Over HTTP (`/v1/native/video/plan` and `/stream`) the run folder must exist under the models root, and a relative one is taken under it. A history larger than the device can still hand out is refused before the merge, naming the window key.
+Over HTTP (`/v1/native/video/plan` and `/stream`) the run folder must exist under the models root, and a relative one is taken under it. A prompt or negative prompt, guidance, a sampler other than the release's, a scheduler, an audio flow shift, another frame rate, trim, boomerang or a size off the 32-pixel grid is a blocking plan issue (`video.request.unsupported`, 422); the run folder and the history are still checked at generation. A history larger than the device can still hand out is refused before the merge, naming the window key.
 
 `Extra["DuoWindowFrames"]` sets the history window (default 144, the default of upstream's `--sliding-window-size` option, `data/inference_options.py`: seven clean blocks behind the current one; upstream's demo runtime passes 238, thirteen; -1 keeps all). Upstream facts the recipe follows (@068e357): the demo runtime sets the `new` RoPE policy (`inference_runtime/engine.py`, which also sets an `adaln_timestep` flag that no Python file there reads); each audio block is decoded alone and cut to `ceil(stop * 32000 / 24) - ceil(start * 32000 / 24)` samples (`serving/common.py::clock_block`). The latent mean and std of `video_vae.yaml` and `audio_vae.yaml` equal the engine's H3 defaults to F32 precision (compared 2026-11-26).
 

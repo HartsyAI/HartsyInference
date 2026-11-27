@@ -147,6 +147,32 @@ public sealed class DuoRecipeTests : IDisposable
     }
 
     [Fact]
+    public async Task ARefusalThatNeedsNoWeightsIsABlockingPlanIssue()
+    {
+        VideoRequest plain = Request();
+        VideoRequest[] refused =
+        [
+            plain with { Prompt = "a face" }, plain with { NegativePrompt = "blur" }, plain with { CfgScale = 2f },
+            plain with { Sampler = "unipc" }, plain with { Scheduler = "karras" }, plain with { AudioFlowShift = 5f },
+            plain with { Fps = 30 }, plain with { TrimVideoStartFrames = 1 }, plain with { VideoBoomerang = true },
+            plain with { Width = 80 },
+        ];
+
+        foreach (VideoRequest request in refused)
+        {
+            VideoPlan plan = await Plan(request);
+
+            VideoPlanIssue issue = Assert.Single(plan.Issues, i => i.Code == "video.request.unsupported");
+            Assert.Equal(VideoPlanIssueSeverity.Error, issue.Severity);
+            Assert.False(plan.IsValid);
+        }
+        // The distilled release runs no named sampler at all.
+        VideoPlan distilled = await Plan(plain with { Sampler = "euler" }, new DuoRecipe(distilled: true), "duo-v1-distill");
+        Assert.False(distilled.IsValid);
+        Assert.True((await Plan(plain with { Sampler = "euler" })).IsValid);
+    }
+
+    [Fact]
     public async Task AGenerationReturnsEveryFrameAndTheSoundtrackOnTheVideoClock()
     {
         using DuoRecipePipeline pipeline = Build();

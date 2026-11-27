@@ -61,6 +61,11 @@ public sealed class DuoRecipe(bool distilled = false) : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.None;
 
     /// <inheritdoc/>
+    /// <remarks>The run folder, its keys and the history size are checked when the pipeline reads them.</remarks>
+    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) =>
+        DuoRunInput.Unsupported(request, settings, distilled);
+
+    /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
     /// <inheritdoc/>

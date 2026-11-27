@@ -21,7 +21,10 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
     /// <exception cref="InvalidDataException">The run folder is malformed.</exception>
     public static DuoRunInput Read(VideoRequest request, VideoEffectiveSettings settings, MiniMaxH3Config config, bool distilled = false)
     {
-        RefuseUnsupported(request, settings, distilled);
+        if (Unsupported(request, settings, distilled) is { } why)
+        {
+            throw new ArgumentException(why, nameof(request));
+        }
         string folder = Option(request, DuoRecipePipeline.RunFolderKey)
             ?? throw new ArgumentException(
                 $"Duo needs a run folder: set Extra[\"{DuoRecipePipeline.RunFolderKey}\"] to a folder with manifest.json.", nameof(request));
@@ -132,41 +135,39 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
         return (int)rows;
     }
 
-    private static void RefuseUnsupported(VideoRequest request, VideoEffectiveSettings settings, bool distilled)
+    /// <summary>Why Duo cannot run the request, from the request and its settings alone; null when it can.</summary>
+    public static string? Unsupported(VideoRequest request, VideoEffectiveSettings settings, bool distilled)
     {
         if (!string.IsNullOrWhiteSpace(request.Prompt) || !string.IsNullOrWhiteSpace(request.NegativePrompt))
         {
-            throw new ArgumentException(
-                "Duo reads no prompt or negative prompt: the Intent rows come from the run folder. Leave both empty.", nameof(request));
+            return "Duo reads no prompt or negative prompt: the Intent rows come from the run folder. Leave both empty.";
         }
         if (settings.CfgScale != 1f)
         {
-            throw new ArgumentException("Duo samples without guidance; the guidance scale must be 1.", nameof(settings));
+            return "Duo samples without guidance; the guidance scale must be 1.";
         }
         if ((settings.Sampler is not null && (distilled || !settings.Sampler.Equals("euler", StringComparison.OrdinalIgnoreCase)))
             || settings.Scheduler is not null || settings.AudioFlowShift is not null)
         {
-            throw new ArgumentException(
-                "Duo runs its release's own solver with one flow shift; leave the sampler, scheduler and audio flow shift unset.",
-                nameof(settings));
+            return "Duo runs its release's own solver with one flow shift; leave the sampler, scheduler and audio flow shift unset.";
         }
         if (settings.Fps != DuoCodecSpec.Fps || (request.Fps is int fps && fps != DuoCodecSpec.Fps))
         {
-            throw new ArgumentException($"Duo runs at {DuoCodecSpec.Fps} fps; its audio is cut to that clock.", nameof(settings));
+            return $"Duo runs at {DuoCodecSpec.Fps} fps; its audio is cut to that clock.";
         }
         if (request.TrimVideoStartFrames != 0 || request.TrimVideoEndFrames != 0 || request.VideoBoomerang)
         {
-            throw new ArgumentException("Duo returns audio on the video clock; trim and boomerang would break the sync.", nameof(request));
+            return "Duo returns audio on the video clock; trim and boomerang would break the sync.";
         }
         if (settings.Width <= 0 || settings.Height <= 0 || settings.Width % SizeMultiple != 0 || settings.Height % SizeMultiple != 0)
         {
-            throw new ArgumentException(
-                $"Duo sizes are multiples of {SizeMultiple}; got {settings.Width}x{settings.Height}.", nameof(settings));
+            return $"Duo sizes are multiples of {SizeMultiple}; got {settings.Width}x{settings.Height}.";
         }
         if (settings.Frames <= 0 || settings.Frames % DuoCodecSpec.Get("duo_5_17").Frames != 0)
         {
-            throw new ArgumentException($"Duo generates whole 17-frame blocks; got {settings.Frames} frames.", nameof(settings));
+            return $"Duo generates whole 17-frame blocks; got {settings.Frames} frames.";
         }
+        return null;
     }
 
     private static int WindowFrames(VideoRequest request)
