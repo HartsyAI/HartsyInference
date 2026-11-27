@@ -36,10 +36,10 @@ internal sealed class LongCatTinyAvatarRelease : IDisposable
     /// <summary>The DiT folder a recipe is pointed at.</summary>
     public string Checkpoint { get; }
 
-    /// <summary>Stand-in driving features: seeded values of the Whisper features' shape. Each call is added to <paramref name="calls"/>.</summary>
-    public static LongCatDrivingFeatures Features(int seed, List<(int Samples, int Fps)>? calls = null) => (speech, fps) =>
+    /// <summary>Stand-in driving features: seeded values of the Whisper features' shape. Each call's speech is added to <paramref name="calls"/>.</summary>
+    public static LongCatDrivingFeatures Features(int seed, List<(float[] Speech, int Fps)>? calls = null) => (speech, fps) =>
     {
-        calls?.Add((speech.Length, fps));
+        calls?.Add(([.. speech], fps));
         Random rng = new(seed);
         return LongCatTestData.RandomValues(rng, (int)(speech.Length / (double)SampleRate * fps) * Config.AudioBlock * Config.AudioChannel);
     };
