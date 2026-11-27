@@ -26,7 +26,7 @@ public sealed class MovieRollVaeGpuTests(ITestOutputHelper output)
     private const int Blocks = 2;
     private const int Hidden = 32;
 
-    /// <summary>The bound on the frame max error: about twice the figure measured on a local RTX 3060 (CUDA) on 2026-11-26, 1.266e-3, from one
+    /// <summary>The bound on the frame max error: about twice the figure measured on a local RTX 3060 (CUDA) on 2026-11-27, 1.266e-3, from one
     /// run of this test. The bound leaves room for run-to-run noise and for the device.</summary>
     private const float FrameErrorBound = 2.5e-3f;
 
