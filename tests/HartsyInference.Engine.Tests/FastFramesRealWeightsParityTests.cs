@@ -58,7 +58,7 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
         string generatorFile = Environment.GetEnvironmentVariable("FF_REAL_PARITY_GENERATOR") ?? "framewise-2step.pt";
 
         string backendName = Environment.GetEnvironmentVariable("FF_REAL_PARITY_BACKEND") ?? "cuda";
-        // Latent and pixel bounds are separate. The defaults are the manager's S bound, set after the 2026-11-26
+        // Latent and pixel bounds are separate. The defaults are the S bounds, set after the 2026-11-26
         // measurement (latent 0.026 and pixel 0.070 against the BF16-vs-FP32 floor of 0.098 to 0.116 latent).
         double bound = double.TryParse(Environment.GetEnvironmentVariable("FF_REAL_PARITY_BOUND"), NumberStyles.Float,
             CultureInfo.InvariantCulture, out double parsed) ? parsed : 0.04;
