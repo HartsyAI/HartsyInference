@@ -30,6 +30,16 @@ internal static class LongCatOps
         return output;
     }
 
+    /// <summary>Rounds an F32 tensor to BF16 (nearest-even) and back, so the values sit on the BF16 grid the reference's x holds. A new tensor.</summary>
+    public static Tensor RoundToBf16(IBackend backend, Tensor values)
+    {
+        using Tensor bf16 = new(values.Shape, DType.BF16);
+        backend.CastToBf16(bf16, values);
+        Tensor rounded = new(values.Shape, DType.F32);
+        backend.CastToF32(rounded, bf16);
+        return rounded;
+    }
+
     /// <summary><c>residual + gate · value</c> with the gate of each token's frame, read from <paramref name="packed"/> at
     /// <paramref name="gateOffset"/>.</summary>
     public static Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value, Tensor packed, int gateOffset, int width,

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Rope;
@@ -15,6 +16,8 @@ public sealed partial class LongCatBlock : IStreamingBlock
 {
     private readonly LongCatConfig _config;
     private Tensor? _adaWeight, _adaBias;
+    // The reference's x is BF16 on a BF16 or INT8 release, so each residual sum rounds to BF16 there; the F32 route (tiny F32 weights) does not.
+    private bool _bf16Residual;
     private Tensor? _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias;
     private Tensor? _crossNormWeight, _crossNormBias;
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
@@ -53,6 +56,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         _adaWeight = w[$"{prefix}.adaLN_modulation.1.weight"];
         _adaBias = LongCatOps.WidenF32(w, $"{prefix}.adaLN_modulation.1.bias", owned);
         _qkv = w[$"{prefix}.attn.qkv.weight"];
+        _bf16Residual = EngineKnobs.LongcatBf16Residual.Value && (_qkv.DType == DType.BF16 || _qkv.DType == DType.I8);
         _qkvBias = LongCatOps.WidenF32(w, $"{prefix}.attn.qkv.bias", owned);
         _qNorm = LongCatOps.WidenF32(w, $"{prefix}.attn.q_norm.weight", owned);
         _kNorm = LongCatOps.WidenF32(w, $"{prefix}.attn.k_norm.weight", owned);
@@ -177,11 +181,11 @@ public sealed partial class LongCatBlock : IStreamingBlock
             ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached, speakers, inputs.TokensPerFrame, out speakerMap)
             : SelfAttention(backend, normed1, in inputs, probe, stage, speakers, out speakerMap);
         probe?.Invoke($"{stage}.self_attn", attn);
-        using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
+        using Tensor afterSelf = Residual(backend, LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex));
         probe?.Invoke($"{stage}.after_self", afterSelf);
 
         // 2. text cross-attention, noisy rows only (conditioning rows get a zero update).
-        using Tensor afterCross = CrossAttentionResidual(backend, afterSelf, text, in inputs, probe, stage);
+        using Tensor afterCross = Residual(backend, CrossAttentionResidual(backend, afterSelf, text, in inputs, probe, stage));
         probe?.Invoke($"{stage}.after_cross", afterCross);
 
         // 2b. avatar audio step (audio tokens given): the noisy rows take the gated audio cross-attention, the conditioning rows are unchanged.
@@ -202,7 +206,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             using Tensor normed3 = LongCatOps.NormModulate(backend, stream, modulation, 4 * dim, 3 * dim, hw);
             using Tensor ffn = FeedForward(backend, normed3);
             probe?.Invoke($"{stage}.ffn", ffn);
-            Tensor output = LongCatOps.GatedResidual(backend, stream, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex);
+            Tensor output = Residual(backend, LongCatOps.GatedResidual(backend, stream, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex));
             probe?.Invoke($"{stage}.out", output);
             return output;
         }
@@ -210,6 +214,20 @@ public sealed partial class LongCatBlock : IStreamingBlock
         {
             afterAudio?.Dispose();
         }
+    }
+
+    /// <summary>Whether this block rounds its residual sums to BF16 (the reference's x dtype on a BF16 or INT8 release).</summary>
+    internal bool Bf16Residual => _bf16Residual;
+
+    /// <summary>The residual after an update: on a BF16 route the sum is rounded to BF16 (nearest-even) and kept as F32 values on the BF16 grid;
+    /// otherwise it is returned unchanged. The sum is disposed when it is rounded.</summary>
+    private Tensor Residual(IBackend backend, Tensor sum)
+    {
+        if (!_bf16Residual)
+            return sum;
+        Tensor rounded = LongCatOps.RoundToBf16(backend, sum);
+        sum.Dispose();
+        return rounded;
     }
 
     private int _qkvTileRows = DefaultTileRows;

@@ -156,6 +156,13 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> NeighborhoodAttentionTiled =
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
+    /// <summary>LongCat's residual sums round to BF16 on a BF16 or INT8 release, as the reference's x is BF16 there (nearest-even, after the
+    /// self-attention and cross-attention residuals and after the FFN residual). Read at construction. The F32 route is unchanged. Effect is
+    /// judged on a 4090 comparison against the reference. Off by default: with it on, the CUDA avatar parity lanes exceed the 0.2% bound (0.235% to
+    /// 0.369%), so the default route keeps the F32 sums until that is resolved.</summary>
+    public static readonly Knob<bool> LongcatBf16Residual =
+        Bool("numerics.longcatBf16Residual", false, KnobScope.Construction, KnobDomain.Numerics, "Rounds LongCat's residual sums to BF16 on a BF16 or INT8 release, as the reference does (off by default; the CUDA avatar parity lanes exceed their bound with it on).");
+
     /// <summary>LongCat's <c>int8_tensorwise</c> linears dequantize the weight and leave the activations as they are, as the release's reference computes
     /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. On by default for LongCat's INT8 releases (a run
     /// with it on: step 1 noise relRMS 0.024218, against 0.026643 for weight-only before the rounding change and 0.098540 with it off, on the
