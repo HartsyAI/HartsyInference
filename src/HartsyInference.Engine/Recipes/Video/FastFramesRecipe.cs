@@ -113,18 +113,13 @@ public sealed class FastFramesRecipe : IVideoRecipe
             // F32 on CPU, where the kernels do not cast a half-precision bias; F16 on a GPU backend.
             bool castForCpu = context.Backend is CpuBackend;
             DType pickleDType = castForCpu ? DType.F32 : DType.F16;
-            Dictionary<string, Tensor> generator = ReadGenerator(context.CheckpointPath, pickleDType, castForCpu, loaders);
-            WanVideoCheckpointConverter.ConvertedWeights converted = WanVideoCheckpointConverter.Convert(generator);
-            if (converted.Transformer.Count == 0)
-            {
-                throw new InvalidOperationException($"FastFrames generator '{context.CheckpointPath}' has no recognized transformer weights after conversion.");
-            }
-            WanVideoConfig wan = WanConfigDetector.Detect(converted.Transformer);
+            Dictionary<string, Tensor> transformerWeights = LoadTransformer(context.CheckpointPath, pickleDType, castForCpu, loaders);
+            WanVideoConfig wan = WanConfigDetector.Detect(transformerWeights);
             FastFramesConfig config = ConfigFor(wan.InnerDim);
 
             WanVideoTransformer transformer = new WanVideoTransformer(wan);
             loaders.Add(transformer);
-            transformer.LoadWeights(converted.Transformer);
+            transformer.LoadWeights(transformerWeights);
 
             CheckpointSource refinerSource = CheckpointSource.Open(refinerPath);
             loaders.Add(refinerSource);
@@ -171,6 +166,41 @@ public sealed class FastFramesRecipe : IVideoRecipe
         {
             throw new FileNotFoundException(
                 $"FastFrames needs '{Path.GetFileName(path)}' beside the generator. Both downloads come from the same catalog entry.", path);
+        }
+    }
+
+    /// <summary>The transformer weights the recipe loads from a generator file: read, converted to the Wan key names, and checked.
+    /// Used by the recipe and by the tests, so the tests exercise the same load path as a generation.</summary>
+    internal static Dictionary<string, Tensor> LoadTransformer(string path, DType pickleDType, bool castForCpu, List<IDisposable> loaders)
+    {
+        Dictionary<string, Tensor> generator = ReadGenerator(path, pickleDType, castForCpu, loaders);
+        WanVideoCheckpointConverter.ConvertedWeights converted = WanVideoCheckpointConverter.Convert(generator);
+        if (converted.Transformer.Count == 0)
+        {
+            throw new InvalidOperationException($"FastFrames generator '{path}' has no recognized transformer weights after conversion.");
+        }
+        RefuseUnsupported(converted.Transformer);
+        return converted.Transformer;
+    }
+
+    /// <summary>Refuses a tensor the FastFrames path cannot read as plain floats, by name. A quantized weight carries scales (ComfyUI
+    /// fp8, int8 or NVFP4) the path cannot apply. Any dtype other than F32, F16 or BF16 is refused too, which covers unscaled fp8.
+    /// The released Apple checkpoints are float and unquantized, so this refuses only a checkpoint someone else made.</summary>
+    internal static void RefuseUnsupported(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        foreach (KeyValuePair<string, Tensor> entry in weights)
+        {
+            Tensor tensor = entry.Value;
+            if (tensor.QuantInfo is { } quant)
+            {
+                throw new NotSupportedException(
+                    $"FastFrames does not load quantized weights: '{entry.Key}' is {quant.Format}. Use the released bf16 or fp16 generator.");
+            }
+            if (tensor.DType != DType.F32 && tensor.DType != DType.F16 && tensor.DType != DType.BF16)
+            {
+                throw new NotSupportedException(
+                    $"FastFrames loads float weights only: '{entry.Key}' is {tensor.DType.Name}. Use the released bf16 or fp16 generator.");
+            }
         }
     }
 

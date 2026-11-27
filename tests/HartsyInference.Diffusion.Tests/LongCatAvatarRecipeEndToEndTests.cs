@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Loudness;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Planning;
@@ -22,15 +23,29 @@ public sealed class LongCatAvatarRecipeEndToEndTests
     [InlineData(true)]
     public void AChainRequestRunsThreeSegmentsAndReturnsTheRequestedClip(bool onePointSix)
     {
-        (VideoGenerationResult result, LongCatStandInVae vae, List<(int Samples, int Fps)> featureCalls) = Run(onePointSix, audioSeed: 1);
+        (VideoGenerationResult result, LongCatStandInVae vae, List<(float[] Speech, int Fps)> featureCalls) = Run(onePointSix, audioSeed: 1);
 
         Assert.Equal(ChainFrames, result.Frames.Count);
         Assert.All(result.Frames, frame => Assert.Equal(Size * Size * 3, frame.Rgb.Length));
         Assert.NotNull(result.Audio);
         Assert.Equal(ChainFrames / (double)LongCatAvatarRecipe.OutputFps, result.Audio.Seconds, 3);
-        // The features are read once, for the whole clip.
-        Assert.Equal((int)(1.2 * SampleRate), Assert.Single(featureCalls).Samples);
-        Assert.Equal(LongCatAvatarRecipe.OutputFps, featureCalls[0].Fps);
+        // The features are read once, for the whole clip: the 25 planned frames plus one second, the 1.2 s of speech padded with silence.
+        (float[] speech, int fps) = Assert.Single(featureCalls);
+        Assert.Equal(LongCatAvatarRecipe.OutputFps, fps);
+        Assert.Equal(2 * SampleRate, speech.Length);
+        Assert.All(speech.Skip((int)(1.2 * SampleRate)), sample => Assert.Equal(0f, sample));
+        float[] decoded = VideoRecipeUtils.DrivingSpeech16k(new VideoRequest { Prompt = "p" }, LongCatTinyAvatarRelease.Speech(1.2));
+        if (onePointSix)
+        {
+            // 1.6 hears the speech as it is.
+            Assert.Equal(decoded, speech.Take(decoded.Length));
+        }
+        else
+        {
+            // 1.5 hears it at the reference's loudness.
+            Assert.InRange(Bs1770Loudness.Integrated(speech, SampleRate), -23.001, -22.999);
+            Assert.NotEqual(decoded, speech.Take(decoded.Length));
+        }
         // Each of the three segments is decoded once, at a segment's latent length.
         Assert.Equal([5, 5, 5], vae.Decoded.Select(call => call.Frames));
         // The portrait, then the 13 context frames after each segment but the last.
@@ -53,12 +68,12 @@ public sealed class LongCatAvatarRecipeEndToEndTests
         }
     }
 
-    private static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(int Samples, int Fps)> FeatureCalls) Run(bool onePointSix,
+    private static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(float[] Speech, int Fps)> FeatureCalls) Run(bool onePointSix,
         int audioSeed)
     {
         LongCatConfig config = LongCatTinyAvatarRelease.Config;
         using LongCatTinyAvatarRelease release = new(onePointSix);
-        List<(int Samples, int Fps)> featureCalls = [];
+        List<(float[] Speech, int Fps)> featureCalls = [];
 
         using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
         using CpuBackend backend = new();

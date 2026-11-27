@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -264,6 +265,11 @@ internal static class LongCatRecipeSupport
         // The placements the engine sets that LongCat cannot honour: CFG-parallel, DiT shards and context parallel are refused; a separate text-encoder
         // or VAE backend is warned about by the engine, which checks first (UnhonouredBackends); this second check does not warn again.
         UnhonouredBackends.Refuse(context, "LongCat", warn: false);
+        // Planning refuses a request's LoRAs; a caller that constructs the recipe directly is told too, instead of running without them.
+        if (context.Loras is { Entries.Count: > 0 })
+        {
+            throw new NotSupportedException("LongCat does not take a user LoRA; the release's own LoRAs are the only ones applied.");
+        }
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
@@ -372,6 +378,14 @@ internal static class LongCatRecipeSupport
     internal static float[] Noise(int seed, int channels, int frames, int height, int width)
     {
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, channels, frames, height, width]), seed);
+        return noise.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>The noise of a request's first (or only) generation: the file of <c>diagnostics.longcatNoiseNpy</c> when it is set, else
+    /// <see cref="Noise"/>. A chain's later segments keep their seeded noise.</summary>
+    internal static float[] InitialNoise(int seed, int channels, int frames, int height, int width)
+    {
+        using Tensor noise = SavedNoise.Create(EngineKnobs.LongCatNoiseNpy, new TensorShape([1L, channels, frames, height, width]), seed, "LongCat");
         return noise.AsReadOnlySpan<float>().ToArray();
     }
 

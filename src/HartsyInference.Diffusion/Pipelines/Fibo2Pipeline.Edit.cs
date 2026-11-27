@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Prompting;
@@ -66,7 +67,8 @@ public sealed unsafe partial class Fibo2Pipeline
 
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
-            latent = Fibo2NoiseSource.Create(new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed);
+            latent = SavedNoise.Create(EngineKnobs.Fibo2NoiseNpy, new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed,
+                "Fibo2");
             float initialSigma = scheduler.InitialNoiseSigma;
             if (MathF.Abs(initialSigma - 1f) > 1e-6f)
                 ScaleInPlace(latent, initialSigma);

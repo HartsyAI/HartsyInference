@@ -82,28 +82,6 @@ public sealed class VocalSeparationWiringTests
         Assert.InRange(decoded[1], 0.499f, 0.501f);
     }
 
-    [Theory]
-    [InlineData(93, 25, 75_521)]      // Python gives the same: (93/25 + 1.0) * 44100 is 208152.00000000003, so ceil takes 208153
-    [InlineData(253, 25, 177_920)]    // a three-segment chain's 253 frames, not the requested total; the reference sums its terms and lands one sample higher
-    public void SeparatedSpeechIsCutToTheClipPlusOneSecond(int clipFrames, int fps, int expected)
-    {
-        float[] speech = new float[200_000];
-        VideoRequest separated = new() { Prompt = "p", VideoAudioReference = Clip, SeparatedSpeech16k = speech };
-
-        Assert.Equal(expected, VideoRecipeUtils.CropSeparatedSpeech(separated, speech, clipFrames, fps).Length);
-    }
-
-    [Fact]
-    public void ShortOrUnseparatedSpeechIsLeftAlone()
-    {
-        float[] speech = new float[1000];
-        VideoRequest separated = new() { Prompt = "p", VideoAudioReference = Clip, SeparatedSpeech16k = speech };
-        float[] longer = new float[200_000];
-
-        Assert.Same(speech, VideoRecipeUtils.CropSeparatedSpeech(separated, speech, 93, 25));
-        Assert.Same(longer, VideoRecipeUtils.CropSeparatedSpeech(new VideoRequest { Prompt = "p", VideoAudioReference = Clip }, longer, 93, 25));
-    }
-
     [Fact]
     public void SeparatorInputIsResampledWithTheSoxrHqStandIn()
     {

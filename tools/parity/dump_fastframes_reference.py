@@ -30,6 +30,45 @@ import types
 from pathlib import Path
 
 
+def _load_state(path: Path, key: str | None = None):
+    """Loads a state dict to F32 on the host. Under ``--precision fp32`` torch.bfloat16 is aliased to float32, which makes
+    safetensors' torch path read BF16 tensors at the wrong width. So a safetensors file is parsed here: BF16 and F16 widen to F32
+    bit-exactly (BF16 is the high 16 bits of F32), and the upstream key prefixes are stripped as upstream does. Other formats use
+    upstream's loader."""
+    import json
+    import struct
+
+    import numpy as np
+    import torch
+    from fastframes.checkpoints import _strip, load_state_dict
+
+    if not str(path).endswith(".safetensors"):
+        return load_state_dict(path, key)
+    with open(path, "rb") as fh:
+        header_len = struct.unpack("<Q", fh.read(8))[0]
+        header = json.loads(fh.read(header_len))
+        base = 8 + header_len
+        out = {}
+        for name, info in header.items():
+            if name == "__metadata__":
+                continue
+            start, end = info["data_offsets"]
+            fh.seek(base + start)
+            raw = fh.read(end - start)
+            shape = tuple(info["shape"])
+            if info["dtype"] == "F32":
+                arr = np.frombuffer(raw, dtype="<f4").reshape(shape).copy()
+            elif info["dtype"] == "F16":
+                arr = np.frombuffer(raw, dtype="<f2").reshape(shape).astype(np.float32)
+            elif info["dtype"] == "BF16":
+                bits = np.frombuffer(raw, dtype="<u2").astype(np.uint32) << 16
+                arr = bits.view(np.float32).reshape(shape).copy()
+            else:
+                raise ValueError(f"{path}: {name} has dtype {info['dtype']}, not a float format the dump reads")
+            out[_strip(name)] = torch.from_numpy(arr)
+    return out
+
+
 def configure(upstream: Path, precision: str):
     import torch
     # A --precision fp32 run replaces torch.bfloat16 process-wide. safetensors must be imported first, so that its dtype table is
@@ -154,13 +193,16 @@ def checkpoint(args):
     from fastframes.models.kv_refinement import KVRefinementNetwork
     from fastframes.models.pixel_decoder import BridgedPixelDecoder, PixelDecoder
 
-    dit = build_wan(spec.config.wan_model, load_state_dict(root / spec.dit, "generator_ema"), dtype=dtype, device="cpu")
+    # --dit-file names a generator in safetensors form (the engine's converted copy, prefix kept; upstream's loader strips it), so the
+    # pickle is never loaded. Without it the generator is root/spec.dit, the upstream pickle, which the runbook forbids opening.
+    dit_path = Path(args.dit_file) if args.dit_file else root / spec.dit
+    dit = build_wan(spec.config.wan_model, _load_state(dit_path, "generator_ema"), dtype=dtype, device="cpu")
     wan = model.WAN_CONFIGS[spec.config.wan_model]
-    refiner_state = load_state_dict(root / spec.refiner, "adapter")
+    refiner_state = _load_state(root / spec.refiner, "adapter")
     refiner = KVRefinementNetwork(dim=wan.dim, num_heads=wan.num_heads, head_dim=wan.dim // wan.num_heads,
                                   num_blocks=wan.num_layers, d_a=refiner_state["stem_in.weight"].shape[0]).to(dtype)
     refiner.load_state_dict(refiner_state, strict=True)
-    decoder_state = load_state_dict(root / spec.decoder)
+    decoder_state = _load_state(root / spec.decoder)
     if any(k.startswith("bridge.") for k in decoder_state):
         decoder = BridgedPixelDecoder(in_dim=wan.dim)
     else:
@@ -213,6 +255,8 @@ def main():
     c.add_argument("--frames", type=int, default=4)
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--precision", choices=["fp32", "bf16"], default="fp32")
+    c.add_argument("--dit-file", default=None,
+                   help="the generator as .safetensors (upstream's loader strips the prefix); default root/<spec.dit>, a pickle")
     c.set_defaults(func=checkpoint)
     args = parser.parse_args()
     args.func(args)
