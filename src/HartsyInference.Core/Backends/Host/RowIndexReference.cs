@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends.Host;
@@ -8,16 +9,27 @@ namespace HartsyInference.Core.Backends.Host;
 /// defaults and the oracles every kernel is checked against.</summary>
 public static unsafe class RowIndexReference
 {
-    /// <summary><c>output[m] = input[indices[m]]</c>.</summary>
+    /// <summary><c>output[m] = input[indices[m]]</c>, widened to F32 when the input is BF16.</summary>
     public static void Gather(Tensor output, Tensor input, Tensor indices)
     {
         RowIndexGeometry g = RowIndexContract.ValidateGather(output, input, indices);
         float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
         int* pIdx = (int*)indices.DataPointer;
+        if (input.DType == DType.BF16)
+        {
+            ushort* pIn = (ushort*)input.DataPointer;
+            for (long m = 0; m < g.Rows; m++)
+            {
+                ushort* src = pIn + (long)pIdx[m] * g.Width;
+                float* dst = pOut + m * g.Width;
+                for (int j = 0; j < g.Width; j++) dst[j] = BFloat16Bits.ToFloat(src[j]);
+            }
+            return;
+        }
+        float* pInF = (float*)input.DataPointer;
         long rowBytes = (long)g.Width * sizeof(float);
         for (long m = 0; m < g.Rows; m++)
-            Buffer.MemoryCopy(pIn + (long)pIdx[m] * g.Width, pOut + m * g.Width, rowBytes, rowBytes);
+            Buffer.MemoryCopy(pInF + (long)pIdx[m] * g.Width, pOut + m * g.Width, rowBytes, rowBytes);
     }
 
     /// <summary><c>output[indices[m]] += weights[m] · input[m]</c>, or the unweighted row when <paramref name="weights"/> is null.</summary>
