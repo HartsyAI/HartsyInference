@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.CrossFrame;
+using HartsyInference.Vision.Dinov3;
 
 namespace HartsyInference.Vision.DepthPro2;
 
@@ -27,6 +28,7 @@ public sealed class DepthPro2VideoStream : IDisposable
     private readonly int _width, _height, _clip, _overlap;
     private readonly double _focal;
     private readonly CrossFrameKvRing? _ring;
+    private readonly Dinov3RopeCache _rope = new();   // every clip of one length has the same tables
     private readonly Queue<byte[]> _frames = new();   // the last _clip frames; the last _held.Count + _new are not yet returned
     private readonly List<float[]> _held = [];        // predicted, not yet returned
     private int _new;
@@ -101,7 +103,11 @@ public sealed class DepthPro2VideoStream : IDisposable
         return Guarded(() => Predict(_overlap > 0 ? _frames.Count : _new, keep: 0));
     }
 
-    public void Dispose() => _ring?.Dispose();
+    public void Dispose()
+    {
+        _ring?.Dispose();
+        _rope.Dispose();
+    }
 
     /// <summary>The bytes an unbuffered stream's attention cache needs: each cross-frame block's full window of keys, values and prefix tokens,
     /// and the one block's window of keys and values a frame reads into new tensors. The frame must be within
@@ -170,7 +176,7 @@ public sealed class DepthPro2VideoStream : IDisposable
         byte[][] clip = [.. _frames.Skip(_frames.Count - length)];
         float[][] inverse;
         using (Tensor frames = DepthPro2Preprocessor.NormalizeFrames(clip, _width, _height))
-        using (Tensor maps = _network.PredictInverseDepthFrames(_backend, frames, _ring))
+        using (Tensor maps = _network.PredictInverseDepthFrames(_backend, frames, _ring, _rope))
             inverse = DepthPro2Model.SplitFrames(maps, length);
 
         int skip = length - _held.Count - _new, held = _held.Count;

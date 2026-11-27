@@ -151,17 +151,18 @@ public sealed class Dinov3VisionEncoder : IDisposable
     /// <c>[T, 3, H, W]</c>: the blocks in <paramref name="crossFrameBlocks"/> run every frame as one sequence (<see cref="CrossFrameTokens"/>),
     /// each frame keeping its prefix tokens, and the others run each frame on its own. With a <paramref name="ring"/> the input is one frame
     /// (<c>T = 1</c>) whose patches in the cross-frame blocks attend to the frames the ring holds as well (<see cref="CrossFrameKvRing"/>).
+    /// A <paramref name="rope"/> cache keeps the RoPE tables for the next call of the same shape; without one they are built for this call.
     /// Taps are <c>[T, prefix + patches, hidden]</c>; the caller owns them.
     /// </summary>
     public Tensor[] EncodeFrameIntermediates(IBackend backend, Tensor frames, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> crossFrameBlocks,
-        CrossFrameKvRing? ring = null)
+        CrossFrameKvRing? ring = null, Dinov3RopeCache? rope = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(frames);
         if (ring is not null && frames.Shape.Rank == 4 && frames.Shape[0] != 1)
             throw new ArgumentException($"A cached frame runs alone; got {frames.Shape[0]} frames.", nameof(frames));
         int last = CheckTaps(blockIndices, crossFrameBlocks, nameof(crossFrameBlocks));
-        return CollectTaps(backend, frames, last, blockIndices, prefixResetBlocks: default, crossFrameBlocks, ring);
+        return CollectTaps(backend, frames, last, blockIndices, prefixResetBlocks: default, crossFrameBlocks, ring, rope);
     }
 
     // The highest tapped block, after checking the taps are distinct and every block named is in range.
@@ -185,13 +186,13 @@ public sealed class Dinov3VisionEncoder : IDisposable
     }
 
     private Tensor[] CollectTaps(IBackend backend, Tensor pixelValues, int last, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> prefixResetBlocks,
-        ReadOnlySpan<int> crossFrameBlocks, CrossFrameKvRing? ring)
+        ReadOnlySpan<int> crossFrameBlocks, CrossFrameKvRing? ring, Dinov3RopeCache? rope = null)
     {
         Tensor?[] taps = new Tensor?[_layers.Length];
         try
         {
             // The last block run is always tapped, so every kept tensor is in taps.
-            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks, crossFrameBlocks, ring);
+            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks, crossFrameBlocks, ring, rope);
             System.Diagnostics.Debug.Assert(ReferenceEquals(final, taps[last]), "the last block run must be a tapped block");
             Tensor[] result = new Tensor[blockIndices.Length];
             for (int i = 0; i < result.Length; i++)
@@ -210,7 +211,8 @@ public sealed class Dinov3VisionEncoder : IDisposable
     // Runs blocks 0..lastBlock. A block listed in tapBlocks has its output stored in taps[block] and is not disposed when the next block starts, so the
     // caller can keep it. Without taps the last block's output is returned for the caller to dispose; with taps it is the last tapped tensor, owned by taps.
     private Tensor RunBlocks(IBackend backend, Tensor pixelValues, int lastBlock, ReadOnlySpan<int> tapBlocks, Tensor?[]? taps,
-        ReadOnlySpan<int> prefixResetBlocks = default, ReadOnlySpan<int> crossFrameBlocks = default, CrossFrameKvRing? ring = null)
+        ReadOnlySpan<int> prefixResetBlocks = default, ReadOnlySpan<int> crossFrameBlocks = default, CrossFrameKvRing? ring = null,
+        Dinov3RopeCache? rope = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_loaded) throw new InvalidOperationException("Call LoadWeights first.");
@@ -227,52 +229,46 @@ public sealed class Dinov3VisionEncoder : IDisposable
         int seqLen = prefix + numPatches;
 
         Tensor seq = EmbedTokens(backend, pixelValues, batch, hidden, gridH, gridW, prefix, seqLen);
-        (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(batch, prefix, gridH, gridW, HeadDim, _preset.RoundRopePeriodsToBf16, _preset.RopeNormalizesByLongSide);
-        CrossFrameRope? frameRope = crossFrameBlocks.IsEmpty ? null : new CrossFrameRope(this, ring is null ? batch : 0, prefix, gridH, gridW);
-        try
+        // Without a caller's cache the tables live for this call.
+        using Dinov3RopeCache? ownRope = rope is null ? new Dinov3RopeCache() : null;
+        (Tensor cos, Tensor sin, Tensor? crossCos, Tensor? crossSin) = (rope ?? ownRope!).Get(new Dinov3RopeCache.Key(batch, prefix, gridH, gridW,
+            HeadDim, _preset.RoundRopePeriodsToBf16, _preset.RopeNormalizesByLongSide,
+            crossFrameBlocks.IsEmpty ? null : ring is null ? batch : 0), rope is null ? null : backend);
+        Tensor h = seq;
+        bool hIsTap = false;
+        for (int i = 0; i <= lastBlock; i++)
         {
-            Tensor h = seq;
-            bool hIsTap = false;
-            for (int i = 0; i <= lastBlock; i++)
-            {
-                Tensor next = !crossFrameBlocks.Contains(i) ? _layers[i].Forward(backend, h, cos, sin)
-                    : ring is null ? JointBlock(backend, _layers[i], h, prefix, frameRope!)
-                    : CachedBlock(backend, i, h, prefix, frameRope!, ring);
-                if (prefixResetBlocks.Contains(i)) CrossFrameTokens.RestorePrefix(backend, next, h, prefix);
-                if (!hIsTap) h.Dispose();
-                h = next;
-                hIsTap = taps is not null && tapBlocks.Contains(i);
-                if (hIsTap) taps![i] = h;
-            }
-            return h;   // with taps, the last block is always tapped: the tensor is in taps and the caller must not dispose it
+            Tensor next = !crossFrameBlocks.Contains(i) ? _layers[i].Forward(backend, h, cos, sin)
+                : ring is null ? JointBlock(backend, _layers[i], h, prefix, crossCos!, crossSin!)
+                : CachedBlock(backend, i, h, prefix, crossCos!, crossSin!, ring);
+            if (prefixResetBlocks.Contains(i)) CrossFrameTokens.RestorePrefix(backend, next, h, prefix);
+            if (!hIsTap) h.Dispose();
+            h = next;
+            hIsTap = taps is not null && tapBlocks.Contains(i);
+            if (hIsTap) taps![i] = h;
         }
-        finally
-        {
-            cos.Dispose();
-            sin.Dispose();
-            frameRope?.Dispose();
-        }
+        return h;   // with taps, the last block is always tapped: the tensor is in taps and the caller must not dispose it
     }
 
     // One block over every frame as one sequence; each frame keeps the prefix it went in with.
     // A lone frame is its own joint sequence (the mean of one prefix is that prefix, and the rope table of one frame is the ordinary one), so it
     // skips Join and Split and only puts its prefix back.
-    private static Tensor JointBlock(IBackend backend, Dinov3Layer layer, Tensor frames, int prefix, CrossFrameRope rope)
+    private static Tensor JointBlock(IBackend backend, Dinov3Layer layer, Tensor frames, int prefix, Tensor cos, Tensor sin)
     {
         if (frames.Shape[0] == 1)
         {
-            Tensor alone = layer.Forward(backend, frames, rope.Cos, rope.Sin);
+            Tensor alone = layer.Forward(backend, frames, cos, sin);
             CrossFrameTokens.RestorePrefix(backend, alone, frames, prefix);
             return alone;
         }
 
         using Tensor joint = CrossFrameTokens.Join(backend, frames, prefix);
-        using Tensor output = layer.Forward(backend, joint, rope.Cos, rope.Sin);
+        using Tensor output = layer.Forward(backend, joint, cos, sin);
         return CrossFrameTokens.Split(backend, output, frames, prefix);
     }
 
     // One block over one frame whose patches attend to [pooled-prefix keys, the ring's patch keys]; the prefix passes through unchanged.
-    private Tensor CachedBlock(IBackend backend, int block, Tensor frame, int prefix, CrossFrameRope rope, CrossFrameKvRing ring)
+    private Tensor CachedBlock(IBackend backend, int block, Tensor frame, int prefix, Tensor cos, Tensor sin, CrossFrameKvRing ring)
     {
         int hidden = _preset.HiddenSize, seqLen = (int)frame.Shape[1], patches = seqLen - prefix;
         Dinov3Layer layer = _layers[block];
@@ -287,7 +283,7 @@ public sealed class Dinov3VisionEncoder : IDisposable
         Tensor keys, values;
         try
         {
-            (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, rope.Cos, rope.Sin);
+            (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, cos, sin);
             using (q)
             {
                 Tensor pk, pv;
@@ -327,40 +323,6 @@ public sealed class Dinov3VisionEncoder : IDisposable
         Tensor next = new(frame.Shape, DType.F32);
         backend.Concat(next, [prefixRows, patchOut], 1);
         return next;
-    }
-
-    // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero
-    // frames the patch rows alone, which a cached frame's patches take.
-    private sealed class CrossFrameRope : IDisposable
-    {
-        public CrossFrameRope(Dinov3VisionEncoder encoder, int frames, int prefix, int gridH, int gridW)
-        {
-            Dinov2Preset preset = encoder._preset;
-            (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(1, 0, gridH, gridW, HeadDim, preset.RoundRopePeriodsToBf16,
-                preset.RopeNormalizesByLongSide);
-            if (frames == 0)
-            {
-                (Cos, Sin) = (cos, sin);
-                return;
-            }
-
-            using (cos)
-            using (sin)
-            {
-                Cos = CrossFrameTokens.TileRope(cos, frames, prefix, 1f);
-                Sin = CrossFrameTokens.TileRope(sin, frames, prefix, 0f);
-            }
-        }
-
-        public Tensor Cos { get; }
-
-        public Tensor Sin { get; }
-
-        public void Dispose()
-        {
-            Cos.Dispose();
-            Sin.Dispose();
-        }
     }
 
     // Patch projection, then [CLS, storage, patches] per batch item. No position embedding is added: RoPE does that in attention. Every step is a

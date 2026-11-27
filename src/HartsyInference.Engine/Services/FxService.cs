@@ -209,7 +209,7 @@ public sealed class FxService : IFxService
     {
         ArgumentNullException.ThrowIfNull(audio);
         AudioModelSelector selector = new(FxCatalog.KimVocal2Id, FxCatalog.KimVocal2Id, null);
-        // CPU on purpose: this runs just before a video model that needs the card, and no request with SeparateDrivingVocals has run on a GPU.
+        // CPU on purpose: this runs just before a video model that needs the card.
         IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, FxCatalog.KimVocal2Id), async ct =>
         {

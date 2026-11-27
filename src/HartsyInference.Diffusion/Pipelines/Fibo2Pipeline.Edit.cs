@@ -44,11 +44,10 @@ public sealed unsafe partial class Fibo2Pipeline
         {
             // Encoder phases first: the vision-conditioned prompt, then the reference latents. The language and vision towers leave the
             // device together once those phases are done, before the denoiser loads.
-            ResidentWeights editEncoder = new(Backend,
-                () => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
-                    .Distinct<Tensor>(ReferenceEqualityComparer.Instance));
-            FreeDenoiserForEncoder(() => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
-                .Distinct<Tensor>(ReferenceEqualityComparer.Instance));
+            IEnumerable<Tensor> EncoderWeights() => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
+                .Distinct<Tensor>(ReferenceEqualityComparer.Instance);
+            ResidentWeights editEncoder = new(Backend, EncoderWeights);
+            FreeDenoiserForEncoder(EncoderWeights);
             editEncoder.Preload();
             try
             {
@@ -63,12 +62,11 @@ public sealed unsafe partial class Fibo2Pipeline
             {
                 editEncoder.Release(force: true);
             }
-            AfterWeightRelease(() => _textEncoder.EnumerateWeights().Concat(edit.VisionEncoder.EnumerateWeights())
-                .Distinct<Tensor>(ReferenceEqualityComparer.Instance), "edit encoders (language and vision)");
+            AfterWeightRelease(EncoderWeights, "edit encoders (language and vision)");
 
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
-            latent = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed);
+            latent = Fibo2NoiseSource.Create(new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed);
             float initialSigma = scheduler.InitialNoiseSigma;
             if (MathF.Abs(initialSigma - 1f) > 1e-6f)
                 ScaleInPlace(latent, initialSigma);
@@ -79,7 +77,8 @@ public sealed unsafe partial class Fibo2Pipeline
                 for (int i = 0; i < steps; i++)
                 {
                     Stopwatch stepWatch = Stopwatch.StartNew();
-                    DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={scheduler.SigmaAt(i):F4}");
+                    if (DeviceMemoryTrace.Enabled)
+                        DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={scheduler.SigmaAt(i):F4}");
                     Tensor velocity = Denoise(latent, scheduler.SigmaAt(i), conditional, unconditional, guidanceScale, references);
                     Tensor next = new(latent.Shape, DType.F32);
                     scheduler.Step(next, velocity, latent, i);

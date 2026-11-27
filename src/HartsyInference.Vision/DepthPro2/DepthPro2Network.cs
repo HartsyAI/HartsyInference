@@ -62,16 +62,16 @@ public sealed class DepthPro2Network : IDisposable
         using Tensor? padded = PadToMultiple(backend, pixels);
         Tensor full = InverseDepthOfPadded(backend, padded ?? pixels, observe);
         if (padded is null) return full;
-        using (full) return Crop(full, height, width);
+        using (full) return Crop(backend, full, height, width);
     }
 
     /// <summary>
     /// Focal-normalised inverse depth <c>[T, 1, H, W]</c> for the normalised frames <c>[T, 3, H, W]</c> of one clip or the views of one scene
     /// (upstream <c>predict_inverse_depth</c> on a clip): the frames attend to each other in the cross-frame blocks, so the result is equivariant
     /// to their order but not per-frame independent. With a <paramref name="ring"/> the input is one frame that attends to the frames the ring
-    /// holds as well, and is then stored in it (unbuffered video).
+    /// holds as well, and is then stored in it (unbuffered video). A <paramref name="rope"/> cache keeps the backbone's RoPE tables for the next call.
     /// </summary>
-    public Tensor PredictInverseDepthFrames(IBackend backend, Tensor frames, CrossFrameKvRing? ring = null)
+    public Tensor PredictInverseDepthFrames(IBackend backend, Tensor frames, CrossFrameKvRing? ring = null, Dinov3RopeCache? rope = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(frames);
@@ -81,9 +81,9 @@ public sealed class DepthPro2Network : IDisposable
         int height = (int)frames.Shape[2], width = (int)frames.Shape[3];
         using ExactGemmScope exact = new(backend);
         using Tensor? padded = PadToMultiple(backend, frames);
-        Tensor full = InverseDepthOfPadded(backend, padded ?? frames, null, ring);
+        Tensor full = InverseDepthOfPadded(backend, padded ?? frames, null, ring, rope);
         if (padded is null) return full;
-        using (full) return Crop(full, height, width);
+        using (full) return Crop(backend, full, height, width);
     }
 
     /// <summary>The tapped token sequences (<c>[1, 5 + patches, width]</c> each, in <see cref="DepthPro2Preset.ReassembledBlocks"/> order) for pixels whose sides
@@ -95,34 +95,44 @@ public sealed class DepthPro2Network : IDisposable
         return _encoder.EncodeIntermediates(backend, paddedPixels, _preset.ReassembledBlocks, _preset.CrossFrameBlocks);
     }
 
-    private Tensor InverseDepthOfPadded(IBackend backend, Tensor padded, Action<string, Tensor>? observe, CrossFrameKvRing? ring = null)
+    private Tensor InverseDepthOfPadded(IBackend backend, Tensor padded, Action<string, Tensor>? observe, CrossFrameKvRing? ring = null,
+        Dinov3RopeCache? rope = null)
     {
         int patch = _preset.Backbone.PatchSize, prefix = 1 + _preset.Backbone.NumRegisterTokens;
         int frames = (int)padded.Shape[0], gridH = (int)padded.Shape[2] / patch, gridW = (int)padded.Shape[3] / patch;
         Tensor[] taps = frames == 1 && ring is null ? EncodeTaps(backend, padded)
-            : _encoder.EncodeFrameIntermediates(backend, padded, _preset.ReassembledBlocks, _preset.CrossFrameBlocks, ring);
+            : _encoder.EncodeFrameIntermediates(backend, padded, _preset.ReassembledBlocks, _preset.CrossFrameBlocks, ring, rope);
         try
         {
             if (frames == 1) return _head.Forward(backend, taps, prefix, gridH, gridW, observe);
             Tensor result = new(new TensorShape(frames, 1, padded.Shape[2], padded.Shape[3]), DType.F32);
-            int plane = (int)(padded.Shape[2] * padded.Shape[3]);
             Tensor[] frameTaps = new Tensor[taps.Length];
-            for (int t = 0; t < frames; t++)
+            try
             {
-                try
+                for (int t = 0; t < frames; t++)
                 {
-                    for (int i = 0; i < taps.Length; i++) frameTaps[i] = FrameOf(taps[i], t);
-                    using Tensor map = _head.Forward(backend, frameTaps, prefix, gridH, gridW, observe);
-                    map.AsReadOnlySpan<float>().CopyTo(result.AsSpan<float>().Slice(t * plane, plane));
+                    try
+                    {
+                        for (int i = 0; i < taps.Length; i++) frameTaps[i] = FrameOf(backend, taps[i], t);
+                        using Tensor map = _head.Forward(backend, frameTaps, prefix, gridH, gridW, observe);
+                        // The first write covers the whole result, so a GPU backend allocates it on the device instead of uploading a host buffer.
+                        if (t == 0) StridedCopies.FillFrom(backend, result, map);
+                        StridedCopies.ScatterAxis(backend, result, map, 0, t);
+                    }
+                    finally
+                    {
+                        foreach (Tensor tap in frameTaps) tap?.Dispose();
+                        Array.Clear(frameTaps);
+                    }
                 }
-                finally
-                {
-                    foreach (Tensor tap in frameTaps) tap?.Dispose();
-                    Array.Clear(frameTaps);
-                }
-            }
 
-            return result;
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
         }
         finally
         {
@@ -131,11 +141,10 @@ public sealed class DepthPro2Network : IDisposable
     }
 
     // Frame t of [T, S, C] as a new [1, S, C].
-    private static Tensor FrameOf(Tensor tokens, int t)
+    private static Tensor FrameOf(IBackend backend, Tensor tokens, int t)
     {
-        long width = tokens.Shape[1] * tokens.Shape[2];
         Tensor frame = new(new TensorShape(1, tokens.Shape[1], tokens.Shape[2]), DType.F32);
-        tokens.AsReadOnlySpan<float>().Slice((int)(t * width), (int)width).CopyTo(frame.AsSpan<float>());
+        StridedCopies.SliceAxis(backend, frame, tokens, 0, t, 1);
         return frame;
     }
 
@@ -153,15 +162,11 @@ public sealed class DepthPro2Network : IDisposable
         return padded;
     }
 
-    private static Tensor Crop(Tensor full, int height, int width)
+    private static Tensor Crop(IBackend backend, Tensor full, int height, int width)
     {
-        int frames = (int)full.Shape[0], fullH = (int)full.Shape[2], fullW = (int)full.Shape[3];
-        Tensor cropped = new(new TensorShape(frames, 1, height, width), DType.F32);
-        ReadOnlySpan<float> src = full.AsReadOnlySpan<float>();
-        Span<float> dst = cropped.AsSpan<float>();
-        for (int t = 0; t < frames; t++)
-            for (int y = 0; y < height; y++)
-                src.Slice((t * fullH + y) * fullW, width).CopyTo(dst.Slice((t * height + y) * width, width));
+        Tensor cropped = new(new TensorShape(full.Shape[0], 1, height, width), DType.F32);
+        StridedView window = StridedView.Of(full.Shape).Slice(2, 0, height).Slice(3, 0, width);
+        backend.CopyStrided(cropped, full, StridedCopySpec.Gather(window));
         return cropped;
     }
 }

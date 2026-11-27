@@ -202,6 +202,12 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> VramTrace =
         Str("diagnostics.vramTrace", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append labelled device-memory readings to (driver free/used, allocator pool reserved/used, resident weights and activations), each after a device sync, at the phase, step and block points a model records (SANA-WM, Wan); unset disables it.");
 
+    /// <summary>A float32 C-order <c>.npy</c> that replaces the seeded starting noise of a Fibo 2.0 generation, for the diffusers parity check.
+    /// Diagnostic only: the file's shape, dtype and order are checked, a mismatch fails the run, and each use logs a warning.</summary>
+    public static readonly Knob<string?> Fibo2NoiseNpy =
+        Str("diagnostics.fibo2NoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Path to a float32 C-order .npy that replaces the seeded starting noise of Fibo 2.0 generations (diffusers parity). Unset draws the seeded noise.");
+
     /// <summary>Directory for a safetensors dump of every YuE decode-stage intermediate, for Python reference parity.</summary>
     public static readonly Knob<string?> YueDump =
         Str("diagnostics.yueDump", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory for a safetensors dump of every YuE decode-stage intermediate, for Python reference parity.");
