@@ -6,6 +6,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Features;
+using HartsyInference.Tests.Shared;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -21,19 +22,26 @@ public sealed class Fibo2DecodeSweepGpuTests(ITestOutputHelper output)
 {
     private const long MiB = 1L << 20;
 
-    [Fact]
-    [Trait("Category", "GpuIntegration")]
-    public void DecodeTileSweep_WithTheRealFlux2Vae()
+    /// <summary>The fact the sweep runs under: reported as skipped, never passed, when HARTSY_FLUX2_VAE is unset or not a file, or when no CUDA
+    /// device opens.</summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class Flux2VaeCudaFactAttribute : FactAttribute
     {
-        string? vaePath = Environment.GetEnvironmentVariable("HARTSY_FLUX2_VAE");
-        if (string.IsNullOrWhiteSpace(vaePath) || !File.Exists(vaePath))
+        public Flux2VaeCudaFactAttribute()
         {
-            throw Xunit.Sdk.SkipException.ForSkip("set HARTSY_FLUX2_VAE to the catalog FLUX.2 VAE file");
+            string? path = Environment.GetEnvironmentVariable("HARTSY_FLUX2_VAE");
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                Skip = "SKIPPED: HARTSY_FLUX2_VAE is unset or not an existing file; the decode sweep did not run.";
+            else if (GpuDevices.CudaFailure is { } failure)
+                Skip = $"SKIPPED: no usable CUDA device ({failure}); the decode sweep did not run.";
         }
-        if (!CudaContext.IsAvailable())
-        {
-            throw Xunit.Sdk.SkipException.ForSkip("CUDA unavailable");
-        }
+    }
+
+    [Flux2VaeCudaFact]
+    [Trait("Category", "GpuIntegration")]
+    public void DecodeTileSweep_Run()
+    {
+        string vaePath = Environment.GetEnvironmentVariable("HARTSY_FLUX2_VAE")!;
 
         using CudaBackend backend = new(0, PtxDirectory());
         using Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "fibo2");
