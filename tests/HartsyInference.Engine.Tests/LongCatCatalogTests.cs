@@ -36,6 +36,23 @@ public sealed class LongCatCatalogTests
     }
 
     [Fact]
+    public void TheAvatarRowPutsTheDmdLoraWhereTheRecipeReadsIt()
+    {
+        CatalogEntry entry = ModelCatalog.Find("longcat-avatar")!;
+        ModelAsset lora = Assert.Single(entry.Assets, a => a.Role == "lora");
+        ModelAsset primary = ModelDownloader.PrimaryAsset(entry)!;
+        string root = Path.GetFullPath("models");
+        // The checkpoint's folder, which is what the recipe resolves the primary shard to.
+        string checkpoint = Path.Combine(root, primary.TargetSubdir);
+
+        string downloaded = Path.Combine(root, lora.TargetSubdir, lora.TargetName!);
+
+        Assert.Equal("lora/dmd_lora.safetensors", lora.RepoPath);
+        Assert.Equal(64, lora.Sha256!.Length);
+        Assert.Equal(Path.GetFullPath(LongCatRecipeSupport.DmdLoraPath(checkpoint)), Path.GetFullPath(downloaded));
+    }
+
+    [Fact]
     public void TheFirstShardIsTheRowsPrimaryAssetSoTheCheckpointFolderResolves()
     {
         CatalogEntry entry = ModelCatalog.Find("longcat-avatar")!;
