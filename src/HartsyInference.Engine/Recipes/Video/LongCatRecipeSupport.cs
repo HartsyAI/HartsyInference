@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
@@ -284,6 +285,8 @@ internal static class LongCatRecipeSupport
         // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
         loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
+        // Before the LoRAs and the DiT, which carry a weight's companions on from here.
+        ApplyInt8WeightOnly(weights);
         // The DiT is registered before any LoRA or weight is read, so a failure at any later step disposes it, and the LoRA files and their
         // stack join the loaders the moment each is built, in the order that disposes the stack after the files it was built from.
         LongCatTransformer dit = new(checkpoint.Config);
@@ -339,6 +342,26 @@ internal static class LongCatRecipeSupport
         bool hasAudio = checkpoint.Weights.Keys.Any(key => key.StartsWith("audio_proj.", StringComparison.Ordinal));
         return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer, dmdGate,
             opsdGate);
+    }
+
+    /// <summary>Under <c>numerics.longcatInt8WeightOnly</c>, marks every packed <c>int8_tensorwise</c> linear for a full-precision GEMM
+    /// (<see cref="QuantWeightInfo.FullPrecisionMatMul"/>), which the CUDA backend reads: the weight is dequantized and the activations stay as they
+    /// are. A weight the weight policy already widened is dense and needs no mark. Returns the number marked; with the knob off, none.</summary>
+    internal static int ApplyInt8WeightOnly(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        if (!EngineKnobs.LongcatInt8WeightOnly.Value)
+            return 0;
+        int marked = 0;
+        foreach (Tensor weight in weights.Values)
+        {
+            if (weight.DType != DType.I8 || weight.QuantInfo is not { Format: "int8_tensorwise", RowScale: not null } info)
+                continue;
+            weight.QuantInfo = info with { FullPrecisionMatMul = true };
+            marked++;
+        }
+        Logs.Info($"[LongCatRecipeSupport] numerics.longcatInt8WeightOnly: {marked} INT8 linears marked weight-only (CUDA dequantizes them on the "
+            + "host on every call).");
+        return marked;
     }
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>

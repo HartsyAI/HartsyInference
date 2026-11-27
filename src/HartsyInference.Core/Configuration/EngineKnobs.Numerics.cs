@@ -150,6 +150,13 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> NeighborhoodAttentionTiled =
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
+    /// <summary>LongCat's <c>int8_tensorwise</c> linears dequantize the weight and leave the activations as they are, as the release's reference computes
+    /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. CUDA only: it takes the existing
+    /// full-precision fallback, which dequantizes on the host to BF16 and uploads that on every call, a tiled projection once per tile. The
+    /// fallback's dense linear is eligible for <c>numerics.w8a8</c>, which would quantize the activations again.</summary>
+    public static readonly Knob<bool> LongcatInt8WeightOnly =
+        Bool("numerics.longcatInt8WeightOnly", false, KnobScope.Construction, KnobDomain.Numerics, "LongCat INT8 linears dequantize the weight and keep the activations unquantized, as the reference does. CUDA: host dequant and upload on every call (slow). Leave numerics.w8a8 off.");
+
     /// <summary>Builds LTX-2.5's diffusion video decoder instead of the ~40x faster conv decoder when the checkpoint has both.</summary>
     public static readonly Knob<bool> Ltx2DiffusionVae =
         Bool("numerics.ltx2DiffusionVae", false, KnobScope.Construction, KnobDomain.Numerics, "Builds LTX-2.5's diffusion video decoder instead of the ~40x faster conv decoder when the checkpoint has both.");

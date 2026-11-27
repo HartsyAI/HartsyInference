@@ -50,6 +50,22 @@ public sealed class LongCatRecipeGpuParityTests
     [CudaDeviceFact]
     public void Cuda_AvatarChain16_MatchesCpu() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true);
 
+    /// <summary>The INT8 chains under <c>numerics.longcatInt8WeightOnly</c>: both sides then compute from the same BF16-widened weights with unquantized
+    /// activations, so they are held to the dense lanes' bound, not the INT8 smoke bound.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain15_Int8WeightOnly_MatchesCpu()
+    {
+        using IDisposable scope = KnobProfile.Create("longcat-int8-weight-only").With(EngineKnobs.LongcatInt8WeightOnly, true).Push();
+        AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: false, int8: true, bound: RelativeTolerance);
+    }
+
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_Int8WeightOnly_MatchesCpu()
+    {
+        using IDisposable scope = KnobProfile.Create("longcat-int8-weight-only").With(EngineKnobs.LongcatInt8WeightOnly, true).Push();
+        AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true, bound: RelativeTolerance);
+    }
+
     /// <summary>Diagnosis of the CUDA 1.6 chain: the same case with exact GEMMs (HighPrecisionGemm on), to see whether the difference is TF32 accumulation.</summary>
     [CudaDeviceFact]
     public void Cuda_AvatarChain16_HighPrecisionGemm_MatchesCpu() => AvatarParity(() =>
@@ -159,10 +175,10 @@ public sealed class LongCatRecipeGpuParityTests
     }
 
     private void AvatarParity(Func<IBackend> device, bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? cpuDense = null,
-        [System.Runtime.CompilerServices.CallerMemberName] string lane = "")
+        double? bound = null, [System.Runtime.CompilerServices.CallerMemberName] string lane = "")
     {
         // The lane is set by the device side: INT8 weights on the device are the INT8 lane (smoke bound), dense weights the dense lane (parity bound).
-        double tolerance = (int8 ?? onePointSix) ? Int8SmokeTolerance : RelativeTolerance;
+        double tolerance = bound ?? ((int8 ?? onePointSix) ? Int8SmokeTolerance : RelativeTolerance);
         List<string> failures = [];
         List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, int8: int8, dense: cpuDense).Vae.Decoded;
         List<(int Frames, float[] Values)> gpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, device, int8).Vae.Decoded;
