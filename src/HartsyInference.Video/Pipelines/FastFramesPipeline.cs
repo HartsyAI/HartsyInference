@@ -160,8 +160,9 @@ public sealed class FastFramesPipeline : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
         // A pinned prefix from an earlier clip is still on the device, so the free VRAM read here does not show what the placement
         // will have free. The placement releases or keeps that prefix; the check after it decides, so skip this one.
-        if (!_generatorPin.Resident)
-            CheckKvFitsNow(latentFrames);
+        // Auto (null) decides the mode in the rollout and checks that mode there; only a forced resident cache is refused at admission.
+        if (!_generatorPin.Resident && OffloadFrameCache == false)
+            CheckKvFitsNow(latentFrames, offload: false);
     }
 
     /// <summary>The frame-cache need of a clip of <paramref name="latentFrames"/> on this pipeline: the cache in the slot dtype, plus one
@@ -170,14 +171,30 @@ public sealed class FastFramesPipeline : IDisposable
         KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
             _transformer.BranchActivation(_backend, singleGroup: true));
 
-    /// <summary>Checks the clip's frame cache against the free VRAM the backend reports now. Called at admission and again once the
-    /// block placement has run, so the weights it uploaded are counted as used.</summary>
-    private void CheckKvFitsNow(int latentFrames)
+    /// <summary>The device bytes of a clip whose frame cache is offloaded: one block's cache and its join, the most a block's attention holds.</summary>
+    private long OffloadedKvNeedBytes(int latentFrames) =>
+        KvNeedBytes(1, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim, _transformer.BranchActivation(_backend, singleGroup: true));
+
+    /// <summary>The frame cache's device need in the mode the clip runs in: the whole cache, or one block's share when offloaded.</summary>
+    private long KvNeedFor(int latentFrames, bool offload) => offload ? OffloadedKvNeedBytes(latentFrames) : ClipKvNeedBytes(latentFrames);
+
+    /// <summary>Whether this clip's frame cache lives on the host. Forced by <see cref="OffloadFrameCache"/>; in auto mode, when the whole cache
+    /// does not fit the free VRAM now. A backend that reports no VRAM is not offloaded.</summary>
+    private bool ResolveFrameCacheOffload(int latentFrames)
+    {
+        if (OffloadFrameCache is bool forced)
+            return forced;
+        (long freeBytes, long totalBytes) = _backend.GetVramInfo();
+        return totalBytes > 0 && ClipKvNeedBytes(latentFrames) > freeBytes;
+    }
+
+    /// <summary>Checks the clip's frame cache, in the mode it runs in, against the free VRAM the backend reports now. Called at admission and
+    /// again once the block placement has run, so the weights it uploaded are counted as used.</summary>
+    private void CheckKvFitsNow(int latentFrames, bool offload)
     {
         (long freeBytes, long totalBytes) = _backend.GetVramInfo();
         DType slot = _transformer.BranchActivation(_backend, singleGroup: true);
-        long need = KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim, slot);
-        CheckFits(_config.Name, need, latentFrames, slot, freeBytes, totalBytes);
+        CheckFits(_config.Name, KvNeedFor(latentFrames, offload), latentFrames, slot, freeBytes, totalBytes);
     }
 
     /// <summary>Refuses a clip whose frame-wise cache cannot fit in the free VRAM, before any frame is denoised. The cache keeps every
@@ -213,12 +230,14 @@ public sealed class FastFramesPipeline : IDisposable
     {
         // The body runs on the first MoveNext, so a rollout enumerated after Dispose is refused here.
         ObjectDisposedException.ThrowIf(_disposed, this);
-        using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
+        // The mode is decided here, before the placement: an offloaded cache keeps only the slots a block's join stages on the device.
+        bool offload = ResolveFrameCacheOffload(latentFrames);
+        using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames, offload);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
         // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
         // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
-        long kvNeed = ClipKvNeedBytes(latentFrames);
+        long kvNeed = KvNeedFor(latentFrames, offload);
         // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
         // prefix beside them, so the headroom only has to cover activations. A failure from here to the first frame releases them and
         // the generator, so a refused clip leaves nothing it uploaded on the device.
@@ -241,7 +260,7 @@ public sealed class FastFramesPipeline : IDisposable
             });
             LastStreamedBlocks = placed.StreamedBlocks;
             // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
-            CheckKvFitsNow(latentFrames);
+            CheckKvFitsNow(latentFrames, offload);
         }
         catch
         {
@@ -316,6 +335,11 @@ public sealed class FastFramesPipeline : IDisposable
     /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
     /// (for tests); ForceOff keeps every block resident.</summary>
     public LowVramMode? StreamingMode { get; set; }
+
+    /// <summary>Where a clip's frame cache lives: null (auto) offloads it to host memory when the whole cache does not fit the free VRAM
+    /// (each written slot leaves the device; a block's join stages back what it reads), true always offloads, false keeps it resident and refuses
+    /// a clip that does not fit. The output is the same in every mode.</summary>
+    public bool? OffloadFrameCache { get; set; }
 
     /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
     public int LastStreamedBlocks { get; private set; }
