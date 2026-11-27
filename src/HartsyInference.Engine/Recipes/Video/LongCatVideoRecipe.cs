@@ -41,7 +41,7 @@ public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
 
     /// <inheritdoc/>
     /// <remarks>The init image becomes the first latent frame (<see cref="LongCatConditioningMode.Image"/>).</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage;
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.VideoContinuation;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "longcat-video", StringComparison.OrdinalIgnoreCase);
@@ -63,7 +63,7 @@ public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
     /// <summary>Planning refusals: the base family has no driving speech, and its long-video chain is not wired yet (a request for one would run as a
     /// single clip, silently).</summary>
     /// <inheritdoc/>
-    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request, distilled: false);
+    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request, settings, distilled: false);
 
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;

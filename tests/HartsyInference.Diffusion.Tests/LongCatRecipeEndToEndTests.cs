@@ -116,8 +116,10 @@ public sealed class LongCatRecipeEndToEndTests
     [Fact]
     public void TheBaseContinuationKeepsItsContextFramesAndGeneratesTheRest()
     {
-        // The reference's 13-frame context (four latents) leads the output, so 17 output frames are the context plus one latent group.
-        byte[][] source = Enumerable.Range(0, 13).Select(i => Enumerable.Range(0, 16 * 16 * 3).Select(b => (byte)((b + i * 7) % 251)).ToArray()).ToArray();
+        // A 16×16 source of 13 frames: the source is its own generation size, so no bucket is involved. The output is the 13 source frames
+        // then the 4 generated frames after the context (17 frames in all, one latent group past the context).
+        byte[][] frames13 = Enumerable.Range(0, 13).Select(i => Enumerable.Range(0, 16 * 16 * 3).Select(b => (byte)((b + i * 7) % 251)).ToArray()).ToArray();
+        LongCatContinuation.Source source = new(frames13, frames13, GenerationHeight: 16, GenerationWidth: 16, Width: 16, Height: 16);
 
         VideoGenerationResult result = RunBaseClip(false, () => new CpuBackend(), frames: 17, continuation: source);
 
@@ -127,8 +129,8 @@ public sealed class LongCatRecipeEndToEndTests
 
     /// <summary>Runs the base recipe on a tiny checkpoint written to disk, on the backend <paramref name="makeBackend"/> makes (CPU, CUDA or
     /// Vulkan). Shared by the CPU smoke test above and the device parity tests (<c>LongCatRecipeGpuParityTests</c>), so the two run the same body.
-    /// <paramref name="continuation"/> (RGB24 frames at 16×16) runs the continuation instead of a text clip.</summary>
-    internal static VideoGenerationResult RunBaseClip(bool int8, Func<IBackend> makeBackend, int frames = 5, byte[][]? continuation = null)
+    /// <paramref name="continuation"/> runs the continuation instead of a text clip.</summary>
+    internal static VideoGenerationResult RunBaseClip(bool int8, Func<IBackend> makeBackend, int frames = 5, LongCatContinuation.Source? continuation = null)
     {
         using LongCatRecipeStandIns standIns = new(LongCatTestData.Tiny.CaptionChannels, LongCatTestData.Tiny.InChannels);
         string directory = Path.Combine(Path.GetTempPath(), "longcat-e2e-" + Guid.NewGuid().ToString("N"));

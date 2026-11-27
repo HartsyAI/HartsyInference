@@ -716,6 +716,7 @@ public static class GenerationDispatch
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
             VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
             DrivingVideo = parameters.GetStringOrNull("driving-video") is { } drivingPath ? LoadVideoClip(drivingPath) : null,
+            VideoContinuation = parameters.GetStringOrNull("continue-video") is { } continuePath ? LoadVideoClip(continuePath) : null,
             DrivingPoseVideo = parameters.GetStringOrNull("pose-video") is { } posePath ? LoadVideoClip(posePath) : null,
             DrivingFaceVideo = parameters.GetStringOrNull("face-video") is { } facePath ? LoadVideoClip(facePath) : null,
             DrivingAutoPreprocess = !parameters.GetBool("no-auto-preprocess", false),

@@ -17,7 +17,9 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// loop, and the Wan 2.1 VAE decode.</summary>
 public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
 {
-    /// <summary>The continuation's conditioning: the reference's <c>num_cond_frames</c> default of 13 pixel frames, which is four latents.</summary>
+    /// <summary>The continuation's conditioning: the reference's <c>num_cond_frames</c> default of 13 pixel frames, which is four latents
+    /// (<c>run_demo_video_continuation.py</c> line 43; <c>pipeline_longcat_video.py</c> line 280).</summary>
+    internal const int ContinuationFrames = 13;
     internal const int ContinuationLatents = 4;
 
     private readonly IBackend _backend;
@@ -42,22 +44,25 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
     public VideoGenerationResult Generate(VideoRequest request, VideoEffectiveSettings settings, IProgress<StepPreview>? progress,
         CancellationToken cancel)
     {
-        // The continuation's source is decoded at the output size before any weight is placed, so a bad clip fails before the denoise.
-        byte[][]? source = request.VideoContinuation is { } clip
-            ? DecodeContinuationSource(clip, settings.Width, settings.Height, cancel)
+        // The clip is decoded before any weight is placed, so a bad clip fails before the denoise.
+        LongCatContinuation.Source? continuation = request.VideoContinuation is { } clip
+            ? PrepareContinuation(clip, cancel)
             : null;
-        return GenerateFrom(request, settings, source, progress, cancel);
+        return GenerateFrom(request, settings, continuation, progress, cancel);
     }
 
-    /// <summary>Generates from the continuation source already decoded to RGB24 at the output size (null for none). <see cref="Generate"/> decodes
-    /// the clip and calls this; the tests call it directly with synthetic frames.</summary>
-    internal VideoGenerationResult GenerateFrom(VideoRequest request, VideoEffectiveSettings settings, byte[][]? continuationSource,
+    /// <summary>Generates from a continuation source already prepared (null for none). <see cref="Generate"/> decodes the clip and calls this; the
+    /// tests call it directly with a synthetic source.</summary>
+    internal VideoGenerationResult GenerateFrom(VideoRequest request, VideoEffectiveSettings settings, LongCatContinuation.Source? continuation,
         IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         // The distilled build's cfg_step LoRA is live for this run only; the undistilled runs see the base weights.
         using IDisposable? cfgStepScope = _distilled ? _parts.CfgStepGate?.Enable(1f) : null;
         cancel.ThrowIfCancellationRequested();
-        int width = settings.Width, height = settings.Height, frames = settings.Frames;
+        // A continuation generates at the aspect bucket of its source, not at the requested size (see LongCatContinuation).
+        int width = continuation?.GenerationWidth ?? settings.Width;
+        int height = continuation?.GenerationHeight ?? settings.Height;
+        int frames = settings.Frames;
         int latentFrames = (frames - 1) / LongCatRecipeSupport.TemporalCompressionFactor + 1;
         int latentHeight = height / LongCatRecipeSupport.SpatialCompressionFactor;
         int latentWidth = width / LongCatRecipeSupport.SpatialCompressionFactor;
@@ -80,12 +85,12 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
             mode = LongCatConditioningMode.Image;
             condLatents = 1;
         }
-        else if (continuationSource is not null)
+        else if (continuation is not null)
         {
-            // The reference's generate_vc: the clip's last 13 frames, encoded to four latents, lead the run and stay in the output.
+            // generate_vc: the source's last 13 frames, resized to the bucket, encoded to four latents that lead the run.
             if (latentFrames <= ContinuationLatents)
-                throw new ArgumentException($"A continuation needs more output frames than its {1 + LongCatVaeSeam.TemporalScale * (ContinuationLatents - 1)}-frame context; got {frames}.");
-            condition = LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, continuationSource, ContinuationLatents, _parts.Channels,
+                throw new ArgumentException($"A continuation needs more output frames than its {ContinuationFrames}-frame context; got {frames}.");
+            condition = LongCatRecipeSupport.EncodeContext(_backend, _parts.Encoder, continuation.ContextFrames, ContinuationLatents, _parts.Channels,
                 latentHeight, latentWidth);
             mode = LongCatConditioningMode.Continuation;
             condLatents = ContinuationLatents;
@@ -110,16 +115,28 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
 
         byte[][] decoded = LongCatRecipeSupport.DecodeFrames(_backend, _parts.Decoder, latents, _parts.Channels, latentFrames, latentHeight, latentWidth);
         Logs.Info($"[LongCatVideoRecipePipeline] Decoded {decoded.Length} frames {width}x{height}.");
-        return VideoRecipeUtils.ToResult(decoded, width, height, request, audio: null, fps: settings.Fps);
+        if (continuation is null)
+            return VideoRecipeUtils.ToResult(decoded, width, height, request, audio: null, fps: settings.Fps);
+
+        // The demo's composition (run_demo_video_continuation.py lines 114-116): the source frames as they were, then the generated frames after the
+        // context, resized back to the source size (BICUBIC, line 112), written at the target rate.
+        List<byte[]> output = [.. continuation.Frames];
+        for (int i = ContinuationFrames; i < decoded.Length; i++)
+        {
+            ImageData generated = new() { Rgb = decoded[i], Width = width, Height = height };
+            output.Add(FeatureImaging.ResizeRgb24(generated, continuation.Width, continuation.Height));
+        }
+        Logs.Info($"[LongCatVideoRecipePipeline] Continuation: {continuation.Frames.Length} source frames, {decoded.Length - ContinuationFrames} generated.");
+        return VideoRecipeUtils.ToResult([.. output], continuation.Width, continuation.Height, request, audio: null, fps: LongCatContinuation.TargetFps);
     }
 
-    /// <summary>Decodes the continuation clip to RGB24 frames at the output size. The whole clip is decoded; the context is its last frames.</summary>
-    private static byte[][] DecodeContinuationSource(VideoClip clip, int width, int height, CancellationToken cancel)
+    /// <summary>Decodes the continuation clip at its own size and frame rate, then prepares its source (see <see cref="LongCatContinuation"/>).</summary>
+    private static LongCatContinuation.Source PrepareContinuation(VideoClip clip, CancellationToken cancel)
     {
         FfmpegProcessDecoder.Result decoded = new FfmpegProcessDecoder()
-            .DecodeAsync(clip.Data, clip.Format, maxFrames: null, scaleWidth: width, scaleHeight: height, cancel: cancel)
+            .DecodeAsync(clip.Data, clip.Format, maxFrames: null, scaleWidth: null, scaleHeight: null, cancel: cancel)
             .GetAwaiter().GetResult();
-        return [.. decoded.Frames];
+        return LongCatContinuation.Prepare(decoded.Frames.ToArray(), decoded.Width, decoded.Height, decoded.Fps, ContinuationFrames);
     }
 
     /// <inheritdoc/>

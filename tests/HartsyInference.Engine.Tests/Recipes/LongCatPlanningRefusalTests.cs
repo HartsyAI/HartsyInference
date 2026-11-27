@@ -68,7 +68,8 @@ public sealed class LongCatPlanningRefusalTests
     public void TheBaseAcceptsAContinuationAndTheDistilledBuildAndAnInitImageAreRefused()
     {
         VideoRequest continuation = new() { Prompt = "p", VideoContinuation = new VideoClip { Data = [1] } };
-        Assert.Null(new LongCatVideoRecipe().RequestRefusal(continuation, Settings()));
+        Assert.Null(new LongCatVideoRecipe().RequestRefusal(continuation, Settings(fps: 15)));
+        Assert.NotNull(new LongCatVideoRecipe().RequestRefusal(continuation, Settings(fps: 25)));
         Assert.NotNull(new LongCatVideoDistilledRecipe().RequestRefusal(continuation, Settings()));
         Assert.NotNull(new LongCatVideoRecipe().RequestRefusal(continuation with { InitImage = new ImageData { Rgb = [1, 2, 3], Width = 1, Height = 1 } },
             Settings()));
