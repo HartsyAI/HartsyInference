@@ -156,6 +156,37 @@ public sealed class LongCatVideoRouteTests : IAsyncLifetime
         Assert.Contains("does not support: Lora", text, StringComparison.Ordinal);
     }
 
+    /// <summary>A continuation request reaches VideoRequest.VideoContinuation through the JSON route, so the base family plans it; the planner refuses
+    /// it for a family that does not declare the feature.</summary>
+    [Fact]
+    public async Task AContinuationRequestReachesTheBaseFamilyAndIsRefusedByTheAvatar()
+    {
+        object clip = new { data = Convert.ToBase64String(new byte[] { 1, 2, 3 }), format = "mp4" };
+        object baseBody = new
+        {
+            model = BaseFamily,
+            modelPath = BaseCheckpoint,
+            save = false,
+            request = new { prompt = "the road continues", frames = BaseFrames, steps = BaseSteps, cfgScale = 1.0, seed = 3, videoContinuation = clip },
+        };
+
+        HttpResponseMessage plan = await _http.PostAsJsonAsync("/v1/native/video/plan", baseBody);
+        string planText = await plan.Content.ReadAsStringAsync();
+        Assert.True(plan.StatusCode == HttpStatusCode.OK, $"{plan.StatusCode}: {planText}");
+
+        object avatarBody = new
+        {
+            model = "longcat-avatar",
+            modelPath = _avatar15.Checkpoint,
+            save = false,
+            request = new { prompt = "the speaker continues", videoContinuation = clip },
+        };
+        HttpResponseMessage refused = await _http.PostAsJsonAsync("/v1/native/video/plan", avatarBody);
+        string refusedText = await refused.Content.ReadAsStringAsync();
+        Assert.True(refused.StatusCode == HttpStatusCode.UnprocessableEntity, $"{refused.StatusCode}: {refusedText}");
+        Assert.Contains("does not support: VideoContinuation", refusedText, StringComparison.Ordinal);
+    }
+
     private object AvatarBody(bool onePointSix)
     {
         Engine.Requests.ImageData portrait = LongCatTinyAvatarRelease.Portrait(Size);
