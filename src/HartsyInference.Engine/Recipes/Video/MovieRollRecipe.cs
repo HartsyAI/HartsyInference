@@ -98,8 +98,9 @@ public sealed class MovieRollRecipe : IVideoRecipe
             // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
             // block the DiT streams. The BF16 to F16 copies below are made once on the host, and they are what the DiT keeps.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
-            // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does. Only the cast copies are owned here; the rest are the container's.
-            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, [DType.BF16], DType.F16);
+            // F32 (the released file) or BF16 -> F16 for the native F16 GEMM. Only the cast copies are owned here; the rest are the container's.
+            // The released distilled t2v file is FP32; without the F32 source the DiT stays FP32 on the card and streams 2x the bytes.
+            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, [DType.BF16, DType.F32], DType.F16);
             HashSet<Tensor> converted = new(ditWeights.Values, ReferenceEqualityComparer.Instance);
             foreach (Tensor copy in ditF16.Values)
             {
