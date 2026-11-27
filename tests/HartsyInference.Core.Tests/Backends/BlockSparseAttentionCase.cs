@@ -15,6 +15,7 @@ internal sealed record BlockSparseAttentionCase(string Name, int Batch, int Head
         new("CrossLength", 1, 2, 64, new(4, 16, 16), new(12, 16, 16), new(4, 4, 4), new(4, 4, 4), 0.9375, 23, 61),
         new("Batched", 2, 3, 16, new(4, 32, 16), new(4, 32, 16), new(4, 4, 4), new(4, 4, 4), 0.875, 37, 127),
         new("UnequalBlocks", 1, 2, 16, new(8, 16, 16), new(8, 16, 32), new(4, 4, 4), new(4, 4, 8), 0.9375, 41, 67),
+        new("HeadDim128", 1, 1, 128, new(8, 16, 16), new(8, 16, 16), new(4, 4, 4), new(4, 4, 4), 0.9375, 71, 127),
         new("Truncated", 1, 1, 32, new(4, 8, 8), new(20, 12, 8), new(4, 4, 4), new(4, 4, 4), 0.9, 53, 11),
         new("NoneSelected", 1, 1, 16, new(8, 8, 8), new(8, 8, 8), new(4, 4, 4), new(4, 4, 4), 0.9375, 67, 29),
     ];

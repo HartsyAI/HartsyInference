@@ -53,6 +53,7 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
     [InlineData("CrossLength")]
     [InlineData("Batched")]
     [InlineData("UnequalBlocks")]
+    [InlineData("HeadDim128")]
     [InlineData("Truncated")]
     [InlineData("NoneSelected")]
     public void MatchesTheReferenceKernel(string name)
@@ -65,6 +66,7 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
             "CrossLength" => (BlockSparseAttentionVectors.CrossLengthOutput, BlockSparseAttentionVectors.CrossLengthSelected),
             "Batched" => (BlockSparseAttentionVectors.BatchedOutput, BlockSparseAttentionVectors.BatchedSelected),
             "UnequalBlocks" => (BlockSparseAttentionVectors.UnequalBlocksOutput, BlockSparseAttentionVectors.UnequalBlocksSelected),
+            "HeadDim128" => (BlockSparseAttentionVectors.HeadDim128Output, BlockSparseAttentionVectors.HeadDim128Selected),
             "Truncated" => (BlockSparseAttentionVectors.TruncatedOutput, BlockSparseAttentionVectors.TruncatedSelected),
             _ => (BlockSparseAttentionVectors.NoneSelectedOutput, []),
         };

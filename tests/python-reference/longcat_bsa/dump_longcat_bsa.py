@@ -6,11 +6,9 @@ Usage:
 Needs an NVIDIA GPU, torch 2.6.0 (cu124 wheels, which bring triton 3.2.0), einops, and a checkout of meituan-longcat/LongCat-Video
 at 58eb336edc5c8c63389838727e40b8c18434e54e.
 
-Nothing of the reference is replaced. Two environment settings are forced before triton and torch load: TRITON_F32_DEFAULT=ieee,
-because Triton's F32 default on this hardware is TF32, and TORCHDYNAMO_DISABLE=1, so the torch.compile helpers run eagerly.
-
-LongCat's head dim of 128 is not among the cases: the F32 kernel at 64 keys a block needs more shared memory than an RTX 30 or 40
-series card has, even at one pipeline stage. BF16, which the pipeline runs, fits.
+No code of the reference is replaced. Two environment settings are forced before triton and torch load: TRITON_F32_DEFAULT=ieee,
+because Triton's F32 default on this hardware is TF32, and TORCHDYNAMO_DISABLE=1, so the torch.compile helpers run eagerly. A case
+that names num_stages sets that scheduling field of the reference's kernel presets, to fit the card's shared memory.
 
 The F32 run is what the C# reference is compared with. A BF16 run of the same inputs is reported beside it (how far the output and
 the block selection move at the precision the pipeline runs); no test reads it.
@@ -44,6 +42,10 @@ CASES = [
     # Different query and key blocks.
     dict(name="UnequalBlocks", batch=1, heads=2, dim=16, q_grid=(8, 16, 16), k_grid=(8, 16, 32), q_block=(4, 4, 4),
          k_block=(4, 4, 8), sparsity=0.9375, seed=41, row_step=67),
+    # LongCat's head dim. At F32 the kernel preset's three pipeline stages need 180480 bytes of shared memory on an RTX 3060,
+    # which has 101376, and two need 114944, so this case runs with one.
+    dict(name="HeadDim128", batch=1, heads=1, dim=128, q_grid=(8, 16, 16), k_grid=(8, 16, 16), q_block=(4, 4, 4),
+         k_block=(4, 4, 4), sparsity=0.9375, seed=71, row_step=127, num_stages=1),
     # (1 - 0.9) * 30 is 2.9999999999999996 in double, so two blocks are read, not three.
     dict(name="Truncated", batch=1, heads=1, dim=32, q_grid=(4, 8, 8), k_grid=(20, 12, 8), q_block=(4, 4, 4),
          k_block=(4, 4, 4), sparsity=0.9, seed=53, row_step=11),
@@ -122,9 +124,13 @@ def main():
                        device=torch.cuda.get_device_name(0), sources=hashes)
     print(json.dumps(environment))
     report = dict(environment=environment, cases=[])
+    presets = bsa.configs_fwd_bsa_varlen_align_preset
+    default_stages = {key: preset["num_stages"] for key, preset in presets.items()}
     members = []
     for case in CASES:
         q, k, v = operands(case)
+        for key, preset in presets.items():
+            preset["num_stages"] = case.get("num_stages", default_stages[key])
         runs = {}
         for precision, dtype in (("f32", torch.float32), ("bf16", torch.bfloat16)):
             tq, tk, tv = (torch.from_numpy(x).cuda().to(dtype) for x in (q, k, v))
@@ -141,7 +147,7 @@ def main():
         row = dict(name=case["name"], selected=int(indices.shape[-1]), min_score_gap=gap,
                    output_rms=float(np.sqrt(np.mean(np.square(output, dtype=np.float64)))),
                    bf16_relative_rms=relative_rms(low_output, output), bf16_query_blocks_with_other_selection=moved,
-                   query_block_rows=int(np.prod(indices.shape[:3])))
+                   query_block_rows=int(np.prod(indices.shape[:3])), num_stages=case.get("num_stages"))
         report["cases"].append(row)
         print(json.dumps(row))
         output.astype("<f4").tofile(os.path.join(args.out, case["name"] + ".output.f32"))
