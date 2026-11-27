@@ -463,6 +463,8 @@ public sealed unsafe class Tensor : IDisposable
         Tensor view = new(ptr, Shape, DType, Device);
         view.SetKeepAlive(this);
         CopyQuantMetadataTo(view, rowsPreserved: true);
+        // The same weight under an adapter: the route it was kept off stays refused.
+        view.SkipNativeFp8Gemm = SkipNativeFp8Gemm;
         view.LowRankAdjunct = adjunct;
         return view;
     }
