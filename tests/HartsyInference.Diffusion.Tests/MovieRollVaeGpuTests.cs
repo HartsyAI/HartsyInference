@@ -14,9 +14,9 @@ using Xunit.Abstractions;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The MovieRoll decode on a device, through <see cref="MovieRollPipeline.Generate"/>: the tiny 4-channel VAE is placed for the decode and
-/// released after it, and the frames must match the CPU run. The bound is not set yet: the test prints the max error and asserts only that the
-/// sampling and the decode read nothing back from the device before the frames are compared. Runs only through the GPU session
-/// (Category=GpuIntegration); it is skipped where no CUDA device is present.</summary>
+/// released after it, and the frames must match the CPU run within <see cref="FrameErrorBound"/>. The sampling and the decode must read nothing
+/// back from the device before the frames are compared. Runs only through the GPU session (Category=GpuIntegration); it is skipped where no
+/// CUDA device is present.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollVaeGpuTests(ITestOutputHelper output)
 {
@@ -25,6 +25,10 @@ public sealed class MovieRollVaeGpuTests(ITestOutputHelper output)
     private const int Width = 3;
     private const int Blocks = 2;
     private const int Hidden = 32;
+
+    /// <summary>The bound on the frame max error: about twice the figure measured on a local RTX 3060 (CUDA) on 2026-11-26, 1.266e-3, from one
+    /// run of this test. The bound leaves room for run-to-run noise and for the device.</summary>
+    private const float FrameErrorBound = 2.5e-3f;
 
     private static readonly MovieRollSamplerOptions Options = new()
     {
@@ -58,6 +62,7 @@ public sealed class MovieRollVaeGpuTests(ITestOutputHelper output)
         output.WriteLine($"MAX_ERR MovieRollVaeDecode frames: {max:E3} at flat index {at} of {e.Length} (cpu {e[at]:G9}, device {a[at]:G9})");
         output.WriteLine($"SWITCHES MovieRollVaeDecode: HighPrecisionGemm={device.Backend.HighPrecisionGemm}");
 
+        Assert.True(max <= FrameErrorBound, $"frame max abs error {max:E3} exceeds {FrameErrorBound:E1}.");
         Assert.Equal(0, reads);
     }
 
