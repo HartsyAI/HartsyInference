@@ -22,12 +22,14 @@ internal static class LongCatWeightFit
         VideoWeightFit.Refusal(backend, "LongCat", () =>
         {
             (long held, long widened) = HeldBytes(directory, backend.SupportsResidentQuant);
-            return (held, widened > 0 ? " (the quantized weights this backend cannot hold packed widen to F32)" : "");
+            string how = LongCatCheckpoint.GgufIn(directory) is null ? "its INT8 weights widen to F32 on this backend"
+                : "the block quants this backend cannot hold packed widen to BF16";
+            return (held, widened > 0 ? $" ({how})" : "");
         });
 
     /// <summary>The bytes the DiT's weights in <paramref name="directory"/> take on a backend, from the file headers: each tensor at its stored
-    /// size, and a quantized weight (INT8, or a GGUF block quant) the backend does not hold packed at 4 bytes an element, an INT8 one without
-    /// its row scales. <c>Widened</c> counts those weights.</summary>
+    /// size; a weight the backend does not hold packed at its widened size, 4 bytes an element for an INT8 one (without its row scales) and 2
+    /// for a GGUF block quant. <c>Widened</c> counts those weights.</summary>
     public static (long Bytes, long Widened) HeldBytes(string directory, Func<Tensor, bool> supportsResidentQuant)
     {
         if (LongCatCheckpoint.GgufIn(directory) is { } gguf)
@@ -85,7 +87,7 @@ internal static class LongCatWeightFit
                     using Tensor probe = new(new TensorShape(1, dtype.BlockElementCount), dtype);
                     packed[dtype] = resident = supportsResidentQuant(probe);
                 }
-                bytes += resident ? parts.Sum(part => part.ByteLength) : elements * DType.F32.SizeInBytes;
+                bytes += resident ? parts.Sum(part => part.ByteLength) : elements * DType.BF16.SizeInBytes;
                 widened += resident ? 0 : 1;
             }
             else if (mixed || (dtype == DType.F32 && EngineKnobs.LongCatDitBf16.Value))

@@ -122,12 +122,24 @@ public static partial class LongCatGgufConverter
         int written = 0;
         foreach (Tensor part in parts)
         {
-            using Tensor? wide = part.DType.IsQuantized ? GgufDequantizer.Dequantize(part, DType.F32)
-                : part.DType == DType.F32 ? null : part.CastTo(DType.F32);
-            ReadOnlySpan<float> values = (wide ?? part).AsReadOnlySpan<float>();
-            for (int i = 0; i < values.Length; i++)
-                bits[written + i] = BFloat16Bits.FromFloat(values[i]);
-            written += values.Length;
+            int count = checked((int)part.ElementCount);
+            if (part.DType.IsQuantized)
+            {
+                using Tensor decoded = GgufDequantizer.Dequantize(part, DType.BF16);
+                decoded.AsReadOnlySpan<ushort>().CopyTo(bits[written..]);
+            }
+            else if (part.DType == DType.BF16)
+            {
+                part.AsReadOnlySpan<ushort>().CopyTo(bits[written..]);
+            }
+            else
+            {
+                using Tensor? wide = part.DType == DType.F32 ? null : part.CastTo(DType.F32);
+                ReadOnlySpan<float> values = (wide ?? part).AsReadOnlySpan<float>();
+                for (int i = 0; i < values.Length; i++)
+                    bits[written + i] = BFloat16Bits.FromFloat(values[i]);
+            }
+            written += count;
         }
         return bf16;
     }

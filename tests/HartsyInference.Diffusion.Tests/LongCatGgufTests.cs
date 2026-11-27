@@ -79,7 +79,8 @@ public sealed class LongCatGgufTests : IDisposable
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(repack.Directory);
         using CpuBackend backend = new();
         Dictionary<string, Tensor> loaded = new(checkpoint.Weights, StringComparer.Ordinal);
-        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackends(loaded, [backend], DType.F32);
+        using QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(loaded, [backend], LongCatRecipeSupport.WidenedDType(checkpoint));
         Dictionary<string, Tensor> expected = ExpectedDense(repack, checkpoint);
         try
         {
@@ -102,7 +103,8 @@ public sealed class LongCatGgufTests : IDisposable
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(repack.Directory);
         using CpuBackend backend = new();
         Dictionary<string, Tensor> loaded = new(checkpoint.Weights, StringComparer.Ordinal);
-        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackends(loaded, [backend], DType.F32);
+        using QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(loaded, [backend], LongCatRecipeSupport.WidenedDType(checkpoint));
         // The LoRA's fused modules (attn.qkv, cross_attn.kv_linear) are the ones the loader builds from the split parts.
         using LongCatLoraFixture fixture = new(Path.Combine(_root, "dmd.safetensors"), _config, 7);
         using LoraFile file = LoraFile.Load(fixture.Path);
@@ -144,13 +146,56 @@ public sealed class LongCatGgufTests : IDisposable
         using Repack repack = WriteRepack(quant, valueQuant);
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(repack.Directory);
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
-        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareFor(weights, _ => packed, "stand-in", DType.F32);
+        using QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareFor(weights, _ => packed, "stand-in", LongCatRecipeSupport.WidenedDType(checkpoint));
 
         long held = weights.Values.Sum(static t => t.DType.ComputeByteCount(t.ElementCount));
         (long bytes, long widened) = LongCatWeightFit.HeldBytes(repack.Directory, _ => packed);
 
         Assert.Equal(held, bytes);
         Assert.Equal(prepared.WidenedCount, widened);
+    }
+
+    [Theory]
+    [InlineData("Q4_1")]
+    [InlineData("Q5_1")]
+    public void ATypeTheBackendCannotDecodeIsHeldAsItsBf16ValuesNotF32(string quant)
+    {
+        // Neither CUDA nor Vulkan decodes these two; widened to F32 the released files would hold about 57 GiB of host weights.
+        using Repack repack = WriteRepack(quant, quant);
+        using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(repack.Directory);
+        Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
+
+        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareFor(weights,
+            weight => weight.DType != DTypeOf(quant), "stand-in", LongCatRecipeSupport.WidenedDType(checkpoint));
+
+        Assert.True(prepared.WidenedCount > 0);
+        Assert.Equal(prepared.WidenedCount, LongCatWeightFit.HeldBytes(repack.Directory, weight => weight.DType != DTypeOf(quant)).Widened);
+        foreach ((string key, Tensor held) in weights)
+        {
+            Assert.False(held.DType.IsQuantized);
+            if (!checkpoint.Weights[key].DType.IsQuantized)
+                continue;
+            Assert.Equal(DType.BF16, held.DType);
+            float[] expected = repack.Decoded[key].AsReadOnlySpan<float>().ToArray();
+            for (int i = 0; i < expected.Length; i++)
+                expected[i] = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(expected[i]));
+            Assert.Equal(expected, Decode(held));
+        }
+    }
+
+    [Fact]
+    public void OnlyARepackWidensToBf16()
+    {
+        using Repack repack = WriteRepack("Q8_0", "Q8_0");
+        string dense = Path.Combine(_root, "dense");
+        Directory.CreateDirectory(dense);
+        LongCatTestData.WriteCheckpoint(dense, _dense);
+        using LongCatCheckpoint gguf = LongCatCheckpoint.Open(repack.Directory);
+        using LongCatCheckpoint safetensors = LongCatCheckpoint.Open(dense);
+
+        Assert.Equal((DType.BF16, DType.F32),
+            (LongCatRecipeSupport.WidenedDType(gguf), LongCatRecipeSupport.WidenedDType(safetensors)));
     }
 
     [Fact]
@@ -216,7 +261,8 @@ public sealed class LongCatGgufTests : IDisposable
         return new Repack(directory, LongCatGgufTestData.Write(directory, _dense, quant, valueQuant, skip));
     }
 
-    /// <summary>The dense weights the checkpoint should behave as: the file's decoded values, BF16-rounded where a join became BF16.</summary>
+    /// <summary>The dense weights the checkpoint should behave as: the file's decoded values, BF16-rounded wherever the engine holds BF16 (a
+    /// widened join) or widens to it (a block quant the CPU cannot hold packed).</summary>
     private static Dictionary<string, Tensor> ExpectedDense(Repack repack, LongCatCheckpoint checkpoint)
     {
         Dictionary<string, Tensor> result = new(StringComparer.Ordinal);
@@ -225,7 +271,7 @@ public sealed class LongCatGgufTests : IDisposable
             Tensor copy = new(decoded.Shape, DType.F32);
             Span<float> values = copy.AsSpan<float>();
             decoded.AsReadOnlySpan<float>().CopyTo(values);
-            if (checkpoint.Weights[key].DType == DType.BF16)
+            if (checkpoint.Weights[key].DType == DType.BF16 || checkpoint.Weights[key].DType.IsQuantized)
                 for (int i = 0; i < values.Length; i++)
                     values[i] = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(values[i]));
             result[key] = copy;

@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.Tests.Shared;
@@ -18,8 +19,8 @@ public sealed class LongCatGgufCudaTests(ITestOutputHelper output) : IDisposable
 {
     private const int Frames = 3, Height = 8, Width = 8, TextRows = 6;
 
-    /// <summary>Relative RMS against the CPU, which widens every weight to F32; the device decodes and multiplies in its own precision. Set before
-    /// the first run.</summary>
+    /// <summary>Relative RMS against the CPU, which widens every block quant to BF16; the device decodes and multiplies in its own precision. Set
+    /// before the first run.</summary>
     private const double Bound = 1e-2;
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "longcat-gguf-cuda-" + Guid.NewGuid().ToString("N"));
@@ -73,7 +74,8 @@ public sealed class LongCatGgufCudaTests(ITestOutputHelper output) : IDisposable
         using IBackend owned = backend;
         using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(root);
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
-        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackends(weights, [backend], DType.F32);
+        using QuantizedWeightPolicy.PreparedWeights prepared =
+            QuantizedWeightPolicy.PrepareForBackends(weights, [backend], LongCatRecipeSupport.WidenedDType(checkpoint));
         using LoraFile file = LoraFile.Load(fixture.Path);
         using LoraStack stack = new();
         AdjunctGate gate = new();
