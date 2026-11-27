@@ -61,4 +61,8 @@ public enum VideoFeatures
     /// <c>&lt;weight[N]:&gt;</c> becomes <c>(text:N)</c> or collapses to its inner text. Derived from
     /// <see cref="IVideoRecipe.PromptWeighting"/>, never declared directly.</summary>
     PromptWeighting = 16384,
+
+    /// <summary>A clip the output continues: its last frames condition the generation and the output begins with them (LongCat-Video's
+    /// video continuation). Requested by <see cref="VideoRequest.VideoContinuation"/>; a recipe without it refuses the request at planning.</summary>
+    VideoContinuation = 32768,
 }

@@ -260,6 +260,32 @@ internal static class LongCatRecipeSupport
     internal static string DmdLoraPath(string checkpointPath) =>
         Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
 
+    /// <summary>The planning refusals of the base family (the base and the distilled build): no driving speech, and a chain length the base recipe
+    /// does not read. Null when the request is one the base family can run.</summary>
+    internal static string? BaseRequestRefusal(HartsyInference.Engine.Requests.VideoRequest request,
+        HartsyInference.Engine.Planning.VideoEffectiveSettings settings, bool distilled)
+    {
+        if (request.VideoAudioReference is not null)
+            return "LongCat-Video has no driving audio; speech-driven video is longcat-avatar.";
+        if (request.ChainTotalFrames is not null)
+            return "Long video on LongCat-Video is not wired yet; the request's chain length would be ignored.";
+        if (request.VideoContinuation is not null)
+        {
+            if (request.InitImage is not null)
+                return "A LongCat-Video continuation takes its conditioning from the clip; it cannot also take an init image.";
+            // The result's size is the clip's, so an explicit size would be silently ignored.
+            if (request.Width is not null || request.Height is not null)
+                return "A LongCat-Video continuation takes its size from the clip; leave width and height unset.";
+            // The reference's generate_vc asserts `not (use_distill and enhance_hf)`, and a continuation runs with enhance_hf.
+            if (distilled)
+                return "The distilled LongCat-Video build cannot continue a clip: its 16-step schedule excludes the continuation's enhance_hf tail. Use longcat-video.";
+            // The demo writes the continuation at 15 fps (run_demo_video_continuation.py line 116).
+            if (settings.Fps != LongCatContinuation.TargetFps)
+                return $"A LongCat-Video continuation is written at {LongCatContinuation.TargetFps} fps, as the reference writes it; leave fps unset or set {LongCatContinuation.TargetFps}.";
+        }
+        return null;
+    }
+
     /// <summary>The base distilled LoRA's path, which must exist: the distilled build is refused rather than run as the undistilled base.</summary>
     internal static string RequireCfgStepLora(string checkpointPath)
     {

@@ -369,6 +369,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         {
             features |= VideoFeatures.LongFormChain;
         }
+        if (request.VideoContinuation is not null)
+        {
+            features |= VideoFeatures.VideoContinuation;
+        }
         return features;
     }
 
