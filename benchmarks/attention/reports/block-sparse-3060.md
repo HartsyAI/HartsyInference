@@ -1,0 +1,40 @@
+# Block-sparse attention on an RTX 3060 (2026-11-27)
+
+CUDA `IBackend.BlockSparseAttention` beside `ScaledDotProductAttention` on the same device-resident operands, at token grids of
+LongCat-Video's 720p refinement, head dim 128, sparsity 0.9375 and 4×4×4 blocks.
+
+- Commit `c665f9ca8`, RTX 3060 12 GB, driver 610.88, Windows 11, .NET 10 Release, default engine settings (TF32 allowed for
+  dense F32, cuDNN on). No other test or inference process on the card; its processor was busy with other work.
+- One untimed call, then the median of three synchronized calls. Output in the operands' dtype.
+- `dotnet test tests/HartsyInference.Core.Tests -c Release --filter FullyQualifiedName~BlockSparseAttentionSpeedTests`
+
+| Token grid (T×H×W) | Tokens | Heads | Key blocks read | Operands | Block-sparse | Dense | Dense / block-sparse |
+|---|---|---|---|---|---|---|---|
+| 12×44×80 | 42,240 | 32 | 41 of 660 | F32 | 878 ms | 9,280 ms | 10.6 |
+| 12×44×80 | 42,240 | 32 | 41 of 660 | BF16 | 834 ms | 8,373 ms | 10.0 |
+| 48×44×80 | 168,960 | 8 | 165 of 2640 | F32 | 3,478 ms | 31,828 ms | 9.2 |
+| 48×44×80 | 168,960 | 8 | 165 of 2640 | BF16 | 3,492 ms | 34,143 ms | 9.8 |
+
+The 48-frame grid runs 8 heads rather than the model's 32: four operands of 32 heads do not fit in 12 GB. Which dense kernel
+row served each call was not recorded.
+
+The block-sparse kernel computes in F32 whatever it reads, so BF16 operands save memory and load traffic and little time. A
+query block reads 1/16 of the keys, and the time falls by less than that: the kernel is F32 arithmetic in the CUDA cores.
+Its workspace beside the operands is the block means and the selection, 34 MiB at the 48-frame, 8-head size (computed from the
+shapes).
+
+## Tile layout
+
+The attention stage alone, F32, 12×44×80 with 8 heads and 41 blocks read, synthetic selection, median of three. Each row is one
+build of the kernel with other tile constants.
+
+| Query rows × key rows a block | Threads sharing 4 query rows | Time |
+|---|---|---|
+| 64 × 64 | 16 | 282 ms |
+| 64 × 64 | 32 (adopted for head dim 32 and up) | 207 ms |
+| 64 × 16 | 16 | 219 ms |
+| 64 × 32 | 32 | 257 ms |
+| 32 × 32 | 16 | 433 ms |
+
+Groups of 2 query rows instead of 4 gave 288 ms (64 × 64) and 320 ms (64 × 32). Head dim 16 keeps 16 threads a group, which is
+all its channels split into.

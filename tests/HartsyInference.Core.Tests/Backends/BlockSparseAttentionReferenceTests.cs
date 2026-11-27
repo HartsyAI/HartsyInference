@@ -60,16 +60,7 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
     {
         using CpuBackend backend = new();
         BlockSparseAttentionCase reference = BlockSparseAttentionCase.Named(name);
-        (uint[] bits, int[] blocks) = name switch
-        {
-            "Shipped" => (BlockSparseAttentionVectors.ShippedOutput, BlockSparseAttentionVectors.ShippedSelected),
-            "CrossLength" => (BlockSparseAttentionVectors.CrossLengthOutput, BlockSparseAttentionVectors.CrossLengthSelected),
-            "Batched" => (BlockSparseAttentionVectors.BatchedOutput, BlockSparseAttentionVectors.BatchedSelected),
-            "UnequalBlocks" => (BlockSparseAttentionVectors.UnequalBlocksOutput, BlockSparseAttentionVectors.UnequalBlocksSelected),
-            "HeadDim128" => (BlockSparseAttentionVectors.HeadDim128Output, BlockSparseAttentionVectors.HeadDim128Selected),
-            "Truncated" => (BlockSparseAttentionVectors.TruncatedOutput, BlockSparseAttentionVectors.TruncatedSelected),
-            _ => (BlockSparseAttentionVectors.NoneSelectedOutput, []),
-        };
+        (uint[] bits, int[] blocks) = reference.Vectors;
 
         (float[] output, int[] selected) = reference.Run(backend);
 
@@ -78,6 +69,41 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
         double error = BlockSparseAttentionCase.RelativeRms(reference.SampledRows(output), expected);
         log.WriteLine($"{name}: relative RMS against the reference kernel {error:E3} over {expected.Length} values");
         Assert.True(error <= Tolerance, $"{name}: relative RMS {error:E3}");
+    }
+
+    [Theory]
+    [InlineData("Shipped")]
+    [InlineData("UnequalBlocks")]
+    [InlineData("HeadDim128")]
+    public void Bf16OperandsRunAsTheSameValuesInF32(string name)
+    {
+        using CpuBackend backend = new();
+        BlockSparseAttentionCase reference = BlockSparseAttentionCase.Named(name);
+        BlockSparseAttentionOptions options = reference.Options;
+        (Tensor query, Tensor key, Tensor value) = reference.Operands();
+        using (query)
+        using (key)
+        using (value)
+        using (Tensor narrowQuery = query.CastTo(DType.BF16))
+        using (Tensor narrowKey = key.CastTo(DType.BF16))
+        using (Tensor narrowValue = value.CastTo(DType.BF16))
+        using (Tensor wideQuery = narrowQuery.CastTo(DType.F32))
+        using (Tensor wideKey = narrowKey.CastTo(DType.F32))
+        using (Tensor wideValue = narrowValue.CastTo(DType.F32))
+        {
+            TensorShape report = new(reference.Batch, reference.Heads, options.QueryBlocks, options.SelectedBlocks);
+            using Tensor wide = new(query.Shape, DType.F32), mixed = new(query.Shape, DType.F32), narrow = new(query.Shape, DType.BF16);
+            using Tensor wideSelected = new(report, DType.I32), mixedSelected = new(report, DType.I32);
+
+            backend.BlockSparseAttention(wide, wideQuery, wideKey, wideValue, options, wideSelected);
+            backend.BlockSparseAttention(mixed, narrowQuery, narrowKey, narrowValue, options, mixedSelected);
+            backend.BlockSparseAttention(narrow, narrowQuery, narrowKey, narrowValue, options);
+
+            Assert.Equal(wideSelected.AsReadOnlySpan<int>().ToArray(), mixedSelected.AsReadOnlySpan<int>().ToArray());
+            Assert.Equal(wide.AsReadOnlySpan<int>().ToArray(), mixed.AsReadOnlySpan<int>().ToArray());
+            float[] expected = wide.AsReadOnlySpan<float>().ToArray();
+            Assert.Equal(Array.ConvertAll(expected, TensorCasts.F32ToBf16BitsRounded), narrow.AsReadOnlySpan<ushort>().ToArray());
+        }
     }
 
     [Theory]
@@ -139,11 +165,32 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
             Assert.ThrowsAny<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Output, f.Query, f.Key, f.Value, bad));
         Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Query, f.Query, f.Key, f.Value, good));
         Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Output, f.Query, f.Key, f.Query, good));
-        using Tensor half = new(f.Query.Shape, DType.F16);
+        using Tensor half = new(f.Query.Shape, DType.F16), narrow = new(f.Query.Shape, DType.BF16);
         Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Output, half, f.Key, f.Value, good));
+        // Q, K and V share one dtype.
+        Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Output, narrow, f.Key, f.Value, good));
+        Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(half, f.Query, f.Key, f.Value, good));
         using Tensor wrongReport = new(new TensorShape(1, 1, 2, 1), DType.I32);
         Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Output, f.Query, f.Key, f.Value, good, wrongReport));
         Assert.All(f.Output.AsReadOnlySpan<float>().ToArray(), static v => Assert.Equal(-7f, v));
+    }
+
+    /// <summary>A tensor allocates on first read, so these shapes cost nothing as long as the call is refused unread.</summary>
+    [Theory]
+    [InlineData(4, 4096, 4096, 4, 64, 0.9375)]
+    [InlineData(1, 256, 256, 1, 1, 0.0)]
+    public void ACallPastAnIntsElementsIsRefusedByName(int frames, int height, int width, int block, int dim, double sparsity)
+    {
+        using CpuBackend backend = new();
+        TokenGrid3D grid = new(frames, height, width), box = new(block, block, block);
+        BlockSparseAttentionOptions options = new() { QueryGrid = grid, KeyGrid = grid, QueryBlock = box, KeyBlock = box, Sparsity = sparsity };
+        TensorShape shape = new(1, 1, grid.Tokens, dim);
+        using Tensor query = new(shape, DType.F32), key = new(shape, DType.F32), value = new(shape, DType.F32), output = new(shape, DType.F32);
+
+        AttentionUnsupportedException refusal = Assert.Throws<AttentionUnsupportedException>(
+            () => backend.BlockSparseAttention(output, query, key, value, options));
+
+        Assert.Contains(nameof(IBackend.BlockSparseAttention), refusal.Message);
     }
 
     private static TokenGrid3D Box(int[] extents) => new(extents[0], extents[1], extents[2]);
