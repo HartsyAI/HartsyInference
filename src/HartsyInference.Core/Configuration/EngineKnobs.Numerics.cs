@@ -83,14 +83,14 @@ public static partial class EngineKnobs
             "Converts a dense F32 LongCat DiT to BF16 at load, as the reference loads it (54.3 GB F32 is more than the host cap); off keeps F32.");
 
     /// <summary>Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.</summary>
+    public static readonly Knob<bool> DitF16 =
+        Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
+
     /// <summary>Lets the MovieRoll DiT narrow its block attention to F16 on load. Off by default: F16 attention fails the upstream parity bound on CUDA
     /// (relative RMS 5.8e-3 against 1e-3); F32 passes (1.1e-4) at about 22% more forward time.</summary>
     public static readonly Knob<bool> MovieRollAttentionF16 =
         Bool("numerics.movieRollAttentionF16", false, KnobScope.Construction, KnobDomain.Numerics,
             "Narrows the MovieRoll DiT block attention to F16 (the parity-failing path); off keeps F32.");
-
-    public static readonly Knob<bool> DitF16 =
-        Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
 
     /// <summary>Krea 2 honours each layer's <c>full_precision_matrix_mult</c> mark (dense GEMM for marked nvfp4 layers). Off
     /// by default: marked layers run the native block-scaled GEMM, which is about 60% faster per step on Blackwell.</summary>

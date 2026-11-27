@@ -14,23 +14,33 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Diagnostic: the released MovieRoll DiT's forward on one backend, block by block. Each block's output image tokens are written to
 /// <c>MOVIEROLL_TAP_OUT</c> as <c>block_NN.bin</c> (raw little-endian floats), so the CPU and CUDA runs can be compared per block.
-/// <c>MOVIEROLL_TAP_BACKEND</c> is <c>cpu</c> or <c>cuda</c>; the CUDA run is the exact lane (full-F32 GEMMs, DiT F16 activations off).
-/// Environment: <c>MOVIEROLL_DIT_PATH</c>, <c>MOVIEROLL_INPUTS</c>. Diagnostic only; asserts nothing beyond the run completing.</summary>
+/// <c>MOVIEROLL_TAP_BACKEND</c> is <c>cpu</c> or <c>cuda</c>. CUDA uses the exact GEMM lane (<c>HighPrecisionGemm</c>); block attention is F32 unless
+/// <c>MOVIEROLL_TAP_ATTENTION_F16=1</c>, matching the engine default. Environment: <c>MOVIEROLL_DIT_PATH</c>, <c>MOVIEROLL_INPUTS</c>, and
+/// <c>MOVIEROLL_TAP_OUT</c> (a directory, required once the other two are set). Skipped when the first two are unset. Diagnostic: asserts only that
+/// one file was written per block, so the output directory should be empty before the run.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollBlockTapTests(ITestOutputHelper output)
 {
-    [Fact]
+    [RealWeightsFact("MOVIEROLL_DIT_PATH", "MOVIEROLL_INPUTS")]
     public void BlockTap_WritesEachBlockOutput()
     {
-        string? dit = Environment.GetEnvironmentVariable("MOVIEROLL_DIT_PATH");
-        string? inputsPath = Environment.GetEnvironmentVariable("MOVIEROLL_INPUTS");
-        string? outDir = Environment.GetEnvironmentVariable("MOVIEROLL_TAP_OUT");
-        string backendName = Environment.GetEnvironmentVariable("MOVIEROLL_TAP_BACKEND") ?? "cpu";
-        if (string.IsNullOrEmpty(dit) || string.IsNullOrEmpty(inputsPath) || string.IsNullOrEmpty(outDir))
+        try
         {
-            output.WriteLine("SKIPPED: MOVIEROLL_DIT_PATH, MOVIEROLL_INPUTS or MOVIEROLL_TAP_OUT is unset.");
-            return;
+            Tap();
         }
+        finally
+        {
+            KnobStore.ResetOverrides();
+        }
+    }
+
+    private void Tap()
+    {
+        string dit = Environment.GetEnvironmentVariable("MOVIEROLL_DIT_PATH")!;
+        string inputsPath = Environment.GetEnvironmentVariable("MOVIEROLL_INPUTS")!;
+        string outDir = Environment.GetEnvironmentVariable("MOVIEROLL_TAP_OUT")
+            ?? throw new InvalidOperationException("MOVIEROLL_TAP_OUT must name the output directory.");
+        string backendName = Environment.GetEnvironmentVariable("MOVIEROLL_TAP_BACKEND") ?? "cpu";
         Directory.CreateDirectory(outDir);
         bool cuda = backendName == "cuda";
 
@@ -40,8 +50,6 @@ public sealed class MovieRollBlockTapTests(ITestOutputHelper output)
         using SafeTensorsLoader inputs = new();
         inputs.Load(inputsPath);
 
-        if (cuda) KnobStore.Set(EngineKnobs.DitF16, false);
-        bool attentionF32 = Environment.GetEnvironmentVariable("MOVIEROLL_TAP_ATTENTION_F32") == "1";
         using IBackend backend = cuda ? GpuDevices.OpenCuda() : new CpuBackend();
         if (cuda) backend.HighPrecisionGemm = true;
 
@@ -68,8 +76,9 @@ public sealed class MovieRollBlockTapTests(ITestOutputHelper output)
             || k.StartsWith("double_blocks.0.", StringComparison.Ordinal)).ToList());
         Dictionary<string, Tensor> sharedOut = HunyuanVideo15CheckpointConverter.Convert(sharedInputs, numBlocks: 1, hidden: config.HiddenSize);
         using HunyuanVideo15Dit dit15 = new(config);
-        dit15.AllowF16Attention = !attentionF32;
-        output.WriteLine($"attention F16 narrowing allowed: {!attentionF32}");
+        // Matches the engine default (F32 block attention); MOVIEROLL_TAP_ATTENTION_F16=1 narrows it to F16.
+        dit15.AllowF16Attention = Environment.GetEnvironmentVariable("MOVIEROLL_TAP_ATTENTION_F16") == "1";
+        output.WriteLine($"attention F16 narrowing allowed: {dit15.AllowF16Attention}");
         dit15.LoadSharedWeights(sharedOut.Where(p => !p.Key.StartsWith("transformer_blocks.", StringComparison.Ordinal))
             .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal));
 
@@ -127,12 +136,12 @@ public sealed class MovieRollBlockTapTests(ITestOutputHelper output)
             using Tensor velocity = dit15.ForwardPerFrame(backend, noise, frameTimesteps, 1000f, qwen, byt5, conditioning: null);
             stream?.EndStep();
             output.WriteLine($"block tap on {backendName}: {config.NumBlocks} blocks, velocity shape {velocity.Shape}");
+            Assert.Equal(config.NumBlocks, Directory.GetFiles(outDir, "block_*.bin").Length);
         }
         finally
         {
             stream?.Dispose();
             foreach (Tensor old in previous) old.Dispose();
-            KnobStore.ResetOverrides();
         }
     }
 }

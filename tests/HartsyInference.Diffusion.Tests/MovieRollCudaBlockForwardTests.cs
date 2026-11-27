@@ -15,23 +15,33 @@ namespace HartsyInference.Diffusion.Tests;
 /// loaded just before its forward (the DiT's <c>BeforeBlockForward</c> seam, chained ahead of the streaming scope's own hook), and the scope moves the
 /// blocks through the device. The output velocity is compared with the upstream velocity by relative RMS.
 /// Environment: <c>MOVIEROLL_DIT_PATH</c> the released file, <c>MOVIEROLL_INPUTS</c> the saved inputs (seed 7), <c>MOVIEROLL_VELOCITY_REF</c> the upstream
-/// velocity (safetensors, key <c>velocity</c>). Without them the test returns early. Bound: relative RMS at most 1e-3.</summary>
+/// velocity (safetensors, key <c>velocity</c>). Skipped (reported, not passed) when any is unset or no CUDA device opens.
+/// <c>MOVIEROLL_CUDA_HIGH_PRECISION_GEMM=1</c> runs the exact lane (full-F32 GEMMs); unset keeps the backend default (TF32), as the recipe does.
+/// <c>MOVIEROLL_CUDA_F16_ATTENTION=1</c> narrows the block attention to F16 (the path that fails the bound); unset keeps F32, the engine default.
+/// Bound: relative RMS at most 1e-3.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollCudaBlockForwardTests(ITestOutputHelper output)
 {
     private const double RelativeRmsBound = 1e-3;
 
-    [CudaDeviceFact]
+    [CudaRealWeightsFact("MOVIEROLL_DIT_PATH", "MOVIEROLL_INPUTS", "MOVIEROLL_VELOCITY_REF")]
     public void CudaBlockStreamedForward_MatchesTheUpstreamVelocity()
     {
-        string? dit = Environment.GetEnvironmentVariable("MOVIEROLL_DIT_PATH");
-        string? inputsPath = Environment.GetEnvironmentVariable("MOVIEROLL_INPUTS");
-        string? refPath = Environment.GetEnvironmentVariable("MOVIEROLL_VELOCITY_REF");
-        if (string.IsNullOrEmpty(dit) || string.IsNullOrEmpty(inputsPath) || string.IsNullOrEmpty(refPath))
+        try
         {
-            output.WriteLine("SKIPPED: MOVIEROLL_DIT_PATH, MOVIEROLL_INPUTS or MOVIEROLL_VELOCITY_REF is unset.");
-            return;
+            Forward();
         }
+        finally
+        {
+            KnobStore.ResetOverrides();
+        }
+    }
+
+    private void Forward()
+    {
+        string dit = Environment.GetEnvironmentVariable("MOVIEROLL_DIT_PATH")!;
+        string inputsPath = Environment.GetEnvironmentVariable("MOVIEROLL_INPUTS")!;
+        string refPath = Environment.GetEnvironmentVariable("MOVIEROLL_VELOCITY_REF")!;
 
         HunyuanVideo15Config config = HunyuanVideo15Config.Full;
         using SafeTensorsLoader weights = new();
@@ -40,21 +50,10 @@ public sealed class MovieRollCudaBlockForwardTests(ITestOutputHelper output)
         inputs.Load(inputsPath);
         using SafeTensorsLoader reference = new();
         reference.Load(refPath);
-        // Diagnostic: MOVIEROLL_DIAG_NO_CUDNN_SDPA=1 routes attention through the non-cuDNN path, to isolate cuDNN SDPA as the divergence.
-        if (Environment.GetEnvironmentVariable("MOVIEROLL_DIAG_NO_CUDNN_SDPA") == "1")
-        {
-            KnobStore.Set(EngineKnobs.SdpaCudnn, false);
-            output.WriteLine("DIAG: cuDNN SDPA disabled for this run");
-        }
-        // The F16 activation path of the DiT blocks and their attention (numerics.ditF16) is off for the exact lane.
-        if (Environment.GetEnvironmentVariable("MOVIEROLL_DIAG_NO_DITF16") == "1")
-        {
-            KnobStore.Set(EngineKnobs.DitF16, false);
-            output.WriteLine("DIAG: numerics.ditF16 disabled for this run");
-        }
+
         using IBackend backend = GpuDevices.OpenCuda();
-        // The exact lane: full-F32 GEMMs, so the error that remains is not TF32 rounding (the default lane is TF32).
-        backend.HighPrecisionGemm = true;
+        backend.HighPrecisionGemm = Environment.GetEnvironmentVariable("MOVIEROLL_CUDA_HIGH_PRECISION_GEMM") == "1";
+        output.WriteLine($"HIGH_PRECISION_GEMM {backend.HighPrecisionGemm}");
 
         // Shared weights first: the top level and block 0 go through the converter once; block 0's outputs are released.
         Dictionary<string, Tensor> source = weights.GetAllTensors();
@@ -62,9 +61,7 @@ public sealed class MovieRollCudaBlockForwardTests(ITestOutputHelper output)
             source.Where(p => !p.Key.StartsWith("double_blocks.", StringComparison.Ordinal) || p.Key.StartsWith("double_blocks.0.", StringComparison.Ordinal))
                 .ToDictionary(p => p.Key, p => p.Value), numBlocks: 1, hidden: config.HiddenSize);
         using HunyuanVideo15Dit dit15 = new(config);
-        // The exact lane keeps the block attention in F32: the joint and window attention narrow to F16 by default (the shipped path), and that narrowing
-        // is what the 5.8e-3 error came from; with F32 attention the per-block outputs match the CPU run to 6e-5 relative RMS.
-        // Parity runs keep F32 attention; MOVIEROLL_CUDA_F16_ATTENTION=1 measures the shipped F16 attention for timing (it is expected to fail the bound).
+        // Block attention stays F32 unless MOVIEROLL_CUDA_F16_ATTENTION=1: the engine default (AllowF16Attention = false) is the parity path.
         dit15.AllowF16Attention = Environment.GetEnvironmentVariable("MOVIEROLL_CUDA_F16_ATTENTION") == "1";
         output.WriteLine($"ATTENTION_F16 {dit15.AllowF16Attention}");
         dit15.LoadSharedWeights(sharedOut.Where(p => !p.Key.StartsWith("transformer_blocks.", StringComparison.Ordinal))
