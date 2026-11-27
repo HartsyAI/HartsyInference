@@ -382,6 +382,7 @@ the call by name.
   subnormal values (no float-controls mode is declared). The attention is an online softmax over chunks of 16 key rows.
   A selection or attention pass above 2^33 element operations goes out in several submissions, split along its workgroups,
   to keep a large call under the Windows GPU watchdog. A captured step graph is submitted whole.
+  [Times](../benchmarks/attention/reports/block-sparse-3060.md#vulkan).
 
 The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in
 top-k mode, whose `bsa_params` ship as sparsity 0.9375 and 4×4×4 blocks. Its CDF-threshold selection has no option here.
