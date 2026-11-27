@@ -1,15 +1,19 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>A LongCat-Video DiT checkpoint folder: a sharded safetensors index with reference key names, either dense (bf16 or F32, the
 /// diffusers-named index) or the per-row INT8 release (<c>quantized_model.safetensors.index.json</c>, <c>.weight_int8</c> plus
-/// <c>.weight_scale</c>), and its <c>config.json</c>. Tensors are borrowed views of the shard mappings and live until this is disposed. INT8
-/// weights come back under the dense key names as I8 tensors carrying their row scale (<see cref="LongCatInt8Converter"/>).</summary>
+/// <c>.weight_scale</c>), or, alone in a folder of its own, one GGUF repack in the ComfyUI Wan layout
+/// (<see cref="LongCatGgufConverter"/>); and its <c>config.json</c>, derived from the shapes when absent. Tensors are borrowed views of the
+/// file mappings, or copies this owns, and live until this is disposed. INT8 weights come back under the dense key names as I8 tensors
+/// carrying their row scale (<see cref="LongCatInt8Converter"/>); GGUF block quants stay packed.</summary>
 public sealed class LongCatCheckpoint : IDisposable
 {
     /// <summary>The index file the dense base and avatar repositories ship.</summary>
@@ -18,12 +22,12 @@ public sealed class LongCatCheckpoint : IDisposable
     /// <summary>The index file of the per-row INT8 release.</summary>
     public const string Int8IndexFileName = "quantized_model.safetensors.index.json";
 
-    private readonly ShardedSafeTensorSet _shards;
+    private readonly IDisposable _files;
 
-    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8,
+    private LongCatCheckpoint(IDisposable files, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8,
         List<Tensor> converted)
     {
-        _shards = shards;
+        _files = files;
         Config = config;
         Weights = weights;
         IsInt8 = isInt8;
@@ -77,6 +81,8 @@ public sealed class LongCatCheckpoint : IDisposable
     /// <see cref="IndexNameIn"/> names.</summary>
     public static LongCatCheckpoint Open(string directory)
     {
+        if (GgufIn(directory) is { } gguf)
+            return OpenGguf(directory, gguf);
         ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, IndexNameIn(directory));
         try
         {
@@ -112,27 +118,86 @@ public sealed class LongCatCheckpoint : IDisposable
                         + (int8 ? " and I8 .weight_int8 weights." : "."));
                 weights[name] = shards.GetTensor(name);
             }
-            // The reference loads the DiT in BF16 (torch_dtype=bfloat16). A dense F32 checkpoint is converted here, so its 54.3 GB does not sit
-            // in host memory at F32 and stream at twice the bytes; the converted tensors are owned by the checkpoint and released with it.
             List<Tensor> converted = [];
-            if (!int8 && EngineKnobs.LongCatDitBf16.Value)
-            {
-                foreach (string name in weights.Keys.ToList())
-                {
-                    Tensor source = weights[name];
-                    if (source.DType != DType.F32)
-                        continue;
-                    Tensor bf16 = ToBf16RoundToNearest(source);
-                    converted.Add(bf16);
-                    weights[name] = bf16;
-                }
-            }
+            if (!int8)
+                HoldDenseAsBf16(weights, converted);
             return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8, converted);
         }
         catch
         {
             shards.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>The GGUF file <see cref="Open"/> reads from <paramref name="directory"/>: its one <c>.gguf</c>, or null for a folder without one.
+    /// A folder with several, or with one beside a safetensors index, is refused: a caller that named a file reaches here with its folder, so
+    /// picking would load weights other than the named ones.</summary>
+    public static string? GgufIn(string directory)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        if (!Directory.Exists(directory))
+            return null;
+        string[] files = Directory.GetFiles(directory, "*.gguf");
+        if (files.Length > 0 && (File.Exists(Path.Combine(directory, IndexFileName)) || File.Exists(Path.Combine(directory, Int8IndexFileName))))
+            throw new InvalidDataException($"'{directory}' holds both a safetensors index and {Path.GetFileName(files[0])}; put the GGUF in a "
+                + "folder of its own.");
+        if (files.Length > 1)
+            throw new InvalidDataException($"'{directory}' holds {files.Length} .gguf files "
+                + $"({string.Join(", ", files.Select(Path.GetFileName).Order(StringComparer.Ordinal))}); put the one to load in a "
+                + "folder of its own.");
+        return files.Length == 1 ? files[0] : null;
+    }
+
+    private static LongCatCheckpoint OpenGguf(string directory, string path)
+    {
+        CheckpointSource source = CheckpointSource.Open(path);
+        List<Tensor> converted = [];
+        try
+        {
+            if (!LongCatGgufConverter.IsComfyLayout(source.Weights.Keys))
+                throw new InvalidDataException($"'{Path.GetFileName(path)}' is not a LongCat DiT in the ComfyUI Wan layout "
+                    + "(blocks.0.self_attn.q.weight beside blocks.0.ffn.w1.weight).");
+            Dictionary<string, Tensor> weights = LongCatGgufConverter.Convert(source.Weights, converted, out int widened);
+            foreach ((string name, Tensor tensor) in weights)
+                if (tensor.DType != DType.BF16 && tensor.DType != DType.F16 && tensor.DType != DType.F32 && !tensor.DType.IsQuantized)
+                    throw new NotSupportedException($"'{name}' is {tensor.DType}; the LongCat GGUF loader reads block quants, BF16, F16 and F32.");
+            if (widened > 0)
+                Logs.Info($"[LongCatCheckpoint] {Path.GetFileName(path)}: {widened} projections join parts of different quant types, so they are "
+                    + "held as BF16 instead of packed.");
+            Dictionary<string, TensorShape> shapes = weights.ToDictionary(entry => entry.Key, entry => entry.Value.Shape, StringComparer.Ordinal);
+            string configPath = Path.Combine(directory, "config.json");
+            LongCatConfig config = File.Exists(configPath)
+                ? LongCatConfig.FromJson(File.ReadAllText(configPath))
+                : LongCatConfig.FromShapes(name => shapes.TryGetValue(name, out TensorShape shape) ? shape : null, CountBlocks(shapes),
+                    (1, 2, 2), true);
+            Validate(config, shapes);
+            HoldDenseAsBf16(weights, converted);
+            return new LongCatCheckpoint(source, config, weights, false, converted);
+        }
+        catch
+        {
+            foreach (Tensor tensor in converted) tensor.Dispose();
+            source.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The reference loads the DiT in BF16 (torch_dtype=bfloat16). A dense F32 tensor is converted here, so a 54.3 GB checkpoint does not
+    /// sit in host memory at F32 and stream at twice the bytes; the converted tensors join <paramref name="converted"/>, which the checkpoint
+    /// owns.</summary>
+    private static void HoldDenseAsBf16(Dictionary<string, Tensor> weights, List<Tensor> converted)
+    {
+        if (!EngineKnobs.LongCatDitBf16.Value)
+            return;
+        foreach (string name in weights.Keys.ToList())
+        {
+            Tensor source = weights[name];
+            if (source.DType != DType.F32)
+                continue;
+            Tensor bf16 = ToBf16RoundToNearest(source);
+            converted.Add(bf16);
+            weights[name] = bf16;
         }
     }
 
@@ -221,10 +286,10 @@ public sealed class LongCatCheckpoint : IDisposable
         return count;
     }
 
-    /// <summary>Unmaps the shards; tensors from <see cref="Weights"/> are invalid afterwards.</summary>
+    /// <summary>Unmaps the files; tensors from <see cref="Weights"/> are invalid afterwards.</summary>
     public void Dispose()
     {
         foreach (Tensor tensor in _converted) tensor.Dispose();
-        _shards.Dispose();
+        _files.Dispose();
     }
 }

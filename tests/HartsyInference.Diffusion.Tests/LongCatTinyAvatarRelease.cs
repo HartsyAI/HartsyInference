@@ -13,17 +13,20 @@ internal sealed class LongCatTinyAvatarRelease : IDisposable
     private const int SampleRate = 16_000;
 
     /// <summary>Writes the release under a new temporary folder; <paramref name="onePointSix"/> writes the INT8 DiT and the two LoRAs.</summary>
-    public LongCatTinyAvatarRelease(bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? dense = null)
+    public LongCatTinyAvatarRelease(bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? dense = null,
+        Action<string>? writeDit = null)
     {
         bool useInt8 = int8 ?? onePointSix;
         Root = Path.Combine(Path.GetTempPath(), "longcat-avatar-" + Guid.NewGuid().ToString("N"));
         Checkpoint = Path.Combine(Root, useInt8 ? "base_model_int8" : "base_model");
         Directory.CreateDirectory(Checkpoint);
-        if (dense is not null)
+        if (writeDit is not null)
+            writeDit(Checkpoint);
+        else if (dense is not null)
             LongCatTestData.WriteCheckpoint(Checkpoint, dense, writeConfig: false, indexFileName: LongCatCheckpoint.IndexFileName);
         else
             WriteCheckpoint(Checkpoint, useInt8);
-        if (dense is not null)
+        if (dense is not null || writeDit is not null)
             File.WriteAllText(Path.Combine(Checkpoint, "config.json"), ConfigJson(Config));
         foreach ((string folder, string file, int seed) in onePointSix
             ? new[] { ("loraA", "lora.safetensors", 81), ("loraB", "lora.safetensors", 82) }
