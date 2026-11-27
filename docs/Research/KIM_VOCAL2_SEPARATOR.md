@@ -75,6 +75,7 @@ Loudness normalization is not part of the separator: LongCat applies it downstre
 
 ## Known limits
 
+- Precision and adapters: the network runs in F32 only. The released weights are one 32-bit float ONNX file, so there is no quantized release to compare against, and the model takes no LoRA adapter.
 - `ExactGemmScope` flips one backend-wide `HighPrecisionGemm` property with no synchronisation, and `fx separate` uses it on the engine's own backend. Audio, image and video generations on one device are serialised by the audio lock and `DeviceGate`, so nothing else runs during a `Forward`. With `vram.sameGpuConcurrent` on, or for host work that uses `ComputeBackend` without the gate, concurrent work also gets exact GEMMs (BF16 weights are then upcast on every call) and overlapping scopes can restore each other's value, as with the other models that set the flag.
 
 ## Evidence (2026-11-23, CPU F32, Debug build of the CLI)
