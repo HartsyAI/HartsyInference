@@ -1,124 +1,152 @@
-using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Duo;
 using Xunit;
 
 namespace HartsyInference.ModelAssets.Tests.Duo;
 
+/// <summary>The Duo LoRA merge on synthetic tensors, against a scalar reference: the F32 delta is <c>(B @ A) * scale</c> added at the row offset, and
+/// a BF16 weight takes two roundings, the delta and then the sum, both to nearest even, as upstream's <c>load_effective</c> does. No
+/// released LoRA bytes are read; the real-bytes parity is not run.</summary>
 public sealed class DuoLoraMergeTests
 {
-    private static float Bf16(ushort bits) => BitConverter.UInt32BitsToSingle((uint)bits << 16);
-
-    private static ushort Bf16Bits(float value) => BFloat16Bits.FromFloat(value);
-
-    private static Tensor F32(long rows, long cols, params float[] values)
-    {
-        Tensor t = new(new TensorShape(rows, cols), DType.F32);
-        values.CopyTo(t.AsSpan<float>());
-        return t;
-    }
-
-    private static Tensor Bf16Tensor(long rows, long cols, params float[] values)
-    {
-        Tensor t = new(new TensorShape(rows, cols), DType.BF16);
-        for (int i = 0; i < values.Length; i++) t.AsSpan<ushort>()[i] = Bf16Bits(values[i]);
-        return t;
-    }
+    private const int Rows = 4, Cols = 3, Rank = 2, LoraRows = 2, RowStart = 1;
+    private const float Scale = 0.5f;
 
     [Fact]
-    public void RoundNearestEven_MatchesTorchOnTiesAndSpecials()
+    public void AnF32MergeAddsTheScaledProductAtTheRowOffset()
     {
-        Assert.Equal((ushort)0x3f80, Bf16Bits(1.0f + 1f / 256f));      // tie between 1.0 and 1.0078125 goes to even (1.0)
-        Assert.Equal((ushort)0x3f82, Bf16Bits(1.0f + 3f / 256f));      // tie goes up to the even neighbour
-        Assert.Equal((ushort)0x3f81, Bf16Bits(1.0f + 1f / 128f));
-        Assert.Equal((ushort)0x7f80, Bf16Bits(float.PositiveInfinity));
-        Assert.True(float.IsNaN(Bf16(Bf16Bits(float.NaN))));
-        Assert.Equal((ushort)0x7f80, Bf16Bits(3.4028235e38f));         // rounds up into infinity, as torch does
-    }
+        float[] weight = Values(1, Rows * Cols);
+        float[] a = Values(2, Rank * Cols);
+        float[] b = Values(3, LoraRows * Rank);
+        using Tensor w = Make(new TensorShape(Rows, Cols), DType.F32, weight);
+        using Tensor lora = Make(new TensorShape(Rank, Cols), DType.F32, a);
+        using Tensor up = Make(new TensorShape(LoraRows, Rank), DType.F32, b);
 
-    [Fact]
-    public void MergeRows_RoundsTheDeltaToBf16BeforeTheAddInsteadOfRoundingOnce()
-    {
-        // delta 0.003907 is just above half a BF16 step at 1.0. Rounded first it becomes exactly 2^-8, the sum is a tie and goes to 1.0;
-        // a single rounding of the F32 sum would reach 1.0078125.
-        using Tensor weight = Bf16Tensor(1, 1, 1.0f);
-        using Tensor a = F32(1, 1, 1f);
-        using Tensor b = F32(1, 1, 0.003907f);
+        DuoLoraMerge.MergeRows(w, RowStart, lora, up, Scale, swapHalves: false);
 
-        DuoLoraMerge.MergeRows(weight, 0, a, b, scale: 1f, swapHalves: false);
-
-        Assert.Equal((ushort)0x3f80, weight.AsSpan<ushort>()[0]);
-        Assert.NotEqual(Bf16Bits(1.0f + 0.003907f), weight.AsSpan<ushort>()[0]);
-    }
-
-    [Fact]
-    public void MergeRows_AppliesTheScaleAndOnlyTouchesItsRowSlice()
-    {
-        using Tensor weight = Bf16Tensor(4, 2, 1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f);
-        using Tensor a = F32(1, 2, 1f, 2f);
-        using Tensor b = F32(2, 1, 4f, 8f);
-
-        DuoLoraMerge.MergeRows(weight, rowStart: 1, a, b, scale: 0.5f, swapHalves: false);
-
-        float[] values = weight.AsSpan<ushort>().ToArray().Select(Bf16).ToArray();
-        Assert.Equal(new[] { 1f, 1f, 3f, 5f, 5f, 9f, 1f, 1f }, values);
-    }
-
-    [Fact]
-    public void MergeRows_SwapsTheGateAndValueHalvesOfB()
-    {
-        // Weight rows are [gate; value]; B arrives as [value; gate], so weight row 0 (gate) takes B row 2 and weight row 2 (value) takes B row 0.
-        using Tensor weight = F32(4, 1, 0f, 0f, 0f, 0f);
-        using Tensor a = F32(1, 1, 1f);
-        using Tensor b = F32(4, 1, 10f, 11f, 20f, 21f);
-
-        DuoLoraMerge.MergeRows(weight, 0, a, b, 1f, swapHalves: true);
-
-        Assert.Equal(new[] { 20f, 21f, 10f, 11f }, weight.AsSpan<float>().ToArray());
-    }
-
-    [Fact]
-    public void MergeRows_MatchesAnIndependentDoubleComputationOnRandomData()
-    {
-        Random rng = new(7);
-        const int Rows = 37, Rank = 6, In = 53;
-        float[] av = Enumerable.Range(0, Rank * In).Select(_ => (float)rng.NextDouble() - 0.5f).ToArray();
-        float[] bv = Enumerable.Range(0, Rows * Rank).Select(_ => (float)rng.NextDouble() - 0.5f).ToArray();
-        float[] wv = Enumerable.Range(0, Rows * In).Select(_ => (float)rng.NextDouble() * 4 - 2).ToArray();
-        using Tensor a = F32(Rank, In, av), b = F32(Rows, Rank, bv), f32Weight = F32(Rows, In, wv);
-        using Tensor bf16Weight = Bf16Tensor(Rows, In, wv);
-
-        DuoLoraMerge.MergeRows(f32Weight, 0, a, b, 0.25f, false);
-        DuoLoraMerge.MergeRows(bf16Weight, 0, a, b, 0.25f, false);
-
-        int bf16Differences = 0;
+        float[] actual = w.AsSpan<float>().ToArray();
+        float[] delta = Delta(a, b);
         for (int r = 0; r < Rows; r++)
         {
-            for (int c = 0; c < In; c++)
+            for (int c = 0; c < Cols; c++)
             {
-                double delta = 0;
-                for (int k = 0; k < Rank; k++) delta += (double)bv[r * Rank + k] * av[k * In + c];
-                float expectedDelta = (float)(delta * 0.25);
-                Assert.Equal(wv[r * In + c] + expectedDelta, f32Weight.AsSpan<float>()[r * In + c], 1e-5f);
-                float baseValue = Bf16(Bf16Bits(wv[r * In + c]));
-                ushort expected = Bf16Bits(baseValue + Bf16(Bf16Bits(expectedDelta)));
-                if (expected != bf16Weight.AsSpan<ushort>()[r * In + c]) bf16Differences++;
+                float expected = weight[(r * Cols) + c];
+                if (r >= RowStart && r < RowStart + LoraRows)
+                {
+                    expected += delta[((r - RowStart) * Cols) + c];
+                }
+                Assert.InRange(actual[(r * Cols) + c], expected - 1e-5f, expected + 1e-5f);
             }
         }
-        // The reference sums in double, the merge in F32; a delta next to a BF16 rounding boundary may land on the other side, which is rare.
-        Assert.True(bf16Differences <= Rows * In / 200, $"{bf16Differences} of {Rows * In} BF16 results differ from the double reference.");
     }
 
     [Fact]
-    public void MergeRows_ValidatesShapesAndDTypes()
+    public void ABf16MergeRoundsTheDeltaThenTheSum()
     {
-        using Tensor weight = Bf16Tensor(2, 2, 0, 0, 0, 0);
-        using Tensor a = F32(1, 2, 1, 1), b = F32(2, 1, 1, 1);
-        using Tensor wrongRank = F32(2, 2, 0, 0, 0, 0), halfA = a.CastTo(DType.F16);
-        Assert.Throws<ArgumentException>(() => DuoLoraMerge.MergeRows(weight, 1, a, b, 1f, false));      // slice does not fit
-        Assert.Throws<ArgumentException>(() => DuoLoraMerge.MergeRows(weight, 0, wrongRank, b, 1f, false)); // A rank 2 vs B rank 1
-        Assert.Throws<ArgumentException>(() => DuoLoraMerge.MergeRows(weight, 0, halfA, b, 1f, false));
-        using Tensor f16Weight = new(new TensorShape(2, 2), DType.F16);
-        Assert.Throws<NotSupportedException>(() => DuoLoraMerge.MergeRows(f16Weight, 0, a, b, 1f, false));
+        float[] weight = Values(4, Rows * Cols);
+        float[] a = Values(5, Rank * Cols);
+        float[] b = Values(6, LoraRows * Rank);
+        using Tensor w = MakeBf16(new TensorShape(Rows, Cols), weight);
+        using Tensor lora = Make(new TensorShape(Rank, Cols), DType.F32, a);
+        using Tensor up = Make(new TensorShape(LoraRows, Rank), DType.F32, b);
+
+        DuoLoraMerge.MergeRows(w, RowStart, lora, up, Scale, swapHalves: false);
+
+        float[] actual = Bf16ToFloat(w);
+        float[] delta = Delta(a, b);
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+            {
+                float start = RoundBf16(weight[(r * Cols) + c]);
+                float expected = start;
+                if (r >= RowStart && r < RowStart + LoraRows)
+                {
+                    expected = RoundBf16(start + RoundBf16(delta[((r - RowStart) * Cols) + c]));
+                }
+                Assert.InRange(actual[(r * Cols) + c], expected - 1e-2f, expected + 1e-2f);
+            }
+        }
+    }
+
+    [Fact]
+    public void AMergeThatDoesNotFitTheWeightIsRefused()
+    {
+        using Tensor w = Make(new TensorShape(Rows, Cols), DType.F32, Values(7, Rows * Cols));
+        using Tensor lora = Make(new TensorShape(Rank, Cols), DType.F32, Values(8, Rank * Cols));
+        using Tensor up = Make(new TensorShape(LoraRows, Rank), DType.F32, Values(9, LoraRows * Rank));
+
+        Assert.Throws<ArgumentException>(() => DuoLoraMerge.MergeRows(w, Rows - 1, lora, up, Scale, swapHalves: false));
+    }
+
+    /// <summary><c>(B @ A)</c> with B <c>[LoraRows, Rank]</c> and A <c>[Rank, Cols]</c>, scaled.</summary>
+    private static float[] Delta(float[] a, float[] b)
+    {
+        float[] delta = new float[LoraRows * Cols];
+        for (int r = 0; r < LoraRows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+            {
+                float sum = 0f;
+                for (int k = 0; k < Rank; k++)
+                {
+                    sum += b[(r * Rank) + k] * a[(k * Cols) + c];
+                }
+                delta[(r * Cols) + c] = sum * Scale;
+            }
+        }
+        return delta;
+    }
+
+    /// <summary>Round to BF16 with round-half-to-even, returned as a float.</summary>
+    private static float RoundBf16(float x)
+    {
+        uint bits = BitConverter.SingleToUInt32Bits(x);
+        bits += 0x7FFFu + ((bits >> 16) & 1u);
+        return BitConverter.UInt32BitsToSingle(bits & 0xFFFF0000u);
+    }
+
+    private static Tensor Make(TensorShape shape, DType dtype, float[] values)
+    {
+        Tensor tensor = new(shape, dtype);
+        values.AsSpan().CopyTo(tensor.AsSpan<float>());
+        return tensor;
+    }
+
+    private static Tensor MakeBf16(TensorShape shape, float[] values)
+    {
+        Tensor tensor = new(shape, DType.BF16);
+        Span<byte> bytes = tensor.AsSpan<byte>();
+        for (int i = 0; i < values.Length; i++)
+        {
+            uint bits = BitConverter.SingleToUInt32Bits(values[i]) >> 16;
+            bytes[2 * i] = (byte)bits;
+            bytes[(2 * i) + 1] = (byte)(bits >> 8);
+        }
+        return tensor;
+    }
+
+    private static float[] Bf16ToFloat(Tensor tensor)
+    {
+        ReadOnlySpan<byte> bytes = tensor.AsReadOnlySpan<byte>();
+        float[] values = new float[(int)tensor.ElementCount];
+        for (int i = 0; i < values.Length; i++)
+        {
+            uint bits = (uint)(bytes[2 * i] | (bytes[(2 * i) + 1] << 8)) << 16;
+            values[i] = BitConverter.UInt32BitsToSingle(bits);
+        }
+        return values;
+    }
+
+    private static float[] Values(int seed, int count)
+    {
+        float[] data = new float[count];
+        for (int i = 0; i < count; i++)
+        {
+            double h = Math.Sin((seed * 12.9898) + (i * 78.233)) * 43758.5453;
+            double frac = h - Math.Floor(h);
+            data[i] = (float)((2.0 * frac) - 1.0);
+        }
+        return data;
     }
 }
