@@ -69,7 +69,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
                 $"LongCat-Video-Avatar's audio windows are built for {OutputFps} fps; the request asked for {fps}.", nameof(fps));
     }
 
-    /// <summary>True when the driving audio is shorter than the clip: the windows past its end repeat its last frame.</summary>
+    /// <summary>True when the driving audio is shorter than the clip: the rest of the clip is encoded as silence.</summary>
     internal static bool DrivingAudioIsShort(double seconds, int frames, int fps) => seconds + 1e-6 < frames / (double)fps;
 
     /// <summary>Whether a chain of <paramref name="totalFrames"/> frames at <paramref name="width"/>×<paramref name="height"/> fits the decode budget.</summary>
@@ -166,8 +166,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, drivingFeatures, loaders, distilled: true,
-                is16 ? null : parts.DmdGate, loraMix);
+            // The reference normalises the speech's loudness on 1.5 and leaves it alone on 1.6.
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, drivingFeatures, normalizeSpeechLoudness: !is16, loaders,
+                distilled: true, is16 ? null : parts.DmdGate, loraMix);
         }
         catch (Exception ex)
         {
