@@ -1,3 +1,4 @@
+using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -461,11 +462,22 @@ internal static class LongCatRecipeSupport
         return noise.AsReadOnlySpan<float>().ToArray();
     }
 
-    /// <summary>The noise of a request's first (or only) generation: the file of <c>diagnostics.longcatNoiseNpy</c> when it is set, else
-    /// <see cref="Noise"/>. A chain's later segments keep their seeded noise.</summary>
-    internal static float[] InitialNoise(int seed, int channels, int frames, int height, int width)
+    /// <summary>Marks a <c>diagnostics.longcatNoiseNpy</c> path that names one file per segment: it is replaced by the segment's number.</summary>
+    internal const string NoiseSegmentMark = "{segment}";
+
+    /// <summary>The starting noise of segment <paramref name="segment"/> of a generation (0 the first, or the only one): the file
+    /// <c>diagnostics.longcatNoiseNpy</c> names for it, else <see cref="Noise"/>. A path with <see cref="NoiseSegmentMark"/> names a file for
+    /// every segment, and each is required; a path without it names the first segment's file only.</summary>
+    internal static float[] SegmentNoise(int segment, int seed, int channels, int frames, int height, int width)
     {
-        using Tensor noise = SavedNoise.Create(EngineKnobs.LongCatNoiseNpy, new TensorShape([1L, channels, frames, height, width]), seed, "LongCat");
+        ArgumentOutOfRangeException.ThrowIfNegative(segment);
+        string? path = EngineKnobs.LongCatNoiseNpy.Value;
+        if (path is not null && path.Contains(NoiseSegmentMark, StringComparison.Ordinal))
+            path = path.Replace(NoiseSegmentMark, segment.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal);
+        else if (segment > 0)
+            path = null;
+        using Tensor noise = SavedNoise.Create(EngineKnobs.LongCatNoiseNpy, path, new TensorShape([1L, channels, frames, height, width]), seed,
+            "LongCat");
         return noise.AsReadOnlySpan<float>().ToArray();
     }
 

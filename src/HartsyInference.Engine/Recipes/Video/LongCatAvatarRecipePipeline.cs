@@ -111,7 +111,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                     throw new InvalidDataException("The substitute text mask must be a prefix of ones (the valid tokens, then padding).");
             positive = positive with { ValidTokens = valid };
         }
-        float[] noise = LongCatRecipeSupport.InitialNoise(seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
+        float[] noise = LongCatRecipeSupport.SegmentNoise(0, seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
 
         LongCatAvatarMode mode = LongCatAvatarMode.At2v;
         int condLatents = 0;
@@ -203,7 +203,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             float[] projected = ProjectConditional(raw, pixels.Length, runLatents - 1);
             float[] tokens = LongCatAvatarChainPlan.ReferenceSlotTokens(projected, projected.Length / (runLatents - 1));
             laterAudio.Add(tokens);
-            laterNoise.Add(LongCatRecipeSupport.Noise(seed + s, channels, runLatents, latentHeight, latentWidth));
+            laterNoise.Add(LongCatRecipeSupport.SegmentNoise(s, seed + s, channels, runLatents, latentHeight, latentWidth));
         }
 
         // Before segment 0: an upper bound on the later runs' budget. It refuses only when even that bound is negative. The later run's own check,

@@ -52,7 +52,7 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
-        float[] noise = LongCatRecipeSupport.InitialNoise(seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
+        float[] noise = LongCatRecipeSupport.SegmentNoise(0, seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
 
         LongCatConditioningMode mode = LongCatConditioningMode.Text;
         int condLatents = 0;

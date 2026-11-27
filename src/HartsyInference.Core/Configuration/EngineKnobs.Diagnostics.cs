@@ -208,10 +208,13 @@ public static partial class EngineKnobs
         Str("diagnostics.fibo2NoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Path to a float32 C-order .npy that replaces the seeded starting noise of Fibo 2.0 generations (diffusers parity). Unset draws the seeded noise.");
 
-    /// <summary>A float32 C-order <c>.npy</c> that replaces the initial noise of a LongCat video or avatar generation, for reference comparisons.</summary>
+    /// <summary>A float32 C-order <c>.npy</c> that replaces the initial noise of a LongCat video or avatar generation, for reference comparisons.
+    /// A path containing <c>{segment}</c> names one file per segment of an avatar chain, 0 the first, and every one is required. A later segment's
+    /// file holds its whole run, <c>[1, C, 1 + context + new latents, H, W]</c>; the reference and context frames at its front are overwritten by
+    /// the conditioning.</summary>
     public static readonly Knob<string?> LongCatNoiseNpy =
         Str("diagnostics.longcatNoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
-            "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain). Unset draws the seeded noise.");
+            "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain); with {segment} in the path, one file per segment, later ones holding the whole run (reference and context frames included). Unset draws the seeded noise.");
 
     /// <summary>Directory where a LongCat avatar generation writes its step-0 conditioning as float32 .npy under the reference's names (text_embeddings_step00,
     /// text_mask_step00, audio_embedding_step00, input_latent_step00, speech_16k_mono_step00). The last generation's files overwrite the earlier ones.
