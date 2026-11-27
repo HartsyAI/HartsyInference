@@ -39,7 +39,8 @@ internal sealed class RealWeightsParityFactAttribute : FactAttribute
 ///   FF_REAL_PARITY_DIR      folder with framewise-2step.pt, kv_refiner.safetensors, pixel_decoder.safetensors and io.safetensors
 ///   FF_REAL_PARITY_GENERATOR  generator file name in that folder (default framewise-2step.pt for S; dit.safetensors for L)
 ///   FF_REAL_PARITY_BACKEND  cuda (default), vulkan or cpu
-///   FF_REAL_PARITY_BOUND    relative RMS bound per frame (default 1e-2; provisional until the BF16-vs-FP32 floor is measured)
+///   FF_REAL_PARITY_BOUND    latent relative RMS bound per frame (default 0.04, set after the 2026-11-26 measurement)
+///   FF_REAL_PARITY_PIXEL_BOUND  pixel relative RMS bound, worst frame (default 0.10, set after the 2026-11-26 measurement)
 ///
 /// The metric is relative RMS, ||engine - upstream|| / ||upstream||, for each latent frame and each pixel frame. The pixel comparison
 /// drops the first three decoded frames, as upstream's align_frames does. The engine's lane is F16 on CUDA and F32 on CPU. The
@@ -57,8 +58,12 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
         string generatorFile = Environment.GetEnvironmentVariable("FF_REAL_PARITY_GENERATOR") ?? "framewise-2step.pt";
 
         string backendName = Environment.GetEnvironmentVariable("FF_REAL_PARITY_BACKEND") ?? "cuda";
+        // Latent and pixel bounds are separate. The defaults are the S bounds, set after the 2026-11-26
+        // measurement (latent 0.026 and pixel 0.070 against the BF16-vs-FP32 floor of 0.098 to 0.116 latent).
         double bound = double.TryParse(Environment.GetEnvironmentVariable("FF_REAL_PARITY_BOUND"), NumberStyles.Float,
-            CultureInfo.InvariantCulture, out double parsed) ? parsed : 1e-2;
+            CultureInfo.InvariantCulture, out double parsed) ? parsed : 0.04;
+        double pixelBound = double.TryParse(Environment.GetEnvironmentVariable("FF_REAL_PARITY_PIXEL_BOUND"), NumberStyles.Float,
+            CultureInfo.InvariantCulture, out double parsedPixel) ? parsedPixel : 0.10;
 
         List<IDisposable> loaders = [];
         try
@@ -133,10 +138,10 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
                 worstPixel = Math.Max(worstPixel, rel);
             }
             output.WriteLine($"pixel frames: worst relative RMS {worstPixel:G4} over {refPixels.Length / perPixelFrame} frames");
-            output.WriteLine($"backend {backendName}, {frames} latent frames, bound {bound:G3}, worst latent {worstLatent:G4}");
+            output.WriteLine($"backend {backendName}, {frames} latent frames, latent bound {bound:G3}, pixel bound {pixelBound:G3}, worst latent {worstLatent:G4}, worst pixel {worstPixel:G4}");
 
             Assert.True(worstLatent <= bound, $"worst latent relative RMS {worstLatent:G4} exceeds {bound:G3}.");
-            Assert.True(worstPixel <= bound, $"worst pixel relative RMS {worstPixel:G4} exceeds {bound:G3}.");
+            Assert.True(worstPixel <= pixelBound, $"worst pixel relative RMS {worstPixel:G4} exceeds {pixelBound:G3}.");
         }
         finally
         {
