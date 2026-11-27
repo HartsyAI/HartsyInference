@@ -177,6 +177,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     /// <summary>The planning error for a vocal-separation request that has no driving audio; null when the request is fine.</summary>
     internal static VideoPlanIssue? SeparateVocalsIssue(VideoRequest request) =>
         request.SeparateDrivingVocals && request.VideoAudioReference is null
+            && request.Speakers is not ({ First.Audio: not null } or { Second.Audio: not null })
             ? new VideoPlanIssue
             {
                 Code = "video.separate_vocals.no_driving_audio",
@@ -189,6 +190,13 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     /// <summary>Replaces the driving audio with its separated vocals (44.1 kHz stereo) so the recipe conditions on speech alone.</summary>
     private async Task<VideoRequest> SeparateDrivingVocalsAsync(VideoRequest request, CancellationToken cancel)
     {
+        if (request.Speakers is { } speakers)
+        {
+            // Each speaker is separated on its own, over the same length; the recording stays on the speaker for the soundtrack.
+            VideoSpeaker first = await SeparateSpeakerAsync(speakers.First, "first", request, cancel).ConfigureAwait(false);
+            VideoSpeaker second = await SeparateSpeakerAsync(speakers.Second, "second", request, cancel).ConfigureAwait(false);
+            return request with { Speakers = speakers with { First = first, Second = second }, SeparateDrivingVocals = false };
+        }
         AudioClip driving = request.VideoAudioReference
             ?? throw new ArgumentException("SeparateDrivingVocals needs VideoAudioReference.", nameof(request));
         double? seconds = DrivingAudioSeconds(request);
@@ -196,6 +204,20 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
         SeparatedVocals vocals = await _engine.FxInternal.SeparateVocalsClipAsync(driving, seconds, cancel).ConfigureAwait(false);
         return request with { VideoAudioReference = vocals.Stem, SeparatedSpeech16k = vocals.Speech16k, SeparateDrivingVocals = false };
+    }
+
+    /// <summary>The speaker with its separated 16 kHz speech beside its recording; a silent speaker comes back as it is.</summary>
+    private async Task<VideoSpeaker> SeparateSpeakerAsync(VideoSpeaker speaker, string which, VideoRequest request, CancellationToken cancel)
+    {
+        if (speaker.Audio is not { } recording)
+        {
+            return speaker;
+        }
+        double? seconds = DrivingAudioSeconds(request);
+        Logs.Info($"[VideoAudio] Separating the {which} speaker's vocals on the CPU before generation"
+            + (seconds is null ? "; this can take minutes." : $" ({seconds.Value:0.0}s of audio); this can take minutes."));
+        SeparatedVocals vocals = await _engine.FxInternal.SeparateVocalsClipAsync(recording, seconds, cancel).ConfigureAwait(false);
+        return speaker with { SeparatedSpeech16k = vocals.Speech16k };
     }
 
     /// <summary>Seconds of driving audio the clip can use: its frame total over its rate, plus one second of margin as LongCat adds. Null when either is unknown, which separates the whole track.</summary>
@@ -372,6 +394,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         if (request.VideoContinuation is not null)
         {
             features |= VideoFeatures.VideoContinuation;
+        }
+        if (request.Speakers is not null)
+        {
+            features |= VideoFeatures.MultiSpeaker;
         }
         return features;
     }
