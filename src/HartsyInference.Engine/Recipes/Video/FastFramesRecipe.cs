@@ -119,6 +119,7 @@ public sealed class FastFramesRecipe : IVideoRecipe
             {
                 throw new InvalidOperationException($"FastFrames generator '{context.CheckpointPath}' has no recognized transformer weights after conversion.");
             }
+            RefuseQuantised(converted.Transformer);
             WanVideoConfig wan = WanConfigDetector.Detect(converted.Transformer);
             FastFramesConfig config = ConfigFor(wan.InnerDim);
 
@@ -180,6 +181,21 @@ public sealed class FastFramesRecipe : IVideoRecipe
     /// safetensors file (L) is passed through as the file stores it, unless <paramref name="castForCpu"/> is set: the CPU kernels
     /// read F32, so each tensor is then cast once to <paramref name="dtype"/> and the copies are freed with the loaders. A CPU
     /// run of L would cast about 28.6 GB of BF16 to about 57 GB of F32 in host RAM, so CPU is not a supported path for L.</summary>
+    /// <summary>Refuses a quantized generator, by name. The FastFrames path reads plain float weights; a quantized weight carries
+    /// scales (ComfyUI fp8, int8 or NVFP4) that the path cannot apply, so a plain read would be wrong. The released Apple checkpoints
+    /// are not quantized, so this refuses only a checkpoint someone else made.</summary>
+    internal static void RefuseQuantised(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        foreach (KeyValuePair<string, Tensor> entry in weights)
+        {
+            if (entry.Value.QuantInfo is { } quant)
+            {
+                throw new NotSupportedException(
+                    $"FastFrames does not load quantized weights: '{entry.Key}' is {quant.Format}. Use the released bf16 or fp16 generator.");
+            }
+        }
+    }
+
     internal static Dictionary<string, Tensor> ReadGenerator(string path, DType dtype, bool castForCpu, List<IDisposable> loaders)
     {
         if (!path.EndsWith(".pt", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".pth", StringComparison.OrdinalIgnoreCase))
