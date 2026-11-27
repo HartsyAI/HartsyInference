@@ -18,6 +18,10 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class LongCatInt8LinearOpTests
 {
     private const int Tokens = 32;
+
+    /// <summary>The correctness bound of this test, relative RMS of the CUDA INT8 output against the per-row int8 activation model (exact q·s, the
+    /// activations quantized per row to int8). Written before its run. The measured figures are 3.7e-8 to 5.7e-8 over the 40 avatar linears.</summary>
+    internal const double ModelRelativeBound = 1e-6;
     private readonly ITestOutputHelper _output;
 
     public LongCatInt8LinearOpTests(ITestOutputHelper output) => _output = output;
@@ -54,6 +58,8 @@ public sealed class LongCatInt8LinearOpTests
             double eExact = RelRms(device, MatMul(x, exact, Tokens, n, k));
             double eUpstream = RelRms(device, MatMul(x, upstream, Tokens, n, k));
             double eActivation = RelRms(device, MatMul(xq, exact, Tokens, n, k));
+            Assert.True(eActivation <= ModelRelativeBound,
+                $"{stem} ({n}x{k}): relative RMS {eActivation:E3} against the per-row int8 activation model, bound {ModelRelativeBound:E0}");
             int clipped = values.Count(v => v == -128f);
             _output.WriteLine($"{stem,-40} {$"{n}x{k}",-14} {eExact,10:E3} {eUpstream,10:E3} {eActivation,10:E3} {clipped,9}");
             Assert.False(double.IsNaN(eExact));
