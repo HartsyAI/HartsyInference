@@ -3,6 +3,39 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.453
+
+- Fixed the Fibo 2.0 int8 loader rejecting ComfyUI's `layers.N.attention.comfy_attention.config` hints (U8 `{"attention": "comfy_kitchen_int8"}`): they are checked, logged (the engine runs float attention by default; INT8 attention is an opt-in knob, numerically unverified against Comfy), and dropped. A malformed hint is refused; any backend name is accepted with a warning. A file at a pinned side-model path whose SHA-256 differs is refused by `ModelFileLocator.RequireOrEnsure`, which also serves Flux3, Krea2, MossImage and the reference adapter.
+
+## alpha.452
+
+- Depth Pro 2 B, L and H+ run on real weights and match the reference on CPU and CUDA, and Depth Pro 2 now computes in plain F32 on CUDA by default (the engine TF32 default was up to 1e-3 off).
+
+## alpha.451
+
+- Added Maxwell-V1.0-Flash (`maxwell-v1-flash`, 35B total / 3B active, Apache-2.0) to the Text path: the official FP8 checkpoint runs through the engine's Text service on CUDA, with a device expert cache, and gave a coherent answer on an RTX 4090; not CLI-drivable yet, and no Vulkan or split-device placement.
+
+## alpha.450
+
+- Added Apple FastFrames S (1.3B, `fastframes-s`) to the video path: frame-wise causal text-to-video at 832x480, 81 frames at 16 fps, with a KV-cached rollout, a KV refiner and a pixel decoder; L (14B, `fastframes-l`) is wired but not CLI-drivable until block streaming lands.
+
+## alpha.449
+
+- Added Hy4 Flash (Tencent, 220B MoE with 12B active; `hy4-flash`, `-fp8`, `-base`) to the Text path as a host reference model on CPU: text chat with its chat template, thinking off or low effort selecting the no_think template, a size check and a tokenizer.json presence check before any model is unloaded, and tiny-config parity with the HF classes; the released checkpoints are refused by size, and the device path, image chat and the reasoning split are not built.
+
+## alpha.448
+
+- Added Sage S2.1 Flash (320B scientific multimodal MoE, `internlm/Sage-S2.1-Flash`) to the Text path as a host reference model: text chat with its own chat template on one device, a catalog row for the BF16 and FP8 checkpoints, and the vision tower and scientific-data projectors as engine pieces; checked against transformers on a tiny random model only, no real weights have run.
+
+## alpha.447
+
+- Added support for Depth Pro 2 S (`hartsy vision -m depthpro2-s`): metric depth in metres with an estimated or given focal length, for one image,
+  several views of one scene and video frames, on CPU, CUDA and Vulkan.
+
+## alpha.446
+
+- Added Bria RMBG 3.0 background removal (`rmbg3`, `rmbg3-int8`; CC BY-NC 4.0): `hartsy vision removebg` and matting draw the alpha matte with the Fibo 2.0 editor. `--remove-background-model rmbg3` also uses it as the cutout step of an image generation (RMBG-1.4 stays the default). Not yet run on real weights.
+
 ## alpha.445
 
 - Added a `prompt` block to the recipe descriptors (`GET /v1/native/recipes`, `POST /v1/native/recipes/describe`) saying what shapes each model's

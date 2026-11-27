@@ -428,6 +428,15 @@ no bug, any more than one bad seed was proof there was one.
 
 ## GPU residency / throughput (CUDA)
 
+- **OPEN, not diagnosed: CUDA graph decode and eager decode produce different text for the same greedy request.**
+  Qwen3-4B Q4_K_M, 8,192 prompt tokens, 128 generated, seed 42, RTX 4090: the eager lanes give one text (SHA-256
+  prefix 26c68e74a9df5f02, 777 characters) and the graph lane another (d490e1fc030bf1fd, 792 characters), parting at
+  character 343. It is the same on the PR 02 pin and on the PR 12 candidate, and stable across 40 graph runs, so it
+  predates the attention series. Nobody has found the token where the two decodes part: the campaign saved text, not
+  token ids. A greedy decode can legitimately flip at a near-tie when two paths round differently, so this may be
+  benign, but a captured graph replaying something stale would look the same. To locate it, save token ids and
+  logits for both paths at the first differing step. Source:
+  [the PR 12 report](../../benchmarks/attention/reports/pr12-qwen-primary.md).
 - **A TRELLIS.2 or Pixal3D shape or texture flow step stops returning and nothing is logged (Windows).** The entry below is the cause. These flow stages now run a
   `StageWatchdog` (`HartsyInference.Core.Runtime`; the small structure flows are not watched): when no step finishes for ten times the median step so far (never under two minutes), it logs one `[Stall]`
   warning naming the stage, the free and total device memory as of the last finished step and the remedies, and the next finished step throws `StageStalledException`, so a run that would
@@ -968,7 +977,7 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   reusable command buffer + fence) was proven correct in isolation but did not fit the model's memory
   profile. Prove the mechanism separately from proving it helps.
 - **`dotnet test` prints `Passed!` after the test host crashes: a thread of the NVIDIA Vulkan driver.** Located,
-  not fixed on `main`; the mitigation is a proposal (below). On the RTX 3060 (driver 610.88, Windows 11) the LLM GPU
+  and the engine now keeps off the path that sets it off (below). On the RTX 3060 (driver 610.88, Windows 11) the LLM GPU
   lane (`--filter Category=GpuIntegration -f net10.0`) ended after about 10 seconds with `Passed! - Failed: 0,
   Passed: 100, Skipped: 19, Total: 119` where the same filter and framework list 345 tests. Further up, the console
   said `The active test run was aborted. Reason: Test host process crashed` and `Test Run Aborted.`; the TRX
@@ -985,20 +994,35 @@ run-by-run history is in git and in `ROADMAP.md` §3.
     exception and nothing on stderr. Windows records each one in the Application log (source `.NET Runtime`, event
     1026, `testhost.exe`, exception code `c0000005`). 32 crashed hosts were recorded from inside the process (see
     below), every one with this signature.
-  - **What sets it off.** A process that creates a `VulkanBackend`, runs cooperative-matrix attention on it
-    (`ScaledDotProductAttention` at head dim 64 with the F16 permission) and destroys it, again and again, with no
-    other Vulkan instance alive. One process per variant: that loop ended the process in 9 of 9 processes, at
-    rounds 4 to 35, usually with the main thread inside `vkDestroyDevice`, twice while the next backend was being
-    created, once during the next attention call. A pause of 1 s before the destroy did not help. The loop
-    survived with only an instance (100 rounds), an instance and a device (100), a backend that ran nothing (100),
-    a backend that ran `Scale` (40), a backend that ran the scalar attention kernel (40), and one backend reused
-    for 200 cooperative-matrix calls. Reading the output back every round made it rarer: at 40 rounds the host
-    crashed in 1 of 3 processes with the read and 3 of 5 without.
-  - **What stopped it in these runs.** One more Vulkan instance alive in the process. With an idle `VulkanInstance`
-    held for the whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it
-    had cost up to 1.8 s. That the driver tears process-wide state down with a process's last instance is the
-    inference from those runs, not something seen in the driver. Making the engine hold such an instance is
-    proposed in PR #1038 and is a decision, not a correction: it changes what a process keeps alive.
+  - **What sets it off.** A process that creates a `VulkanBackend`, has it compile the cooperative-matrix attention
+    pipelines (`ScaledDotProductAttention` at head dim 64 with the F16 permission, on a pipeline cache that does not
+    already hold them) and destroys it, again and again, with no other Vulkan instance alive. That is necessary, not
+    sufficient: the same loop, every round on an empty cache directory of its own, crashed 5 of 5 while other jobs
+    shared the machine, 0 of 5 half an hour later when it was quiet, and 5 of 8 with every CPU core kept busy. The
+    lane crashed about 2 of 25 times on the shared cache file, 10 of 12 on a private empty directory during a busy
+    stretch, and 1 of 5 the same way on a quiet one. What the rate follows is not pinned down: load on the machine
+    is the best lead, and an empty cache alone is not it. One process per variant: that loop ended the process in 9
+    of 9 processes, at rounds 4 to 35, usually with the main thread inside `vkDestroyDevice`, twice while the next
+    backend was being created, once during the next attention call. A pause of 1 s before the destroy did not help.
+    The loop survived with only an instance (100 rounds), an instance and a device (100), a backend that ran nothing
+    (100), a backend that ran `Scale` (40), a backend that ran the scalar attention kernel (40), and one backend
+    reused for 200 cooperative-matrix calls. Reading the output back every round made it rarer: at 40 rounds the
+    host crashed in 1 of 3 processes with the read and 3 of 5 without.
+  - **What stops it.** One more Vulkan instance alive in the process. With an idle `VulkanInstance` held for the
+    whole loop, or an idle `VulkanBackend`, 40 rounds survived, and a round cost about 0.2 s where it had cost up to
+    1.8 s. So `VulkanInstance` creates one more instance before the first and never destroys it
+    (`VulkanInstance.HoldsProcessInstance`); `diagnostics.vkKeepInstance` turns that off, and a process that never
+    touches Vulkan (no backend, no `VulkanContext` device count, which `auto` asks for only when CUDA is not taken)
+    never creates it. `VulkanBackendTeardownTests` is the loop, every round on an empty cache directory of its own:
+    alone in its process, interleaved over one afternoon, it crashed the host in 10 of 18 runs with the setting off
+    and 0 of 13 with it on. The lane, 5 runs each way on a quiet machine: 1 crashed with the setting off, 0 with it
+    on, which by itself separates nothing (the lane runs its classes in parallel, so another class usually has an
+    instance alive). A census of the threads that start inside `nvoglv64.dll` shows what the hold changes: with the
+    setting off every backend starts 5 threads at `+0xA3D280` and ends them when it is disposed; with it on, one of
+    those exists before the first backend and lives for the process, and each backend starts and ends 4. The same
+    threads start whatever the backend then runs, so that does not say why only the cooperative-matrix path
+    crashes, and that the crash runs into that one thread or its state is an inference, not something seen in the
+    driver. Not checked: other driver versions, the RTX 4090, other vendors, Linux.
   - **Leads that did not hold** (the first was reported as the cause before it was checked):
     - a leak of the computed buffer in `VulkanBackend.CacheOutputCastingFrom`. **That report was wrong.** The method
       ends with `_xfer.FreeDevice(computed)`; it had been read through a command that cut off its last line. Read
@@ -1079,6 +1103,13 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   RWKV-6 rescale) and the SigLIP mmproj swap under [Weight layout](#weight-layout--transpose--converter-parity).
 - **Qwen3.5 Gated DeltaNet:** missing `q *= 1/√head_dim` before the recurrence produces fluent-looking
   word salad (not a crash).
+- **Some llama.cpp Qwen3.5 GGUFs store the Gated DeltaNet value heads TILED when there are more value than key heads.** In the
+  SenseNova fork at 24ea7bb (conversion/qwen.py `_LinearAttentionVReorderBase`) that covers qkv V rows, z, a, b, `A_log`, `dt_bias`,
+  conv V channels and the `out_proj` columns. This engine and transformers use GROUPED order (value head `h` reads key head `h / repeat`).
+  The layout depends on the converter version, not on the architecture name, and the version history of upstream llama.cpp was not
+  checked. Only the SenseNova-Loop path un-tiles at load (`Qwen35Model.PrepareSenseNovaWeights`). A plain `qwen35` GGUF with unequal
+  head counts (9B-class, Clef) is not converted and is suspected wrong until checked against the HF route; detecting the layout will need
+  a signal in the file, since the architecture alone does not decide it.
 - **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
   row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
 - **A GGUF codec that agrees with its GPU kernel can still be wrong** — a kernel written to mirror the host

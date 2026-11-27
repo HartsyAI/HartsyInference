@@ -97,6 +97,24 @@ public sealed class SegmentModulation : IDisposable
         return table;
     }
 
+    /// <summary>Wraps shift, scale and gate tables that are already F32 <c>[groups, D]</c>, one row per layout group (for example the six
+    /// projections of one batched adaLN). The result takes ownership: disposing it disposes the three tables.</summary>
+    public static SegmentModulation FromTables(Tensor shift, Tensor scale, Tensor gate, TokenSegmentLayout layout)
+    {
+        ArgumentNullException.ThrowIfNull(shift);
+        ArgumentNullException.ThrowIfNull(scale);
+        ArgumentNullException.ThrowIfNull(gate);
+        ArgumentNullException.ThrowIfNull(layout);
+        foreach (Tensor table in new[] { shift, scale, gate })
+        {
+            if (table.Shape.Rank != 2 || table.DType != DType.F32)
+                throw new ArgumentException($"Modulation tables must be F32 [groups, D]; got {table.Shape} {table.DType}.", nameof(shift));
+            if (table.Shape[0] != layout.GroupCount || table.Shape[1] != shift.Shape[1])
+                throw new ArgumentException($"Modulation tables must be [{layout.GroupCount}, {shift.Shape[1]}]; got {table.Shape}.", nameof(shift));
+        }
+        return new SegmentModulation(shift, scale, gate, layout);
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {

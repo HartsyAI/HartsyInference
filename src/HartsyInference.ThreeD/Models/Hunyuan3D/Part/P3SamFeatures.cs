@@ -46,7 +46,8 @@ public sealed class P3SamFeatures : IDisposable
     /// <summary>Whether the encoder's GEMMs run in full F32 on a GPU backend (<see cref="IBackend.HighPrecisionGemm"/>, scoped to <see cref="Extract"/>). On by
     /// default: with the TF32 defaults the CUDA features differ from upstream by relRMS 3.6e-2; this flag alone gives 2.1e-2 and, with <c>numerics.sdpaNoTf32</c> as well, 7.1e-5. Time is
     /// the same at 6000 points (1.83 s) and within 3 % at 100k points (3.45 s with TF32, 3.54 s exact). The
-    /// attention half is a construction-time knob (<c>numerics.sdpaNoTf32</c>, or the <c>reference</c> profile), which this class cannot change.</summary>
+    /// attention half used to need the construction-time knob <c>numerics.sdpaNoTf32</c>; since Depth Pro 2 (A5) CUDA's F32 attention GEMMs also follow this flag, so it
+    /// reaches both halves. The figures above were measured before that change and not re-measured.</summary>
     public bool ExactGemm { get; set; } = true;
 
     internal Detail ExtractDetailed(double[] points, float[] normals, int count, P3SamVoxelPick pick, Random? random = null, bool keepStages = true)

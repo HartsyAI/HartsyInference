@@ -1007,9 +1007,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // The quantized weight is cached without its scale; a scaled weight takes the GEMM, which applies it.
         if (GemmScale(weight) != 1f) return false;
 
-        int M = (int)output.Shape[0], N = (int)output.Shape[1], K = (int)input.Shape[1];
+        // Sized from the operands, as every other Linear path is: a caller may shape the output differently over the same elements.
+        int M = (int)input.Shape[0], N = (int)weight.Shape[0], K = (int)input.Shape[1];
         if ((K & 3) != 0) return false;
-        if ((int)weight.Shape[0] != N || (int)weight.Shape[1] != K) return false;
+        if ((int)weight.Shape[1] != K || output.ElementCount != (long)M * N) return false;
         if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != N)) return false;
 
         // The activation is quantized per call into a transient; the weight once, cached beside its other casts.
@@ -1979,6 +1980,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
     private const int FlashMaxHeadDim = 128;
 
+    /// <summary>The score matrix the materialized path holds whole. Past it an unmasked call is tiled along the query axis; a call
+    /// with a bias cannot be, so the tiled kernel's admission reads the same limit.</summary>
+    private const ulong NaiveWholeScoreLimitBytes = 1UL << 30;
+
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) =>
         ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
 
@@ -2269,7 +2274,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         long Br = Sq;
         ulong fullScoreBytes = (ulong)(totalHeads * Sq * Skv) * (ulong)dtype.SizeInBytes;
         bool forceTile = EngineKnobs.SdpaForceTiled.Value;
-        if (mask is null && (forceTile || fullScoreBytes > (1UL << 30)))   // > 1 GiB score matrix → tile
+        if (mask is null && (forceTile || fullScoreBytes > NaiveWholeScoreLimitBytes))
         {
             long perRow = totalHeads * Skv * dtype.SizeInBytes;            // bytes per query row across all heads
             Br = Math.Max(1, (512L * 1024 * 1024) / Math.Max(1, perRow));  // ~512 MB score-tile budget
@@ -2722,6 +2727,64 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan ConvTranspose1d dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    public void ConvTranspose2d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
+        int strideH, int strideW, int padH, int padW)
+    {
+        if (input.Shape.Rank != 4 || weight.Shape.Rank != 4 || output.Shape.Rank != 4)
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose2d: input {input.Shape}, weight {weight.Shape} and output {output.Shape} must be rank-4.");
+        int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
+        int cOut = (int)output.Shape[1], oH = (int)output.Shape[2], oW = (int)output.Shape[3];
+        int kH = (int)weight.Shape[2], kW = (int)weight.Shape[3];
+        if ((int)weight.Shape[0] != cIn || (int)weight.Shape[1] != cOut || (int)output.Shape[0] != batch || strideH < 1 || strideW < 1)
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose2d: input {input.Shape}, weight {weight.Shape}, output {output.Shape} do not match "
+                + $"(stride={strideH}x{strideW}); the weight is [C_in, C_out, kH, kW].");
+        if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32 || (bias is not null && bias.DType != DType.F32))
+            throw new NotSupportedException(
+                $"Vulkan ConvTranspose2d supports F32 only: input {input.DType}, weight {weight.DType}, output {output.DType}, bias {bias?.DType}.");
+        if (bias is not null && bias.ElementCount != cOut)
+            throw new ArgumentException($"Vulkan ConvTranspose2d: bias has {bias.ElementCount} elements, expected {cOut}.");
+        // The shader indexes input, weight and output with 32-bit offsets.
+        if (input.ElementCount > uint.MaxValue || weight.ElementCount > uint.MaxValue || output.ElementCount > uint.MaxValue)
+            throw new NotSupportedException(
+                $"Vulkan ConvTranspose2d: input {input.Shape}, weight {weight.Shape} or output {output.Shape} exceeds the shader's 32-bit index range.");
+        using OpScope _op = EnterOp();
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer wBuf = GetBuffer(weight);
+        VulkanBuffer biasBuf = bias is null ? inBuf : GetBuffer(bias);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            SpecConstant[] spec = { _default1DSpec[0], _default1DSpec[1], _default1DSpec[2], SpecConstant.Bool(10, bias is not null) };
+            VulkanKernel k = GetKernel("conv_transpose2d", 4, spec);
+            Span<byte> pc = stackalloc byte[13 * 4];
+            BinaryWriteUInt(pc, 0, (uint)batch);
+            BinaryWriteUInt(pc, 4, (uint)cIn);
+            BinaryWriteUInt(pc, 8, (uint)cOut);
+            BinaryWriteUInt(pc, 12, (uint)iH);
+            BinaryWriteUInt(pc, 16, (uint)iW);
+            BinaryWriteUInt(pc, 20, (uint)oH);
+            BinaryWriteUInt(pc, 24, (uint)oW);
+            BinaryWriteUInt(pc, 28, (uint)kH);
+            BinaryWriteUInt(pc, 32, (uint)kW);
+            BinaryWriteUInt(pc, 36, (uint)strideH);
+            BinaryWriteUInt(pc, 40, (uint)strideW);
+            BinaryWriteUInt(pc, 44, unchecked((uint)padH));
+            BinaryWriteUInt(pc, 48, unchecked((uint)padW));
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ConvTranspose2d dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }

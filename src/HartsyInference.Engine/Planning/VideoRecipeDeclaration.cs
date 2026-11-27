@@ -1,4 +1,5 @@
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Planning;
@@ -19,6 +20,9 @@ public sealed record VideoRecipeDeclaration
     /// <summary>The family's generation limits.</summary>
     public required VideoConstraints Constraints { get; init; }
 
+    /// <summary>The recipe's <see cref="IVideoRecipe.RequestRefusal"/>; null for a declaration that refuses nothing.</summary>
+    public Func<VideoRequest, VideoEffectiveSettings, string?>? RequestRefusal { get; init; }
+
     /// <summary>The resolved variant; null for a family that declares none.</summary>
     public ResolvedModelVariant? Variant { get; init; }
 
@@ -37,6 +41,7 @@ public sealed record VideoRecipeDeclaration
             Defaults = recipe.DefaultsFor(variant),
             Features = features,
             Constraints = recipe.Constraints,
+            RequestRefusal = recipe.RequestRefusal,
             Variant = variant,
         };
     }

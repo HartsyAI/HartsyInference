@@ -1,0 +1,78 @@
+[
+ {
+  "name": "plain",
+  "messages": [
+   {
+    "role": "user",
+    "content": "hello"
+   }
+  ],
+  "add_generation_prompt": true,
+  "reasoning_effort": null,
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:high<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>hello<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource>"
+ },
+ {
+  "name": "no_think",
+  "messages": [
+   {
+    "role": "user",
+    "content": "hello"
+   }
+  ],
+  "add_generation_prompt": true,
+  "reasoning_effort": "no_think",
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>hello<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource></think:opensource>"
+ },
+ {
+  "name": "high",
+  "messages": [
+   {
+    "role": "user",
+    "content": "hello"
+   }
+  ],
+  "add_generation_prompt": true,
+  "reasoning_effort": "high",
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:high<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>hello<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource>"
+ },
+ {
+  "name": "system_and_turns",
+  "messages": [
+   {
+    "role": "system",
+    "content": "be brief"
+   },
+   {
+    "role": "user",
+    "content": "2+2?"
+   },
+   {
+    "role": "assistant",
+    "content": "4"
+   },
+   {
+    "role": "user",
+    "content": "and 3+3?"
+   }
+  ],
+  "add_generation_prompt": true,
+  "reasoning_effort": null,
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜>be brief<｜reasoning_mode:opensource｜>reasoning_effort:high<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>2+2?<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource></think:opensource>4<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>and 3+3?<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource>"
+ },
+ {
+  "name": "no_generation_prompt",
+  "messages": [
+   {
+    "role": "user",
+    "content": "hi"
+   },
+   {
+    "role": "assistant",
+    "content": "hello"
+   }
+  ],
+  "add_generation_prompt": false,
+  "reasoning_effort": null,
+  "text": "<｜hy_start:opensource｜>system<｜hy_middle:opensource｜><｜reasoning_mode:opensource｜>reasoning_effort:high<｜hy_end:opensource｜><｜hy_start:opensource｜>user<｜hy_middle:opensource｜>hi<｜hy_end:opensource｜><｜hy_start:opensource｜>assistant<｜hy_middle:opensource｜><think:opensource></think:opensource>hello<｜hy_end:opensource｜>"
+ }
+]

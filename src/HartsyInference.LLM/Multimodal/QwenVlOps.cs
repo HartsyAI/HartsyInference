@@ -4,11 +4,11 @@ namespace HartsyInference.LLM.Multimodal;
 internal static class QwenVlOps
 {
     /// <summary>2D rotary cos/sin tables <c>[gh·gw, headDim]</c> in the merge-block order of <see cref="VisionPatchOps.Patchify"/>: h-frequencies on the first quarter, w-frequencies on the second, both mirrored on the upper half (the rotate_half layout Qwen-VL's vision attention expects).</summary>
-    public static (float[] cos, float[] sin) BuildRope(int gh, int gw, int headDim, int merge)
+    public static (float[] cos, float[] sin) BuildRope(int gh, int gw, int headDim, int merge, float theta = 10000f)
     {
         int np = gh * gw, ropeDim = headDim / 2, freqN = ropeDim / 2;
         float[] inv = new float[freqN];
-        for (int i = 0; i < freqN; i++) inv[i] = 1f / MathF.Pow(10000f, (2f * i) / ropeDim);
+        for (int i = 0; i < freqN; i++) inv[i] = 1f / MathF.Pow(theta, (2f * i) / ropeDim);
         int[] hpos = new int[np], wpos = new int[np];
         VisionPatchOps.BlockOrderPositions(gh, gw, merge, hpos, wpos);
         float[] cos = new float[np * headDim], sin = new float[np * headDim];

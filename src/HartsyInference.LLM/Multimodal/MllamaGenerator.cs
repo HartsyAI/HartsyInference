@@ -52,7 +52,7 @@ public sealed class MllamaGenerator
     }
 
     /// <summary>Generates a reply to <paramref name="question"/> about the image (<paramref name="pixelValues"/> = normalized <c>[1, 3, 560, 560]</c>) using a Llama-3 chat prompt with a single <c>&lt;|image|&gt;</c> token before the question.</summary>
-    public unsafe string Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
+    public unsafe VisionGeneration Generate(Tensor pixelValues, string question, int maxTokens = 64, SamplingOptions? sampling = null)
     {
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
@@ -112,7 +112,7 @@ public sealed class MllamaGenerator
         if (decoded > 1)
             HartsyInference.Core.Logging.Logs.Info(
                 $"[mllama] decode: {decoded} tokens in {decodeSw.Elapsed.TotalSeconds:F2}s = {decoded / decodeSw.Elapsed.TotalSeconds:F1} tok/s");
-        return sb.ToString();
+        return new VisionGeneration(sb.ToString(), StoppedOnToken: stops.Contains(token));
     }
 
     /// <summary>The hidden-state forward for one step (prefill or one decode token): staged across the placement (cross-attention states peer-copied per stage) when sharded, else the plain single-backend cross-attention path.</summary>

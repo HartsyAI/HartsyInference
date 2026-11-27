@@ -211,6 +211,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IFxService Fx => _fx.Value;
 
+    /// <summary>The concrete audio-effects service, for engine-internal steps that need more than <see cref="IFxService"/>.</summary>
+    internal FxService FxInternal => _fx.Value;
+
     /// <inheritdoc/>
     public IModelPrefetchService ModelPrefetch => _modelPrefetch.Value;
 
@@ -367,7 +370,8 @@ public sealed class InferenceEngine : IInferenceEngine
         };
         // Reported BEFORE construction, so a request that then runs out of VRAM has already said which of the
         // operator's memory settings this family was never going to act on.
-        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
+        if (recipe.RefusesUnhonouredPlacements) UnhonouredBackends.Refuse(context, recipe.Name);
+        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports, recipe.RefusesUnhonouredPlacements);
         // Victims leave the cache before the device gate is taken. A leased pipeline must never be disposed, and that
         // check runs outside ConstructWithVramCleanup, whose failure path frees every device buffer.
         using IDisposable constructionTurn = TakeConstructionTurn(spec.LocalPath, alsoKeepPath, cancel,
@@ -553,8 +557,11 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
     /// registry lookup the construction path uses.</summary>
-    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec) =>
-        ResolveRecipe(spec).PromptWeighting;
+    internal Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ModelSpec spec)
+    {
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return recipe.PromptWeightingFor(RecipeResolution.ResolveVariant(recipe.Variants, spec));
+    }
 
     /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
     internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
@@ -639,7 +646,8 @@ public sealed class InferenceEngine : IInferenceEngine
             VideoSwapPercent = request?.VideoSwapPercent,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
-        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
+        if (recipe.RefusesUnhonouredPlacements) UnhonouredBackends.Refuse(context, recipe.Name);
+        MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports, recipe.RefusesUnhonouredPlacements);
         using IDisposable constructionTurn = TakeConstructionTurn(spec.LocalPath, alsoKeepPath: null, cancel,
             () => _videoRecipePipelines.ContainsKey(key), out EvictedPipelines victims);
         lock (_pipelineCacheLock)

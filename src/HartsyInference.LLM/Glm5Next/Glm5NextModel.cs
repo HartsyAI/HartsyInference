@@ -1,0 +1,162 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
+
+namespace HartsyInference.LLM.Glm5Next;
+
+/// <summary>The glm5_next text decoder (GLM-5.3-Flash, Sage S2.1 Flash) on <see cref="IBackend"/> ops with host F32 activations: embedding broadcast to
+/// <c>hc_mult</c> streams, the decoder layers, an unweighted mean over the streams, <c>model.norm</c> and the LM head. The MTP layer is not run.</summary>
+public sealed class Glm5NextModel : IDisposable
+{
+    private readonly IBackend _backend;
+    private readonly Glm5NextConfig _c;
+    private readonly Glm5NextLayer[] _layers;
+    private readonly Tensor _embedding, _finalNorm, _lmHead;
+
+    /// <summary>Loads every decoder layer, the embedding, the final norm and the LM head from <paramref name="source"/>. The model keeps the source's
+    /// tensors; the source must outlive it.</summary>
+    public Glm5NextModel(IBackend backend, Glm5NextConfig config, IModelWeightSource source)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(source);
+        _backend = backend;
+        _c = config;
+        _layers = new Glm5NextLayer[config.Layers];
+        Tensor? embedding = null, finalNorm = null, lmHead = null;
+        try
+        {
+            embedding = source.Read(Glm5NextWeightNames.Embedding);
+            RequireShape(embedding, config.Vocab, config.Hidden, "embed_tokens");
+            // Rows are gathered by SliceRows, which drops the per-row QuantInfo, so a scaled FP8 table would decode without its grid. The
+            // checkpoints store the table plain (the FP8 index has no embed_tokens scale), so a scaled one is refused rather than read wrong.
+            if (embedding.QuantInfo?.Fp8BlockScaleInv is not null)
+                throw new InvalidDataException("'embed_tokens' is stored FP8 with block scales; the glm5_next row gather cannot apply that grid, so it is refused.");
+            if (embedding.DType != DType.F32 && embedding.DType != DType.BF16)
+                throw new InvalidDataException($"'embed_tokens' is {embedding.DType}; the glm5_next row gather takes F32 or BF16 tables.");
+            // The final norm is read as F32 whatever the checkpoint stores: the norm kernel reads its weight as F32.
+            finalNorm = Glm5NextLayer.F32(source, Glm5NextWeightNames.FinalNorm, config.Hidden);
+            lmHead = source.Read(Glm5NextWeightNames.LmHead);
+            RequireShape(lmHead, config.Vocab, config.Hidden, "lm_head");
+            for (int i = 0; i < config.Layers; i++) _layers[i] = new Glm5NextLayer(backend, config, i, source);
+        }
+        catch
+        {
+            // Everything this constructor took ownership of is released here; the fields are assigned only once the load has succeeded.
+            embedding?.Dispose();
+            finalNorm?.Dispose();
+            lmHead?.Dispose();
+            foreach (Glm5NextLayer? l in _layers) l?.Dispose();
+            throw;
+        }
+        _embedding = embedding;
+        _finalNorm = finalNorm;
+        _lmHead = lmHead;
+    }
+
+    /// <summary>The decoder's shape.</summary>
+    public Glm5NextConfig Config => _c;
+
+    /// <summary>Called with each layer's residual stream <c>[tokens, hc, hidden]</c> after it ran; for parity checks.</summary>
+    public Action<int, float[]>? LayerObserver { get; set; }
+
+    /// <summary>Token embeddings of <paramref name="ids"/> as <c>[tokens, hidden]</c>.</summary>
+    public float[] Embed(ReadOnlySpan<int> ids)
+    {
+        int d = _c.Hidden;
+        if (ids.Length == 0) return [];
+        // The device gather only when the table is resident (TryGatherRowsResident). Otherwise the needed rows are gathered on the host by the
+        // row-index reference, so a non-resident table is never uploaded to the card for one lookup. Out-of-range ids are refused by the contract.
+        using Tensor rows = new(new TensorShape(ids.Length, d), DType.F32);
+        if (!_backend.TryGatherRowsResident(rows, _embedding, ids))
+        {
+            using Tensor index = IndexTensor.Rows(ids);
+            RowIndexReference.Gather(rows, _embedding, index);
+        }
+        return rows.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>Runs <paramref name="embeddings"/> <c>[tokens, hidden]</c> through the decoder at positions <c>state.Length ..</c>, advancing the state, and
+    /// returns the final normed hidden rows <c>[tokens, hidden]</c>. A call that throws partway leaves <paramref name="state"/> to be reset before reuse.</summary>
+    public float[] ForwardHidden(ReadOnlySpan<float> embeddings, Glm5NextState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        // Exact F32 GEMMs for the whole decoder. Under TF32 the tiny config's layer 1 stream is off by about 4e-3 on CUDA, from the GEMMs
+        // alone (see the Sage S2.1 Flash decoder on CUDA and Vulkan row in docs/Checklists/PARITY_VERIFICATION.md); the cost is that BF16 weights are upcast on every call.
+        using ExactGemmScope exact = new(_backend);
+        int d = _c.Hidden, hc = _c.HcMult;
+        if (embeddings.Length == 0 || embeddings.Length % d != 0) throw new ArgumentException("embeddings must hold whole [hidden] rows.", nameof(embeddings));
+        int tokens = embeddings.Length / d, start = state.Length;
+        if (start + tokens > state.Capacity) throw new InvalidOperationException("The state's cache is full; allocate one for a longer sequence.");
+
+        float[] stream = ExpandStream(embeddings, tokens);
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            _layers[i].Forward(stream, tokens, start, state);
+            LayerObserver?.Invoke(i, stream);
+        }
+        state.Length = start + tokens;
+
+        // The stream read-out is the plain mean of the copies (no head projection), then the final RMS norm.
+        float[] hidden = ReadOut(stream, tokens);
+        HostOps.RmsNorm(_backend, hidden, d, _finalNorm, _c.RmsNormEps);
+        return hidden;
+    }
+
+    // The embedding copied into every stream: the HcPostMix op with unit post weights, zero residual and zero comb, so out[t,s] = sub[t].
+    private float[] ExpandStream(ReadOnlySpan<float> embeddings, int tokens)
+    {
+        int hc = _c.HcMult, d = _c.Hidden;
+        using Tensor sub = HostMath.Tensor(embeddings, tokens, d);
+        using Tensor residual = HostMath.Tensor(new float[tokens * hc * d], tokens, hc, d);
+        using Tensor post = HostMath.Tensor(Filled(tokens * hc, 1f), tokens, hc);
+        using Tensor comb = HostMath.Tensor(new float[tokens * hc * hc], tokens, hc, hc);
+        using Tensor output = new(new TensorShape(tokens, hc, d), DType.F32);
+        _backend.HcPostMix(output, sub, residual, post, comb);
+        return output.AsReadOnlySpan<float>().ToArray();
+    }
+
+    // The unweighted mean over the streams: the HcPreMix op with every pre weight 1/hc.
+    private float[] ReadOut(ReadOnlySpan<float> stream, int tokens)
+    {
+        int hc = _c.HcMult, d = _c.Hidden;
+        using Tensor x = HostMath.Tensor(stream, tokens, hc, d);
+        using Tensor pre = HostMath.Tensor(Filled(tokens * hc, 1f / hc), tokens, hc);
+        using Tensor y = new(new TensorShape(tokens, d), DType.F32);
+        _backend.HcPreMix(y, x, pre);
+        return y.AsReadOnlySpan<float>().ToArray();
+    }
+
+    private static float[] Filled(int count, float value)
+    {
+        float[] values = new float[count];
+        Array.Fill(values, value);
+        return values;
+    }
+
+    /// <summary>Logits <c>[tokens, vocab]</c> for the rows <paramref name="hidden"/> <c>[tokens, hidden]</c>.</summary>
+    public float[] Project(ReadOnlySpan<float> hidden)
+    {
+        using ExactGemmScope exact = new(_backend);
+        int rows = hidden.Length / _c.Hidden;
+        return HostOps.Project(_backend, hidden, rows, _c.Hidden, _lmHead, _c.Vocab);
+    }
+
+    /// <summary>Embeds <paramref name="ids"/>, runs them and returns every position's logits <c>[tokens, vocab]</c>.</summary>
+    public float[] Forward(ReadOnlySpan<int> ids, Glm5NextState state) => Project(ForwardHidden(Embed(ids), state));
+
+    private static void RequireShape(Tensor t, int rows, int cols, string name)
+    {
+        if (t.Shape.Rank != 2 || t.Shape[0] != rows || t.Shape[1] != cols) throw new InvalidDataException($"{name} must be [{rows}, {cols}]; got {t.Shape}.");
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        foreach (Glm5NextLayer? l in _layers) l?.Dispose();
+        _embedding?.Dispose();
+        _finalNorm?.Dispose();
+        _lmHead?.Dispose();
+    }
+}

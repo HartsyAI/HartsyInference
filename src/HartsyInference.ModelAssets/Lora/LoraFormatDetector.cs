@@ -32,7 +32,9 @@ public static class LoraFormatDetector
         bool hasFibo2 = false;
         bool hasAnima = false;
         bool hasKrea2 = false;
+        bool hasAiToolkitMiniMaxH3 = false;
         bool hasIdol = false;
+        bool hasLongCat = false;
         bool hasKohyaGeneric = false;
 
         foreach (string key in descriptors.Keys)
@@ -62,6 +64,11 @@ public static class LoraFormatDetector
             {
                 hasAnima = true;
             }
+            // LongCat's own state dict. Its prefix is unique, and its lora_up.blocks.N keys carry no suffix the generic arms know.
+            if (LongCatLoraMapper.IsDistinctive(key))
+            {
+                hasLongCat = true;
+            }
             // Idol's block modules. Bare `blocks.N.attn.qkv.lora_down.weight` roots would otherwise reach the bare-checkpoint arm below,
             // whose PEFT-only suffix list does not even carry the kohya matrices these files use.
             if (HasLoraSuffix(key) && IdolLoraMapper.IsDistinctive(key))
@@ -73,6 +80,12 @@ public static class LoraFormatDetector
             if (HasLoraSuffix(key) && Krea2LoraMapper.IsDistinctive(key))
             {
                 hasKrea2 = true;
+            }
+            // MiniMax-H3 under ai-toolkit's `diffusion_model.` wrapper. Its `diffusion_model.blocks.N.` roots would otherwise be claimed
+            // by the Wan arm below, which labels the file DiffusersWan. The H3-only module names (`attn.qkv_proj`, `mlp.fc1`) claim it.
+            if (HasLoraSuffix(key) && MiniMaxH3AiToolkitLoraMapper.IsDistinctive(key))
+            {
+                hasAiToolkitMiniMaxH3 = true;
             }
             // No wrapper prefix at all — the root IS the checkpoint's own key (MiniMax-H3's published Turbo LoRA:
             // `blocks.0.attn.qkv_proj.lora_A.weight`, `token_refiner.blocks.0.mlp.fc1.lora_B.weight`). Recorded
@@ -188,12 +201,14 @@ public static class LoraFormatDetector
             }
         }
 
+        if (hasLongCat) return LoraFormat.LongCat;
         if (hasFlux3) return LoraFormat.Flux3;
         if (hasMossImage) return LoraFormat.MossImage;
         if (hasFibo2) return LoraFormat.Fibo2;
         if (hasAnima) return LoraFormat.Anima;
         if (hasIdol) return LoraFormat.Idol;
         if (hasKrea2) return LoraFormat.Krea2;
+        if (hasAiToolkitMiniMaxH3) return LoraFormat.AiToolkitMiniMaxH3;
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;
         if (hasZImage) return LoraFormat.ComfyZImageDit;

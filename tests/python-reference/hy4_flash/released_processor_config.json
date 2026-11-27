@@ -1,0 +1,75 @@
+{
+  "image_processor": {
+    "device": "cpu",
+    "do_convert_rgb": true,
+    "do_normalize": true,
+    "do_rescale": true,
+    "do_resize": true,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_processor_type": "HYV4VLImageProcessor",
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "max_frames": 1024,
+    "max_pixels": 4194304,
+    "merge_size": 2,
+    "min_frames": 2,
+    "min_pixels": 4096,
+    "patch_size": 16,
+    "resample": 1,
+    "rescale_factor": 0.00392156862745098,
+    "size": {
+      "longest_edge": 4194304,
+      "shortest_edge": 4096
+    },
+    "spatial_patch_size": 1,
+    "temporal_patch_size": 1,
+    "timestamp_token_per_frame": 6,
+    "timestamp_token_reserve": 1000,
+    "video_max_image_size": 1024
+  },
+  "processor_class": "HYV4FlashProcessor",
+  "video_processor": {
+    "do_convert_rgb": true,
+    "do_normalize": true,
+    "do_rescale": true,
+    "do_resize": true,
+    "do_sample_frames": false,
+    "fps": 2,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "max_frames": 2048,
+    "max_pixels": 61440000,
+    "merge_size": 2,
+    "min_frames": 2,
+    "min_pixels": 16384,
+    "patch_size": 16,
+    "resample": 1,
+    "rescale_factor": 0.00392156862745098,
+    "return_metadata": false,
+    "size": {
+      "longest_edge": 61440000,
+      "shortest_edge": 16384
+    },
+    "spatial_patch_size": 1,
+    "temporal_patch_size": 1,
+    "timestamp_token_per_frame": 6,
+    "timestamp_token_reserve": 1000,
+    "video_max_image_size": 1024,
+    "video_processor_type": "HYV4VLVideoProcessor"
+  }
+}

@@ -30,15 +30,29 @@ internal static class OnigurumaPattern
             char c = pattern[i];
             if (c == '\\')
             {
+                if (pattern.AsSpan(i).StartsWith(@"\p{Han}") || pattern.AsSpan(i).StartsWith(@"\P{Han}"))
+                    throw new NotSupportedException("Unicode script classes other than [\\p{Han}] are not translated; .NET has no script properties.");
                 atom = sb.Length;
                 int length = EscapeLength(pattern, i);
                 sb.Append(pattern, i, length);
                 i += length;
             }
+            else if (pattern.AsSpan(i).StartsWith(@"[\p{Han}]"))
+            {
+                // .NET has no script classes; HanScript spells the same set as ranges, and a surrogate-pair alternation for the astral ones.
+                atom = sb.Length;
+                sb.Append("(?:[").Append(HanScript.BmpRanges).Append(']');
+                foreach (string alternative in HanScript.AstralAlternatives.Split('|')) sb.Append('|').Append(alternative);
+                sb.Append(')');
+                i += @"[\p{Han}]".Length;
+            }
             else if (c == '[')
             {
                 atom = sb.Length;
                 int end = ClassEnd(pattern, i);
+                ReadOnlySpan<char> cls = pattern.AsSpan(i, end - i);
+                if (cls.Contains(@"\p{Han}", StringComparison.Ordinal) || cls.Contains(@"\P{Han}", StringComparison.Ordinal))
+                    throw new NotSupportedException("A Han script class is translated only as the whole class [\\p{Han}].");
                 sb.Append(pattern, i, end - i);
                 i = end;
             }

@@ -69,6 +69,22 @@ public sealed partial class AttentionLayer
     /// <summary>The layer's configuration.</summary>
     public AttentionLayerConfig Config => _config;
 
+    /// <summary>The projection, bias and norm tensors the layer was built with. They are borrowed, so this lists them for a residency
+    /// owner to preload or free; nothing is copied or disposed.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        if (_weights is null)
+            yield break;
+        foreach (Tensor? t in new[]
+                 {
+                     _weights.Query, _weights.Key, _weights.Value, _weights.Qkv, _weights.QkvBias, _weights.Output,
+                     _weights.QueryBias, _weights.KeyBias, _weights.ValueBias, _weights.OutputBias, _weights.Gate, _weights.GateBias,
+                     _weights.QueryNorm, _weights.KeyNorm,
+                 })
+            if (t is not null)
+                yield return t;
+    }
+
     /// <summary>Attention of <paramref name="qInput"/> <c>[B, S, C]</c> or <c>[S, C]</c> over <paramref name="kvInput"/> (the same
     /// tensor for self-attention). Returns the output projection, shaped like the query input with the output width; the caller
     /// owns it.</summary>
@@ -133,7 +149,7 @@ public sealed partial class AttentionLayer
 
     /// <summary><see cref="Attend"/> over flat operands: <paramref name="q"/> <c>[B, S, heads·D]</c>, <paramref name="k"/> and
     /// <paramref name="v"/> <c>[B, Skv, kvHeads·D]</c> (a joint sequence, or a full-width norm's layout); rank-2
-    /// <c>[S, heads·D]</c> operands are one batch item.</summary>
+    /// <c>[S, heads·D]</c> operands are one batch item. As in <see cref="Attend"/>, all three are taken over and disposed.</summary>
     public Tensor AttendFlat(IBackend backend, Tensor q, Tensor k, Tensor v, TensorShape flatShape, in AttentionCallContext context)
     {
         if (_config.QkNorm is not (AttentionQkNorm.None or AttentionQkNorm.FullWidthRms))
@@ -358,12 +374,25 @@ public sealed partial class AttentionLayer
     }
 
     /// <summary>The permute back to <paramref name="flatShape"/> (<c>[B, S, heads·D]</c>) of a branch's head-major output, which is
-    /// disposed; the caller owns the result.</summary>
+    /// disposed, also when the permute throws (the new tensor is then disposed too, and the exception propagates); the caller owns
+    /// the result.</summary>
     public Tensor MergeHeads(IBackend backend, Tensor attnMh, TensorShape flatShape)
     {
         Tensor flat = new(flatShape, attnMh.DType);
-        backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
-        attnMh.Dispose();
+        try
+        {
+            backend.Permute0213(flat, attnMh, _config.Heads, (int)attnMh.Shape[2], _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attnMh.Dispose();
+        }
+
         return flat;
     }
 
@@ -754,14 +783,26 @@ public sealed partial class AttentionLayer
         return RunHeadMajor(backend, qMh, kMh, vMh, sq, act, flatShape, in context);
     }
 
-    /// <summary>The head-major call over permuted operands, then the permute back to <paramref name="flatShape"/>.</summary>
+    /// <summary>The head-major call over permuted operands, then the permute back to <paramref name="flatShape"/>. When that permute
+    /// throws, the attention output and the new tensor are disposed and the exception propagates.</summary>
     private Tensor RunHeadMajor(IBackend backend, Tensor qMh, Tensor kMh, Tensor vMh, int sq, DType act, TensorShape flatShape,
         in AttentionCallContext context)
     {
         Tensor attn = RunAttention(backend, qMh, kMh, vMh, act, in context, OperandOwnership.All);
         Tensor flat = new(flatShape, act);
-        backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
-        attn.Dispose();
+        try
+        {
+            backend.Permute0213(flat, attn, _config.Heads, sq, _config.HeadDim);
+        }
+        catch
+        {
+            flat.Dispose();
+            throw;
+        }
+        finally
+        {
+            attn.Dispose();
+        }
         return flat;
     }
 

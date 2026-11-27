@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.IO;
@@ -42,6 +43,13 @@ public static class ModelResolver
                 catalog = family;
                 variant = selector.Variant;
             }
+        }
+        // longcat-avatar:1.6 (or avatar-1.6) is the 1.6 INT8 row, for every caller: the family's 1.5 row carries the 1.5 weights.
+        if (modality == Modality.Video && catalog?.Id == "longcat-avatar" && variant is not null
+            && LongCatAvatarVariants.IsOnePointSix(variant) && ModelCatalog.Find(LongCatAvatarVariants.Avatar16FamilyId) is CatalogEntry row)
+        {
+            catalog = row;
+            variant = null;
         }
         string? local = LocateLocal(modelArg, modelPathArg, catalog, modality);
         return new ModelSpec

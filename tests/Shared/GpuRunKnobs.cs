@@ -1,0 +1,154 @@
+using System.Runtime.CompilerServices;
+using HartsyInference.Core.Configuration;
+using Xunit;
+
+namespace HartsyInference.Tests.Shared;
+
+/// <summary>Turns knobs on for a whole test run, for the GpuIntegration lanes: <c>HARTSY_GPU_TEST_KNOBS="numerics.tileFromDevice=true"</c>
+/// (several as <c>id=value;id=value</c>). Linked into each test project that runs the GpuIntegration category. Unset, it does nothing.</summary>
+/// <remarks>The values go through <see cref="KnobProfile.TrySet"/>, so they are parsed and range-checked like a <c>--set</c>, then applied as a
+/// run profile with <see cref="KnobStore.ApplyRunProfile"/>. A malformed value, or an id that is retired with no replacement (which would
+/// otherwise be dropped silently), fails the test host at load, not mid-lane.</remarks>
+internal static class GpuRunKnobs
+{
+    internal const string EnvVar = "HARTSY_GPU_TEST_KNOBS";
+
+    /// <summary>Parses <c>id=value;...</c>. False, with the reason, for a malformed pair or an id that applied nothing.</summary>
+    internal static bool TryParse(string raw, out KnobProfile profile, out string? error)
+    {
+        profile = KnobProfile.Create("gpu-test-run");
+        error = null;
+        HashSet<string> named = new(StringComparer.Ordinal);
+        foreach (string pair in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0)
+            {
+                error = $"{EnvVar}: expected id=value, got '{pair}'.";
+                return false;
+            }
+            string id = pair[..eq];
+            int before = profile.Count;
+            if (!profile.TrySet(id, pair[(eq + 1)..], out KnobProfile next, out error))
+            {
+                error = $"{EnvVar}: {error}";
+                return false;
+            }
+            if (named.Add(id) && next.Count == before)
+            {
+                error = $"{EnvVar}: '{id}' is a retired setting with no replacement; nothing would be applied.";
+                return false;
+            }
+            profile = next;
+        }
+        return true;
+    }
+
+    [ModuleInitializer]
+    internal static void ApplyRunKnobs()
+    {
+        string? raw = Environment.GetEnvironmentVariable(EnvVar);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return;
+        }
+        if (!TryParse(raw, out KnobProfile profile, out string? error))
+        {
+            throw new InvalidOperationException(error);
+        }
+        KnobStore.ApplyRunProfile(profile);
+    }
+}
+
+/// <summary>A <see cref="FactAttribute"/> that is reported as skipped (not passed) when the whole-run switch is not set up for the test: the variable
+/// <c>HARTSY_GPU_TEST_KNOBS</c> is unset, or, when <paramref name="requiredId"/> is given, does not name that id. The skip is set at discovery.</summary>
+public sealed class WhenRunKnobsFactAttribute : FactAttribute
+{
+    public WhenRunKnobsFactAttribute(string? requiredId = null)
+    {
+        string? raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar);
+        if (string.IsNullOrWhiteSpace(raw))
+            Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} is unset; the whole-run knob check did not run.";
+        else if (requiredId is not null && !IsTrueFor(raw, requiredId))
+            Skip = $"SKIPPED: {GpuRunKnobs.EnvVar} does not set {requiredId} to true.";
+    }
+
+    /// <summary>True when the switch parses <paramref name="id"/> to true (true, 1, or any casing of true). A value of false, 0 or anything else is not on.</summary>
+    private static bool IsTrueFor(string raw, string id)
+    {
+        foreach (string pair in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0 || !string.Equals(pair[..eq], id, StringComparison.Ordinal)) continue;
+            string value = pair[(eq + 1)..];
+            return value == "1" || bool.TryParse(value, out bool parsed) && parsed;
+        }
+        return false;
+    }
+}
+
+/// <summary>Serializes the tests that read or change the process-wide knob store, so a Reload or a host Set in one cannot race another's assert.</summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public static class GlobalKnobStore
+{
+    public const string Name = "GlobalKnobStore";
+}
+
+/// <summary>Proves the whole-run switch reached the knob store: every id in <c>HARTSY_GPU_TEST_KNOBS</c> resolves with source "run profile",
+/// and <c>numerics.tileFromDevice</c>, when it is set to true, reads true. Each test is skipped, not passed, when the switch does not set what it needs.</summary>
+[Trait("Category", "GpuIntegration")]
+[Collection(GlobalKnobStore.Name)]
+public sealed class GpuRunKnobsTests
+{
+    [WhenRunKnobsFact]
+    public void TheWholeRunKnobsAreInForceForEveryTestInTheRun()
+    {
+        string raw = Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar)!;
+        Assert.True(GpuRunKnobs.TryParse(raw, out KnobProfile profile, out string? error), error);
+        foreach (string pair in raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            Assert.Equal("run profile", KnobStore.SourceOf(pair[..pair.IndexOf('=')]));
+        }
+        if (raw.Contains("numerics.tileFromDevice=true", StringComparison.Ordinal))
+        {
+            Assert.True(EngineKnobs.TileFromDevice.Value == true);
+        }
+    }
+
+    [WhenRunKnobsFact("numerics.tileFromDevice")]
+    public void TheRunProfileSurvivesAReloadAndAClear()
+    {
+        // Paint21 and other suites call KnobFile.Reload and KnobStore.Clear mid-run; neither may drop the whole-run profile.
+        KnobFile.Reload();
+        Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+        Assert.True(EngineKnobs.TileFromDevice.Value == true);
+        KnobStore.Clear(EngineKnobs.TileFromDevice);
+        Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+        Assert.True(EngineKnobs.TileFromDevice.Value == true);
+    }
+
+    [WhenRunKnobsFact("numerics.tileFromDevice")]
+    public void AHostSetDoesNotBeatTheRunProfile()
+    {
+        // Order: request profile, run profile, host overrides. A host Set to off must not turn the lane's knob back off.
+        KnobStore.Set(EngineKnobs.TileFromDevice, false);
+        try
+        {
+            Assert.Equal("run profile", KnobStore.SourceOf("numerics.tileFromDevice"));
+            Assert.True(EngineKnobs.TileFromDevice.Value == true);
+        }
+        finally
+        {
+            // The host override is this test's alone: clear it so later tests in the run read the run profile, not a stale host value.
+            KnobStore.Clear(EngineKnobs.TileFromDevice);
+        }
+    }
+
+    [Fact]
+    public void ARetiredIdWithNoReplacementIsRefusedNotDropped()
+    {
+        // numerics.sdpaV2 is retired with no replacement: TrySet accepts it and applies nothing, so the parse must refuse it.
+        Assert.False(GpuRunKnobs.TryParse("numerics.sdpaV2=1", out _, out string? error));
+        Assert.Contains("retired", error, StringComparison.Ordinal);
+    }
+}

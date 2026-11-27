@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Metadata;
 
@@ -24,6 +26,10 @@ public interface IVideoRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
+    /// <summary>True when the family refuses the CFG-parallel, DiT-shard and context-parallel placements. The engine refuses them before the
+    /// memory report, so a refusing family never reaches the CFG-parallel warning; the recipe re-checks without a warning.</summary>
+    bool RefusesUnhonouredPlacements => false;
+
     /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies — the
     /// video counterpart of <see cref="IArchitectureRecipe.PromptWeighting"/>, and the source of
     /// <see cref="VideoFeatures.PromptWeighting"/>.</summary>
@@ -35,6 +41,11 @@ public interface IVideoRecipe
 
     /// <summary>What this family can generate: limits planning validates a request against, which its own defaults satisfy.</summary>
     VideoConstraints Constraints { get; }
+
+    /// <summary>Why this family cannot run a request, when the request and its resolved settings alone show it; null otherwise. Planning
+    /// reports it as a blocking issue, before any weight is read. <paramref name="request"/> has <paramref name="settings"/> applied.
+    /// The exact-hash profile path (MiniMax-H3) does not ask.</summary>
+    string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => null;
 
     /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
     ModelVariantCatalog? Variants => null;

@@ -87,7 +87,7 @@ public sealed unsafe class HieraBlock
 
         int b = (int)x.Shape[0];
 
-        Tensor xn = new Tensor(x.Shape, DType.F32);
+        using Tensor xn = new Tensor(x.Shape, DType.F32);
         backend.LayerNorm(xn, x, _norm1W!, _norm1B!, _eps);
 
         // Residual path: project + pool when entering a new stage so it matches the attention output.
@@ -99,7 +99,9 @@ public sealed unsafe class HieraBlock
         }
         if (_qPool)
         {
-            shortcut = MaxPoolNhwc(backend, shortcut, _dimOut, ref shH, ref shW);
+            Tensor unpooled = shortcut;
+            shortcut = MaxPoolNhwc(backend, unpooled, _dimOut, ref shH, ref shW);
+            if (!ReferenceEquals(unpooled, x)) unpooled.Dispose();
         }
 
         // Attention (optionally windowed).
@@ -114,6 +116,7 @@ public sealed unsafe class HieraBlock
         }
 
         (Tensor attnOut, int aH, int aW) = Attention(backend, attnIn, attnH, attnW);
+        if (ws > 0) attnIn.Dispose();
 
         int outH = shH, outW = shW;
         if (ws > 0)
@@ -121,7 +124,9 @@ public sealed unsafe class HieraBlock
             int unWs = _qPool ? ws / 2 : ws; // a pooled query shrinks each window by 2
             int padHp = outH + (unWs - outH % unWs) % unWs;
             int padWp = outW + (unWs - outW % unWs) % unWs;
-            attnOut = WindowUnpartition(attnOut, b, unWs, padHp, padWp, outH, outW, _dimOut);
+            Tensor windows = attnOut;
+            attnOut = WindowUnpartition(windows, b, unWs, padHp, padWp, outH, outW, _dimOut);
+            windows.Dispose();
         }
         else
         {
@@ -129,14 +134,16 @@ public sealed unsafe class HieraBlock
             outW = aW;
         }
 
-        Tensor added = new Tensor(new TensorShape(b, outH, outW, _dimOut), DType.F32);
+        using Tensor added = new Tensor(new TensorShape(b, outH, outW, _dimOut), DType.F32);
         backend.Add(added, shortcut, attnOut);
+        attnOut.Dispose();
+        if (!ReferenceEquals(shortcut, x)) shortcut.Dispose();
 
-        Tensor n2 = new Tensor(added.Shape, DType.F32);
+        using Tensor n2 = new Tensor(added.Shape, DType.F32);
         backend.LayerNorm(n2, added, _norm2W!, _norm2B!, _eps);
-        Tensor hidden = LinearNhwc(backend, n2, _mlpW0!, _mlpB0!, outH, outW, _mlpHidden);
+        using Tensor hidden = LinearNhwc(backend, n2, _mlpW0!, _mlpB0!, outH, outW, _mlpHidden);
         backend.Gelu(hidden, hidden);
-        Tensor mlpOut = LinearNhwc(backend, hidden, _mlpW1!, _mlpB1!, outH, outW, _dimOut);
+        using Tensor mlpOut = LinearNhwc(backend, hidden, _mlpW1!, _mlpB1!, outH, outW, _dimOut);
 
         Tensor y = new Tensor(added.Shape, DType.F32);
         backend.Add(y, added, mlpOut);
@@ -151,75 +158,67 @@ public sealed unsafe class HieraBlock
         int b = (int)x.Shape[0];
         int n = h * w;
 
-        Tensor xf = x.Reshape(new TensorShape(b, n, _dimIn));
-        Tensor qkv = new Tensor(new TensorShape(b, n, 3 * _dimOut), DType.F32);
-        backend.Linear(qkv, xf, _qkvW!, _qkvB);
-
-        // Split the packed qkv [B,N,3,dimOut] along the "3" axis into q/k/v.
-        Tensor qkv4 = qkv.Reshape(new TensorShape(b, n, 3, _dimOut));
-        Tensor q3 = new Tensor(new TensorShape(b, n, 1, _dimOut), DType.F32);
-        Tensor k3 = new Tensor(new TensorShape(b, n, 1, _dimOut), DType.F32);
-        Tensor v3 = new Tensor(new TensorShape(b, n, 1, _dimOut), DType.F32);
-        Span<Tensor> parts = [q3, k3, v3];
-        backend.Split(parts, qkv4, 2);
-
-        Tensor qFlat = q3.Reshape(new TensorShape(b, n, _dimOut));
-        Tensor kFlat = k3.Reshape(new TensorShape(b, n, _dimOut));
-        Tensor vFlat = v3.Reshape(new TensorShape(b, n, _dimOut));
+        // The packed qkv is [B,N,3,dimOut]; split its "3" axis into q/k/v. Linear, Transpose2D and Permute0213 size themselves from their
+        // counts, so every result is created in the shape its reader wants and none is reshaped on the host.
+        Tensor q = new Tensor(new TensorShape(b, n, 1, _dimOut), DType.F32);
+        using Tensor k = new Tensor(new TensorShape(b, n, 1, _dimOut), DType.F32);
+        using Tensor v = new Tensor(new TensorShape(b, n, 1, _dimOut), DType.F32);
+        using (Tensor qkv = new Tensor(new TensorShape(b, n, 3, _dimOut), DType.F32))
+        {
+            backend.Linear(qkv, x, _qkvW!, _qkvB);
+            backend.Split([q, k, v], qkv, 2);
+        }
 
         int outH = h, outW = w;
         int nq = n;
         if (_qPool)
         {
-            Tensor qNhwc = qFlat.Reshape(new TensorShape(b, h, w, _dimOut));
-            Tensor qPooled = MaxPoolNhwc(backend, qNhwc, _dimOut, ref outH, ref outW);
+            // MaxPool2D reads its extents from the shapes, so the query takes its grid shape first.
+            using Tensor qNhwc = q.IntoShape(new TensorShape(b, h, w, _dimOut));
+            q = MaxPoolNhwc(backend, qNhwc, _dimOut, ref outH, ref outW);
             nq = outH * outW;
-            qFlat = qPooled.Reshape(new TensorShape(b, nq, _dimOut));
         }
 
-        Tensor qHeads = ToHeads(backend, qFlat, b, nq);
-        Tensor kHeads = ToHeads(backend, kFlat, b, n);
-        Tensor vHeads = ToHeads(backend, vFlat, b, n);
+        using Tensor qHeads = ToHeads(backend, q, b, nq);
+        q.Dispose();
+        using Tensor kHeads = ToHeads(backend, k, b, n);
+        using Tensor vHeads = ToHeads(backend, v, b, n);
 
-        Tensor attn = AttentionLayer.Shared(_heads, _headDim, computeDType: DType.F32).AttendHeadMajorOperands(backend, qHeads, kHeads, vHeads, default);
+        using Tensor attn = AttentionLayer.Shared(_heads, _headDim, computeDType: DType.F32).AttendHeadMajorOperands(backend, qHeads, kHeads, vHeads, default);
 
         // [B,heads,Nq,hd] → [B,Nq,heads,hd] → [B,Nq,dimOut]
-        Tensor merged = new Tensor(new TensorShape(b, nq, _heads, _headDim), DType.F32);
+        using Tensor merged = new Tensor(new TensorShape(b, nq, _dimOut), DType.F32);
         backend.Permute0213(merged, attn, _heads, nq, _headDim);
-        Tensor mergedFlat = merged.Reshape(new TensorShape(b, nq, _dimOut));
 
-        Tensor proj = new Tensor(new TensorShape(b, nq, _dimOut), DType.F32);
-        backend.Linear(proj, mergedFlat, _attnProjW!, _attnProjB);
-        return (proj.Reshape(new TensorShape(b, outH, outW, _dimOut)), outH, outW);
+        Tensor proj = new Tensor(new TensorShape(b, outH, outW, _dimOut), DType.F32);
+        backend.Linear(proj, merged, _attnProjW!, _attnProjB);
+        return (proj, outH, outW);
     }
 
-    /// <summary>[B,N,dimOut] → [B,heads,N,headDim] (reshape to heads, then swap the seq/head axes).</summary>
+    /// <summary>[B,N,dimOut] → [B,heads,N,headDim] (read as heads, then swap the seq/head axes).</summary>
     private Tensor ToHeads(IBackend backend, Tensor x, int b, int n)
     {
-        Tensor reshaped = x.Reshape(new TensorShape(b, n, _heads, _headDim));
         Tensor outT = new Tensor(new TensorShape(b, _heads, n, _headDim), DType.F32);
-        backend.Permute0213(outT, reshaped, n, _heads, _headDim);
+        backend.Permute0213(outT, x, n, _heads, _headDim);
         return outT;
     }
 
     private static Tensor LinearNhwc(IBackend backend, Tensor x, Tensor weight, Tensor bias, int h, int w, int outDim)
     {
         int b = (int)x.Shape[0];
-        int inDim = (int)x.Shape[3];
-        Tensor v = x.Reshape(new TensorShape(b, h * w, inDim));
-        Tensor o = new Tensor(new TensorShape(b, h * w, outDim), DType.F32);
-        backend.Linear(o, v, weight, bias);
-        return o.Reshape(new TensorShape(b, h, w, outDim));
+        Tensor o = new Tensor(new TensorShape(b, h, w, outDim), DType.F32);
+        backend.Linear(o, x, weight, bias);
+        return o;
     }
 
     /// <summary>Stride-2 max-pool of a channels-last <c>[B,H,W,C]</c> tensor; updates <paramref name="h"/>/<paramref name="w"/>.</summary>
     private static Tensor MaxPoolNhwc(IBackend backend, Tensor x, int c, ref int h, ref int w)
     {
         int b = (int)x.Shape[0];
-        Tensor nchw = HieraImageEncoder.NhwcToNchw(backend, x, b, h, w, c);
+        using Tensor nchw = HieraImageEncoder.NhwcToNchw(backend, x, b, h, w, c);
         int oH = (h - 2) / 2 + 1;
         int oW = (w - 2) / 2 + 1;
-        Tensor pooled = new Tensor(new TensorShape(b, c, oH, oW), DType.F32);
+        using Tensor pooled = new Tensor(new TensorShape(b, c, oH, oW), DType.F32);
         backend.MaxPool2D(pooled, nchw, 2, 2, 2, 2, 0, 0);
         h = oH;
         w = oW;

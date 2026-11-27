@@ -41,7 +41,7 @@ public static class IdolConditioner
         }
 
         using Tensor latent = vae.Encode(backend, pixels);
-        using Tensor tokens = Flux2LatentOps.ToPackedTokens(latent, bnMean, bnVar, BatchNormEps, PatchSize);
+        using Tensor tokens = Flux2LatentOps.ToPackedTokens(backend, latent, bnMean, bnVar, BatchNormEps, PatchSize);
         using Tensor zeros = new(new TensorShape(1, ZeroTokens, tokens.Shape[2]), DType.F32);
         Tensor result = new(new TensorShape(1, ZeroTokens + tokens.Shape[1], tokens.Shape[2]), DType.F32);
         backend.Concat(result, [zeros, tokens], 1);

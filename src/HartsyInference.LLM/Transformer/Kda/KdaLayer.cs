@@ -28,11 +28,13 @@ public readonly record struct KdaSettings(int Hidden, int Heads, int HeadDim, in
 /// <param name="ForgetUp"><c>[KeyDim, ForgetRank]</c>, the folded <c>diag(exp A)·W</c>.</param>
 /// <param name="ForgetBias"><c>[KeyDim]</c>, the folded <c>exp(A) ⊙ dt_bias</c>.</param>
 /// <param name="BetaProj"><c>[Heads, Hidden]</c>: write-strength projection, pre-sigmoid.</param>
-/// <param name="OutGateProj"><c>[KeyDim, Hidden]</c>.</param>
+/// <param name="OutGateProj"><c>[KeyDim, Hidden]</c>; null when the gate is low-rank (<paramref name="OutGateDown"/> and <paramref name="OutGateUp"/>).</param>
 /// <param name="OutNorm"><c>[HeadDim]</c>, the per-head RMSNorm weight.</param>
 /// <param name="OutProj"><c>[Hidden, KeyDim]</c>.</param>
+/// <param name="OutGateDown"><c>[GateRank, Hidden]</c>: first factor of a low-rank output gate (GLM-5.3-Flash <c>g_a_proj</c>).</param>
+/// <param name="OutGateUp"><c>[KeyDim, GateRank]</c>: second factor (<c>g_b_proj</c>).</param>
 public sealed record KdaWeights(Tensor QkvProj, Tensor ConvTaps, Tensor ForgetDown, Tensor ForgetUp, Tensor ForgetBias,
-    Tensor BetaProj, Tensor OutGateProj, Tensor OutNorm, Tensor OutProj);
+    Tensor BetaProj, Tensor? OutGateProj, Tensor OutNorm, Tensor OutProj, Tensor? OutGateDown = null, Tensor? OutGateUp = null);
 
 /// <summary>The carried state of one KDA layer across calls: the conv history and the recurrent state.</summary>
 public sealed class KdaState : IDisposable
@@ -90,9 +92,18 @@ public static class KdaLayer
 
     /// <summary>Runs the layer over <paramref name="tokens"/> tokens of <paramref name="input"/> (F32 <c>[tokens, Hidden]</c>) into
     /// <paramref name="output"/>, advancing <paramref name="state"/>.</summary>
-    public static void Forward(IBackend backend, KdaSettings s, KdaWeights w, Tensor input, Tensor output, KdaState state, float eps = 1e-6f)
+    /// <param name="eps">Epsilon of the per-head output RMSNorm.</param>
+    /// <param name="l2Eps">Epsilon inside the q and k L2 normalization, <c>1/sqrt(sum + eps)</c>; defaults to <paramref name="eps"/>.
+    /// GLM-5.3-Flash keeps it at 1e-6 while its RMSNorm epsilon is 1e-5.</param>
+    public static void Forward(IBackend backend, KdaSettings s, KdaWeights w, Tensor input, Tensor output, KdaState state, float eps = 1e-6f,
+        float? l2Eps = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        bool full = w.OutGateProj is not null, down = w.OutGateDown is not null, up = w.OutGateUp is not null;
+        if (down != up || full == down)
+            throw new ArgumentException("A KDA layer needs exactly one output gate form: OutGateProj, or OutGateDown with OutGateUp.", nameof(w));
+        if (down && (w.OutGateUp!.Shape.Rank != 2 || w.OutGateDown!.Shape.Rank != 2 || w.OutGateUp.Shape[1] != w.OutGateDown.Shape[0] || w.OutGateUp.Shape[0] != s.KeyDim || w.OutGateDown.Shape[1] != s.Hidden))
+            throw new ArgumentException($"The low-rank output gate must be OutGateDown [rank, Hidden] and OutGateUp [KeyDim, rank]; got {w.OutGateDown!.Shape} and {w.OutGateUp!.Shape}.", nameof(w));
         int tokens = checked((int)(input.ElementCount / s.Hidden));
         int keyDim = s.KeyDim;
         float qScale = 1f / MathF.Sqrt(s.HeadDim);
@@ -102,7 +113,7 @@ public static class KdaLayer
         using Tensor q = Alloc(tokens, keyDim);
         using Tensor k = Alloc(tokens, keyDim);
         using Tensor v = Alloc(tokens, keyDim);
-        backend.SsmConvSplitPrefill(q, k, v, qkv, state.History, w.ConvTaps, s.ConvKernel, s.Heads, s.HeadDim, s.Heads, s.HeadDim, eps, qScale);
+        backend.SsmConvSplitPrefill(q, k, v, qkv, state.History, w.ConvTaps, s.ConvKernel, s.Heads, s.HeadDim, s.Heads, s.HeadDim, l2Eps ?? eps, qScale);
 
         using Tensor forgetLow = Alloc(tokens, s.ForgetRank);
         backend.Linear(forgetLow, input, w.ForgetDown, null);
@@ -123,7 +134,16 @@ public static class KdaLayer
         backend.RmsNorm(normed, core, w.OutNorm, eps);
 
         using Tensor gatePre = Alloc(tokens, keyDim);
-        backend.Linear(gatePre, input, w.OutGateProj, null);
+        if (w.OutGateProj is { } gateProj)
+        {
+            backend.Linear(gatePre, input, gateProj, null);
+        }
+        else
+        {
+            using Tensor gateLow = Alloc(tokens, w.OutGateDown!.Shape[0]);
+            backend.Linear(gateLow, input, w.OutGateDown, null);
+            backend.Linear(gatePre, gateLow, w.OutGateUp!, null);
+        }
         using Tensor gate = Alloc(tokens, keyDim);
         backend.Sigmoid(gate, gatePre);
         using Tensor gated = Alloc(tokens, keyDim);

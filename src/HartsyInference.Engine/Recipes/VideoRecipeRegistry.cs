@@ -64,6 +64,13 @@ public static class VideoRecipeRegistry
         new Video.LanceVideoRecipe(),
         new Video.Kandinsky5VideoRecipe(),
         new Video.HunyuanVideoRecipe(),
+        new Video.MovieRollRecipe(),
+        new Video.FastFramesRecipe(),
         new Video.MiniMaxH3Recipe(),
+        new Video.DuoRecipe(),
+        new Video.DuoRecipe(distilled: true),
+        new Video.LongCatVideoRecipe(),
+        new Video.LongCatVideoDistilledRecipe(),
+        new Video.LongCatAvatarRecipe(),
     };
 }

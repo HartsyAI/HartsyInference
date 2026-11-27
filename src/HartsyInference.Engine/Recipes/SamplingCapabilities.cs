@@ -86,6 +86,8 @@ public static class SamplingCapabilities
     private static readonly Dictionary<string, SamplingSupport> Video = new(StringComparer.OrdinalIgnoreCase)
     {
         ["hunyuan-video"] = FullSeam,
+        // MovieRoll's rolling sampler owns its update rule (the distilled DMD rollout); no sampler or sigma schedule plugs in.
+        ["movieroll"] = SolverOwned,
         ["kandinsky5-video"] = FullSeam,
         ["lance-video"] = FullSeam,
         // Upstream's own solver names, not the seam's: these two pick between ported solvers rather than driving one.
@@ -95,13 +97,20 @@ public static class SamplingCapabilities
         ["wan-22-5b"] = SolverOwned,
         ["wan-21-1_3b"] = SolverOwned,
         ["wan-21-14b"] = SolverOwned,
+        // FastFrames runs its own released schedule; no sampler or scheduler is selectable.
+        ["fastframes"] = SolverOwned,
         ["wan-vace"] = SolverOwned,
         ["wan-s2v"] = SolverOwned,
+        // LongCat runs its own flow-match Euler with the reference's sigma lists; no sampler or schedule is selectable.
+        ["longcat-video"] = SolverOwned,
+        ["longcat-avatar"] = SolverOwned,
         ["ltx-video"] = SolverOwned,
         ["ltx-video-2"] = SolverOwned,
         ["ltx-2.5-distilled"] = SolverOwned,
         ["minimax-h3"] = SolverOwned,
         ["minimax-h3-image"] = SolverOwned,
+        // Duo runs each release's own solver (causal Euler, distilled re-noise); no sampler or schedule is selectable.
+        ["duo-v1"] = SolverOwned,
     };
 
     /// <summary>What the image family <paramref name="familyId"/> accepts, or <see cref="Unknown"/> if unrecognized.</summary>

@@ -7,13 +7,14 @@ namespace HartsyInference.Core.Backends.Contracts;
 /// to keep in range and, for the scatter-add, free of repeats — the kernels add without atomics.</summary>
 public static class RowIndexContract
 {
-    /// <summary><see cref="IBackend.GatherRows"/>: <c>output[m] = input[indices[m]]</c>. Repeated indices are valid.</summary>
+    /// <summary><see cref="IBackend.GatherRows"/>: <c>output[m] = input[indices[m]]</c>. Repeated indices are valid. The input is F32 or BF16
+    /// (a table as stored in a checkpoint); the output is always F32, so a BF16 row is widened exactly.</summary>
     public static RowIndexGeometry ValidateGather(Tensor output, Tensor input, Tensor indices)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(indices);
-        RequireDtypes("GatherRows", output, input, indices);
+        RequireGatherDtypes(output, input, indices);
         int width = Width("GatherRows", input);
         long rows = Count("GatherRows", indices);
         if (output.ElementCount != rows * width)
@@ -66,6 +67,16 @@ public static class RowIndexContract
         long tableRows = table.ElementCount / width;
         CheckRange("GatherAddRows", indices, tableRows, unique: false);
         return new RowIndexGeometry(rows, width, tableRows);
+    }
+
+    private static void RequireGatherDtypes(Tensor output, Tensor input, Tensor indices)
+    {
+        if (input.DType != DType.F32 && input.DType != DType.BF16)
+            throw new NotSupportedException($"GatherRows takes F32 or BF16 rows; got {input.DType}.");
+        if (output.DType != DType.F32)
+            throw new NotSupportedException($"GatherRows writes F32 rows; got {output.DType}.");
+        if (indices.DType != DType.I32)
+            throw new NotSupportedException($"GatherRows takes an I32 index; got {indices.DType}.");
     }
 
     private static void RequireDtypes(string op, Tensor a, Tensor b, Tensor indices)

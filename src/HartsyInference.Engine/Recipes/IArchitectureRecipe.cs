@@ -35,11 +35,20 @@ public interface IArchitectureRecipe
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
+    /// <summary>True when the family refuses the CFG-parallel, DiT-shard and context-parallel placements. The engine refuses them before the
+    /// memory report, so a refusing family never reaches the CFG-parallel warning; the recipe re-checks without a warning.</summary>
+    bool RefusesUnhonouredPlacements => false;
+
     /// <summary>Which of SwarmUI's two <c>(word:1.5)</c> mechanisms this family's pipeline actually applies. Read off
     /// ComfyUI's tokenizer for the family and pinned by <c>PromptWeightingModeLedgerTests</c>; declared only once the
     /// pipeline consumes it, because <see cref="ImageFeatures.PromptWeighting"/> derives from this and a declaration
     /// the pipeline ignores would leave the emphasis parens in the prompt as prose.</summary>
     Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.None;
+
+    /// <summary>The weighting mode of <paramref name="variant"/>: a build whose pipeline does not apply emphasis (a perception
+    /// model whose prompts carry parentheses as text) answers <see cref="Diffusion.Prompting.PromptWeightingMode.None"/>
+    /// even when its family weights; the default is the family-level <see cref="PromptWeighting"/>.</summary>
+    Diffusion.Prompting.PromptWeightingMode PromptWeightingFor(ResolvedModelVariant? variant) => PromptWeighting;
 
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null. Every recipe declares its own; there is no generic fallback.</summary>

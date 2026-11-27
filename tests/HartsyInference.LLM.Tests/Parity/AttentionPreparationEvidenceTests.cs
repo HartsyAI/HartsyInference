@@ -272,10 +272,13 @@ public sealed class AttentionPreparationEvidenceTests
         Assert.Equal(Bytes(output), Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.flash.output")).Bytes);
     }
 
-    [VulkanFact]
-    public void VulkanScalarFlashOverF32CastsNothingAndRecordsNoCast()
+    /// <summary>The tiled kernel takes this F32 call by default and the scalar kernel with the knob off; neither casts.</summary>
+    [VulkanTheory]
+    [InlineData(VulkanTiledAttention.Auto, "tiled.f32")]
+    [InlineData(VulkanTiledAttention.Off, "flash.scalar")]
+    public void VulkanFlashOverF32CastsNothingAndRecordsNoCast(VulkanTiledAttention tiled, string implementation)
     {
-        using VulkanBackend backend = new();
+        using VulkanBackend backend = new() { TiledAttention = tiled };
         using Tensor q = new(new TensorShape(1, 2, 6, 32), DType.F32);
         using Tensor k = new(new TensorShape(1, 2, 9, 32), DType.F32);
         using Tensor v = new(k.Shape, DType.F32);
@@ -287,14 +290,14 @@ public sealed class AttentionPreparationEvidenceTests
         backend.Sync();
         AttentionEvidenceEvent[] events = evidence.Snapshot();
 
-        Assert.Equal("flash.scalar", Ran(events));
+        Assert.Equal(implementation, Ran(events));
         AssertStatedPreparationRan(backend, in call, events);
         Assert.DoesNotContain(events, e => e.Kind == AttentionEvidenceKind.Cast);
         Assert.Equal(0, backend.PlanAttention(in call).Preparation!.Value.Total);
     }
 
     /// <summary>Head dim 64 with the F16 permission is the cooperative-matrix kernel's call where the device has it, and
-    /// the scalar kernel's elsewhere. Either row states what it casts.</summary>
+    /// elsewhere the tiled kernel's, or the scalar kernel's where the device cannot run that. Each row states what it casts.</summary>
     [VulkanFact]
     public void VulkanFlashOverF32WithTheF16PermissionStatesTheCastsItRecords()
     {
@@ -310,7 +313,7 @@ public sealed class AttentionPreparationEvidenceTests
         backend.Sync();
         AttentionEvidenceEvent[] events = evidence.Snapshot();
 
-        Assert.Contains(Ran(events), (string[])["cm2.flash", "flash.scalar"]);
+        Assert.Contains(Ran(events), (string[])["cm2.flash", "tiled.f32", "flash.scalar"]);
         AssertStatedPreparationRan(backend, in call, events);
         if (Ran(events) != "cm2.flash") return;
         AttentionEvidenceEvent inputs = Assert.Single(Of(events, AttentionEvidenceKind.Cast, "vulkan.cm2.inputs"));

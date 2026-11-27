@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// <para><b>Design:</b> decomposed into existing <see cref="IBackend.Conv2D"/> calls over the temporal kernel taps, so it runs on EVERY backend (CPU/CUDA/Vulkan) with no new kernel — <c>out[t] = Σ_dt Conv2D(paddedInput[t·strideT + dt], weight[:,:,dt])</c>. Spatial padding is symmetric; temporal padding is <b>causal</b> (left-only, <c>2·padT</c> frames) so a frame never sees the future. An optional <paramref name="cacheFrames"/> prepend supports chunked/streaming decode (the caller owns the cache; <c>CACHE_T=2</c> for Wan2.2).</para>
 ///
 /// <para>Operates on 5-D tensors <c>[B, C, T, H, W]</c>. Bias is added once after the temporal sum.</para></summary>
-public sealed unsafe class CausalConv3d
+public sealed unsafe class CausalConv3d : IVaeModule
 {
     /// <summary>Test-only escape hatch: forces the original per-frame accumulate loop instead of the batched fast path,
     /// so a parity test can prove the two produce identical output. Never set in production.</summary>
@@ -75,7 +75,8 @@ public sealed unsafe class CausalConv3d
         _padH = padH; _padW = padW;
         _padTLeft = causal ? 2 * padT : padT;     // non-causal splits the temporal pad symmetrically
         _padTRight = causal ? 0 : padT;
-        _bias = bias is null ? null : (bias.DType == DType.F32 ? bias : bias.CastTo(DType.F32));
+        // An owned copy in every case: the layer's tensors are its own, so Dispose can release them without touching the loader's.
+        _bias = bias?.CastTo(DType.F32);
         _zero = new Tensor(new TensorShape(1), _computeDtype);
         _zero.AsSpan<byte>().Clear();
         _weight5d = weight5d.CastTo(_computeDtype);   // an owned copy either way
@@ -123,6 +124,21 @@ public sealed unsafe class CausalConv3d
         cast?.Dispose();
         GC.KeepAlive(weight5d);
         return slices;
+    }
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+        lock (_weightGate)
+        {
+            _weight5d?.Dispose();
+            _weight5d = null;
+            if (_weight2d is not null)
+                foreach (Tensor slice in _weight2d) slice.Dispose();
+            _weight2d = null;
+        }
+        _bias?.Dispose();
+        _zero.Dispose();
     }
 
     /// <summary>Enumerates the weight forms the conv holds now and the bias, for GPU preloading and release: the 5-D weight

@@ -21,4 +21,7 @@
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\GpuRunKnobs.cs" Link="Shared\GpuRunKnobs.cs" />
+  </ItemGroup>
 </Project>

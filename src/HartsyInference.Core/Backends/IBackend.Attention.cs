@@ -10,6 +10,10 @@ namespace HartsyInference.Core.Backends;
 // hyper-connection primitives. Backends without a kernel refuse attention; host execution is an explicit caller choice.
 public partial interface IBackend
 {
+    /// <summary>Notes the headroom a streaming scope's planner leaves free (<c>HeadroomBytes</c>, model- and token-derived, not free memory) while the
+    /// scope is open. Under <c>numerics.tileFromDevice</c> the attention gate budget is half of it. 0 clears the note (scope disposed). The default ignores it.</summary>
+    void NoteAttentionHeadroom(long bytes) { }
+
     /// <summary>Runs one attention call (docs/ATTENTION_CONTRACT.md). A backend with kernel rows overrides this with its
     /// planner; the default validates then refuses the call. Call <see cref="AttentionHostReference.Run"/> explicitly for host execution.</summary>
     void Attention(in AttentionCall call)
@@ -62,6 +66,25 @@ public partial interface IBackend
     /// <exception cref="NotSupportedException">The backend has no Sol-Attn, or none for an option the call uses.</exception>
     void SolAttention(Tensor output, Tensor query, Tensor key, Tensor value, SolAttentionOptions options, Span<bool> routed = default) =>
         throw NotSupportedPrimitive(nameof(SolAttention));
+
+    /// <summary>Whether <see cref="BlockSparseAttention"/> runs on this backend. False by default, and a call made anyway is
+    /// refused.</summary>
+    bool HasBlockSparseAttention => false;
+
+    /// <summary>Block-sparse attention over a 3D token grid (<see cref="BlockSparseAttentionReference"/>): each query block scores
+    /// every key block by the dot product of the two blocks' mean rows, keeps the highest, and its tokens attend exactly those
+    /// blocks' keys. Operands and output are in <c>(T, H, W)</c> raster order.</summary>
+    /// <param name="output">F32 <c>[B, H, Sq, D]</c>; must not be an input.</param>
+    /// <param name="query">F32 <c>[B, H, Sq, D]</c>, already normed and rotated.</param>
+    /// <param name="key">F32 <c>[B, H, Sk, D]</c>.</param>
+    /// <param name="value">F32 <c>[B, H, Sk, D]</c>.</param>
+    /// <param name="options">The grids, blocks, sparsity and score multiplier.</param>
+    /// <param name="selected">When not null, receives each query block's key blocks, ascending, as I32
+    /// <c>[B, H, QueryBlocks, SelectedBlocks]</c>.</param>
+    /// <exception cref="NotSupportedException">The backend has no block-sparse attention; see
+    /// <see cref="HasBlockSparseAttention"/>.</exception>
+    void BlockSparseAttention(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
+        Tensor? selected = null) => throw NotSupportedPrimitive(nameof(BlockSparseAttention));
 
     /// <summary>Whether the backend has any kernel that reads paged keys and values. False by default, and a caller then
     /// builds no paged call at all.</summary>

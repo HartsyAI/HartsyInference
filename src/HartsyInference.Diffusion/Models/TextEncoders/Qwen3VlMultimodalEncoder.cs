@@ -44,6 +44,11 @@ public sealed unsafe class Qwen3VlMultimodalEncoder
         _numDeepstackLayers = visionConfig.DeepstackVisualIndexes.Length;
     }
 
+    /// <summary>Every weight the encoder holds, the language tower and the vision tower once each, for a residency owner to preload or
+    /// free.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() =>
+        _language.EnumerateWeights().Concat(_vision.EnumerateWeights()).Distinct<Tensor>(ReferenceEqualityComparer.Instance);
+
     /// <summary>Encodes a templated instruction. <paramref name="tokenIds"/> must already contain
     /// <c>image_token_id</c> repeated once per merged vision token (between the vision start/end markers) for each image
     /// in <paramref name="referenceImages"/>; pass an empty list for text-only. Returns the LM final hidden state.</summary>

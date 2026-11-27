@@ -131,13 +131,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
                     + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
-            SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
-            qwenLoader.Load(qwenPath);
-            loaders.Add(qwenLoader);
-            LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
-            llama.LoadWeights(qwenLoader.GetAllTensors());
-            HunyuanImageQwenTextEncoder qwenEncoder = new HunyuanImageQwenTextEncoder(llama);
+            (LlamaStyleEncoder llama, HunyuanImageQwenTextEncoder qwenEncoder) = HunyuanTextEncoders.LoadQwen25Vl(context, loaders);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanImageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
@@ -164,17 +158,9 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
             // The glyph encoder loads on the first prompt that quotes text, and only for a checkpoint that has the ByT5
             // projection (context_embedder_2) to read it.
-            Func<CancellationToken, (T5TextEncoder, IDisposable)>? glyphFactory = config.TextEmbedDim2 is null ? null : cancel =>
-            {
-                string byt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.ByT5SmallGlyphXl, onProgress: null, cancel)
-                    .GetAwaiter().GetResult();
-                SafeTensorsLoader byt5Loader = new SafeTensorsLoader();
-                byt5Loader.Load(byt5Path);
-                T5TextEncoder byt5 = new T5TextEncoder(T5TextEncoderConfig.ByT5SmallGlyph);
-                byt5.LoadWeights(byt5Loader.GetAllTensors());
-                Logs.Info("[HunyuanImageRecipe] Glyph-ByT5-small loaded for quoted prompt text.");
-                return (byt5, byt5Loader);
-            };
+            Func<CancellationToken, (T5TextEncoder, IDisposable)>? glyphFactory = config.TextEmbedDim2 is null
+                ? null
+                : HunyuanTextEncoders.LoadGlyphByt5;
             return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, checkpoint, loraStack,
                 glyphFactory);
         }

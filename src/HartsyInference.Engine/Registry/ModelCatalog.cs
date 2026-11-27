@@ -42,6 +42,26 @@ public static class ModelCatalog
         Role = "config",
     };
 
+    /// <summary>One transformer shard of an Open Vision Banana build, kept under its own folder so the index beside it resolves
+    /// the set. <paramref name="checkpoint"/> is the release folder, e.g. <c>final_models/4B/zeroshot/checkpoint-87500-95000-w25</c>.</summary>
+    private static ModelAsset OvbShard(string folder, string checkpoint, int index, int count, string sha256) => new ModelAsset
+    {
+        Repo = "FunAILab/Open-Vision-Banana",
+        RepoPath = $"{checkpoint}/transformer/diffusion_pytorch_model-{index:D5}-of-{count:D5}.safetensors",
+        TargetSubdir = $"Stable-Diffusion/OpenVisionBanana/{folder}",
+        Role = "transformer",
+        Sha256 = sha256,
+    };
+
+    /// <summary>The shard index of an Open Vision Banana build.</summary>
+    private static ModelAsset OvbIndex(string folder, string checkpoint) => new ModelAsset
+    {
+        Repo = "FunAILab/Open-Vision-Banana",
+        RepoPath = $"{checkpoint}/transformer/diffusion_pytorch_model.safetensors.index.json",
+        TargetSubdir = $"Stable-Diffusion/OpenVisionBanana/{folder}",
+        Role = "config",
+    };
+
     /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
     private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10, LiveControls = OasisControlScheme.Instance };
@@ -118,6 +138,16 @@ public static class ModelCatalog
     [
         new() { Repo = "tencent/" + repo, RepoPath = folder + "/model.fp16.safetensors", TargetSubdir = "3D/" + id, Role = "transformer", Sha256 = weightsSha },
         new() { Repo = "tencent/" + repo, RepoPath = folder + "/config.yaml", TargetSubdir = "3D/" + id, Role = "config", Sha256 = configSha },
+    ];
+
+    /// <summary>The Realization LoRA of one Duo release: <c>.metadata</c> and <c>__0_0.distcp</c> of the repo's <c>realization/dcp</c> folder (2.78 GB), the only Duo-specific weights. The backbone is MiniMax-H3's Ref2VA transformer, which the
+    /// same repo repeats byte for byte, so it is not listed here. Hashes are the repo's own LFS sha256 at the revision named in <c>docs/Research/DUO_V1_WEIGHTS.md</c>.</summary>
+    private static ModelAsset[] DuoLoraAssets(string repo, string id, string metadataSha, string distcpSha) =>
+    [
+        new() { Repo = repo, RepoPath = "realization/dcp/__0_0.distcp", TargetSubdir = "Stable-Diffusion/Duo/" + id, TargetName = "realization/dcp/__0_0.distcp",
+            Role = "LoRA (distributed checkpoint)", Sha256 = distcpSha },
+        new() { Repo = repo, RepoPath = "realization/dcp/.metadata", TargetSubdir = "Stable-Diffusion/Duo/" + id, TargetName = "realization/dcp/.metadata",
+            Role = "LoRA index", Sha256 = metadataSha },
     ];
 
     /// <summary>Hunyuan3D Paint 2.0 (<c>tencent/Hunyuan3D-2</c> at <c>9cd649ba</c>): the multiview UNet and the SD VAE, both safetensors, in the diffusers layout the loader reads.</summary>
@@ -512,6 +542,49 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>The base LongCat-Video DiT's files (the six shards, their index and config), shared by the base and the distilled rows. The shard
+    /// sha256 are the HF tree's LFS oids at 03b55529.</summary>
+    private static ModelAsset[] LongCatVideoDitAssets() =>
+    [
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00001-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "4a64ebfe319eaea7144a3e38acaf79e031736c254b53cd3d59643d5673444b7c" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00002-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "711a92e5bb38be84508869d62f451e8a1cb14cd903faf34b8291b1b3e299bab7" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00003-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "977b90558908fa725ff66995ac72993e4092e9c040092893766acd60ad8e086f" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00004-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "902f38deacdb75d97639968c98a2b520d97d268cfde9698c55810ed26e9170e2" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00005-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "f3e7ef21120757e658d501fa70fa8db2af3ff95945de72c4904fbe5ccbe0050b" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00006-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "dac297b544a030ce961648994ea791f58bab0e3d722092ac8c11a1475b2f4989" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model.safetensors.index.json",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/config.json",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+    ];
+
+    /// <summary>The 1.5 distillation LoRA, shared by the 1.5 rows: the recipe reads it from <c>lora/</c> beside the checkpoint's own folder and
+    /// refuses to run without it.</summary>
+    private static ModelAsset LongCatAvatar15DmdLora() => new()
+    {
+        Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "lora/dmd_lora.safetensors",
+        TargetSubdir = "LongCat/avatar-1.5/lora", TargetName = "dmd_lora.safetensors", Role = "lora",
+        Sha256 = "d969115a7f3fbc212a277ed4399f77a1a065d170148c6d4bc272e980cd3e907a",
+    };
+
+    /// <summary>The DMD (loraA) and OPSD (loraB) adapters of the 1.6 card, shared by the 1.6 rows and laid out as the release does, beside the
+    /// checkpoint's own folder.</summary>
+    private static ModelAsset[] LongCatAvatar16Loras() =>
+    [
+        new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraA/lora.safetensors",
+            TargetSubdir = "LongCat/avatar-1.6/loraA", TargetName = "lora.safetensors", Role = "lora",
+            Sha256 = "6e0d1ce0d8b3fdfd63fbdae4c25e1bbbb286b1cb198a2ec07d4c945e883c188c" },
+        new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraB/lora.safetensors",
+            TargetSubdir = "LongCat/avatar-1.6/loraB", TargetName = "lora.safetensors", Role = "lora",
+            Sha256 = "5efc11d8eaa298cfa60fa20ce8f57e894df07deff61c922166aed8f4503e660b" },
+    ];
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -730,6 +803,26 @@ public static class ModelCatalog
                     new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "mmproj-Cloudflare_clef-f16.gguf",
                         TargetSubdir = "LLM/clef", Role = "mmproj",
                         Sha256 = "f0e2930e301586f0932262c7d232c74e385d7b4281170111c36a686e16e59ba8" },
+                },
+            },
+
+            // SenseNova-Loop-9B (SenseTime, Apache-2.0: "Licensed under the Apache License, Version 2.0"; no territory or commercial limit found).
+            // Qwen3.5 trunk with layers 4-27 run twice (own cache per visit), two-stream mHC and YaRN. The official GGUF (OpenSenseNova/llama.cpp
+            // layout, sensenova_loop) at sensenova/SenseNova-Loop-9B-GGUF @ b489b15c; the official AWQ build has no reader and is not offered.
+            // Pending until the real-weight run is green.
+            new CatalogEntry
+            {
+                Id = "sensenova-loop-9b", Modality = txt, DisplayName = "SenseNova-Loop-9B (looped Qwen3.5 + mHC, text and image)",
+                Architecture = "Qwen3.5 Gated-DeltaNet + full-attn hybrid, layers 4-27 looped x2, two-stream mHC, YaRN (+Qwen3-VL vision)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "sensenova/SenseNova-Loop-9B-GGUF", RepoPath = "SenseNova-Loop-9B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/sensenova-loop-9b", Role = "transformer",
+                        Sha256 = "5528b06c41a92d0a2413e827ab08531be56b10f881606c6659361b5da507eeed" },
+                    new() { Repo = "sensenova/SenseNova-Loop-9B-GGUF", RepoPath = "mmproj-SenseNova-Loop-9B-F16.gguf",
+                        TargetSubdir = "LLM/sensenova-loop-9b", Role = "mmproj",
+                        Sha256 = "1bb6afd085020f555b3dca73b6d2139f3a7b28455228b0f07285d0f0ebc61481" },
                 },
             },
 
@@ -1134,8 +1227,17 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
+            // Text / LLM — Hy4 Flash (instruct, FP8, base): host reference text path for checkpoints up to 1 GiB; the released sizes are refused by name.
+            Hy4FlashCatalog.Instruct(),
+            Hy4FlashCatalog.Fp8(),
+            Hy4FlashCatalog.Base(),
+            // Text / LLM — Maxwell-V1.0-Flash: host reference model (MaxwellModel, block-sparse attention with its indexer) on the Text path; CUDA real-weight run passed through TextService, reference token comparison pending.
+            MaxwellCatalog.Build(),
+
             // Text / LLM — Kimi K3.1 Pro: text decoder on the Text path (device-chosen backend, no vision, single device); structural until a real run.
             KimiK31Catalog.Build(),
+            // Text / LLM - Sage S2.1 Flash (glm5_next): host reference decoder on the Text path, tiny-config parity only; structural until a real run.
+            SageS21FlashCatalog.Build(),
 
             // Text / LLM — MOSS-VL-Realtime: cross-attention VLM; GGUF (vision inside) or the official BF16 checkpoint.
             MossVlCatalog.Build(),
@@ -1273,6 +1375,46 @@ public static class ModelCatalog
                     IrisZIndex("big"),
                     SideModels.IrisZBigEmptyPrompt,
                     SideModels.MistralSmallFlux2,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Open Vision Banana 4B, zero-shot averaged checkpoint (FunAILab/Open-Vision-Banana @ 558ea8a): FLUX.2 [klein] Base 4B
+                // fine-tuned so a task prompt about a photo is answered with a painted image (segmentation, depth, normals, editing).
+                // Served by Flux2Recipe's open-vision-banana-4b variant (reference edit, true CFG, 28 steps). fp32 shards (15.5 GB).
+                // Licence: weights FLUX Non-Commercial (the release's own statement: "The released model weights are derived from FLUX.2
+                // [klein] Base and are distributed under the FLUX Non-Commercial License ... Use of the weights, and of any output
+                // produced with them, is subject to the terms of that license."); code Apache-2.0. Built and parity-tested on a tiny
+                // diffusers fixture. One real-weight run on the RTX 3060 (2026-11-24): qualitative depth and normals; segmentation mIoU 0.779
+                // over 40 COCO val2017 images (five object classes, our protocol; docs/Checklists/MODEL_STATUS_IMAGE.md).
+                Id = "open-vision-banana-4b", Modality = img, DisplayName = "Open Vision Banana 4B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 1, 2, "e0eb9850ca1be16a9e48f5d00dd5309c4d024c7592f56d61c33efdeb6a74a0a0"),
+                    OvbShard("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25", 2, 2, "4f55e02ea4862375e4250205ba9d83a0fb035f83475a7467f80ce9baa36c5e72"),
+                    OvbIndex("OVB-4B-zeroshot", "final_models/4B/zeroshot/checkpoint-87500-95000-w25"),
+                    SideModels.Qwen3_4B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Open Vision Banana 9B, zero-shot averaged checkpoint: FLUX.2 [klein] Base 9B fine-tune; fp32 shards (36.3 GB). Same
+                // licence terms as the 4B. Klein 9B has never run on real weights here, so this inherits that risk.
+                Id = "open-vision-banana-9b", Modality = img, DisplayName = "Open Vision Banana 9B", Architecture = "FLUX.2 Klein DiT, reference edit, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 1, 4, "88eba535a98b57af3196ff325cfaacb029e24cf6083dd6fe839cf6bdd7a65ae3"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 2, 4, "139c6462cbdd4d6b23728bb3dcc8f6ce8a53e610471160d3104daf986dc7c7c2"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 3, 4, "c68b36de4303583c63f6f9f5a0e8ad72e5d8c6e2399de00277afbc7b5fcfd078"),
+                    OvbShard("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25", 4, 4, "f6cb6c2128fd06a8ad8aadd8c66bce362d387c61cb904097730a9743dd3a435a"),
+                    OvbIndex("OVB-9B-zeroshot", "final_models/9B/zeroshot/checkpoint-coco86750-w25"),
+                    SideModels.Qwen3_8B_Fp4Mixed,
                     SideModels.Flux2Vae,
                 },
             },
@@ -2449,6 +2591,33 @@ public static class ModelCatalog
                 // `htdemucs_ft` stays --model-path-only: upstream ships it as a 4-checkpoint weight-averaged
                 // ensemble, not a single 4-stem checkpoint.
             },
+            new CatalogEntry
+            {
+                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = ok,
+                CliDrivable = true, // `hartsy fx separate <wav> -m kim-vocal-2`, and `hartsy video --driving-audio <wav> --separate-vocals`.
+                Features = CatalogFeatures.MdxNetSeparator,
+                // Weights: the vocal_separator/Kim_Vocal_2.onnx file of meituan-longcat/LongCat-Video-Avatar-1.6 (66,759,214 bytes, sha256 pinned in
+                // FxCatalog), read straight from the .onnx by ModelAssets/Onnx. Licence: not stated by the file, the repo or UVR's model repository
+                // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend.
+                // Matches audio-separator 0.30.2 and LongCat's separate_vocals on CPU F32 (docs/Checklists/PARITY_VERIFICATION.md).
+            },
+
+            new CatalogEntry
+            {
+                Id = "voice-isolator", Modality = fx, DisplayName = "Inworld Voice Isolator (offline)", Architecture = "Band-split dual-path attention and Mamba speech isolator, 48 kHz, 64M", Status = vp,
+                Features = CatalogFeatures.VoiceIsolator,
+                CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator` writes a `voice` and a `background` stem (mono, 48 kHz).
+                // Weights: inworld/voice-isolator denoiser.safetensors (256,260,128 bytes, sha256 pinned in FxCatalog). Licence: Apache-2.0 for code and
+                // weights; trained on Inworld first-party data plus VocalSet (CC BY 4.0), IndicVoices-R (CC BY 4.0) and VCTK (ODC-By 1.0), credited in the
+                // upstream NOTICE. Matches the upstream PyTorch network on tiny random weights; real-weight parity pending (docs/Checklists/MODEL_STATUS_AUDIO.md).
+            },
+            new CatalogEntry
+            {
+                Id = "voice-isolator-realtime", Modality = fx, DisplayName = "Inworld Voice Isolator (realtime)", Architecture = "Causal band-split dual-path attention and Mamba speech isolator, 48 kHz, 58M, look-ahead 0/20/40 ms", Status = vp,
+                Features = CatalogFeatures.VoiceIsolator,
+                CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator-realtime` runs the causal stream over the clip (look-ahead 20 ms, about 63 ms latency).
+                // Weights: inworld/voice-isolator denoiser_realtime.safetensors (232,780,800 bytes, sha256 pinned in FxCatalog); same licence as the offline model.
+            },
 
             // Vision
             new CatalogEntry
@@ -2590,6 +2759,11 @@ public static class ModelCatalog
                         TargetSubdir = "Vision/DepthAnything", Role = "transformer", Sha256 = null },
                 },
             },
+            // Depth Pro 2 metric depth: research-only weights (licence terms in DepthPro2Catalog), one row per size.
+            DepthPro2Catalog.Small(),
+            DepthPro2Catalog.Base(),
+            DepthPro2Catalog.Large(),
+            DepthPro2Catalog.HugePlus(),
             new CatalogEntry
             {
                 Id = "hed", Modality = vis, DisplayName = "HED (ControlNetHED soft-edge)", Architecture = "VGG16-style 5-block trunk", Status = ok,
@@ -2645,6 +2819,7 @@ public static class ModelCatalog
             {
                 Id = "rmbg", Modality = vis, DisplayName = "RMBG-1.4 (BriaRMBG / ISNet background removal)", Architecture = "U²-Net-style nested-U RSU encoder/decoder", Status = ok,
                 CliDrivable = true,
+                Features = CatalogFeatures.BackgroundRemoval,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "briaai/RMBG-1.4", RepoPath = "model.safetensors",
@@ -2665,6 +2840,46 @@ public static class ModelCatalog
                     new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors",
                         TargetSubdir = "Vision/BiRefNet-matting", Role = "transformer",
                         Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+                },
+            },
+
+            // Bria RMBG 3.0 (background removal, image). Not a segmentation net: Fibo 2.0 (8B flow-matching DiT, Qwen3-VL-4B, FLUX.2 VAE)
+            // tuned to draw an alpha matte as an edit of the source image in 4 steps, so it runs through Fibo2Recipe's edit path and
+            // shares the Fibo 2.0 encoder and VAE assets. The transformer is Bria's own ungated ComfyUI repack briaai/RMBG-3.0-Comfy
+            // @ 63880aa074782b09e7ae17184960dfd6de70ab85 (the original briaai/RMBG-3.0 is auto-gated); its safetensors header has
+            // the same keys and shapes as the Comfy-Org Fibo 2.0 files. Hashes are the Hugging Face LFS object ids. Not real-weight
+            // verified. Licence: CC BY-NC 4.0 (the repo LICENSE file; the Hub metadata says bria-fibo), non-commercial; the card says
+            // "Commercial use requires a separate agreement with Bria AI." Bria's separate video model VRMBG-3.0 is manually gated
+            // and not included.
+            new CatalogEntry
+            {
+                Id = "rmbg3", Modality = vis, DisplayName = "Bria RMBG 3.0 (background removal)",
+                Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
+                CliDrivable = true,
+                Features = CatalogFeatures.BackgroundRemoval | CatalogFeatures.AlphaMatte | CatalogFeatures.ReleasesGeneratorFirst,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "a5df048f799025510f29a743c0dca0d4f1362478ec00f6f7c86ee66d57b4e5d9" },
+                    SideModels.Fibo2Qwen3VL4B,
+                    SideModels.Fibo2Vae,
+                },
+            },
+            // RMBG 3.0 as Bria's int8_tensorwise + ConvRot build (8.41 GB) with the matching int8 Qwen3-VL-4B encoder; same recipe and licence.
+            new CatalogEntry
+            {
+                Id = "rmbg3-int8", Modality = vis, DisplayName = "Bria RMBG 3.0 (int8 ConvRot)",
+                Architecture = "Fibo 2.0 DiT edit, 4-step distilled (alpha matte)", Status = vp,
+                CliDrivable = true,
+                Features = CatalogFeatures.BackgroundRemoval | CatalogFeatures.AlphaMatte | CatalogFeatures.ReleasesGeneratorFirst,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "briaai/RMBG-3.0-Comfy", RepoPath = "diffusion_models/rmbg3_int8_convrot.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "bc29b9a87ed378596c5ca5bc0c5bdfaa8aabc8415d33f3c767f9a3cbd9fd566d" },
+                    SideModels.Fibo2Qwen3VL4BInt8,
+                    SideModels.Fibo2Vae,
                 },
             },
 
@@ -2911,6 +3126,19 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Gated: yunyangge/MovieRoll asks for acceptance of its access conditions. The sha256 is the LFS object id from the repo's raw
+                // pointer file (33,291,800,480 bytes, a full-precision DiT). The entry stays ValidationPending until a real-weight run validates it.
+                Id = "movieroll", Modality = vid, DisplayName = "MovieRoll (distilled T2V)", Architecture = "HunyuanVideo-1.5 DiT + rolling KV sampler",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "yunyangge/MovieRoll", RepoPath = "distilled/t2v/model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MovieRoll/distilled-t2v", Role = "transformer",
+                        Sha256 = "410694c3e24f6c5d3a53485fbebdfe8e9cc18165f103623eee21f6ff3b91b169" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "hunyuan-video", Modality = vid, DisplayName = "HunyuanVideo 13B (T2V)", Architecture = "MMDiT + 3D causal VAE", Status = vp,
                 CliDrivable = true,
                 Assets = new ModelAsset[]
@@ -2919,6 +3147,220 @@ public static class ModelCatalog
                     new() { Repo = "Comfy-Org/HunyuanVideo_repackaged", RepoPath = "split_files/diffusion_models/hunyuan_video_t2v_720p_bf16.safetensors",
                         TargetSubdir = "Stable-Diffusion/HunyuanVideo", Role = "transformer", Sha256 = "c6ff2d107f0fec571fe276ad847468404ed01855c28c0be8859c3b311daec52a" },
                 },
+            },
+            new CatalogEntry
+            {
+                Id = "fastframes-s", Modality = vid, DisplayName = "FastFrames S (1.3B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Apple's FastFrames-S companions plus the Causal Forcing++ generator they were trained with (Apache-2.0).
+                    // The generator is a PyTorch pickle read through the safe subset reader; nothing in it is executed.
+                    new() { Repo = "zhuhz22/Causal-Forcing", RepoPath = "causal-forcing++/framewise-2step.pt",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "framewise-2step.pt", Role = "transformer",
+                        Sha256 = "8f899a016dffb9539788fac82c6200e43ef6e23b6e61ec6b885bb507a760ce42" },
+                    new() { Repo = "apple/FastFrames-S", RepoPath = "fastframes-s/kv_refiner.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "kv_refiner.safetensors", Role = "kv refiner",
+                        Sha256 = "b4f36d00effd78a60435526dcc2b1a0e6bbed0f09621ee8ab4019460769a7bbb" },
+                    new() { Repo = "apple/FastFrames-S", RepoPath = "fastframes-s/pixel_decoder.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-s", TargetName = "pixel_decoder.safetensors", Role = "pixel decoder",
+                        Sha256 = "815682581f6376d2cdacc60568facf1bd979112091e4157fb6c00ae946b89b32" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "fastframes-l", Modality = vid, DisplayName = "FastFrames L (14B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
+                // The frame KV cache is not streamed, so 81 frames need an 80 GB card (block streaming alone does not fit them). An 81-frame
+                // clip ran through this CLI on an H100 80GB (docs/Checklists/PARITY_VERIFICATION.md).
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // Apple's FastFrames-L, all three files.
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/dit.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "dit.safetensors", Role = "transformer",
+                        Sha256 = "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de" },
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/kv_refiner.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "kv_refiner.safetensors", Role = "kv refiner",
+                        Sha256 = "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74" },
+                    new() { Repo = "apple/FastFrames-L", RepoPath = "fastframes-l/pixel_decoder.safetensors",
+                        TargetSubdir = "FastFrames/fastframes-l", TargetName = "pixel_decoder.safetensors", Role = "pixel decoder",
+                        Sha256 = "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55" },
+                },
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video, the base family, from the upstream repo pinned to meituan-longcat/LongCat-Video @ 03b55529 (the F32 DiT, 54.3 GB;
+                // shard sha256 are the HF tree's LFS oids; the index and config are git blobs and carry no hash here). Licence: MIT, as the model
+                // card, the README's licence section and the LICENSE file state it. The base project page (meituan-longcat.github.io/LongCat-Video)
+                // states no licence or use restriction; the academic-use-only statement and upstream issue #165 recorded on the avatar rows
+                // concern the avatar releases. The distilled build is its own row (longcat-video-distilled, which carries cfg_step_lora); the refinement LoRA is not a row asset.
+                Id = "longcat-video", Modality = vid, DisplayName = "LongCat-Video (text and image to video)",
+                Architecture = "flow-matching DiT, 13.6B", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video",
+                Assets =
+                [
+                    .. LongCatVideoDitAssets(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video, the base family, from the upstream repo pinned to meituan-longcat/LongCat-Video @ 03b55529 (the F32 DiT, 54.3 GB;
+                // shard sha256 are the HF tree's LFS oids; the index and config are git blobs and carry no hash here). Licence: MIT, as the model
+                // card, the README's licence section and the LICENSE file state it. The base project page (meituan-longcat.github.io/LongCat-Video)
+                // states no licence or use restriction; the academic-use-only statement and upstream issue #165 recorded on the avatar rows
+                // concern the avatar releases. The distilled build is its own row (longcat-video-distilled, which carries cfg_step_lora); the refinement LoRA is not a row asset.
+                Id = "longcat-video-distilled", Modality = vid, DisplayName = "LongCat-Video distilled (text and image to video, 16 steps)",
+                Architecture = "flow-matching DiT, 13.6B", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video",
+                Assets =
+                [
+                    .. LongCatVideoDitAssets(),
+                    // The distilled path's LoRA: the recipe reads it from lora/ beside the checkpoint's dit/ folder and refuses to run without it.
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "lora/cfg_step_lora.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/lora", TargetName = "cfg_step_lora.safetensors", Role = "lora",
+                        Sha256 = "1a903b49d62571e343258211300668f4b8d375842388092781bd11e364ae65a9" },
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video-Avatar 1.5 weights from the upstream repo, pinned to meituan-longcat/LongCat-Video-Avatar-1.5 @ 92016c71
+                // (bf16 base_model; shard sha256 are the HF tree's LFS oids; index and config are git blobs and carry no hash here).
+                // Licence conflict, recorded not resolved: MIT on the model card, "academic use only and commercial use is not permitted" on the
+                // project page, upstream issue #165 unanswered. Likeness generation: the depicted person's consent is required.
+                // The 1.5 layout is distilled (8 steps, guidance off); the recipe runs this row on that path by default, and a 1.6 request routes
+                // to the 1.6 INT8 row (a row's settings must match its weights). The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
+                // (stt/openai--whisper-large-v3 @ 06f233fe). TargetSubdir is LongCat/<row>, the family-folder convention (FastFrames/, Vision/,
+                // LLM/), not the Comfy-style diffusion_models/ layout. The Hartsy-hosted repack is a later swap that needs the user's upload OK.
+                Id = "longcat-avatar", Modality = vid, DisplayName = "LongCat-Video-Avatar 1.5 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00001-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "c6140bdeb791620f2caa1f7c4d931dd4499bbafd148acdd65f1cdc254bd45eb2" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00002-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "90f71c9038c3d5fc596cc2bb2fc74c598b289bc76f57096277a42ff5bc9c37d9" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00003-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "bf69617758bfb0a2ca73d97341725dada77cc5fd2f07d07806beac3ecc5e0e6a" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00004-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "0540804fa47d2558ddc88d19dcf4a58ff7739673ec4da56cb2b1c5623810c57c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00005-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "91eedc26cf8a11a147cb0b29d640ccbd0c411c1b5f1949fad12003f48a9906c8" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model-00006-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "transformer", Sha256 = "5fdb0fbff4bc75ea9bf1573c3551a974da4ab05b64b7cdd835a9b0d377374d1d" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/diffusion_pytorch_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/config.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
+                    // The distillation LoRA of the 8-step path.
+                    LongCatAvatar15DmdLora(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video-Avatar 1.5, the per-row INT8 release (base_model_int8) of the same repo at 92016c71 (15,880,382,936 B across four
+                // shards; shard sha256 are the HF tree's LFS oids; the index and configs are git blobs and carry no hash here). Same 8-step distilled
+                // path and dmd_lora as the BF16 row, which it shares on disk. Licence conflict and consent as that row.
+                Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar15Int8FamilyId, Modality = vid,
+                DisplayName = "LongCat-Video-Avatar 1.5 INT8 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
+                Assets =
+                [
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00001-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "ccf575d8cdf8e762272e2d4e52ae1a7c0b5d1fa81e26dfa4592867de4dd9a4fd" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00002-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "af6ddb737ad66d12fd5892adee568c14314143ebd4388d3ab9cc6065754b3688" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00003-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "6a349b76592b4752c2967235af457824d8938e3514bad8e78cfa86009e8a9bf5" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00004-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "ab54b648a3f6a53946f07dd0a21441e2a8cb1aa8da17996b5f3f7f2e1370705b" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/config.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantization_config.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "config" },
+                    LongCatAvatar15DmdLora(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video-Avatar 1.6, the per-row INT8 release (base_model_int8) from meituan-longcat/LongCat-Video-Avatar-1.6. The 1.6 build
+                // runs the 8-step distilled path with its loraA (DMD) and loraB (OPSD) mixed per step (upstream --use_distill, mix_steps 4). The INT8 files share the
+                // layout the 1.5 INT8 release uses (15,880,145,024 B across four shards); the loader reads the INT8 index and converts the weights.
+                // Shards, index and configs are pinned by the HF tree (lfs oids; the index and config are git blobs and carry no hash here). Sizes in bytes.
+                // Licence conflict as the 1.5 row: MIT on the model card, "academic use only and commercial use is not permitted" on the project page.
+                // Likeness generation: the depicted person's consent is required. Routed by the id "longcat-avatar-1.6" (CLI: longcat-avatar:1.6).
+                Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar16FamilyId, Modality = vid, DisplayName = "LongCat-Video-Avatar 1.6 INT8 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.6",
+                Assets =
+                [
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00001-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "59bc93c0100bbeb2f1cd4fcb274e556270248beadbcd5ce3386a1b35070ed2b5" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00002-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "2e132eb2b8277a8c34ed6ac1ff823af35e7105219e18f7f619b943d8144b06f4" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00003-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "e382678dea3e8da14b9c0947381005b39268accba26df3aef0cb1b5e91852c2f" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00004-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "69d819629f55e5a06c295dc03c55ba94b3557c885879802237ce593b74fb4df6" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/config.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantization_config.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
+                    .. LongCatAvatar16Loras(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared with the 1.5 row.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video-Avatar 1.6, the BF16 base_model of the same repo (31,706,008,384 B across six shards; shard sha256 are the HF tree's LFS
+                // oids at acfc6282; the index and config are git blobs and carry no hash here). Same 8-step path and LoRA mix as the INT8 row,
+                // whose LoRA files it shares on disk. Licence conflict and consent as the 1.5 row. Routed by its own id only.
+                Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar16Bf16FamilyId, Modality = vid,
+                DisplayName = "LongCat-Video-Avatar 1.6 BF16 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.6",
+                Assets =
+                [
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00001-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "bdda91efcb20fbd04bb329b6f069f68ff97e86054ddc7034bc2d55a297abf88e" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00002-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "a94566ecbb61caa2909b5de78fc542513d9093f90b49b6805aa99f3a9539234c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00003-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "4af3d66b9789caf0a11f4e5cb19e3298655ea4673c975cb288a34a0399c032c5" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00004-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "311e2db9d5b89beae43bb97bd91fc44ca328c8711211b84112cc52f16ca3f7ac" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00005-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "c63a0f4c31c5860325a72b50bb0c60b05666be8a7646c53096b1b9e85ec9735b" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00006-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "aa524b4d584f8de9596b8e1b9ec3f59aa4feba6b3c54bb80292692e2698cf32c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/config.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "config" },
+                    .. LongCatAvatar16Loras(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared with the other rows.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
             },
             new CatalogEntry
             {
@@ -2984,6 +3426,40 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae/MiniMaxH3", Role = "vae",
                         Sha256 = "8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48" },
                 },
+            },
+
+            // Duo v1 (inclusionAI): a LoRA on MiniMax-H3's Ref2VA DiT, driven chunk by chunk by a LoRA-tuned Qwen3-VL-32B. The DuoRecipe runs all three releases from supplied Intent rows (`hartsy video --duo-run-folder`; no Intent model, no ASR,
+            // nothing verified on released weights). The assets are the Duo-specific LoRA files only: the user places the release's realization/backbone shards and codec/ VAEs (MiniMax-H3's own files) beside them in the release folder.
+            // The distilled release ships the LoRA only: the causal release's backbone and codec files go beside it, and its run folder also holds the re-noise draws.
+            // Licence: the MiniMax H3 Community License (repo LICENSE, Exhibit A). Its default terms grant rights only outside the EU, UK, Republic of Korea and United States (use and distribution), require the licence and NOTICE
+            // beside any distributed file and a notice on modified files, bind recipients to the same restrictions (including no use of outputs to improve another model), and ask for "MiniMax H3" on a commercial UI and a
+            // machine-generated disclosure on public outputs. The owner holds a separate MiniMax licence that allows hosting a repack; its terms are not recorded yet, so hosting stays off until they are written here.
+            new CatalogEntry
+            {
+                Id = "duo-v1-distill", Modality = vid, DisplayName = "Duo 1.0 distill (full-duplex audio-video, 4 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (DMD generator, shift 5.0); needs the causal release's backbone and codec files",
+                Status = vp, CliDrivable = true, LoadsFromFolder = true, HuggingFaceRepo = "inclusionAI/Duo-1.0-distill",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.0-distill", "duo-1.0-distill",
+                    "4ca08a328ea6ecc19490bd16605164d07dd9d8dcd7d3b0774c4d9358349be10a",
+                    "27b0188a15d7d52872db0005022c9737c3b128fdde9df360237aa0798a165bd4"),
+            },
+            new CatalogEntry
+            {
+                Id = "duo-v1-causal", Modality = vid, DisplayName = "Duo 1.0 causal base (full-duplex audio-video, 50 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the release's backbone and codec files",
+                Status = vp, CliDrivable = true, LoadsFromFolder = true, HuggingFaceRepo = "inclusionAI/Duo-1.0-causal-base",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.0-causal-base", "duo-1.0-causal-base",
+                    "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
+                    "36a14c91142a15321d0d1e40257afb8ab4ddf1c5eddbb8723eca18d83d0620e1"),
+            },
+            new CatalogEntry
+            {
+                Id = "duo-v1-2-causal", Modality = vid, DisplayName = "Duo 1.2 causal base (full-duplex audio-video, 50 steps)",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the release's backbone and codec files",
+                Status = vp, CliDrivable = true, LoadsFromFolder = true, HuggingFaceRepo = "inclusionAI/Duo-1.2-causal-base",
+                Assets = DuoLoraAssets("inclusionAI/Duo-1.2-causal-base", "duo-1.2-causal-base",
+                    "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
+                    "05332963e83056c3b3352329fdd55e84fb46881170f7889ddebf7ce7eede88a7"),
             },
 
             // 3D

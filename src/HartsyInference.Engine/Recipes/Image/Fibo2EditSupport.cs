@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -10,7 +11,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>What Fibo 2.0 editing needs beyond text-to-image: the Qwen3-VL vision tower (read from the same text-encoder file the
 /// recipe already loads) and the FLUX.2 VAE encoder. Built on the first edit, so text-to-image never pays for the tower. Owns the
 /// tower and its file mapping; the language tower, VAE and path are borrowed.</summary>
-internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encoderPath, Flux2VaeComponents vae) : IDisposable
+internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encoderPath, Flux2VaeComponents vae, IBackend towerBackend) : IDisposable
 {
     /// <summary>Qwen3-VL-4B's deepstack taps (ComfyUI <c>QWEN3VL_VISION["qwen3vl_4b"]</c>); the weights carry no config to read them from.</summary>
     private static readonly int[] DeepstackTaps = [5, 11, 17];
@@ -21,6 +22,7 @@ internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encode
     private readonly object _gate = new();
     private Qwen3VlVisionEncoder? _vision;
     private CheckpointSource? _source;
+    private List<IDisposable>? _widened;
     private Loaded? _loaded;
     private int _disposed;
 
@@ -48,10 +50,14 @@ internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encode
             (Dictionary<string, Tensor> bare, CheckpointSource source) = ComponentLoader.Load(encoderPath, "Fibo2Recipe", BareVisionKey,
                 applyFp8Dequant: true);
             Qwen3VlVisionEncoder? vision = null;
+            List<IDisposable> widened = [];
             try
             {
                 if (bare.Count == 0)
                     throw new InvalidDataException($"Fibo 2.0 editing needs the Qwen3-VL vision tower, but '{Path.GetFileName(encoderPath)}' holds no visual.* tensors.");
+                // The language tower is widened in Fibo2Recipe; the vision tower is loaded from its own dictionary, so it needs the
+                // same widening. A dense tower (the pinned Comfy-Org build) passes through untouched; a packed int8 tower widens here.
+                Fibo2WeightPreparation.WidenUnsupported(bare, [towerBackend], DType.BF16, widened);
                 Qwen3VlVisionConfig config = Qwen3VlVisionConfig.FromWeights(bare, numHeads: 16) with
                 {
                     DeepstackVisualIndexes = DeepstackTaps,
@@ -64,12 +70,15 @@ internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encode
                 Logs.Info($"[Fibo2Recipe] Qwen3-VL vision tower loaded for editing: depth {config.Depth}, hidden {config.HiddenSize}.");
                 // Kept only once everything loaded, so a failed first edit leaves nothing behind for a retry to overwrite.
                 _source = source;
+                _widened = widened;
                 _vision = vision;
                 return _loaded = new Loaded(processor, encoder, config.PatchSize * config.SpatialMergeSize);
             }
             catch
             {
                 vision?.Dispose();
+                foreach (IDisposable owned in widened)
+                    owned.Dispose();
                 source.Dispose();
                 throw;
             }
@@ -91,6 +100,9 @@ internal sealed class Fibo2EditSupport(LlamaStyleEncoder language, string encode
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
         _vision?.Dispose();
+        if (_widened is not null)
+            foreach (IDisposable owned in _widened)
+                owned.Dispose();
         _source?.Dispose();
     }
 

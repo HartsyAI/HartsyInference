@@ -179,6 +179,8 @@ SINGLE_KERNELS=(
     ssm_conv_history_update
     ssm_delta_prefill
     ssm_gated_norm_prefill
+    ssm_selective_scan
+    conv_transpose2d
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do

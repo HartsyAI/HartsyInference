@@ -63,6 +63,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule? _mxfp8Module;
     private readonly nint _mxfp8DequantF16;
     private readonly nint _mxfp8DequantBf16;
+    private readonly CudaModule? _int8DequantModule;
+    private readonly nint _int8DequantBf16;
     private readonly nint _nvfp4DequantF16;
     private readonly nint _nvfp4DequantBf16;
 
@@ -756,6 +758,14 @@ public sealed partial class CudaKernels : IDisposable
             _mxfp8DequantBf16 = _mxfp8Module.GetFunction("dequant_mxfp8_to_bf16");
         }
 
+        // Optional module: int8_tensorwise unpack (Kernels/dequant/dequant_int8_to_bf16.cu). Absence is not an error.
+        string int8DequantPath = Ptx("dequant_int8_to_bf16");
+        if (CanLoad(int8DequantPath))
+        {
+            _int8DequantModule = LoadOwnedModule(int8DequantPath);
+            _int8DequantBf16 = _int8DequantModule.GetFunction("dequant_int8_to_bf16");
+        }
+
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
         string nvfp4Path = Ptx("dequant_nvfp4_to_f16");
         if (CanLoad(nvfp4Path))
@@ -1094,6 +1104,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadDitNormActKernels();
         LoadSsmPrefillKernels();
         LoadChannelDecayPrefillKernel();
+        LoadSelectiveScanKernel();
         LoadMxfp4LinearKernel();
         LoadFrameScanKernels();
         LoadDepthwiseGluKernels();
@@ -1111,6 +1122,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadNormModulateKernels();
         LoadGatingKernels();
         LoadGuidanceKernels();
+        LoadReductionKernels();
         LoadRowIndexKernels();
         LoadNeighborhoodAttentionKernels();
         LoadInt8AttentionV2Kernels();
@@ -2145,6 +2157,25 @@ public sealed partial class CudaKernels : IDisposable
         uint gridY = (uint)Math.Min(rows, 65535);
         CudaDriverApi.cuLaunchKernel(outBf16 ? _mxfp8DequantBf16 : _mxfp8DequantF16,
             gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional dequant_int8_to_bf16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
+    public bool HasInt8DequantKernels => _int8DequantModule is not null;
+
+    /// <summary>int8_tensorwise unpack: I8 <c>[rows, cols]</c> x one F32 scale per row to dense BF16 <c>[rows, cols]</c>, truncated as
+    /// <c>Int8ConvRotCodec.DequantToBf16</c> stores it. A run of rows is a pointer into the weight and the same offset into the scales.</summary>
+    public unsafe void LaunchInt8Dequant(ulong output, ulong weight, ulong rowScale, int rows, int cols, nint stream)
+    {
+        if (_int8DequantModule is null) throw new InvalidOperationException("dequant_int8_to_bf16.ptx not present in the Ptx folder.");
+        ulong wArg = weight, sArg = rowScale, oArg = output;
+        uint rowsArg = (uint)rows, colsArg = (uint)cols;
+        void** args = stackalloc void*[5];
+        args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
+        args[3] = &rowsArg; args[4] = &colsArg;
+        const uint BlockSize = 256;
+        uint gridX = (uint)(((long)cols + BlockSize - 1) / BlockSize);
+        uint gridY = (uint)Math.Min(rows, 65535);
+        CudaDriverApi.cuLaunchKernel(_int8DequantBf16, gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>

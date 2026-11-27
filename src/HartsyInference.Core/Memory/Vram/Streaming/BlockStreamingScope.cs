@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -16,15 +17,20 @@ namespace HartsyInference.Core.Memory.Vram.Streaming;
 public sealed class BlockStreamingScope : IDisposable
 {
     private readonly IStreamableDenoiser _denoiser;
+    private readonly IBackend _backend;
     private readonly string _modelName;
     private readonly bool _perStepTrim;
     private readonly BlockStreamingController? _streamer;
     private bool _disposed;
 
-    private BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
+    internal BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
         BlockStreamingController? streamer)
     {
         _denoiser = options.Denoiser;
+        // The planner leaves this much free while the scope is open; the attention gate budget is half of it (see NoteAttentionHeadroom).
+        // Noted for every scope, including forced-stream ones. Cleared in Dispose.
+        _backend = options.Backend;
+        _backend.NoteAttentionHeadroom(options.HeadroomBytes);
         _modelName = options.ModelName;
         _perStepTrim = options.PerStepTrim;
         _streamer = streamer;
@@ -127,6 +133,7 @@ public sealed class BlockStreamingScope : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _backend.NoteAttentionHeadroom(0);
         _denoiser.BeforeBlockForward = null;
         if (_streamer is null) return;
         if (_perStepTrim && StepsEnded == 0)
@@ -156,7 +163,12 @@ public sealed class BlockStreamingScope : IDisposable
             // The prefix being freed may be exactly what a previous generation's captured graph baked pointers to
             // (LTX-2 replays one over this very scope), so the graph has to go before the memory does.
             VramGraphGuard.InvalidateBeforeRelease(backend);
-            backend.FreeWeights(BlockRangeWeights(denoiser, 0, pin.PinnedBlocks));
+            // An unsized pin (PinnedBlocks == -1) holds every block, as ReleasePinnedBlocks assumes; freeing zero blocks would leave them resident.
+            int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : denoiser.BlockCount;
+            backend.FreeWeights(BlockRangeWeights(denoiser, 0, residentBlocks));
+            // Freeing a block also frees the LoRA adapter operands it expands to, and those are shared-resident: restore them before the
+            // free-memory read, or the prefix is sized against memory the forward still needs.
+            backend.PreloadWeights(denoiser.EnumerateSharedWeights());
             backend.TrimMemoryPool();
             pin.Resident = false;
             pin.PinnedBlocks = -1;
@@ -178,16 +190,19 @@ public sealed class BlockStreamingScope : IDisposable
             return 0;
         }
 
+        // The planner's inputs, read once after the shared preload and the trim: the sizing spends free memory minus the headroom on whole blocks.
+        long freeAfterShared = backend.FreeMemoryBytes();
+        long sharedBytes = SumBytes(denoiser.EnumerateSharedWeights());
         int prefix;
         if (pin is null)
         {
-            prefix = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes);
+            prefix = ResidentPrefixSizing.Size(freeAfterShared, headroom, blockBytes);
         }
         else
         {
             if (pin.PinnedBlocks < 0 || options.TokenLoad > pin.SizedTokens)
             {
-                pin.PinnedBlocks = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes);
+                pin.PinnedBlocks = ResidentPrefixSizing.Size(freeAfterShared, headroom, blockBytes);
                 pin.SizedTokens = options.TokenLoad;
             }
             prefix = pin.PinnedBlocks;
@@ -204,7 +219,20 @@ public sealed class BlockStreamingScope : IDisposable
                 }
             }
         }
+        // Diagnostics only (diagnostics.streamResidentPrefix, default off): pin the count instead of the free-memory sizing.
+        if (EngineKnobs.StreamResidentPrefix.Value is int pinnedPrefix) prefix = Math.Clamp(pinnedPrefix, 0, blockBytes.Length);
+        Logs.Info($"[VRAM] {options.ModelName}/denoise plan: free after shared {ByteFormat.Mb(freeAfterShared)}, shared {ByteFormat.Mb(sharedBytes)}, " +
+            $"headroom {ByteFormat.Mb(headroom)}, spendable {ByteFormat.Mb(freeAfterShared - headroom)}, " +
+            $"block 0 {ByteFormat.Mb(blockBytes.Length > 0 ? blockBytes[0] : 0)}, prefix {prefix} of {blockBytes.Length}.");
         return prefix;
+    }
+
+    private static long SumBytes(IEnumerable<Tensor> tensors)
+    {
+        long bytes = 0;
+        foreach (Tensor tensor in tensors)
+            bytes += tensor.DType.ComputeByteCount(tensor.ElementCount);
+        return bytes;
     }
 
     /// <summary>The <see cref="BlockStreamingPolicy.AllOrNothing"/> split, straight off <see cref="VramPlanner"/>.</summary>
@@ -240,6 +268,8 @@ public sealed class BlockStreamingScope : IDisposable
         int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : blockCount;
         VramGraphGuard.InvalidateBeforeRelease(options.Backend);
         options.Backend.FreeWeights(BlockRangeWeights(options.Denoiser, 0, residentBlocks));
+        // As in PlanResidentPrefix: the freed blocks' adapter operands are shared-resident, so restore them before the planner reads free memory.
+        options.Backend.PreloadWeights(options.Denoiser.EnumerateSharedWeights());
         options.Backend.TrimMemoryPool();
         pin.Resident = false;
         pin.PinnedBlocks = -1;

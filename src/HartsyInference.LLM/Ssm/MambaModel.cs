@@ -12,7 +12,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
     // Per-layer recurrent state, carried across calls — see Mamba2Model's identical pattern for the full
     // rationale. _convHistory[i]: last (ConvKernel-1) pre-conv x rows. _ssmState[i]: the selective scan state.
     private readonly float[][] _convHistory;
-    private readonly float[][] _ssmState;
+    private readonly Tensor[] _ssmState;
     private int _disposed;
 
     public GgufMetadata Metadata => _handle.Metadata;
@@ -32,11 +32,11 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
         DModel = dModel; NumLayers = layers; DInner = dInner; DState = dState; ConvKernel = convK; DtRank = dtRank;
         VocabSize = vocab; Eps = eps <= 0f ? 1e-5f : eps;
         _convHistory = new float[layers][];
-        _ssmState = new float[layers][];
+        _ssmState = new Tensor[layers];
         for (int i = 0; i < layers; i++)
         {
             _convHistory[i] = new float[(convK - 1) * dInner];
-            _ssmState[i] = new float[dInner * dState];
+            _ssmState[i] = new Tensor(new TensorShape(1, dInner, dState), DType.F32);
         }
     }
 
@@ -44,7 +44,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
     public void ResetState()
     {
         foreach (float[] h in _convHistory) Array.Clear(h);
-        foreach (float[] s in _ssmState) Array.Clear(s);
+        foreach (Tensor s in _ssmState) s.AsSpan<float>().Clear();
     }
 
     public static MambaModel Load(string ggufPath)
@@ -75,6 +75,13 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
     }
 
     private Tensor W(string key) => _w[key];
+
+    private static Tensor FromHost(float[] values, int a, int b, int c)
+    {
+        Tensor t = new(new TensorShape(a, b, c), DType.F32);
+        fixed (float* src = values) Buffer.MemoryCopy(src, (void*)t.DataPointer, (long)values.Length * 4, (long)values.Length * 4);
+        return t;
+    }
 
     /// <summary>Runs the stack over <paramref name="ids"/> — the NEW tokens since the last call — advancing each layer's carried recurrent state, and returns the next-token logits (last position); call <see cref="ResetState"/> before the first call of a new generation.</summary>
     public float[] ForwardLastLogits(IBackend backend, IReadOnlyList<int> ids)
@@ -184,36 +191,24 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
         float* dp = (float*)delta.DataPointer;
         for (long n = 0; n < (long)seq * di; n++) { float v = dp[n]; dp[n] = v > 20f ? v : MathF.Log(1f + MathF.Exp(v)); }
 
-        // Selective scan: h[di, ds]; A = -exp(A_log). y[t,i] = Σ_s C[t,s]·h[i,s] + D[i]·x[t,i].
-        // GGUF ssm_a already stores A = -exp(A_log) (llama.cpp bakes the -exp at conversion), so use it directly.
-        float* A = (float*)W($"{p}.ssm_a").DataPointer;      // [di, ds] = A
-        float* dD = (float*)W($"{p}.ssm_d").DataPointer;     // [di]
-        float[] state = _ssmState[i];   // carried across calls — zero only at true position 0
-        float[] y = new float[seq * di];
-        for (int s = 0; s < seq; s++)
-            for (int c = 0; c < di; c++)
-            {
-                float dti = dp[s * di + c], xi = xc[s * di + c], acc = 0f;
-                long sb = (long)c * ds;
-                for (int st = 0; st < ds; st++)
-                {
-                    float dA = MathF.Exp(dti * A[c * ds + st]);
-                    float dBx = dti * Bm[s * ds + st] * xi;
-                    float hs = dA * state[sb + st] + dBx;
-                    state[sb + st] = hs;
-                    acc += Cm[s * ds + st] * hs;
-                }
-                y[s * di + c] = acc + dD[c] * xi;
-            }
+        // Selective scan (backend op): y = Σ_n C·h + D·x, gated by SiLU(z), with the layer's state carried across calls.
+        // GGUF ssm_a already stores A = -exp(A_log) (llama.cpp bakes the -exp at conversion), so it is passed as the decay.
+        Tensor scanU = FromHost(xc, 1, seq, di);
+        Tensor scanB = FromHost(Bm, 1, seq, ds);
+        Tensor scanC = FromHost(Cm, 1, seq, ds);
+        Tensor scanZ = FromHost(z, 1, seq, di);
+        Tensor scanY = new(new TensorShape(1, seq, di), DType.F32);
+        backend.SelectiveScan(scanY, scanU, delta, W($"{p}.ssm_a"), scanB, scanC, W($"{p}.ssm_d"), scanZ, _ssmState[i], 1, seq, di, ds);
+        scanU.Dispose();
+        scanB.Dispose();
+        scanC.Dispose();
+        scanZ.Dispose();
         delta.Dispose();
 
-        // Gate: y *= SiLU(z), then out_proj.
-        for (long n = 0; n < (long)seq * di; n++) { float zv = z[n]; y[n] *= zv / (1f + MathF.Exp(-zv)); }
-        Tensor yT = new(new TensorShape(1, seq, di), DType.F32);
-        fixed (float* src = y) Buffer.MemoryCopy(src, (void*)yT.DataPointer, (long)seq * di * 4, (long)seq * di * 4);
+        // out_proj.
         Tensor outp = new(new TensorShape(1, seq, d), DType.F32);
-        backend.Linear(outp, yT, W($"{p}.ssm_out.weight"), null);
-        yT.Dispose();
+        backend.Linear(outp, scanY, W($"{p}.ssm_out.weight"), null);
+        scanY.Dispose();
 
         // Residual.
         Tensor result = new(new TensorShape(1, seq, d), DType.F32);
@@ -225,6 +220,7 @@ public sealed unsafe class MambaModel : IDisposable, ISsmModel
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        foreach (Tensor state in _ssmState) state.Dispose();
         _handle.Dispose();
     }
 }
