@@ -68,6 +68,64 @@ public sealed class DuoRunFilesTests : IDisposable
         Assert.Throws<InvalidDataException>(() => DuoRunFiles.Read(_directory, sample, TextWidth, VideoWidth, AudioWidth));
     }
 
+    [Theory]
+    [InlineData("\"shift\": 0")]
+    [InlineData("\"shift\": -1")]
+    [InlineData("")]
+    public void AShiftThatIsMissingZeroOrNegativeIsRefused(string shiftField)
+    {
+        DuoSampleInput sample = Sample(blocks: 1);
+        WriteAllFiles();
+        WriteRawManifest($"{{\"steps\": 4, {shiftField}, \"sharedText\": \"shared.f32\", \"referenceVideo\": \"reference.f32\", \"blocks\": [{Block(0)}]}}".Replace(", , ", ", "));
+
+        Assert.Throws<InvalidDataException>(() => DuoRunFiles.Read(_directory, sample, TextWidth, VideoWidth, AudioWidth));
+    }
+
+    [Fact]
+    public void AnAbsoluteFileNameIsRefused()
+    {
+        DuoSampleInput sample = Sample(blocks: 1);
+        WriteAllFiles();
+        string absolute = Path.Combine(_directory, "shared.f32").Replace("\\", "\\\\");
+        WriteRawManifest($"{{\"steps\": 4, \"shift\": 1.0, \"sharedText\": \"{absolute}\", \"referenceVideo\": \"reference.f32\", \"blocks\": [{Block(0)}]}}");
+
+        Assert.Throws<InvalidDataException>(() => DuoRunFiles.Read(_directory, sample, TextWidth, VideoWidth, AudioWidth));
+    }
+
+    [Fact]
+    public void AFileNameThatLeavesTheRunFolderIsRefused()
+    {
+        DuoSampleInput sample = Sample(blocks: 1);
+        WriteAllFiles();
+        WriteRawManifest($"{{\"steps\": 4, \"shift\": 1.0, \"sharedText\": \"../shared.f32\", \"referenceVideo\": \"reference.f32\", \"blocks\": [{Block(0)}]}}");
+
+        Assert.Throws<InvalidDataException>(() => DuoRunFiles.Read(_directory, sample, TextWidth, VideoWidth, AudioWidth));
+    }
+
+    [Fact]
+    public void AMissingFileNameIsRefused()
+    {
+        DuoSampleInput sample = Sample(blocks: 1);
+        WriteAllFiles();
+        WriteRawManifest($"{{\"steps\": 4, \"shift\": 1.0, \"referenceVideo\": \"reference.f32\", \"blocks\": [{Block(0)}]}}");
+
+        Assert.Throws<InvalidDataException>(() => DuoRunFiles.Read(_directory, sample, TextWidth, VideoWidth, AudioWidth));
+    }
+
+    private void WriteAllFiles()
+    {
+        Write("shared.f32", Values(1, 3 * TextWidth));
+        Write("reference.f32", Values(2, 4 * VideoWidth));
+        Write("body0.f32", Values(3, 2 * TextWidth));
+        Write("video0.f32", Values(4, 20 * VideoWidth));
+        Write("audio0.f32", Values(5, 6 * AudioWidth));
+    }
+
+    private static string Block(int b) =>
+        $"{{\"bodyText\": \"body{b}.f32\", \"noiseVideo\": \"video{b}.f32\", \"noiseAudio\": \"audio{b}.f32\"}}";
+
+    private void WriteRawManifest(string json) => File.WriteAllText(Path.Combine(_directory, "manifest.json"), json);
+
     private float[] Write(string name, float[] values)
     {
         byte[] bytes = new byte[values.Length * sizeof(float)];

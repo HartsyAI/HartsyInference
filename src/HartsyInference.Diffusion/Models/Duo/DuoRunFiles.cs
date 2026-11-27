@@ -44,7 +44,28 @@ public static class DuoRunFiles
             noiseVideo.Add(Load(directory, files.NoiseVideo, input.Video.VideoRows * videoWidth, $"blocks[{block}].noiseVideo"));
             noiseAudio.Add(Load(directory, files.NoiseAudio, 2 * input.AudioSteps * audioWidth, $"blocks[{block}].noiseAudio"));
         }
-        return new DuoRun(shared, reference, body, noiseVideo, noiseAudio, manifest.Steps, manifest.Shift);
+        if (manifest.Shift is not { } shift || !double.IsFinite(shift) || shift <= 0)
+        {
+            throw new InvalidDataException($"{manifestPath}: shift must be a finite number above 0; it is {manifest.Shift?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "missing"}.");
+        }
+        return new DuoRun(shared, reference, body, noiseVideo, noiseAudio, manifest.Steps, shift);
+    }
+
+    /// <summary>The path of a file named by the manifest, which must sit inside the run folder: absolute paths and any path that leaves the folder
+    /// through ".." are refused.</summary>
+    private static string ResolveInside(string directory, string file, string field)
+    {
+        if (Path.IsPathRooted(file))
+        {
+            throw new InvalidDataException($"{field}: {file} is an absolute path; the run folder takes relative names only.");
+        }
+        string root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string path = Path.GetFullPath(Path.Combine(root, file));
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"{field}: {file} resolves outside the run folder.");
+        }
+        return path;
     }
 
     private static float[] Load(string directory, string? file, int count, string field)
@@ -53,7 +74,7 @@ public static class DuoRunFiles
         {
             throw new InvalidDataException($"The manifest has no file for {field}.");
         }
-        string path = Path.Combine(directory, file);
+        string path = ResolveInside(directory, file, field);
         byte[] bytes = File.ReadAllBytes(path);
         if (bytes.Length != count * FloatBytes)
         {
@@ -68,7 +89,7 @@ public static class DuoRunFiles
     {
         public int Steps { get; set; }
 
-        public double Shift { get; set; }
+        public double? Shift { get; set; }
 
         public string? SharedText { get; set; }
 
