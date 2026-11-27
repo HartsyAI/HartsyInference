@@ -125,6 +125,59 @@ def save(tensors: dict, path: Path):
     save_file({k: v.detach().contiguous().cpu().float() for k, v in tensors.items()}, str(path))
 
 
+def place_dit(dit, device: str, offload: bool, log=print):
+    """Places the DiT for a run on ``device``. Without ``offload`` the whole model goes to the device. With ``offload`` the
+    shared parts (embeddings, head, norms) stay on the device, and each transformer block lives on the host and moves to the
+    device just before its forward and back after it. Upstream's code is not edited: the move is done by forward hooks, so the
+    arithmetic is the same, only the place the weights sit in changes."""
+    if device == "cpu":
+        return
+    if not offload:
+        dit.to(device)
+        return
+    for name, child in dit.named_children():
+        if name != "blocks":
+            child.to(device)
+    for param in dit.parameters(recurse=False):
+        param.data = param.data.to(device)
+    for block in dit.blocks:
+        block.to("cpu")
+    calls = {"frame_forwards": 0}
+
+    def pre(module, inputs):
+        module.to(device)
+        return None
+
+    def post(module, inputs, output):
+        module.to("cpu")
+        return None
+
+    def pre_first(module, inputs):
+        calls["frame_forwards"] += 1
+        log(f"[offload] frame forward {calls['frame_forwards']}: {len(dit.blocks)} blocks move to {device} one at a time")
+
+    # Upstream's text cache calls each block's cross-attention text_kv directly, outside the block's forward, so the block
+    # is moved for that call too. Its arithmetic is unchanged; only the call is wrapped.
+    def wrap_text_kv(block):
+        original = block.cross_attn.text_kv
+
+        def text_kv(context):
+            block.to(device)
+            try:
+                return original(context)
+            finally:
+                block.to("cpu")
+
+        block.cross_attn.text_kv = text_kv
+
+    for index, block in enumerate(dit.blocks):
+        if index == 0:
+            block.register_forward_pre_hook(pre_first)
+        block.register_forward_pre_hook(pre)
+        block.register_forward_hook(post)
+        wrap_text_kv(block)
+
+
 def run_rollout(torch, pipeline, causal_model, config, dit, refiner, decoder, prompt_embeds, noise, transition, frames):
     class Replay(pipeline.FastFrames):
         def _noise(self, seed):
@@ -196,7 +249,14 @@ def checkpoint(args):
     # --dit-file names a generator in safetensors form (the engine's converted copy, prefix kept; upstream's loader strips it), so the
     # pickle is never loaded. Without it the generator is root/spec.dit, the upstream pickle, which the runbook forbids opening.
     dit_path = Path(args.dit_file) if args.dit_file else root / spec.dit
-    dit = build_wan(spec.config.wan_model, _load_state(dit_path, "generator_ema"), dtype=dtype, device="cpu")
+    # Under --precision bf16 the generator is read by upstream's loader, which keeps BF16 as BF16 (no fp32 alias in that mode). The
+    # widening reader would double a 28.6 GB BF16 DiT to 57 GB of F32 in host RAM, so it is used only for the FP32 run.
+    if args.precision == "bf16":
+        dit_state = load_state_dict(dit_path, "generator_ema")
+    else:
+        dit_state = _load_state(dit_path, "generator_ema")
+    dit = build_wan(spec.config.wan_model, dit_state, dtype=dtype, device="cpu")
+    del dit_state
     wan = model.WAN_CONFIGS[spec.config.wan_model]
     refiner_state = _load_state(root / spec.refiner, "adapter")
     refiner = KVRefinementNetwork(dim=wan.dim, num_heads=wan.num_heads, head_dim=wan.dim // wan.num_heads,
@@ -211,6 +271,27 @@ def checkpoint(args):
     decoder.load_state_dict(decoder_state, strict=True)
     decoder = decoder.to(dtype).eval().requires_grad_(False)
     refiner.eval().requires_grad_(False)
+    device = args.device
+    if device == "cuda":
+        # On CUDA, upstream's refiner attention receives q as a strided view of the packed qkv (stride 2304 on the token axis). With
+        # fp32 that call finds no kernel ("No available kernel") on torch 2.6. Making the three operands contiguous copies the values
+        # and changes no arithmetic; upstream's own function is called unchanged. Set --debug-sdpa to print each call's shape.
+        import fastframes.models.kv_refinement as kv_refinement
+
+        original_sdpa = kv_refinement._sdpa
+
+        def contiguous_sdpa(q, k, v):
+            if args.debug_sdpa:
+                print(f"[sdpa] q {tuple(q.shape)} {q.dtype} {q.device} stride {q.stride()} contiguous {q.is_contiguous()} "
+                      f"math {torch.backends.cuda.math_sdp_enabled()} flash {torch.backends.cuda.flash_sdp_enabled()} "
+                      f"eff {torch.backends.cuda.mem_efficient_sdp_enabled()} cudnn {torch.backends.cuda.cudnn_sdp_enabled()} "
+                      f"grad {torch.is_grad_enabled()} inference {torch.is_inference_mode_enabled()}", flush=True)
+            return original_sdpa(q.contiguous(), k.contiguous(), v.contiguous())
+
+        kv_refinement._sdpa = contiguous_sdpa
+    place_dit(dit, device, args.offload_blocks)
+    refiner.to(device)
+    decoder.to(device)
 
     frames = args.frames
     config = spec.config.__class__(**{**spec.config.__dict__, "num_frames": frames, "num_pixel_frames": 4 * frames - 3,
@@ -222,8 +303,9 @@ def checkpoint(args):
         prompt_embeds = torch.cat([prompt_embeds, pad])
     generator = torch.Generator().manual_seed(args.seed)
     height, width = config.latent_size
-    noise = torch.randn(1, frames, 16, height, width, generator=generator).to(dtype)
-    transition = torch.randn(3, 1, frames, 16, height, width, generator=generator).to(dtype)
+    noise = torch.randn(1, frames, 16, height, width, generator=generator).to(dtype).to(device)
+    transition = torch.randn(3, 1, frames, 16, height, width, generator=generator).to(dtype).to(device)
+    prompt_embeds = prompt_embeds.to(device)
 
     latents, features, modulation, pixels = run_rollout(
         torch, pipeline, causal_model, config, dit, refiner, decoder, prompt_embeds, noise, transition, frames)
@@ -255,6 +337,10 @@ def main():
     c.add_argument("--frames", type=int, default=4)
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--precision", choices=["fp32", "bf16"], default="fp32")
+    c.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    c.add_argument("--debug-sdpa", action="store_true", help="print the shapes, dtypes and devices of the refiner's attention calls")
+    c.add_argument("--offload-blocks", action="store_true",
+                   help="keep the DiT blocks on the host and move each to the device for its forward (device=cuda only)")
     c.add_argument("--dit-file", default=None,
                    help="the generator as .safetensors (upstream's loader strips the prefix); default root/<spec.dit>, a pickle")
     c.set_defaults(func=checkpoint)
