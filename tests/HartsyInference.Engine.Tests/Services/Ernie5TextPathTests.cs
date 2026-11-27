@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Ernie5;
@@ -198,9 +200,10 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.Equal(pipeline.Result.PromptTokens, scheduled.Result.PromptTokens);
     }
 
-    /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
-    /// the slot's backend runs on.</summary>
-    internal sealed record ServiceRun(TextResult Result, bool Scheduled, DeviceKind Device);
+    /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, the device
+    /// the slot's backend runs on, and, when an expert cache is attached, where the routed rows ran and what the cache holds.</summary>
+    internal sealed record ServiceRun(TextResult Result, bool Scheduled, DeviceKind Device, MoeOffloadStats? Offload,
+        ExpertCacheStats? ExpertCache);
 
     /// <summary>Loads <paramref name="directory"/> through the engine's Text service on <paramref name="device"/> and generates up to four tokens,
     /// with the continuous-batching knob pinned for the load and the request.</summary>
@@ -218,7 +221,9 @@ public sealed class Ernie5TextPathTests : IDisposable
         };
         TextResult result = await engine.Text.GenerateAsync(spec, request);
         TextDeviceSlot slot = ((TextService)engine.Text).SlotFor(device) ?? throw new InvalidOperationException($"No slot ran on '{device}'.");
-        return new ServiceRun(result, slot.Scheduler is not null, slot.Backend!.Device);
+        // Read here: disposing the engine unloads the slot, which drops the offload.
+        return new ServiceRun(result, slot.Scheduler is not null, slot.Backend!.Device, slot.ExpertOffload?.Stats,
+            slot.ExpertOffload?.CacheBase.Stats);
     }
 
     [Fact]

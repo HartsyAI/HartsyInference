@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Backends.Experts;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Ernie5;
@@ -87,13 +90,29 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     [ErnieCudaFact]
     public Task Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
 
+    // vram.ernieExpertCache on: the single-device load attaches the device-only expert cache; first use of each expert is a per-call upload miss.
+    // A process-wide override, not a profile scope: GenerateThroughService pushes its own profile, which would hide a scoped value.
+    [ErnieCudaFact]
+    public async Task Cuda_TextService_ExpertCache_MatchesCpu()
+    {
+        KnobStore.Set(EngineKnobs.ErnieExpertCache, true);
+        try
+        {
+            await TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8, expertCache: true);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.ErnieExpertCache);
+        }
+    }
+
     [ErnieVulkanFact]
     public Task Vulkan_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.F32);
 
     [ErnieVulkanFact]
     public Task Vulkan_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
 
-    private async Task TextServiceOn(string device, Ernie5SyntheticCheckpoint.Storage storage)
+    private async Task TextServiceOn(string device, Ernie5SyntheticCheckpoint.Storage storage, bool expertCache = false)
     {
         string dir = Path.Combine(_root, $"service-{storage}-" + device.Replace(':', '-'));
         Ernie5SyntheticCheckpoint.Write(dir, storage: storage);
@@ -104,7 +123,21 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
             Assert.True(run.Device.IsGpu, $"{device} loaded on {run.Device}.");
             Assert.Equal(batching, run.Scheduled);
             Assert.Equal(cpu.Result.Text, run.Result.Text);
+            if (expertCache) AssertExpertCacheUsed(run);
+            else Assert.Null(run.Offload);
         }
+    }
+
+    // Matching text alone would also pass with no cache: it must have attached, admitted experts and served routed rows from them.
+    private static void AssertExpertCacheUsed(Ernie5TextPathTests.ServiceRun run)
+    {
+        Assert.NotNull(run.Offload);
+        Assert.NotNull(run.ExpertCache);
+        MoeOffloadStats rows = run.Offload.Value;
+        ExpertCacheStats cache = run.ExpertCache.Value;
+        Assert.True(rows.Admitted > 0 && cache.ResidentExperts > 0, $"No expert entered the cache: {rows}; {cache}.");
+        Assert.True(rows.ResidentRows > 0, $"No routed row ran from the cache: {rows}.");
+        Assert.Equal(0L, rows.HostRows);
     }
 
     // One FP8 linear whose weight spans two row blocks and three column blocks with distinct scales, on the device and the CPU.

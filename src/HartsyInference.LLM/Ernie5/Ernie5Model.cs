@@ -380,6 +380,19 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         return Math.Max(free - headroom, 0);
     }
 
+    /// <summary>Device bytes a cache of the routed experts may take after the preload: the free memory less the same headroom the preload kept
+    /// (<see cref="PreloadBudget"/>). Zero when that cannot hold one expert, block-scale grids included, or there is no MoE layer.</summary>
+    /// <exception cref="InvalidOperationException">The model streams its layers (<see cref="Ernie5LoadOptions.ResidentWeights"/> off).</exception>
+    public long ExpertCacheBudget(long freeBytes, long totalBytes)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        RequireResidentForOffload();
+        // Every MoE layer takes its expert shape from the same config, so one expert measures them all.
+        MoeFeedForward? moe = _layers.Select(l => l?.Moe).OfType<MoeFeedForward>().FirstOrDefault();
+        long budget = PreloadBudget(freeBytes, totalBytes);
+        return moe is null || budget < moe.ExpertBytes ? 0 : budget;
+    }
+
     private static long Bytes(IEnumerable<Tensor> weights) => weights.Sum(t => t.DType.ComputeByteCount(t.ElementCount));
 
     private string DeviceSummary()

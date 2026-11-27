@@ -1,6 +1,9 @@
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Memory.Host;
+using HartsyInference.Core.Moe;
+using HartsyInference.Core.Moe.Residency;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
@@ -75,6 +78,24 @@ public sealed partial class Ernie5DenseWeightsTests : IDisposable
     [InlineData(3L << 30, 24L << 30, 0L)]                                        // less free than the headroom
     public void Preload_budget_with_every_weight_keeps_a_smaller_headroom(long free, long total, long expected) =>
         Assert.Equal(expected, Ernie5Model.PreloadBudget(free, total, allWeights: true));
+
+    // A cache too small for one expert gets no budget; one expert is what the cache itself accounts, block-scale grids included.
+    [Fact]
+    public void Expert_cache_budget_is_zero_below_one_expert()
+    {
+        Ernie5SyntheticCheckpoint.Write(_root, storage: Ernie5SyntheticCheckpoint.Storage.Fp8);
+        using CpuBackend cpu = new();
+        using Ernie5Model model = Ernie5Model.Load(_root, cpu, new Ernie5LoadOptions { MaxSequenceTokens = 8, ResidentWeights = true });
+        using MoeExpertOffload offload = new(new HostExpertCache(1L << 20), host: null, new DecayedLfuHysteresisPolicy(0.99996, 0.25));
+        int layer = model.AttachExpertOffload(offload)[0].Layer;
+        ExpertWeights expert = offload.Resolve(new ExpertKey(layer, 0));
+        // A 12 GiB device, where the headroom is the 3 GiB floor.
+        const long total = 12L << 30, headroom = 3L << 30;
+
+        Assert.Contains(expert.Tensors, t => t.DType == DType.F32);
+        Assert.Equal(0L, model.ExpertCacheBudget(headroom + expert.Bytes - 1, total));
+        Assert.Equal(expert.Bytes, model.ExpertCacheBudget(headroom + expert.Bytes, total));
+    }
 
     // The load reads a layer's mapped weights ahead of their uploads with parallel readers. That only helps for tensors with a file
     // extent, so every routed expert of a sharded FP8 checkpoint must have one, and the read-ahead must cover each byte once.

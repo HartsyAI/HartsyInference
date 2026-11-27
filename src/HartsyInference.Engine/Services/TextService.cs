@@ -1167,6 +1167,19 @@ public sealed partial class TextService : ITextService, IDisposable
         Logs.Warning(backend.Device.IsGpu
             ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
             : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
+        if (slot.HostReference is Ernie5TextModel ernie)
+        {
+            try
+            {
+                slot.ExpertOffload = AttachErnie5ExpertCache(backend, ernie);
+            }
+            catch
+            {
+                // Without the cache the experts would be uploaded on every forward, so a half-attached model is unloaded rather than kept.
+                UnloadSlot(slot);
+                throw;
+            }
+        }
         Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
     }
 
@@ -1217,6 +1230,23 @@ public sealed partial class TextService : ITextService, IDisposable
             return;
         }
         Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey}.");
+    }
+
+    /// <summary>Attaches a device expert cache to a single-device ERNIE-5.5 load, sized to the VRAM its dense weights left free. Null when
+    /// <c>vram.ernieExpertCache</c> is off, the device is not CUDA, or the room left cannot hold one expert.</summary>
+    private static MoeExpertOffload? AttachErnie5ExpertCache(IBackend backend, Ernie5TextModel model)
+    {
+        if (!EngineKnobs.ErnieExpertCache.Value || backend is not CudaBackend) return null;
+        Ernie5Model ernie = model.Generation.Model;
+        DeviceMemoryUsage usage = backend.GetDeviceMemoryUsage();
+        long budget = ernie.ExpertCacheBudget(usage.FreeBytes, usage.TotalBytes);
+        if (budget == 0)
+        {
+            // Attaching takes the experts out of auto-promotion, so a cache too small to hold one would only cost.
+            Logs.Warning("[TextService] ERNIE-5.5 expert cache not attached: the VRAM left after the dense weights cannot hold one expert.");
+            return null;
+        }
+        return ExpertOffloadSetup.AttachDeviceOnly(backend, ernie, budget, "[TextService] ERNIE-5.5");
     }
 
     /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed
