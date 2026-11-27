@@ -54,4 +54,13 @@ public sealed class LongCatPlanningRefusalTests
         Assert.NotNull(baseRecipe.RequestRefusal(new VideoRequest { Prompt = "p", ChainTotalFrames = 300 }, Settings()));
         Assert.Null(baseRecipe.RequestRefusal(new VideoRequest { Prompt = "p" }, Settings()));
     }
+
+    [Fact]
+    public void TheDistilledBaseRefusesWhatTheBaseRefuses()
+    {
+        LongCatVideoDistilledRecipe distilled = new();
+        Assert.NotNull(distilled.RequestRefusal(new VideoRequest { Prompt = "p", VideoAudioReference = Speech }, Settings()));
+        Assert.NotNull(distilled.RequestRefusal(new VideoRequest { Prompt = "p", ChainTotalFrames = 300 }, Settings()));
+        Assert.Null(distilled.RequestRefusal(new VideoRequest { Prompt = "p" }, Settings()));
+    }
 }
