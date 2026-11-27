@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -18,13 +19,17 @@ public sealed class LongCatCheckpoint : IDisposable
 
     private readonly ShardedSafeTensorSet _shards;
 
-    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8)
+    private LongCatCheckpoint(ShardedSafeTensorSet shards, LongCatConfig config, Dictionary<string, Tensor> weights, bool isInt8,
+        List<Tensor> converted)
     {
         _shards = shards;
         Config = config;
         Weights = weights;
         IsInt8 = isInt8;
+        _converted = converted;
     }
+
+    private readonly List<Tensor> _converted;
 
     /// <summary>True for the per-row INT8 release: its linears are I8 tensors carrying <see cref="Tensor.QuantInfo"/>. Those need
     /// <c>QuantizedWeightPolicy.PrepareForBackends</c> (or a backend with a resident int8 path) before a forward.</summary>
@@ -81,7 +86,22 @@ public sealed class LongCatCheckpoint : IDisposable
                         + (int8 ? " and I8 .weight_int8 weights." : "."));
                 weights[name] = shards.GetTensor(name);
             }
-            return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8);
+            // The reference loads the DiT in BF16 (torch_dtype=bfloat16). A dense F32 checkpoint is converted here, so its 54.3 GB does not sit
+            // in host memory at F32 and stream at twice the bytes; the converted tensors are owned by the checkpoint and released with it.
+            List<Tensor> converted = [];
+            if (!int8 && EngineKnobs.LongCatDitBf16.Value)
+            {
+                foreach (string name in weights.Keys.ToList())
+                {
+                    Tensor source = weights[name];
+                    if (source.DType != DType.F32)
+                        continue;
+                    Tensor bf16 = source.CastTo(DType.BF16);
+                    converted.Add(bf16);
+                    weights[name] = bf16;
+                }
+            }
+            return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8, converted);
         }
         catch
         {
@@ -176,5 +196,9 @@ public sealed class LongCatCheckpoint : IDisposable
     }
 
     /// <summary>Unmaps the shards; tensors from <see cref="Weights"/> are invalid afterwards.</summary>
-    public void Dispose() => _shards.Dispose();
+    public void Dispose()
+    {
+        foreach (Tensor tensor in _converted) tensor.Dispose();
+        _shards.Dispose();
+    }
 }

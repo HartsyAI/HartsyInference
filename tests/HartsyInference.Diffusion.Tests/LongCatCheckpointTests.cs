@@ -25,6 +25,39 @@ public sealed class LongCatCheckpointTests : IDisposable
         return weights;
     }
 
+    [Fact]
+    public void ADenseF32CheckpointOpensAsBf16ByDefaultAndRunsWithinBf16Tolerance()
+    {
+        Dictionary<string, Tensor> source = WriteCheckpoint(writeConfig: true);
+        try
+        {
+            using CpuBackend backend = new();
+        using Tensor latent = LongCatTestData.Latent(_config, 5, 4, 4, 2);
+        using Tensor text = LongCatTestData.Encoder(_config, 5, 3);
+        LongCatConditioning conditioning = new(NumCondLatents: 1);
+        float[] reference;
+        using (LongCatTestData.PinF32Dit())
+        using (LongCatCheckpoint f32 = LongCatCheckpoint.Open(_directory))
+            reference = Forward(backend, f32.Weights, latent, text, conditioning);
+        using LongCatCheckpoint bf16 = LongCatCheckpoint.Open(_directory);
+        Assert.All(bf16.Weights.Values, tensor => Assert.Equal(DType.BF16, tensor.DType));
+        float[] converted = Forward(backend, bf16.Weights, latent, text, conditioning);
+        double error = 0, scale = 0;
+        for (int i = 0; i < reference.Length; i++)
+        {
+            double d = converted[i] - reference[i];
+            error += d * d;
+            scale += reference[i] * (double)reference[i];
+        }
+        // BF16 keeps 8 significand bits: the converted forward differs from the F32 one by bf16 rounding, not by a defect.
+        Assert.True(Math.Sqrt(error / scale) < 2e-2, $"BF16 forward relative RMS {Math.Sqrt(error / scale):E3} over 2e-2");
+        }
+        finally
+        {
+            LongCatTestData.DisposeAll(source);
+        }
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -34,6 +67,7 @@ public sealed class LongCatCheckpointTests : IDisposable
         try
         {
             using CpuBackend backend = new();
+            using IDisposable f32 = LongCatTestData.PinF32Dit();
             using LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(_directory);
             Assert.Equal(_config, checkpoint.Config);
             Assert.Equal(source.Count, checkpoint.Weights.Count);
