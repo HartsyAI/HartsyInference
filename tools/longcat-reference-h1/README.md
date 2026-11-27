@@ -27,6 +27,19 @@ and the patched demo parses. NOT run anywhere: the runner has not been executed 
   block-sparse module is stubbed (not used here).
 - `h1_runner.py`: imports the patched demo, fixes the size to `H1_SIZE` (default `368x640`, height by width) by replacing
   `LongCatVideoAvatarPipeline.get_condition_shape`, then calls the demo's `_parse_args` and `generate`.
+- `h1-int8-meta.patch`: a `git diff` against `longcat_video/modules/quantization.py` at the pinned sha. It builds the INT8 DiT on the
+  meta device (the stock build materialises about 63.5 GB of float32 on CPU, which exceeded the 48G host cap) and loads the shards with
+  `load_state_dict(assign=True)`. Before assigning, the 486 float32 parameters receive their BF16 checkpoint tensors converted to BF16
+  (the only dtype difference allowed; the stock path ends in BF16 too, by copy and then cast). INT8 buffers keep their bytes. The load
+  fails on any missing or unexpected key, any other dtype or shape difference, and any tensor left on meta. Applies with or without the
+  attention patches.
+- `h1_int8_meta_check.py`: CPU check on a tiny config. Writes a BF16 checkpoint in the release layout, loads it with the stock and the
+  patched `load_quantized_dit`, and requires every state tensor to match in value, shape and dtype and nothing on meta. Then it requires
+  refusal of a checkpoint with a missing key and of one with a wrong dtype on an INT8 buffer. Run:
+  `python h1_int8_meta_check.py <reference root> <patched quantization.py> <release base_model_int8/config.json>`.
+- `inspect_int8_meta.py`: read-only. Builds the model on meta with the same replacement and compares its keys, shapes and dtypes with the
+  shard headers. The only accepted dtype difference is the 486 float32-parameter / BF16-checkpoint conversion above; the count must be
+  exactly 486. Any other mismatch, missing or unexpected key, or a different count exits 1.
 
 ## Apply and run (on the server, from the reference checkout)
 ```
@@ -34,6 +47,7 @@ cd /home/hartsy/refs/LongCat-Video
 git apply /path/to/h1-reference.patch
 git apply /path/to/h1-sdpa.patch
 git apply /path/to/h1-sdpa-cross.patch
+git apply /path/to/h1-int8-meta.patch
 cp /path/to/h1_runner.py .
 export H1_ATTN=sdpa   # required: without it the attention still calls flash_attn
 ```

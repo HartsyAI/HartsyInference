@@ -96,7 +96,13 @@ def main():
     model_state = model.state_dict()
     missing = sorted(k for k in model_state if k not in shard_headers)
     unexpected = sorted(k for k in shard_headers if k not in model_state)
+    # The only allowed dtype difference: a float32 model parameter whose checkpoint tensor is BF16. load_quantized_dit
+    # converts it to BF16 at load (the stock path copies it into float32 and casts back to BF16, the patched path converts
+    # it directly; both give the same BF16 values). Every other shape or dtype difference is a failure.
+    ALLOWED_CONVERSIONS = 486
+    fp32_params = {name for name, p in params if p.dtype == torch.float32}
     mismatched = []
+    converted = []
     for k, tensor in model_state.items():
         if k not in shard_headers:
             continue
@@ -105,7 +111,10 @@ def main():
             mismatched.append((k, "shape", list(tensor.shape), meta["shape"]))
         expected_dtype = {torch.float32: "F32", torch.bfloat16: "BF16", torch.float16: "F16", torch.int8: "I8", torch.uint8: "U8"}.get(tensor.dtype)
         if expected_dtype != meta["dtype"]:
-            mismatched.append((k, "dtype", str(tensor.dtype), meta["dtype"]))
+            if k in fp32_params and meta["dtype"] == "BF16":
+                converted.append(k)
+            else:
+                mismatched.append((k, "dtype", str(tensor.dtype), meta["dtype"]))
     emit()
     emit(f"model state_dict keys: {len(model_state)}; checkpoint tensors: {len(shard_headers)}")
     emit(f"missing from checkpoint (model only): {len(missing)}")
@@ -114,10 +123,14 @@ def main():
     emit(f"unexpected in checkpoint (not in model): {len(unexpected)}")
     for k in unexpected[:200]:
         emit(f"  UNEXPECTED {k}")
-    emit(f"shape or dtype mismatches: {len(mismatched)}")
+    emit(f"shape or dtype mismatches (other than the allowed float32-model / BF16-checkpoint conversion): {len(mismatched)}")
     for item in mismatched[:200]:
         emit(f"  MISMATCH {item}")
+    emit(f"allowed conversions (float32 model parameter, BF16 checkpoint tensor): {len(converted)} (must be {ALLOWED_CONVERSIONS})")
     if missing or unexpected or mismatched:
+        failures += 1
+    if len(converted) != ALLOWED_CONVERSIONS:
+        emit(f"  CONVERSION COUNT {len(converted)} != {ALLOWED_CONVERSIONS}")
         failures += 1
 
     emit()
