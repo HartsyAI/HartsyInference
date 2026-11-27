@@ -51,8 +51,8 @@ public sealed partial class VulkanBackend
     /// the activation is quantized to E4M3 per tensor each call (a static checkpoint scale, or absmax/448 computed and read on the
     /// device), and the product accumulates in F32 on <c>matmul_fp8_coopmat2</c> where the device lists an E4M3 coopmat2
     /// configuration, else <c>matmul_fp8_coopmat</c>. Refuses a weight marked <see cref="Tensor.SkipNativeFp8Gemm"/>, and what the
-    /// kernel cannot take — an E5M2 or block-scaled weight, a pre-quantized input, K not a multiple of 4 or, on coopmat1, N or K off the fragment shape (a ragged M is padded) — and
-    /// the caller falls through to the F16-cast path.</summary>
+    /// kernel cannot take — an E5M2 or block-scaled weight, a pre-quantized input, K not a multiple of 4 or, on coopmat1, N or K off the
+    /// fragment shape (a ragged M is padded) — and the caller falls through to the F16-cast path.</summary>
     private bool TryDispatchFp8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         if (!EnableFp8Linear || !Vk.HasFloat8CooperativeMatrix) return false;
