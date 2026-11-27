@@ -13,10 +13,10 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>The MovieRoll decode on a device, through <see cref="MovieRollPipeline.Generate"/>: the tiny 4-channel VAE is placed for the decode and
-/// released after it, and the frames must match the CPU run. The bound is not set yet: the test prints the max error and asserts only that the
-/// sampling and the decode read nothing back from the device before the frames are compared. Runs only through the GPU session
-/// (Category=GpuIntegration); it is skipped where no Vulkan device opens.</summary>
+/// <summary>The MovieRoll decode on Vulkan, through <see cref="MovieRollPipeline.Generate"/>: the tiny 4-channel VAE is placed for the decode and
+/// released after it, and the frames must match the CPU run within <see cref="FrameErrorBound"/>. The sampling and the decode must read nothing back
+/// from the device before the frames are compared. Every CausalConv3d reaches Vulkan through the composed padding (PaddedFrames), so this fact covers
+/// that path. Runs only through the GPU session (Category=GpuIntegration); it is skipped where no Vulkan device opens.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollVulkanTests(ITestOutputHelper output)
 {
@@ -32,7 +32,8 @@ public sealed class MovieRollVulkanTests(ITestOutputHelper output)
         KvRecomputeEnabled = true, KvRecomputeThreshold = 3, KvRecomputeRecentK = 1, Cfg = new MovieRollCfg(1f, 4f),
     };
 
-    /// <summary>The bound on the frame max error: about twice the measured 4.917e-6.</summary>
+    /// <summary>The bound on the frame max error: about twice the measured 4.917e-6 (local RTX 3060, Vulkan), before and after the composed padding,
+    /// which copies values unchanged; the same figure is measured after the change.</summary>
     private const float FrameErrorBound = 1e-5f;
 
     [VulkanDeviceFact]
