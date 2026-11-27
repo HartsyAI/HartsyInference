@@ -179,9 +179,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
         // With several speakers the self-attention also yields the reference map the audio step positions its queries from.
         float[]? speakerMap = null;
-        using Tensor attn = past is { } cached
+        using Tensor attn = Sub(backend, past is { } cached
             ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached, speakers, inputs.TokensPerFrame, out speakerMap)
-            : SelfAttention(backend, normed1, in inputs, probe, stage, speakers, out speakerMap);
+            : SelfAttention(backend, normed1, in inputs, probe, stage, speakers, out speakerMap));
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = Residual(backend, LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex));
         probe?.Invoke($"{stage}.after_self", afterSelf);
@@ -197,7 +197,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             if (_audio is null)
                 throw new InvalidOperationException("The block has no avatar audio weights, but audio tokens were given.");
             afterAudio = Residual(backend, speakers is null
-                ? _audio.Apply(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw)
+                ? _audio.Apply(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw, null, probe, $"{stage}.audio_cross_attn", _bf16Residual)
                 : SpeakerAudio(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw, speakers, speakerMap!, probe, stage));
             probe?.Invoke($"{stage}.after_audio", afterAudio);
         }
@@ -206,7 +206,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         {
             // 3. SwiGLU FFN.
             using Tensor normed3 = LongCatOps.NormModulate(backend, stream, modulation, 4 * dim, 3 * dim, hw);
-            using Tensor ffn = FeedForward(backend, normed3);
+            using Tensor ffn = Sub(backend, FeedForward(backend, normed3));
             probe?.Invoke($"{stage}.ffn", ffn);
             Tensor output = Residual(backend, LongCatOps.GatedResidual(backend, stream, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex));
             probe?.Invoke($"{stage}.out", output);
@@ -223,6 +223,10 @@ public sealed partial class LongCatBlock : IStreamingBlock
 
     /// <summary>The residual after an update: on a BF16 route the sum is rounded to BF16 (nearest-even) and kept as F32 values on the BF16 grid;
     /// otherwise it is returned unchanged. The sum is disposed when it is rounded.</summary>
+    /// <summary>A sub-layer output (self-attention, cross-attention, audio cross-attention, FFN) before its gated or added residual: rounded to BF16
+    /// on the BF16 route, as the reference's sub-layer outputs are. The input is disposed when it is rounded.</summary>
+    private Tensor Sub(IBackend backend, Tensor output) => LongCatOps.RoundOwned(backend, output, _bf16Residual);
+
     private Tensor Residual(IBackend backend, Tensor sum)
     {
         if (!_bf16Residual)
@@ -374,7 +378,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         using Tensor normed = new(x.Shape, DType.F32);
         backend.LayerNorm(normed, x, _crossNormWeight!, _crossNormBias!, LongCatConfig.NormEps);
         using Tensor? noisyRowsInput = condRows == 0 ? null : SliceRows(backend, normed, condRows, noisyRows, dim);
-        using Tensor update = CrossAttention(backend, noisyRowsInput ?? normed, text);
+        using Tensor update = Sub(backend, CrossAttention(backend, noisyRowsInput ?? normed, text));
         probe?.Invoke($"{stage}.cross_attn", update);
         if (condRows == 0)
             return LongCatOps.Add(backend, x, update);

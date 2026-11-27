@@ -30,6 +30,17 @@ internal static class LongCatOps
         return output;
     }
 
+    /// <summary>The tensor rounded to the BF16 grid when <paramref name="on"/>: the input is disposed and a new tensor returned. Otherwise the
+    /// input itself is returned, so the caller's <c>using</c> disposes it either way.</summary>
+    public static Tensor RoundOwned(IBackend backend, Tensor owned, bool on)
+    {
+        if (!on)
+            return owned;
+        Tensor rounded = RoundToBf16(backend, owned);
+        owned.Dispose();
+        return rounded;
+    }
+
     /// <summary>Rounds an F32 tensor to BF16 (nearest-even) and back, so the values sit on the BF16 grid the reference's x holds. A new tensor.</summary>
     public static Tensor RoundToBf16(IBackend backend, Tensor values)
     {

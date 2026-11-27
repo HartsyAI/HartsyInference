@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using System.Linq;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -28,6 +30,9 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     private LongCatAudioProjection? _audioProjection;
 
     private Tensor? _patchW2d, _patchBias;
+    // The BF16 route (a BF16 or INT8 release, with numerics.longcatBf16Residual on): the reference casts the latent, the timestep and the text states to the
+    // x_embedder's dtype, and the patch embedding's output is BF16. The F32 route leaves all four alone.
+    private bool _bf16Route;
     private Tensor? _time1W, _time1B, _time2W, _time2B;
     private Tensor? _text1W, _text1B, _text2W, _text2B;
     private Tensor? _finalAdaW, _finalAdaB, _finalW, _finalB;
@@ -75,6 +80,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         {
             if (w["x_embedder.proj.weight"].DType == DType.I8)
                 throw new InvalidDataException("The x_embedder projection must be dense; a quantized one has no patchify path.");
+            _bf16Route = EngineKnobs.LongcatBf16Residual.Value && (int8Release || w["x_embedder.proj.weight"].DType == DType.BF16);
             _patchW2d = WanDitOps.Reshape2d(w["x_embedder.proj.weight"], _config.HiddenSize, _config.PatchVector);
             owned.Add(_patchW2d);
             _patchBias = LongCatOps.WidenF32(w, "x_embedder.proj.bias", owned);
@@ -200,13 +206,15 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
 
         // The caption and timestep embeddings run first: they can throw (a bad validTextTokens), and the patch embedding is the one tensor
         // that would leak on that path.
-        using Tensor timeEmbed = TimestepEmbedding(backend, frameTimesteps, frames);
+        float[]? roundedTimesteps = _bf16Route ? RoundToBf16(frameTimesteps) : null;
+        using Tensor timeEmbed = TimestepEmbedding(backend, roundedTimesteps ?? frameTimesteps, frames);
         Probe?.Invoke("t_embedder", timeEmbed);
-        using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
+        using Tensor? roundedEncoder = _bf16Route ? LongCatOps.RoundToBf16(backend, encoder) : null;
+        using Tensor text = CaptionEmbedding(backend, roundedEncoder ?? encoder, validTextTokens);
         Probe?.Invoke("y_embedder", text);
         using LongCatSpeakerPass? speakerPass = speakers is null ? null : SpeakerPass(speakers, frames - conditioning.NumCondLatents);
 
-        Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+        Tensor hidden = PatchEmbed(backend, latent);
         Probe?.Invoke("x_embedder", hidden);
 
         int roperef = conditioning.NumRefLatents > 0 ? conditioning.RefImgIndex + 1 : 0;
@@ -239,6 +247,27 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         Tensor velocity = WanDitOps.Unpatchify(projected, _config.OutChannels, frames / pt, gridH, gridW, _config.PatchSize);
         Probe?.Invoke("velocity", velocity);
         return velocity;
+    }
+
+    /// <summary>The patch embedding. On the BF16 route the latent is rounded before the projection and the output after it, as the reference's
+    /// x_embedder runs on BF16 values and returns a BF16 tensor.</summary>
+    private Tensor PatchEmbed(IBackend backend, Tensor latent)
+    {
+        int dim = _config.HiddenSize;
+        if (!_bf16Route)
+            return WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+        using Tensor rounded = LongCatOps.RoundToBf16(backend, latent);
+        Tensor patched = WanDitOps.Patchify(backend, rounded, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+        return LongCatOps.RoundOwned(backend, patched, on: true);
+    }
+
+    /// <summary>The timesteps as BF16 values (nearest even): the reference casts the timestep to the x_embedder's dtype before its float cast.</summary>
+    private static float[] RoundToBf16(ReadOnlySpan<float> timesteps)
+    {
+        float[] rounded = new float[timesteps.Length];
+        for (int i = 0; i < timesteps.Length; i++)
+            rounded[i] = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(timesteps[i]));
+        return rounded;
     }
 
     /// <summary>Sinusoidal features (cos then sin, base 10000) of each frame's timestep, then Linear, SiLU, Linear: <c>[frames, adaln]</c>.</summary>

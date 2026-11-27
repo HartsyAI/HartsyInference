@@ -156,12 +156,14 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> NeighborhoodAttentionTiled =
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
-    /// <summary>Rounds the residual stream of LongCat's blocks to BF16 (nearest even) after the self-attention, cross-attention and audio residuals
-    /// and the FFN residual, on a BF16 or INT8 release; the reference's x is BF16 there (reference lines 152-153, 178-179, 185-186 at 58eb336).
-    /// Read at construction and logged at load. It rounds only the residual sums: the sub-layer outputs (self-attention, audio cross-attention,
-    /// FFN) stay F32, where the reference also rounds them to BF16, and the patch embedding stays F32. The F32 route is unchanged. Off by default:
-    /// the CUDA avatar parity lanes exceed the 0.2% bound with it on, and the 4090 comparison at 9998155f6 (LC-CMP8) is worse than the
-    /// engine without it (6 of 8 steps over the 2e-2 bound, against 1 step with the knob off).</summary>
+    /// <summary>Rounds LongCat's activations to the BF16 grid on a BF16 or INT8 release, as the reference does when its x and x_embedder are BF16:
+    /// the latent input, the timestep and the text states (the reference casts each to the x_embedder's dtype, avatar DiT lines 492-495), the
+    /// patch embedding's output, each sub-layer output (self-attention, text cross-attention, audio cross-attention before its gate, FFN) and each
+    /// residual sum (self-attention, cross-attention, audio, FFN; reference lines 152-153, 178-179 and 185-186 at 58eb336). Gate and modulation math
+    /// stays F32. The velocity is not rounded: no reference line makes it BF16 (its FinalLayer_FP32 runs the linear under F32 autocast), so it rests
+    /// on the BF16-exact dump alone. Read at construction and logged at load. The F32 route is unchanged. Off by default: the CUDA avatar parity
+    /// lanes exceeded the 0.2% bound with the earlier residual-only rounding, and the 4090 comparison at 9998155f6 (LC-CMP8) was worse than with
+    /// the knob off (6 of 8 steps over the 2e-2 bound against 1 with it off). No A/B of this rounding is recorded yet.</summary>
     public static readonly Knob<bool> LongcatBf16Residual =
         Bool("numerics.longcatBf16Residual", false, KnobScope.Construction, KnobDomain.Numerics, "Rounds LongCat's residual sums to BF16 on a BF16 or INT8 release, as the reference does (off by default; the CUDA avatar parity lanes exceed their bound with it on).");
 

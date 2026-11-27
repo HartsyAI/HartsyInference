@@ -141,7 +141,7 @@ public sealed partial class LongCatTransformer
         KvSegmentStore store = new(backend, _blocks.Length, tokenAxis: 2);
         try
         {
-            cur = WanDitOps.Patchify(backend, condLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+            cur = PatchEmbed(backend, condLatent);
             (Tensor cos, Tensor sin) = RopeFor(frames, gridH, gridW, conditioning);
             AttentionSegment[] segments = conditioning.AttentionPlan(hw, frames);
             LongCatBlockInputs inputs = new(frames, hw, conditioning.NumCondLatents, cos, sin, segments, FrameRowIndex(frames, hw));
