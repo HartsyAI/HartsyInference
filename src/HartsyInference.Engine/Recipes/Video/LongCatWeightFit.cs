@@ -40,6 +40,8 @@ internal static class LongCatWeightFit
         using Tensor probe = new(new TensorShape(1, 1), DType.I8);
         probe.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = scale, ConvRotGroupSize = 0 };
         bool packed = supportsResidentQuant(probe);
+        // numerics.longcatFp8Ffn holds the selected projections of a dense DiT at one byte an element, on every backend.
+        HashSet<string> fp8 = EngineKnobs.LongCatFp8Ffn.Value ? [.. LongCatFp8FfnConverter.Keys()] : [];
         long bytes = 0, widened = 0;
         foreach ((string name, TensorLocation location) in shards.Inventory)
         {
@@ -47,6 +49,10 @@ internal static class LongCatWeightFit
             {
                 bytes += location.Shape.ElementCount * DType.F32.SizeInBytes;
                 widened++;
+            }
+            else if (fp8.Contains(name))
+            {
+                bytes += location.Shape.ElementCount * DType.F8E4M3.SizeInBytes;
             }
             else if (packed || !name.EndsWith(LongCatInt8Converter.ScaleSuffix, StringComparison.Ordinal))
             {

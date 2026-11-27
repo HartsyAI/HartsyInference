@@ -37,6 +37,12 @@ public static partial class EngineKnobs
         Bool("numerics.mm3FlowCfgBatch", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Batched CFG for the MiniMax-Music3 flow pipeline; off runs two separate forwards.");
 
+    /// <summary>Holds the FFN input projections the LongCat reference runs in FP8 as FP8 E4M3 weights; activations are not quantized.</summary>
+    public static readonly Knob<bool> LongCatFp8Ffn =
+        Bool("numerics.longcatFp8Ffn", false, KnobScope.Runtime, KnobDomain.Numerics,
+            "Quantizes ffn.w1 and ffn.w3 of blocks 6 and 9-47 of a dense LongCat DiT to FP8 E4M3 weights at load, the layers of the reference's "
+            + "FP8 mode (calibrated there for Avatar 1.6). Weights only: Transformer Engine's activation quantization is not reproduced.");
+
     /// <summary>Logs per-stage Anima tensor statistics.</summary>
     public static readonly Knob<bool> AnimaDebugStats =
         Bool("diagnostics.animaDebugStats", false, KnobScope.Runtime, KnobDomain.Diagnostics,

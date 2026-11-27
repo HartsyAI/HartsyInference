@@ -118,9 +118,18 @@ public sealed class LongCatCheckpoint : IDisposable
                         + (int8 ? " and I8 .weight_int8 weights." : "."));
                 weights[name] = shards.GetTensor(name);
             }
+            if (int8 && EngineKnobs.LongCatFp8Ffn.Value)
+                throw new NotSupportedException("numerics.longcatFp8Ffn quantizes BF16 weights; this is an INT8 release, and the reference does not "
+                    + "combine the two.");
             List<Tensor> converted = [];
             if (!int8)
                 HoldDenseAsBf16(weights, converted);
+            if (EngineKnobs.LongCatFp8Ffn.Value)
+            {
+                int quantized = LongCatFp8FfnConverter.Convert(weights, converted);
+                Logs.Info($"[LongCatCheckpoint] numerics.longcatFp8Ffn: {quantized} FFN input projections held as FP8 E4M3 weights; activations "
+                    + "are not quantized (the reference's Transformer Engine path is not reproduced).");
+            }
             return new LongCatCheckpoint(shards, config, int8 ? LongCatInt8Converter.Convert(weights) : weights, int8, converted);
         }
         catch
@@ -151,6 +160,8 @@ public sealed class LongCatCheckpoint : IDisposable
 
     private static LongCatCheckpoint OpenGguf(string directory, string path)
     {
+        if (EngineKnobs.LongCatFp8Ffn.Value)
+            throw new NotSupportedException("numerics.longcatFp8Ffn quantizes BF16 weights; a GGUF repack is already quantized.");
         CheckpointSource source = CheckpointSource.Open(path);
         List<Tensor> converted = [];
         try
