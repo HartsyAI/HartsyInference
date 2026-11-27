@@ -20,7 +20,7 @@ internal delegate float[] LongCatDrivingFeatures(float[] speech16k, int fps);
 /// speech alone (<see cref="LongCatAvatarMode.At2v"/>). The driving speech goes through Whisper-large-v3 and the avatar audio projection in
 /// every block. One 93-frame segment at 25 fps; the multi-segment chain is wired in the pipeline; multi-speaker is not.</summary>
 /// <remarks>Likeness warning: the output is a generated talking person. Use it only with the consent of the person depicted.</remarks>
-public sealed class LongCatAvatarRecipe : IVideoRecipe
+public sealed class LongCatAvatarRecipe : IVideoRecipe, IVideoDeviceCheck
 {
     /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
     public bool RefusesUnhonouredPlacements => true;
@@ -127,6 +127,10 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
+    /// <inheritdoc/>
+    string? IVideoDeviceCheck.DeviceRefusal(IBackend backend, string checkpointPath) =>
+        LongCatWeightFit.Refusal(backend, LongCatRecipeSupport.CheckpointDirectory(checkpointPath));
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)

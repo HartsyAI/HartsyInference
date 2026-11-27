@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
@@ -7,7 +8,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>LongCat-Video, the base family: text-to-video and image-to-video on the 13.6B DiT, flow-match Euler with CFG-Zero* guidance
 /// (<see cref="LongCatVideoPipeline"/>). Long video, video continuation and the 720p refinement are not wired here yet.</summary>
-public sealed class LongCatVideoRecipe : IVideoRecipe
+public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
 {
     /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
     public bool RefusesUnhonouredPlacements => true;
@@ -58,6 +59,10 @@ public sealed class LongCatVideoRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
+
+    /// <inheritdoc/>
+    string? IVideoDeviceCheck.DeviceRefusal(IBackend backend, string checkpointPath) =>
+        LongCatWeightFit.Refusal(backend, LongCatRecipeSupport.CheckpointDirectory(checkpointPath));
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
