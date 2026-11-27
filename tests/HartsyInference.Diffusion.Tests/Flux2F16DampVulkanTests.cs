@@ -1,9 +1,9 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Vulkan;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -11,10 +11,11 @@ namespace HartsyInference.Diffusion.Tests;
 /// F16's range by damping it 1/32, and the damp rides on each weight's <see cref="Tensor.Fp8ScaleFactor"/>; a backend
 /// that drops the factor runs the stream at its natural scale, overflows, and the image comes out black. The tokens
 /// here are large enough that the undamped stream passes 65504 while the damped one stays under it. The tiny
-/// checkpoint's widths (8 and 12) are off the cooperative-matrix fragment, so a damped product here runs coopmat2
-/// where the device has it and the tiled kernel elsewhere. An undamped F32 product of at most sixteen rows takes the fused GEMV, which has no alpha; a damped weight
-/// must never reach it. The cooperative-matrix kernels are covered by <c>VulkanGemmScaleParityTests</c>.</summary>
-public sealed class Flux2F16DampVulkanTests(ITestOutputHelper output)
+/// checkpoint's widths (8 and 12) are off the KHR cooperative-matrix fragment; a damped F16 product here runs
+/// coopmat2, which has no alignment requirement, where the device has it, and the tiled kernel elsewhere. An undamped
+/// F32 product of at most sixteen rows takes the fused GEMV, which has no alpha; a damped weight must never reach it.
+/// The cooperative-matrix kernels are covered by <c>VulkanGemmScaleParityTests</c>.</summary>
+public sealed class Flux2F16DampVulkanTests
 {
     private const int GridHeight = 2;
     private const int GridWidth = 3;
@@ -22,34 +23,28 @@ public sealed class Flux2F16DampVulkanTests(ITestOutputHelper output)
     /// <summary>Tokens of about 1e6 give an embedded stream of about 2e5 undamped and 6e3 damped.</summary>
     private const float TokenScale = 5e6f;
 
-    [Fact]
+    [VulkanF16DeviceFact]
     [Trait("Category", "GpuIntegration")]
     public void OnVulkanTheF16LoopStaysInRangeAndMatchesTheF32Loop()
     {
-        VulkanBackend backend;
-        try { backend = new VulkanBackend(); }
-        catch (Exception ex) { output.WriteLine($"SKIPPED: Vulkan unavailable ({ex.Message})"); return; }
-        using (backend)
+        using VulkanBackend backend = GpuDevices.OpenVulkan();
+        using Tensor tokens = IrisZTestData.Random(new Random(21), 1, GridHeight * GridWidth, IrisZTestData.Channels);
+        foreach (ref float value in tokens.AsSpan<float>()) value *= TokenScale;
+        using Tensor text = IrisZTestData.Random(new Random(22), 1, TextLength, IrisZTestData.Context);
+
+        float[] f32 = RunLoaded(backend, tokens, text, ditF16: false);
+        float[] f16 = RunLoaded(backend, tokens, text, ditF16: true);
+
+        Assert.All(f32, value => Assert.True(float.IsFinite(value), "the F32 loop produced a non-finite velocity"));
+        Assert.All(f16, value => Assert.True(float.IsFinite(value), "the F16 loop produced a non-finite velocity"));
+        float difference = 0f, magnitude = 0f;
+        for (int i = 0; i < f32.Length; i++)
         {
-            if (!backend.Capabilities.SupportsF16) { output.WriteLine("SKIPPED: this Vulkan device has no F16"); return; }
-            using Tensor tokens = IrisZTestData.Random(new Random(21), 1, GridHeight * GridWidth, IrisZTestData.Channels);
-            foreach (ref float value in tokens.AsSpan<float>()) value *= TokenScale;
-            using Tensor text = IrisZTestData.Random(new Random(22), 1, TextLength, IrisZTestData.Context);
-
-            float[] f32 = RunLoaded(backend, tokens, text, ditF16: false);
-            float[] f16 = RunLoaded(backend, tokens, text, ditF16: true);
-
-            Assert.All(f32, value => Assert.True(float.IsFinite(value), "the F32 loop produced a non-finite velocity"));
-            Assert.All(f16, value => Assert.True(float.IsFinite(value), "the F16 loop produced a non-finite velocity"));
-            float difference = 0f, magnitude = 0f;
-            for (int i = 0; i < f32.Length; i++)
-            {
-                difference = MathF.Max(difference, MathF.Abs(f32[i] - f16[i]));
-                magnitude = MathF.Max(magnitude, MathF.Abs(f32[i]));
-            }
-            // The final LayerNorm cancels the damp, so what is left is the F16 stream's 11 bits.
-            Assert.True(difference <= 0.02f * magnitude, $"max abs difference {difference} against a largest velocity of {magnitude}");
+            difference = MathF.Max(difference, MathF.Abs(f32[i] - f16[i]));
+            magnitude = MathF.Max(magnitude, MathF.Abs(f32[i]));
         }
+        // The final LayerNorm cancels the damp, so what is left is the F16 stream's 11 bits.
+        Assert.True(difference <= 0.02f * magnitude, $"max abs difference {difference} against a largest velocity of {magnitude}");
     }
 
     /// <summary>A fresh checkpoint per load: loading under <c>numerics.ditF16</c> multiplies the damp into the weights' factors.</summary>

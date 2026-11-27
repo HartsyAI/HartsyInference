@@ -775,10 +775,15 @@ e2e coherent + prompt-faithful (structured-JSON prompt), visually verified. Perf
 
 Clean astronaut on CUDA. **Vulkan, RTX 3060 12 GB (2026-11-21):** the BF16 checkpoint (`flux-2-klein-4b.safetensors`,
 `qwen_3_4b.safetensors`, `flux2-vae.safetensors`), 512², 4 steps, seed 1234, gives a clean astronaut-on-horse that
-matches the CUDA image by eye; no pixel metric against CUDA or a reference implementation was taken. Step-graph
+matches the CUDA image by eye; no pixel metric against CUDA or a reference implementation was taken. Engine build of
+that run: a CLI output from `main` `055a00238` with the Vulkan and Diffusion assemblies of
+[#1047](https://github.com/HartsyAI/HartsyInference/pull/1047) copied in; the commit those two assemblies were built
+from was not recorded. The same PNG (sha256 `f1f247487a11a50b…`) came from a CLI built at `e418dfa71`, and from that
+output with the Vulkan assembly and `matmul_coopmat2.spv` of
+[#1055](https://github.com/HartsyAI/HartsyInference/pull/1055) swapped in. Step-graph
 capture does not fit this card on Vulkan (it retains 4.3 GB of intermediates beside 7.4 GB of weights), so every
-generation logs one capture out-of-memory warning and runs eagerly; the output is unaffected. Not run on Vulkan:
-1024², img2img, inpaint, regions, the GGUF checkpoint, a card where the capture fits.
+generation logs one capture out-of-memory warning and reruns that step eagerly; the output is unaffected. Not run on
+Vulkan: 1024², img2img, inpaint, regions, LoRA, the GGUF checkpoint, a card where the capture fits.
 
 ### Flux.2 Dev (32B)
 
