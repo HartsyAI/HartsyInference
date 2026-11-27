@@ -4,7 +4,10 @@ The plan makes a consumer Blackwell card the final CUDA and Vulkan gate. This re
 on a real RTX 5090, each at the same commit and each on a different card. They are numbered 1, 2, 3 and 5; no results
 for a pass 4 are recorded.
 
-**The gate is partly met.**
+**The gate is partly met.** What passed: in the project runs of passes 1, 2 and 5, on three of the four cards, every
+test that ran passed apart from the failures counted below. The cuDNN-routed tests passed on one card only, in pass 5.
+The GPU lane failures of passes 1 and 2 are not broken down by cause, and pass 5 has no recorded GPU lane or timing
+counts.
 
 - **CUDA without cuDNN (passes 1 and 2):** the per-project counts give 42 failed tests in the project runs (first
   recorded as 45, unreconciled). They include 11 that route through cuDNN, which the pods did not have.
@@ -23,7 +26,7 @@ for a pass 4 are recorded.
 | Commit | `f8b9d4b4b` (the `main` tip at the time), checked out detached on the pod, in all four passes |
 | Card | NVIDIA GeForce RTX 5090, 32,607 MiB, compute capability 12.0, driver 595.112.07, secure cloud, $1.39/hr (recorded for passes 1 and 2) |
 | Image | `kalebbroo/hartsy-gpu-runner:cuda13.0-ssh`, .NET SDK 10.0.404, cuBLAS present (4 files), cuDNN absent as shipped (0 files) |
-| Stages | the LLM GPU lane as a probe (`GpuIntegration`), whole Core, Audio, Diffusion, Vision, LLM and ThreeD projects, Engine PSA tests, then the LLM `GpuBenchmark` timing tests (recorded for passes 1 and 2) |
+| Stages | probe (LLM `GpuIntegration`), whole Core, Audio, Diffusion, Vision, LLM and ThreeD projects, Engine PSA tests, then the LLM `GpuBenchmark` timing tests (recorded for passes 1 and 2) |
 
 | Pass | Pod | Card | Time | Cost | cuDNN | Illegal address |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -32,9 +35,9 @@ for a pass 4 are recorded.
 | 3 | `h5isulyrqg4d1o` | third, GPU UUID `3cb5d6d5-...` | 27 min of tests | about $0.72 | downloaded, not installed | yes |
 | 5 | `z4enbbuqqhoj2g` | fourth, GPU UUID `0919cf68-...`, bus 21:00.0 | 14 min of tests | about $0.38 | installed | none |
 
-Passes 1 to 3 ran on 2026-11-22 and 2026-11-23. The date of pass 5 was not recorded. The commits of pull request #1062
-bound it: the revision of 2026-11-23 21:36 UTC says no attempt after pass 3 had reached a card, and the revision of
-2026-11-24 01:12 UTC records pass 5.
+Passes 1 to 3 ran on 2026-11-22 and 2026-11-23. The date of pass 5 was not recorded. It had run by 2026-11-24 01:12
+UTC, when the revision of this report that first records it was committed to pull request #1062; the revision of
+2026-11-23 21:36 UTC says no attempt after pass 3 had reached a card.
 
 Pass 2 differs from pass 1 only in also installing `libxext6` and `libx11-6` before the Vulkan check. Passes 1 and 2
 both copied their results back with a matching sha256, no test host crashed and no stage hit its time budget.
@@ -53,7 +56,7 @@ earlier commit `4b5f9d02c`; no failure was recorded there.
 | LLM (whole) | 849 | 815 / 0 | 815 | 782 / 33 | 81 | 793 / 22 |
 | ThreeD | 1,466 ran of 1,457 listed | 1,435 / 0 | 1,425 | 1,417 / 8 | 25 | 1,417 / 8 |
 | Engine PSA attention | 2 | not run | 2 | 2 / 0 | 1 | 2 / 0 |
-| LLM GPU lane (probe) | not recorded | not recorded | not recorded | 24 failed | 40 | not recorded |
+| LLM GPU lane | not recorded | not recorded | not recorded | 24 failed | 40 | not recorded |
 
 The ThreeD figures do not reconcile: 1,466 ran against 1,457 listed, without saying which run the 1,466 belongs to, and
 passes 1 and 2 ran 1,425 where the RTX 3060 passed 1,435. Neither difference is explained. Audio, Diffusion, Vision and
@@ -141,7 +144,7 @@ loader and environment tests do not decide it. A different image was not tried. 
 libraries, so an image rebuild alone is not expected to help.
 
 The rental campaign says that if the device is still missing with `NVIDIA_DRIVER_CAPABILITIES=all` set, the finding is
-that the Vulkan half cannot be run at this provider. This is that finding, for this image.
+that the Vulkan half cannot be run at this provider. This is that finding, as far as the image and pods tried can show.
 
 ## Departure from the campaign plan
 
