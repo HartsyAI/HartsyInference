@@ -16,8 +16,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// blocks through the device. The output velocity is compared with the upstream velocity by relative RMS.
 /// Environment: <c>MOVIEROLL_DIT_PATH</c> the released file, <c>MOVIEROLL_INPUTS</c> the saved inputs (seed 7), <c>MOVIEROLL_VELOCITY_REF</c> the upstream
 /// velocity (safetensors, key <c>velocity</c>). Skipped (reported, not passed) when any is unset or no CUDA device opens.
-/// <c>MOVIEROLL_CUDA_HIGH_PRECISION_GEMM=1</c> runs the exact lane (full-F32 GEMMs); unset keeps the backend default (TF32), as the recipe does.
-/// <c>MOVIEROLL_CUDA_F16_ATTENTION=1</c> narrows the block attention to F16 (the path that fails the bound); unset keeps F32, the engine default.
+/// No other environment overrides: the forward runs the engine defaults (exact GEMMs via <c>numerics.movieRollExactGemm</c>, F32 block attention).
 /// Bound: relative RMS at most 1e-3.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollCudaBlockForwardTests(ITestOutputHelper output)
@@ -52,8 +51,7 @@ public sealed class MovieRollCudaBlockForwardTests(ITestOutputHelper output)
         reference.Load(refPath);
 
         using IBackend backend = GpuDevices.OpenCuda();
-        backend.HighPrecisionGemm = Environment.GetEnvironmentVariable("MOVIEROLL_CUDA_HIGH_PRECISION_GEMM") == "1";
-        output.WriteLine($"HIGH_PRECISION_GEMM {backend.HighPrecisionGemm}");
+        output.WriteLine($"MOVIEROLL_EXACT_GEMM {EngineKnobs.MovieRollExactGemm.Value}");
 
         // Shared weights first: the top level and block 0 go through the converter once; block 0's outputs are released.
         Dictionary<string, Tensor> source = weights.GetAllTensors();
@@ -61,8 +59,6 @@ public sealed class MovieRollCudaBlockForwardTests(ITestOutputHelper output)
             source.Where(p => !p.Key.StartsWith("double_blocks.", StringComparison.Ordinal) || p.Key.StartsWith("double_blocks.0.", StringComparison.Ordinal))
                 .ToDictionary(p => p.Key, p => p.Value), numBlocks: 1, hidden: config.HiddenSize);
         using HunyuanVideo15Dit dit15 = new(config);
-        // Block attention stays F32 unless MOVIEROLL_CUDA_F16_ATTENTION=1: the engine default (AllowF16Attention = false) is the parity path.
-        dit15.AllowF16Attention = Environment.GetEnvironmentVariable("MOVIEROLL_CUDA_F16_ATTENTION") == "1";
         output.WriteLine($"ATTENTION_F16 {dit15.AllowF16Attention}");
         dit15.LoadSharedWeights(sharedOut.Where(p => !p.Key.StartsWith("transformer_blocks.", StringComparison.Ordinal))
             .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal));
