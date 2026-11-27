@@ -78,10 +78,28 @@ public sealed class FastFramesOffloadBoundaryTests
     private const long Mb = 1L << 20;
 
     [Fact]
-    public void AResidentCacheFitsExactlyBesideTheWindowAndNotOneByteLess()
+    public void AResidentCacheFitsExactlyBesideTheWindowAndTheActivationAllowanceAndNotOneByteLess()
     {
-        Assert.True(FastFramesPipeline.ResidentCacheFits(freeBytes: 100 * Mb + 50 * Mb, windowBytes: 50 * Mb, kvNeedBytes: 100 * Mb));
-        Assert.False(FastFramesPipeline.ResidentCacheFits(freeBytes: 100 * Mb + 50 * Mb - 1, windowBytes: 50 * Mb, kvNeedBytes: 100 * Mb));
+        long need = 100 * Mb, window = 50 * Mb, room = need + window + FastFramesPipeline.DefaultStreamingHeadroomBytes;
+        Assert.True(FastFramesPipeline.ResidentCacheFits(freeBytes: room, windowBytes: window, kvNeedBytes: need));
+        Assert.False(FastFramesPipeline.ResidentCacheFits(freeBytes: room - 1, windowBytes: window, kvNeedBytes: need));
+    }
+
+    [Fact]
+    public void ThePlacementHeadroomIsTheCacheNeedPlusTheActivationAllowancePlusTheWindowUnlessOverridden()
+    {
+        const long need = 100 * Mb, window = 50 * Mb;
+        Assert.Equal(need + FastFramesPipeline.DefaultStreamingHeadroomBytes + window,
+            FastFramesPipeline.PlacementHeadroomBytes(need, window, overrideBytes: null));
+        Assert.Equal(1L << 30, FastFramesPipeline.DefaultStreamingHeadroomBytes);
+        Assert.Equal(7 * Mb, FastFramesPipeline.PlacementHeadroomBytes(kvNeedBytes: 1, windowBytes: 0, overrideBytes: 7 * Mb));
+    }
+
+    [Fact]
+    public void AutoChoosesOffloadWhenOnlyTheCacheAndWindowWouldFitWithoutTheAllowance()
+    {
+        // The cache and the window fit the free VRAM, but not the activation allowance the placement keeps as well.
+        Assert.False(FastFramesPipeline.ResidentCacheFits(freeBytes: 150 * Mb, windowBytes: 50 * Mb, kvNeedBytes: 100 * Mb));
     }
 
     [Fact]

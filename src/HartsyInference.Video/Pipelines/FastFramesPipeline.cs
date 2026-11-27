@@ -195,10 +195,19 @@ public sealed class FastFramesPipeline : IDisposable
         return !ResidentCacheFits(freeBytes, window, ClipKvNeedBytes(latentFrames));
     }
 
-    /// <summary>The check after the placement for a resident cache, in terms the placement can meet: the streaming window is uploaded after the
-    /// placement, so the cache must fit beside it. A placement that fills to its headroom leaves at least the cache's need, so the check passes
-    /// there as well.</summary>
-    public static bool ResidentCacheFits(long freeBytes, long windowBytes, long kvNeedBytes) => freeBytes - windowBytes >= kvNeedBytes;
+    /// <summary>The activation allowance the block placement keeps free beyond the clip's frame cache. The refiner and the decoder are not in it:
+    /// they are uploaded before the placement, so the planner counts them as used.</summary>
+    public const long DefaultStreamingHeadroomBytes = 1L << 30;
+
+    /// <summary>The bytes the block placement keeps free: the chosen mode's frame-cache need, <see cref="DefaultStreamingHeadroomBytes"/> and the
+    /// streaming window, which is uploaded right after the placement. An override replaces the sum.</summary>
+    public static long PlacementHeadroomBytes(long kvNeedBytes, long windowBytes, long? overrideBytes) =>
+        overrideBytes ?? kvNeedBytes + DefaultStreamingHeadroomBytes + windowBytes;
+
+    /// <summary>The check for a resident cache in the auto mode, in the same terms as the placement's headroom: the cache must fit beside the
+    /// window and the activation allowance, so a resident choice never leaves less than the placement reserves.</summary>
+    public static bool ResidentCacheFits(long freeBytes, long windowBytes, long kvNeedBytes) =>
+        freeBytes - windowBytes - DefaultStreamingHeadroomBytes >= kvNeedBytes;
 
     /// <summary>The placement releases a pinned prefix when the clip is longer than the prefix was sized for, or streaming is forced; mirrors the
     /// release in BlockStreamingScope.</summary>
@@ -306,10 +315,10 @@ public sealed class FastFramesPipeline : IDisposable
                 Backend = _backend,
                 Denoiser = _transformer,
                 ModelName = _config.Name,
-                // The headroom is the chosen mode's frame-cache need plus the window (prefetchAhead + 1 streamed blocks), which is uploaded
-                // right after the placement.
-                HeadroomBytes = StreamingHeadroomOverride
-                    ?? kvNeed + StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead),
+                // The headroom is the chosen mode's frame-cache need, the activation allowance and the window (prefetchAhead + 1 streamed blocks),
+                // which is uploaded right after the placement.
+                HeadroomBytes = PlacementHeadroomBytes(kvNeed, StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead),
+                    StreamingHeadroomOverride),
                 Mode = StreamingMode,
                 Pin = _generatorPin,
                 TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
@@ -387,8 +396,7 @@ public sealed class FastFramesPipeline : IDisposable
         _generatorPin.Resident = true;
     }
 
-    /// <summary>Bytes the block placement keeps free beyond the clip's frame cache. When null, the chosen mode's cache need plus the streaming
-    /// window is used.</summary>
+    /// <summary>Replaces the placement headroom (the cache need, the activation allowance and the window) when set; null uses the sum.</summary>
     public long? StreamingHeadroomOverride { get; set; }
 
     /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
