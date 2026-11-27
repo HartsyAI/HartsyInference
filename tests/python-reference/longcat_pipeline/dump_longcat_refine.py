@@ -8,6 +8,9 @@ blocking, mean pooling and top-k selection (the function sources are compiled fr
 their torch.compile decorators) followed by torch SDPA over the selected key blocks of each query block. The kernel itself is
 compared with the engine's operation elsewhere (tests/python-reference/longcat_bsa).
 
+With --triton the reference's own kernel runs instead (needs CUDA and triton; the DiT stays on the CPU and only the attention
+operands move to the card). `meta.json`'s `attention` field records which ran.
+
 Stubbed and therefore NOT verified here: the VAE (the dump queues the latents it would have produced for the upsampled clip and the
 condition frames), umT5, and the pixel preparation's result (the reference computes it, and the VAE stub ignores it). The refinement
 LoRA is not loaded: the tiny checkpoint has none.
@@ -16,6 +19,7 @@ Outputs (under --out): `ckpt/`, `meta.json`, and raw little-endian F32 files `<s
 """
 import argparse
 import ast
+import importlib
 import json
 import math
 import os
@@ -87,6 +91,22 @@ def stand_in(reference):
     return flash_attn_bsa_3d
 
 
+def reference_kernel():
+    """The reference's own `flash_attn_bsa_3d`, run on the card; the DiT around it stays on the CPU."""
+    name = "longcat_video.block_sparse_attention.bsa_interface"
+    sys.modules.pop(name, None)
+    kernel = importlib.import_module(name).flash_attn_bsa_3d
+
+    def flash_attn_bsa_3d(q, k, v, latent_shape_q, latent_shape_k, **params):
+        counts_q = [g // b for g, b in zip(latent_shape_q, params["chunk_3d_shape_q"])]
+        counts_k = [g // b for g, b in zip(latent_shape_k, params["chunk_3d_shape_k"])]
+        key_blocks = int(np.prod(counts_k))
+        SELECTION.append((int(np.prod(counts_q)), key_blocks, int((1 - params["sparsity"]) * key_blocks)))
+        return kernel(q.cuda(), k.cuda(), v.cuda(), latent_shape_q, latent_shape_k, **params).cpu()
+
+    return flash_attn_bsa_3d
+
+
 class Frame(np.ndarray):
     """A stage-1 frame: the pipeline reads `height` and `width` and converts the list to one array."""
 
@@ -99,18 +119,21 @@ def run(args):
     os.makedirs(out_dir, exist_ok=True)
     repo = os.path.abspath(args.repo)
     base.install_stubs(repo)
+    attention = reference_kernel() if args.triton else stand_in(reference_selection(repo))
     interface = types.ModuleType("longcat_video.block_sparse_attention.bsa_interface")
-    interface.flash_attn_bsa_3d = stand_in(reference_selection(repo))
+    interface.flash_attn_bsa_3d = attention
     sys.modules["longcat_video.block_sparse_attention.bsa_interface"] = interface
-    torch.cuda.empty_cache = lambda: None
-    torch.cuda.ipc_collect = lambda: None
+    if not args.triton:          # the pipeline calls these whether or not a card is there
+        torch.cuda.empty_cache = lambda: None
+        torch.cuda.ipc_collect = lambda: None
     base.CONFIG["bsa_params"] = dict(sparsity=SPARSITY, chunk_3d_shape_q=BLOCK, chunk_3d_shape_k=BLOCK)
 
     ckpt_dst = os.path.join(out_dir, "ckpt")
     if not os.path.isdir(ckpt_dst):
         shutil.copytree(os.path.abspath(args.ckpt), ckpt_dst)
 
-    meta = dict(commit=base.LONGCAT_COMMIT, torch=torch.__version__, shift=SHIFT, steps=STEPS, threshold=THRESHOLD, sparsity=SPARSITY,
+    meta = dict(commit=base.LONGCAT_COMMIT, torch=torch.__version__, attention="triton" if args.triton else "stand-in",
+                shift=SHIFT, steps=STEPS, threshold=THRESHOLD, sparsity=SPARSITY,
                 block=BLOCK, text_len=base.TEXT_LEN, valid_pos=base.VALID_POS, tensors={}, scenarios={})
     recorder = base.Recorder(out_dir, meta)
     base.SHIFT = SHIFT           # the scheduler build_pipeline constructs
@@ -176,6 +199,7 @@ def main():
     ap.add_argument("--ckpt", required=True, help="the B1 tiny checkpoint folder (ckpt/ from the B1 dump)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=13)
+    ap.add_argument("--triton", action="store_true", help="run the reference's Triton kernel on the card instead of the stand-in")
     run(ap.parse_args())
 
 

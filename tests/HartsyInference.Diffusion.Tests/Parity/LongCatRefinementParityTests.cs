@@ -1,17 +1,20 @@
 using System.Text.Json;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests.Parity;
 
 /// <summary>The LongCat-Video 720p refinement (image-conditioned and unconditioned) against the pinned reference's own
 /// <c>generate_refine</c> loop and DiT (tests/python-reference/longcat_pipeline/dump_longcat_refine.py, @ 58eb336), on the tiny B1
-/// checkpoint, CPU F32. The reference's attention there is a stand-in: its own block selection with dense attention over the
-/// selected blocks, in place of its Triton kernel. Skipped, and so not evidence, until HARTSY_LONGCAT_REFINE_DIR names the dump
-/// directory.</summary>
+/// checkpoint, on the CPU in F32 and on CUDA with exact F32 GEMMs. A dump's <c>attention</c> field says what the reference
+/// attended with: its Triton kernel, or the stand-in of its own block selection with dense attention over the selected blocks.
+/// Skipped, and so not evidence, until HARTSY_LONGCAT_REFINE_DIR names the dump directory.</summary>
 [Trait("Category", "Integration")]
 public sealed class LongCatRefinementParityTests
 {
@@ -20,6 +23,21 @@ public sealed class LongCatRefinementParityTests
 
     [LongCatRefinementFact]
     public void EveryScenarioMatchesTheReference()
+    {
+        using CpuBackend backend = new();
+        Compare(backend, "refinement-parity-report.txt");
+    }
+
+    [LongCatRefinementFact(cuda: true)]
+    [Trait("Category", "GpuIntegration")]
+    public void EveryScenarioMatchesTheReferenceOnCuda()
+    {
+        using CudaBackend backend = GpuDevices.OpenCuda();
+        using ExactGemmScope exact = new(backend);
+        Compare(backend, "refinement-parity-report-cuda.txt");
+    }
+
+    private static void Compare(IBackend backend, string report)
     {
         string dir = Environment.GetEnvironmentVariable(EnvName)!;
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "meta.json")));
@@ -34,7 +52,6 @@ public sealed class LongCatRefinementParityTests
         };
         using LongCatTransformer transformer = new(config);
         transformer.LoadWeights(checkpoint.Weights);
-        using CpuBackend backend = new();
         LongCatVideoPipeline pipeline = new(backend, transformer);
         LongCatPrompt prompt = new(Read(dir, document, "text.pos_embeds"), root.GetProperty("text_len").GetInt32(),
             root.GetProperty("valid_pos").GetInt32());
@@ -63,7 +80,7 @@ public sealed class LongCatRefinementParityTests
             Compare(failures, passed, $"{name} final", result.Latents, Read(dir, document, $"{name}.final"));
         }
 
-        File.WriteAllLines(Path.Combine(dir, "refinement-parity-report.txt"),
+        File.WriteAllLines(Path.Combine(dir, report),
             failures.Select(static l => "FAIL " + l).Concat(passed.Select(static l => "ok   " + l)));
         Assert.True(failures.Count == 0, $"{failures.Count} comparison(s) off, {passed.Count} matched:\n{string.Join('\n', failures)}");
     }
@@ -86,11 +103,13 @@ public sealed class LongCatRefinementParityTests
     [AttributeUsage(AttributeTargets.Method)]
     private sealed class LongCatRefinementFactAttribute : FactAttribute
     {
-        public LongCatRefinementFactAttribute()
+        public LongCatRefinementFactAttribute(bool cuda = false)
         {
             string? dir = Environment.GetEnvironmentVariable(EnvName);
             if (string.IsNullOrWhiteSpace(dir) || !File.Exists(Path.Combine(dir, "meta.json")))
                 Skip = $"SKIPPED: {EnvName} is unset or has no meta.json; the LongCat refinement reference comparison did not run.";
+            else if (cuda && GpuDevices.CudaFailure is { } failure)
+                Skip = $"SKIPPED: no usable CUDA device ({failure}).";
         }
     }
 }
