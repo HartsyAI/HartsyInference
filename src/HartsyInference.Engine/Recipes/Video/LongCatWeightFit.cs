@@ -16,22 +16,12 @@ internal static class LongCatWeightFit
 {
     /// <summary>Why <paramref name="backend"/> cannot hold the DiT in <paramref name="directory"/>, or null. Null without reading a file for a
     /// backend that streams blocks or reports no device memory.</summary>
-    public static string? Refusal(IBackend backend, string directory)
-    {
-        if (backend.StreamingCache is not null)
-            return null;
-        long total = backend.GetVramInfo().TotalBytes;
-        if (total <= 0)
-            return null;
-        long usable = Math.Max(0, total - PlacementPlanner.PerDeviceReserveBytes);
-        (long held, long widened) = HeldBytes(directory, backend.SupportsResidentQuant);
-        if (held <= usable)
-            return null;
-        string int8 = widened > 0 ? " (its INT8 weights widen to F32 on this backend)" : "";
-        return $"LongCat cannot run on {backend.Capabilities.Name}: this backend has no weight streaming, so every DiT block stays on the device, "
-            + $"and the weights take {ByteFormat.GbF1(held)}{int8}. The device has {ByteFormat.GbF1(usable)} usable of {ByteFormat.GbF1(total)}. "
-            + "The CUDA backend streams the blocks.";
-    }
+    public static string? Refusal(IBackend backend, string directory) =>
+        VideoWeightFit.Refusal(backend, "LongCat", () =>
+        {
+            (long held, long widened) = HeldBytes(directory, backend.SupportsResidentQuant);
+            return (held, widened > 0 ? " (its INT8 weights widen to F32 on this backend)" : "");
+        });
 
     /// <summary>The bytes the DiT's weights in <paramref name="directory"/> take on a backend, from the shard headers: each tensor at its stored
     /// size, and an INT8 weight the backend does not hold packed at 4 bytes an element without its row scales. <c>Widened</c> counts those

@@ -1,10 +1,11 @@
+using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes.Video;
 using Xunit;
 
 namespace HartsyInference.Engine.Tests.Registry;
 
-/// <summary>The plan-time refusal of the released MovieRoll DiT on a backend without weight streaming: the DiT is held at its FP32 load dtype off
-/// CUDA, so a 33.3 GB file cannot run on a 12 GB card there. A backend that streams is not refused.</summary>
+/// <summary>The MovieRoll refusals and the shared device fit they use: the DiT is held at its FP32 load dtype off CUDA, so a 33.3 GB file cannot run
+/// on a 12 GB non-streaming device; quantized checkpoints and LoRA requests have no path and are refused.</summary>
 [Trait("Category", "Integration")]
 public sealed class MovieRollWeightsRefusalTests
 {
@@ -12,22 +13,39 @@ public sealed class MovieRollWeightsRefusalTests
     private const long Gb = 1024L * 1024 * 1024;
 
     [Fact]
-    public void A_NonStreamingBackend_SmallerThanTheDit_IsRefused()
+    public void NonStreamingDevice_SmallerThanTheDit_IsRefused()
     {
-        string? refusal = MovieRollRecipe.WeightsRefusal(streams: false, totalBytes: 12 * Gb, weightBytes: ReleasedDitBytes, backendName: "Vulkan");
+        string? refusal = VideoWeightFit.Decide("Vulkan", 12 * Gb, ReleasedDitBytes, "MovieRoll", MovieRollRecipe.DitHoldDetail);
         Assert.NotNull(refusal);
-        Assert.Contains("cannot run on Vulkan", refusal);
+        Assert.Contains("MovieRoll cannot run on Vulkan", refusal);
+        Assert.Contains("FP32 load dtype", refusal);
     }
 
     [Fact]
-    public void A_StreamingBackend_IsNotRefused()
+    public void NonStreamingDevice_LargerThanTheDit_IsNotRefused()
     {
-        Assert.Null(MovieRollRecipe.WeightsRefusal(streams: true, totalBytes: 12 * Gb, weightBytes: ReleasedDitBytes, backendName: "CUDA"));
+        Assert.Null(VideoWeightFit.Decide("Vulkan", 48 * Gb, ReleasedDitBytes, "MovieRoll", MovieRollRecipe.DitHoldDetail));
     }
 
     [Fact]
-    public void A_NonStreamingBackend_LargerThanTheDit_IsNotRefused()
+    public void LongCatMessage_IsUnchangedThroughTheSharedFit()
     {
-        Assert.Null(MovieRollRecipe.WeightsRefusal(streams: false, totalBytes: 48 * Gb, weightBytes: ReleasedDitBytes, backendName: "Vulkan"));
+        string? refusal = VideoWeightFit.Decide("Vulkan", 12 * Gb, 20 * Gb, "LongCat", " (its INT8 weights widen to F32 on this backend)");
+        Assert.StartsWith("LongCat cannot run on Vulkan: this backend has no weight streaming", refusal);
+        Assert.Contains("(its INT8 weights widen to F32 on this backend)", refusal);
+    }
+
+    [Fact]
+    public void QuantizedDtypes_AreRefused_AndFloatDtypesAreNot()
+    {
+        Assert.NotNull(MovieRollRecipe.QuantRefusal([DType.F32, DType.I8]));
+        Assert.Null(MovieRollRecipe.QuantRefusal([DType.F32, DType.BF16, DType.F16]));
+    }
+
+    [Fact]
+    public void LoraAdapters_AreRefused_AndNoAdaptersAreNot()
+    {
+        Assert.NotNull(MovieRollRecipe.LoraRefusal(hasAdapters: true));
+        Assert.Null(MovieRollRecipe.LoraRefusal(hasAdapters: false));
     }
 }

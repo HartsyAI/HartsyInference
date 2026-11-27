@@ -75,27 +75,31 @@ public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
     /// <inheritdoc/>
     public bool RefusesUnhonouredPlacements => true;
 
-    /// <summary>Why a backend cannot hold the released DiT at <paramref name="weightBytes"/>, or null. A backend with a streaming cache moves the blocks
-    /// through the device and is not refused here. One without keeps every block on the device, and the DiT is held at its load dtype: FP32 off CUDA
-    /// (the F16 cast is CUDA only), so a file larger than the usable device memory cannot run there.</summary>
-    public static string? WeightsRefusal(bool streams, long totalBytes, long weightBytes, string backendName)
-    {
-        if (streams || totalBytes <= 0) return null;
-        long usable = Math.Max(0, totalBytes - HartsyInference.Engine.Placement.PlacementPlanner.PerDeviceReserveBytes);
-        if (weightBytes <= usable) return null;
-        return $"MovieRoll cannot run on {backendName}: this backend has no weight streaming, so every DiT block stays on the device, and the DiT is held at its "
-            + $"FP32 load dtype (the F16 cast is CUDA only), {HartsyInference.Core.Memory.Vram.ByteFormat.GbF1(weightBytes)}. The device has "
-            + $"{HartsyInference.Core.Memory.Vram.ByteFormat.GbF1(usable)} usable of {HartsyInference.Core.Memory.Vram.ByteFormat.GbF1(totalBytes)}. "
-            + "The CUDA backend streams the blocks.";
-    }
+    /// <summary>The note on how the released DiT is held on a backend without streaming: FP32 off CUDA, since the F16 cast is CUDA only.</summary>
+    internal const string DitHoldDetail = " (held at its FP32 load dtype; the F16 cast is CUDA only)";
 
     /// <inheritdoc/>
     string? IVideoDeviceCheck.DeviceRefusal(IBackend backend, string checkpointPath)
     {
         if (!File.Exists(checkpointPath)) return null;
-        long bytes = new FileInfo(checkpointPath).Length;
-        return WeightsRefusal(backend.StreamingCache is not null, backend.GetVramInfo().TotalBytes, bytes, backend.Capabilities.Name);
+        return VideoWeightFit.Refusal(backend, "MovieRoll", () => (new FileInfo(checkpointPath).Length, DitHoldDetail));
     }
+
+    /// <summary>Why the checkpoint's tensors cannot run: a quantized (FP8 or INT8) DiT has no load path here, so only FP32 and BF16 (and the F16 cast
+    /// of them) are accepted. Null when every dtype is one of those.</summary>
+    public static string? QuantRefusal(IEnumerable<DType> dtypes)
+    {
+        foreach (DType dtype in dtypes)
+        {
+            if (dtype != DType.F32 && dtype != DType.BF16 && dtype != DType.F16)
+                return $"MovieRoll has no load path for {dtype} weights; use the FP32 or BF16 release. Quantized (FP8 or INT8) checkpoints are not in scope.";
+        }
+        return null;
+    }
+
+    /// <summary>Why a request's LoRA adapters cannot run: the MovieRoll recipe has no adapter path, so any entry is refused. Null without adapters.</summary>
+    public static string? LoraRefusal(bool hasAdapters) =>
+        hasAdapters ? "MovieRoll does not support LoRA adapters; remove Loras from the request." : null;
 
     /// <summary>The source dtypes the DiT casts to F16 at load on this backend. BF16 is cast on every backend, as before; FP32 (the released file's
     /// dtype) is cast on CUDA only, because the F16 path for FP32 weights is proven there and not on the CPU backend, which keeps them.</summary>
@@ -119,8 +123,13 @@ public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
             CheckpointSource ditSource = CheckpointSource.Open(context.CheckpointPath);
             loaders.Add(ditSource);
             HunyuanVideo15Config config = HunyuanVideo15Config.Full;
+            // Refused before anything is converted or copied: a backend without streaming cannot hold this DiT, whatever it is cast to.
+            string? fit = VideoWeightFit.Refusal(context.Backend, "MovieRoll", () => (new FileInfo(context.CheckpointPath).Length, DitHoldDetail));
+            if (fit is not null) throw new NotSupportedException(fit);
             Dictionary<string, Tensor> ditWeights = HunyuanVideo15CheckpointConverter.Convert(
                 new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal), config.NumBlocks, config.HiddenSize);
+            string? quant = QuantRefusal(ditWeights.Values.Select(weight => weight.DType));
+            if (quant is not null) throw new NotSupportedException(quant);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
             // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
