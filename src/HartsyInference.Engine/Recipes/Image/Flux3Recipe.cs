@@ -23,6 +23,9 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <see cref="Flux3Variants"/>). Drives through <see cref="Flux3RecipePipeline"/>.</summary>
 public sealed class Flux3Recipe : IArchitectureRecipe
 {
+    /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
+    public bool RefusesUnhonouredPlacements => true;
+
     /// <summary>The full build's sampling settings (ComfyUI template): 25 steps at true-CFG 3.5, 1024². The <c>er_sde</c> sampler
     /// is SwarmUI core's for Flux 3 Image (<c>WorkflowGenerator.cs</c>; <c>Model Support.md</c>, Flux 3 Image). The distilled
     /// build keeps the pipeline's sampler: its flow-map step targets the sampler's own sigmas.</summary>
@@ -83,7 +86,7 @@ public sealed class Flux3Recipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        UnhonouredBackends.Refuse(context, "FLUX.3");
+        UnhonouredBackends.Refuse(context, "FLUX.3", warn: false);
         string fileName = Path.GetFileName(context.CheckpointPath);
         ResolvedModelVariant variant = context.ResolveVariant(Flux3Variants.Catalog);
         List<IDisposable> owned = new List<IDisposable>();

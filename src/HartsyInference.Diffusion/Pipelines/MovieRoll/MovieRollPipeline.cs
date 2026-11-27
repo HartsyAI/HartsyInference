@@ -14,6 +14,7 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
 {
     private readonly HunyuanVideo15Dit _dit;
     private readonly HunyuanVideo15Vae _vae;
+    private readonly ResidentWeights _vaeResidency;
     private readonly MovieRollSchedule _schedule;
     private readonly long _kvByteBudget;
 
@@ -27,6 +28,7 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
     {
         _dit = dit ?? throw new ArgumentNullException(nameof(dit));
         _vae = vae ?? throw new ArgumentNullException(nameof(vae));
+        _vaeResidency = new ResidentWeights(backend, () => _vae.EnumerateWeights());
         _schedule = schedule ?? throw new ArgumentNullException(nameof(schedule));
         if (kvByteBudget <= 0) throw new ArgumentOutOfRangeException(nameof(kvByteBudget), kvByteBudget, "The K and V budget is positive.");
         _kvByteBudget = kvByteBudget;
@@ -81,8 +83,8 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         // The decoder takes the latent already divided by the scaling factor (movieroll_pipeline.py:decode_latents, latents / scaling_factor).
         using Tensor unscaled = new(latents.Shape, DType.F32);
         Backend.Scale(unscaled, latents, 1f / _vae.Config.ScalingFactor);
-        // The VAE's weights are resident only for the decode, so the sampling run's memory is released before it.
-        Backend.PreloadWeights(_vae.EnumerateWeights());
+        // The VAE's weights are placed for the decode and released after it, as the VRAM profile allows: a profile that keeps models resident keeps them.
+        _vaeResidency.Preload();
         try
         {
             return _vae.Decode(Backend, unscaled);
@@ -90,7 +92,7 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         finally
         {
             Backend.Sync();
-            Backend.FreeWeights(_vae.EnumerateWeights());
+            _vaeResidency.Release();
         }
     }
 

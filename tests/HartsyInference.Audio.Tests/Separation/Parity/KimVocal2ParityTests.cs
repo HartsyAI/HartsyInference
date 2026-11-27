@@ -138,17 +138,12 @@ public sealed unsafe class KimVocal2ParityTests(ITestOutputHelper output)
         (long[] shape, float[] data) = Npy.Read(Path.Combine(reference, "stem_normalized.npy"));
         int n = (int)shape[^1];
         float[][] stem = [data.AsSpan(0, n).ToArray(), data.AsSpan(n, n).ToArray()];
-        MdxSeparator separator = new(MdxSettings.KimVocal2, new NoModel());
+        float[] resampled = MdxSeparator.ToMono(stem, MdxSettings.KimVocal2.SampleRate, 16_000);
 
-        double mono = Compare("vocals 16 kHz mono (C# soxr_hq stand-in)", reference, "vocals_16k", separator.ToMono(stem, 16_000));
+        double mono = Compare("vocals 16 kHz mono (C# soxr_hq stand-in)", reference, "vocals_16k", resampled);
 
         // The engine polyphase resampler was 3.4e-3 from soxr_hq on the 8 s test mix, so this limit also catches a return to it.
         Assert.True(mono < 1e-3, $"16 kHz vocals relRMS {mono:E2}");
-    }
-
-    private sealed class NoModel : IMdxSpectrogramModel
-    {
-        public void Run(float[] spectrogram, float[] prediction) => throw new NotSupportedException("the resampler comparison runs no network");
     }
 
     /// <summary>Only the real dumper records the replay check and the audio-separator version.</summary>

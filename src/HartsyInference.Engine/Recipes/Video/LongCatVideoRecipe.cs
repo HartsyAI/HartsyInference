@@ -9,6 +9,9 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// (<see cref="LongCatVideoPipeline"/>). Long video, video continuation and the 720p refinement are not wired here yet.</summary>
 public sealed class LongCatVideoRecipe : IVideoRecipe
 {
+    /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
+    public bool RefusesUnhonouredPlacements => true;
+
     private readonly LongCatSideModels? _sides;
 
     /// <summary>The production recipe: umT5 and the VAE come from the engine's side-model downloads.</summary>

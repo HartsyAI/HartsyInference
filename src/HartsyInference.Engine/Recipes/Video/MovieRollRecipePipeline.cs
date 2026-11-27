@@ -1,9 +1,11 @@
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Models.TextEncoders;
+using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Pipelines.MovieRoll;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Utilities;
@@ -23,7 +25,9 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
     Func<CancellationToken, (T5TextEncoder Encoder, IDisposable Loader)> glyphFactory, List<IDisposable> loaders) : IVideoRecipePipeline
 {
     private readonly object _glyphLock = new();
+    private readonly ResidentWeights _llamaResidency = new(backend, () => llama.EnumerateWeights());
     private T5TextEncoder? _glyph;
+    private ResidentWeights? _glyphResidency;
     private IDisposable? _glyphLoader;
 
     /// <inheritdoc/>
@@ -62,19 +66,24 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
         {
             string prompt = request.Prompt;
             (int[] ids, int crop) = HunyuanVideo15Prompt.Tokenize(tokenizer, prompt);
-            backend.PreloadWeights(llama.EnumerateWeights());
-            text = qwen.EncodeCropped(backend, ids, crop);
-            backend.Sync();
-            backend.FreeWeights(llama.EnumerateWeights());
+            // The text encoder needs the room for the sampling run, so its weights are released even when the profile keeps models resident.
+            _llamaResidency.Preload();
+            try
+            {
+                text = qwen.EncodeCropped(backend, ids, crop);
+            }
+            finally
+            {
+                backend.Sync();
+                _llamaResidency.Release(force: true);
+            }
 
             glyphFeatures = EncodeGlyphText(prompt, cancel);
 
             Func<int, Tensor> noise = SeededNoise(seed, HunyuanVideo15Config.Full.LatentChannels, latentHeight, latentWidth);
             using Tensor rgb = pipeline.Generate(options, text, glyphFeatures, null, null, latentHeight, latentWidth, noise);
 
-            int f = (int)rgb.Shape[2];
-            byte[][] decoded = new byte[f][];
-            for (int i = 0; i < f; i++) decoded[i] = VideoRgbFrames.ExtractFrame(rgb, i);
+            byte[][] decoded = VideoRgbFrames.ExtractAllFrames(rgb);
             int w = (int)rgb.Shape[4], h = (int)rgb.Shape[3];
             Logs.Info($"[MovieRollRecipePipeline] Generated {decoded.Length} frames {w}x{h} (seed {seed}).");
             return VideoRecipeUtils.ToResult(decoded, w, h, request);
@@ -102,6 +111,7 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
             {
                 (T5TextEncoder encoder, IDisposable loader) = glyphFactory(cancel);
                 _glyph = encoder;
+                _glyphResidency = new ResidentWeights(backend, () => encoder.EnumerateWeights());
                 _glyphLoader = loader;
             }
         }
@@ -111,11 +121,16 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
             // Truncate the glyph text, then end on the end-of-sequence token as ByT5Tokenizer.Encode does, so the window keeps its EOS.
             tokens = [.. tokens[..(HunyuanVideo15Prompt.ByT5MaxTokens - 1)], ByT5Tokenizer.EosId];
         }
-        backend.PreloadWeights(_glyph!.EnumerateWeights());
-        Tensor features = _glyph.Encode(backend, [tokens]);
-        backend.Sync();
-        backend.FreeWeights(_glyph.EnumerateWeights());
-        return features;
+        _glyphResidency!.Preload();
+        try
+        {
+            return _glyph!.Encode(backend, [tokens]);
+        }
+        finally
+        {
+            backend.Sync();
+            _glyphResidency.Release(force: true);
+        }
     }
 
     /// <summary>Draws the sampler's noise from one seed: each call takes the next seed, so a request is reproducible.</summary>
@@ -128,13 +143,7 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
     /// <inheritdoc/>
     public void Dispose()
     {
-        pipeline.Dispose();
-        vae.Dispose();
-        dit.Dispose();
-        llama.Dispose();
-        _glyph?.Dispose();
-        _glyphLoader?.Dispose();
-        foreach (IDisposable loader in loaders)
-            loader.Dispose();
+        // The pipeline and the DiT go before the containers and the DiT's F16 copies, which the DiT's weights may still reference until it is gone.
+        new CompositeDisposable([pipeline, vae, dit, llama, _glyph, _glyphLoader, .. loaders]).Dispose();
     }
 }
