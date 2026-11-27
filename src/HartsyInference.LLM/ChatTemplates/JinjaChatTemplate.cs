@@ -79,6 +79,19 @@ public sealed class JinjaChatTemplate : IChatTemplate
         return WithBos(tokenizer, SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer));
     }
 
+    /// <summary>The text this template renders after a user turn's content, with the generation prompt (for a Qwen-style template: the
+    /// im_end and assistant header, then whatever think prefix it writes for <paramref name="enableThinking"/>). Rendered from the loaded
+    /// template, so a model's own switch decides the prefix rather than a constant in the caller.</summary>
+    public string TurnTailAfterUser(ILlmTokenizer tokenizer, bool? enableThinking)
+    {
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        const string sentinel = "QWERTY_TURN_TAIL_SENTINEL";
+        string text = Render(tokenizer, [new ChatMessage("user", sentinel)], addGenerationPrompt: true, enableThinking, null);
+        int at = text.LastIndexOf(sentinel, StringComparison.Ordinal);
+        if (at < 0) throw new InvalidOperationException("The chat template did not render the user content.");
+        return text[(at + sentinel.Length)..];
+    }
+
     /// <summary>How the prompt for <paramref name="messages"/> ends: reasoning is open when the generation prompt the template appends
     /// writes a <c>&lt;think&gt;</c> it does not close (Dory, Nemotron and Qwen3-Thinking prefill one), so the completion starts inside the
     /// think block. Only the appended tail is read, because message content keeps its reasoning markers literal.</summary>

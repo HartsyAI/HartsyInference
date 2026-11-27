@@ -30,11 +30,24 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Engine surface
 
-`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. It always runs on the CPU backend: `FxService` pins both isolators to CPU, and the CLI forces CPU for every `fx separate`. The GPU route has not been run, and the STFT is on the host either way; `IBackend.SelectiveScan` has a host reference (no CUDA kernel yet). 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
+`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. Where it runs (`FxService.IsolateVoiceAsync`): **offline** on the engine's backend when that is CUDA or Vulkan, with a CPU rerun when the card is full; **realtime** always on the CPU. The CLI passes `-b` through for both isolators (Demucs still forces CPU). The STFT is on the host on every backend (`IBackend.Stft` has no GPU path), and the Mamba causal-conv history round-trips the host each block, so the network is not fully device-resident.
+
+Measured on the 3060 against the CPU on the same golden clips (fp32, wall time of the render/stream call):
+
+| Case | CPU | CUDA | Vulkan |
+|---|---|---|---|
+| offline 3 s | 25.8 s | 15 s | 34 s |
+| offline 11 s | 184 s | 59 s | 69 s |
+| realtime 3 s | 38.0 s | 54 s | 237 s |
+| realtime 11 s | 213 s | 208 s | 116 s |
+
+CUDA is faster offline at both lengths and no faster realtime, so offline uses it and realtime stays on CPU. Vulkan is faster only offline at 11 s; the 3 s offline and the realtime runs were slower, so Vulkan is not routed by the service. Timings include the GPU's shared load from other sessions. Every GPU case passes the 1e-4 tolerance. Max abs error: CPU up to 5.7e-7; Vulkan 1.6e-7 to 5.7e-7; CUDA 2.6e-5 to 8.5e-5 (relRMS up to 1.2e-4). The CUDA gap is about 150 times the Vulkan error and is not explained yet (check GEMM precision such as TF32 before tightening).
+
+16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
 
 ## Reuse map
 
-`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1). The LLM `MambaModel` keeps its own host scan until the item C change (#1191) moves it onto this op.
+`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1), with CUDA (`ssm_selective_scan_f32`) and Vulkan (`ssm_selective_scan`) kernels, verified against `SelectiveScanReference`. The stream attention cache runs on backend ops (`CopyStrided`, `Rotary`). The LLM `MambaModel` keeps its own host scan until the item C change (#1191) moves it onto this op.
 
 ## Reference runs
 
@@ -42,4 +55,4 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Not verified
 
-GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read.
+GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 208 s, on CPU by design). The STFT and the Mamba conv history stay on the host (see Engine surface).
