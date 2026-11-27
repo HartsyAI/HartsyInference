@@ -203,7 +203,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     /// The caller owns the returned tensor.</summary>
     private Tensor Denoise(Tensor latent, float sigma, Tensor conditional, Tensor? unconditional, float guidanceScale)
     {
-        DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={sigma:F4}");
+        if (DeviceMemoryTrace.Enabled)
+            DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={sigma:F4}");
         Tensor conditionalVelocity = _transformer.Forward(Backend, latent, sigma, conditional);
         if (unconditional is null)
             return conditionalVelocity;
