@@ -41,7 +41,7 @@ Measured on the 3060 against the CPU on the same golden clips (fp32, wall time o
 | realtime 3 s | 38.0 s | 7.6 s | 18.7 s |
 | realtime 11 s | 213 s | 32.4 s | 68.9 s |
 
-On the final head the device runs beat the CPU in every case, so both models route to the engine backend. Times are the log time of the render or stream call, measured on the final head; the CPU column is from the baseline run (CPU reruns on the shared machine took 30 to 396 s). Every device case passes the 1e-4 tolerance, and the device errors are at the CPU level (CUDA 1.2e-7 to 1.8e-7, Vulkan 1.7e-7 to 5.7e-7) because the network runs under exact GEMMs. The earlier CUDA error (2.6e-5 to 8.5e-5) was TF32 GEMMs.
+On the final head the device runs beat the CPU in every case, so both models route to the engine backend. Times are the log time of the render or stream call, measured 2026-11-26 on commit f9b2a2178 (the device conv and exact-GEMM code; the later commits change docs and routing only, not the goldens' path). The CPU column is from the baseline run at 5bf639317 (the CPU path is unchanged since; CPU reruns on the shared machine took 30 to 396 s). Every device case passes the 1e-4 tolerance, and the device errors are at the CPU level (CUDA 1.2e-7 to 1.8e-7, Vulkan 1.7e-7 to 5.7e-7) because the network runs under exact GEMMs. The earlier CUDA error (2.6e-5 to 8.5e-5) was TF32 GEMMs.
 
 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
 
@@ -55,4 +55,4 @@ On the final head the device runs beat the CPU in every case, so both models rou
 
 ## Not verified
 
-GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 208 s, on CPU by design). The STFT stays on the host; the Mamba conv runs on the device (CUDA and Vulkan) and on the host on the CPU (see Engine surface).
+GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 37 s, on CUDA; 2026-11-26, commit f9b2a2178). The STFT stays on the host; the Mamba conv runs on the device (CUDA and Vulkan) and on the host on the CPU (see Engine surface).
