@@ -7,6 +7,7 @@ using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Duo;
@@ -91,6 +92,7 @@ public sealed class DuoRecipe : IVideoRecipe
                 throw new NotSupportedException(
                     "Duo needs the full MiniMax-H3 Ref2VA backbone with audio and unpruned adaLN; this checkpoint is a different build.");
             }
+            CheckPlannedRequest(context, config);
             using (DuoLoraSource lora = OpenCausalLora(assets.LoraDirectory))
             {
                 // Merged before LoadWeights, since device caches are keyed on the tensor a layer captured.
@@ -119,6 +121,20 @@ public sealed class DuoRecipe : IVideoRecipe
             new CompositeDisposable([.. loaders]).Dispose();
             throw;
         }
+    }
+
+    /// <summary>Runs the request and history checks of a service-bound plan before the merge, so a request that cannot run does not cost
+    /// one. <see cref="DuoRecipePipeline.Generate"/> repeats them, since the pipeline is cached.</summary>
+    private static void CheckPlannedRequest(RecipeContext context, MiniMaxH3Config config)
+    {
+        if (context.VideoPlan?.RequestBinding is null)
+        {
+            return;
+        }
+        VideoPlan plan = VideoRequestExecutionBinding.RequirePlannedState(context.VideoPlan);
+        VideoRequest planned = plan.EffectiveSettings.Apply(plan.RequestBinding!.Request);
+        DuoRunInput input = DuoRunInput.Read(planned, plan.EffectiveSettings, config);
+        input.RequireHistoryFits(config, context.Backend.GetDeviceMemoryUsage());
     }
 
     private static DuoLoraSource OpenCausalLora(string directory)

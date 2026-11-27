@@ -58,6 +58,7 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         cancel.ThrowIfCancellationRequested();
         DuoRunInput input = DuoRunInput.Read(request, settings, _config);
+        input.RequireHistoryFits(_config, _backend.GetDeviceMemoryUsage());
         int totalSteps = input.Sample.Blocks.Count * input.Run.Steps;
         Logs.Info($"[Duo] {input.Sample.Blocks.Count} blocks, {input.Run.Steps} steps each, {input.CacheRows} history rows; "
             + "the prompt and seed are unused (Intent rows and noise come from the run folder).");
@@ -67,7 +68,7 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         try
         {
             TryPreload(codecWeights, "codec");
-            if (DitFits(input.CacheRows))
+            if (DitFits(input.HistoryBytes(_config)))
             {
                 TryPreload(dit, "DiT");
             }
@@ -137,9 +138,8 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
     }
 
     /// <summary>Whether the DiT can stay resident beside this run's F32 history. A backend that reports no free figure is taken to fit.</summary>
-    private bool DitFits(int cacheRows)
+    private bool DitFits(long historyBytes)
     {
-        long historyBytes = (long)cacheRows * _config.NumLayers * 2 * _config.NumAttentionHeads * _config.AttentionHeadDim * sizeof(float);
         (long freeBytes, _) = _backend.GetVramInfo();
         bool fits = freeBytes <= 0 || freeBytes >= _ditResidentBytes + historyBytes;
         Logs.Info($"[Duo] DiT {_ditResidentBytes / 1e9:F2} GB with reserve + history {historyBytes / 1e9:F2} GB vs "
