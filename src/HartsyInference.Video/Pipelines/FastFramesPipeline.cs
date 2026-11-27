@@ -230,10 +230,16 @@ public sealed class FastFramesPipeline : IDisposable
     {
         if (!offload)
             return;
-        long need = FrameKvCache.EstimateBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
-            _transformer.BranchActivation(_backend, singleGroup: true));
-        CheckHostFits(_config.Name, need, latentFrames, HostMemoryInfo.AvailableBytes());
+        DType slot = _transformer.BranchActivation(_backend, singleGroup: true);
+        int tokens = _gridHeight * _gridWidth, hidden = _transformer.Config.InnerDim;
+        long cache = FrameKvCache.EstimateBytes(_transformer.BlockCount, latentFrames, tokens, hidden, slot);
+        long oneBlockJoin = FrameKvCache.EstimateBytes(1, latentFrames, tokens, hidden, slot);
+        CheckHostFits(_config.Name, HostNeedBytes(cache, oneBlockJoin), latentFrames, HostMemoryInfo.AvailableBytes());
     }
+
+    /// <summary>The host bytes an offloaded clip holds: the whole frame cache, plus one block's join staging. Each join copies the stored host slots of
+    /// one block to fresh host tensors before the device concat reads them, so one block's keys and values sit on the host beside the cache.</summary>
+    internal static long HostNeedBytes(long cacheBytes, long oneBlockJoinBytes) => cacheBytes + oneBlockJoinBytes;
 
     /// <summary>Throws when an offloaded cache's host bytes exceed the host's available bytes (no check when the host reports none).</summary>
     /// <exception cref="InvalidOperationException">The offloaded cache does not fit host memory.</exception>

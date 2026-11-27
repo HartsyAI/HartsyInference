@@ -96,6 +96,15 @@ public sealed class FastFramesOffloadBoundaryTests
     }
 
     [Fact]
+    public void TheHostNeedIsTheWholeCachePlusOneBlocksJoinStaging()
+    {
+        Assert.Equal(300 * Mb, FastFramesPipeline.HostNeedBytes(cacheBytes: 280 * Mb, oneBlockJoinBytes: 20 * Mb));
+        // A host with exactly the cache but not the staging is refused.
+        Assert.Throws<InvalidOperationException>(() =>
+            FastFramesPipeline.CheckHostFits("FastFrames L", FastFramesPipeline.HostNeedBytes(280 * Mb, 20 * Mb), 21, availableBytes: 280 * Mb));
+    }
+
+    [Fact]
     public void AutoChoosesOffloadWhenOnlyTheCacheAndWindowWouldFitWithoutTheAllowance()
     {
         // The cache and the window fit the free VRAM, but not the activation allowance the placement keeps as well.
