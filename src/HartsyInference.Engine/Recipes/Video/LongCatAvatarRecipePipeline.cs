@@ -26,7 +26,6 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     private readonly LongCatParts _parts;
     private readonly LongCatDrivingFeatures _drivingFeatures;
     private readonly bool _normalizeSpeechLoudness;
-    private int _conditionCalls;
     private readonly List<IDisposable> _loaders;
     private readonly bool _distilled;
     private readonly AdjunctGate? _loraGate;
@@ -58,6 +57,12 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         AudioClip speech = request.VideoAudioReference
             ?? throw new InvalidOperationException("LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference.");
         float[] waveform = VideoRecipeUtils.DrivingSpeech16k(request, speech);
+        // Diagnostics (default off): the speech as the engine holds it, and a reference's speech when the substitute directory has one.
+        string? conditionDump = EngineKnobs.LongCatConditioningDump.Value;
+        string? conditionSubstitute = EngineKnobs.LongCatConditioningSubstitute.Value;
+        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.Speech, waveform, [waveform.Length]);
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.Speech, -1, out float[] speechSubstitute))
+            waveform = speechSubstitute;
         AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
 
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
@@ -79,21 +84,33 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         int clipFrames = plan?.TotalPixelFrames ?? frames;
         float[] prepared = LongCatDrivingAudio.Prepare(waveform, clipFrames, settings.Fps, _normalizeSpeechLoudness);
         float[] rawAudio = DrivingWindows(prepared, settings.Fps, clipFrames);
+        // The DiT's audio input before its projection: the Whisper windows of the whole clip, as the reference passes its audio embedding.
+        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.AudioEmbedding, rawAudio, [clipFrames, RowWidth]);
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.AudioEmbedding, clipFrames * RowWidth,
+            out float[] audioSubstitute))
+            rawAudio = audioSubstitute;
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
-        // Diagnostics (default off): dump this generation's conditioning tensors, or replace the positive embeddings from a reference file.
-        int conditionCall = _conditionCalls++;
-        string? conditionDump = EngineKnobs.LongCatConditioningDump.Value;
+        // The positive prompt's embeddings [1, S, C] and its mask [1, S] (1 for the valid tokens, a prefix); a substitute keeps the token count.
         int captionChannels = _parts.CaptionChannels;
-        LongCatConditioningDiagnostics.Dump(conditionDump, conditionCall, "text_embeds", positive.Embeds, [1, positive.Length, captionChannels]);
-        LongCatConditioningDiagnostics.Dump(conditionDump, conditionCall, "text_valid_tokens", [positive.ValidTokens], [1]);
-        positive = positive with
+        int promptLength = positive.Length;
+        float[] mask = new float[promptLength];
+        for (int t = 0; t < promptLength; t++) mask[t] = t < positive.ValidTokens ? 1f : 0f;
+        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.TextEmbeddings, positive.Embeds,
+            [1, promptLength, captionChannels]);
+        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.TextMask, mask, [1, promptLength]);
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.TextEmbeddings, promptLength * captionChannels,
+            out float[] embedsSubstitute))
+            positive = positive with { Embeds = embedsSubstitute };
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.TextMask, promptLength, out float[] maskSubstitute))
         {
-            Embeds = LongCatConditioningDiagnostics.Replace(EngineKnobs.LongCatTextEmbedNpy, positive.Embeds, [1, positive.Length, captionChannels]),
-        };
-        LongCatConditioningDiagnostics.Dump(conditionDump, conditionCall, "audio_windows", rawAudio, [clipFrames, RowWidth]);
-        LongCatConditioningDiagnostics.Dump(conditionDump, conditionCall, "speech16k", waveform, [waveform.Length]);
+            int valid = (int)maskSubstitute.Sum();
+            for (int t = 0; t < promptLength; t++)
+                if ((t < valid) != (maskSubstitute[t] > 0.5f))
+                    throw new InvalidDataException("The substitute text mask must be a prefix of ones (the valid tokens, then padding).");
+            positive = positive with { ValidTokens = valid };
+        }
         float[] noise = LongCatRecipeSupport.InitialNoise(seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
 
         LongCatAvatarMode mode = LongCatAvatarMode.At2v;
@@ -104,21 +121,28 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             // The avatar reference's init image: diffusers' resize_mode "crop" (cover, Lanczos, centre crop), not a stretch.
             byte[] rgb = FeatureImaging.ResizeCropRgb24Lanczos(request.InitImage, width, height);
             firstFrame = LongCatRecipeSupport.EncodeFirstFrame(_backend, _parts.Encoder, rgb, width, height, _parts.Channels);
-            int[] firstShape = [1, _parts.Channels, 1, latentHeight, latentWidth];
-            LongCatConditioningDiagnostics.Dump(conditionDump, conditionCall, "first_frame_latent", firstFrame, firstShape);
-            firstFrame = LongCatConditioningDiagnostics.Replace(EngineKnobs.LongCatFirstFrameLatentNpy, firstFrame, firstShape);
             mode = LongCatAvatarMode.Ai2v;
             condLatents = 1;
         }
+
+        // The DiT's step-0 input (input_latent_step00): the conditioning frames and the initial noisy frames, [channels, frames, hw] with the
+        // conditioning frames first. A substitute replaces both parts; the step loop then starts from the substitute.
+        int channelCount = _parts.Channels, hwCount = latentHeight * latentWidth;
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.InputLatent,
+            channelCount * latentFrames * hwCount, out float[] latentSubstitute))
+        {
+            noise = latentSubstitute;
+            if (firstFrame is not null)
+                firstFrame = LongCatConditioningDiagnostics.CondFrames(latentSubstitute, channelCount, latentFrames, hwCount, condLatents);
+        }
+        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.InputLatent,
+            LongCatFrameOps.JoinFrames(firstFrame, LongCatFrameOps.SteppedFrames(noise, channelCount, latentFrames, hwCount, condLatents),
+                channelCount, latentFrames, hwCount, condLatents), [1, channelCount, latentFrames, latentHeight, latentWidth]);
 
         // The DiT is placed by the streaming scope (see the base recipe); each finished step returns the stream's reservations.
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
         float[] firstWindows = rawAudio.Length == frames * RowWidth ? rawAudio : rawAudio[..(frames * RowWidth)];
         (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(firstWindows, frames, latentFrames);
-        int audioDim = _parts.Dit.Config.AudioOutputDim;
-        int[] audioShape = [audioTokens.Length / audioDim, audioDim];
-        LongCatConditioningDiagnostics.Dump(conditionDump, conditionCall, "audio_tokens", audioTokens, audioShape);
-        audioTokens = LongCatConditioningDiagnostics.Replace(EngineKnobs.LongCatAudioTokensNpy, audioTokens, audioShape);
         byte[][] decoded;
         if (plan is null)
         {
