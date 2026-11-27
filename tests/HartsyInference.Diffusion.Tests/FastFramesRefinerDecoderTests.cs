@@ -1,6 +1,8 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.FastFrames;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -657,6 +659,68 @@ public sealed class FastFramesRefinerDecoderTests
     {
         using Tensor f32 = t.DType == DType.F32 ? t.Reshape(t.Shape) : t.CastTo(DType.F32);
         return f32.AsReadOnlySpan<float>().ToArray().Select(v => (double)v).ToArray();
+    }
+
+    /// <summary>The refiner's layer repair on CUDA against the CPU backend, on the same weights and inputs. A CUDA fact: without a device it
+    /// is reported as skipped.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void TheRefinerRepairOnCudaMatchesTheCpuRepair()
+    {
+        FastFramesKvRefinerConfig c = TinyRefiner;
+        Dictionary<string, Tensor> weights = RefinerWeights(c, seed: 23);
+        Random rng = new(24);
+        double[][] stem = RandomRows(rng, Tokens, c.Dim);
+        double[][][] noisyK = Enumerable.Range(0, c.Layers).Select(_ => RandomRows(rng, Tokens, c.Dim)).ToArray();
+        double[][][] noisyV = Enumerable.Range(0, c.Layers).Select(_ => RandomRows(rng, Tokens, c.Dim)).ToArray();
+        const float timestep = 833.3333f;
+        try
+        {
+            using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
+            for (int l = 0; l < c.Layers; l++)
+            {
+                (float[] expectedK, float[] expectedV) = Repair(new CpuBackend(), weights, stem, noisyK[l], noisyV[l], l, timestep, c);
+                (float[] actualK, float[] actualV) = Repair(cuda, weights, stem, noisyK[l], noisyV[l], l, timestep, c);
+                Assert.True(RelativeRms(expectedK, actualK) < 1e-3, $"layer {l} keys: CUDA against CPU exceeds 1e-3");
+                Assert.True(RelativeRms(expectedV, actualV) < 1e-3, $"layer {l} values: CUDA against CPU exceeds 1e-3");
+            }
+        }
+        finally
+        {
+            foreach (Tensor t in weights.Values)
+                t.Dispose();
+        }
+    }
+
+    private static (float[] K, float[] V) Repair(IBackend backend, Dictionary<string, Tensor> weights, double[][] stem, double[][] noisyK,
+        double[][] noisyV, int layer, float timestep, FastFramesKvRefinerConfig c)
+    {
+        using FastFramesKvRefiner refiner = new(c);
+        refiner.LoadWeights(weights);
+        using FastFramesKvRefiner.Conditioning conditioning = refiner.Prepare(backend, timestep);
+        using Tensor stemTokens = ToTensor(stem);
+        using Tensor phi = refiner.ComputePhi(backend, stemTokens, conditioning);
+        using Tensor phiV = refiner.ProjectPhi(backend, phi);
+        using Tensor k = ToTensor(noisyK);
+        using Tensor v = ToTensor(noisyV);
+        (Tensor refinedK, Tensor refinedV) = refiner.RepairLayer(backend, layer, k, v, phiV, conditioning);
+        using (refinedK)
+        using (refinedV)
+        {
+            return (refinedK.AsReadOnlySpan<float>().ToArray(), refinedV.AsReadOnlySpan<float>().ToArray());
+        }
+    }
+
+    private static double RelativeRms(float[] expected, float[] actual)
+    {
+        double num = 0, den = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            double d = actual[i] - expected[i];
+            num += d * d;
+            den += (double)expected[i] * expected[i];
+        }
+        return Math.Sqrt(num / Math.Max(den, 1e-30));
     }
 
     private static double[][] RandomRows(Random rng, int rows, int cols) =>
