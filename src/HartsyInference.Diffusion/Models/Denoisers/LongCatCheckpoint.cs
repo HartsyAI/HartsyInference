@@ -48,6 +48,10 @@ public sealed class LongCatCheckpoint : IDisposable
     {
         ArgumentNullException.ThrowIfNull(source);
         Tensor bf16 = new(source.Shape, DType.BF16);
+        // A tensor's host buffer is allocated lazily by its first AsSpan/DataPointer (Tensor's contract), so touch both serially here: if
+        // the workers made that first call, two of them could each allocate a buffer and the conversion would land in a discarded one.
+        _ = source.AsReadOnlySpan<float>();
+        _ = bf16.AsSpan<ushort>();
         // Each range writes only its own elements, so the result is the same at any worker count (CpuParallel.ForRanges' contract).
         // The conversion is elementwise, so the ranges can be any size; 2^18 elements keeps each range a few hundred microseconds.
         CpuParallel.ForRanges(source.ElementCount, RangeElements, workPerElement: 4, (source, bf16), static (start, length, state) =>
