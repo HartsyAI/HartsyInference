@@ -1,0 +1,83 @@
+diff --git a/longcat_video/modules/avatar/attention.py b/longcat_video/modules/avatar/attention.py
+index 952e9d5..5fecc57 100644
+--- a/longcat_video/modules/avatar/attention.py
++++ b/longcat_video/modules/avatar/attention.py
+@@ -8,6 +8,18 @@ from einops import rearrange
+ from .rope_3d import RotaryPositionalEmbedding
+ from ..blocks import RMSNorm_FP32
+ from ...block_sparse_attention.bsa_interface import flash_attn_bsa_3d
++
++import os as _h1_os
++
++
++def _h1_sdpa(q, k, v, scale):
++    """H1: torch SDPA in place of flash_attn_func. Inputs and output are [B, S, H, D], as flash_attn_func uses them."""
++    out = torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), scale=scale)
++    return out.transpose(1, 2)
++
++
++def _h1_use_sdpa():
++    return _h1_os.environ.get("H1_ATTN") == "sdpa"
+ from ...context_parallel.ulysses_wrapper import ulysses_wrapper
+ from ...audio_process.torch_utils import get_attn_map_with_target
+ from .rope_3d import RotaryPositionalEmbedding1D
+@@ -89,17 +101,21 @@ class Attention(nn.Module):
+             )
+             x = rearrange(x, "B S H D -> B H S D")
+         elif self.enable_flashattn2:
+-            from flash_attn import flash_attn_func
++            if not _h1_use_sdpa():
++                from flash_attn import flash_attn_func
+             q = rearrange(q, "B H S D -> B S H D")
+             k = rearrange(k, "B H S D -> B S H D")
+             v = rearrange(v, "B H S D -> B S H D")
+-            x = flash_attn_func(
+-                q,
+-                k,
+-                v,
+-                dropout_p=0.0,
+-                softmax_scale=self.scale,
+-            )
++            if _h1_use_sdpa():
++                x = _h1_sdpa(q, k, v, self.scale)
++            else:
++                x = flash_attn_func(
++                    q,
++                    k,
++                    v,
++                    dropout_p=0.0,
++                    softmax_scale=self.scale,
++                )
+             x = rearrange(x, "B S H D -> B H S D")
+         elif self.enable_xformers:
+             import xformers.ops
+@@ -412,17 +428,21 @@ class SingleStreamAttention(nn.Module):
+             )
+             x = rearrange(x, "B S H D -> B H S D")
+         elif self.enable_flashattn2:
+-            from flash_attn import flash_attn_func
++            if not _h1_use_sdpa():
++                from flash_attn import flash_attn_func
+             q = rearrange(q, "B H S D -> B S H D")
+             encoder_k = rearrange(encoder_k, "B H S D -> B S H D")
+             encoder_v = rearrange(encoder_v, "B H S D -> B S H D")
+-            x = flash_attn_func(
+-                q,
+-                encoder_k,
+-                encoder_v,
+-                dropout_p=0.0,
+-                softmax_scale=self.scale,
+-            )
++            if _h1_use_sdpa():
++                x = _h1_sdpa(q, encoder_k, encoder_v, self.scale)
++            else:
++                x = flash_attn_func(
++                    q,
++                    encoder_k,
++                    encoder_v,
++                    dropout_p=0.0,
++                    softmax_scale=self.scale,
++                )
+             x = rearrange(x, "B S H D -> B H S D")
+         elif self.enable_xformers:
+             import xformers.ops

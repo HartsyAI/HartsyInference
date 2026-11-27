@@ -1,0 +1,48 @@
+diff --git a/run_demo_avatar_single_audio_to_video.py b/run_demo_avatar_single_audio_to_video.py
+index e32622c..db62910 100644
+--- a/run_demo_avatar_single_audio_to_video.py
++++ b/run_demo_avatar_single_audio_to_video.py
+@@ -33,6 +33,18 @@ def torch_gc():
+ 
+ 
+ 
++def _h1_dump(latent, video_array, output_dir):
++    """H1 reference dump: the final latent and every decoded frame as lossless PNG. Off unless H1_DUMP_DIR is set."""
++    d = os.environ.get("H1_DUMP_DIR")
++    if not d:
++        return
++    os.makedirs(d, exist_ok=True)
++    lat = latent.detach().float().cpu().numpy() if hasattr(latent, "detach") else np.asarray(latent, dtype=np.float32)
++    np.save(os.path.join(d, "final_latent.npy"), lat)
++    for i, img in enumerate(video_array):
++        PIL.Image.fromarray(img).save(os.path.join(d, f"frame_{i:03d}.png"))
++
++
+ def generate(args):
+ 
+     # load parsed args
+@@ -222,7 +234,7 @@ def generate(args):
+         )
+ 
+     os.makedirs(output_dir, exist_ok=True)
+-    global_seed = 42
++    global_seed = int(os.environ.get("H1_SEED", "42"))
+     seed = global_seed + global_rank
+ 
+     generator = torch.Generator(device=local_rank)
+@@ -297,6 +309,7 @@ def generate(args):
+         output, latent = output_tuple
+         output = output[0]
+         video_array = (output * 255).astype(np.uint8)
++        _h1_dump(latent, video_array, output_dir)
+         video = [PIL.Image.fromarray(img) for img in video_array]
+ 
+         if cp_rank == 0 and (args.save_every_segment or num_segments == 1):
+@@ -328,6 +341,7 @@ def generate(args):
+         output, latent = output_tuple
+         output = output[0]
+         video_array = (output * 255).astype(np.uint8)
++        _h1_dump(latent, video_array, output_dir)
+         video = [PIL.Image.fromarray(img) for img in video_array]
+ 
+         if cp_rank == 0 and (args.save_every_segment or num_segments == 1):
