@@ -50,7 +50,7 @@ public sealed partial class LongCatBlock
                 throw;
             }
             store.Set(layer, 0, keys, values);
-            return _selfAttention!.ProjectOutput(backend, SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments));
+            return _selfAttention!.ProjectOutput(backend, LongCatOps.RoundOwned(backend, SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments), _bf16Residual));
         }
     }
 
@@ -87,7 +87,7 @@ public sealed partial class LongCatBlock
             k.Dispose();
             v.Dispose();
         }
-        return _selfAttention.ProjectOutput(backend, _selfAttention.MergeHeads(backend, attended, new TensorShape(s, _config.HiddenSize)));
+        return _selfAttention.ProjectOutput(backend, LongCatOps.RoundOwned(backend, _selfAttention.MergeHeads(backend, attended, new TensorShape(s, _config.HiddenSize)), _bf16Residual));
     }
 
     /// <summary>The rows' token-major queries, keys and values, queries and keys rotated. The caller owns all three.</summary>
@@ -99,6 +99,8 @@ public sealed partial class LongCatBlock
         try
         {
             _selfAttention!.RotateQk(backend, q, k, in context);
+            q = LongCatOps.RoundOwned(backend, q, _bf16Residual);
+            k = LongCatOps.RoundOwned(backend, k, _bf16Residual);
             return (q, k, v);
         }
         catch

@@ -24,6 +24,15 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private readonly int _dim, _encoderDim, _heads, _headDim;
     private readonly AttentionLayerConfig _config;
     private AttentionLayer? _attention;
+    private bool _bf16Route;
+
+    /// <summary>Turns the BF16 route on or off: the attention layer's projections round as the reference's do (see <see cref="AttentionLayer.RoundProjection"/>).</summary>
+    internal void SetBf16Route(bool on)
+    {
+        _bf16Route = on;
+        if (_attention is not null)
+            _attention.RoundProjection = on ? LongCatOps.RoundFn : null;
+    }
     private Tensor? _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB;
     private List<Tensor> _owned = [];
     private bool _loaded;
@@ -69,6 +78,7 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             Tensor pB = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj.bias", owned, [_dim]);
 
             AttentionLayer attention = new(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
+            attention.RoundProjection = _bf16Route ? LongCatOps.RoundFn : null;
             ReleaseOwned();
             _owned = owned;
             _attention = attention;

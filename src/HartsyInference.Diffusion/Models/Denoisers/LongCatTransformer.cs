@@ -34,8 +34,6 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     // x_embedder's dtype, and the patch embedding's output is BF16. The F32 route leaves all four alone.
     private bool _bf16Route;
 
-    /// <summary>Caption-projection builds so far (a cache hit does not build): a test reads it to see that steps share one entry.</summary>
-    internal int TextProjBuilds => _caches.TextProjBuilds;
     private Tensor? _time1W, _time1B, _time2W, _time2B;
     private Tensor? _text1W, _text1B, _text2W, _text2B;
     private Tensor? _finalAdaW, _finalAdaB, _finalW, _finalB;
@@ -244,10 +242,9 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         using Tensor finalModulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _finalAdaW!, _finalAdaB);
         using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw, _bf16Route);
         cur.Dispose();
-        // The final linear's output is BF16 on the BF16 route (the velocity it feeds is the rounded projection).
-        Tensor projectedRaw = new(new TensorShape((long)frames * hw, _finalW!.Shape[0]), DType.F32);
-        backend.Linear(projectedRaw, modulated, _finalW!, _finalB);
-        using Tensor projected = LongCatOps.RoundOwned(backend, projectedRaw, _bf16Route);
+        // The final linear's output stays F32: autocast('cuda', float32) runs it in F32 (checked on CUDA). Its input is rounded above.
+        using Tensor projected = new(new TensorShape((long)frames * hw, _finalW!.Shape[0]), DType.F32);
+        backend.Linear(projected, modulated, _finalW!, _finalB);
         Probe?.Invoke("final_layer", projected);
         Tensor velocity = WanDitOps.Unpatchify(projected, _config.OutChannels, frames / pt, gridH, gridW, _config.PatchSize);
         Probe?.Invoke("velocity", velocity);

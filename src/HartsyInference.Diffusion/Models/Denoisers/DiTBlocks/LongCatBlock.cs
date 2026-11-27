@@ -78,6 +78,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         _w2 = w[$"{prefix}.ffn.w2.weight"];
         _w3 = w[$"{prefix}.ffn.w3.weight"];
         BuildAttention();
+        _selfAttention!.RoundProjection = _bf16Residual ? LongCatOps.RoundFn : null;
         // Avatar blocks carry the audio step. It loads first, so the estimate below counts it. A base checkpoint has none of these keys: any step
         // from an earlier avatar load is released, so the block is a base block again.
         LongCatAvatarAudioStep? audio = w.ContainsKey($"{prefix}.audio_adaLN_modulation.1.weight")
@@ -85,6 +86,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             : null;
         _audio?.Dispose();
         _audio = audio;
+        _audio?.SetBf16Route(_bf16Residual);
         long bytes = 0;
         foreach (Tensor t in EnumerateWeights())
             bytes += t.DType.ComputeByteCount(t.ElementCount);
@@ -334,7 +336,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         {
             AttentionSegment.Validate(inputs.Segments, s);
             // The fused path needs one projection tile, and it exposes no rotated queries and keys for the reference map.
-            if (speakers is null && inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
+            if (!_bf16Residual && speakers is null && inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
                 return _selfAttention!.Forward(backend, input, input, in context);
         }
 
@@ -342,6 +344,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         try
         {
             _selfAttention!.RotateQk(backend, q, k, in context);
+            // q and k round after the norm (in the projection hook) and again after the rotation: the reference's rope_3d output is BF16.
+            q = LongCatOps.RoundOwned(backend, q, _bf16Residual);
+            k = LongCatOps.RoundOwned(backend, k, _bf16Residual);
             if (probe is not null)
             {
                 probe($"{stage}.q", q);
@@ -354,7 +359,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 using Tensor referenceKeys = HeadMajorFirstRows(backend, k, inputs.TokensPerFrame);
                 speakerMap = speakers.ReferenceMap(backend, _selfAttention, q, inputs.CondFrames * inputs.TokensPerFrame, referenceKeys);
             }
-            Tensor flat = SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments);
+            Tensor flat = LongCatOps.RoundOwned(backend, SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments), _bf16Residual);
             return _selfAttention.ProjectOutput(backend, flat);
         }
         finally
@@ -408,6 +413,10 @@ public sealed partial class LongCatBlock : IStreamingBlock
             // kv_linear is one [2·dim, dim] weight: k is its first dim rows, v the next; windowed so a LoRA adjunct on it applies per part.
             backend.LinearWeightRows(k, text, _crossKv!, _crossKvBias, 0, dim);
             backend.LinearWeightRows(v, text, _crossKv!, _crossKvBias, dim, dim);
+            // The query, key and value projections round to BF16, as the reference's nn.Linear outputs do.
+            q = LongCatOps.RoundOwned(backend, q, _bf16Residual);
+            k = LongCatOps.RoundOwned(backend, k, _bf16Residual);
+            v = LongCatOps.RoundOwned(backend, v, _bf16Residual);
         }
         catch
         {
@@ -417,7 +426,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             throw;
         }
         // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
-        Tensor flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
+        Tensor flat = LongCatOps.RoundOwned(backend, _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default), _bf16Residual);
         using (flat)
         {
             Tensor projected = new(new TensorShape(rows, dim), DType.F32);
@@ -467,17 +476,22 @@ public sealed partial class LongCatBlock : IStreamingBlock
     {
         int s = (int)x.Shape[0];
         int hidden = _config.FfnHiddenDim;
-        using Tensor gate = new(new TensorShape(s, hidden), DType.F32);
-        backend.Linear(gate, x, _w1!, null);
-        using Tensor activated = new(gate.Shape, DType.F32);
-        backend.Silu(activated, gate);
-        using Tensor up = new(gate.Shape, DType.F32);
-        backend.Linear(up, x, _w3!, null);
-        using Tensor product = new(gate.Shape, DType.F32);
-        backend.Mul(product, activated, up);
-        Tensor output = new(new TensorShape(s, _config.HiddenSize), DType.F32);
-        backend.Linear(output, product, _w2!, null);
-        return output;
+        // SwiGLU with the reference's BF16 rounding after each op: the gate, its SiLU, the up projection, the product and the output.
+        Tensor gateRaw = new(new TensorShape(s, hidden), DType.F32);
+        backend.Linear(gateRaw, x, _w1!, null);
+        using Tensor gate = LongCatOps.RoundOwned(backend, gateRaw, _bf16Residual);
+        Tensor activatedRaw = new(gate.Shape, DType.F32);
+        backend.Silu(activatedRaw, gate);
+        using Tensor activated = LongCatOps.RoundOwned(backend, activatedRaw, _bf16Residual);
+        Tensor upRaw = new(gate.Shape, DType.F32);
+        backend.Linear(upRaw, x, _w3!, null);
+        using Tensor up = LongCatOps.RoundOwned(backend, upRaw, _bf16Residual);
+        Tensor productRaw = new(gate.Shape, DType.F32);
+        backend.Mul(productRaw, activated, up);
+        using Tensor product = LongCatOps.RoundOwned(backend, productRaw, _bf16Residual);
+        Tensor outputRaw = new(new TensorShape(s, _config.HiddenSize), DType.F32);
+        backend.Linear(outputRaw, product, _w2!, null);
+        return LongCatOps.RoundOwned(backend, outputRaw, _bf16Residual);
     }
 
     private static Tensor SliceRows(IBackend backend, Tensor source, int start, int count, int dim)

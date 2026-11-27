@@ -130,16 +130,19 @@ public sealed class LongCatBf16ResidualForwardTests
         return stages;
     }
 
-    /// <summary>The transformer's embedding, caption, final-layer and velocity stages on the BF16 route are on the grid; with the knob off they are not.</summary>
+    /// <summary>The transformer's patch embedding and caption projection are on the BF16 grid on the BF16 route. The final linear and the velocity stay
+    /// F32: autocast('cuda', float32) runs the final linear in F32 (checked on CUDA), so they are off the grid even with the knob on.</summary>
     [Fact]
-    public void TheTransformerEmbeddingFinalAndVelocityAreOnTheBf16GridOnTheBf16Route()
+    public void TheTransformerEmbeddingAndCaptionAreOnTheBf16GridAndTheFinalLayerIsF32()
     {
         Dictionary<string, float[]> stages = TransformerStages(knob: true);
-        foreach (string name in new[] { "x_embedder", "y_embedder", "final_layer", "velocity" })
+        foreach (string name in new[] { "x_embedder", "y_embedder" })
         {
             Assert.True(stages.ContainsKey(name), $"no probe {name}");
             Assert.All(stages[name], v => Assert.True(OnBf16Grid(v), $"{name}: {v:R} is not a BF16 value"));
         }
+        Assert.Contains(stages["final_layer"], v => !OnBf16Grid(v));
+        Assert.Contains(stages["velocity"], v => !OnBf16Grid(v));
     }
 
     [Fact]
@@ -234,7 +237,7 @@ public sealed class LongCatBf16ResidualForwardTests
         Assert.All(first, v => Assert.True(float.IsFinite(v)));
         Assert.All(second, v => Assert.True(float.IsFinite(v)));
         Assert.Equal(first.Length, second.Length);
-        Assert.Equal(1, transformer.TextProjBuilds);
+        Assert.Equal(1, transformer.TextProjectionBuilds);
         foreach (Tensor t in weights.Values) t.Dispose();
     }
 
@@ -258,7 +261,7 @@ public sealed class LongCatBf16ResidualForwardTests
         using Tensor encoder = LongCatTestData.Encoder(config, 4, 21);
         using (Tensor v1 = transformer.Forward(backend, latent, encoder, [600f], LongCatConditioning.None)) { }
         using (Tensor v2 = transformer.Forward(backend, latent, encoder, [400f], LongCatConditioning.None)) { }
-        Assert.Equal(1, transformer.TextProjBuilds);
+        Assert.Equal(1, transformer.TextProjectionBuilds);
         foreach (Tensor t in weights.Values) t.Dispose();
     }
 

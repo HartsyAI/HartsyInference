@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Core.Layers.Attention;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -30,6 +31,27 @@ internal static class LongCatOps
         ModulationSpec modulation = ModulationSpec.Packed(packed, packed.Shape[1], scaleOffset, shiftOffset, tokensPerFrame, ScaleMode.OnePlus);
         backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, LongCatConfig.NormEps).WithModulation(in modulation));
         return RoundOwned(backend, output, roundOutput);
+    }
+
+    /// <summary>The rounding as a projection hook (<see cref="AttentionLayer.RoundProjection"/>): always rounds.</summary>
+    public static readonly Func<IBackend, Tensor, Tensor> RoundFn = static (backend, values) => RoundOwned(backend, values, on: true);
+
+    /// <summary>The caption projection (PixArtAlpha: Linear, GELU, Linear) with BF16 rounding after every op, as the reference's y_embedder runs in
+    /// BF16 (per-stage check, B6). The encoder is rounded on entry. A new tensor, owned by the caller.</summary>
+    public static Tensor TextProjectionRounded(IBackend backend, Tensor encoder, int dim, Tensor w1, Tensor? b1, Tensor w2, Tensor? b2)
+    {
+        int lastDim = (int)encoder.Shape[encoder.Shape.Rank - 1];
+        int l = (int)(encoder.Shape.ElementCount / lastDim);
+        using Tensor input = RoundToBf16(backend, encoder);
+        Tensor h1Raw = new(new TensorShape(l, dim), DType.F32);
+        backend.Linear(h1Raw, input, w1, b1);
+        using Tensor h1 = RoundOwned(backend, h1Raw, on: true);
+        Tensor actRaw = new(h1.Shape, DType.F32);
+        backend.Gelu(actRaw, h1);
+        using Tensor act = RoundOwned(backend, actRaw, on: true);
+        Tensor outRaw = new(new TensorShape(l, dim), DType.F32);
+        backend.Linear(outRaw, act, w2, b2);
+        return RoundOwned(backend, outRaw, on: true);
     }
 
     /// <summary>The tensor rounded to the BF16 grid when <paramref name="on"/>: the input is disposed and a new tensor returned. Otherwise the

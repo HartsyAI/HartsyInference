@@ -77,6 +77,9 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
     /// <param name="rotation">The multi-speaker L-RoPE tables of the noisy frames; null for one speaker.</param>
     /// <param name="probe">Receives the cross-attention output of the noisy rows as <paramref name="probeName"/> when set.</param>
     /// <returns>A new <c>[frames·S, dim]</c> stream; the conditioning rows are the input rows.</returns>
+    /// <summary>Turns the BF16 route on or off for the audio cross-attention projections (the qkv and the normed query and key round).</summary>
+    internal void SetBf16Route(bool on) => _attention.SetBf16Route(on);
+
     public Tensor Apply(IBackend backend, Tensor x, Tensor audioTokens, Tensor timeEmbed, int numCond, int tokensPerFrame,
         LongCatSpeakerRotation? rotation = null, Action<string, Tensor>? probe = null, string probeName = "", bool roundSubLayer = false)
     {

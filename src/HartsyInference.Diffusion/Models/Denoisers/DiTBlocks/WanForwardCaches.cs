@@ -56,8 +56,7 @@ public sealed class WanForwardCaches
         Tensor proj;
         if (roundToBf16)
         {
-            using Tensor roundedInput = LongCatOps.RoundToBf16(backend, encoder);
-            proj = LongCatOps.RoundOwned(backend, WanDitOps.TextEmbed(backend, roundedInput, dim, w1, b1, w2, b2), on: true);
+            proj = LongCatOps.TextProjectionRounded(backend, encoder, dim, w1, b1, w2, b2);
         }
         else
         {
