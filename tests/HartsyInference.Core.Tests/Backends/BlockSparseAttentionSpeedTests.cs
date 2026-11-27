@@ -25,9 +25,9 @@ public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
         Record(cuda, frames, height, width, heads);
     }
 
+    /// <summary>The smaller grid only: the Vulkan attention is one dispatch, and a longer one can trip a driver's watchdog.</summary>
     [VulkanTheory]
     [InlineData(12, 44, 80, 8)]
-    [InlineData(12, 44, 80, 32)]
     public void VulkanBlockSparseBesideDense(int frames, int height, int width, int heads)
     {
         using VulkanBackend vulkan = new();
