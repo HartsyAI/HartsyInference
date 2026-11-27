@@ -2162,16 +2162,18 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Whether the optional dequant_int8_to_bf16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
     public bool HasInt8DequantKernels => _int8DequantModule is not null;
 
-    /// <summary>int8_tensorwise unpack: I8 <c>[rows, cols]</c> x one F32 scale per row to dense BF16 <c>[rows, cols]</c>, truncated as
-    /// <c>Int8ConvRotCodec.DequantToBf16</c> stores it. A run of rows is a pointer into the weight and the same offset into the scales.</summary>
-    public unsafe void LaunchInt8Dequant(ulong output, ulong weight, ulong rowScale, int rows, int cols, nint stream)
+    /// <summary>int8_tensorwise unpack: I8 <c>[rows, cols]</c> x one F32 scale per row to dense BF16 <c>[rows, cols]</c>. The default truncates as
+    /// <c>Int8ConvRotCodec.DequantToBf16</c> stores it; <paramref name="referenceRounding"/> rounds as the reference's bf16 QuantizedLinear does
+    /// (see dequant_int8_to_bf16.cu). A run of rows is a pointer into the weight and the same offset into the scales.</summary>
+    public unsafe void LaunchInt8Dequant(ulong output, ulong weight, ulong rowScale, int rows, int cols, nint stream, bool referenceRounding = false)
     {
         if (_int8DequantModule is null) throw new InvalidOperationException("dequant_int8_to_bf16.ptx not present in the Ptx folder.");
         ulong wArg = weight, sArg = rowScale, oArg = output;
         uint rowsArg = (uint)rows, colsArg = (uint)cols;
-        void** args = stackalloc void*[5];
+        int refArg = referenceRounding ? 1 : 0;
+        void** args = stackalloc void*[6];
         args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
-        args[3] = &rowsArg; args[4] = &colsArg;
+        args[3] = &rowsArg; args[4] = &colsArg; args[5] = &refArg;
         const uint BlockSize = 256;
         uint gridX = (uint)(((long)cols + BlockSize - 1) / BlockSize);
         uint gridY = (uint)Math.Min(rows, 65535);

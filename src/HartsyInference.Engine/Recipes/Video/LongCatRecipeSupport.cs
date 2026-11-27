@@ -406,7 +406,9 @@ internal static class LongCatRecipeSupport
         {
             if (weight.DType != DType.I8 || weight.QuantInfo is not { Format: "int8_tensorwise", RowScale: not null } info)
                 continue;
-            weight.QuantInfo = info with { FullPrecisionMatMul = true };
+            // LongCat's reference dequantizes in BF16 with nearest-even rounding (quantization.py @ 58eb336, lines 27-31): the flag selects that
+            // for this layer only; other families keep their own dequant.
+            weight.QuantInfo = info with { FullPrecisionMatMul = true, ReferenceRounding = true };
             marked++;
         }
         Logs.Info($"[LongCatRecipeSupport] numerics.longcatInt8WeightOnly: {marked} INT8 linears marked weight-only (CUDA unpacks each for a dense "

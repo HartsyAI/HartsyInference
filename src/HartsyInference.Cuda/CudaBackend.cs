@@ -807,10 +807,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Unpacks <paramref name="rows"/> rows of a resident int8 weight, from <paramref name="firstRow"/>, into
     /// <paramref name="bf16"/>, and returns them in <paramref name="gemmDtype"/>: that buffer itself, or <paramref name="cast"/> filled from
     /// it.</summary>
-    private ulong UnpackInt8Rows(ulong pWeight, ulong rowScaleDev, int firstRow, int rows, int columns, DType gemmDtype, ulong bf16, ulong cast)
+    private ulong UnpackInt8Rows(ulong pWeight, ulong rowScaleDev, int firstRow, int rows, int columns, DType gemmDtype, ulong bf16, ulong cast,
+        bool referenceRounding = false)
     {
         _kernels!.LaunchInt8Dequant(bf16, pWeight + (ulong)((long)firstRow * columns), rowScaleDev + (ulong)((long)firstRow * sizeof(float)),
-            rows, columns, _stream.Handle);
+            rows, columns, _stream.Handle, referenceRounding);
         if (gemmDtype == DType.BF16) return bf16;
         CastOnGpu(cast, bf16, DType.BF16, gemmDtype, checked(rows * columns));
         return cast;
@@ -2077,7 +2078,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (!int8Unpack && weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
             && !CanRunResidentInt8(output, input, weight, int8Info, weightRowOffset, weightRowCount))
         {
-            using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize);
+            using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize, int8Info.ReferenceRounding);
             try
             {
                 LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
@@ -2396,7 +2397,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     {
                         // The whole weight: these kernels read it once.
                         pInt8Bf16 = CudaMemory.Allocate((nuint)(weight.ElementCount * DType.BF16.SizeInBytes));
-                        gemvWeight = UnpackInt8Rows(pWeight, int8RowScaleDev, 0, n, k, DType.BF16, pInt8Bf16, 0);
+                        gemvWeight = UnpackInt8Rows(pWeight, int8RowScaleDev, 0, n, k, DType.BF16, pInt8Bf16, 0, weight.QuantInfo is { ReferenceRounding: true });
                     }
                     else
                     {
@@ -2634,7 +2635,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (gemmDtype != DType.BF16)
                     pWeightCast = CudaMemory.Allocate((nuint)((long)tileRows * k * gemmDtype.SizeInBytes));
                 weightPtr = int8Tiled ? 0
-                    : UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset, n, k, gemmDtype, pInt8Bf16, pWeightCast);
+                    : UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset, n, k, gemmDtype, pInt8Bf16, pWeightCast, weight.QuantInfo is { ReferenceRounding: true });
             }
             else if (weight.DType == gemmDtype)
             {
@@ -2782,7 +2783,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         {
                             int rows = Math.Min(tileRows, n - first);
                             ulong tileWeight = int8Tiled
-                                ? UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset + first, rows, k, gemmDtype, pInt8Bf16, pWeightCast)
+                                ? UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset + first, rows, k, gemmDtype, pInt8Bf16, pWeightCast, weight.QuantInfo is { ReferenceRounding: true })
                                 : weightPtr;
                             CublasApi.cublasGemmEx(
                                 _cublasHandle,

@@ -32,8 +32,12 @@ public static unsafe class Int8ConvRotCodec
     /// <summary>Dequantizes an int8 weight <c>[out, in]</c> and un-rotates it, producing the BF16 <c>[out, in]</c> <c>IBackend.Linear</c> consumes.</summary>
     /// <param name="rowScale">F32, one scale per output row; a single element is broadcast as a per-tensor scale.</param>
     /// <param name="convRotGroupSize">0 for a weight quantized without rotation.</param>
-    public static Tensor DequantToBf16(Tensor weight, Tensor rowScale, int convRotGroupSize)
+    /// <param name="referenceRounding">When true, dequantize as the reference's bf16 <c>QuantizedLinear.forward</c> does (LongCat-Video @ 58eb336,
+    /// quantization.py lines 27-31): the scale rounds to BF16, the product of the level and that scale rounds to nearest-even. Unrotated only.</param>
+    public static Tensor DequantToBf16(Tensor weight, Tensor rowScale, int convRotGroupSize, bool referenceRounding = false)
     {
+        if (referenceRounding && convRotGroupSize != 0)
+            throw new ArgumentException("The reference rounding is defined for unrotated weights only.", nameof(convRotGroupSize));
         ArgumentNullException.ThrowIfNull(weight);
         ArgumentNullException.ThrowIfNull(rowScale);
         if (weight.DType != DType.I8 || weight.Shape.Rank != 2) throw new ArgumentException($"ConvRot weight must be I8 rank-2; got {weight.DType} {weight.Shape}.", nameof(weight));
@@ -64,6 +68,17 @@ public static unsafe class Int8ConvRotCodec
             {
                 sbyte* sourceRow = source + row * inFeatures;
                 float scale = perTensor ? scales[0] : scales[row];
+                if (referenceRounding)
+                {
+                    // The level is exact in BF16; the scale rounds to BF16; the product (exact in F32) rounds to nearest-even.
+                    float scaleBf16 = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(scale));
+                    ushort* refRow = destination + row * inFeatures;
+                    for (long column = 0; column < inFeatures; column++)
+                    {
+                        refRow[column] = BFloat16Bits.FromFloat(sourceRow[column] * scaleBf16);
+                    }
+                    return;
+                }
                 for (long column = 0; column < inFeatures; column++)
                 {
                     scratch[column] = sourceRow[column] * scale;

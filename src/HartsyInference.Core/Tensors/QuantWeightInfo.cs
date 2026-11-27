@@ -35,6 +35,11 @@ public sealed record QuantWeightInfo
     /// <summary>The descriptor's <c>full_precision_matrix_mult</c>: this layer must dequantize and run a normal GEMM.</summary>
     public bool FullPrecisionMatMul { get; init; }
 
+    /// <summary>Dequantize as the reference's bf16 <c>QuantizedLinear.forward</c> does: the level and the scale in BF16, the scale rounded to
+    /// nearest-even, and the product rounded to nearest-even. The default (false) is the truncating F32 product of
+    /// <see cref="Int8ConvRotCodec.DequantToBf16"/>. Set by the family whose reference does this (LongCat-Video's INT8 release, @ 58eb336).</summary>
+    public bool ReferenceRounding { get; init; }
+
     /// <summary>Whether a block-scaled GEMM may consume this weight as stored; false where the layer's policy asks for a dense GEMM.</summary>
     public bool NativeGemmEligible => !FullPrecisionMatMul;
 
