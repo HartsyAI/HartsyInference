@@ -354,6 +354,8 @@ the call by name.
   multiplier (null is `D^-1/2`). A grid that is not a multiple of its block on every axis is refused: the caller pads.
   There is no attention mask. A caller that lets one group of queries see only part of the keys makes one call per
   group, each with its own grids.
+- A query or key operand, or the call's selection (`B · H · queryBlocks · K`), of more than `int.MaxValue` elements is
+  refused by name with `AttentionUnsupportedException`: they are sliced as spans.
 - Scale multiplies the token scores only. Selection ignores it, and no neighbour or sink block is added.
 - `K = 0` (fewer than 16 key blocks at sparsity 0.9375) writes zeros.
 - Of equal block scores the lower index wins, and a NaN score ranks above every number, so a NaN key reaches the output

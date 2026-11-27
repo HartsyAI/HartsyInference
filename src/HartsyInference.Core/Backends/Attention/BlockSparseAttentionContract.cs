@@ -6,8 +6,10 @@ namespace HartsyInference.Core.Backends.Attention;
 public static class BlockSparseAttentionContract
 {
     /// <summary>Checks the options, the operands' shapes against their grids and their dtypes (Q, K and V one of F32 or BF16, the
-    /// output F32 or BF16), aliasing and the selection report. It reads no tensor's data.</summary>
+    /// output F32 or BF16), aliasing, the call's size and the selection report. It reads no tensor's data.</summary>
     /// <exception cref="ArgumentException">An operand or option does not fit the call.</exception>
+    /// <exception cref="AttentionUnsupportedException">An operand or the call's selection holds more elements than an int
+    /// indexes.</exception>
     public static void Validate(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
         Tensor? selected = null)
     {
@@ -36,6 +38,7 @@ public static class BlockSparseAttentionContract
         // By reference only: reading a pointer would sync a device-resident operand to the host.
         if (ReferenceEquals(output, query) || ReferenceEquals(output, key) || ReferenceEquals(output, value))
             throw new ArgumentException("The output must not alias an input.", nameof(output));
+        RefuseOversize(query, key, options);
         if (selected is null) return;
         TensorShape report = new(query.Shape[0], query.Shape[1], options.QueryBlocks, options.SelectedBlocks);
         if (selected.DType != DType.I32 || selected.Shape != report)
@@ -46,6 +49,17 @@ public static class BlockSparseAttentionContract
     }
 
     private static bool IsOperandType(DType type) => type == DType.F32 || type == DType.BF16;
+
+    // Operands and the selection report are sliced as spans, which an int indexes.
+    private static void RefuseOversize(Tensor query, Tensor key, BlockSparseAttentionOptions options)
+    {
+        if (query.ElementCount <= int.MaxValue && key.ElementCount <= int.MaxValue
+            && query.Shape[0] * query.Shape[1] * options.QueryBlocks * options.SelectedBlocks <= int.MaxValue)
+            return;
+        throw new AttentionUnsupportedException(
+            $"{nameof(IBackend.BlockSparseAttention)} takes operands and a selection of at most {int.MaxValue} elements each; "
+            + $"got Q={query.Shape}, K={key.Shape} with {options.QueryBlocks} query blocks.");
+    }
 
     private static void CheckGrid(TokenGrid3D grid, TokenGrid3D block, long tokens, string side)
     {

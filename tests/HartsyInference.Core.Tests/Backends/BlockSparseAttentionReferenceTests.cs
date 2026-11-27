@@ -175,6 +175,24 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
         Assert.All(f.Output.AsReadOnlySpan<float>().ToArray(), static v => Assert.Equal(-7f, v));
     }
 
+    /// <summary>A tensor allocates on first read, so these shapes cost nothing as long as the call is refused unread.</summary>
+    [Theory]
+    [InlineData(4, 4096, 4096, 4, 64, 0.9375)]
+    [InlineData(1, 256, 256, 1, 1, 0.0)]
+    public void ACallPastAnIntsElementsIsRefusedByName(int frames, int height, int width, int block, int dim, double sparsity)
+    {
+        using CpuBackend backend = new();
+        TokenGrid3D grid = new(frames, height, width), box = new(block, block, block);
+        BlockSparseAttentionOptions options = new() { QueryGrid = grid, KeyGrid = grid, QueryBlock = box, KeyBlock = box, Sparsity = sparsity };
+        TensorShape shape = new(1, 1, grid.Tokens, dim);
+        using Tensor query = new(shape, DType.F32), key = new(shape, DType.F32), value = new(shape, DType.F32), output = new(shape, DType.F32);
+
+        AttentionUnsupportedException refusal = Assert.Throws<AttentionUnsupportedException>(
+            () => backend.BlockSparseAttention(output, query, key, value, options));
+
+        Assert.Contains(nameof(IBackend.BlockSparseAttention), refusal.Message);
+    }
+
     private static TokenGrid3D Box(int[] extents) => new(extents[0], extents[1], extents[2]);
 
     private static Tensor Noise(Random random, int batch, int heads, int tokens, int dim)

@@ -131,7 +131,8 @@ extern "C" __global__ void bsa_select(int* __restrict__ selected, const float* _
 
 // ---------------------------------------------------------------------------------------------------------------------
 // 3. Attention over the selected blocks. Grid (query blocks x tiles per block, heads, batch); LANES threads share a group of
-// BSA_QPT query rows, each scoring BSA_KT / LANES key rows of a chunk and accumulating D / LANES channels. Dynamic shared
+// BSA_QPT query rows, each scoring BSA_KT / LANES key rows of a chunk and accumulating D / LANES channels: a warp per group,
+// half a warp at head dim 16, which has no 32 channels to split. Dynamic shared
 // memory: the query tile, one chunk of K and then of V in the same rows, the chunk's weights and the chunk's row numbers
 // (CudaKernels.BlockSparseAttentionSharedBytes). Rows are padded by one float against bank conflicts.
 template <typename T, int HD, int LANES>
@@ -288,22 +289,21 @@ __device__ __forceinline__ void bsa_attend_impl(void* __restrict__ output, const
     }
 }
 
-#define BSA_LANES 16
-#define BSA_ATTEND(NAME, TYPE, HD)                                                                                          \
-    extern "C" __global__ __launch_bounds__(BSA_QT / BSA_QPT * BSA_LANES) void NAME(                                       \
-        void* output, const TYPE* Q, const TYPE* K, const TYPE* V, const int* selected, int queryTokens, int keyTokens,     \
+#define BSA_ATTEND(NAME, TYPE, HD, LANES)                                                                                  \
+    extern "C" __global__ __launch_bounds__(BSA_QT / BSA_QPT * LANES) void NAME(                                           \
+        void* output, const TYPE* Q, const TYPE* K, const TYPE* V, const int* selected, int queryTokens, int keyTokens,    \
         int heads, int queryBlocks, int chosen, int qGridH, int qGridW, int qbt, int qbh, int qbw, int kGridH, int kGridW, \
         int kbt, int kbh, int kbw, float scale, int outputBf16)                                                            \
-    {                                                                                                                       \
-        bsa_attend_impl<TYPE, HD, BSA_LANES>(output, Q, K, V, selected, queryTokens, keyTokens, heads, queryBlocks, chosen, \
-            qGridH, qGridW, qbt, qbh, qbw, kGridH, kGridW, kbt, kbh, kbw, scale, outputBf16);                               \
+    {                                                                                                                      \
+        bsa_attend_impl<TYPE, HD, LANES>(output, Q, K, V, selected, queryTokens, keyTokens, heads, queryBlocks, chosen,    \
+            qGridH, qGridW, qbt, qbh, qbw, kGridH, kGridW, kbt, kbh, kbw, scale, outputBf16);                              \
     }
 
-BSA_ATTEND(bsa_attend_f32_d16, float, 16)
-BSA_ATTEND(bsa_attend_f32_d32, float, 32)
-BSA_ATTEND(bsa_attend_f32_d64, float, 64)
-BSA_ATTEND(bsa_attend_f32_d128, float, 128)
-BSA_ATTEND(bsa_attend_bf16_d16, __nv_bfloat16, 16)
-BSA_ATTEND(bsa_attend_bf16_d32, __nv_bfloat16, 32)
-BSA_ATTEND(bsa_attend_bf16_d64, __nv_bfloat16, 64)
-BSA_ATTEND(bsa_attend_bf16_d128, __nv_bfloat16, 128)
+BSA_ATTEND(bsa_attend_f32_d16, float, 16, 16)
+BSA_ATTEND(bsa_attend_f32_d32, float, 32, 32)
+BSA_ATTEND(bsa_attend_f32_d64, float, 64, 32)
+BSA_ATTEND(bsa_attend_f32_d128, float, 128, 32)
+BSA_ATTEND(bsa_attend_bf16_d16, __nv_bfloat16, 16, 16)
+BSA_ATTEND(bsa_attend_bf16_d32, __nv_bfloat16, 32, 32)
+BSA_ATTEND(bsa_attend_bf16_d64, __nv_bfloat16, 64, 32)
+BSA_ATTEND(bsa_attend_bf16_d128, __nv_bfloat16, 128, 32)

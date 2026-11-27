@@ -6,8 +6,11 @@ namespace HartsyInference.Cuda;
 // 3D block-sparse attention (Kernels/attention/block_sparse_attention.cu): block means, block selection, attention.
 public sealed partial class CudaKernels
 {
-    /// <summary>Query rows and key rows of one attention tile (BSA_QT, BSA_KT) and the threads of one block.</summary>
-    private const int BsaQueryTile = 64, BsaKeyTile = 64, BsaThreads = 256;
+    /// <summary>Query rows and key rows of one attention tile (BSA_QT, BSA_KT), and the threads of one selection block.</summary>
+    private const int BsaQueryTile = 64, BsaKeyTile = 64, BsaSelectThreads = 256;
+
+    /// <summary>The threads of one attention block: a group of 4 query rows per warp, per half warp at head dim 16.</summary>
+    private static uint BsaAttendThreads(int headDim) => headDim == 16 ? 256u : 512u;
 
     /// <summary>The head dims the attention entries are compiled for.</summary>
     private static readonly int[] BsaHeadDims = [16, 32, 64, 128];
@@ -79,7 +82,7 @@ public sealed partial class CudaKernels
         int dA = dim, hA = heads, qbA = queryBlocks, kbA = keyBlocks, cA = chosen;
         void** a = stackalloc void*[8];
         a[0] = &sA; a[1] = &qA; a[2] = &kA; a[3] = &dA; a[4] = &hA; a[5] = &qbA; a[6] = &kbA; a[7] = &cA;
-        CudaDriverApi.cuLaunchKernel(_bsaSelect, (uint)queryBlocks, (uint)heads, (uint)batch, BsaThreads, 1, 1,
+        CudaDriverApi.cuLaunchKernel(_bsaSelect, (uint)queryBlocks, (uint)heads, (uint)batch, BsaSelectThreads, 1, 1,
             (uint)(keyBlocks * sizeof(uint)), stream, (nint)a, 0).ThrowOnError();
     }
 
@@ -101,7 +104,7 @@ public sealed partial class CudaKernels
         a[18] = &kbhA; a[19] = &kbwA; a[20] = &scaleA; a[21] = &obA;
         int at = Array.IndexOf(BsaHeadDims, dim) + (type == DType.BF16 ? BsaHeadDims.Length : 0);
         long tiles = (qx.Tokens + BsaQueryTile - 1) / BsaQueryTile;
-        CudaDriverApi.cuLaunchKernel(_bsaAttend[at], checked((uint)(options.QueryBlocks * tiles)), (uint)heads, (uint)batch, BsaThreads,
-            1, 1, (uint)BlockSparseAttentionSharedBytes(dim), stream, (nint)a, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(_bsaAttend[at], checked((uint)(options.QueryBlocks * tiles)), (uint)heads, (uint)batch,
+            BsaAttendThreads(dim), 1, 1, (uint)BlockSparseAttentionSharedBytes(dim), stream, (nint)a, 0).ThrowOnError();
     }
 }

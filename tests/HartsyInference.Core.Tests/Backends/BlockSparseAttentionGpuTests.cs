@@ -184,7 +184,7 @@ public sealed class BlockSparseAttentionGpuTests(ITestOutputHelper log)
         using Tensor value = new(key.Shape, DType.F32);
         using Tensor output = new(query.Shape, DType.F32);
         output.AsSpan<float>().Fill(-7f);
-        Assert.Throws<NotSupportedException>(() => cuda.BlockSparseAttention(output, query, key, value, options));
+        Assert.Throws<AttentionUnsupportedException>(() => cuda.BlockSparseAttention(output, query, key, value, options));
         cuda.Sync();
         Assert.All(output.AsReadOnlySpan<float>().ToArray(), static v => Assert.Equal(-7f, v));
     }
