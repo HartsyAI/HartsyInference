@@ -12,10 +12,12 @@ The run starts from a saved latent (--noise, or one drawn here and saved), so th
     python run_base_reference.py --repo /path/LongCat-Video --checkpoint /path/models/LongCat-Video --out /path/run1
 
 Defaults: the engine comparison's prompt, the demo's negative prompt, 832x480, 93 frames, 50 steps, guidance 4, seed 1234, BF16, GPU 0 with
-20GiB for the DiT and 40GiB of host memory. --distill runs the demo's distilled call instead: lora/cfg_step_lora.safetensors, 16 steps, guidance 1.
+13GiB for the DiT's weights and 40GiB of host memory. The rest of a 24 GB card is for the forward: an estimate, not a measurement (about 8 GB of
+activations at 37,440 tokens with two guidance passes). If the first step runs out of GPU memory, lower --gpu-memory by 2GiB. --distill runs the demo's distilled call instead: lora/cfg_step_lora.safetensors, 16 steps, guidance 1.
 
-Writes noise.npy and final_latent.npy (float32, [1, 16, latent frames, height / 8, width / 8]), frame_000.png onward (lossless, converted to
-8 bits as the demo converts them), report.json, and with --dump-steps steps/step_000.npy onward (the latent after each step).
+Writes noise.npy and final_latent.npy (float32, [1, 16, latent frames, height / 8, width / 8]), the encoded text (prompt_embeds.npy,
+prompt_mask.npy and, with guidance, the negative pair), frame_000.png onward (lossless, converted to 8 bits as the demo converts them),
+report.json, and with --dump-steps steps/step_000.npy onward (the latent after each step).
 """
 
 import argparse
@@ -110,7 +112,7 @@ def main():
     parser.add_argument("--lora-dim", type=int, default=128, help="the LoRA's rank; the release's is the model's default")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("bf16", "f32"), default="bf16")
-    parser.add_argument("--gpu-memory", default="20GiB", help="what the DiT may take of the GPU")
+    parser.add_argument("--gpu-memory", default="13GiB", help="what the DiT's weights may take of the GPU")
     parser.add_argument("--cpu-memory", default="40GiB")
     parser.add_argument("--dump-steps", action="store_true")
     args = parser.parse_args()
@@ -119,6 +121,9 @@ def main():
     guidance = args.guidance if args.guidance is not None else (1.0 if args.distill else 4.0)
     device = torch.device(args.device)
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    # The reference's float32 regions are CUDA autocast: off the card, BF16 weights meet float32 inputs and fail.
+    if args.dtype == "bf16" and device.type != "cuda":
+        parser.error("--dtype bf16 needs a CUDA device; use --dtype f32 on the CPU")
     os.makedirs(args.out, exist_ok=True)
     started = time.time()
     times = {}
@@ -148,6 +153,9 @@ def main():
         encoded = pipe.encode_prompt(prompt=args.prompt, negative_prompt=args.negative_prompt, do_classifier_free_guidance=guided,
                                      num_videos_per_prompt=1, max_sequence_length=512, dtype=dtype, device=device)
     encoded = tuple(None if value is None else value.cpu() for value in encoded)
+    for name, value in zip(("prompt_embeds", "prompt_mask", "negative_prompt_embeds", "negative_prompt_mask"), encoded):
+        if value is not None:
+            np.save(os.path.join(args.out, name + ".npy"), value.float().numpy() if value.is_floating_point() else value.numpy())
     pipe.text_encoder = None
     del text_encoder
     free(device)
@@ -229,7 +237,8 @@ def main():
     vae = vae.to(device).eval()
     with torch.no_grad():
         decoded = vae.decode(pipe.denormalize_latents(final.to(device, vae.dtype)), return_dict=False)[0]
-        frames = pipe.video_processor.postprocess_video(decoded.float(), output_type="np")[0]
+        # In the VAE's own dtype, as the pipeline passes it on: the processor maps to [0, 1] in that dtype.
+        frames = pipe.video_processor.postprocess_video(decoded, output_type="np")[0]
     from PIL import Image
     for index, frame in enumerate(frames):
         # The demo's conversion: times 255, clamped, truncated.
