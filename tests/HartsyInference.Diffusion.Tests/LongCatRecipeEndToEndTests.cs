@@ -17,6 +17,33 @@ namespace HartsyInference.Diffusion.Tests;
 [Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatRecipeEndToEndTests
 {
+    [Theory]
+    [InlineData("base")]
+    [InlineData("1.5")]
+    [InlineData("1.6")]
+    public void ConstructingARecipeWithAUserLoraIsRefused(string build)
+    {
+        using LongCatTinyAvatarRelease release = new(onePointSix: build == "1.6");
+        LongCatConfig config = LongCatTinyAvatarRelease.Config;
+        // Stand-ins, so a build that stopped refusing would fail here without fetching anything.
+        using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
+        IVideoRecipe recipe = build == "base" ? new LongCatVideoRecipe(standIns.Sides)
+            : new LongCatAvatarRecipe(standIns.Sides, LongCatTinyAvatarRelease.Features(seed: 1));
+        using CpuBackend backend = new();
+
+        RecipeContext context = new()
+        {
+            CheckpointPath = release.Checkpoint, Backend = backend,
+            VariantHints = build == "1.6" ? [LongCatAvatarVariants.Avatar16FamilyId] : [],
+            Loras = new LoraStack { Entries = [new LoraEntry { Model = "some-lora" }] },
+        };
+
+        // A pipeline built anyway is disposed, so the release folder can still be removed and the assertion is what fails.
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => recipe.Construct(context).Dispose());
+
+        Assert.Contains("user LoRA", refused.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ASavedNoiseFileReplacesTheSeededNoise()
     {
