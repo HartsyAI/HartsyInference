@@ -7,6 +7,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -56,17 +57,36 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe, IVideoDeviceCheck
     /// <summary>The checks a request is refused on before any weight is read, each with its stable code.</summary>
     internal static void ValidateChainRequest(int? chainTotal, int frames, int width, int height, int fps)
     {
+        if (ChainIssue(chainTotal, frames, width, height, fps) is { } issue)
+            throw new VideoChainException(issue.Code, issue.Message, issue.Field);
+    }
+
+    /// <summary>The first chain problem of a request, or null. Planning reports it before any weight is read; the pipeline throws it.</summary>
+    internal static (string Code, string Message, string Field)? ChainIssue(int? chainTotal, int frames, int width, int height, int fps)
+    {
         if (chainTotal is int requested && !ChainWithinBudget(requested, width, height))
-            throw new VideoChainException("video.chain.budget",
+            return ("video.chain.budget",
                 $"A LongCat-Video-Avatar chain of {requested} frames at {width}x{height} is over the budget of {MaxChainFrames} frames at 832x480 "
                 + "(the same pixel count at other sizes).",
-                nameof(chainTotal));
+                "chainTotal");
         if (frames > SegmentFrames)
-            throw new VideoChainException("video.chain.segment_frames",
-                $"One LongCat-Video-Avatar segment of {frames} frames is over the limit of {SegmentFrames}.", nameof(frames));
+            return ("video.chain.segment_frames",
+                $"One LongCat-Video-Avatar segment of {frames} frames is over the limit of {SegmentFrames}.", "frames");
         if (fps != OutputFps)
-            throw new VideoChainException("video.chain.fps",
-                $"LongCat-Video-Avatar's audio windows are built for {OutputFps} fps; the request asked for {fps}.", nameof(fps));
+            return ("video.chain.fps",
+                $"LongCat-Video-Avatar's audio windows are built for {OutputFps} fps; the request asked for {fps}.", "fps");
+        return null;
+    }
+
+    /// <summary>Planning refusals: a request that can only fail after the weights are loaded (no driving speech; a bad chain).</summary>
+    /// <inheritdoc/>
+    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings)
+    {
+        if (request.VideoAudioReference is null)
+            return "LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference; the avatar has no speech-free path.";
+        return ChainIssue(request.ChainTotalFrames, settings.Frames, settings.Width, settings.Height, settings.Fps) is { } issue
+            ? issue.Message
+            : null;
     }
 
     /// <summary>True when the driving audio is shorter than the clip: the rest of the clip is encoded as silence.</summary>
