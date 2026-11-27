@@ -32,10 +32,10 @@ index 0000000..169a946
 +    np.save(os.path.join(directory, f"{tag}_t.npy"), np.asarray(t_value, dtype=np.float32))
 +    np.save(os.path.join(directory, f"{tag}_noise.npy"), noise_pred.detach().float().cpu().numpy())
 +    np.save(os.path.join(directory, f"{tag}_latent.npy"), latents.detach().float().cpu().numpy())
-diff --git a/pipeline_longcat_video_avatar.py b/pipeline_longcat_video_avatar.py
+diff --git a/longcat_video/pipeline_longcat_video_avatar.py b/longcat_video/pipeline_longcat_video_avatar.py
 index 26e1716..18edc76 100644
---- a/pipeline_longcat_video_avatar.py
-+++ b/pipeline_longcat_video_avatar.py
+--- a/longcat_video/pipeline_longcat_video_avatar.py
++++ b/longcat_video/pipeline_longcat_video_avatar.py
 @@ -2,6 +2,7 @@ import os
  from typing import Any, Dict, List, Optional, Union, Literal
  
