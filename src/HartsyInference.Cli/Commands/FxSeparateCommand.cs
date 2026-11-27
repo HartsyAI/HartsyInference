@@ -29,7 +29,7 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         public string? ModelPath { get; init; }
 
         /// <summary>Compute backend selector. Honoured by kim-vocal-2 (MDX-Net) and the voice isolator; Demucs always runs on the CPU.</summary>
-        /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet. The voice isolator runs its offline network on the device and its realtime stream on the CPU.</remarks>
+        /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet. The voice isolator runs on the engine's backend (CUDA or Vulkan), with a CPU rerun when the card is full.</remarks>
         [CommandOption("-b|--backend")]
         [Description("Backend selector for kim-vocal-2 and the voice isolator (auto, cpu, cuda, vulkan). auto, the default, uses the GPU when there is one; pass cpu to keep the work off it. Demucs always runs on the CPU (its STFT has no GPU path).")]
         public string Backend { get; init; } = "auto";
@@ -54,9 +54,8 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         // Demucs' STFT/ISTFT (DemucsSpec.Spec) only has a CPU implementation (CudaBackend.Stft throws
         // NotSupportedException), so Demucs forces CPU whatever -b says. The MDX-Net separator and the voice isolator take -b:
         // the isolator's STFT stays on the host, but its network runs on the requested backend.
-        bool voiceIsolator = string.Equals(settings.Model, "voice-isolator", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(settings.Model, "voice-isolator-realtime", StringComparison.OrdinalIgnoreCase);
-        bool usesBackend = voiceIsolator || ModelCatalog.Find(settings.Model)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
+        CatalogFeatures features = ModelCatalog.Find(settings.Model)?.Features ?? CatalogFeatures.None;
+        bool usesBackend = features.HasFlag(CatalogFeatures.MdxNetSeparator) || features.HasFlag(CatalogFeatures.VoiceIsolator);
         string backend = usesBackend ? settings.Backend : "cpu";
         ParamState parameters = new ParamState(Modality.Fx) { Backend = backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "separate");

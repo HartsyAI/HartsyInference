@@ -116,6 +116,8 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     /// zeros, as its stream frames the start and end of its input, and reads the look-ahead frames of the decoder.</summary>
     internal float[] Isolate(IBackend backend, float[] audio, int lookahead)
     {
+        // The isolator runs under exact GEMMs: CUDA TF32 GEMMs put the golden error near 1e-4 (2.6e-5 to 8.5e-5); exact GEMMs put it at the CPU level (1.2e-7 to 1.8e-7).
+        using ExactGemmScope _exact = new(backend);
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(audio);
         if (Config.Causal)
@@ -193,6 +195,8 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     /// <summary>The blocks over the new frames' tokens <paramref name="features"/> (not disposed) with <paramref name="lane"/>'s carried state.</summary>
     internal Tensor StreamBlocks(IBackend backend, Tensor features, int frames, VoiceIsolatorLane lane, VoiceIsolatorStreamAttention attention)
     {
+        // The isolator runs under exact GEMMs: CUDA TF32 GEMMs put the golden error near 1e-4 (2.6e-5 to 8.5e-5); exact GEMMs put it at the CPU level (1.2e-7 to 1.8e-7).
+        using ExactGemmScope _exact = new(backend);
         Tensor x = features;
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -211,6 +215,8 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     /// <summary>Band tokens <c>[bands * frames, width]</c> of the spectra.</summary>
     internal unsafe Tensor Encode(IBackend backend, float[] re, float[] im, int frames, int lookahead)
     {
+        // The isolator runs under exact GEMMs: CUDA TF32 GEMMs put the golden error near 1e-4 (2.6e-5 to 8.5e-5); exact GEMMs put it at the CPU level (1.2e-7 to 1.8e-7).
+        using ExactGemmScope _exact = new(backend);
         int width = Config.Width;
         int bins = _spectral.Bins;
         Tensor tokens = new(new TensorShape(1, (long)_edges.Length * frames, width), DType.F32);
@@ -258,6 +264,8 @@ public sealed class VoiceIsolatorNetwork : IDisposable
     /// <summary>The per-band heads over <paramref name="features"/> <c>[bands * frames, width]</c>: <c>[frames, bins, 4]</c>.</summary>
     internal unsafe float[] Decode(IBackend backend, Tensor features, int frames)
     {
+        // The isolator runs under exact GEMMs: CUDA TF32 GEMMs put the golden error near 1e-4 (2.6e-5 to 8.5e-5); exact GEMMs put it at the CPU level (1.2e-7 to 1.8e-7).
+        using ExactGemmScope _exact = new(backend);
         int width = Config.Width;
         int bins = _spectral.Bins;
         float[] raw = new float[(long)frames * bins * 4];

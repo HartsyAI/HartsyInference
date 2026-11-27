@@ -71,7 +71,18 @@ internal sealed class VoiceIsolatorMamba : IDisposable
         Tensor z = new(new TensorShape(1, n, inner), DType.F32);
         VoiceIsolatorOps.SplitHalves(backend, xz, u, z);
         xz.Dispose();
-        VoiceIsolatorOps.CausalDepthwiseSilu(u, _conv, _convBias, carry?.History, rows, frames, inner, _config.MambaConv);
+        // CUDA and Vulkan convolve with backend ops (no host round trip per block). The CPU keeps the host loop: the op
+        // route is correct there but about 3.5 times slower on the realtime clips (reference copies per block).
+        if (backend.Device.Type is DeviceType.Cuda or DeviceType.Vulkan)
+        {
+            Tensor convolved = VoiceIsolatorOps.CausalDepthwiseSiluOn(backend, u, _conv, _convBias, carry?.History, rows, frames, inner, _config.MambaConv);
+            u.Dispose();
+            u = convolved;
+        }
+        else
+        {
+            VoiceIsolatorOps.CausalDepthwiseSilu(u, _conv, _convBias, carry?.History, rows, frames, inner, _config.MambaConv);
+        }
         Tensor projected = WhisperOps.ProjectLinear(backend, u, _xProj, null, 1, (int)n, inner, dtRank + 2 * states);
         Tensor dt = new(new TensorShape(1, n, dtRank), DType.F32);
         Tensor b = new(new TensorShape(1, n, states), DType.F32);
