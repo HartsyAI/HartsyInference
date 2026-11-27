@@ -26,10 +26,16 @@ def main(dump_dir, out_path):
     noise0 = np.load(os.path.join(dump_dir, "call00_step00_noise.npy")).astype(np.float64)
     assert latent0.shape == noise0.shape and latent0.ndim == 5 and latent0.shape[0] == 1, (latent0.shape, noise0.shape)
     dt = (t1 - t0) / 1000.0
+    # Precision of the saved tensors: a value whose low 16 float32 bits are zero is on the bf16 grid; the step casts its result to the
+    # model output's dtype, so a half-precision noise_pred leaves latent0 on that grid and the derived init inherits the rounding.
+    for name, arr in (("latent0", latent0), ("noise0", noise0)):
+        bits = arr.astype(np.float32).view(np.uint32)
+        print(f"{name}: share on bf16 grid {np.mean((bits & 0xFFFF) == 0):.4f}")
     x = np.zeros_like(latent0)
     x[:, :, 1:] = latent0[:, :, 1:] - dt * noise0[:, :, 1:]
     frames = x[:, :, 1:]
     print(f"t0={t0!r} t1={t1!r} dt={dt!r} shape={x.shape}")
+    print(f"rounding bound: |derived - exact| <= |dt| * |noise0| * eps_noise + eps_latent * |latent0|, eps = 2^-8 for bf16 (about 4e-3 relative)")
     print(f"noise frames 1..: mean={frames.mean():.4f} std={frames.std():.4f} (seeded noise is about 0 and 1)")
     if not (abs(frames.mean()) < 0.05 and 0.9 < frames.std() < 1.1):
         raise SystemExit("derived noise is not N(0, 1)-like: the sigma formula or the dump is wrong; do not use this file")
