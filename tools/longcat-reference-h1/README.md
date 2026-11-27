@@ -35,8 +35,10 @@ and the patched demo parses. NOT run anywhere: the runner has not been executed 
   attention patches.
 - `h1_int8_meta_check.py`: CPU check on a tiny config. Writes a BF16 checkpoint in the release layout, loads it with the stock and the
   patched `load_quantized_dit`, and requires every state tensor to match in value, shape and dtype and nothing on meta. Then it requires
-  refusal of a checkpoint with a missing key and of one with a wrong dtype on an INT8 buffer. Run:
-  `python h1_int8_meta_check.py <reference root> <patched quantization.py> <release base_model_int8/config.json>`.
+  refusal of a checkpoint with a missing key, one with an unexpected key, and one with a wrong dtype on an INT8 buffer. It refuses a
+  reference root whose `quantization.py` already has the patch, so run it on a pristine checkout (a second clone at the pinned sha, not
+  the run checkout). The meta-leftover refusal is not exercised by a strict load. Run:
+  `python h1_int8_meta_check.py <pristine reference root> <patched quantization.py> <release base_model_int8/config.json>`.
 - `inspect_int8_meta.py`: read-only. Builds the model on meta with the same replacement and compares its keys, shapes and dtypes with the
   shard headers. The only accepted dtype difference is the 486 float32-parameter / BF16-checkpoint conversion above; the count must be
   exactly 486. Any other mismatch, missing or unexpected key, or a different count exits 1.

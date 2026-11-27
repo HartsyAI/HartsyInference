@@ -109,6 +109,11 @@ def main(reference_root, patched_path, release_config_path):
     torch.compile = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
     from longcat_video.modules import quantization as stock
     patched = load_patched(patched_path)
+    # Guards: "stock" must be the pristine pinned file, or the comparison is patched against patched.
+    if hasattr(stock, "_h1_assign_state"):
+        raise SystemExit("reference root's quantization.py already has the H1 patch; run the check on a pristine checkout")
+    if not hasattr(patched, "_h1_assign_state"):
+        raise SystemExit("the patched file has no _h1_assign_state: it is not the H1 patch")
     with open(release_config_path, encoding="utf-8") as f:
         config = tiny_config(json.load(f))
 
@@ -164,6 +169,21 @@ def main(reference_root, patched_path, release_config_path):
         tensors[int8_key] = tensors[int8_key].to(torch.float32)
         save_file(tensors, shard_path)
         expect_refused(f"wrong dtype on {int8_key}", dtype_root)
+
+        extra_root = write_checkpoint(stock, config, os.path.join(tmp, "extra"))
+        qdir = os.path.join(extra_root, "base_model_int8")
+        shard_path = os.path.join(qdir, SHARD)
+        index_path = os.path.join(qdir, "quantized_model.safetensors.index.json")
+        tensors = load_file(shard_path)
+        extra = "unexpected.extra_tensor"
+        tensors[extra] = torch.zeros(4, dtype=torch.bfloat16)
+        save_file(tensors, shard_path)
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+        index["weight_map"][extra] = SHARD
+        with open(index_path, "w", encoding="utf-8") as f:
+            json.dump(index, f)
+        expect_refused(f"unexpected key {extra}", extra_root)
     print("ALL PASS")
 
 
