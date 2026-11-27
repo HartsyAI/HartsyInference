@@ -1,6 +1,7 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.FastFrames;
@@ -39,6 +40,7 @@ internal sealed class RealWeightsParityFactAttribute : FactAttribute
 ///   FF_REAL_PARITY_DIR      folder with framewise-2step.pt, kv_refiner.safetensors, pixel_decoder.safetensors and io.safetensors
 ///   FF_REAL_PARITY_GENERATOR  generator file name in that folder (default framewise-2step.pt for S; dit.safetensors for L)
 ///   FF_REAL_PARITY_BACKEND  cuda (default), vulkan or cpu
+///   FF_REAL_PARITY_STREAMING  auto (default, the production policy), on (force block streaming) or off (force resident)
 ///   FF_REAL_PARITY_BOUND    latent relative RMS bound per frame (default 0.04, set after the 2026-11-26 measurement)
 ///   FF_REAL_PARITY_PIXEL_BOUND  pixel relative RMS bound, worst frame (default 0.10, set after the 2026-11-26 measurement)
 ///
@@ -110,7 +112,17 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
             io.Weights["prompt_embeds"].AsReadOnlySpan<float>().CopyTo(prompt.AsSpan<float>());
             SavedNoise noise = new(io.Weights["noise"], io.Weights["transition"], frames, latentValues);
 
-            FastFramesPipeline pipeline = new(backend, transformer, refiner, decoder, config);
+            // FF_REAL_PARITY_STREAMING: auto (the production default), on (force block streaming), off (force resident).
+            // Forcing "on" is how a card too small for the resident DiT runs the same numbers through the streamed placement.
+            string streaming = Environment.GetEnvironmentVariable("FF_REAL_PARITY_STREAMING") ?? "auto";
+            LowVramMode? streamingMode = streaming switch
+            {
+                "auto" => null,
+                "on" => LowVramMode.ForceOn,
+                "off" => LowVramMode.ForceOff,
+                _ => throw new ArgumentException($"FF_REAL_PARITY_STREAMING must be auto, on or off; got '{streaming}'."),
+            };
+            FastFramesPipeline pipeline = new(backend, transformer, refiner, decoder, config) { StreamingMode = streamingMode };
             List<FastFramesFrame> got = pipeline.Rollout(prompt, noise, frames).ToList();
             Assert.Equal(frames, got.Count);
 
@@ -138,7 +150,7 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
                 worstPixel = Math.Max(worstPixel, rel);
             }
             output.WriteLine($"pixel frames: worst relative RMS {worstPixel:G4} over {refPixels.Length / perPixelFrame} frames");
-            output.WriteLine($"backend {backendName}, {frames} latent frames, latent bound {bound:G3}, pixel bound {pixelBound:G3}, worst latent {worstLatent:G4}, worst pixel {worstPixel:G4}");
+            output.WriteLine($"backend {backendName}, streaming {streaming}, streamed blocks {pipeline.LastStreamedBlocks}, {frames} latent frames, latent bound {bound:G3}, pixel bound {pixelBound:G3}, worst latent {worstLatent:G4}, worst pixel {worstPixel:G4}");
 
             Assert.True(worstLatent <= bound, $"worst latent relative RMS {worstLatent:G4} exceeds {bound:G3}.");
             Assert.True(worstPixel <= pixelBound, $"worst pixel relative RMS {worstPixel:G4} exceeds {pixelBound:G3}.");
