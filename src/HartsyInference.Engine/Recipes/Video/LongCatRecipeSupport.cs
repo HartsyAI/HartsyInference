@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -372,6 +373,14 @@ internal static class LongCatRecipeSupport
     internal static float[] Noise(int seed, int channels, int frames, int height, int width)
     {
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, channels, frames, height, width]), seed);
+        return noise.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>The noise of a request's first (or only) generation: the file of <c>diagnostics.longcatNoiseNpy</c> when it is set, else
+    /// <see cref="Noise"/>. A chain's later segments keep their seeded noise.</summary>
+    internal static float[] InitialNoise(int seed, int channels, int frames, int height, int width)
+    {
+        using Tensor noise = SavedNoise.Create(EngineKnobs.LongCatNoiseNpy, new TensorShape([1L, channels, frames, height, width]), seed, "LongCat");
         return noise.AsReadOnlySpan<float>().ToArray();
     }
 

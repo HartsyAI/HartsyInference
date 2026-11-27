@@ -1,16 +1,16 @@
 using System.Text;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Utilities;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>The saved-noise reader behind diagnostics.fibo2NoiseNpy: a round trip, and each refusal (shape, dtype, order, length).</summary>
-public sealed class Fibo2NoiseSourceTests : IDisposable
+/// <summary>The saved-noise reader behind the noise-file settings: a round trip, and each refusal (shape, dtype, order, length).</summary>
+public sealed class SavedNoiseTests : IDisposable
 {
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), "fibo2-noise-" + Guid.NewGuid().ToString("N"));
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "saved-noise-" + Guid.NewGuid().ToString("N"));
 
-    public Fibo2NoiseSourceTests() => Directory.CreateDirectory(_dir);
+    public SavedNoiseTests() => Directory.CreateDirectory(_dir);
 
     public void Dispose()
     {
@@ -24,7 +24,7 @@ public sealed class Fibo2NoiseSourceTests : IDisposable
         float[] values = [0.5f, -1.25f, 3f, 1e-7f, -0f, 42f];
         string path = Write("ok.npy", "'<f4'", "False", "(2, 3)", Bytes(values));
 
-        Tensor tensor = Fibo2NoiseSource.LoadFloat32Npy(path, new TensorShape(2, 3));
+        Tensor tensor = SavedNoise.LoadFloat32Npy(path, new TensorShape(2, 3));
         try
         {
             Assert.Equal(DType.F32, tensor.DType);
@@ -41,7 +41,7 @@ public sealed class Fibo2NoiseSourceTests : IDisposable
     {
         string path = Write("shape.npy", "'<f4'", "False", "(3, 2)", Bytes(new float[6]));
 
-        Assert.Throws<InvalidDataException>(() => Fibo2NoiseSource.LoadFloat32Npy(path, new TensorShape(2, 3)));
+        Assert.Throws<InvalidDataException>(() => SavedNoise.LoadFloat32Npy(path, new TensorShape(2, 3)));
     }
 
     [Fact]
@@ -49,7 +49,7 @@ public sealed class Fibo2NoiseSourceTests : IDisposable
     {
         string path = Write("dtype.npy", "'<f8'", "False", "(2, 3)", new byte[6 * 8]);
 
-        Assert.Throws<InvalidDataException>(() => Fibo2NoiseSource.LoadFloat32Npy(path, new TensorShape(2, 3)));
+        Assert.Throws<InvalidDataException>(() => SavedNoise.LoadFloat32Npy(path, new TensorShape(2, 3)));
     }
 
     [Fact]
@@ -57,7 +57,7 @@ public sealed class Fibo2NoiseSourceTests : IDisposable
     {
         string path = Write("order.npy", "'<f4'", "True", "(2, 3)", Bytes(new float[6]));
 
-        Assert.Throws<InvalidDataException>(() => Fibo2NoiseSource.LoadFloat32Npy(path, new TensorShape(2, 3)));
+        Assert.Throws<InvalidDataException>(() => SavedNoise.LoadFloat32Npy(path, new TensorShape(2, 3)));
     }
 
     [Fact]
@@ -65,7 +65,7 @@ public sealed class Fibo2NoiseSourceTests : IDisposable
     {
         string path = Write("short.npy", "'<f4'", "False", "(2, 3)", Bytes(new float[5]));
 
-        Assert.Throws<InvalidDataException>(() => Fibo2NoiseSource.LoadFloat32Npy(path, new TensorShape(2, 3)));
+        Assert.Throws<InvalidDataException>(() => SavedNoise.LoadFloat32Npy(path, new TensorShape(2, 3)));
     }
 
     [Fact]
@@ -74,7 +74,7 @@ public sealed class Fibo2NoiseSourceTests : IDisposable
         string path = Path.Combine(_dir, "junk.npy");
         File.WriteAllBytes(path, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
 
-        Assert.Throws<InvalidDataException>(() => Fibo2NoiseSource.LoadFloat32Npy(path, new TensorShape(2, 3)));
+        Assert.Throws<InvalidDataException>(() => SavedNoise.LoadFloat32Npy(path, new TensorShape(2, 3)));
     }
 
     /// <summary>Writes a version 1.0 .npy whose header is padded to a 64-byte boundary, as numpy writes it.</summary>

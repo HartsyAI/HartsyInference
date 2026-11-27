@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Planning;
@@ -15,6 +17,63 @@ namespace HartsyInference.Diffusion.Tests;
 [Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatRecipeEndToEndTests
 {
+    [Fact]
+    public void ASavedNoiseFileReplacesTheSeededNoise()
+    {
+        LongCatConfig config = LongCatTestData.Tiny;
+        using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
+        string directory = Path.Combine(Path.GetTempPath(), "longcat-noise-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, seed: 71);
+            LongCatTestData.WriteCheckpoint(directory, weights);
+            LongCatTestData.DisposeAll(weights);
+            // 5 frames at 16x16 are 2 latent frames of 2x2.
+            int[] shape = [1, config.InChannels, 2, 2, 2];
+            string first = WriteNoise(directory, "first.npy", shape, seed: 11), second = WriteNoise(directory, "second.npy", shape, seed: 12);
+
+            using CpuBackend backend = new();
+            using IVideoRecipePipeline pipeline = new LongCatVideoRecipe(standIns.Sides).Construct(new RecipeContext
+            {
+                CheckpointPath = directory, Backend = backend,
+            });
+
+            float[] Latents(string? noise, int seed)
+            {
+                VideoRequest request = new() { Prompt = "a lighthouse at dusk", NegativePrompt = "", Seed = seed };
+                VideoEffectiveSettings settings = new()
+                {
+                    Width = 16, Height = 16, Frames = 5, Fps = 8, Steps = 2, CfgScale = 1f, Seed = seed,
+                    ReferenceSizing = VideoReferenceSizing.Native, LockedFields = default,
+                };
+                using IDisposable? scope = noise is null ? null
+                    : KnobProfile.Create("longcat-noise").With(EngineKnobs.LongCatNoiseNpy, noise).Push();
+                pipeline.Generate(request, settings, progress: null, CancellationToken.None);
+                return standIns.Vae.Decoded[^1].Values;
+            }
+
+            // With a file the seed no longer matters, and the file does.
+            Assert.Equal(Latents(first, seed: 3), Latents(first, seed: 4));
+            Assert.NotEqual(Latents(first, seed: 3), Latents(second, seed: 3));
+            Assert.NotEqual(Latents(null, seed: 3), Latents(null, seed: 4));
+            string wrong = WriteNoise(directory, "wrong.npy", [1, config.InChannels, 3, 2, 2], seed: 13);
+            Assert.Throws<InvalidDataException>(() => Latents(wrong, seed: 3));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static string WriteNoise(string directory, string name, int[] shape, int seed)
+    {
+        float[] values = LongCatTestData.RandomValues(new Random(seed), shape.Aggregate(1, (a, d) => a * d));
+        string path = Path.Combine(directory, name);
+        File.WriteAllBytes(path, NpyFile.Float32(values, shape));
+        return path;
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
