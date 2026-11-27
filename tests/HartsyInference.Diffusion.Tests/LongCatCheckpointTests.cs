@@ -1,5 +1,6 @@
 using System.Text.Json;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -41,6 +42,28 @@ public sealed class LongCatCheckpointTests : IDisposable
         Assert.Equal(0x3F80, bits[1]);
         Assert.Equal(0x3F82, bits[2]);
         Assert.Equal(0xBDCD, bits[3]);
+    }
+
+    [Fact]
+    public void TheParallelBf16ConversionMatchesTheSerialRoundToNearestOnEveryElement()
+    {
+        // Large enough to split into several ranges (RangeElements), so the parallel path runs; the serial reference is computed per element.
+        int count = LongCatCheckpoint.RangeElements * 5 + 1234;
+        Random rng = new(7);
+        using Tensor values = new(new TensorShape(count), DType.F32);
+        Span<float> v = values.AsSpan<float>();
+        for (int i = 0; i < count; i++)
+            v[i] = (float)(rng.NextDouble() * 8 - 4);
+        v[0] = 0.1f; v[1] = 1f + 1f / 256f; v[2] = 1f + 3f / 256f; v[3] = float.PositiveInfinity; v[4] = float.NaN;
+
+        using Tensor bf16 = LongCatCheckpoint.ToBf16RoundToNearest(values);
+
+        ReadOnlySpan<ushort> bits = bf16.AsReadOnlySpan<ushort>();
+        ReadOnlySpan<float> src = values.AsReadOnlySpan<float>();
+        int mismatches = 0;
+        for (int i = 0; i < count; i++)
+            if (BFloat16Bits.FromFloat(src[i]) != bits[i]) mismatches++;
+        Assert.Equal(0, mismatches);
     }
 
     [Fact]

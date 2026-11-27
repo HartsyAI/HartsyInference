@@ -123,6 +123,11 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Path to the driving motion video (Wan-Animate); its pose skeleton and face crop are auto-derived unless overridden.")]
         public string? DrivingVideo { get; init; }
 
+        /// <summary>The clip a continuation extends (LongCat-Video's video continuation).</summary>
+        [CommandOption("--continue-video")]
+        [Description("Path to a clip to continue (LongCat-Video, base build only): the output begins with the whole clip, sampled to 15 fps, and its last 13 sampled frames condition the generated frames after them. Leave width and height unset; the result is 15 fps.")]
+        public string? ContinueVideo { get; init; }
+
         /// <summary>Pre-rendered pose/skeleton video overriding the pose branch's auto-preprocess.</summary>
         [CommandOption("--pose-video")]
         [Description("Path to a pre-rendered pose/skeleton video for the pose branch (overrides auto-preprocessing).")]
@@ -380,6 +385,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("init-image", settings.InitImage);
         parameters.PutIfSet("end-frame", settings.EndFrame);
         parameters.PutIfSet("driving-video", settings.DrivingVideo);
+        parameters.PutIfSet("continue-video", settings.ContinueVideo);
         parameters.PutIfSet("pose-video", settings.PoseVideo);
         parameters.PutIfSet("face-video", settings.FaceVideo);
         if (settings.NoAutoPreprocess)

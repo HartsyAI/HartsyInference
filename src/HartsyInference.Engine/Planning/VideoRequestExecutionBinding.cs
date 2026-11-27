@@ -152,6 +152,7 @@ internal sealed class VideoRequestExecutionBinding
         CaptureMedia(request.VideoAudioReference, mediaBuffers);
         CaptureMedia(request.VideoDenoiseMask, mediaBuffers);
         CaptureMedia(request.DrivingVideo, mediaBuffers);
+        CaptureMedia(request.VideoContinuation, mediaBuffers);
         CaptureMedia(request.DrivingPoseVideo, mediaBuffers);
         CaptureMedia(request.DrivingFaceVideo, mediaBuffers);
         CaptureMedia(request.DrivingBackgroundVideo, mediaBuffers);

@@ -342,3 +342,10 @@ The planner reproduces these until the row that owns each is rewritten.
   The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
   so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
   has it. No model calls the primitive yet, and it has no timing.
+- **Block-sparse attention** over a 3D token grid is not an `AttentionCall` either: which keys a query reads depends on
+  the operands, so no mask, planner row or `Execution` evidence describes it. It is the backend primitive
+  `IBackend.BlockSparseAttention`, defined by `BlockSparseAttentionReference` and specified in
+  [backend op contracts](BACKEND_OPS.md#blocksparseattention). It keeps this contract's head-major `[B, H, S, D]`
+  operands, its plain scale multiplier and its zero row for a token with no key; it takes no mask, no grouped K/V and no
+  numerical permissions. The CPU backend runs the reference in F32; CUDA and Vulkan have no kernel and refuse the call by
+  name. No model calls it yet, and it has no timing.

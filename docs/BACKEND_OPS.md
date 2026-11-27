@@ -329,6 +329,43 @@ it flat and skips a reshape. CUDA runs the per-query kernel, or the query-tiled 
 `numerics.neighborhoodAttentionTiled` is off (the tiled path is an online softmax over the tile's union window, a different
 summation order).
 
+## BlockSparseAttention
+
+```
+block      = a QueryBlock or KeyBlock box of its (T, H, W) token grid; blocks and the tokens inside one in raster order
+q̄[m], k̄[n] = the mean row of query block m, of key block n                  per (batch, head)
+score[m,n] = q̄[m] · k̄[n]                                                    unscaled
+read[m]    = the K highest-scoring n, K = (int)((1 − sparsity) · keyBlocks)  truncated in double precision
+out[i]     = Σ_j softmax_j(scale · q[i] · k[j]) · v[j]                       i in block m, j over the keys of read[m]
+```
+
+Reference: `BlockSparseAttentionReference.Apply`. Contract: `BlockSparseAttentionContract.Validate`. Called as
+`IBackend.BlockSparseAttention`; `HasBlockSparseAttention` says whether a backend runs it, and one that does not refuses
+the call by name.
+
+- Operands are F32 head-major `[B, H, Sq|Sk, D]` in raster order of their grids, already normed and rotated, with one head
+  count for Q, K and V. The output is `[B, H, Sq, D]` in query raster order and is not an input.
+- `BlockSparseAttentionOptions` carries a query grid and a key grid (`TokenGrid3D`, `Frames × Height × Width`; they may
+  differ on every axis), a block per side (default 4×4×4, and the two may differ), the sparsity in `[0, 1]` and the score
+  multiplier (null is `D^-1/2`). A grid that is not a multiple of its block on every axis is refused: the caller pads.
+  There is no attention mask. A caller that lets one group of queries see only part of the keys makes one call per
+  group, each with its own grids.
+- Scale multiplies the token scores only. Selection ignores it, and no neighbour or sink block is added.
+- `K = 0` (fewer than 16 key blocks at sparsity 0.9375) writes zeros.
+- Of equal block scores the lower index wins, and a NaN score ranks above every number, so a NaN key reaches the output
+  while `K > 0`. Both rules are this engine's: `torch.topk`, which the definition below uses, states no tie order.
+- A token whose every score is negative infinity gets a zero row; a NaN score propagates
+  ([attention contract §3](ATTENTION_CONTRACT.md#3-scores)).
+- The optional `selected` tensor, I32 `[B, H, queryBlocks, K]`, receives each query block's key blocks, ascending.
+- A kernel is held to the reference on F32 operands: the same `selected` report and an output within a relative RMS of
+  1e-5. The reference sums a block mean in the block's raster order and a score in channel order, both in F32; a kernel
+  that sums in another order can rank two blocks differently only where their scores differ by rounding alone.
+
+The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in
+top-k mode, whose `bsa_params` ship as sparsity 0.9375 and 4×4×4 blocks. Its CDF-threshold selection has no option here.
+It is a different operation from [Sol-Attn](ATTENTION_CONTRACT.md#9-where-kernels-differ-today) (64-token runs of one
+sequence, with a pooled tail) and from the video sparse attention sessions.
+
 ## FakeQuantizeUniform
 
 ```
@@ -498,6 +535,7 @@ Every implementation of these ops:
 | `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
 | `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
+| `BlockSparseAttention` | reference | refused | refused |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
 | `SparseTopK` | reference | `sparse_index.ptx` (`sparse_topk_f32`) | `sparse_topk` |
