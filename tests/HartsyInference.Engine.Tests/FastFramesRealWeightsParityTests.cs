@@ -39,8 +39,8 @@ internal sealed class RealWeightsParityFactAttribute : FactAttribute
 ///   FF_REAL_PARITY_DIR      folder with framewise-2step.pt, kv_refiner.safetensors, pixel_decoder.safetensors and io.safetensors
 ///   FF_REAL_PARITY_GENERATOR  generator file name in that folder (default framewise-2step.pt for S; dit.safetensors for L)
 ///   FF_REAL_PARITY_BACKEND  cuda (default), vulkan or cpu
-///   FF_REAL_PARITY_BOUND    latent relative RMS bound per frame (default 0.04, the manager's S bound)
-///   FF_REAL_PARITY_PIXEL_BOUND  pixel relative RMS bound, worst frame (default 0.10, the manager's S bound)
+///   FF_REAL_PARITY_BOUND    latent relative RMS bound per frame (default 0.04, set after the 2026-11-26 measurement)
+///   FF_REAL_PARITY_PIXEL_BOUND  pixel relative RMS bound, worst frame (default 0.10, set after the 2026-11-26 measurement)
 ///
 /// The metric is relative RMS, ||engine - upstream|| / ||upstream||, for each latent frame and each pixel frame. The pixel comparison
 /// drops the first three decoded frames, as upstream's align_frames does. The engine's lane is F16 on CUDA and F32 on CPU. The
