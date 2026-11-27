@@ -221,13 +221,14 @@ public sealed partial class LongCatTransformer
         backend.SliceRows(cos, fullCos, cache.Tokens);
         backend.SliceRows(sin, fullSin, cache.Tokens);
 
-        using Tensor timeEmbed = TimestepEmbedding(backend, frameTimesteps, frames);
+        float[]? roundedTimesteps = _bf16Route ? RoundToBf16(frameTimesteps) : null;
+        using Tensor timeEmbed = TimestepEmbedding(backend, roundedTimesteps ?? frameTimesteps, frames);
         using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
         using LongCatSpeakerPass? speakerPass = speakers is null ? null : SpeakerPass(speakers, frames);
         Tensor? cur = null;
         try
         {
-            cur = WanDitOps.Patchify(backend, noisyLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+            cur = PatchEmbed(backend, noisyLatent);
             AttentionSegment[] segments = [AttentionSegment.Dense(rows)];
             LongCatBlockInputs inputs = new(frames, hw, 0, cos, sin, segments, FrameRowIndex(frames, hw));
             for (int i = 0; i < _blocks.Length; i++)

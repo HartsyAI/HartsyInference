@@ -200,6 +200,68 @@ public sealed class LongCatBf16ResidualForwardTests
         return stages;
     }
 
+    /// <summary>The cached denoise pass runs two steps with the knob on and off. The caption projection stays owned by its cache, so the second step
+    /// reads it again (it is not disposed by the first), and the pass finishes with finite velocities of the noisy latent's shape.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheCachedPassRunsTwoStepsWithTheCaptionProjectionOwnedByItsCache(bool knob)
+    {
+        LongCatConfig config = LongCatTestData.Tiny;
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, 15);
+        Tensor proj = weights["x_embedder.proj.weight"];
+        weights["x_embedder.proj.weight"] = proj.CastTo(DType.BF16);
+        proj.Dispose();
+        using LongCatTransformer transformer = new(config);
+        using (KnobProfile.Create("bf16-cached-two-steps").With(EngineKnobs.LongcatBf16Residual, knob).Push())
+        {
+            transformer.LoadWeights(weights);
+        }
+
+        LongCatConditioning conditioning = new(NumCondLatents: 1);
+        using Tensor condLatent = LongCatTestData.Random(new TensorShape(new long[] { 1, config.InChannels, 1, 4, 6 }), 16);
+        using Tensor noisy = LongCatTestData.Random(new TensorShape(new long[] { 1, config.InChannels, 2, 4, 6 }), 18);
+        using Tensor encoder = LongCatTestData.Encoder(config, 4, 17);
+        using LongCatKvCache cache = transformer.BuildKvCache(backend, condLatent, conditioning);
+
+        float[] first, second;
+        using (Tensor v1 = transformer.ForwardCached(backend, noisy, encoder, [600f], in conditioning, cache))
+            first = v1.AsReadOnlySpan<float>().ToArray();
+        using (Tensor v2 = transformer.ForwardCached(backend, noisy, encoder, [400f], in conditioning, cache))
+            second = v2.AsReadOnlySpan<float>().ToArray();
+
+        Assert.All(first, v => Assert.True(float.IsFinite(v)));
+        Assert.All(second, v => Assert.True(float.IsFinite(v)));
+        Assert.Equal(first.Length, second.Length);
+        Assert.Equal(1, transformer.TextProjBuilds);
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
+    /// <summary>The uncached pass reuses the caption projection across calls with the same encoder: the key is the caller's encoder, so the second call
+    /// hits. With the knob on, the cached projection is the rounded one.</summary>
+    [Fact]
+    public void TheUncachedPassBuildsTheCaptionProjectionOnce()
+    {
+        LongCatConfig config = LongCatTestData.Tiny;
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, 19);
+        Tensor proj = weights["x_embedder.proj.weight"];
+        weights["x_embedder.proj.weight"] = proj.CastTo(DType.BF16);
+        proj.Dispose();
+        using LongCatTransformer transformer = new(config);
+        using (KnobProfile.Create("bf16-uncached-hit").With(EngineKnobs.LongcatBf16Residual, true).Push())
+        {
+            transformer.LoadWeights(weights);
+        }
+        using Tensor latent = LongCatTestData.Random(new TensorShape(new long[] { 1, config.InChannels, 2, 4, 6 }), 20);
+        using Tensor encoder = LongCatTestData.Encoder(config, 4, 21);
+        using (Tensor v1 = transformer.Forward(backend, latent, encoder, [600f], LongCatConditioning.None)) { }
+        using (Tensor v2 = transformer.Forward(backend, latent, encoder, [400f], LongCatConditioning.None)) { }
+        Assert.Equal(1, transformer.TextProjBuilds);
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
     private static bool OnBf16Grid(float v) => BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(v)) == v;
 
     /// <summary>One block forward on the tiny config, with the given weight dtype, release flag and knob. The cached path runs the build pass into a

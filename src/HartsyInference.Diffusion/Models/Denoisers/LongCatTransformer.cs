@@ -33,6 +33,9 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     // The BF16 route (a BF16 or INT8 release, with numerics.longcatBf16Residual on): the reference casts the latent, the timestep and the text states to the
     // x_embedder's dtype, and the patch embedding's output is BF16. The F32 route leaves all four alone.
     private bool _bf16Route;
+
+    /// <summary>Caption-projection builds so far (a cache hit does not build): a test reads it to see that steps share one entry.</summary>
+    internal int TextProjBuilds => _caches.TextProjBuilds;
     private Tensor? _time1W, _time1B, _time2W, _time2B;
     private Tensor? _text1W, _text1B, _text2W, _text2B;
     private Tensor? _finalAdaW, _finalAdaB, _finalW, _finalB;
@@ -210,8 +213,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         float[]? roundedTimesteps = _bf16Route ? RoundToBf16(frameTimesteps) : null;
         using Tensor timeEmbed = TimestepEmbedding(backend, roundedTimesteps ?? frameTimesteps, frames);
         Probe?.Invoke("t_embedder", timeEmbed);
-        using Tensor? roundedEncoder = _bf16Route ? LongCatOps.RoundToBf16(backend, encoder) : null;
-        using Tensor text = CaptionEmbedding(backend, roundedEncoder ?? encoder, validTextTokens);
+        using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
         Probe?.Invoke("y_embedder", text);
         using LongCatSpeakerPass? speakerPass = speakers is null ? null : SpeakerPass(speakers, frames - conditioning.NumCondLatents);
 
@@ -327,7 +329,8 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     {
         int dim = _config.HiddenSize;
         // The caption projection's output is BF16 on the BF16 route: the reference's y_embedder runs outside autocast (line 497).
-        Tensor projected = LongCatOps.RoundOwned(backend, _caches.TextProj(backend, encoder, dim, _text1W!, _text1B, _text2W!, _text2B), _bf16Route);
+        // The projection is owned by the cache: it is rounded inside the cache's build, not here, so nothing disposes a cached tensor.
+        Tensor projected = _caches.TextProj(backend, encoder, dim, _text1W!, _text1B, _text2W!, _text2B, _bf16Route);
         int rows = (int)projected.Shape[0];
         int valid = validTextTokens < 0 ? rows : validTextTokens;
         if (valid < 1 || valid > rows)

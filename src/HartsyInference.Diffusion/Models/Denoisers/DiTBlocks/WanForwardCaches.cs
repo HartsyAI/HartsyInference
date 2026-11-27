@@ -40,7 +40,9 @@ public sealed class WanForwardCaches
 
     /// <summary>Returns the (host-materialized) PixArt text projection for <paramref name="encoder"/>, computing it
     /// once per encoder tensor identity.</summary>
-    public Tensor TextProj(IBackend backend, Tensor encoder, int dim, Tensor w1, Tensor? b1, Tensor w2, Tensor? b2)
+    /// <param name="roundToBf16">LongCat's BF16 route: the encoder is rounded to the BF16 grid before the projection and the projection's output is
+    /// rounded, both on a miss. The key stays the caller's encoder, so every step of a generation hits the same entry.</param>
+    public Tensor TextProj(IBackend backend, Tensor encoder, int dim, Tensor w1, Tensor? b1, Tensor w2, Tensor? b2, bool roundToBf16 = false)
     {
         if (_textProj.TryGetValue(encoder, out Tensor? hit))
         {
@@ -51,7 +53,16 @@ public sealed class WanForwardCaches
             foreach (Tensor t in _textProj.Values) t.Dispose();
             _textProj.Clear();
         }
-        Tensor proj = WanDitOps.TextEmbed(backend, encoder, dim, w1, b1, w2, b2);
+        Tensor proj;
+        if (roundToBf16)
+        {
+            using Tensor roundedInput = LongCatOps.RoundToBf16(backend, encoder);
+            proj = LongCatOps.RoundOwned(backend, WanDitOps.TextEmbed(backend, roundedInput, dim, w1, b1, w2, b2), on: true);
+        }
+        else
+        {
+            proj = WanDitOps.TextEmbed(backend, encoder, dim, w1, b1, w2, b2);
+        }
         TextProjBuilds++;
         unsafe { _ = (nint)proj.DataPointer; }   // host-materialize (see class doc)
         _textProj[encoder] = proj;
