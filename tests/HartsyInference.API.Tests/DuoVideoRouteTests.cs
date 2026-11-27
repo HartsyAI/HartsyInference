@@ -3,8 +3,10 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Tests.Duo;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Metadata;
@@ -124,14 +126,25 @@ public sealed class DuoVideoRouteTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
-    private object Body(object folder, int window) => new
+    [Theory]
+    [InlineData("/v1/native/video/plan")]
+    [InlineData("/v1/native/video/stream")]
+    public async Task APromptIsA422FromPlanning(string route)
+    {
+        HttpResponseMessage response = await _http.PostAsJsonAsync(route, Body("run", window: 34, prompt: "a face"));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Contains("video.request.unsupported", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    private object Body(object folder, int window, string prompt = "") => new
     {
         model = Family,
         modelPath = _release.Release,
         save = false,
         request = new
         {
-            prompt = "",
+            prompt,
             width = DuoReleaseFixture.Size,
             height = DuoReleaseFixture.Size,
             frames = DuoReleaseFixture.Frames,
@@ -179,6 +192,8 @@ public sealed class DuoVideoRouteTests : IAsyncLifetime
         public VideoFeatures Supports => _duo.Supports;
 
         public bool RefusesUnhonouredPlacements => _duo.RefusesUnhonouredPlacements;
+
+        public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => _duo.RequestRefusal(request, settings);
 
         public bool Matches(string familyId) => string.Equals(familyId, Family, StringComparison.OrdinalIgnoreCase);
 
