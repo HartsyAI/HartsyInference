@@ -68,6 +68,29 @@ public static class LongCatAvatarAudio
         }
     }
 
+    /// <summary>The audio tokens of several tracks as one frame's tokens one track after another, the reference's concatenation of the
+    /// speakers' projections along the token axis: each of <paramref name="tracks"/> is <c>[frames·T]</c> values and the result is
+    /// <c>[frames·tracks·T]</c>. One track comes back as it is.</summary>
+    public static float[] JoinTracks(IReadOnlyList<float[]> tracks, int frames)
+    {
+        ArgumentNullException.ThrowIfNull(tracks);
+        ArgumentOutOfRangeException.ThrowIfLessThan(frames, 1);
+        if (tracks.Count == 0 || tracks[0].Length == 0 || tracks[0].Length % frames != 0)
+            throw new ArgumentException("Each track must hold whole frames.", nameof(tracks));
+        if (tracks.Count == 1)
+            return tracks[0];
+        int perFrame = tracks[0].Length / frames;
+        float[] joined = new float[tracks[0].Length * tracks.Count];
+        for (int t = 0; t < tracks.Count; t++)
+        {
+            if (tracks[t].Length != tracks[0].Length)
+                throw new ArgumentException("Every track must hold the same number of values.", nameof(tracks));
+            for (int f = 0; f < frames; f++)
+                Array.Copy(tracks[t], f * perFrame, joined, ((f * tracks.Count) + t) * perFrame, perFrame);
+        }
+        return joined;
+    }
+
     private static void CopySlot(ReadOnlySpan<float> source, Span<float> destination, int row, int window, int slot, int slotWidth, int rowWidth,
         int frame, int slots)
     {

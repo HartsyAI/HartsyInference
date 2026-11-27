@@ -169,9 +169,12 @@ public sealed partial class LongCatTransformer
     /// <summary>The denoising pass over the noisy latents <c>[1, C, N, H, W]</c> with <paramref name="cache"/> in front of them. The conditioning
     /// frames are not in <paramref name="noisyLatent"/>: <paramref name="conditioning"/> still says how many there were, and the rope rows
     /// start after the cache. <paramref name="frameTimesteps"/> is one timestep for all noisy frames, or one per noisy frame.
-    /// <paramref name="audioTokens"/> are the noisy frames' audio tokens: exactly <c>N·contextTokens</c> rows, the last N frames of the projection.</summary>
+    /// <paramref name="audioTokens"/> are the noisy frames' audio tokens: exactly <c>N·contextTokens</c> rows, the last N frames of the projection
+    /// (with <paramref name="speakers"/>, <c>N·tracks·contextTokens</c> rows, and each block's reference map reads the cache's first
+    /// frame).</summary>
     public Tensor ForwardCached(IBackend backend, Tensor noisyLatent, Tensor encoder, ReadOnlySpan<float> frameTimesteps,
-        in LongCatConditioning conditioning, LongCatKvCache cache, int validTextTokens = -1, Tensor? audioTokens = null)
+        in LongCatConditioning conditioning, LongCatKvCache cache, int validTextTokens = -1, Tensor? audioTokens = null,
+        LongCatSpeakers? speakers = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(noisyLatent);
@@ -195,7 +198,7 @@ public sealed partial class LongCatTransformer
             throw new ArgumentException("This avatar checkpoint needs the noisy frames' audio tokens.", nameof(audioTokens));
         if (_audioProjection is null && audioTokens is not null)
             throw new ArgumentException("This checkpoint has no audio projection, so audio tokens do not apply.", nameof(audioTokens));
-        if (audioTokens is not null)
+        if (audioTokens is not null && speakers is null)
         {
             int ctx = _config.AudioContextTokens, outDim = _config.AudioOutputDim;
             if (audioTokens.Shape.Rank != 2 || audioTokens.Shape[0] != (long)frames * ctx || audioTokens.Shape[1] != outDim)
@@ -208,6 +211,8 @@ public sealed partial class LongCatTransformer
             throw new ArgumentException($"The cache holds {cache.Frames} frames of {cache.GridH}×{cache.GridW} tokens; the pass needs "
                 + $"{conditioning.NumCondLatents} of {gridH}×{gridW}.", nameof(cache));
         int rows = frames * hw;
+        if (speakers is not null)
+            RequireSpeakers(speakers, audioTokens, frames, gridH, gridW);
 
         // The rope rows of the noisy frames: the full table covers the conditioning frames then the noisy ones; the noisy part starts at the cache.
         (Tensor fullCos, Tensor fullSin) = RopeFor(conditioning.NumCondLatents + frames, gridH, gridW, conditioning);
@@ -218,6 +223,7 @@ public sealed partial class LongCatTransformer
 
         using Tensor timeEmbed = TimestepEmbedding(backend, frameTimesteps, frames);
         using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
+        using LongCatSpeakerPass? speakerPass = speakers is null ? null : SpeakerPass(speakers, frames);
         Tensor? cur = null;
         try
         {
@@ -230,7 +236,7 @@ public sealed partial class LongCatTransformer
                 using (cache.Stage(i))
                 {
                     Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, new LongCatPastKv(cache.Keys(i), cache.Values(i)),
-                        Probe, Probe is null ? "" : $"block{i}", audioTokens);
+                        Probe, Probe is null ? "" : $"block{i}", audioTokens, speakerPass);
                     cur.Dispose();
                     cur = next;
                 }

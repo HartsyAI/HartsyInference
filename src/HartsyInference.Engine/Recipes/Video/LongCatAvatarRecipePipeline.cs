@@ -18,7 +18,9 @@ namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>A constructed LongCat-Video-Avatar pipeline: the driving speech goes through Whisper into per-frame windows, the DiT's audio projection,
 /// and the avatar denoising loop with the portrait as the first latent frame (Ai2v) when one is given. A request longer than one segment runs as a
-/// chain: each later segment is conditioned on a fixed reference frame and the last latents of the chain so far.</summary>
+/// chain: each later segment is conditioned on a fixed reference frame and the last latents of the chain so far. A multi-speaker request runs the
+/// same path with one audio track per speaker (and a silent one for marked silent people), joined in the DiT's audio tokens, and the speakers'
+/// regions of the portrait.</summary>
 public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 {
     private readonly IBackend _backend;
@@ -54,16 +56,29 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        AudioClip speech = request.VideoAudioReference
-            ?? throw new InvalidOperationException("LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference.");
-        float[] waveform = VideoRecipeUtils.DrivingSpeech16k(request, speech);
+        VideoSpeakers? speakers = request.Speakers;
+        if (speakers is not null && LongCatAvatarSpeakers.Refusal(request, speakers) is { } refusal)
+            throw new ArgumentException(refusal, nameof(request));
+        AudioClip? speech = request.VideoAudioReference;
+        if (speakers is null && speech is null)
+            throw new InvalidOperationException("LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference.");
         // Diagnostics (default off): the speech as the engine holds it, and a reference's speech when the substitute directory has one.
         string? conditionDump = EngineKnobs.LongCatConditioningDump.Value;
         string? conditionSubstitute = EngineKnobs.LongCatConditioningSubstitute.Value;
-        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.Speech, waveform, [waveform.Length]);
-        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.Speech, -1, out float[] speechSubstitute))
-            waveform = speechSubstitute;
-        AudioBuffer drivingSpeech = AudioClipCodec.DecodeNative(speech);
+        float[] waveform = [];
+        AudioBuffer drivingSpeech = AudioBuffer.Empty;
+        if (speech is not null && speakers is null)
+        {
+            waveform = VideoRecipeUtils.DrivingSpeech16k(request, speech);
+            LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.Speech, waveform, [waveform.Length]);
+            if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.Speech, -1, out float[] speechSubstitute))
+                waveform = speechSubstitute;
+            drivingSpeech = AudioClipCodec.DecodeNative(speech);
+        }
+        else if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.Speech, -1, out _))
+        {
+            throw new NotSupportedException("A substitute speech file applies to a single speaker; substitute the audio embedding for several.");
+        }
 
         int width = settings.Width, height = settings.Height, frames = settings.Frames;
         LongCatAvatarRecipe.ValidateChainRequest(request.ChainTotalFrames, frames, width, height, settings.Fps);
@@ -77,18 +92,46 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         // A chain request longer than the segment runs the chain plan; its audio covers the whole clip, so the windows are cut once for all of it.
         int total = request.ChainTotalFrames is int chainTotal && chainTotal > frames ? chainTotal : frames;
         LongCatAvatarChainPlan? plan = total > frames ? LongCatAvatarChainPlan.For(latentFrames, total) : null;
-        // The clip delivered is the requested length; past the driving audio's end the encoder hears silence.
-        if (!drivingSpeech.IsEmpty && LongCatAvatarRecipe.DrivingAudioIsShort(drivingSpeech.Seconds, total, settings.Fps))
-            Logs.Warning($"[LongCatAvatarRecipePipeline] The driving audio lasts {drivingSpeech.Seconds:F2} s and the clip {total / (double)settings.Fps:F2} s; "
-                + "the rest of the clip is encoded as silence.");
         int clipFrames = plan?.TotalPixelFrames ?? frames;
-        float[] prepared = LongCatDrivingAudio.Prepare(waveform, clipFrames, settings.Fps, _normalizeSpeechLoudness);
-        float[] rawAudio = DrivingWindows(prepared, settings.Fps, clipFrames);
-        // The DiT's audio input before its projection: the Whisper windows of the whole clip, as the reference passes its audio embedding.
-        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.AudioEmbedding, rawAudio, [clipFrames, RowWidth]);
-        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.AudioEmbedding, clipFrames * RowWidth,
+        // One encoder input per track: the single speaker's, or each speaker's (and the silent track) laid out on one timeline.
+        float[][] prepared;
+        if (speakers is null)
+        {
+            // The clip delivered is the requested length; past the driving audio's end the encoder hears silence.
+            if (!drivingSpeech.IsEmpty && LongCatAvatarRecipe.DrivingAudioIsShort(drivingSpeech.Seconds, total, settings.Fps))
+                Logs.Warning($"[LongCatAvatarRecipePipeline] The driving audio lasts {drivingSpeech.Seconds:F2} s and the clip "
+                    + $"{total / (double)settings.Fps:F2} s; the rest of the clip is encoded as silence.");
+            prepared = [LongCatDrivingAudio.Prepare(waveform, clipFrames, settings.Fps, _normalizeSpeechLoudness)];
+        }
+        else
+        {
+            LongCatSpeakerAudio audio = LongCatAvatarSpeakers.PrepareAudio(speakers, clipFrames, settings.Fps, _normalizeSpeechLoudness);
+            prepared = audio.Tracks;
+            // The reference muxes the 16 kHz mix of the recordings, not the separated vocals.
+            drivingSpeech = new AudioBuffer { Channels = [audio.Soundtrack], SampleRate = LongCatDrivingAudio.SampleRate };
+        }
+        int tracks = prepared.Length;
+        float[][] rawAudio = new float[tracks][];
+        for (int t = 0; t < tracks; t++)
+            rawAudio[t] = DrivingWindows(prepared[t], settings.Fps, clipFrames);
+        // The DiT's audio input before its projection, the whole clip's windows: [tracks, frames, row] for several speakers.
+        int trackValues = clipFrames * RowWidth;
+        if (!string.IsNullOrEmpty(conditionDump))
+        {
+            float[] embedding = tracks == 1 ? rawAudio[0] : [.. rawAudio.SelectMany(static track => track)];
+            LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.AudioEmbedding, embedding,
+                tracks == 1 ? [clipFrames, RowWidth] : [tracks, clipFrames, RowWidth]);
+        }
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.AudioEmbedding, tracks * trackValues,
             out float[] audioSubstitute))
-            rawAudio = audioSubstitute;
+        {
+            for (int t = 0; t < tracks; t++)
+                rawAudio[t] = tracks == 1 ? audioSubstitute : audioSubstitute[(t * trackValues)..((t + 1) * trackValues)];
+        }
+        (int _, int patchHeight, int patchWidth) = _parts.Dit.Config.PatchSize;
+        LongCatSpeakers? regions = speakers is null ? null
+            : LongCatAvatarSpeakers.Conditioning(speakers, request.InitImage!, tracks, width, height, latentHeight / patchHeight,
+                latentWidth / patchWidth);
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
@@ -141,8 +184,10 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         // The DiT is placed by the streaming scope (see the base recipe); each finished step returns the stream's reservations.
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
-        float[] firstWindows = rawAudio.Length == frames * RowWidth ? rawAudio : rawAudio[..(frames * RowWidth)];
-        (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(firstWindows, frames, latentFrames);
+        float[][] firstWindows = [.. rawAudio.Select(track => track.Length == frames * RowWidth ? track : track[..(frames * RowWidth)])];
+        (float[] audioTokens, float[] unconditionalTokens) = ProjectTracks(firstWindows, frames, latentFrames);
+        long speakerBytes = regions is null ? 0
+            : LongCatSpeakers.ScratchBytes(_parts.Dit.Config, regions.GridHeight, regions.GridWidth, latentFrames);
         // The DiT's audio input after the projection: [frames·contextTokens, outputDim] here, written as the reference's [1, frames, contextTokens, outputDim]
         // (audio_tokens_step00: its audio_proj output, the same row-major elements). A substitute must hold the same element count.
         int audioDim = _parts.Dit.Config.AudioOutputDim, audioContext = audioTokens.Length / (latentFrames * audioDim);
@@ -156,11 +201,11 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         {
             float[] latents = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
                 () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                    LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth)),
+                    LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth), speakerBytes),
                 onStep =>
                 {
                     LongCatAvatarRun run = SegmentRun(latentFrames, latentHeight, latentWidth, noise, positive, negative, audioTokens,
-                        unconditionalTokens, settings, mode, condLatents, firstFrame, onStep, cancel);
+                        unconditionalTokens, settings, mode, condLatents, firstFrame, regions, onStep, cancel);
                     return _pipeline.Denoise(run).Latents;
                 },
                 bridge);
@@ -171,7 +216,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         {
             // Each segment is decoded once inside the chain and its output frames are kept; no joined latent is decoded.
             decoded = RunChain(plan, rawAudio, latentFrames, latentHeight, latentWidth, seed, noise, positive, negative, settings, mode,
-                condLatents, firstFrame, audioTokens, unconditionalTokens, bridge, cancel);
+                condLatents, firstFrame, audioTokens, unconditionalTokens, regions, bridge, cancel);
             cancel.ThrowIfCancellationRequested();
         }
         Logs.Info($"[LongCatAvatarRecipePipeline] Decoded {decoded.Length} frames {width}x{height}.");
@@ -185,24 +230,30 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     /// noise. Every segment is denoised in its own streaming scope and decoded once, outside any scope; each decoded segment keeps its output frames
     /// (segment 0 all of them, a later segment those after its context), and its last frames are re-encoded as the next context on the 1.5 path.
     /// Returns the chain's output frames, <c>plan.TotalPixelFrames</c> of them.</summary>
-    private byte[][] RunChain(LongCatAvatarChainPlan plan, float[] rawAudio, int latentFrames, int latentHeight, int latentWidth, int seed,
+    private byte[][] RunChain(LongCatAvatarChainPlan plan, float[][] rawAudio, int latentFrames, int latentHeight, int latentWidth, int seed,
         float[] noise, LongCatPrompt positive, LongCatPrompt negative, VideoEffectiveSettings settings, LongCatAvatarMode mode, int condLatents,
-        float[]? firstFrame, float[] firstAudio, float[] firstUnconditionalAudio, Action<GenerationProgress> bridge, CancellationToken cancel)
+        float[]? firstFrame, float[] firstAudio, float[] firstUnconditionalAudio, LongCatSpeakers? speakers, Action<GenerationProgress> bridge,
+        CancellationToken cancel)
     {
         int channels = _parts.Channels, hw = latentHeight * latentWidth, runLatents = plan.RunLatents;
         // The unconditional tokens are the projection of zeroed audio, the same for every later segment. The run's audio is its windows
         // (RunWindows) projected for the run's latents without the reference slot, which then takes a copy of the first frame's tokens.
         (_, float[] laterUnconditional) = ProjectAudio(new float[plan.RunWindows * RowWidth], plan.RunWindows, runLatents - 1);
         laterUnconditional = LongCatAvatarChainPlan.ReferenceSlotTokens(laterUnconditional, laterUnconditional.Length / (runLatents - 1));
+        // Every track's unconditional audio is the same zeros.
+        laterUnconditional = LongCatAvatarAudio.JoinTracks([.. Enumerable.Repeat(laterUnconditional, rawAudio.Length)], runLatents);
         List<float[]> laterAudio = [];
         List<float[]> laterNoise = [];
         for (int s = 1; s < plan.Segments; s++)
         {
             int[] pixels = plan.RunPixelIds(s);
-            float[] raw = GatherWindows(rawAudio, pixels);
-            float[] projected = ProjectConditional(raw, pixels.Length, runLatents - 1);
-            float[] tokens = LongCatAvatarChainPlan.ReferenceSlotTokens(projected, projected.Length / (runLatents - 1));
-            laterAudio.Add(tokens);
+            float[][] tokens = new float[rawAudio.Length][];
+            for (int t = 0; t < rawAudio.Length; t++)
+            {
+                float[] projected = ProjectConditional(GatherWindows(rawAudio[t], pixels), pixels.Length, runLatents - 1);
+                tokens[t] = LongCatAvatarChainPlan.ReferenceSlotTokens(projected, projected.Length / (runLatents - 1));
+            }
+            laterAudio.Add(LongCatAvatarAudio.JoinTracks(tokens, runLatents));
             laterNoise.Add(LongCatRecipeSupport.SegmentNoise(s, seed + s, channels, runLatents, latentHeight, latentWidth));
         }
 
@@ -221,14 +272,17 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             : $"[LongCatAvatarRecipePipeline] {pixelWidth}x{pixelHeight} has no measured later-run peak: the per-token estimate and its refusal apply.");
         long laterTokens = figures.Tokens;
         long laterCache = figures.CacheBytes;
-        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache, measuredPeak);
+        // The measured later-run sizes are of one speaker, so a multi-speaker block's scratch is added to them.
+        long speakerBytes = speakers is null ? 0
+            : LongCatSpeakers.ScratchBytes(_parts.Dit.Config, speakers.GridHeight, speakers.GridWidth, latentFrames);
+        LongCatRecipeSupport.RequireChainRoom(_backend, _parts, laterTokens, laterCache + speakerBytes, measuredPeak);
 
         // Segment 0: an ordinary generation in its own streaming scope.
         float[] first = LongCatRecipeSupport.RunDenoiseStreamed(_backend, _parts.Dit,
             () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar",
-                LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth)),
+                LongCatRecipeSupport.TokenCount(latentFrames, latentHeight, latentWidth), speakerBytes),
             onStep => _pipeline.Denoise(SegmentRun(latentFrames, latentHeight, latentWidth, noise, positive, negative, firstAudio,
-                firstUnconditionalAudio, settings, mode, condLatents, firstFrame, onStep, cancel)).Latents,
+                firstUnconditionalAudio, settings, mode, condLatents, firstFrame, speakers, onStep, cancel)).Latents,
             bridge);
 
         // The later segments: each run is denoised in its own scope, so the decode and the encode between runs are outside any scope.
@@ -237,7 +291,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
             settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
             settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
             _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, LongCatAvatarMode.Avc, plan.ContextLatents + 1, null,
-            Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix);
+            Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix, Speakers: speakers);
 
         // Each segment is decoded once. Segment 0 keeps all its frames; a later segment keeps the frames after its context. The last frames of a
         // segment are re-encoded as the next context (the 1.5 build: use_vcond False in the reference, pipeline 1467-1490). The 1.6 chain uses the same
@@ -262,7 +316,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
                 // A cached later step runs only its noisy frames through the blocks. The conditioning frames' keys and values come from the offloaded
                 // cache: a staged pair and the joined copy of it stay on the device for the block, and are counted with the activations, while the
                 // noisy rows' own keys and values are activations. So the headroom counts the new latents, and the cache's two pairs.
-                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, laterCache,
+                () => LongCatRecipeSupport.OpenDenoiseStream(_backend, _parts, "longcat-avatar", laterTokens, laterCache + speakerBytes,
                     measuredPeakBytes: measuredPeak),
                 // The later runs offload their cache to host memory: the device holds one block's keys and values at a time.
                 onStep => _pipeline.Denoise(run with { OnProgress = onStep, OffloadKv = figures.OffloadKv }).Latents,
@@ -278,12 +332,12 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
     /// <summary>One generation's run: the segment's latents, its audio and its conditioning.</summary>
     private LongCatAvatarRun SegmentRun(int latentFrames, int latentHeight, int latentWidth, float[] noise, LongCatPrompt positive,
         LongCatPrompt negative, float[] audioTokens, float[] unconditionalTokens, VideoEffectiveSettings settings, LongCatAvatarMode mode,
-        int condLatents, float[]? firstFrame, Action<GenerationProgress> onStep, CancellationToken cancel) =>
+        int condLatents, float[]? firstFrame, LongCatSpeakers? speakers, Action<GenerationProgress> onStep, CancellationToken cancel) =>
         new(_parts.Channels, latentFrames, latentHeight, latentWidth, noise, positive, negative, audioTokens, unconditionalTokens,
             settings.Steps, _distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear,
             settings.FlowShift ?? LongCatAvatarPipelineSettings.Shift, settings.CfgScale,
             _distilled ? 1f : LongCatAvatarPipelineSettings.AudioGuidance, mode, condLatents, firstFrame,
-            OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix);
+            OnProgress: onStep, Cancel: cancel, LoraGate: _loraGate, LoraMix: _loraMix, Speakers: speakers);
 
     /// <summary>Whisper features of the driving speech, cut into one 5-frame window per video frame: <c>[frames, 5 · 5 · 1280]</c>.</summary>
     private float[] DrivingWindows(float[] waveform, int fps, int frames)
@@ -316,6 +370,20 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         using Tensor cond = _parts.Dit.ProjectAudio(_backend, raw, latentFrames);
         using Tensor condHost = VideoRecipeUtils.HostCopy(cond);
         return condHost.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary><see cref="ProjectAudio"/> over every track, each projected on its own as the reference batches them, joined per frame.</summary>
+    private (float[] Conditional, float[] Unconditional) ProjectTracks(float[][] windows, int frames, int latentFrames)
+    {
+        (float[] first, float[] unconditional) = ProjectAudio(windows[0], frames, latentFrames);
+        if (windows.Length == 1)
+            return (first, unconditional);
+        float[][] conditional = new float[windows.Length][];
+        conditional[0] = first;
+        for (int t = 1; t < windows.Length; t++)
+            conditional[t] = ProjectConditional(windows[t], frames, latentFrames);
+        return (LongCatAvatarAudio.JoinTracks(conditional, latentFrames),
+            LongCatAvatarAudio.JoinTracks([.. Enumerable.Repeat(unconditional, windows.Length)], latentFrames));
     }
 
     /// <summary>The audio tokens of the clip and the same clip with zeroed raw audio (the unconditional pass of the three-pass CFG).</summary>

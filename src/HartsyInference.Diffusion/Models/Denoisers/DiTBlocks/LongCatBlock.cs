@@ -154,7 +154,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
 
     /// <summary>The forward with <paramref name="past"/>, the cached conditioning rows of the denoising pass, in front of the rows' own keys.</summary>
     internal Tensor Forward(IBackend backend, Tensor hidden, Tensor text, Tensor timeEmbed, in LongCatBlockInputs inputs, LongCatPastKv? past,
-        Action<string, Tensor>? probe, string stage, Tensor? audio)
+        Action<string, Tensor>? probe, string stage, Tensor? audio, LongCatSpeakerPass? speakers = null)
     {
         int dim = _config.HiddenSize;
         int s = checked(inputs.Frames * inputs.TokensPerFrame);
@@ -171,9 +171,11 @@ public sealed partial class LongCatBlock : IStreamingBlock
         using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
         probe?.Invoke($"{stage}.attn_in", normed1);
         // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
+        // With several speakers the self-attention also yields the reference map the audio step positions its queries from.
+        float[]? speakerMap = null;
         using Tensor attn = past is { } cached
-            ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached)
-            : SelfAttention(backend, normed1, in inputs, probe, stage);
+            ? CachedSelfAttention(backend, normed1, inputs.Cos, inputs.Sin, in cached, speakers, inputs.TokensPerFrame, out speakerMap)
+            : SelfAttention(backend, normed1, in inputs, probe, stage, speakers, out speakerMap);
         probe?.Invoke($"{stage}.self_attn", attn);
         using Tensor afterSelf = LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex);
         probe?.Invoke($"{stage}.after_self", afterSelf);
@@ -188,7 +190,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         {
             if (_audio is null)
                 throw new InvalidOperationException("The block has no avatar audio weights, but audio tokens were given.");
-            afterAudio = _audio.Apply(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw);
+            afterAudio = speakers is null
+                ? _audio.Apply(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw)
+                : SpeakerAudio(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw, speakers, speakerMap!, probe, stage);
             probe?.Invoke($"{stage}.after_audio", afterAudio);
         }
         Tensor stream = afterAudio ?? afterCross;
@@ -294,16 +298,18 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
-    private Tensor SelfAttention(IBackend backend, Tensor input, in LongCatBlockInputs inputs, Action<string, Tensor>? probe, string stage)
+    private Tensor SelfAttention(IBackend backend, Tensor input, in LongCatBlockInputs inputs, Action<string, Tensor>? probe, string stage,
+        LongCatSpeakerPass? speakers, out float[]? speakerMap)
     {
+        speakerMap = null;
         int s = (int)input.Shape[0];
         QkRotation rotation = new(QkRotationKind.InterleavedPairs, inputs.Cos, inputs.Sin, s);
         AttentionCallContext context = new() { QueryRotation = rotation, KeyRotation = rotation };
         if (inputs.Segments.Length == 1)
         {
             AttentionSegment.Validate(inputs.Segments, s);
-            // The fused path projects every row at once, so it runs only when the rows fit one projection tile.
-            if (inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
+            // The fused path needs one projection tile, and it exposes no rotated queries and keys for the reference map.
+            if (speakers is null && inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
                 return _selfAttention!.Forward(backend, input, input, in context);
         }
 
@@ -316,6 +322,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 probe($"{stage}.q", q);
                 probe($"{stage}.k", k);
                 probe($"{stage}.v", v);
+            }
+            if (speakers is not null)
+            {
+                // The noisy rows' queries against the first latent frame's keys.
+                using Tensor referenceKeys = HeadMajorFirstRows(backend, k, inputs.TokensPerFrame);
+                speakerMap = speakers.ReferenceMap(backend, _selfAttention, q, inputs.CondFrames * inputs.TokensPerFrame, referenceKeys);
             }
             Tensor flat = SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments);
             return _selfAttention.ProjectOutput(backend, flat);

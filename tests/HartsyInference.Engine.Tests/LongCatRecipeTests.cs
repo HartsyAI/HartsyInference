@@ -59,11 +59,12 @@ public sealed class LongCatRecipeTests
     }
 
     [Fact]
-    public void TheAvatarDeclaresTheInitImageAndDrivingAudio()
+    public void TheAvatarDeclaresTheInitImageDrivingAudioChainsAndSpeakers()
     {
         LongCatAvatarRecipe avatar = new();
 
-        Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain, avatar.Supports);
+        Assert.Equal(VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain | VideoFeatures.MultiSpeaker,
+            avatar.Supports);
     }
 
     [Fact]
