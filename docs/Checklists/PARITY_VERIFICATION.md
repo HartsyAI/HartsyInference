@@ -490,7 +490,7 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 |---|---|---|---|
 | **Duo v1** (inclusionAI) | not run | CPU tiny-model cached-vs-dense blocks, session driver, duo_5_17 video and audio stream decoders. CUDA on an RTX 3060 with synthetic weights (JOBs T, U, AF, AG, 2026-11-26): chunk session 3.9e-6 of CPU, audio stream 1e-5, video stream bytes equal. | Chunk session and stream decoders on main; the session driver merged as 79ac96501 (#1338) |
 
-The engine recipe has run on synthetic weights on the CPU only; no released backbone or codec has run through it, and no upstream comparison exists. Intent, ASR, the CLI route, Vulkan and quantization are not built or not run, and the service route is not exercised; see `MODEL_STATUS_VIDEO.md`.
+The engine recipe has run on synthetic weights on the CPU only; no released backbone or codec has run through it, and no upstream comparison exists. Intent, ASR, Vulkan and quantization are not built or not run; see `MODEL_STATUS_VIDEO.md`.
 
 ## Engine checks (not model parity)
 
