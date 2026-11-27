@@ -6374,6 +6374,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             long Br = fromDevice
                 ? TileRowsFromDevice((ulong)deviceTotal, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value)
                 : TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
+            AttnTrace.Tile(Br, sq, skv, totalHeads, (ulong)freeBytes, (ulong)deviceTotal, remembered.Bytes, fromDevice);
 
             // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
             // so the floor never turns a slow call into a failed one. Knob off, the height that fit is remembered so the failures (each one a full

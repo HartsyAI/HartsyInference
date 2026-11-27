@@ -345,6 +345,7 @@ public sealed partial class CudaBackend
     /// that decides with the knob off does not log, so an ordinary run's log is empty.</summary>
     internal void LogGate(string gate, bool over, GateReading reading)
     {
+        AttnTrace.Gate(gate, over, reading.Budget, reading.Free, reading.Total);
         if (EngineKnobs.TileFromDevice.Value != true) return;
         TileFreeLog.RecordGate(gate, reading.Free, reading.Total, over);
     }
