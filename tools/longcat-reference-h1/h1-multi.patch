@@ -1,0 +1,291 @@
+diff --git a/run_demo_avatar_multi_audio_to_video.py b/run_demo_avatar_multi_audio_to_video.py
+index 9c00308..b39f755 100644
+--- a/run_demo_avatar_multi_audio_to_video.py
++++ b/run_demo_avatar_multi_audio_to_video.py
+@@ -29,6 +29,7 @@ from longcat_video.audio_process import get_audio_encoder, get_audio_feature_ext
+ from longcat_video.audio_process.torch_utils import save_video_ffmpeg
+ from longcat_video.audio_process.vocal_separator import separate_vocals
+ from audio_separator.separator import Separator
++import h1_seq  # H1: sequential placement and memory log (H1_SEQ=1); inert otherwise
+ 
+ 
+ def torch_gc():
+@@ -41,11 +42,73 @@ def generate_random_uid():
+     uid = timestamp_part + random_part
+     return uid
+ 
++def _h1_dump(latent, video_array, segment):
++    """H1 reference dump: the segment's latent and every decoded frame as lossless PNG. Off unless H1_DUMP_DIR is set.
++    The first segment is written to H1_DUMP_DIR, later ones to H1_DUMP_DIR/segment_NN."""
++    d = os.environ.get("H1_DUMP_DIR")
++    if not d:
++        return
++    if segment > 0:
++        d = os.path.join(d, f"segment_{segment:02d}")
++    os.makedirs(d, exist_ok=True)
++    lat = latent.detach().float().cpu().numpy() if hasattr(latent, "detach") else np.asarray(latent, dtype=np.float32)
++    np.save(os.path.join(d, "final_latent.npy"), lat)
++    for i, img in enumerate(video_array):
++        PIL.Image.fromarray(img).save(os.path.join(d, f"frame_{i:03d}.png"))
++
++def _h1_separate_enabled():
++    """H1: the demo's Kim_Vocal_2 separation runs only with H1_SEPARATE=1. The default is the speech file unchanged."""
++    return os.environ.get("H1_SEPARATE", "0") == "1"
++
+ def extract_vocal_from_speech(source_path, vocal_separator, duration):
+     if source_path is None:
+         return None
+-    speech_array, _ = separate_vocals(vocal_separator, source_path, duration=duration)
+-    return speech_array
++    if _h1_separate_enabled():
++        speech_array, _ = separate_vocals(vocal_separator, source_path, duration=duration)
++        return speech_array
++    # H1 pass-through: the speech file, mono at 16 kHz and cut to the clip length (the format the separator returns).
++    mono, _ = librosa.load(source_path, sr=16000, mono=True)
++    if duration is not None:
++        mono = mono[: math.ceil(duration * 16000)]
++    return mono.astype(np.float32, copy=False)
++
++def _h1_audio_embeddings(pipe, vocal_separator, left_raw_speech_path, right_raw_speech_path, audio_type, use_background_silent_audio,
++                         num_frames, save_fps, num_segments, num_cond_frames, audio_stride, local_rank, model_type, use_loudness_norm,
++                         audio_output_name):
++    """H1: the demo's own audio block, moved into a function so H1_SEQ can run it before the DiT is on the GPU."""
++    # extract vocal
++    sr = 16000
++    generate_duration = num_frames / save_fps + (num_segments-1) * (num_frames-num_cond_frames) / save_fps
++    audio_process_duration = generate_duration + 1.0
++    left_speech_array = extract_vocal_from_speech(left_raw_speech_path, vocal_separator, audio_process_duration)
++    right_speech_array = extract_vocal_from_speech(right_raw_speech_path, vocal_separator, audio_process_duration)
++
++    # prepare each vocal and synthesize the sum audio
++    left_speech_array_ext, right_speech_array_ext, merge_speech = audio_prepare_multi(left_speech_array, right_speech_array, audio_process_duration, \
++                                                                                        left_raw_speech_path, right_raw_speech_path, sample_rate=sr, audio_type=audio_type)
++    merge_speech_path = f"/tmp/temp_speech_{audio_output_name}_merge.wav"
++    sf.write(merge_speech_path, merge_speech, 16000)
++
++    left_full_audio_emb = pipe.get_audio_embedding(
++        left_speech_array_ext, fps=save_fps*audio_stride, device=local_rank, sample_rate=sr,
++        model_type=model_type, use_loudness_norm=use_loudness_norm
++    )
++    right_full_audio_emb = pipe.get_audio_embedding(
++        right_speech_array_ext, fps=save_fps*audio_stride, device=local_rank, sample_rate=sr,
++        model_type=model_type, use_loudness_norm=use_loudness_norm
++    )
++    if torch.isnan(left_full_audio_emb).any() or torch.isnan(right_full_audio_emb).any():
++        raise ValueError(f"broken audio embedding with nan values")
++    back_full_audio_emb = None
++    if use_background_silent_audio:
++        back_full_audio_emb = pipe.get_audio_embedding(
++            np.zeros_like(left_speech_array_ext), fps=save_fps*audio_stride, device=local_rank,
++            sample_rate=sr, model_type=model_type, use_loudness_norm=use_loudness_norm
++        )
++    assert left_full_audio_emb.shape == right_full_audio_emb.shape, f"Inconsistent audio embedding shape."
++    if use_background_silent_audio:
++        assert left_full_audio_emb.shape == back_full_audio_emb.shape, f"Inconsistent audio embedding shape between speaker and background."
++    return left_full_audio_emb, right_full_audio_emb, back_full_audio_emb, merge_speech_path
+ 
+ def audio_prepare_multi(left_speech_array, right_speech_array, generate_duration, left_raw_speech_path, right_raw_speech_path, sample_rate=16000, audio_type='para'):
+     sr = sample_rate
+@@ -123,7 +186,7 @@ def generate(args):
+     if model_type == "avatar-v1.5":
+         save_fps = 25
+         audio_stride = 1
+-    num_frames = 93
++    num_frames = h1_seq.num_frames(93)
+     num_cond_frames = 13
+ 
+     if resolution == '480p':
+@@ -177,7 +240,55 @@ def generate(args):
+         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_dir, subfolder="scheduler", torch_dtype=torch.bfloat16)
+     else:
+         raise ValueError(f"Unsupported model_type: {model_type}. Expected 'avatar-v1.0' or 'avatar-v1.5'.")
+-    
++
++    # H1 sequential placement (H1_SEQ=1): umT5 alone, prompt cache, whisper alone, then DiT and LoRAs. See h1_seq.py.
++    h1_on = h1_seq.enabled()
++    h1_pipe = None
++    h1_state = None
++    h1_audio_out = None
++    if h1_on:
++        h1_seq.check_supported(model_type, context_parallel_size, args.use_fp8, args.compile_dit, _h1_separate_enabled())
++        h1_base_bytes = h1_seq.allocated_bytes()
++        h1_seq.stage_begin("text_load")
++        text_encoder.to(local_rank)
++        h1_seq.stage_end("text_load")
++        h1_pipe = LongCatVideoAvatarPipeline(
++            tokenizer=tokenizer,
++            text_encoder=text_encoder,
++            vae=vae,
++            scheduler=scheduler,
++            dit=None,
++            audio_encoder=None,
++            audio_feature_extractor=None,
++            model_type=model_type,
++        )
++        h1_pipe._text_guidance_scale = text_guidance_scale
++        h1_pipe._audio_guidance_scale = audio_guidance_scale
++        h1_do_cfg = h1_pipe.do_classifier_free_guidance
++        h1_seq.stage_begin("prompt")
++        with torch.no_grad():  # without it the cached embeddings keep the autograd graph, and with it the umT5 weights
++            h1_pipe.encode_prompt(prompt, negative_prompt=negative_prompt, do_classifier_free_guidance=h1_do_cfg,
++                                  num_videos_per_prompt=1, max_sequence_length=512, device=local_rank, dtype=torch.bfloat16)
++        h1_seq.stage_end("prompt")
++        text_encoder = None  # the caller's reference must go before the release
++        h1_state = h1_seq.release_text_encoder(h1_pipe, h1_base_bytes)
++        h1_seq.install_prompt_guard(h1_pipe, h1_state)
++        # audio embeddings of every track with whisper alone on the GPU
++        h1_seq.stage_begin("audio")
++        whisper_path = os.path.join(checkpoint_dir, 'whisper-large-v3')
++        h1_audio = get_audio_encoder(whisper_path, model_type).to(local_rank)
++        h1_pipe.audio_encoder = h1_audio
++        h1_pipe.audio_feature_extractor = get_audio_feature_extractor(whisper_path, model_type)
++        with torch.no_grad():
++            h1_audio_out = _h1_audio_embeddings(h1_pipe, None, left_raw_speech_path, right_raw_speech_path, audio_type,
++                                                use_background_silent_audio, num_frames, save_fps, num_segments, num_cond_frames,
++                                                audio_stride, local_rank, model_type, use_loudness_norm,
++                                                f"{generate_random_uid()}_{global_rank}")
++        h1_pipe.audio_encoder = None
++        del h1_audio
++        h1_seq.free_cuda()
++        h1_seq.stage_end("audio")
++
+     if model_type == "avatar-v1.0":
+         dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="avatar_multi", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
+     elif model_type == "avatar-v1.5":
+@@ -186,7 +297,11 @@ def generate(args):
+             dit = load_quantized_dit(checkpoint_dir, subfolder="base_model_int8", cp_split_hw=cp_split_hw)
+         else:
+             dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="base_model", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
++        if h1_on:
++            h1_seq.stage_begin('dit_to_gpu')
+         dit = dit.to(local_rank)
++        if h1_on:
++            h1_seq.stage_end('dit_to_gpu')
+         if use_distill:
+             if args.mix_steps > 0:
+                 dmd_lora_path = os.path.join(checkpoint_dir, "loraA", "lora.safetensors")
+@@ -236,7 +351,7 @@ def generate(args):
+         audio_model_checkpoint_path = os.path.join(checkpoint_dir, 'chinese-wav2vec2-base')
+     elif model_type == "avatar-v1.5":
+         audio_model_checkpoint_path = os.path.join(checkpoint_dir, 'whisper-large-v3')
+-    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
++    audio_encoder = None if h1_on else get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
+     audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
+ 
+     vocal_separator_path = os.path.join(checkpoint_dir, 'vocal_separator/Kim_Vocal_2.onnx')
+@@ -245,23 +360,26 @@ def generate(args):
+     audio_output_dir_temp = Path(audio_output_dir_temp)
+     audio_separator_model_path = os.path.dirname(vocal_separator_path)
+     audio_separator_model_name = os.path.basename(vocal_separator_path)
+-    vocal_separator = Separator(
+-        output_dir=audio_output_dir_temp / "vocals",
+-        output_single_stem="vocals",
+-        model_file_dir=audio_separator_model_path,
+-    )
+-    if vocal_separator.onnx_execution_provider == ["CUDAExecutionProvider"]:
++    vocal_separator = None
++    if _h1_separate_enabled():
++        vocal_separator = Separator(
++            output_dir=audio_output_dir_temp / "vocals",
++            output_single_stem="vocals",
++            model_file_dir=audio_separator_model_path,
++        )
++    if vocal_separator is not None and vocal_separator.onnx_execution_provider == ["CUDAExecutionProvider"]:
+         vocal_separator.onnx_execution_provider = [
+             (
+                 "CUDAExecutionProvider",
+                 {"device_id": local_rank, "cudnn_conv_algo_search": "HEURISTIC"},
+             )
+         ]
+-    vocal_separator.load_model(audio_separator_model_name)
++    if vocal_separator is not None:
++        vocal_separator.load_model(audio_separator_model_name)
+ 
+     
+     # initialize pipeline
+-    pipe = LongCatVideoAvatarPipeline(
++    pipe = h1_pipe if h1_on else LongCatVideoAvatarPipeline(
+         tokenizer = tokenizer,
+         text_encoder = text_encoder,
+         vae = vae,
+@@ -271,6 +389,9 @@ def generate(args):
+         audio_feature_extractor=audio_feature_extractor,
+         model_type=model_type
+     )
++    if h1_on:
++        pipe.dit = dit
++        h1_seq.install_stage_hooks(pipe, dit, h1_state, local_rank)
+     pipe.to(local_rank)
+ 
+     if args.compile_vae:
+@@ -294,45 +415,21 @@ def generate(args):
+             options={"triton.cudagraphs": False},
+         )
+ 
+-    global_seed = 42
++    global_seed = int(os.environ.get("H1_SEED", "42"))
+     seed = global_seed + global_rank
+ 
+     generator = torch.Generator(device=local_rank)
+     generator.manual_seed(seed)
+ 
+     if cp_rank == 0:
+-        # extract vocal
+-        sr = 16000
+-        generate_duration = num_frames / save_fps + (num_segments-1) * (num_frames-num_cond_frames) / save_fps
+-        audio_process_duration = generate_duration + 1.0
+-        left_speech_array = extract_vocal_from_speech(left_raw_speech_path, vocal_separator, audio_process_duration)
+-        right_speech_array = extract_vocal_from_speech(right_raw_speech_path, vocal_separator, audio_process_duration)
+-        
+-        # prepare each vocal and synthesize the sum audio
+-        left_speech_array_ext, right_speech_array_ext, merge_speech = audio_prepare_multi(left_speech_array, right_speech_array, audio_process_duration, \
+-                                                                                            left_raw_speech_path, right_raw_speech_path, sample_rate=sr, audio_type=audio_type)
+-        merge_speech_path = f"/tmp/temp_speech_{generate_random_uid()}_{global_rank}_merge.wav"
+-        sf.write(merge_speech_path, merge_speech, 16000)
+-
+-        left_full_audio_emb = pipe.get_audio_embedding(
+-            left_speech_array_ext, fps=save_fps*audio_stride, device=local_rank, sample_rate=sr,
+-            model_type=model_type, use_loudness_norm=use_loudness_norm
+-        )
+-        right_full_audio_emb = pipe.get_audio_embedding(
+-            right_speech_array_ext, fps=save_fps*audio_stride, device=local_rank, sample_rate=sr,
+-            model_type=model_type, use_loudness_norm=use_loudness_norm
+-        )
+-        if torch.isnan(left_full_audio_emb).any() or torch.isnan(right_full_audio_emb).any():
+-            raise ValueError(f"broken audio embedding with nan values")
+-        if use_background_silent_audio:
+-            back_full_audio_emb = pipe.get_audio_embedding(
+-                np.zeros_like(left_speech_array_ext), fps=save_fps*audio_stride, device=local_rank,
+-                sample_rate=sr, model_type=model_type, use_loudness_norm=use_loudness_norm
+-            )
+-        assert left_full_audio_emb.shape == right_full_audio_emb.shape, f"Inconsistent audio embedding shape."
+-        if use_background_silent_audio:
+-            assert left_full_audio_emb.shape == back_full_audio_emb.shape, f"Inconsistent audio embedding shape between speaker and background."
+-  
++        if h1_on:
++            left_full_audio_emb, right_full_audio_emb, back_full_audio_emb, merge_speech_path = h1_audio_out
++        else:
++            left_full_audio_emb, right_full_audio_emb, back_full_audio_emb, merge_speech_path = _h1_audio_embeddings(
++                pipe, vocal_separator, left_raw_speech_path, right_raw_speech_path, audio_type, use_background_silent_audio, num_frames,
++                save_fps, num_segments, num_cond_frames, audio_stride, local_rank, model_type, use_loudness_norm,
++                f"{generate_random_uid()}_{global_rank}")
++
+         if context_parallel_util.get_cp_size() > 1:
+             full_audio_emb_shape_list = list(left_full_audio_emb.size())
+             full_audio_emb_tensor_shape_list = torch.tensor(full_audio_emb_shape_list, dtype=torch.int64, device=left_full_audio_emb.device)
+@@ -428,6 +525,7 @@ def generate(args):
+     output, latent = output_tuple 
+     output = output[0]
+     video_array = (output * 255).astype(np.uint8)
++    _h1_dump(latent, video_array, 0)
+     video = [PIL.Image.fromarray(img) for img in video_array]
+ 
+     if cp_rank == 0 and (args.save_every_segment or num_segments == 1):
+@@ -498,6 +596,7 @@ def generate(args):
+ 
+         output = output[0]
+         new_video_array = (output * 255).astype(np.uint8)
++        _h1_dump(latent, new_video_array, segment_idx)
+         new_video = [PIL.Image.fromarray(img) for img in new_video_array]
+         del output
+ 

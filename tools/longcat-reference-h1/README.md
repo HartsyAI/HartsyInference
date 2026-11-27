@@ -92,3 +92,71 @@ Apply after h1-seq.patch: `git -c core.autocrlf=false apply h1-step-dump.patch` 
 at three denoise loops and adds `h1_step_dump.py`). With `H1_STEP_DUMP_DIR` unset nothing is written or copied. Set, each denoise step
 writes `call{n:02d}_step{i:02d}_{t,noise,latent}.npy` (float32): the timestep, the model output after the pipeline's sign flip, and the
 latents after the scheduler step. Call n counts denoise calls from 0 (one per generate stage). Check: `python h1_step_dump_check.py <dir with h1_step_dump.py>`.
+
+## Multi-speaker runner (h1-multi.patch, h1_multi_runner.py)
+For the pinned `run_demo_avatar_multi_audio_to_video.py` (two speakers, per-speaker audio, reference attention map, L-RoPE).
+Status: run on CPU on a tiny checkpoint (below). NOT run on a GPU, with real weights, INT8 or Whisper.
+
+- `h1-multi.patch`: a `git diff` against the multi demo at the pinned sha. It adds `H1_SEED` (default 42), `H1_DUMP_DIR`
+  (`final_latent.npy` and `frame_NNN.png`; later segments in `segment_NN/`), `H1_SEPARATE` (as in `h1-reference.patch`: unset, the
+  speech files are used unchanged and no separator is built), `H1_NUM_FRAMES` and `H1_SEQ` (the same order as `h1-seq.patch`, with
+  both tracks and the silent background track embedded while Whisper is alone). The demo's audio block moves into a function so that
+  `H1_SEQ` can call it early. It uses `h1_seq.py` as it is; the single-demo `h1-seq.patch` and `h1-step-dump.patch` are not needed.
+- `h1_multi_runner.py`: imports the patched demo, fixes the size to `H1_SIZE` (default `368x640`) and installs the dump.
+- `h1_multi_dump.py` (`H1_MULTI_DUMP_DIR`): the step-0 dump, installed at run time with forward hooks and two wrapped functions;
+  no reference file changes. `conditioning/` holds the step-0 text, mask, audio embedding and input latent under the engine's
+  `diagnostics.longcatConditioningSubstitute` names; `probe/` holds the engine's probe names, and for the blocks in
+  `H1_MULTI_BLOCKS` (default `0,1,24,47`) the self-attention, FFN, reference map, query and key positions and audio
+  cross-attention. Distilled path only: a guided run is refused.
+- `h1_multi_compare.py <dump dir> <engine probe dir> [<engine conditioning dir>]`: relative RMS and maximum difference per probe,
+  and for each reference map the share of tokens that fall in the same region on both sides. It prints; it sets no threshold.
+- `h1_multi_cpu_check.py <patched root> <pristine root> <work dir>`: the CPU run. Its docstring lists what is real and what is
+  stubbed.
+
+### Apply and run (on the server, from the reference checkout, after `h1-sdpa`, `h1-sdpa-cross` and `h1-int8-meta`)
+```
+git -c core.autocrlf=false apply /path/to/h1-multi.patch
+cp /path/to/{h1_seq.py,h1_multi_dump.py,h1_multi_runner.py} .
+export H1_ATTN=sdpa H1_SEQ=1 H1_SIZE=368x640 H1_MULTI_DUMP_DIR=$E/multi-dump H1_DUMP_DIR=$E/frames H1_MEM_LOG=$E/h1_mem.log
+```
+Then the launch in `h1_multi_runner.py`'s docstring, with `assets/avatar/multi_example_1.json` (`sing.png`, `sing_man.WAV`,
+`sing_woman.WAV`, `para`, no boxes). The paths in that file are relative to the checkout. `multi_example_2.json` uses MP3, which the
+engine does not read.
+
+- The patch must apply to a pinned demo: the single-demo patches touch another file and can stay.
+- The checkpoint needs what the 1.6 single run used (`base_model_int8`, `loraA`, `loraB`, `whisper-large-v3`, the umT5, VAE,
+  tokenizer and scheduler). The demo no longer needs the Kim_Vocal_2 file; `audio-separator` must still be importable.
+- Memory: beyond the single-speaker run, every block builds the reference map. At 93 frames and 368x640 each half of the 32
+  heads is a [1, 16, 21160, 920] BF16 tensor (0.62 GB), with about four alive at once: about 2.5 GB of transient memory
+  (computed from the pinned code and the 1.6 config, not measured). If it does not fit, `H1_NUM_FRAMES=49` (about 1.3 GB),
+  with the engine at 49 frames.
+- Disk, at 93 frames with the default four named blocks (computed): about 22 GB for the reference dump and about 34 GB for the
+  engine's probe, which writes more stages per named block. Fewer named blocks (the same list on both sides) save about 1 GB
+  each on the reference side and 4 GB each on the engine side; the 48 block outputs take 17 GB per side regardless.
+- The reference compiles the map function with `torch.compile`, and the multi-speaker path is the only one that runs it. If it
+  fails, run again with `H1_EAGER_MAP=1` (the same function, uncompiled) and say so with the results.
+
+### Engine arm and comparison
+The same portrait, speech files and timing, `--width 640 --height 368 --frames 93`, no boxes, with
+`--set diagnostics.longcatConditioningSubstitute=$E/multi-dump/conditioning --set diagnostics.longcatProbeDump=<dir>`
+`--set diagnostics.longcatProbeBlocks=0,1,24,47 --set diagnostics.longcatConditioningDump=<dir2>`, then
+`python h1_multi_compare.py $E/multi-dump <dir> <dir2>`. The substitution gives both sides the same text, audio embedding and step-0
+latent, so the probes compare the DiT alone. The reference computes in BF16 and FP32 and the engine with its own precision, so the
+differences are not expected to be zero.
+
+### CPU run, as done
+Pinned sources with the four patches, torch 2.6.0 and diffusers 0.35.1, a tiny avatar DiT (2 blocks, 4 heads, BF16 weights,
+rank-4 LoRAs), 93 frames at 64x96. Reference side (`h1_multi_cpu_check.py`):
+- The latents of the untouched demo, the patched demo and the patched demo with `H1_SEQ=1` are identical bit for bit over two
+  segments.
+- `H1_SEQ=1` runs the stages in order (text, prompt, release, audio, DiT, denoise, decode); a guided run is refused by the dump.
+
+Engine side (CPU, HartsyInference at `e181dd033`, a temporary test that is not committed: the avatar recipe with stand-in umT5 and
+VAE, the same checkpoint, portrait and speech, the four substitutes), against the F32 reference run, `h1_multi_compare.py`:
+- 17 shared probes and the audio tokens: relative RMS 1.2e-6 at most (blocks 0 and 1: self-attention, FFN, audio
+  cross-attention, outputs, the reference map; the embedders and the velocity). Key positions equal; query positions 8e-8.
+- All 552 noisy tokens take the same region on both sides in both maps (all three regions occupied).
+- The engine's step-0 input latent is the substituted one, element for element.
+
+Not covered: INT8, GPU placement and memory, BF16 arithmetic on a GPU, `torch.compile` of the map function (the identity here),
+Whisper and its embedding, the VAE, umT5 and its tokenizer, the real LoRA rank, user boxes, sequential timing, context parallel.
