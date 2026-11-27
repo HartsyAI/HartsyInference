@@ -399,7 +399,7 @@ internal static class LongCatRecipeSupport
             }
             loaders.Add(merged);
         }
-        dit.LoadWeights(weights);
+        dit.LoadWeights(weights, checkpoint.IsInt8);
 
         (IWanVaeDecoder decoder, IWanVaeEncoder encoder) = sides is null
             ? LoadProductionVae(loaders, context.Cancel)
