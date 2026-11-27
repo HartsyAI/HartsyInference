@@ -115,6 +115,24 @@ public sealed class DuoRecipeTests : IDisposable
         Assert.Empty(ModelDownloader.MissingAssets(entry, _release.Release));
     }
 
+    [Theory]
+    [InlineData("duo-v1-causal")]
+    [InlineData("duo-v1-distill")]
+    public void ACataloguedRunIsRefusedUpFrontOnlyWhenItsReleaseFolderHasNoBackbone(string id)
+    {
+        CatalogEntry entry = ModelCatalog.All.Single(e => e.Id == id);
+        ModelSpec Spec(string path) => new() { Requested = id, Modality = Modality.Video, Catalog = entry, LocalPath = path };
+        // The release folder, its dcp folder and a file in it, the last two as they are named before any download.
+        string[] present = [_release.Release, _release.Dcp, Path.Combine(_release.Dcp, "__0_0.distcp")];
+        Assert.All(present, path => Assert.Null(DuoRecipe.BackboneRefusal(Spec(path))));
+
+        string empty = Path.Combine(_release.Root, "empty");
+        string[] absent = [empty, Path.Combine(empty, "realization", "dcp"), Path.Combine(empty, "realization", "dcp", "__0_0.distcp")];
+        string expected = Path.Combine(empty, "realization", "backbone");
+        Assert.All(absent, path => Assert.Contains(expected, DuoRecipe.BackboneRefusal(Spec(path)), StringComparison.Ordinal));
+        Assert.Null(DuoRecipe.BackboneRefusal(new ModelSpec { Requested = empty, Modality = Modality.Video, LocalPath = empty }));
+    }
+
     [Fact]
     public async Task TheDefaultsPlanWithoutIssuesAndAnOffGridFrameCountIsRefused()
     {

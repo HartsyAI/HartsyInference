@@ -32,6 +32,26 @@ internal sealed record DuoAssets(string LoraDirectory, IReadOnlyList<string> Bac
             Codec(components?.AudioVae, Path.Combine(root, "codec", "audio_vae", "diffusion_pytorch_model.safetensors"), "audio VAE"));
     }
 
+    /// <summary>Where the backbone of the release at <paramref name="checkpointPath"/> belongs: the release folder, its
+    /// <c>realization/dcp</c> folder or a file in it. Told apart by name, so no file has to exist yet.</summary>
+    public static string BackboneFolder(string checkpointPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
+        string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(checkpointPath));
+        foreach (string? dcp in new[] { full, Path.GetDirectoryName(full) })
+        {
+            string? parent = dcp is null ? null : Path.GetDirectoryName(dcp);
+            if (parent is not null && Named(dcp!, "dcp") && Named(parent, "realization"))
+            {
+                return Path.Combine(parent, "backbone");
+            }
+        }
+        return Path.Combine(full, "realization", "backbone");
+    }
+
+    private static bool Named(string folder, string name) =>
+        string.Equals(Path.GetFileName(folder), name, StringComparison.OrdinalIgnoreCase);
+
     private static string DcpFolder(string checkpointPath)
     {
         string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(checkpointPath));

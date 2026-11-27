@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Duo;
 using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
@@ -72,6 +73,29 @@ public sealed class DuoRecipe(bool distilled = false) : IVideoRecipe
     /// <inheritdoc/>
     public SamplingCapabilities.SamplingSupport SamplingSupportFor(string familyId, ResolvedModelVariant? variant) =>
         SamplingCapabilities.ForVideo(FamilyId);
+
+    /// <summary>Why a catalogued Duo model must be refused before anything is downloaded: the release folder the run would read (the spec's
+    /// path, else where the catalog puts its files) holds no <c>realization/backbone</c>, and no download provides it. Null when the folder
+    /// holds one, or the spec is not a catalogued Duo model.</summary>
+    public static string? BackboneRefusal(ModelSpec spec)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        if (spec.Catalog is not { } entry || (!_causalIds.Contains(entry.Id, StringComparer.OrdinalIgnoreCase)
+            && !_distilledIds.Contains(entry.Id, StringComparer.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+        string? path = spec.LocalPath ?? ModelDownloader.PrimaryLocalPath(entry);
+        if (path is null)
+        {
+            return null;
+        }
+        string backbone = DuoAssets.BackboneFolder(path);
+        return Directory.Exists(backbone)
+            ? null
+            : $"{entry.Id} reads the MiniMax-H3 Ref2VA backbone (about 66 GB) from '{backbone}', which is not there and no download "
+                + "provides it. Put the release's shards there, or name a release folder that holds them with --model-path.";
+    }
 
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context) => Build(context, LoadCodecs);
