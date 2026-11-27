@@ -5,15 +5,29 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Engine.Tests;
 
+/// <summary>A fact skipped unless both <c>FF_REAL_CONVERSION_PT</c> and <c>FF_REAL_CONVERSION_ST</c> name files. It does not look at
+/// <c>FF_REAL_PARITY_DIR</c>, which belongs to the parity fact.</summary>
+internal sealed class ConversionFactAttribute : FactAttribute
+{
+    public ConversionFactAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FF_REAL_CONVERSION_PT"))
+            || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FF_REAL_CONVERSION_ST")))
+        {
+            Skip = "SKIPPED: FF_REAL_CONVERSION_PT and FF_REAL_CONVERSION_ST must both name the pickle and the converted file.";
+        }
+    }
+}
+
 /// <summary>The converted S generator equals the engine's own read of the Causal Forcing++ pickle, tensor for tensor. Both sides
 /// go through the engine's reader (<c>PytorchEnvelopeReader</c> for the pickle, safetensors for the converted file), so this shows
 /// the converter wrote what the reader read; it does not check the reader against upstream's <c>torch.load</c>, which the runbook
-/// does not allow. Gated: skipped unless <c>FF_REAL_CONVERSION_PT</c> and <c>FF_REAL_CONVERSION_ST</c> name the two files.</summary>
+/// does not allow. Gated on <c>FF_REAL_CONVERSION_PT</c> and <c>FF_REAL_CONVERSION_ST</c> only.</summary>
 public sealed class FastFramesConversionTests(ITestOutputHelper output)
 {
     private const string Prefix = "model._fsdp_wrapped_module.";
 
-    [RealWeightsParityFact]
+    [ConversionFact]
     public void TheConvertedSGeneratorEqualsTheEngineReadOfThePickle()
     {
         string pt = Environment.GetEnvironmentVariable("FF_REAL_CONVERSION_PT")!;
@@ -34,6 +48,7 @@ public sealed class FastFramesConversionTests(ITestOutputHelper output)
                 string fileKey = Prefix + key;
                 Assert.True(fromFile.TryGetValue(fileKey, out Tensor? fileTensor), $"converted file has no '{fileKey}'.");
                 Assert.Equal(pickleTensor.DType, fileTensor!.DType);
+                Assert.Equal(pickleTensor.Shape, fileTensor.Shape);
                 Assert.Equal(pickleTensor.ElementCount, fileTensor.ElementCount);
                 ReadOnlySpan<float> a = pickleTensor.AsReadOnlySpan<float>();
                 ReadOnlySpan<float> b = fileTensor.AsReadOnlySpan<float>();
