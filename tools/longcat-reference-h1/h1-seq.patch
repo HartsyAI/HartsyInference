@@ -1,9 +1,9 @@
 diff --git a/h1_seq.py b/h1_seq.py
 new file mode 100644
-index 0000000..ddcd178
+index 0000000..f870345
 --- /dev/null
 +++ b/h1_seq.py
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,223 @@
 +"""H1 sequential device placement and memory log (H1_SEQ=1). Device placement only: no tensor value or dtype changes.
 +
 +Order on one GPU (23.52 GiB):
@@ -21,6 +21,8 @@ index 0000000..ddcd178
 +import gc
 +import os
 +import time
++import types
++import weakref
 +import torch
 +
 +GIB = float(2 ** 30)
@@ -121,11 +123,44 @@ index 0000000..ddcd178
 +    )
 +
 +
-+def free_text_encoder(pipe, text_encoder):
-+    """Swap umT5 out of the pipeline for the shim and free it. Returns the state dict used by the guard."""
-+    pipe.text_encoder = TextEncoderShim(text_encoder.config, dtype=text_encoder.dtype)
-+    del text_encoder
++def allocated_bytes():
++    return torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
++
++
++def _describe(obj):
++    if isinstance(obj, types.FrameType):
++        return f"frame {obj.f_code.co_name} at line {obj.f_lineno}"
++    if isinstance(obj, dict):
++        return f"dict with keys {sorted(map(str, obj.keys()))[:8]}"
++    return type(obj).__name__
++
++
++def release_text_encoder(pipe, base_bytes, tolerance_gib=0.25):
++    """Swap umT5 out of the pipeline for the shim and release every reference to it. The caller must already have set its
++    own variable to None. Raises if the module is still alive (printing its referrers), or if the GPU allocation has not
++    returned to base_bytes plus the prompt cache (tolerance_gib)."""
++    module = pipe.text_encoder
++    ref = weakref.ref(module)
++    # every parameter and buffer too: an autograd graph that saved a weight keeps the tensor alive even after the module is gone
++    tensor_refs = [weakref.ref(t) for t in list(module.parameters()) + list(module.buffers())]
++    pipe.text_encoder = TextEncoderShim(module.config, dtype=module.dtype)
++    del module
 +    free_cuda()
++    alive = ref()
++    alive_tensors = [r() for r in tensor_refs if r() is not None]
++    if alive is not None or alive_tensors:
++        target = alive if alive is not None else alive_tensors[0]
++        holders = [_describe(o) for o in gc.get_referrers(target) if o is not globals()]
++        log("text_release_FAILED", module_alive=alive is not None, tensors_alive=len(alive_tensors), holders=len(holders))
++        for h in holders:
++            print(f"[H1_MEM] referrer: {h}", flush=True)
++        del alive, alive_tensors, target
++        raise RuntimeError("H1_SEQ: umT5 is still referenced after release (referrers printed above)")
++    del alive
++    grew = (allocated_bytes() - base_bytes) / GIB
++    log("text_released", grew_since_base_GiB=f"{grew:.3f}")
++    if grew > tolerance_gib:
++        raise RuntimeError(f"H1_SEQ: GPU allocation is {grew:.3f} GiB above the base after release (limit {tolerance_gib})")
 +    return {"text_freed": True, "dit": None, "dit_on_host": False}
 +
 +
@@ -193,7 +228,7 @@ index 0000000..ddcd178
 +
 +    pipe._decode_video_latents = logged_decode
 diff --git a/run_demo_avatar_single_audio_to_video.py b/run_demo_avatar_single_audio_to_video.py
-index 6a73c74..2d144ea 100644
+index 6a73c74..976fb0b 100644
 --- a/run_demo_avatar_single_audio_to_video.py
 +++ b/run_demo_avatar_single_audio_to_video.py
 @@ -25,6 +25,7 @@ from longcat_video.audio_process import get_audio_encoder, get_audio_feature_ext
@@ -213,7 +248,7 @@ index 6a73c74..2d144ea 100644
      num_cond_frames = 13
  
      if resolution == '480p':
-@@ -131,6 +132,60 @@ def generate(args):
+@@ -131,6 +132,62 @@ def generate(args):
      else:
          raise ValueError(f"Unsupported model_type: {model_type}. Expected 'avatar-v1.0' or 'avatar-v1.5'.")
      
@@ -223,6 +258,7 @@ index 6a73c74..2d144ea 100644
 +    h1_state = None
 +    if h1_on:
 +        h1_seq.check_supported(model_type, context_parallel_size, args.use_fp8, args.compile_dit, _h1_separate_enabled())
++        h1_base_bytes = h1_seq.allocated_bytes()
 +        h1_seq.stage_begin("text_load")
 +        text_encoder.to(local_rank)
 +        h1_seq.stage_end("text_load")
@@ -240,11 +276,12 @@ index 6a73c74..2d144ea 100644
 +        h1_pipe._audio_guidance_scale = audio_guidance_scale
 +        h1_do_cfg = h1_pipe.do_classifier_free_guidance
 +        h1_seq.stage_begin("prompt")
-+        h1_pipe.encode_prompt(prompt, negative_prompt=negative_prompt, do_classifier_free_guidance=h1_do_cfg,
-+                              num_videos_per_prompt=1, max_sequence_length=512, device=local_rank, dtype=torch.bfloat16)
++        with torch.no_grad():  # without it the cached embeddings keep the autograd graph, and with it the umT5 weights
++            h1_pipe.encode_prompt(prompt, negative_prompt=negative_prompt, do_classifier_free_guidance=h1_do_cfg,
++                                  num_videos_per_prompt=1, max_sequence_length=512, device=local_rank, dtype=torch.bfloat16)
 +        h1_seq.stage_end("prompt")
-+        h1_state = h1_seq.free_text_encoder(h1_pipe, text_encoder)
-+        text_encoder = None
++        text_encoder = None  # the caller's reference must go before the release
++        h1_state = h1_seq.release_text_encoder(h1_pipe, h1_base_bytes)
 +        h1_seq.install_prompt_guard(h1_pipe, h1_state)
 +        # audio embedding with whisper alone on the GPU; the same calls as the stock cp_rank == 0 block below
 +        h1_seq.stage_begin("audio")
@@ -274,7 +311,7 @@ index 6a73c74..2d144ea 100644
      if model_type == "avatar-v1.0":
          dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="avatar_single", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
      elif model_type == "avatar-v1.5":
-@@ -139,7 +194,11 @@ def generate(args):
+@@ -139,7 +196,11 @@ def generate(args):
              dit = load_quantized_dit(checkpoint_dir, subfolder="base_model_int8", cp_split_hw=cp_split_hw)
          else:
              dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="base_model", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
@@ -286,7 +323,7 @@ index 6a73c74..2d144ea 100644
          if use_distill:
              if args.mix_steps > 0:
                  dmd_lora_path = os.path.join(checkpoint_dir, "loraA", "lora.safetensors")
-@@ -191,7 +250,7 @@ def generate(args):
+@@ -191,7 +252,7 @@ def generate(args):
          audio_model_checkpoint_path = os.path.join(checkpoint_dir, 'chinese-wav2vec2-base')
      elif model_type == "avatar-v1.5":
          audio_model_checkpoint_path = os.path.join(checkpoint_dir, 'whisper-large-v3')
@@ -295,7 +332,7 @@ index 6a73c74..2d144ea 100644
      audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
  
      vocal_separator_path = os.path.join(checkpoint_dir, 'vocal_separator/Kim_Vocal_2.onnx')
-@@ -218,7 +277,7 @@ def generate(args):
+@@ -218,7 +279,7 @@ def generate(args):
  
      
      # initialize pipeline
@@ -304,7 +341,7 @@ index 6a73c74..2d144ea 100644
          tokenizer = tokenizer,
          text_encoder = text_encoder,
          vae = vae,
-@@ -228,6 +287,9 @@ def generate(args):
+@@ -228,6 +289,9 @@ def generate(args):
          audio_feature_extractor=audio_feature_extractor,
          model_type=model_type
      )
@@ -314,7 +351,7 @@ index 6a73c74..2d144ea 100644
      pipe.to(local_rank)
  
      if args.compile_vae:
-@@ -258,7 +320,7 @@ def generate(args):
+@@ -258,7 +322,7 @@ def generate(args):
      generator = torch.Generator(device=local_rank)
      generator.manual_seed(seed)
  

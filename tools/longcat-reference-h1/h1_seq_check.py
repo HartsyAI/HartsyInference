@@ -113,28 +113,42 @@ def expect_raise(label, fn):
     raise AssertionError(f"{label}: accepted")
 
 
-def main():
+def build_cached_pipe(no_grad=True):
+    """The demo's H1 order: the encode runs on a pipeline whose text encoder is only held by the pipeline, then the caller drops it.
+    Returns the pipeline and the cached result; no local here keeps the module alive."""
     te = make_text_encoder()
-
-    # 1. reference encode on a fresh pipeline, then the cached encode after the umT5 is freed
-    ref_pipe = make_pipe(te)
-    ref_pipe._text_guidance_scale = 4.0
-    ref_pipe._audio_guidance_scale = 4.0
-    ref = encode(ref_pipe)
-
     pipe = make_pipe(te)
     pipe._text_guidance_scale = 4.0
     pipe._audio_guidance_scale = 4.0
     cfg = pipe.do_classifier_free_guidance
     assert cfg is True
-    pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=cfg, num_videos_per_prompt=1,
-                       max_sequence_length=512, device=DEVICE, dtype=DTYPE)  # precompute with device=DEVICE, as the demo does
-    state = h1_seq.free_text_encoder(pipe, te)
+    if no_grad:
+        with torch.no_grad():
+            pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=cfg, num_videos_per_prompt=1,
+                               max_sequence_length=512, device=DEVICE, dtype=DTYPE)
+    else:
+        pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=cfg, num_videos_per_prompt=1,
+                           max_sequence_length=512, device=DEVICE, dtype=DTYPE)
     te = None
+    return pipe
+
+
+def main():
+    # 1. reference values from a separate encoder with the same weights (seeded), then the cached encode after release
+    ref_te = make_text_encoder()
+    ref_pipe = make_pipe(ref_te)
+    ref_pipe._text_guidance_scale = 4.0
+    ref_pipe._audio_guidance_scale = 4.0
+    ref = encode(ref_pipe)
+    del ref_pipe, ref_te
+
+    pipe = build_cached_pipe(no_grad=True)
+    cached = pipe._prompt_cache
+    assert all(t is None or (not t.requires_grad and t.grad_fn is None) for t in cached), "cached tensors carry autograd"
+    state = h1_seq.release_text_encoder(pipe, base_bytes=0)  # CPU: no GPU bytes to compare, the referrer check still runs
     h1_seq.install_prompt_guard(pipe, state)
-    # generate passes device=self.device; the key uses str(device), so this must equal the device passed above
     pipe.device = DEVICE
-    got = pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=cfg, num_videos_per_prompt=1,
+    got = pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=True, num_videos_per_prompt=1,
                              max_sequence_length=512, device=DEVICE, dtype=DTYPE)
     for i, (a, b) in enumerate(zip(ref, got)):
         if a is None:
@@ -142,12 +156,22 @@ def main():
             continue
         assert a.shape == b.shape and a.dtype == b.dtype, (i, a.shape, b.shape, a.dtype, b.dtype)
         assert torch.equal(a, b), f"tensor {i} differs"
-    print("PASS: cached prompt result equals a fresh encode_prompt (4 tensors, values and dtypes); umT5 freed")
+    print("PASS: cached result equals a fresh encode_prompt; umT5 collected (weakref dead) after release")
+
+    # 1b. regression: the encode without no_grad keeps the module alive through the autograd graph, so release must refuse
+    pipe_graph = build_cached_pipe(no_grad=False)
+    try:
+        h1_seq.release_text_encoder(pipe_graph, base_bytes=0)
+    except RuntimeError as exc:
+        print(f"PASS (refused, encode without no_grad keeps umT5 alive): {str(exc)[:100]}")
+    else:
+        raise AssertionError("release accepted a module still held by the autograd graph")
+    del pipe_graph
 
     # 2. misses
-    expect_raise("different prompt", lambda: pipe.encode_prompt("a dog", negative_prompt=NEG, do_classifier_free_guidance=cfg,
+    expect_raise("different prompt", lambda: pipe.encode_prompt("a dog", negative_prompt=NEG, do_classifier_free_guidance=True,
                                                                 num_videos_per_prompt=1, max_sequence_length=512, device=DEVICE, dtype=DTYPE))
-    expect_raise("different dtype", lambda: pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=cfg,
+    expect_raise("different dtype", lambda: pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=True,
                                                               num_videos_per_prompt=1, max_sequence_length=512, device=DEVICE, dtype=torch.bfloat16))
     expect_raise("different cfg flag", lambda: pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=False,
                                                                  num_videos_per_prompt=1, max_sequence_length=512, device=DEVICE, dtype=DTYPE))
@@ -224,9 +248,9 @@ def main():
     assert torch.equal(out, torch.full((2,), 2.0))
     assert moves == ["cpu"], moves
     assert state["dit_on_host"] is True
-    pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=cfg, num_videos_per_prompt=1,
+    pipe.encode_prompt(PROMPT, negative_prompt=NEG, do_classifier_free_guidance=True, num_videos_per_prompt=1,
                        max_sequence_length=512, device=DEVICE, dtype=DTYPE)
-    assert moves == ["cpu", "cpu"], moves  # the guard moved the DiT back (device string from state)
+    assert moves == ["cpu", "cpu"], moves  # the guard moved the DiT back
     assert state["dit_on_host"] is False
     h1_seq.move_dit_and_loras = real_move
     os.environ.pop("H1_DECODE_OFFLOAD", None)

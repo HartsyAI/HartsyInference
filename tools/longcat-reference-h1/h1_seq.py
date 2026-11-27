@@ -15,6 +15,8 @@ Memory: torch.cuda peaks are reset at each stage and logged after every denoise 
 import gc
 import os
 import time
+import types
+import weakref
 import torch
 
 GIB = float(2 ** 30)
@@ -115,11 +117,44 @@ def prompt_key(prompt, negative_prompt, do_classifier_free_guidance, num_videos_
     )
 
 
-def free_text_encoder(pipe, text_encoder):
-    """Swap umT5 out of the pipeline for the shim and free it. Returns the state dict used by the guard."""
-    pipe.text_encoder = TextEncoderShim(text_encoder.config, dtype=text_encoder.dtype)
-    del text_encoder
+def allocated_bytes():
+    return torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+
+
+def _describe(obj):
+    if isinstance(obj, types.FrameType):
+        return f"frame {obj.f_code.co_name} at line {obj.f_lineno}"
+    if isinstance(obj, dict):
+        return f"dict with keys {sorted(map(str, obj.keys()))[:8]}"
+    return type(obj).__name__
+
+
+def release_text_encoder(pipe, base_bytes, tolerance_gib=0.25):
+    """Swap umT5 out of the pipeline for the shim and release every reference to it. The caller must already have set its
+    own variable to None. Raises if the module is still alive (printing its referrers), or if the GPU allocation has not
+    returned to base_bytes plus the prompt cache (tolerance_gib)."""
+    module = pipe.text_encoder
+    ref = weakref.ref(module)
+    # every parameter and buffer too: an autograd graph that saved a weight keeps the tensor alive even after the module is gone
+    tensor_refs = [weakref.ref(t) for t in list(module.parameters()) + list(module.buffers())]
+    pipe.text_encoder = TextEncoderShim(module.config, dtype=module.dtype)
+    del module
     free_cuda()
+    alive = ref()
+    alive_tensors = [r() for r in tensor_refs if r() is not None]
+    if alive is not None or alive_tensors:
+        target = alive if alive is not None else alive_tensors[0]
+        holders = [_describe(o) for o in gc.get_referrers(target) if o is not globals()]
+        log("text_release_FAILED", module_alive=alive is not None, tensors_alive=len(alive_tensors), holders=len(holders))
+        for h in holders:
+            print(f"[H1_MEM] referrer: {h}", flush=True)
+        del alive, alive_tensors, target
+        raise RuntimeError("H1_SEQ: umT5 is still referenced after release (referrers printed above)")
+    del alive
+    grew = (allocated_bytes() - base_bytes) / GIB
+    log("text_released", grew_since_base_GiB=f"{grew:.3f}")
+    if grew > tolerance_gib:
+        raise RuntimeError(f"H1_SEQ: GPU allocation is {grew:.3f} GiB above the base after release (limit {tolerance_gib})")
     return {"text_freed": True, "dit": None, "dit_on_host": False}
 
 
