@@ -49,7 +49,7 @@ Memory: the load-time merge makes about 40 GB of host copies beside the mapped B
 
 ## First run on released weights (2026-11-27)
 
-`duo-v1-causal` on the `Duo-1.0-causal-base` release, `main` at `981965f36`, RTX 4090, host with 62 GiB of RAM (56 GiB available), the run's cgroup capped at 54 GiB, `vram.noAutopromote=true`, 320x384, 2 steps (the release runs 50), history window 34 frames. **The Intent rows, reference latent and noise were random draws, so the pictures mean nothing. This shows loading, merging, shapes, memory and time. It is not parity.**
+JOB BL: `duo-v1-causal` on the `Duo-1.0-causal-base` release, `main` at `981965f36`, RTX 4090, host with 62 GiB of RAM (56 GiB available), the run's cgroup capped at 54 GiB, `vram.noAutopromote=true`, 320x384, 2 steps (the release runs 50), history window 34 frames. **The Intent rows, reference latent and noise were random draws, so the pictures mean nothing. This shows loading, merging, shapes, memory and time. It is not parity.**
 
 | | A: 1 block | B: 2 blocks |
 |---|---|---|
@@ -60,7 +60,7 @@ Memory: the load-time merge makes about 40 GB of host copies beside the mapped B
 | Peak host RSS | 56,564,256 kB (53.9 GiB) | 56,744,172 kB (54.1 GiB) |
 | GPU-wide memory peak | 16,697 MiB, about 436 MiB of it SwarmUI's | 16,898 MiB |
 
-Both merged 317 LoRA modules into 213 weights, loaded 560 video VAE and 1087 audio VAE tensors, held 842 history rows and produced no nonfinite latent. A logged the DiT as streamed (68.06 GB with its reserve against 13.99 GB free). The CLI prints the time since the previous step, so the first step has none, and B's [3/4] covers block 0's commit as well as a step. Load, merge and decode times are not logged. A first attempt at B, on a 754 s budget, was killed after 757 s in step 4 of 4, before any decode. Evidence on the server: `/home/hartsy/evidence/peer-job-bl-2026-11-27/` (B in `outB/`).
+Both merged 317 LoRA modules into 213 weights, loaded 560 video VAE and 1087 audio VAE tensors, held 842 history rows and produced no nonfinite latent. A logged the DiT as streamed (68.06 GB with its reserve against 13.99 GB free). The CLI prints the time since the previous step, so the first step has none, and B's [3/4] spans block 0's commit and decoder calls as well as block 1's first step (from the code). Load, merge and decode times are not logged. A first attempt at B, on a 754 s budget, was killed after 757 s in step 4 of 4, before any output was written. Evidence on the server: `/home/hartsy/evidence/peer-job-bl-2026-11-27/` (B in `outB/`).
 
 Host memory, sampled every 3 s from start to exit of B: `RssAnon` peaked at 40,394,248 kB (38.5 GiB) and `RssFile` at 27,962,684 kB (26.7 GiB), not at the same moment; the cgroup peaked at its cap while page cache was reclaimed. A sample over only the last 61 s of the killed attempt read `RssAnon` 38.2 GiB, `RssFile` 9.0 GiB, cgroup anonymous 38.2 GiB and cgroup file 15.6 GiB. The anonymous peak (41.4 GB) agrees with the computed 40 GB of merge copies. Peak RSS is higher than that because it also counts the mapped checkpoint pages resident at the time, which the kernel can drop. B's peak reads 0.1 GiB over the cap; mapped pages that another cgroup had cached would count in RSS and not against the cap (a possible cause, not checked).
 
