@@ -71,3 +71,18 @@ grep for `flash_attn` in the code path before trusting a run.
 - The size override only changes the avatar pipeline's `get_condition_shape`. Anything else that reads the aspect-ratio buckets
   is not changed.
 - The demo's `save_video_ffmpeg` path still writes an mp4. The PNG frames are the lossless record.
+
+## Sequential placement on one 23.52 GiB card (h1-seq.patch, H1_SEQ=1)
+Apply after the other patches, from the run checkout: `git -c core.autocrlf=false apply h1-seq.patch` (it also adds `h1_seq.py`).
+Device placement only. Order: umT5 alone and the prompt encoded once into the pipeline's own cache (a miss raises), umT5 freed;
+whisper alone for the audio embedding, freed; then the INT8 DiT and both LoRAs on the GPU, as stock; generation. The DiT is
+moved to the host before each VAE decode only with `H1_DECODE_OFFLOAD=1`.
+Memory: `h1_seq.py` resets the CUDA peaks at each stage and logs `[H1_MEM] ...` lines (allocated and reserved, now and peak, GiB)
+after each stage and each denoise forward, flushed to stdout and to `H1_MEM_LOG` (default `h1_mem.log`).
+Fallback: `H1_NUM_FRAMES=49` (1 mod 4, at least 14) runs 49 frames instead of 93. The demo's arithmetic supports it unchanged; the
+comparison then covers 49 frames only.
+Refused, not run differently: `--use_fp8`, `--compile_dit`, context parallel > 1, avatar-v1.0, `H1_SEPARATE=1`.
+
+Check (CPU, tiny umT5, real pipeline class from the pinned package): `h1_seq_check.py <pristine reference root> <dir with h1_seq.py>`.
+It covers the cache result equal to a fresh encode, the three cache misses, pipe.to with the shim, the frame override, the DiT and
+LoRA move, and the forward and decode hooks. It does not cover the demo's H1 block, the GPU residency, or the memory numbers.

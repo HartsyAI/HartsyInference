@@ -1,0 +1,323 @@
+diff --git a/h1_seq.py b/h1_seq.py
+new file mode 100644
+index 0000000..6e60616
+--- /dev/null
++++ b/h1_seq.py
+@@ -0,0 +1,186 @@
++"""H1 sequential device placement and memory log (H1_SEQ=1). Device placement only: no tensor value or dtype changes.
++
++Order on one GPU (23.52 GiB):
++  1. umT5 (text_encoder) to the GPU alone; encode the prompt and the negative prompt once through the pipeline's own
++     encode_prompt (same key, dtype and device as generate uses); keep the result in pipe._prompt_cache.
++  2. umT5 is freed. From then on encode_prompt is guarded: a call whose key is not the cached key raises. It never reloads umT5.
++  3. whisper (audio encoder) alone on the GPU for the audio embedding; freed.
++  4. DiT and LoRAs to the GPU (the stock order: dit.to, then the LoRA block), then generation as stock.
++  5. Optional (H1_DECODE_OFFLOAD=1): DiT and LoRA objects go to the host before each VAE decode, and back before the next denoise.
++
++Memory: torch.cuda peaks are reset at each stage and logged after every denoise forward, flushed to stdout and to H1_MEM_LOG
++(default h1_mem.log in the working directory), so a failed run still leaves the numbers.
++"""
++
++import gc
++import os
++import torch
++
++GIB = float(2 ** 30)
++MEM_LOG = os.environ.get("H1_MEM_LOG", "h1_mem.log")
++
++
++def enabled():
++    return os.environ.get("H1_SEQ", "0") == "1"
++
++
++def num_frames(default):
++    """The reference's frame count, unless H1_SEQ=1 and H1_NUM_FRAMES is set (the fallback). Frames must be 1 mod 4."""
++    if not enabled() or "H1_NUM_FRAMES" not in os.environ:
++        return default
++    n = int(os.environ["H1_NUM_FRAMES"])
++    if n < 14 or (n - 1) % 4 != 0:
++        raise ValueError(f"H1_NUM_FRAMES={n}: need n >= 14 (13 condition frames) and (n-1) % 4 == 0")
++    return n
++
++
++def check_supported(model_type, context_parallel_size, use_fp8, compile_dit, separate):
++    """Refuse configurations this placement does not cover, rather than run them differently."""
++    if model_type != "avatar-v1.5":
++        raise NotImplementedError(f"H1_SEQ covers avatar-v1.5 (1.6 maps to it), got {model_type}")
++    if context_parallel_size != 1:
++        raise NotImplementedError("H1_SEQ covers context_parallel_size 1 only")
++    if use_fp8 or compile_dit:
++        raise NotImplementedError("H1_SEQ does not cover --use_fp8 or --compile_dit")
++    if separate:
++        raise NotImplementedError("H1_SEQ needs H1_SEPARATE=0 (pass-through speech)")
++
++
++def log(stage, **fields):
++    if torch.cuda.is_available():
++        dev = torch.cuda.current_device()
++        now_a = torch.cuda.memory_allocated(dev) / GIB
++        now_r = torch.cuda.memory_reserved(dev) / GIB
++        peak_a = torch.cuda.max_memory_allocated(dev) / GIB
++        peak_r = torch.cuda.max_memory_reserved(dev) / GIB
++        body = f"alloc_now={now_a:.3f} reserved_now={now_r:.3f} peak_alloc={peak_a:.3f} peak_reserved={peak_r:.3f} (GiB)"
++    else:
++        body = "cuda unavailable (CPU check)"
++    extra = " ".join(f"{k}={v}" for k, v in fields.items())
++    line = f"[H1_MEM] stage={stage} {extra} {body}".rstrip()
++    print(line, flush=True)
++    with open(MEM_LOG, "a", encoding="utf-8") as f:
++        f.write(line + "\n")
++        f.flush()
++        os.fsync(f.fileno())
++
++
++def stage_begin(name):
++    if torch.cuda.is_available():
++        torch.cuda.synchronize()
++        torch.cuda.reset_peak_memory_stats()
++    log(f"begin:{name}")
++
++
++def stage_end(name):
++    if torch.cuda.is_available():
++        torch.cuda.synchronize()
++    log(f"end:{name}")
++
++
++def free_cuda():
++    gc.collect()
++    if torch.cuda.is_available():
++        torch.cuda.empty_cache()
++
++
++class TextEncoderShim:
++    """Stands in for the freed umT5 so pipe.to() and the config reads keep working. Calling it is an error."""
++
++    def __init__(self, config, dtype):
++        self.config = config
++        self.dtype = dtype
++
++    def to(self, *args, **kwargs):
++        return self
++
++    def __call__(self, *args, **kwargs):
++        raise RuntimeError("H1_SEQ: umT5 is freed; a prompt must be in the cache before generation")
++
++
++def prompt_key(prompt, negative_prompt, do_classifier_free_guidance, num_videos_per_prompt, max_sequence_length, device, dtype):
++    """The same tuple LongCatVideoAvatarPipeline.encode_prompt stores in _prompt_cache_key (pipeline lines 318-326)."""
++    return (
++        tuple([prompt] if isinstance(prompt, str) else prompt),
++        None if negative_prompt is None else tuple(
++            [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
++        ),
++        do_classifier_free_guidance,
++        num_videos_per_prompt,
++        max_sequence_length,
++        str(device),
++        dtype,
++    )
++
++
++def free_text_encoder(pipe, text_encoder):
++    """Swap umT5 out of the pipeline for the shim and free it. Returns the state dict used by the guard."""
++    pipe.text_encoder = TextEncoderShim(text_encoder.config, dtype=text_encoder.dtype)
++    del text_encoder
++    free_cuda()
++    return {"text_freed": True, "dit": None, "dit_on_host": False}
++
++
++def move_dit_and_loras(dit, device):
++    """DiT parameters and LoRA objects together. The LoRA objects live in dit.lora_dict, which nn.Module.to does not reach.
++    This does not call dit.disable_all_loras(), which would remove the forward hooks."""
++    dit.to(device)
++    for network in getattr(dit, "lora_dict", {}).values():
++        for lora in network.loras:
++            lora.to(device)
++
++
++def install_prompt_guard(pipe, state):
++    """After umT5 is freed, encode_prompt may only return the cached result for the same key."""
++    original = pipe.encode_prompt
++
++    def guarded(prompt, negative_prompt=None, do_classifier_free_guidance=True, num_videos_per_prompt=1,
++                max_sequence_length=512, device=None, dtype=None):
++        if state["text_freed"]:
++            key = prompt_key(prompt, negative_prompt, do_classifier_free_guidance, num_videos_per_prompt,
++                             max_sequence_length, device, dtype)
++            cached = getattr(pipe, "_prompt_cache_key", None)
++            if key != cached:
++                raise RuntimeError(f"H1_SEQ prompt cache miss: requested {key!r}, cached {cached!r}")
++        state["denoise_calls"] = state.get("denoise_calls", 0) + 1
++        stage_begin(f"denoise_{state['denoise_calls']}")
++        if state.get("dit") is not None and state.get("dit_on_host"):
++            move_dit_and_loras(state["dit"], state["device"])
++            state["dit_on_host"] = False
++        return original(prompt, negative_prompt=negative_prompt,
++                        do_classifier_free_guidance=do_classifier_free_guidance,
++                        num_videos_per_prompt=num_videos_per_prompt, max_sequence_length=max_sequence_length,
++                        device=device, dtype=dtype)
++
++    pipe.encode_prompt = guarded
++
++
++def install_stage_hooks(pipe, dit, state, device):
++    """Per-forward memory log on the DiT, and the decode stage (with the optional DiT offload before decode)."""
++    state["dit"] = dit
++    state["device"] = device
++    forward = dit.forward
++    counter = {"n": 0}
++
++    def logged_forward(*args, **kwargs):
++        out = forward(*args, **kwargs)
++        counter["n"] += 1
++        log("denoise_fwd", n=counter["n"])
++        return out
++
++    dit.forward = logged_forward
++
++    decode = pipe._decode_video_latents
++    offload = os.environ.get("H1_DECODE_OFFLOAD", "0") == "1"
++
++    def logged_decode(latents):
++        stage_begin("decode")
++        if offload:
++            move_dit_and_loras(dit, "cpu")
++            state["dit_on_host"] = True
++            free_cuda()
++        out = decode(latents)
++        stage_end("decode")
++        return out
++
++    pipe._decode_video_latents = logged_decode
+diff --git a/run_demo_avatar_single_audio_to_video.py b/run_demo_avatar_single_audio_to_video.py
+index 6a73c74..2d144ea 100644
+--- a/run_demo_avatar_single_audio_to_video.py
++++ b/run_demo_avatar_single_audio_to_video.py
+@@ -25,6 +25,7 @@ from longcat_video.audio_process import get_audio_encoder, get_audio_feature_ext
+ from longcat_video.audio_process.torch_utils import save_video_ffmpeg
+ from longcat_video.audio_process.vocal_separator import separate_vocals
+ from audio_separator.separator import Separator
++import h1_seq  # H1: sequential placement and memory log (H1_SEQ=1); inert otherwise
+ 
+ 
+ def torch_gc():
+@@ -90,7 +91,7 @@ def generate(args):
+     if model_type == "avatar-v1.5":
+         save_fps = 25
+         audio_stride = 1
+-    num_frames = 93
++    num_frames = h1_seq.num_frames(93)
+     num_cond_frames = 13
+ 
+     if resolution == '480p':
+@@ -131,6 +132,60 @@ def generate(args):
+     else:
+         raise ValueError(f"Unsupported model_type: {model_type}. Expected 'avatar-v1.0' or 'avatar-v1.5'.")
+     
++    # H1 sequential placement (H1_SEQ=1): umT5 alone, prompt cache, whisper alone, then DiT and LoRAs. See h1_seq.py.
++    h1_on = h1_seq.enabled()
++    h1_pipe = None
++    h1_state = None
++    if h1_on:
++        h1_seq.check_supported(model_type, context_parallel_size, args.use_fp8, args.compile_dit, _h1_separate_enabled())
++        h1_seq.stage_begin("text_load")
++        text_encoder.to(local_rank)
++        h1_seq.stage_end("text_load")
++        h1_pipe = LongCatVideoAvatarPipeline(
++            tokenizer=tokenizer,
++            text_encoder=text_encoder,
++            vae=vae,
++            scheduler=scheduler,
++            dit=None,
++            audio_encoder=None,
++            audio_feature_extractor=None,
++            model_type=model_type,
++        )
++        h1_pipe._text_guidance_scale = text_guidance_scale
++        h1_pipe._audio_guidance_scale = audio_guidance_scale
++        h1_do_cfg = h1_pipe.do_classifier_free_guidance
++        h1_seq.stage_begin("prompt")
++        h1_pipe.encode_prompt(prompt, negative_prompt=negative_prompt, do_classifier_free_guidance=h1_do_cfg,
++                              num_videos_per_prompt=1, max_sequence_length=512, device=local_rank, dtype=torch.bfloat16)
++        h1_seq.stage_end("prompt")
++        h1_state = h1_seq.free_text_encoder(h1_pipe, text_encoder)
++        text_encoder = None
++        h1_seq.install_prompt_guard(h1_pipe, h1_state)
++        # audio embedding with whisper alone on the GPU; the same calls as the stock cp_rank == 0 block below
++        h1_seq.stage_begin("audio")
++        whisper_path = os.path.join(checkpoint_dir, 'whisper-large-v3')
++        h1_audio = get_audio_encoder(whisper_path, model_type).to(local_rank)
++        h1_pipe.audio_encoder = h1_audio
++        h1_pipe.audio_feature_extractor = get_audio_feature_extractor(whisper_path, model_type)
++        generate_duration = num_frames / save_fps + (num_segments-1)*(num_frames-num_cond_frames) / save_fps
++        audio_process_duration = generate_duration + 1.0
++        speech_array, sr = _h1_speech(None, raw_speech_path, duration=audio_process_duration)
++        assert speech_array.size > 0, "No vocal detected"
++        source_duraion = len(speech_array) / sr
++        added_sample_nums = math.ceil((audio_process_duration - source_duraion) * sr)
++        if added_sample_nums > 0:
++            speech_array = np.append(speech_array, [0.]*added_sample_nums)
++        full_audio_emb = h1_pipe.get_audio_embedding(
++            speech_array, fps=save_fps*audio_stride, device=local_rank, sample_rate=sr,
++            model_type=model_type, use_loudness_norm=use_loudness_norm
++        )
++        if torch.isnan(full_audio_emb).any():
++            raise ValueError(f"broken audio embedding with nan values")
++        h1_pipe.audio_encoder = None
++        del h1_audio
++        h1_seq.free_cuda()
++        h1_seq.stage_end("audio")
++
+     if model_type == "avatar-v1.0":
+         dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="avatar_single", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
+     elif model_type == "avatar-v1.5":
+@@ -139,7 +194,11 @@ def generate(args):
+             dit = load_quantized_dit(checkpoint_dir, subfolder="base_model_int8", cp_split_hw=cp_split_hw)
+         else:
+             dit = LongCatVideoAvatarTransformer3DModel.from_pretrained(checkpoint_dir, subfolder="base_model", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16)
++        if h1_on:
++            h1_seq.stage_begin('dit_to_gpu')
+         dit = dit.to(local_rank)
++        if h1_on:
++            h1_seq.stage_end('dit_to_gpu')
+         if use_distill:
+             if args.mix_steps > 0:
+                 dmd_lora_path = os.path.join(checkpoint_dir, "loraA", "lora.safetensors")
+@@ -191,7 +250,7 @@ def generate(args):
+         audio_model_checkpoint_path = os.path.join(checkpoint_dir, 'chinese-wav2vec2-base')
+     elif model_type == "avatar-v1.5":
+         audio_model_checkpoint_path = os.path.join(checkpoint_dir, 'whisper-large-v3')
+-    audio_encoder = get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
++    audio_encoder = None if h1_on else get_audio_encoder(audio_model_checkpoint_path, model_type).to(local_rank)
+     audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
+ 
+     vocal_separator_path = os.path.join(checkpoint_dir, 'vocal_separator/Kim_Vocal_2.onnx')
+@@ -218,7 +277,7 @@ def generate(args):
+ 
+     
+     # initialize pipeline
+-    pipe = LongCatVideoAvatarPipeline(
++    pipe = h1_pipe if h1_on else LongCatVideoAvatarPipeline(
+         tokenizer = tokenizer,
+         text_encoder = text_encoder,
+         vae = vae,
+@@ -228,6 +287,9 @@ def generate(args):
+         audio_feature_extractor=audio_feature_extractor,
+         model_type=model_type
+     )
++    if h1_on:
++        pipe.dit = dit
++        h1_seq.install_stage_hooks(pipe, dit, h1_state, local_rank)
+     pipe.to(local_rank)
+ 
+     if args.compile_vae:
+@@ -258,7 +320,7 @@ def generate(args):
+     generator = torch.Generator(device=local_rank)
+     generator.manual_seed(seed)
+ 
+-    if cp_rank == 0:
++    if cp_rank == 0 and not h1_on:
+         # extract vocal
+         generate_duration = num_frames / save_fps + (num_segments-1)*(num_frames-num_cond_frames) / save_fps
+         audio_process_duration = generate_duration + 1.0
