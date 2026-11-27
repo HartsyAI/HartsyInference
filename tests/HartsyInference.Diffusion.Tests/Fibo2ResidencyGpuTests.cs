@@ -8,6 +8,7 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Whether weights preloaded on CUDA actually leave the device when released, and what the pool trim returns. Uses synthetic
 /// tensors only, so it runs on any CUDA card with room for 256 MiB. It answers the residency question behind audit B3 without model weights.</summary>
+[Collection(DeviceMemoryCollection.Name)]
 public sealed class Fibo2ResidencyGpuTests(ITestOutputHelper output)
 {
     private const long TensorBytes = 32L * 1024 * 1024;
