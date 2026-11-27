@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Video.Pipelines;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -67,5 +68,47 @@ public sealed class FastFramesKvOffloadTests
         using CpuBackend backend = new();
         using FrameKvCache cache = new(backend, layers: 1, maxFrames: 1);
         Assert.False(cache.Offloaded);
+    }
+}
+
+/// <summary>The auto mode's boundary and the host refusal: a resident cache is chosen only when the same check after the placement passes, and an
+/// offloaded cache the host cannot hold is refused before a frame runs.</summary>
+public sealed class FastFramesOffloadBoundaryTests
+{
+    private const long Mb = 1L << 20;
+
+    [Fact]
+    public void AResidentCacheFitsExactlyBesideTheWindowAndNotOneByteLess()
+    {
+        Assert.True(FastFramesPipeline.ResidentCacheFits(freeBytes: 100 * Mb + 50 * Mb, windowBytes: 50 * Mb, kvNeedBytes: 100 * Mb));
+        Assert.False(FastFramesPipeline.ResidentCacheFits(freeBytes: 100 * Mb + 50 * Mb - 1, windowBytes: 50 * Mb, kvNeedBytes: 100 * Mb));
+    }
+
+    [Fact]
+    public void AFreeAmountThatFitsTheCacheButNotTheWindowForcesOffload()
+    {
+        // The cache fits the free VRAM on its own, but the window the placement uploads after it does not: a resident choice would then fail the check.
+        Assert.False(FastFramesPipeline.ResidentCacheFits(freeBytes: 6000 * Mb, windowBytes: 3000 * Mb, kvNeedBytes: 5000 * Mb));
+    }
+
+    [Fact]
+    public void AHostThatHoldsTheOffloadedCacheExactlyPasses()
+    {
+        FastFramesPipeline.CheckHostFits("FastFrames L", needBytes: 26 * 1024 * Mb, latentFrames: 21, availableBytes: 26 * 1024 * Mb);
+    }
+
+    [Fact]
+    public void AHostOneByteShortRefusesTheOffloadedCacheBeforeAFrame()
+    {
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            FastFramesPipeline.CheckHostFits("FastFrames L", needBytes: 26 * 1024 * Mb, latentFrames: 21, availableBytes: 26 * 1024 * Mb - 1));
+        Assert.Contains("host memory", error.Message, StringComparison.Ordinal);
+        Assert.Contains("21 latent frames", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AHostWithUnknownMemoryIsNotChecked()
+    {
+        FastFramesPipeline.CheckHostFits("FastFrames L", needBytes: long.MaxValue, latentFrames: 21, availableBytes: null);
     }
 }
