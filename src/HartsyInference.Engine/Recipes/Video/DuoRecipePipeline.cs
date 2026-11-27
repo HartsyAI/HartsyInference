@@ -25,7 +25,8 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
     /// The history is held in F32 on the backend, so this bounds its memory.</summary>
     public const string WindowFramesKey = "DuoWindowFrames";
 
-    /// <summary>The upstream offline window: seven clean 17-frame blocks of history behind the current one.</summary>
+    /// <summary>Upstream's sliding-window option default: seven clean 17-frame blocks of history behind the current one. Its demo runtime
+    /// passes 238.</summary>
     public const int DefaultWindowFrames = 144;
 
     private readonly IBackend _backend;
