@@ -76,7 +76,7 @@ public sealed class LongCatAvatarDitParityTests
     }
 
     /// <summary>The tiny avatar config the dump uses: hidden 64, depth 2, 4 heads, caption 32, audio window 5, 3 blocks of 6 channels, output 16.</summary>
-    private static LongCatConfig TinyAvatarConfig() => new()
+    internal static LongCatConfig TinyAvatarConfig() => new()
     {
         InChannels = 4, OutChannels = 4, HiddenSize = 64, Depth = 2, NumHeads = 4, CaptionChannels = 32, MlpRatio = 4,
         AdalnTembedDim = 32, FrequencyEmbeddingSize = 32, PatchSize = (1, 2, 2), TextTokensZeroPad = true,
