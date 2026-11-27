@@ -1,8 +1,8 @@
 diff --git a/run_demo_avatar_single_audio_to_video.py b/run_demo_avatar_single_audio_to_video.py
-index e32622c..db62910 100644
+index e32622c..6a73c74 100644
 --- a/run_demo_avatar_single_audio_to_video.py
 +++ b/run_demo_avatar_single_audio_to_video.py
-@@ -33,6 +33,18 @@ def torch_gc():
+@@ -33,6 +33,34 @@ def torch_gc():
  
  
  
@@ -18,10 +18,47 @@ index e32622c..db62910 100644
 +        PIL.Image.fromarray(img).save(os.path.join(d, f"frame_{i:03d}.png"))
 +
 +
++def _h1_separate_enabled():
++    """H1: the demo's Kim_Vocal_2 separation runs only with H1_SEPARATE=1. The default is the speech file unchanged."""
++    return os.environ.get("H1_SEPARATE", "0") == "1"
++
++
++def _h1_speech(vocal_separator, source_path, duration=None):
++    """H1 pass-through: the speech file, mono at 16 kHz and cut to the clip length (the same format the separator returns)."""
++    if _h1_separate_enabled():
++        return separate_vocals(vocal_separator, source_path, duration=duration)
++    import librosa
++    mono, sr = librosa.load(source_path, sr=16000, mono=True)
++    if duration is not None:
++        mono = mono[: math.ceil(duration * 16000)]
++    return mono.astype(np.float32, copy=False), 16000
++
++
  def generate(args):
  
      # load parsed args
-@@ -222,7 +234,7 @@ def generate(args):
+@@ -172,12 +200,14 @@ def generate(args):
+     audio_output_dir_temp = Path(audio_output_dir_temp)
+     audio_separator_model_path = os.path.dirname(vocal_separator_path)
+     audio_separator_model_name = os.path.basename(vocal_separator_path)
+-    vocal_separator = Separator(
+-        output_dir=audio_output_dir_temp / "vocals",
+-        output_single_stem="vocals",
+-        model_file_dir=audio_separator_model_path,
+-    )
+-    if vocal_separator.onnx_execution_provider == ["CUDAExecutionProvider"]:
++    vocal_separator = None
++    if _h1_separate_enabled():
++        vocal_separator = Separator(
++            output_dir=audio_output_dir_temp / "vocals",
++            output_single_stem="vocals",
++            model_file_dir=audio_separator_model_path,
++        )
++    if vocal_separator is not None and vocal_separator.onnx_execution_provider == ["CUDAExecutionProvider"]:
+         vocal_separator.onnx_execution_provider = [
+             (
+                 "CUDAExecutionProvider",
+@@ -222,7 +252,7 @@ def generate(args):
          )
  
      os.makedirs(output_dir, exist_ok=True)
@@ -30,7 +67,16 @@ index e32622c..db62910 100644
      seed = global_seed + global_rank
  
      generator = torch.Generator(device=local_rank)
-@@ -297,6 +309,7 @@ def generate(args):
+@@ -232,7 +262,7 @@ def generate(args):
+         # extract vocal
+         generate_duration = num_frames / save_fps + (num_segments-1)*(num_frames-num_cond_frames) / save_fps
+         audio_process_duration = generate_duration + 1.0
+-        speech_array, sr = separate_vocals(vocal_separator, raw_speech_path, duration=audio_process_duration)
++        speech_array, sr = _h1_speech(vocal_separator, raw_speech_path, duration=audio_process_duration)
+         assert speech_array.size > 0, "No vocal detected"
+ 
+         # audio padding to target length
+@@ -297,6 +327,7 @@ def generate(args):
          output, latent = output_tuple
          output = output[0]
          video_array = (output * 255).astype(np.uint8)
@@ -38,7 +84,7 @@ index e32622c..db62910 100644
          video = [PIL.Image.fromarray(img) for img in video_array]
  
          if cp_rank == 0 and (args.save_every_segment or num_segments == 1):
-@@ -328,6 +341,7 @@ def generate(args):
+@@ -328,6 +359,7 @@ def generate(args):
          output, latent = output_tuple
          output = output[0]
          video_array = (output * 255).astype(np.uint8)

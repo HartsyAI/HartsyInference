@@ -11,8 +11,11 @@ and the patched demo parses. NOT run anywhere: the runner has not been executed 
   `flash_attn_func` for `torch.nn.functional.scaled_dot_product_attention` in the self and cross attention of the
   `enable_flashattn2` branch. It runs only when `H1_ATTN=sdpa` is set; otherwise the file behaves as the pinned file.
 - `h1-reference.patch`: a `git diff` against `run_demo_avatar_single_audio_to_video.py` at the pinned sha. It adds
-  `H1_SEED` (default 42), and `_h1_dump`, which writes `final_latent.npy` and `frame_NNN.png` to `H1_DUMP_DIR`. It does nothing
-  unless `H1_DUMP_DIR` is set.
+  `H1_SEED` (default 42); `_h1_dump`, which writes `final_latent.npy` and `frame_NNN.png` to `H1_DUMP_DIR` when it is set; and
+  `H1_SEPARATE`. With `H1_SEPARATE` unset or `0` (the default), the speech file is used unchanged (mono, 16 kHz, cut to the clip
+  length) and the Kim_Vocal_2 separator is neither constructed nor run. With `H1_SEPARATE=1` the pinned separation runs.
+  The pass-through needs `audio-separator` importable, because the demo imports `separate_vocals` at module level, but it does not
+  load the Kim ONNX file: the separator is not constructed in pass-through mode.
 - `h1_runner.py`: imports the patched demo, fixes the size to `H1_SIZE` (default `368x640`, height by width) by replacing
   `LongCatVideoAvatarPipeline.get_condition_shape`, then calls the demo's `_parse_args` and `generate`.
 
@@ -36,8 +39,9 @@ reaches `longcat_video/modules/attention.py` (the base attention file, which als
 grep for `flash_attn` in the code path before trusting a run.
 
 ## Known gaps (not fixed here)
-- `run_demo_avatar_single_audio_to_video.py` imports `audio_separator.separator` at module level. Install `audio-separator==0.30.2`
-  in the venv (the version the Kim reference used), or the run fails on import.
+- `run_demo_avatar_single_audio_to_video.py` imports `audio_separator` at module level, through `vocal_separator.py`. Install `audio-separator==0.30.2`
+  (the version the Kim reference used). Installing it does not download the Kim model; only constructing a `Separator` does. Stubbing it
+  is possible, but the stub must provide `audio_separator.separator.uvr_lib_v5.spec_utils`, so installing is the simpler path.
 - The size override only changes the avatar pipeline's `get_condition_shape`. Anything else that reads the aspect-ratio buckets
   is not changed.
 - The demo's `save_video_ffmpeg` path still writes an mp4. The PNG frames are the lossless record.
