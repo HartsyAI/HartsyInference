@@ -886,13 +886,13 @@ public sealed partial class TextService : ITextService, IDisposable
         string question = VisionQuestion(request);
         SamplingOptions sampling = BuildVisionSampling(request);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
-        string answer;
-        StopReason reason = StopReason.Stop;
+        VisionGeneration gen;
+        bool reasoningOpen = false;   // only the SSM template path can open a reasoning block the answer is split on
         if (slot.MllamaVision is not null)
         {
             using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
                 slot.MllamaVision.ImageSize, MllamaMean, MllamaStd);
-            answer = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            gen = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
         else if (slot.SsmModel is not null)
         {
@@ -901,10 +901,13 @@ public sealed partial class TextService : ITextService, IDisposable
             // aspect-preserving resize (the grid is read from the resized pixels), not the square squash below.
             Qwen3VlEncoder vision = slot.SpliceVision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector.");
             using Tensor px = vision.PreprocessImage(image.Rgb, image.Width, image.Height);
-            Qwen35VlGenerator.VlGeneration gen = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!)
-                .Generate(px, question, maxTokens, sampling, request.EnableThinking);
-            answer = gen.Text;
-            reason = gen.StoppedOnToken ? StopReason.Stop : StopReason.Length;
+            // The turn tail comes from the loaded model's own template, so its switch decides the think prefix (no constant here).
+            string turnTail = slot.SsmModel.Template is JinjaChatTemplate jinja
+                ? jinja.TurnTailAfterUser(slot.SsmModel.Tokenizer, request.EnableThinking)
+                : "<|im_end|>\n<|im_start|>assistant\n";
+            reasoningOpen = Qwen35VlGenerator.ReasoningOpen(turnTail);
+            gen = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!)
+                .Generate(px, question, maxTokens, sampling, turnTail);
         }
         else
         {
@@ -915,11 +918,31 @@ public sealed partial class TextService : ITextService, IDisposable
             using Tensor px = vision is LlavaNextEncoder
                 ? LlavaNextImagePreprocessor.RawToNativeTensor(image.Rgb, image.Width, image.Height)
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
-            answer = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            gen = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
+        (string reasoning, string answer) = SplitVisionReasoning(gen.Text, reasoningOpen, gen.StoppedOnToken);
+        if (reasoning.Length > 0) sink?.Invoke(new TextChunk { Kind = TextChunkKind.Reasoning, Text = reasoning });
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
-        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
-        return new GenOutcome(answer, reason, 0, completion);
+        // Completion tokens are everything generated, reasoning included (counted from the text the model produced, not the answer).
+        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(gen.Text).Length;
+        return new GenOutcome(answer, VisionStopReason(gen.StoppedOnToken), 0, completion);
+    }
+
+    /// <summary>Maps a vision generator's stop flag to the turn's stop reason: a stop token is a natural stop, a spent token budget is a length stop.</summary>
+    internal static StopReason VisionStopReason(bool stoppedOnToken) => stoppedOnToken ? StopReason.Stop : StopReason.Length;
+
+    /// <summary>Splits a vision answer into reasoning and content, as the text path does, for a prompt that opened a reasoning block
+    /// (<paramref name="reasoningOpen"/>). Without one, the whole text is content: a non-reasoning model that spends its budget keeps its answer.
+    /// With one, the text before the first closing think marker is reasoning and the rest is content; with no marker, it is content when
+    /// decoding stopped on a token, and reasoning when the budget ran out inside the reasoning block.</summary>
+    internal static (string Reasoning, string Content) SplitVisionReasoning(string raw, bool reasoningOpen, bool stoppedOnToken)
+    {
+        const string close = "</think>";
+        if (!reasoningOpen) return ("", raw);
+        int at = raw.IndexOf(close, StringComparison.Ordinal);
+        if (at < 0) return stoppedOnToken ? ("", raw) : (raw.Replace("<think>", "", StringComparison.Ordinal).Trim(), "");
+        string reasoning = raw[..at].Replace("<think>", "", StringComparison.Ordinal).Trim();
+        return (reasoning, raw[(at + close.Length)..].TrimStart());
     }
 
     /// <summary>Loads a Hugging Face text directory: a host reference model (DeepSeek-V4.1, ERNIE-5.5, Kimi K3.1), a stateful family, or
