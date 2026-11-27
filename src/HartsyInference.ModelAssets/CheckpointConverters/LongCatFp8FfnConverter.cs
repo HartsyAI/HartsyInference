@@ -6,8 +6,9 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <summary>The weights the LongCat reference runs in FP8 (<c>enable_fp8_ffn</c>, quantization.py @ 58eb336): the SwiGLU's two input projections,
 /// <c>ffn.w1</c> and <c>ffn.w3</c>, of blocks 6 and 9 to 47, taken from the BF16 weights. Each becomes an FP8 E4M3 weight with one scale per
 /// tensor, its largest magnitude over 448.</summary>
-/// <remarks>Weights only. The reference runs those layers through Transformer Engine, which also quantizes their activations with delayed
-/// scaling; neither is reproduced here, so no parity with the reference's FP8 mode is claimed.</remarks>
+/// <remarks>Weights only: each weight is kept off the backends' native fp8 GEMMs (<see cref="Tensor.SkipNativeFp8Gemm"/>), so activations take
+/// the same dtype as beside a BF16 weight. The reference runs those layers through Transformer Engine, which also quantizes their activations
+/// with delayed scaling; neither is reproduced here, so no parity with the reference's FP8 mode is claimed.</remarks>
 public static class LongCatFp8FfnConverter
 {
     /// <summary>The reference's <c>DEFAULT_FP8_FFN_BLOCKS</c>.</summary>
@@ -37,6 +38,8 @@ public static class LongCatFp8FfnConverter
             Tensor source = weights[key];
             using Tensor wide = source.CastTo(DType.F32);
             Tensor packed = CheckpointConvertUtils.QuantizeF32ToFp8Scaled(wide);
+            // Weights only: a native fp8 GEMM would quantize the activation to e4m3 as well.
+            packed.SkipNativeFp8Gemm = true;
             owned.Add(packed);
             weights[key] = packed;
             if (owned.Remove(source))

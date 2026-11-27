@@ -65,6 +65,7 @@ public sealed class LongCatFp8FfnTests : IDisposable
             using Tensor reference = bf16.Weights[key].CastTo(DType.F32);
             LongCatFp8FfnCheck.Report report = LongCatFp8FfnCheck.Compare(reference, fp8.Weights[key]);
             Assert.True(report.Violations == 0 && report.ScaleIsAbsMaxOver448, $"{key}: {report}");
+            Assert.True(fp8.Weights[key].SkipNativeFp8Gemm, $"{key} would take a native fp8 GEMM, which quantizes its input");
         }
     }
 
@@ -102,6 +103,9 @@ public sealed class LongCatFp8FfnTests : IDisposable
                 gated = Forward(backend, patched);
 
             LongCatRecipeSupport.RequireFullyApplied(stack.Report, "lora.safetensors");
+            // The adapter's alias of a weight keeps the mark, so a LoRA does not bring the native route back.
+            Assert.All(LongCatFp8FfnConverter.Keys(), key =>
+                Assert.True(patched[key].LowRankAdjunct is not null && patched[key].SkipNativeFp8Gemm, key));
             Assert.True(LongCatTestData.RelRms(off, Forward(backend, decoded)) < 1e-5, "the FP8 forward is the decoded weights' forward");
             Assert.True(LongCatTestData.RelRms(off, Forward(backend, bf16.Weights)) > 1e-5, "the FP8 weights are not the BF16 ones");
             Assert.True(LongCatTestData.RelRms(gated, Forward(backend, merged)) < 2e-5, "gate on at 1 is the merged weight");

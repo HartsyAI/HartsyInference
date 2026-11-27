@@ -50,13 +50,14 @@ public sealed partial class VulkanBackend
     /// <summary>The fp8 Linear, CUDA's native fp8 scheme: the weight stays packed E4M3 with its per-tensor scale folded into alpha,
     /// the activation is quantized to E4M3 per tensor each call (a static checkpoint scale, or absmax/448 computed and read on the
     /// device), and the product accumulates in F32 on <c>matmul_fp8_coopmat2</c> where the device lists an E4M3 coopmat2
-    /// configuration, else <c>matmul_fp8_coopmat</c>. Refuses what the kernel cannot take — an E5M2 or block-scaled weight, a
-    /// pre-quantized input, K not a multiple of 4 or, on coopmat1, N or K off the fragment shape (a ragged M is padded) — and
+    /// configuration, else <c>matmul_fp8_coopmat</c>. Refuses a weight marked <see cref="Tensor.SkipNativeFp8Gemm"/>, and what the
+    /// kernel cannot take — an E5M2 or block-scaled weight, a pre-quantized input, K not a multiple of 4 or, on coopmat1, N or K off the fragment shape (a ragged M is padded) — and
     /// the caller falls through to the F16-cast path.</summary>
     private bool TryDispatchFp8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         if (!EnableFp8Linear || !Vk.HasFloat8CooperativeMatrix) return false;
         if (weight.DType != DType.F8E4M3 || weight.Shape.Rank != 2 || weight.QuantInfo?.BlockScale is not null) return false;
+        if (weight.SkipNativeFp8Gemm) return false;
         if ((input.DType != DType.F32 && input.DType != DType.F16) || (output.DType != DType.F32 && output.DType != DType.F16)) return false;
         long n = weight.Shape[0], k = weight.Shape[1];
         if (input.Shape[input.Shape.Rank - 1] != k) return false;

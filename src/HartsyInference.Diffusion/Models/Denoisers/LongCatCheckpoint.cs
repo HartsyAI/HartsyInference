@@ -87,6 +87,7 @@ public sealed class LongCatCheckpoint : IDisposable
         if (GgufIn(directory) is { } gguf)
             return OpenGguf(directory, gguf);
         ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, IndexNameIn(directory));
+        List<Tensor> converted = [];
         try
         {
             bool int8 = LongCatInt8Converter.IsInt8Layout(shards.Inventory.Keys);
@@ -124,7 +125,6 @@ public sealed class LongCatCheckpoint : IDisposable
             if (int8 && EngineKnobs.LongCatFp8Ffn.Value)
                 throw new NotSupportedException("numerics.longcatFp8Ffn quantizes BF16 weights; this is an INT8 release, and the reference does not "
                     + "combine the two.");
-            List<Tensor> converted = [];
             if (!int8)
                 HoldDenseAsBf16(weights, converted);
             if (EngineKnobs.LongCatFp8Ffn.Value)
@@ -137,6 +137,7 @@ public sealed class LongCatCheckpoint : IDisposable
         }
         catch
         {
+            foreach (Tensor tensor in converted) tensor.Dispose();
             shards.Dispose();
             throw;
         }

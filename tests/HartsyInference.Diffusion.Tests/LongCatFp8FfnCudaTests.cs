@@ -5,6 +5,8 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
+using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.Tests.Shared;
@@ -28,6 +30,38 @@ public sealed class LongCatFp8FfnCudaTests(ITestOutputHelper output) : IDisposab
 
     /// <summary>The default lane: how far FP8 may drift from the CPU as a multiple of the BF16 DiT's drift in the same run.</summary>
     private const double DefaultRatio = 1.5;
+
+    [CudaDeviceFact]
+    public void TheRecipeTurnsCachedWeightCastsOffOnlyWithTheKnob()
+    {
+        Dictionary<string, Tensor> dense = LongCatTestData.Weights(_config, 97);
+        Directory.CreateDirectory(_root);
+        try
+        {
+            LongCatTestData.WriteCheckpoint(_root, dense, writeConfig: false, storage: DType.BF16);
+            File.WriteAllText(Path.Combine(_root, "config.json"), LongCatTinyAvatarRelease.ConfigJson(_config));
+        }
+        finally
+        {
+            LongCatTestData.DisposeAll(dense);
+        }
+        using LongCatRecipeStandIns standIns = new(_config.CaptionChannels, _config.InChannels);
+
+        Assert.True(CachesAfterConstruct(standIns));
+        using IDisposable on = KnobProfile.Create("longcat-fp8-ffn").With(EngineKnobs.LongCatFp8Ffn, true).Push();
+        Assert.False(CachesAfterConstruct(standIns));
+    }
+
+    private bool CachesAfterConstruct(LongCatRecipeStandIns standIns)
+    {
+        using CudaBackend cuda = GpuDevices.OpenCuda();
+        cuda.CacheWeightCasts = true;
+        using IVideoRecipePipeline pipeline = new LongCatVideoRecipe(standIns.Sides).Construct(new RecipeContext
+        {
+            CheckpointPath = _root, Backend = cuda,
+        });
+        return cuda.CacheWeightCasts;
+    }
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "longcat-fp8-cuda-" + Guid.NewGuid().ToString("N"));
     private readonly LongCatConfig _config = LongCatTestData.Tiny with { Depth = 48 };

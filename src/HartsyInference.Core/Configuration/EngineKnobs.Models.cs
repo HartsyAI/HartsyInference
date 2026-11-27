@@ -40,8 +40,9 @@ public static partial class EngineKnobs
     /// <summary>Holds the FFN input projections the LongCat reference runs in FP8 as FP8 E4M3 weights; activations are not quantized.</summary>
     public static readonly Knob<bool> LongCatFp8Ffn =
         Bool("numerics.longcatFp8Ffn", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Quantizes ffn.w1 and ffn.w3 of blocks 6 and 9-47 of a dense LongCat DiT to FP8 E4M3 weights at load, the layers of the reference's "
-            + "FP8 mode (calibrated there for Avatar 1.6). Weights only: Transformer Engine's activation quantization is not reproduced.");
+            "Quantizes ffn.w1 and ffn.w3 of blocks 6 and 9-47 of a LongCat DiT held as BF16 to FP8 E4M3 weights at load, the layers of the "
+            + "reference's FP8 mode (calibrated there for Avatar 1.6). Weights only: activations are never quantized to FP8, so Transformer "
+            + "Engine's activation quantization is not reproduced. Turns cached weight casts off; the CPU decodes each weight on every call.");
 
     /// <summary>Logs per-stage Anima tensor statistics.</summary>
     public static readonly Knob<bool> AnimaDebugStats =
