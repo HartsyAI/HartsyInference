@@ -14,6 +14,13 @@ public sealed class LongCatAvatarGateTests
         Assert.Null(LongCatAvatarGate.ConsentNotice("longcat-avatar", quiet: true));
     }
 
+    [Theory]
+    [InlineData("longcat-avatar-int8")]
+    [InlineData("longcat-avatar-1.6")]
+    [InlineData("longcat-avatar-1.6-bf16")]
+    public void TheConsentLinePrintsForEveryAvatarRow(string row) =>
+        Assert.Equal(LongCatAvatarGate.ConsentText, LongCatAvatarGate.ConsentNotice(row, quiet: false));
+
     [Fact]
     public void TheConsentLineIsSilentForOtherFamiliesAndForNoFamily()
     {
