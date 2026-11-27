@@ -166,6 +166,33 @@ public sealed class DuoRecipeTests : IDisposable
         Refused(request, settings with { Width = 2048, Height = 2048 });
     }
 
+    /// <summary>The outside file holds 3 bytes, so a reader that sized it would complain about its rows and not its place.</summary>
+    [Fact]
+    public async Task AManifestNameOutsideTheRunFolderOrAMalformedManifestIsRefused()
+    {
+        using DuoRecipePipeline pipeline = Build();
+        VideoRequest request = Request();
+        VideoEffectiveSettings settings = (await Plan(request)).EffectiveSettings;
+        string outside = Path.Combine(_release.Root, "outside.bin");
+        File.WriteAllBytes(outside, [1, 2, 3]);
+        string path = Path.Combine(_release.RunFolder, "manifest.json");
+        string manifest = File.ReadAllText(path);
+        string Refusal() => Assert.Throws<InvalidDataException>(() => pipeline.Generate(request, settings, null, default)).Message;
+
+        foreach (string field in new[] { "shared.bin", "body1.bin" })
+        {
+            foreach (string name in new[] { "../outside.bin", outside.Replace('\\', '/') })
+            {
+                File.WriteAllText(path, manifest.Replace($"\"{field}\"", $"\"{name}\"", StringComparison.Ordinal));
+                Assert.Contains("run folder", Refusal(), StringComparison.Ordinal);
+            }
+        }
+        File.WriteAllText(path, "{ not json");
+        Assert.Contains("not a run manifest", Refusal(), StringComparison.Ordinal);
+        File.Delete(path);
+        Assert.Contains("does not exist", Refusal(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheReleaseResolvesFromItsFolderItsDcpFolderOrTheDistcpFile()
     {

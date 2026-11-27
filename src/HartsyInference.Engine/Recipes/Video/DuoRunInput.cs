@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Duo;
 using HartsyInference.Engine.Planning;
@@ -15,8 +14,6 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
     private const int PixelsPerLatent = 16;
     private const int SizeMultiple = 32;
 
-    private static readonly JsonSerializerOptions _manifestJson = new() { PropertyNameCaseInsensitive = true };
-
     /// <summary>Reads the run folder named by the request. The geometry comes from the settings and the Intent row counts from the folder's
     /// file lengths; <see cref="DuoRunFiles.Read"/> then checks every file.</summary>
     /// <exception cref="ArgumentException">The request asks for something Duo does not do, or disagrees with the run folder.</exception>
@@ -31,20 +28,15 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
         DuoCodecSpec codec = DuoCodecSpec.Get("duo_5_17");
         int blocks = settings.Frames / codec.Frames;
 
-        string manifestPath = Path.Combine(folder, "manifest.json");
-        DuoRunFiles.DuoRunManifest manifest =
-            JsonSerializer.Deserialize<DuoRunFiles.DuoRunManifest>(File.ReadAllText(manifestPath), _manifestJson)
-            ?? throw new InvalidDataException($"{manifestPath} is empty.");
-        if (manifest.Blocks is null || manifest.Blocks.Count != blocks)
+        DuoRunShape shape = DuoRunFiles.ReadShape(folder, config.TextDim);
+        if (shape.BodyRows.Count != blocks)
         {
-            int held = manifest.Blocks?.Count ?? 0;
+            int held = shape.BodyRows.Count;
             throw new ArgumentException(
                 $"The run folder holds {held} blocks ({held * codec.Frames} frames); the request asks for {settings.Frames} frames.",
                 nameof(settings));
         }
-
-        int sharedRows = Rows(folder, manifest.SharedText, config.TextDim, "sharedText");
-        if (sharedRows == 0)
+        if (shape.SharedRows == 0)
         {
             throw new InvalidDataException("sharedText holds no rows; a Duo run needs the shared Intent rows.");
         }
@@ -52,13 +44,12 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
         DuoBlockInput[] inputs = new DuoBlockInput[blocks];
         for (int block = 0; block < blocks; block++)
         {
-            int bodyRows = Rows(folder, manifest.Blocks[block]?.BodyText, config.TextDim, $"blocks[{block}].bodyText");
-            inputs[block] = Block(codec, block, bodyRows, reference with { Frames = codec.Latents });
+            inputs[block] = Block(codec, block, shape.BodyRows[block], reference with { Frames = codec.Latents });
         }
         // The two shared spans take the same positions and see the same rows as one, so the whole span is passed as the description.
         DuoSampleInput sample = new()
         {
-            SampleId = 0, SharedDescriptionRows = sharedRows, SharedCueRows = 0, Reference = reference, Blocks = inputs,
+            SampleId = 0, SharedDescriptionRows = shape.SharedRows, SharedCueRows = 0, Reference = reference, Blocks = inputs,
             CleanBlocks = 0, NoisyBlocks = [],
         };
 
@@ -169,21 +160,5 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
     {
         string? text = request.Extra.TryGetValue(key, out object? value) ? Convert.ToString(value, CultureInfo.InvariantCulture) : null;
         return string.IsNullOrWhiteSpace(text) ? null : text;
-    }
-
-    private static int Rows(string folder, string? file, int width, string field)
-    {
-        if (string.IsNullOrEmpty(file))
-        {
-            throw new InvalidDataException($"The manifest has no file for {field}.");
-        }
-        FileInfo info = new(Path.Combine(folder, file));
-        long rowBytes = (long)width * sizeof(float);
-        if (!info.Exists || info.Length % rowBytes != 0)
-        {
-            throw new InvalidDataException(
-                $"{field}: {file} must exist and hold whole rows of {width} float32 values.");
-        }
-        return checked((int)(info.Length / rowBytes));
     }
 }
