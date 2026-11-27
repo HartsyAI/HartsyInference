@@ -408,8 +408,8 @@ internal static class LongCatRecipeSupport
             weight.QuantInfo = info with { FullPrecisionMatMul = true };
             marked++;
         }
-        Logs.Info($"[LongCatRecipeSupport] numerics.longcatInt8WeightOnly: {marked} INT8 linears marked weight-only (CUDA dequantizes them on the "
-            + "host on every call).");
+        Logs.Info($"[LongCatRecipeSupport] numerics.longcatInt8WeightOnly: {marked} INT8 linears marked weight-only (CUDA unpacks each for a dense "
+            + "GEMM on every call).");
         return marked;
     }
 
