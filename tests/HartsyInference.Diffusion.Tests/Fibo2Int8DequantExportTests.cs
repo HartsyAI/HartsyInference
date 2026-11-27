@@ -42,7 +42,7 @@ public sealed class Fibo2Int8DequantExportTests(Xunit.Abstractions.ITestOutputHe
         int packed = weights.Values.Count(t => t.QuantInfo is not null);
 
         using CpuBackend cpu = new();
-        using PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackend(weights, cpu, DType.BF16);
+        using QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackend(weights, cpu, DType.BF16);
         SafeTensorsWriter.Save(outPath, weights);
 
         output.WriteLine($"wrote {weights.Count} tensors ({packed} quantized, widened to BF16) to {outPath}");
