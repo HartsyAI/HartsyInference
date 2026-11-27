@@ -493,7 +493,7 @@ internal static class DuoCliGate
         }
         return runFolder is null && windowFrames is null
             ? null
-            : "--duo-run-folder and --duo-window-frames need -m duo-v1-causal or -m duo-v1-2-causal.";
+            : "--duo-run-folder and --duo-window-frames need a Duo model: -m duo-v1-causal, duo-v1-2-causal or duo-v1-distill.";
     }
 }
 

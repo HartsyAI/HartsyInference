@@ -8,7 +8,12 @@ namespace HartsyInference.Diffusion.Models.Duo;
 /// <summary>The media and text one Duo conversation run needs: the shared Intent rows, the reference latent rows, and for each block its body
 /// Intent rows and the initial noise of its video and audio.</summary>
 public sealed record DuoRun(float[] SharedText, float[] ReferenceVideo, IReadOnlyList<float[]> BodyText, IReadOnlyList<float[]> NoiseVideo,
-    IReadOnlyList<float[]> NoiseAudio, int Steps, double Shift);
+    IReadOnlyList<float[]> NoiseAudio, int Steps, double Shift)
+{
+    /// <summary>The re-noise of each block for the distilled solver (<see cref="DuoSolver.ConsistencyRenoise"/>); null runs the causal
+    /// student's Euler steps.</summary>
+    public IReadOnlyList<DuoRenoise>? Renoise { get; init; }
+}
 
 /// <summary>What a run publishes: the video blocks as RGB8, and the audio blocks as <c>[channel][sample]</c> float PCM, in block order.</summary>
 public sealed record DuoOutput(IReadOnlyList<DuoDecodedBlock> Video, IReadOnlyList<float[]> Audio);
@@ -54,6 +59,10 @@ public sealed class DuoSession
         {
             throw new ArgumentException($"The run needs body text, video noise and audio noise for each of the {blocks} blocks.", nameof(run));
         }
+        if (run.Renoise is not null && run.Renoise.Count != blocks)
+        {
+            throw new ArgumentException($"The run needs re-noise for each of the {blocks} blocks, or none.", nameof(run));
+        }
         // Every block is checked before anything is committed: a grid or audio length that the decoders cannot take fails here, not mid-run.
         for (int block = 0; block < blocks; block++)
         {
@@ -66,6 +75,10 @@ public sealed class DuoSession
             {
                 throw new ArgumentException($"Block {block} has {input.AudioSteps} audio steps; the audio stream takes {_audio.BlockSteps}.", nameof(run));
             }
+            if (run.Renoise is not null)
+            {
+                DuoChunkSession.RequireRenoise(run.Renoise[block], run.NoiseVideo[block].Length, run.NoiseAudio[block].Length, run.Steps, block);
+            }
         }
         cancel.ThrowIfCancellationRequested();
         _ran = true;
@@ -77,7 +90,7 @@ public sealed class DuoSession
         {
             int done = block * run.Steps;
             (float[] rows, float[] audioRows) = _chunks.GenerateBlock(block, run.BodyText[block], run.NoiseVideo[block], run.NoiseAudio[block],
-                run.Steps, run.Shift, onStep is null ? null : step => onStep(done + step), cancel);
+                run.Steps, run.Shift, onStep is null ? null : step => onStep(done + step), cancel, run.Renoise?[block]);
             using (Tensor chunk = Chunk(rows, block))
             {
                 video.AddRange(_video.OnChunk(chunk));

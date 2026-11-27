@@ -19,9 +19,9 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
     /// file lengths; <see cref="DuoRunFiles.Read"/> then checks every file.</summary>
     /// <exception cref="ArgumentException">The request asks for something Duo does not do, or disagrees with the run folder.</exception>
     /// <exception cref="InvalidDataException">The run folder is malformed.</exception>
-    public static DuoRunInput Read(VideoRequest request, VideoEffectiveSettings settings, MiniMaxH3Config config)
+    public static DuoRunInput Read(VideoRequest request, VideoEffectiveSettings settings, MiniMaxH3Config config, bool distilled = false)
     {
-        RefuseUnsupported(request, settings);
+        RefuseUnsupported(request, settings, distilled);
         string folder = Option(request, DuoRecipePipeline.RunFolderKey)
             ?? throw new ArgumentException(
                 $"Duo needs a run folder: set Extra[\"{DuoRecipePipeline.RunFolderKey}\"] to a folder with manifest.json.", nameof(request));
@@ -56,7 +56,13 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
 
         int cacheRows = HistoryRows(sample, window == -1 ? blocks : Math.Min((window / codec.Frames) - 1, blocks));
         DuoRun run = DuoRunFiles.Read(folder, sample, config.TextDim, config.VideoPatchDim, config.AudioLatentsDim);
-        float shift = settings.FlowShift ?? (float)DuoSchedule.CausalShift;
+        if (distilled != (run.Renoise is not null))
+        {
+            throw new ArgumentException(distilled
+                ? "The distilled release re-noises between steps; the run folder needs renoiseVideo and renoiseAudio for every block."
+                : "A causal release takes Euler steps; its run folder must not name renoiseVideo or renoiseAudio.", nameof(request));
+        }
+        float shift = settings.FlowShift ?? (float)(distilled ? DuoSchedule.DistillShift : DuoSchedule.CausalShift);
         if (run.Steps != settings.Steps || (float)run.Shift != shift)
         {
             throw new ArgumentException(string.Create(CultureInfo.InvariantCulture,
@@ -126,7 +132,7 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
         return (int)rows;
     }
 
-    private static void RefuseUnsupported(VideoRequest request, VideoEffectiveSettings settings)
+    private static void RefuseUnsupported(VideoRequest request, VideoEffectiveSettings settings, bool distilled)
     {
         if (!string.IsNullOrWhiteSpace(request.Prompt) || !string.IsNullOrWhiteSpace(request.NegativePrompt))
         {
@@ -137,11 +143,11 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
         {
             throw new ArgumentException("Duo samples without guidance; the guidance scale must be 1.", nameof(settings));
         }
-        if ((settings.Sampler is not null && !settings.Sampler.Equals("euler", StringComparison.OrdinalIgnoreCase))
+        if ((settings.Sampler is not null && (distilled || !settings.Sampler.Equals("euler", StringComparison.OrdinalIgnoreCase)))
             || settings.Scheduler is not null || settings.AudioFlowShift is not null)
         {
             throw new ArgumentException(
-                "Duo runs its released Euler grid with one flow shift; leave the sampler, scheduler and audio flow shift unset.",
+                "Duo runs its release's own solver with one flow shift; leave the sampler, scheduler and audio flow shift unset.",
                 nameof(settings));
         }
         if (settings.Fps != DuoCodecSpec.Fps || (request.Fps is int fps && fps != DuoCodecSpec.Fps))

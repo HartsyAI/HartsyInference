@@ -196,6 +196,69 @@ public sealed class DuoChunkSessionTests
         }
     }
 
+    /// <summary>The device re-noise loop against the host sampler it mirrors: each cached block equals a dense forward driven by
+    /// <see cref="DuoSampling.Sample"/> with the same draws. Zero draws change the result, so the draws are really read.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public void ReNoisedBlocksMatchTheHostSamplerOverTheSameHistory(int steps)
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        DuoSampleInput sample = ThreeBlockSample();
+        float[] reference = Values(30, RefRows * VideoIn);
+        DuoChunkSession session = new(transformer, backend, sample, DuoRopePolicy.Old,
+            new DuoStreamCache(backend, blocks: Layers, width: Inner, capacityRows: 64));
+        session.Prefill(Shared0(), reference);
+
+        float[][] video = new float[3][];
+        float[][] audio = new float[3][];
+        for (int b = 0; b < 3; b++)
+        {
+            (video[b], audio[b]) = session.GenerateBlock(b, Body(b), Noise(40 + 10 * b, VideoRows),
+                Values(41 + 10 * b, AudioRows * AudioIn), steps, 5.0, renoise: Draws(b, steps));
+        }
+
+        for (int b = 0; b < 3; b++)
+        {
+            float[] cleanVideo = video.Take(b).SelectMany(v => v).ToArray();
+            float[] cleanAudio = audio.Take(b).SelectMany(a => a).ToArray();
+            (float[] denseVideo, float[] denseAudio) = DuoChunkSession.FullBlock(transformer, backend, sample, b, DuoRopePolicy.Old,
+                Shared0(), [Body(0), Body(1), Body(2)], reference, cleanVideo, cleanAudio,
+                Noise(40 + 10 * b, VideoRows), Values(41 + 10 * b, AudioRows * AudioIn), steps, 5.0, Draws(b, steps));
+            AssertClose(denseVideo, video[b], Tolerance, $"block {b} video against the dense re-noised forward");
+            AssertClose(denseAudio, audio[b], Tolerance, $"block {b} audio against the dense re-noised forward");
+        }
+        if (steps > 1)
+        {
+            DuoRenoise zero = new(new float[(steps - 1) * VideoRows * VideoIn], new float[(steps - 1) * AudioRows * AudioIn]);
+            (float[] other, _) = DuoChunkSession.FullBlock(transformer, backend, sample, 0, DuoRopePolicy.Old,
+                Shared0(), [Body(0), Body(1), Body(2)], reference, [], [], Noise(40, VideoRows), Values(41, AudioRows * AudioIn), steps, 5.0,
+                zero);
+            Assert.True(MaxDiff(other, video[0]) > Sensitivity, "The draws do not reach the result.");
+        }
+    }
+
+    [Fact]
+    public void ReNoiseOfTheWrongLengthIsRefusedBeforeAnythingIsCommitted()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 64);
+        DuoChunkSession session = new(transformer, backend, ThreeBlockSample(), DuoRopePolicy.Old, cache);
+        session.Prefill(Shared0(), Values(30, RefRows * VideoIn));
+        int committed = cache.Length;
+
+        Assert.Throws<ArgumentException>(() => session.GenerateBlock(0, Body(0), Noise(40, VideoRows),
+            Values(41, AudioRows * AudioIn), 4, 5.0, renoise: Draws(0, 3)));
+
+        Assert.Equal(committed, cache.Length);
+        Assert.Equal(0, session.NextBlock);
+    }
+
+    private static DuoRenoise Draws(int block, int steps) => new(
+        Values(70 + block, (steps - 1) * VideoRows * VideoIn), Values(80 + block, (steps - 1) * AudioRows * AudioIn));
+
     [Fact]
     public void LongRolloutSlidesTheWindowAndEachBlockMatchesTheWindowedForward()
     {

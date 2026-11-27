@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using Spectre.Console;
 
@@ -46,6 +47,11 @@ public static class ModelAcquisition
     /// <returns>The spec pointed at the now-present primary file, to be disposed when the run ends.</returns>
     public static AcquiredModel EnsurePresent(ModelSpec spec)
     {
+        // A Duo run also needs a backbone no catalog file provides, so it is refused before anything is offered.
+        if (DuoRecipe.BackboneRefusal(spec) is { } refusal)
+        {
+            throw new DirectoryNotFoundException(refusal);
+        }
         bool declined = false;
         ModelSpec ready = Acquire(spec, ref declined);
         return new AcquiredModel(ready, declined ? RefuseForThisRun(spec) : null);

@@ -5,17 +5,18 @@ using HartsyInference.ModelAssets.Duo;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>The files of a Duo causal release in the upstream bundle layout under one release folder: <c>realization/dcp</c> (the LoRA),
+/// <summary>The files of a Duo release in the upstream bundle layout under one release folder: <c>realization/dcp</c> (the LoRA),
 /// <c>realization/backbone</c> (the MiniMax-H3 Ref2VA shards), <c>codec/video_vae/model.safetensors</c> and
-/// <c>codec/audio_vae/diffusion_pytorch_model.safetensors</c>. A request's VAE overrides replace the codec files.</summary>
+/// <c>codec/audio_vae/diffusion_pytorch_model.safetensors</c>. The distilled release ships the LoRA alone, so the causal release's
+/// backbone and codec go beside it. A request's VAE overrides replace the codec files.</summary>
 internal sealed record DuoAssets(string LoraDirectory, IReadOnlyList<string> BackboneShards, string VideoVae, string AudioVae)
 {
     /// <summary>Resolves the release from <paramref name="checkpointPath"/>: the release folder, its <c>realization/dcp</c> folder, or a
     /// file in that folder.</summary>
     /// <exception cref="FileNotFoundException">The LoRA or a codec file is missing.</exception>
     /// <exception cref="DirectoryNotFoundException">The backbone folder is missing.</exception>
-    /// <exception cref="NotSupportedException">The release is not a causal one, or the backbone folder is not the released shard set.</exception>
-    public static DuoAssets Resolve(string checkpointPath, ComponentOverrides? components)
+    /// <exception cref="NotSupportedException">The release is of the other stage, or the backbone folder is not the released shard set.</exception>
+    public static DuoAssets Resolve(string checkpointPath, ComponentOverrides? components, bool distilled = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         string dcp = DcpFolder(checkpointPath);
@@ -25,11 +26,37 @@ internal sealed record DuoAssets(string LoraDirectory, IReadOnlyList<string> Bac
         {
             throw new DirectoryNotFoundException($"'{dcp}' is not '<release>/realization/dcp', so the backbone and codec cannot be located.");
         }
-        RefuseOtherStage(realization);
+        RefuseOtherStage(realization, distilled ? "dmd" : "causal");
         return new DuoAssets(dcp, Backbone(Path.Combine(realization, "backbone")),
             Codec(components?.VideoVae ?? components?.Vae, Path.Combine(root, "codec", "video_vae", "model.safetensors"), "video VAE"),
             Codec(components?.AudioVae, Path.Combine(root, "codec", "audio_vae", "diffusion_pytorch_model.safetensors"), "audio VAE"));
     }
+
+    /// <summary>Where the backbone of the release at <paramref name="checkpointPath"/> belongs: the release folder, its LoRA folder or a
+    /// file in it. A LoRA folder on disk is known by its <c>.metadata</c> under any name, as <see cref="Resolve"/> reads it; before a
+    /// download, <c>realization/dcp</c> is known by name.</summary>
+    public static string BackboneFolder(string checkpointPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
+        string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(checkpointPath));
+        string? lora = File.Exists(full) ? Path.GetDirectoryName(full) : full;
+        if (lora is not null && File.Exists(Path.Combine(lora, ".metadata")) && Path.GetDirectoryName(lora) is { } beside)
+        {
+            return Path.Combine(beside, "backbone");
+        }
+        foreach (string? dcp in new[] { full, Path.GetDirectoryName(full) })
+        {
+            string? parent = dcp is null ? null : Path.GetDirectoryName(dcp);
+            if (parent is not null && Named(dcp!, "dcp") && Named(parent, "realization"))
+            {
+                return Path.Combine(parent, "backbone");
+            }
+        }
+        return Path.Combine(full, "realization", "backbone");
+    }
+
+    private static bool Named(string folder, string name) =>
+        string.Equals(Path.GetFileName(folder), name, StringComparison.OrdinalIgnoreCase);
 
     private static string DcpFolder(string checkpointPath)
     {
@@ -42,7 +69,7 @@ internal sealed record DuoAssets(string LoraDirectory, IReadOnlyList<string> Bac
                 $"No Duo LoRA at '{full}': expected the release folder, or its realization/dcp folder, holding realization/dcp/.metadata.");
     }
 
-    private static void RefuseOtherStage(string realization)
+    private static void RefuseOtherStage(string realization, string expected)
     {
         string manifest = Path.Combine(realization, "complete.json");
         if (!File.Exists(manifest))
@@ -51,10 +78,11 @@ internal sealed record DuoAssets(string LoraDirectory, IReadOnlyList<string> Bac
         }
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(manifest));
         string? stage = document.RootElement.TryGetProperty("stage", out JsonElement value) ? value.GetString() : null;
-        if (!string.Equals(stage, "causal", StringComparison.Ordinal))
+        if (!string.Equals(stage, expected, StringComparison.Ordinal))
         {
             throw new NotSupportedException(
-                $"{manifest} names stage '{stage}'. Only the causal releases run; the distilled (dmd) re-noise solver is not ported.");
+                $"{manifest} names stage '{stage}'; this model runs a '{expected}' release. Pick duo-v1-distill for 'dmd' and a causal "
+                + "model for 'causal'.");
         }
     }
 

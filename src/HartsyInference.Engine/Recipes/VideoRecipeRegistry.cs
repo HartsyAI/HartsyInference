@@ -68,6 +68,7 @@ public static class VideoRecipeRegistry
         new Video.FastFramesRecipe(),
         new Video.MiniMaxH3Recipe(),
         new Video.DuoRecipe(),
+        new Video.DuoRecipe(distilled: true),
         new Video.LongCatVideoRecipe(),
         new Video.LongCatAvatarRecipe(),
     };

@@ -2,7 +2,9 @@ using HartsyInference.Cli.Commands;
 using HartsyInference.Cli.Dispatch;
 using HartsyInference.Cli.Infra;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Registry;
 using Xunit;
 
 namespace HartsyInference.Cli.Tests;
@@ -50,13 +52,33 @@ public sealed class DuoCliTests
         Assert.Equal("grain", GenerationDispatch.VideoNegativePrompt(parameters));
     }
 
+    [Fact]
+    public void ADuoModelWithoutABackboneIsRefusedBeforeAnyDownloadIsOffered()
+    {
+        string release = Path.Combine(Path.GetTempPath(), "duo-cli-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(release);
+        try
+        {
+            ModelSpec spec = ModelResolver.Resolve("duo-v1-causal", release, Modality.Video);
+
+            DirectoryNotFoundException error = Assert.Throws<DirectoryNotFoundException>(() => ModelAcquisition.EnsurePresent(spec));
+
+            Assert.Contains("backbone", error.Message, StringComparison.Ordinal);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(release));
+        }
+        finally
+        {
+            Directory.Delete(release, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("duo-v1-causal", true)]
     [InlineData("duo-v1-2-causal", true)]
-    [InlineData("duo-v1-distill", false)]
+    [InlineData("duo-v1-distill", true)]
     [InlineData("minimax-h3", false)]
     [InlineData("", false)]
-    public void OnlyTheCausalDuoModelsTakeTheRunOptions(string model, bool expected) =>
+    public void OnlyDuoModelsTakeTheRunOptions(string model, bool expected) =>
         Assert.Equal(expected, DuoCliGate.IsDuo(model));
 
     [Fact]

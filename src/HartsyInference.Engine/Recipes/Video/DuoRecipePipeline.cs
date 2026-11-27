@@ -12,7 +12,7 @@ using HartsyInference.ModelAssets.Duo;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
-/// <summary>A constructed Duo causal pipeline driven against the native <see cref="VideoRequest"/>. Each generation reads one run folder
+/// <summary>A constructed Duo pipeline driven against the native <see cref="VideoRequest"/>. Each generation reads one run folder
 /// (shared and per-block Intent rows, reference latent, noise), runs a fresh <see cref="DuoSession"/> with a sliding clean-block history,
 /// and returns the 24 fps frames with their 32 kHz stereo audio. The prompt and the seed are not used: the folder holds the condition and
 /// the noise. Takes ownership of the transformer and every disposable it is given.</summary>
@@ -34,18 +34,20 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
     private readonly MiniMaxH3Config _config;
     private readonly DuoCodecs _codecs;
     private readonly long _ditResidentBytes;
+    private readonly bool _distilled;
     private readonly IReadOnlyList<IDisposable> _owned;
     private int _disposed;
 
     /// <param name="ditResidentBytes">What the resident DiT needs beside the history: its weights and the activation reserve.</param>
     internal DuoRecipePipeline(IBackend backend, MiniMaxH3Transformer transformer, MiniMaxH3Config config, DuoCodecs codecs,
-        long ditResidentBytes, IReadOnlyList<IDisposable> owned)
+        long ditResidentBytes, IReadOnlyList<IDisposable> owned, bool distilled = false)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _transformer = transformer ?? throw new ArgumentNullException(nameof(transformer));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _codecs = codecs ?? throw new ArgumentNullException(nameof(codecs));
         _ditResidentBytes = ditResidentBytes;
+        _distilled = distilled;
         _owned = owned ?? throw new ArgumentNullException(nameof(owned));
     }
 
@@ -57,7 +59,7 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         ArgumentNullException.ThrowIfNull(settings);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         cancel.ThrowIfCancellationRequested();
-        DuoRunInput input = DuoRunInput.Read(request, settings, _config);
+        DuoRunInput input = DuoRunInput.Read(request, settings, _config, _distilled);
         input.RequireHistoryFits(_config, _backend.GetDeviceMemoryUsage());
         int totalSteps = input.Sample.Blocks.Count * input.Run.Steps;
         Logs.Info($"[Duo] {input.Sample.Blocks.Count} blocks, {input.Run.Steps} steps each, {input.CacheRows} history rows; "

@@ -58,9 +58,11 @@ internal sealed class DuoChunkSession
     }
 
     /// <summary>Denoises block <paramref name="block"/> against the committed history, then commits its clean media. It must be the next
-    /// block in order. <paramref name="bodyText"/> holds this block's body Intent rows. Returns the committed clean video and audio.</summary>
+    /// block in order. <paramref name="bodyText"/> holds this block's body Intent rows. Returns the committed clean video and audio.
+    /// Without <paramref name="renoise"/> the steps are Euler; with it each step predicts the clean block and re-noises it to the next
+    /// time, except the last.</summary>
     public (float[] Video, float[] Audio) GenerateBlock(int block, float[] bodyText, float[] noiseVideo, float[] noiseAudio, int steps, double shift,
-        Action<int>? onStep = null, CancellationToken cancel = default)
+        Action<int>? onStep = null, CancellationToken cancel = default, DuoRenoise? renoise = null)
     {
         ArgumentNullException.ThrowIfNull(bodyText);
         ArgumentNullException.ThrowIfNull(noiseVideo);
@@ -93,6 +95,11 @@ internal sealed class DuoChunkSession
             throw new ArgumentException($"Block {block} noise audio has {noiseAudio.Length} values; expected {audioRows} rows.", nameof(noiseAudio));
         }
 
+        if (renoise is not null)
+        {
+            RequireRenoise(renoise, noiseVideo.Length, noiseAudio.Length, steps, block);
+        }
+
         // Refuse a block that cannot fit even after every clean block is dropped, before any work is done or anything is evicted.
         int committedRows = input.Video.VideoRows + audioRows;
         int evictable = _cache.Groups.Where(g => g.Kind == DuoGroupKind.Clean).Sum(g => g.End - g.Start);
@@ -123,7 +130,8 @@ internal sealed class DuoChunkSession
                 // A cancelled block leaves the cache as it was: nothing is evicted or committed before the loop ends.
                 cancel.ThrowIfCancellationRequested();
                 float t = schedule[index];
-                float remaining = schedule[index + 1] - t;
+                // Euler moves to the next time; the distilled solver moves all the way to the clean estimate and re-noises after.
+                float remaining = renoise is null ? schedule[index + 1] - t : 1f - t;
                 using Forwarded predicted = ForwardTensors(_transformer, _backend, noisy, refiner, textTensor, video, audio, [1f, t], _cache,
                     commit: false);
                 Tensor nextVideo = Euler(video, predicted.Video, remaining);
@@ -145,6 +153,15 @@ internal sealed class DuoChunkSession
                 audio?.Dispose();
                 video = nextVideo;
                 audio = nextAudio;
+                if (renoise is not null && index + 1 < steps)
+                {
+                    float next = schedule[index + 1];
+                    Replace(ref video, Renoised(video, renoise.Video, index, next));
+                    if (audio is not null)
+                    {
+                        Replace(ref audio, Renoised(audio, renoise.Audio, index, next));
+                    }
+                }
                 onStep?.Invoke(index + 1);
             }
 
@@ -194,6 +211,48 @@ internal sealed class DuoChunkSession
         return next;
     }
 
+    /// <summary><c>clean · t + noise · (1 - t)</c> on the device with the noise of step <paramref name="step"/>, the same arithmetic as
+    /// <see cref="DuoSampler.AddNoise"/>.</summary>
+    private Tensor Renoised(Tensor clean, float[] noise, int step, float t)
+    {
+        int length = checked((int)clean.ElementCount);
+        using Tensor draw = DuoDeviceWindow.Upload(clean.Shape, noise.AsSpan(step * length, length).ToArray());
+        using Tensor kept = new(clean.Shape, DType.F32);
+        using Tensor added = new(clean.Shape, DType.F32);
+        _backend.Scale(kept, clean, t);
+        _backend.Scale(added, draw, 1f - t);
+        Tensor next = new(clean.Shape, DType.F32);
+        try
+        {
+            _backend.Add(next, kept, added);
+        }
+        catch
+        {
+            next.Dispose();
+            throw;
+        }
+        return next;
+    }
+
+    private static void Replace(ref Tensor current, Tensor next)
+    {
+        current.Dispose();
+        current = next;
+    }
+
+    /// <summary>Refuses re-noise that does not hold <c>steps - 1</c> draws of the block's video and audio.</summary>
+    internal static void RequireRenoise(DuoRenoise renoise, int videoValues, int audioValues, int steps, int block)
+    {
+        ArgumentNullException.ThrowIfNull(renoise);
+        long draws = Math.Max(0, steps - 1);
+        if (renoise.Video is null || renoise.Audio is null || renoise.Video.Length != draws * videoValues
+            || renoise.Audio.Length != draws * audioValues)
+        {
+            throw new ArgumentException(
+                $"Block {block} re-noise needs {draws} draws of {videoValues} video and {audioValues} audio values.", nameof(renoise));
+        }
+    }
+
     private static bool IsFinite(float[] values)
     {
         foreach (float value in values)
@@ -211,7 +270,7 @@ internal sealed class DuoChunkSession
     /// clean media of blocks <c>0..block-1</c> in layout order. Static, so the tests can run it against any history, right or wrong.</summary>
     public static (float[] Video, float[] Audio) FullBlock(MiniMaxH3Transformer transformer, IBackend backend, DuoSampleInput sample,
         int block, DuoRopePolicy rope, float[] sharedText, float[][] bodyTexts, float[] referenceVideo, float[] cleanVideo,
-        float[] cleanAudio, float[] noiseVideo, float[] noiseAudio, int steps, double shift)
+        float[] cleanAudio, float[] noiseVideo, float[] noiseAudio, int steps, double shift, DuoRenoise? renoise = null)
     {
         DuoLayout full = DuoLayoutBuilder.Build([Truncate(sample, block)], rope);
         int shared = SharedRows(sample);
@@ -232,9 +291,18 @@ internal sealed class DuoChunkSession
         float[] fixedVideo = Concat(referenceVideo, cleanVideo);
         float[] fixedAudio = cleanAudio;
         float[] textAll = [.. text];
-        return DuoSampling.Sample(noiseVideo, noiseAudio, steps, shift, DuoSolver.Euler,
+        Func<int, int, float[]>? draw = renoise is null
+            ? null
+            : (step, stream) =>
+            {
+                float[] all = stream == 0 ? renoise.Video : renoise.Audio;
+                int length = stream == 0 ? noiseVideo.Length : noiseAudio.Length;
+                return all.AsSpan(step * length, length).ToArray();
+            };
+        return DuoSampling.Sample(noiseVideo, noiseAudio, steps, shift,
+            renoise is null ? DuoSolver.Euler : DuoSolver.ConsistencyRenoise,
             (v, a, time) => FullVelocity(transformer, backend, full, refiner, textAll, fixedVideo, fixedAudio, v, a, time),
-            renoise: null);
+            draw);
     }
 
     private static (float[] Video, float[] Audio) FullVelocity(MiniMaxH3Transformer transformer, IBackend backend, DuoLayout layout,

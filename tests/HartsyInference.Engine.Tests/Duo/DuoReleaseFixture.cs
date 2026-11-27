@@ -9,8 +9,8 @@ using HartsyInference.ModelAssets.Tests.Duo;
 
 namespace HartsyInference.Engine.Tests.Duo;
 
-/// <summary>A tiny synthetic Duo release folder (2-block backbone in BF16 with per-head qkv rows, a causal LoRA in a distributed
-/// checkpoint, placeholder codec files) and a two-block run folder, both written to a temporary directory. The codecs are fake decoders
+/// <summary>A tiny synthetic Duo release folder (2-block backbone in BF16 with per-head qkv rows, a causal or distilled LoRA in a
+/// distributed checkpoint, placeholder codec files) and a two-block run folder for that stage, both written to a temporary directory. The codecs are fake decoders
 /// whose pixels and samples depend on their input window.</summary>
 internal sealed class DuoReleaseFixture : IDisposable
 {
@@ -19,17 +19,18 @@ internal sealed class DuoReleaseFixture : IDisposable
     public const int SharedRows = 3, BodyRows = 2;
     private const int VideoIn = 96, AudioIn = 32, RefRows = 4, VideoRows = 20, AudioRows = 58;
 
-    public DuoReleaseFixture()
+    public DuoReleaseFixture(bool distilled = false)
     {
         Root = Path.Combine(Path.GetTempPath(), $"duo-recipe-{Guid.NewGuid():N}");
         Release = Path.Combine(Root, "release");
         RunFolder = Path.Combine(Root, "run");
         WriteBackbone(Backbone);
-        WriteLora(Dcp, "models.student.");
+        WriteLora(Dcp, distilled ? "models.generator." : "models.student.");
         Touch(Path.Combine(Release, "codec", "video_vae", "model.safetensors"));
         Touch(Path.Combine(Release, "codec", "audio_vae", "diffusion_pytorch_model.safetensors"));
-        File.WriteAllText(Path.Combine(Release, "realization", "complete.json"), """{ "stage": "causal" }""");
-        WriteRun(RunFolder);
+        File.WriteAllText(Path.Combine(Release, "realization", "complete.json"),
+            $$"""{ "stage": "{{(distilled ? "dmd" : "causal")}}" }""");
+        WriteRun(RunFolder, distilled);
     }
 
     public string Root { get; }
@@ -166,7 +167,10 @@ internal sealed class DuoReleaseFixture : IDisposable
         SafeTensorsStreamWriter.Write(Path.Combine(folder, "model-00002-of-00002.safetensors"), blocks);
     }
 
-    private static void WriteRun(string folder)
+    public const int DistilledSteps = 4;
+
+    /// <summary>A causal run of <see cref="Steps"/> steps at shift 1, or a distilled run of four steps at shift 5 with re-noise.</summary>
+    public static void WriteRun(string folder, bool distilled)
     {
         Directory.CreateDirectory(folder);
         WriteFloats(folder, "shared.bin", Values(2, SharedRows * TextDim));
@@ -177,10 +181,17 @@ internal sealed class DuoReleaseFixture : IDisposable
             WriteFloats(folder, $"body{block}.bin", Values(40 + block, BodyRows * TextDim));
             WriteFloats(folder, $"video{block}.bin", Values(50 + block, VideoRows * VideoIn));
             WriteFloats(folder, $"audio{block}.bin", Values(60 + block, AudioRows * AudioIn));
-            blocks.Add($$"""{ "bodyText": "body{{block}}.bin", "noiseVideo": "video{{block}}.bin", "noiseAudio": "audio{{block}}.bin" }""");
+            string renoise = "";
+            if (distilled)
+            {
+                WriteFloats(folder, $"rvideo{block}.bin", Values(70 + block, (DistilledSteps - 1) * VideoRows * VideoIn));
+                WriteFloats(folder, $"raudio{block}.bin", Values(80 + block, (DistilledSteps - 1) * AudioRows * AudioIn));
+                renoise = $$""", "renoiseVideo": "rvideo{{block}}.bin", "renoiseAudio": "raudio{{block}}.bin" """;
+            }
+            blocks.Add($$"""{ "bodyText": "body{{block}}.bin", "noiseVideo": "video{{block}}.bin", "noiseAudio": "audio{{block}}.bin"{{renoise}} }""");
         }
         File.WriteAllText(Path.Combine(folder, "manifest.json"),
-            $$"""{ "steps": {{Steps}}, "shift": 1.0, "sharedText": "shared.bin", "referenceVideo": "reference.bin", "blocks": [ {{string.Join(", ", blocks)}} ] }""");
+            $$"""{ "steps": {{(distilled ? DistilledSteps : Steps)}}, "shift": {{(distilled ? "5.0" : "1.0")}}, "sharedText": "shared.bin", "referenceVideo": "reference.bin", "blocks": [ {{string.Join(", ", blocks)}} ] }""");
     }
 
     private static void WriteFloats(string folder, string name, float[] values)
