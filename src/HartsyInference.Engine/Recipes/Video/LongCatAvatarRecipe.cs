@@ -120,9 +120,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe, IVideoDeviceCheck
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain;
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) =>
-        string.Equals(familyId, "longcat-avatar", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, LongCatAvatarVariants.Avatar16FamilyId, StringComparison.OrdinalIgnoreCase);
+    public bool Matches(string familyId) => LongCatAvatarVariants.RowIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The default build's settings (1.5, the catalog row's weights): the distilled path, 8 steps, guidance off (1.0), shift 7. Steps
     /// and guidance are fixed by the distillation, so the planner locks them.</summary>

@@ -1,8 +1,10 @@
 using HartsyInference.Engine;
+using HartsyInference.Engine.Catalog;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Registry;
+using HartsyInference.Engine.Variants;
 using Xunit;
 
 namespace HartsyInference.Engine.Tests;
@@ -87,6 +89,40 @@ public sealed class LongCatCatalogTests
         Assert.Equal("lora/dmd_lora.safetensors", lora.RepoPath);
         Assert.Equal(64, lora.Sha256!.Length);
         Assert.Equal(Path.GetFullPath(LongCatRecipeSupport.DmdLoraPath(checkpoint)), Path.GetFullPath(downloaded));
+    }
+
+    [Theory]
+    [InlineData("longcat-avatar", "1.5", "LongCat/avatar-1.5/base_model", 6)]
+    [InlineData("longcat-avatar-int8", "1.5", "LongCat/avatar-1.5/base_model_int8", 4)]
+    [InlineData("longcat-avatar-1.6", "1.6", "LongCat/avatar-1.6/base_model_int8", 4)]
+    [InlineData("longcat-avatar-1.6-bf16", "1.6", "LongCat/avatar-1.6/base_model", 6)]
+    public void EachAvatarRowResolvesToTheAvatarRecipeItsBuildAndItsLoraFiles(string id, string build, string folder, int shards)
+    {
+        CatalogEntry entry = ModelCatalog.Find(id)!;
+        ModelSpec spec = ModelResolver.Resolve(id, null, Modality.Video);
+        ModelAsset primary = ModelDownloader.PrimaryAsset(entry)!;
+        string root = Path.GetFullPath("models");
+        // The checkpoint's folder, which is what the recipe resolves the primary shard to.
+        string checkpoint = Path.Combine(root, primary.TargetSubdir);
+
+        (IVideoRecipe? recipe, ResolvedModelVariant? variant) = RecipeResolution.ResolveVideo(spec);
+
+        Assert.Contains(id, LongCatAvatarVariants.RowIds);
+        Assert.Equal("longcat-avatar", recipe!.Name);
+        Assert.Equal(build, variant!.Variant.Id);
+        Assert.Equal(folder, primary.TargetSubdir);
+        List<ModelAsset> transformer = entry.Assets.Where(a => a.Role == "transformer").ToList();
+        Assert.Equal(shards, transformer.Count);
+        Assert.Equal(shards, transformer.Select(a => a.Sha256).Distinct().Count());
+        Assert.All(transformer, shard => Assert.Equal((64, folder), (shard.Sha256!.Length, shard.TargetSubdir)));
+        // The recipe reads one folder: the index and configs land beside the shards.
+        Assert.All(entry.Assets.Where(a => a.Role == "config"), file => Assert.Equal(folder, file.TargetSubdir));
+        Assert.Contains(entry.Assets, a => a.Role == "config" && a.RepoPath.EndsWith(".safetensors.index.json", StringComparison.Ordinal));
+        string[] downloaded = [.. entry.Assets.Where(a => a.Role == "lora")
+            .Select(a => Path.GetFullPath(Path.Combine(root, a.TargetSubdir, a.TargetName!))).Order(StringComparer.Ordinal)];
+        LongCatRecipeSupport.LongCatLoraFiles mixed = LongCatRecipeSupport.Avatar16LoraFiles(checkpoint);
+        string[] read = build == "1.6" ? [mixed.DmdPath, mixed.OpsdPath] : [LongCatRecipeSupport.DmdLoraPath(checkpoint)];
+        Assert.Equal(read.Select(Path.GetFullPath).Order(StringComparer.Ordinal), downloaded);
     }
 
     [Fact]

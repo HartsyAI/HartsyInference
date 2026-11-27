@@ -564,6 +564,27 @@ public static class ModelCatalog
             TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
     ];
 
+    /// <summary>The 1.5 distillation LoRA, shared by the 1.5 rows: the recipe reads it from <c>lora/</c> beside the checkpoint's own folder and
+    /// refuses to run without it.</summary>
+    private static ModelAsset LongCatAvatar15DmdLora() => new()
+    {
+        Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "lora/dmd_lora.safetensors",
+        TargetSubdir = "LongCat/avatar-1.5/lora", TargetName = "dmd_lora.safetensors", Role = "lora",
+        Sha256 = "d969115a7f3fbc212a277ed4399f77a1a065d170148c6d4bc272e980cd3e907a",
+    };
+
+    /// <summary>The DMD (loraA) and OPSD (loraB) adapters of the 1.6 card, shared by the 1.6 rows and laid out as the release does, beside the
+    /// checkpoint's own folder.</summary>
+    private static ModelAsset[] LongCatAvatar16Loras() =>
+    [
+        new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraA/lora.safetensors",
+            TargetSubdir = "LongCat/avatar-1.6/loraA", TargetName = "lora.safetensors", Role = "lora",
+            Sha256 = "6e0d1ce0d8b3fdfd63fbdae4c25e1bbbb286b1cb198a2ec07d4c945e883c188c" },
+        new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraB/lora.safetensors",
+            TargetSubdir = "LongCat/avatar-1.6/loraB", TargetName = "lora.safetensors", Role = "lora",
+            Sha256 = "5efc11d8eaa298cfa60fa20ce8f57e894df07deff61c922166aed8f4503e660b" },
+    ];
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -3212,8 +3233,8 @@ public static class ModelCatalog
                 // (bf16 base_model; shard sha256 are the HF tree's LFS oids; index and config are git blobs and carry no hash here).
                 // Licence conflict, recorded not resolved: MIT on the model card, "academic use only and commercial use is not permitted" on the
                 // project page, upstream issue #165 unanswered. Likeness generation: the depicted person's consent is required.
-                // The 1.5 layout is distilled (8 steps, guidance off); the recipe runs this row on that path by default, and refuses a 1.6
-                // request until a 1.6 INT8 row exists (a row's settings must match its weights). The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
+                // The 1.5 layout is distilled (8 steps, guidance off); the recipe runs this row on that path by default, and a 1.6 request routes
+                // to the 1.6 INT8 row (a row's settings must match its weights). The Whisper front end is not a row asset: the recipe reads the audio stack's cached copy
                 // (stt/openai--whisper-large-v3 @ 06f233fe). TargetSubdir is LongCat/<row>, the family-folder convention (FastFrames/, Vision/,
                 // LLM/), not the Comfy-style diffusion_models/ layout. The Hartsy-hosted repack is a later swap that needs the user's upload OK.
                 Id = "longcat-avatar", Modality = vid, DisplayName = "LongCat-Video-Avatar 1.5 (speech and image to video, consent required)",
@@ -3237,10 +3258,8 @@ public static class ModelCatalog
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/config.json",
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
-                    // The distillation LoRA of the 8-step path. The recipe reads it from lora/ beside base_model/ and refuses to run without it.
-                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "lora/dmd_lora.safetensors",
-                        TargetSubdir = "LongCat/avatar-1.5/lora", TargetName = "dmd_lora.safetensors", Role = "lora",
-                        Sha256 = "d969115a7f3fbc212a277ed4399f77a1a065d170148c6d4bc272e980cd3e907a" },
+                    // The distillation LoRA of the 8-step path.
+                    LongCatAvatar15DmdLora(),
                     // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
                     SideModels.Umt5Xxl,
                     SideModels.Wan21Vae,
@@ -3248,18 +3267,48 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // LongCat-Video-Avatar 1.5, the per-row INT8 release (base_model_int8) of the same repo at 92016c71 (15,880,382,936 B across four
+                // shards; shard sha256 are the HF tree's LFS oids; the index and configs are git blobs and carry no hash here). Same 8-step distilled
+                // path and dmd_lora as the BF16 row, which it shares on disk. Licence conflict and consent as that row.
+                Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar15Int8FamilyId, Modality = vid,
+                DisplayName = "LongCat-Video-Avatar 1.5 INT8 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.5",
+                Assets =
+                [
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00001-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "ccf575d8cdf8e762272e2d4e52ae1a7c0b5d1fa81e26dfa4592867de4dd9a4fd" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00002-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "af6ddb737ad66d12fd5892adee568c14314143ebd4388d3ab9cc6065754b3688" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00003-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "6a349b76592b4752c2967235af457824d8938e3514bad8e78cfa86009e8a9bf5" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model-00004-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "transformer", Sha256 = "ab54b648a3f6a53946f07dd0a21441e2a8cb1aa8da17996b5f3f7f2e1370705b" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantized_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/config.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model_int8/quantization_config.json",
+                        TargetSubdir = "LongCat/avatar-1.5/base_model_int8", Role = "config" },
+                    LongCatAvatar15DmdLora(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
+            },
+            new CatalogEntry
+            {
                 // LongCat-Video-Avatar 1.6, the per-row INT8 release (base_model_int8) from meituan-longcat/LongCat-Video-Avatar-1.6. The 1.6 build
                 // runs the 8-step distilled path with its loraA (DMD) and loraB (OPSD) mixed per step (upstream --use_distill, mix_steps 4). The INT8 files share the
                 // layout the 1.5 INT8 release uses (15,880,145,024 B across four shards); the loader reads the INT8 index and converts the weights.
                 // Shards, index and configs are pinned by the HF tree (lfs oids; the index and config are git blobs and carry no hash here). Sizes in bytes.
-                // The LoRAs are the DMD (loraA) and OPSD (loraB) adapters of the 1.6 card, laid out as the release does (loraA/lora.safetensors, loraB/lora.safetensors).
                 // Licence conflict as the 1.5 row: MIT on the model card, "academic use only and commercial use is not permitted" on the project page.
                 // Likeness generation: the depicted person's consent is required. Routed by the id "longcat-avatar-1.6" (CLI: longcat-avatar:1.6).
                 Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar16FamilyId, Modality = vid, DisplayName = "LongCat-Video-Avatar 1.6 INT8 (speech and image to video, consent required)",
                 Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
                 HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.6",
-                Assets = new ModelAsset[]
-                {
+                Assets =
+                [
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00001-of-00004.safetensors",
                         TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "59bc93c0100bbeb2f1cd4fcb274e556270248beadbcd5ce3386a1b35070ed2b5" },
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00002-of-00004.safetensors",
@@ -3274,16 +3323,44 @@ public static class ModelCatalog
                         TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantization_config.json",
                         TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
-                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraA/lora.safetensors",
-                        TargetSubdir = "LongCat/avatar-1.6/loraA", TargetName = "lora.safetensors", Role = "lora",
-                        Sha256 = "6e0d1ce0d8b3fdfd63fbdae4c25e1bbbb286b1cb198a2ec07d4c945e883c188c" },
-                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraB/lora.safetensors",
-                        TargetSubdir = "LongCat/avatar-1.6/loraB", TargetName = "lora.safetensors", Role = "lora",
-                        Sha256 = "5efc11d8eaa298cfa60fa20ce8f57e894df07deff61c922166aed8f4503e660b" },
+                    .. LongCatAvatar16Loras(),
                     // The text encoder and VAE are the engine's existing pinned side models, shared with the 1.5 row.
                     SideModels.Umt5Xxl,
                     SideModels.Wan21Vae,
-                },
+                ],
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video-Avatar 1.6, the BF16 base_model of the same repo (31,706,008,384 B across six shards; shard sha256 are the HF tree's LFS
+                // oids at acfc6282; the index and config are git blobs and carry no hash here). Same 8-step path and LoRA mix as the INT8 row,
+                // whose LoRA files it shares on disk. Licence conflict and consent as the 1.5 row. Routed by its own id only.
+                Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar16Bf16FamilyId, Modality = vid,
+                DisplayName = "LongCat-Video-Avatar 1.6 BF16 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.6",
+                Assets =
+                [
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00001-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "bdda91efcb20fbd04bb329b6f069f68ff97e86054ddc7034bc2d55a297abf88e" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00002-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "a94566ecbb61caa2909b5de78fc542513d9093f90b49b6805aa99f3a9539234c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00003-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "4af3d66b9789caf0a11f4e5cb19e3298655ea4673c975cb288a34a0399c032c5" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00004-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "311e2db9d5b89beae43bb97bd91fc44ca328c8711211b84112cc52f16ca3f7ac" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00005-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "c63a0f4c31c5860325a72b50bb0c60b05666be8a7646c53096b1b9e85ec9735b" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model-00006-of-00006.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "transformer", Sha256 = "aa524b4d584f8de9596b8e1b9ec3f59aa4feba6b3c54bb80292692e2698cf32c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/diffusion_pytorch_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model/config.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model", Role = "config" },
+                    .. LongCatAvatar16Loras(),
+                    // The text encoder and VAE are the engine's existing pinned side models, shared with the other rows.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
             },
             new CatalogEntry
             {
