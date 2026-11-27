@@ -1333,6 +1333,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private ExpertWeights ResolveExpert(ExpertKey key) =>
         new(key, new ExpertMatrix(_gateW[key.Expert]), new ExpertMatrix(_downW[key.Expert]), new ExpertMatrix(_upW[key.Expert]));
 
+    /// <summary>Device bytes one routed expert occupies in an expert cache. Unpacked experts only.</summary>
+    internal long ExpertBytes => ResolveExpert(new ExpertKey(0, 0)).Bytes;
+
     private F32ExpertWeights ResolveHostWeights(ExpertKey key)
     {
         F32ExpertWeights? weights = _hostWeights![key.Expert];

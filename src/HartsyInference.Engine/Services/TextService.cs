@@ -1182,14 +1182,20 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Attaches a device expert cache to a single-device ERNIE-5.5 load, sized to the VRAM its dense weights left free. Null when
-    /// <c>vram.ernieExpertCache</c> is off, the device is not CUDA, or nothing is left.</summary>
+    /// <c>vram.ernieExpertCache</c> is off, the device is not CUDA, or the room left cannot hold one expert.</summary>
     private static MoeExpertOffload? AttachErnie5ExpertCache(IBackend backend, Ernie5TextModel model)
     {
         if (!EngineKnobs.ErnieExpertCache.Value || backend is not CudaBackend) return null;
+        Ernie5Model ernie = model.Generation.Model;
         DeviceMemoryUsage usage = backend.GetDeviceMemoryUsage();
-        long budget = ExpertOffloadSetup.DeviceCacheBudget(usage.FreeBytes, usage.TotalBytes);
-        if (budget <= 0) return null;
-        return ExpertOffloadSetup.AttachDeviceOnly(backend, model.Generation.ExpertTarget, budget, "[TextService] ERNIE-5.5");
+        long budget = ernie.ExpertCacheBudget(usage.FreeBytes, usage.TotalBytes);
+        if (budget == 0)
+        {
+            // Attaching takes the experts out of auto-promotion, so a cache too small to hold one would only cost.
+            Logs.Warning("[TextService] ERNIE-5.5 expert cache not attached: the VRAM left after the dense weights cannot hold one expert.");
+            return null;
+        }
+        return ExpertOffloadSetup.AttachDeviceOnly(backend, ernie, budget, "[TextService] ERNIE-5.5");
     }
 
     /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed

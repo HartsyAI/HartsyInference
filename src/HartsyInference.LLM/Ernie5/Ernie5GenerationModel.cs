@@ -26,8 +26,8 @@ public sealed class Ernie5GenerationModel : IGenerationModel
         Info = new GenerationModelInfo("ERNIE-5.5", model.Config.VocabSize, model.Config.HiddenSize, model.Config.NumHiddenLayers, maxTokens);
     }
 
-    /// <summary>The loaded model's routed experts, for an expert cache to attach to.</summary>
-    public IExpertOffloadTarget ExpertTarget => _model;
+    /// <summary>The loaded model, for an expert cache to size itself against and attach to.</summary>
+    public Ernie5Model Model => _model;
 
     /// <summary>The longest sequence the model was loaded for.</summary>
     public int MaxTokens { get; }
