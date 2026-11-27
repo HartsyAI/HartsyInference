@@ -104,9 +104,11 @@ internal sealed class AudioRuntime
     }
 
     /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when the switch would not fit, retries once after evicting every other unpinned model when the work still runs out of VRAM, then frees leftover activations and trims the pool so a finished generation leaves nothing behind. <paramref name="job"/> names the cache and bare key the work is about to load through <c>GetOrLoadAsync</c>, so the eviction sweep can keep exactly that runner.</summary>
-    /// <remarks><paramref name="work"/> can therefore run twice, so it must release whatever it acquires itself.</remarks>
+    /// <remarks><paramref name="work"/> can therefore run twice, so it must release whatever it acquires itself. Set
+    /// <paramref name="callerFallsBackFromOutOfVram"/> when the caller runs the work elsewhere if it still ends out of VRAM: that
+    /// failure is then logged as a warning. Any other failure is logged as an error.</remarks>
     internal async Task<T> RunAsync<T>(IBackend backend, AudioJob job, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
-        IReadOnlyList<IBackend>? stageBackends = null)
+        IReadOnlyList<IBackend>? stageBackends = null, bool callerFallsBackFromOutOfVram = false)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(work);
@@ -127,7 +129,7 @@ internal sealed class AudioRuntime
             {
                 result = await work(cancel).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ShouldRetry(ex, cancel))
+            catch (Exception ex) when (IsUncancelledOutOfVram(ex, cancel))
             {
                 EvictForRetry(backend, job, ex);
                 probe = probe.Restart(backend);
@@ -139,6 +141,12 @@ internal sealed class AudioRuntime
         catch (OperationCanceledException)
         {
             Logs.Debug($"[Audio] '{job.ModelKey}' was cancelled.");
+            throw;
+        }
+        catch (Exception ex) when (callerFallsBackFromOutOfVram && IsUncancelledOutOfVram(ex, cancel))
+        {
+            Logs.Warning($"[Audio] '{job.ModelKey}' failed out of VRAM, and its caller falls back: {FindOutOfVram(ex)?.Message}");
+            Logs.Debug($"[Audio] '{job.ModelKey}' out-of-VRAM failure: {ex}");
             throw;
         }
         catch (Exception ex)
@@ -182,7 +190,7 @@ internal sealed class AudioRuntime
                 {
                     more = await items.MoveNextAsync().ConfigureAwait(false);
                 }
-                catch (Exception ex) when (!yielded && !retried && ShouldRetry(ex, cancel))
+                catch (Exception ex) when (!yielded && !retried && IsUncancelledOutOfVram(ex, cancel))
                 {
                     retried = true;
                     IAsyncEnumerator<T> failed = items;
@@ -407,8 +415,9 @@ internal sealed class AudioRuntime
         return evicted;
     }
 
-    /// <summary>Whether a failed attempt earns the one retry: it ran out of VRAM and nobody cancelled it.</summary>
-    private static bool ShouldRetry(Exception error, CancellationToken cancel) =>
+    /// <summary>Whether <paramref name="error"/> is an out-of-VRAM failure that nobody cancelled: what earns the one retry, and what a
+    /// caller with a fallback acts on.</summary>
+    internal static bool IsUncancelledOutOfVram(Exception error, CancellationToken cancel) =>
         !cancel.IsCancellationRequested && FindOutOfVram(error) is not null;
 
     /// <summary>Clears the device for the retry after <paramref name="error"/>: every other unpinned runner goes, whether
