@@ -196,7 +196,7 @@ def checkpoint(args):
     # --dit-file names a generator in safetensors form (the engine's converted copy, prefix kept; upstream's loader strips it), so the
     # pickle is never loaded. Without it the generator is root/spec.dit, the upstream pickle, which the runbook forbids opening.
     dit_path = Path(args.dit_file) if args.dit_file else root / spec.dit
-    dit = build_wan(spec.config.wan_model, load_state_dict(dit_path, "generator_ema"), dtype=dtype, device="cpu")
+    dit = build_wan(spec.config.wan_model, _load_state(dit_path, "generator_ema"), dtype=dtype, device="cpu")
     wan = model.WAN_CONFIGS[spec.config.wan_model]
     refiner_state = _load_state(root / spec.refiner, "adapter")
     refiner = KVRefinementNetwork(dim=wan.dim, num_heads=wan.num_heads, head_dim=wan.dim // wan.num_heads,
