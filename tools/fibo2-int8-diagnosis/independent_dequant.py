@@ -15,10 +15,12 @@ the max absolute error and the error divided by the tensor's largest absolute va
 above the BF16 bound, when an int8 tensor has no scale or descriptor, when a key is missing from the engine output,
 or when a shape or format does not match. Exit code 1 on any failure.
 
-BF16 bound: the engine writes each value as one BF16 rounding of the exact result. Rounding to 8 significant bits moves
-a value by at most half an ulp, which is at most 2^-8 of the value, so at most 2^-8 of the tensor's largest value.
-A tensor above that bound means the engine did more than one rounding (for example it rotated in BF16) or computed a
-different result.
+BF16 bound. The engine writes each BF16 value by truncation: TensorCasts.F32ToBf16Bits keeps the top 16 bits of the
+float32 (bits >> 16), which rounds toward zero. The error is therefore below one BF16 ulp. An ulp is 2^-7 of the
+value at most (8 significant bits), so the error is at most 2^-7 of the tensor's largest value. Round-to-nearest
+would halve that, but the engine does not round. The bound adds a 2^-16 margin for the float32 arithmetic before the
+cast (the scale multiply and the radix-4 rotation). A ratio above the bound means the engine is wrong, or differs in
+more than rounding.
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ from pathlib import Path
 import numpy as np
 
 H4 = np.array([[1, 1, 1, -1], [1, 1, -1, 1], [1, -1, 1, 1], [-1, 1, 1, 1]], dtype=np.float64)
-BF16_BOUND = 2.0 ** -8
+F32_MARGIN = 2.0 ** -16
+BF16_TRUNC_BOUND = 2.0 ** -7 + F32_MARGIN
+ROUND_NEAREST_BOUND = 2.0 ** -8  # not the engine's rule; kept only to show the truncation cases sit above it
 
 
 def hadamard(group: int) -> np.ndarray:
@@ -102,10 +106,9 @@ def as_float(dtype: str, shape: tuple, raw: bytes) -> np.ndarray:
 
 
 def f32_to_bf16_bytes(values: np.ndarray) -> bytes:
-    """Round to nearest, ties to even, as BF16 bits (inputs here are finite)."""
-    bits = np.asarray(values, dtype=np.float32).reshape(-1).view(np.uint32).astype(np.uint64)
-    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
-    return rounded.astype("<u2").tobytes()
+    """The engine's cast: the top 16 bits of each float32, which truncates toward zero (TensorCasts.F32ToBf16Bits)."""
+    bits = np.asarray(values, dtype=np.float32).reshape(-1).view(np.uint32)
+    return (bits >> 16).astype("<u2").tobytes()
 
 
 def descriptor_settings(raw: bytes) -> tuple[str, int, str]:
@@ -157,7 +160,17 @@ def quantize_for_selftest(w: np.ndarray, group: int) -> tuple[np.ndarray, np.nda
     return q, scale.astype(np.float32)
 
 
-def compare(int8_path: str, engine_path: str, max_keys: int | None) -> int:
+def error_ratio(mine: np.ndarray, ref: np.ndarray) -> float:
+    """Largest absolute difference divided by the largest absolute value of the engine's tensor."""
+    diff = float(np.abs(mine - ref).max())
+    tensor_max = float(np.abs(ref).max())
+    if tensor_max == 0:
+        return 0.0 if diff == 0 else float("inf")
+    return diff / tensor_max
+
+
+def compare_files(int8_path: str, engine_path: str, max_keys: int | None) -> tuple[int, float, int]:
+    """Returns (exit code, worst error ratio, tensors compared). Prints one line per tensor and a summary."""
     src = read_safetensors(int8_path)
     eng = read_safetensors(engine_path)
     checked = 0
@@ -184,25 +197,28 @@ def compare(int8_path: str, engine_path: str, max_keys: int | None) -> int:
             continue
         mine = dequantize(as_float(dtype, shape, raw), as_float(*src[scale_key]), group)
         ref = as_float(ref_dtype, ref_shape, ref_raw)
-        diff = np.abs(mine - ref)
-        tensor_max = float(np.abs(ref).max())
-        rel = float(diff.max()) / tensor_max if tensor_max > 0 else (0.0 if diff.max() == 0 else float("inf"))
+        ratio = error_ratio(mine, ref)
         checked += 1
-        print(f"{name}: convrot={group} ({where}) max_abs={diff.max():.3e} tensor_max={tensor_max:.3e} "
-              f"error/tensor_max={rel:.3e}")
-        if rel > BF16_BOUND:
-            failures.append(f"{name}: error {rel:.3e} of the tensor max is above the BF16 bound {BF16_BOUND:.3e}")
-        if rel > worst:
-            worst, worst_name = rel, name
+        print(f"{name}: convrot={group} ({where}) max_abs={np.abs(mine - ref).max():.3e} "
+              f"tensor_max={np.abs(ref).max():.3e} error/tensor_max={ratio:.3e}")
+        if ratio > BF16_TRUNC_BOUND:
+            failures.append(f"{name}: error {ratio:.3e} of the tensor max is above the BF16 truncation bound "
+                            f"{BF16_TRUNC_BOUND:.3e}")
+        if ratio > worst:
+            worst, worst_name = ratio, name
         if max_keys is not None and checked >= max_keys:
             break
     print(f"checked {checked} int8 tensors; worst error/tensor_max {worst:.3e} at {worst_name or '-'}; "
-          f"BF16 bound {BF16_BOUND:.3e}")
+          f"BF16 truncation bound {BF16_TRUNC_BOUND:.3e}")
     if checked == 0:
         failures.append("no int8 tensor with a scale and descriptor was compared")
     for line in failures:
         print("FAIL", line)
-    return 1 if failures else 0
+    return (1 if failures else 0), worst, checked
+
+
+def compare(int8_path: str, engine_path: str, max_keys: int | None) -> int:
+    return compare_files(int8_path, engine_path, max_keys)[0]
 
 
 def _settings_cases() -> None:
@@ -227,7 +243,16 @@ def _settings_cases() -> None:
         raise AssertionError(f"descriptor {raw!r} should have been refused")
 
 
-def _end_to_end(tmp: Path, layout: str, group: int, engine_group: int, perturb: bool) -> int:
+def _truncation_cases() -> None:
+    # 1 + 0.9 * 2^-7 lies 0.9 of a BF16 ulp above 1.0. Truncation keeps 1.0; round-to-nearest would give 1 + 2^-7.
+    v = np.array([1.0 + 2.0 ** -7 * 0.9, -(1.0 + 2.0 ** -7 * 0.9)], dtype=np.float32)
+    got = np.frombuffer(f32_to_bf16_bytes(v), dtype="<u2").astype(np.uint32) << 16
+    back = got.view(np.float32)
+    if back[0] != np.float32(1.0) or back[1] != np.float32(-1.0):
+        raise AssertionError(f"engine stand-in must truncate toward zero, got {back}")
+
+
+def _end_to_end(tmp: Path, layout: str, group: int, engine_group: int, perturb: float) -> tuple[int, float]:
     rng = np.random.default_rng(1)
     w = rng.standard_normal((8, 64))
     q, s = quantize_for_selftest(w, group)
@@ -238,8 +263,8 @@ def _end_to_end(tmp: Path, layout: str, group: int, engine_group: int, perturb: 
     if group == 0:
         desc = {"format": "int8_tensorwise", "params": {}}
     desc_bytes = json.dumps(desc).encode("utf-8")
-    int8_file = tmp / f"int8_{layout}_{group}.safetensors"
-    engine_file = tmp / f"engine_{layout}_{group}.safetensors"
+    int8_file = tmp / f"int8_{layout}_{group}_{perturb}.safetensors"
+    engine_file = tmp / f"engine_{layout}_{group}_{engine_group}_{perturb}.safetensors"
     write_safetensors(str(int8_file), {
         "blk.weight": ("I8", q.shape, q.tobytes()),
         "blk.weight_scale": ("F32", s.shape, s.astype("<f4").tobytes()),
@@ -247,10 +272,11 @@ def _end_to_end(tmp: Path, layout: str, group: int, engine_group: int, perturb: 
     })
     ref = dequantize(q.astype(np.float64), s.astype(np.float64), engine_group)
     if perturb:
-        ref[0, 0] += 0.02 * np.abs(ref).max()
+        ref[0, 0] += perturb * np.abs(ref).max()
     write_safetensors(str(engine_file), {"blk.weight": ("BF16", ref.shape, f32_to_bf16_bytes(ref))})
     with contextlib.redirect_stdout(io.StringIO()):
-        return compare(str(int8_file), str(engine_file), None)
+        code, worst, _ = compare_files(str(int8_file), str(engine_file), None)
+    return code, worst
 
 
 def selftest() -> int:
@@ -266,16 +292,32 @@ def selftest() -> int:
             return 1
     _settings_cases()
     print("descriptor layouts ok (top-level, params, conflicts refused)")
+    _truncation_cases()
+    print("engine stand-in truncates toward zero, as TensorCasts.F32ToBf16Bits does")
+
+    # Ratio arithmetic on known values: 0.005 sits between 2^-8 and the truncation bound; 0.009 sits above it.
+    mine = np.array([1.0, 0.5, -1.0])
+    inside = mine.copy(); inside[1] += 0.005
+    outside = mine.copy(); outside[1] += 0.009
+    print(f"ratio 0.005 (window): {error_ratio(mine, inside):.4f}; ratio 0.009: {error_ratio(mine, outside):.4f}; "
+          f"bound {BF16_TRUNC_BOUND:.5f}")
+    if not (ROUND_NEAREST_BOUND < error_ratio(mine, inside) <= BF16_TRUNC_BOUND):
+        print("FAIL: the window case is not between 2^-8 and the truncation bound")
+        return 1
+    if error_ratio(mine, outside) <= BF16_TRUNC_BOUND:
+        print("FAIL: a case above the truncation bound was accepted")
+        return 1
+
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        checks = [
-            ("top-level ConvRot, engine rotated", _end_to_end(tmp, "top", 16, 16, False), 0),
-            ("params ConvRot, engine rotated", _end_to_end(tmp, "params", 16, 16, False), 0),
-            ("engine unrotated must fail", _end_to_end(tmp, "top", 16, 0, False), 1),
-            ("a 2% element error must fail", _end_to_end(tmp, "top", 16, 16, True), 1),
+        cases = [
+            ("top-level ConvRot, engine rotated and truncated", _end_to_end(tmp, "top", 16, 16, 0.0), 0),
+            ("params ConvRot, engine rotated and truncated", _end_to_end(tmp, "params", 16, 16, 0.0), 0),
+            ("engine unrotated must fail", _end_to_end(tmp, "top", 16, 0, 0.0), 1),
+            ("a 2% element error must fail", _end_to_end(tmp, "top", 16, 16, 0.02), 1),
         ]
-    for label, got, want in checks:
-        print(f"end to end, {label}: exit {got} (want {want})")
+    for label, (got, worst), want in cases:
+        print(f"end to end, {label}: exit {got} (want {want}), worst error/tensor_max {worst:.4f}")
         if got != want:
             print("FAIL: compare did not behave as the case requires")
             return 1
