@@ -1,3 +1,4 @@
+using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
@@ -70,6 +71,58 @@ public sealed class LongCatRecipeGpuParityTests
     [CudaDeviceFact]
     public void Cuda_AvatarChain16_DenseWeights_MatchesCpu() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true, int8: false);
 
+    /// <summary>Diagnosis of the INT8 gap: the CPU side runs the 1.6 chain on exact F32 q*s weights (the INT8 values times their scale, no BF16
+    /// truncation), and the CUDA side runs the INT8 release. If the gap closes, the CPU widening's BF16 truncation is the difference.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_CpuExactDequant_MatchesCuda() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true, int8: true,
+        cpuDense: ExactDequantWeights());
+
+    /// <summary>The 1.6 dense weights with every linear replaced by its INT8 values times their scale, in exact F32 (same seed as the INT8 release).</summary>
+    private static Dictionary<string, Tensor> ExactDequantWeights(bool upstream = false)
+    {
+        Dictionary<string, Tensor> weights = LongCatTestData.AvatarWeights(LongCatTinyAvatarRelease.Config, seed: 71);
+        Dictionary<string, Tensor> quantized = LongCatTestData.QuantizePerRow(weights);
+        Dictionary<string, Tensor> dense = new(StringComparer.Ordinal);
+        foreach ((string key, Tensor tensor) in weights)
+        {
+            if (key.EndsWith(".weight", StringComparison.Ordinal) && quantized.TryGetValue(key[..^".weight".Length] + ".weight_int8", out Tensor? q)
+                && quantized.TryGetValue(key[..^".weight".Length] + ".weight_scale", out Tensor? scale))
+            {
+                Tensor exact = new(tensor.Shape, DType.F32);
+                long cols = tensor.Shape[1];
+                ReadOnlySpan<sbyte> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, sbyte>(q.AsSpan<byte>());
+                ReadOnlySpan<float> scales = scale.AsSpan<float>();
+                Span<float> outValues = exact.AsSpan<float>();
+                for (long r = 0; r < tensor.Shape[0]; r++)
+                    for (long c = 0; c < cols; c++)
+                    {
+                        float qv = values[(int)(r * cols + c)], sc = scales[(int)r];
+                        // Upstream QuantizedLinear.forward: weight = weight_int8.to(x.dtype) * weight_scale.to(x.dtype), with x.dtype BF16.
+                        outValues[(int)(r * cols + c)] = upstream ? Bf16Rne(Bf16Rne(sc) * qv) : qv * sc;
+                    }
+                dense[key] = exact;
+            }
+            else
+            {
+                dense[key] = tensor;
+            }
+        }
+        return dense;
+    }
+
+    /// <summary>Diagnosis: the CPU side runs the 1.6 chain on the weights upstream's QuantizedLinear forms, bf16(bf16(scale) * q) in BF16 (the
+    /// reference's dtype rule), against the CUDA INT8 release.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_CpuUpstreamDequant_MatchesCuda() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true, int8: true,
+        cpuDense: ExactDequantWeights(upstream: true));
+
+    private static float Bf16Rne(float value)
+    {
+        uint bits = BitConverter.SingleToUInt32Bits(value);
+        uint lsb = (bits >> 16) & 1u;
+        return BitConverter.UInt32BitsToSingle((bits + 0x7FFFu + lsb) & 0xFFFF0000u);
+    }
+
     [VulkanDeviceFact]
     public void Vulkan_AvatarChain15_MatchesCpu() => AvatarParity(() => GpuDevices.OpenVulkan(), onePointSix: false);
 
@@ -92,9 +145,9 @@ public sealed class LongCatRecipeGpuParityTests
         Assert.True(worst <= FrameLevels, $"largest 8-bit frame difference {worst} levels, allowed {FrameLevels}");
     }
 
-    private static void AvatarParity(Func<IBackend> device, bool onePointSix, bool? int8 = null)
+    private static void AvatarParity(Func<IBackend> device, bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? cpuDense = null)
     {
-        List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, int8: int8).Vae.Decoded;
+        List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, int8: int8, dense: cpuDense).Vae.Decoded;
         List<(int Frames, float[] Values)> gpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, device, int8).Vae.Decoded;
 
         Assert.Equal(cpu.Count, gpu.Count);

@@ -13,13 +13,18 @@ internal sealed class LongCatTinyAvatarRelease : IDisposable
     private const int SampleRate = 16_000;
 
     /// <summary>Writes the release under a new temporary folder; <paramref name="onePointSix"/> writes the INT8 DiT and the two LoRAs.</summary>
-    public LongCatTinyAvatarRelease(bool onePointSix, bool? int8 = null)
+    public LongCatTinyAvatarRelease(bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? dense = null)
     {
         bool useInt8 = int8 ?? onePointSix;
         Root = Path.Combine(Path.GetTempPath(), "longcat-avatar-" + Guid.NewGuid().ToString("N"));
         Checkpoint = Path.Combine(Root, useInt8 ? "base_model_int8" : "base_model");
         Directory.CreateDirectory(Checkpoint);
-        WriteCheckpoint(Checkpoint, useInt8);
+        if (dense is not null)
+            LongCatTestData.WriteCheckpoint(Checkpoint, dense, writeConfig: false, indexFileName: LongCatCheckpoint.IndexFileName);
+        else
+            WriteCheckpoint(Checkpoint, useInt8);
+        if (dense is not null)
+            File.WriteAllText(Path.Combine(Checkpoint, "config.json"), ConfigJson(Config));
         foreach ((string folder, string file, int seed) in onePointSix
             ? new[] { ("loraA", "lora.safetensors", 81), ("loraB", "lora.safetensors", 82) }
             : [("lora", "dmd_lora.safetensors", 81)])
@@ -76,14 +81,7 @@ internal sealed class LongCatTinyAvatarRelease : IDisposable
         {
             LongCatTestData.WriteCheckpoint(directory, written, writeConfig: false,
                 indexFileName: int8 ? LongCatCheckpoint.Int8IndexFileName : LongCatCheckpoint.IndexFileName);
-            File.WriteAllText(Path.Combine(directory, "config.json"), $$"""
-                {"in_channels":{{config.InChannels}},"out_channels":{{config.OutChannels}},"hidden_size":{{config.HiddenSize}},
-                 "depth":{{config.Depth}},"num_heads":{{config.NumHeads}},"caption_channels":{{config.CaptionChannels}},"mlp_ratio":{{config.MlpRatio}},
-                 "adaln_tembed_dim":{{config.AdalnTembedDim}},"frequency_embedding_size":{{config.FrequencyEmbeddingSize}},"patch_size":[1,2,2],
-                 "text_tokens_zero_pad":true,"output_dim":{{config.AudioOutputDim}},"audio_window":{{config.AudioWindow}},
-                 "audio_block":{{config.AudioBlock}},"audio_channel":{{config.AudioChannel}},"intermediate_dim":{{config.AudioIntermediateDim}},
-                 "context_tokens":{{config.AudioContextTokens}},"vae_scale":{{config.AudioVaeScale}}}
-                """);
+            File.WriteAllText(Path.Combine(directory, "config.json"), ConfigJson(config));
         }
         finally
         {
@@ -93,4 +91,14 @@ internal sealed class LongCatTinyAvatarRelease : IDisposable
             LongCatTestData.DisposeAll(weights);
         }
     }
+
+    /// <summary>The config the recipe reads, for the tiny avatar DiT.</summary>
+    internal static string ConfigJson(LongCatConfig config) => $$"""
+                {"in_channels":{{config.InChannels}},"out_channels":{{config.OutChannels}},"hidden_size":{{config.HiddenSize}},
+                 "depth":{{config.Depth}},"num_heads":{{config.NumHeads}},"caption_channels":{{config.CaptionChannels}},"mlp_ratio":{{config.MlpRatio}},
+                 "adaln_tembed_dim":{{config.AdalnTembedDim}},"frequency_embedding_size":{{config.FrequencyEmbeddingSize}},"patch_size":[1,2,2],
+                 "text_tokens_zero_pad":true,"output_dim":{{config.AudioOutputDim}},"audio_window":{{config.AudioWindow}},
+                 "audio_block":{{config.AudioBlock}},"audio_channel":{{config.AudioChannel}},"intermediate_dim":{{config.AudioIntermediateDim}},
+                 "context_tokens":{{config.AudioContextTokens}},"vae_scale":{{config.AudioVaeScale}}}
+                """;
 }
