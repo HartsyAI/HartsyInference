@@ -208,6 +208,11 @@ public static partial class EngineKnobs
         Str("diagnostics.fibo2NoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Path to a float32 C-order .npy that replaces the seeded starting noise of Fibo 2.0 generations (diffusers parity). Unset draws the seeded noise.");
 
+    /// <summary>Directory for the per-step dump of the LongCat avatar denoise loop; unset writes nothing and reads nothing back.</summary>
+    public static readonly Knob<string?> LongCatStepDump =
+        Str("diagnostics.longcatStepDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar denoise loop's per-step .npy dump (call{n}_step{i}_t, _noise, _latent); unset writes nothing.");
+
     /// <summary>Directory for a safetensors dump of every YuE decode-stage intermediate, for Python reference parity.</summary>
     public static readonly Knob<string?> YueDump =
         Str("diagnostics.yueDump", null, KnobScope.Runtime, KnobDomain.Diagnostics, "Directory for a safetensors dump of every YuE decode-stage intermediate, for Python reference parity.");

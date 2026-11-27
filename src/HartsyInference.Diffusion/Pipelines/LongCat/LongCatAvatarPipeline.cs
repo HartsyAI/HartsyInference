@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Requests;
@@ -97,6 +98,8 @@ public sealed class LongCatAvatarPipeline
 {
     private readonly IBackend _backend;
     private readonly LongCatTransformer _dit;
+    // Counts the denoise calls that dumped their steps, so a chain's segments do not overwrite each other's files.
+    private int _dumpedCalls;
 
     /// <summary>Creates the pipeline over a loaded avatar transformer.</summary>
     public LongCatAvatarPipeline(IBackend backend, LongCatTransformer dit)
@@ -160,6 +163,8 @@ public sealed class LongCatAvatarPipeline
                 cache = _dit.BuildKvCache(_backend, condClip, conditioning, offload: run.OffloadKv);
             }
 
+            string? dumpDirectory = EngineKnobs.LongCatStepDump.Value;
+            LongCatStepDump? dump = string.IsNullOrEmpty(dumpDirectory) ? null : new LongCatStepDump(dumpDirectory, _dumpedCalls++);
             long started = System.Diagnostics.Stopwatch.GetTimestamp();
             for (int i = 0; i < run.Steps; i++)
             {
@@ -186,6 +191,7 @@ public sealed class LongCatAvatarPipeline
                 }
                 state.Dispose();
                 state = next;
+                dump?.Write(i, t, velocity, state, run.CondLatents, channels, frames, cond, run.Height, run.Width);
                 run.OnProgress?.Invoke(new GenerationProgress(i + 1, run.Steps, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds));
             }
 
