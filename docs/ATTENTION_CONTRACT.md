@@ -287,11 +287,11 @@ The planner reproduces these until the row that owns each is rewritten.
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
 - With `numerics.tileFromDevice` on (default off), the tile height is the device's fixed rung over the row bytes: 1 GiB when the card's total VRAM
   is 20 GiB or more (binary; a 20 GB card reports about 18.6 GiB and gets 512 MiB), else 512 MiB. The rung sets the height only. The tiling,
-  BF16-cast and causal-mask gates share one budget, `min(total/2, headroom)`. The headroom is the policy headroom that a streaming scope
-  keeps free after its resident prefix, noted when the scope starts and cleared when it is disposed; with no scope active the cap is
-  1 GiB. The budget reads no free memory, so the gate path does not move with the free reading, and a materialized allocation at this
-  size fits in what the planner held back. A failed allocation is not retried at a smaller height under this knob: it raises
-  OutOfVram, so a run never changes path mid-run. The remembered cap is recorded but not read under this knob, so later calls do not
+  BF16-cast and causal-mask gates share one budget. While a streaming scope is open it is `min(total/2, headroom/2)`, where the headroom is
+  the scope's `HeadroomBytes` (model- and token-derived, what the planner leaves free; noted when the scope is constructed, cleared when it
+  is disposed). With no scope open it is the device's tile rung (1 GiB at 20 GiB total or more, else 512 MiB). The budget reads no free
+  memory, so the gate path does not move with the free reading. A failed allocation is not retried at a smaller height under this knob: it
+  raises OutOfVram, so a run never changes path mid-run. The remembered cap is recorded but not read under this knob, so later calls do not
   start from a shrunken height. The gate is pinned by `SdpaTileFromDeviceTests` (budget as a function of total and headroom) and the
   on-card A/B `SdpaTileFromDeviceGpuTests` (bit-identical output across two free readings with the knob on; knob off differs at rounding). A/B on RTX 4090 at 93 frames, seed 1234, knob
   `c3a55333c` vs main `712ea2ca7`: 832x480 knob steps 92.7 / 92.0 s, peaks 19585 / 19718 MiB; main steps 90.7 / 91.7 s, peaks

@@ -26,8 +26,8 @@ public sealed class BlockStreamingScope : IDisposable
         BlockStreamingController? streamer)
     {
         _denoiser = options.Denoiser;
-        // The planner keeps this much free after the resident prefix, so an attention gate budget of at most this much always fits (see
-        // NoteAttentionHeadroom). Cleared in Dispose.
+        // The planner leaves this much free while the scope is open; the attention gate budget is half of it (see NoteAttentionHeadroom).
+        // Noted for every scope, including forced-stream ones. Cleared in Dispose.
         _backend = options.Backend;
         _backend.NoteAttentionHeadroom(options.HeadroomBytes);
         _modelName = options.ModelName;

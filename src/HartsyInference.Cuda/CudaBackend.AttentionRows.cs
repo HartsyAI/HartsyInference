@@ -353,19 +353,17 @@ public sealed partial class CudaBackend
     /// total half makes a gate's path the same on every run of one device while free VRAM is ample; the free clamp stops a gate choosing a buffer
     /// the card does not have free now. So the path can still move when free falls below half the total: the A/B rows name the free reading of
     /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
-    /// <remarks>Under the knob the budget reads no free memory: it is the device total's half, capped at the headroom a streaming scope
-    /// noted (see <see cref="NoteAttentionHeadroom"/>). The planner keeps that headroom free after its resident prefix, so a materialized
-    /// allocation at this size fits. With no scope noted, the default is <see cref="AttentionDefaultBudgetBytes"/>.</remarks>
+    /// <remarks>Under the knob the budget reads no free memory. While a streaming scope is open it is half its noted headroom
+    /// (<c>BudgetHeadroomBytes</c>, the planner's free-after-prefix, a function of model and tokens), capped at half the device total: the
+    /// same "half of free" the knob-off path uses, with the free replaced by the planner's figure. With no scope open it is the tile rung of
+    /// the device (<see cref="TileRungBytes"/>), small and free-independent.</remarks>
     internal static ulong PlannedGateBudget(ulong deviceTotalBytes, ulong headroomBytes)
     {
-        ulong cap = headroomBytes > 0 ? headroomBytes : AttentionDefaultBudgetBytes;
-        return Math.Min(deviceTotalBytes / 2, cap);
+        if (headroomBytes == 0) return (ulong)TileRungBytes(deviceTotalBytes);
+        return Math.Min(deviceTotalBytes / 2, headroomBytes / 2);
     }
 
-    /// <summary>The budget cap when no streaming scope has noted a headroom (<c>numerics.tileFromDevice</c>): 1 GiB.</summary>
-    internal const ulong AttentionDefaultBudgetBytes = 1UL << 30;
-
-    /// <summary>The headroom a streaming scope noted, 0 when none is active.</summary>
+    /// <summary>The headroom a streaming scope noted, 0 when none is open.</summary>
     internal ulong AttentionHeadroomBytes => (ulong)Math.Max(0L, _attentionHeadroom);
 
     private long _attentionHeadroom;

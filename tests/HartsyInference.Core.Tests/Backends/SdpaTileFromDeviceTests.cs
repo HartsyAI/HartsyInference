@@ -41,19 +41,31 @@ public sealed class SdpaTileFromDeviceTests
     }
 
     [Fact]
-    public void TheGateBudgetIsTheNotedHeadroomCappedAtHalfTheTotal()
+    public void WhileAScopeIsOpenTheBudgetIsHalfItsHeadroomCappedAtHalfTheTotal()
     {
-        // No free-memory argument exists: the budget is a function of the device total and the noted headroom only.
-        Assert.Equal(2UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
-        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 20UL << 30));
+        // Free-independent: a function of the device total and the scope's headroom only.
+        Assert.Equal(1UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
+        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 40UL << 30));
     }
 
     [Fact]
-    public void WithNoHeadroomNotedTheBudgetIsTheOneGiBDefault()
+    public void TheBudgetDoesNotDependOnThePrefixCountAndNeverExceedsTheHeadroom()
     {
-        // A scope that clears its note (headroom 0) leaves the default, never an unbounded or zero budget.
-        Assert.Equal(CudaBackend.AttentionDefaultBudgetBytes, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 0));
-        Assert.Equal(1UL << 30, CudaBackend.AttentionDefaultBudgetBytes);
+        // The budget takes no prefix argument; for any headroom it is at most half of that headroom (so within it).
+        foreach (ulong headroom in new[] { 512UL << 20, 2UL << 30, 6UL << 30, 12UL << 30 })
+        {
+            ulong budget = CudaBackend.PlannedGateBudget(Card24Gb, headroom);
+            Assert.True(budget <= headroom);
+            Assert.Equal(budget, CudaBackend.PlannedGateBudget(Card24Gb, headroom));
+        }
+    }
+
+    [Fact]
+    public void WithNoScopeOpenTheBudgetIsTheDeviceTileRung()
+    {
+        // Headroom 0 means no open scope (cleared on dispose): the budget is the device's rung, never unbounded or zero.
+        Assert.Equal(1L << 30, (long)CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 0));
+        Assert.Equal(512L << 20, (long)CudaBackend.PlannedGateBudget(Card8Gb, headroomBytes: 0));
     }
 
     [Fact]
@@ -61,7 +73,7 @@ public sealed class SdpaTileFromDeviceTests
     {
         // A 1 GiB rung on a 24 GB card: a 2 GiB score matrix is under the gate, so it stays materialized.
         Assert.Equal(1L << 30, CudaBackend.TileRungBytes(Card24Gb));
-        Assert.True(2UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
+        Assert.True(1UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
     }
 
     [Fact]
