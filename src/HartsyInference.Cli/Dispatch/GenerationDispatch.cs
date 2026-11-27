@@ -733,6 +733,7 @@ public static class GenerationDispatch
                     ?? throw new FileNotFoundException($"Driving audio not found: {drivingAudio}")
                 : null,
             SeparateDrivingVocals = parameters.GetBool("separate-vocals", false),
+            Speakers = BuildSpeakers(parameters),
             Guides = VideoInputManifest.Guides(parameters),
             VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
             AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),
@@ -1616,6 +1617,48 @@ public static class GenerationDispatch
         return parameters.GetDoubleOrNull("chain-seconds") is double seconds
             ? (int)Math.Round(seconds * nativeFps)
             : null;
+    }
+
+    /// <summary>The two speakers of a multi-speaker video, or null when no speaker option was passed. What a family cannot run is refused by the
+    /// engine's planning; only the option text is checked here.</summary>
+    internal static VideoSpeakers? BuildSpeakers(ParamState parameters)
+    {
+        string? firstAudio = parameters.GetStringOrNull("speaker1-audio"), secondAudio = parameters.GetStringOrNull("speaker2-audio");
+        string? firstBox = parameters.GetStringOrNull("speaker1-box"), secondBox = parameters.GetStringOrNull("speaker2-box");
+        string? timing = parameters.GetStringOrNull("speaker-timing");
+        string[]? silent = SplitPaths(parameters.GetStringOrNull("silent-boxes"));
+        if (firstAudio is null && secondAudio is null && firstBox is null && secondBox is null && timing is null && silent is null)
+        {
+            return null;
+        }
+        return new VideoSpeakers
+        {
+            First = new VideoSpeaker { Audio = LoadAudioClip(firstAudio), Box = ParseSpeakerBox(firstBox, "--speaker1-box") },
+            Second = new VideoSpeaker { Audio = LoadAudioClip(secondAudio), Box = ParseSpeakerBox(secondBox, "--speaker2-box") },
+            Timing = timing?.Trim().ToLowerInvariant() switch
+            {
+                null or "parallel" or "para" => VideoSpeakerTiming.Parallel,
+                "sequential" or "add" => VideoSpeakerTiming.Sequential,
+                _ => throw new ArgumentException($"--speaker-timing is parallel or sequential, not '{timing}'."),
+            },
+            SilentBoxes = silent?.Select(box => ParseSpeakerBox(box, "--silent-box")!).ToList(),
+        };
+    }
+
+    private static VideoSpeakerBox? ParseSpeakerBox(string? text, string option)
+    {
+        if (text is null)
+        {
+            return null;
+        }
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        int[] values = new int[4];
+        if (parts.Length != 4 || !parts.Select((part, i) => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out values[i]))
+            .ToArray().All(static parsed => parsed))
+        {
+            throw new ArgumentException($"{option} takes four whole numbers y_min,x_min,y_max,x_max, not '{text}'.");
+        }
+        return new VideoSpeakerBox { YMin = values[0], XMin = values[1], YMax = values[2], XMax = values[3] };
     }
 
     private static List<ReferenceVideo>? BuildReferenceVideos(ParamState parameters)

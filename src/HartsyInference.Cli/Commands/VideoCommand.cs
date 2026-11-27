@@ -185,6 +185,39 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             + "Runs on the CPU and is slow: minutes for a clip of a few seconds.")]
         public bool SeparateVocals { get; init; }
 
+        /// <summary>The first speaker's speech in a two-person clip (LongCat-Video-Avatar).</summary>
+        [CommandOption("--speaker1-audio")]
+        [Description("Speech (WAV) of the first of two people in --init-image (LongCat-Video-Avatar); instead of --driving-audio. "
+            + "Leave one speaker without audio to keep that person silent.")]
+        public string? Speaker1Audio { get; init; }
+
+        /// <summary>The second speaker's speech.</summary>
+        [CommandOption("--speaker2-audio")]
+        [Description("Speech (WAV) of the second person in --init-image.")]
+        public string? Speaker2Audio { get; init; }
+
+        /// <summary>Where the first speaker is.</summary>
+        [CommandOption("--speaker1-box")]
+        [Description("The first speaker's region of --init-image as y_min,x_min,y_max,x_max in its pixels. Give both boxes or neither; "
+            + "with neither the first speaker is on the left half and the second on the right.")]
+        public string? Speaker1Box { get; init; }
+
+        /// <summary>Where the second speaker is.</summary>
+        [CommandOption("--speaker2-box")]
+        [Description("The second speaker's region of --init-image as y_min,x_min,y_max,x_max.")]
+        public string? Speaker2Box { get; init; }
+
+        /// <summary>Other people in the picture, who stay silent.</summary>
+        [CommandOption("--silent-box")]
+        [Description("Region of another person who stays silent, as y_min,x_min,y_max,x_max; repeat for more. Needs both speaker boxes.")]
+        public string[]? SilentBoxes { get; init; }
+
+        /// <summary>Whether the speakers talk at once or in turn.</summary>
+        [CommandOption("--speaker-timing")]
+        [Description("parallel (default): both speak from the start and the soundtrack adds the two. sequential: the second speaker starts when "
+            + "the first recording ends.")]
+        public string? SpeakerTiming { get; init; }
+
         /// <summary>Arbitrary image guides expressed as FRAME=PATH.</summary>
         [CommandOption("--guide-image")]
         [Description("Image guide as FRAME=PATH; repeat. Negative frames resolve from the aligned target end.")]
@@ -416,6 +449,15 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
             parameters.Put("ref-audios", string.Join('\n', settings.ReferenceAudios));
         }
         parameters.PutIfSet("driving-audio", settings.DrivingAudio);
+        parameters.PutIfSet("speaker1-audio", settings.Speaker1Audio);
+        parameters.PutIfSet("speaker2-audio", settings.Speaker2Audio);
+        parameters.PutIfSet("speaker1-box", settings.Speaker1Box);
+        parameters.PutIfSet("speaker2-box", settings.Speaker2Box);
+        parameters.PutIfSet("speaker-timing", settings.SpeakerTiming);
+        if (settings.SilentBoxes is { Length: > 0 })
+        {
+            parameters.Put("silent-boxes", string.Join('\n', settings.SilentBoxes));
+        }
         if (settings.SeparateVocals)
         {
             parameters.Put("separate-vocals", "true");

@@ -5,16 +5,16 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>The avatar's audio cross-attention (<c>SingleStreamAttention</c>, <c>modules/avatar/attention.py</c> @ 58eb336) for a single speaker
-/// without the multi-speaker reference map. Each latent frame's <c>S</c> video tokens attend to that frame's <c>ctx</c> audio tokens only:
+/// <summary>The avatar's audio cross-attention (<c>SingleStreamAttention</c>, <c>modules/avatar/attention.py</c> @ 58eb336). Each latent frame's
+/// <c>S</c> video tokens attend to that frame's <c>ctx</c> audio tokens only (with several speakers, every speaker's tokens of that frame):
 /// q is a projection of the video tokens with a per-head RMSNorm, k and v are the two halves of one <c>kv_linear</c> over the audio tokens with
 /// a per-head RMSNorm on k, and the output is projected back to <c>dim</c>.</summary>
 /// <remarks>
 /// Layout: <c>x</c> is <c>[frames·S, dim]</c> (frame-major) and <c>audio</c> is <c>[frames·ctx, encoderDim]</c>, both F32. The noisy frames
 /// are batched as the attention's batch axis, so each frame still attends only to its own audio. With <c>numCond</c> conditioning frames the
 /// reference returns zeros for their tokens and computes only the noisy frames; this returns the same, so the output is <c>[frames·S, dim]</c>.
-/// Weights under <c>attn.</c>: <c>q_linear</c>, <c>q_norm</c>, <c>kv_linear</c>, <c>k_norm</c>, <c>proj</c>. The reference's RoPE1D on q and k runs
-/// only when a multi-speaker reference map is given; that path is not in this class.
+/// Weights under <c>attn.</c>: <c>q_linear</c>, <c>q_norm</c>, <c>kv_linear</c>, <c>k_norm</c>, <c>proj</c>. The reference's RoPE1D runs only for
+/// several speakers: the caller gives its tables (<see cref="LongCatSpeakerRope"/>), and q and k are rotated after their norms.
 /// </remarks>
 public sealed class LongCatAudioCrossAttention : IDisposable
 {
@@ -89,7 +89,12 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     /// <exception cref="InvalidOperationException">No weights are loaded.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="frames"/> or <paramref name="numCond"/> is out of range.</exception>
     /// <exception cref="ArgumentException"><paramref name="x"/> or <paramref name="audio"/> is not F32, has the wrong width, or has rows that do not split per frame.</exception>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor audio, int frames, int numCond)
+    public Tensor Forward(IBackend backend, Tensor x, Tensor audio, int frames, int numCond) =>
+        Forward(backend, x, audio, frames, numCond, null);
+
+    /// <summary>The forward with <paramref name="rotation"/>, the multi-speaker L-RoPE tables over the noisy tokens and their audio tokens; null for
+    /// one speaker.</summary>
+    internal Tensor Forward(IBackend backend, Tensor x, Tensor audio, int frames, int numCond, LongCatSpeakerRotation? rotation)
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(backend);
@@ -114,6 +119,9 @@ public sealed class LongCatAudioCrossAttention : IDisposable
         int tokens = (int)x.Shape[0] / frames, ctx = (int)audio.Shape[0] / frames;
         int noisy = frames - numCond;
         int noisyTokens = noisy * tokens, noisyCtx = noisy * ctx;
+        if (rotation is { } tables && (tables.QueryCos.Shape[0] != noisyTokens || tables.KeyCos.Shape[0] != noisyCtx))
+            throw new ArgumentException($"The speaker rotation covers {tables.QueryCos.Shape[0]} queries and {tables.KeyCos.Shape[0]} keys; "
+                + $"the noisy frames have {noisyTokens} and {noisyCtx}.", nameof(rotation));
 
         // The noisy frames, batched on the attention's batch axis: [noisy, tokens, heads, D] for q and [noisy, ctx, heads, D] for k and v.
         // With no conditioning frames the noisy rows are all of x and audio, so they are used in place rather than copied.
@@ -128,7 +136,7 @@ public sealed class LongCatAudioCrossAttention : IDisposable
                 noisyAudio = new(new TensorShape(noisyCtx, _encoderDim), DType.F32);
                 backend.SliceRows(noisyAudio, audio, numCond * ctx);
             }
-            projected = AttendBatched(backend, noisyX ?? x, noisyAudio ?? audio, noisy, tokens, ctx);
+            projected = AttendBatched(backend, noisyX ?? x, noisyAudio ?? audio, noisy, tokens, ctx, rotation);
         }
         finally
         {
@@ -150,7 +158,8 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     }
 
     /// <summary>All noisy frames at once: q, k and v, one attention over the batch of frames, then the output projection.</summary>
-    private Tensor AttendBatched(IBackend backend, Tensor noisyX, Tensor noisyAudio, int batch, int tokens, int ctx)
+    private Tensor AttendBatched(IBackend backend, Tensor noisyX, Tensor noisyAudio, int batch, int tokens, int ctx,
+        LongCatSpeakerRotation? rotation)
     {
         // The Linear and LinearWeightRows writes use the 4-D layout the attention layer reads; the element counts match.
         Tensor q = new(new TensorShape(batch, tokens, _heads, _headDim), DType.F32);
@@ -170,7 +179,15 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             throw;
         }
         // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
-        Tensor attended = _attention!.Attend(backend, q, k, v, new TensorShape(batch * tokens, _dim), default);
+        // A rotation table covers the batch's rows in order, so one table serves all frames; the layer applies it after the QK norm.
+        AttentionCallContext context = rotation is { } tables
+            ? new AttentionCallContext
+            {
+                QueryRotation = new QkRotation(QkRotationKind.InterleavedPairs, tables.QueryCos, tables.QuerySin, batch * tokens),
+                KeyRotation = new QkRotation(QkRotationKind.InterleavedPairs, tables.KeyCos, tables.KeySin, batch * ctx),
+            }
+            : default;
+        Tensor attended = _attention!.Attend(backend, q, k, v, new TensorShape(batch * tokens, _dim), in context);
         using (attended)
         {
             Tensor projected = new(new TensorShape(batch * tokens, _dim), DType.F32);

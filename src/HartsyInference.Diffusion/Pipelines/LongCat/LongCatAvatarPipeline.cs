@@ -15,7 +15,9 @@ public enum LongCatAvatarMode { At2v, Ai2v, Avc }
 /// <c>[Frames·contextTokens, outputDim]</c> (see <see cref="LongCatTransformer.ProjectAudio"/>). <see cref="UnconditionalAudioTokens"/> is the
 /// projection of zero raw audio with the same shape; it is required when either guidance scale is above 1.
 /// <see cref="Kind"/> picks the reference's sigma path, and the scheduler's static <see cref="Shift"/> applies to it (the shipped 1.6 scheduler
-/// config has shift 7). <see cref="UseKvCache"/> applies only to <see cref="LongCatAvatarMode.Avc"/>; at2v and ai2v ignore it.</summary>
+/// config has shift 7). <see cref="UseKvCache"/> applies only to <see cref="LongCatAvatarMode.Avc"/>; at2v and ai2v ignore it.
+/// <see cref="Speakers"/> turns on the multi-speaker path (ai2v and avc only): both audio arrays then hold every track of each frame,
+/// <c>[Frames·tracks·contextTokens, outputDim]</c>, and every guidance pass reads the same masks.</summary>
 public sealed record LongCatAvatarRun(
     int Channels, int Frames, int Height, int Width, float[] Noise,
     LongCatPrompt Positive, LongCatPrompt Negative, float[] AudioTokens, float[]? UnconditionalAudioTokens,
@@ -23,7 +25,7 @@ public sealed record LongCatAvatarRun(
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
     int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default,
-    AdjunctGate? LoraGate = null, bool OffloadKv = false, LongCatAvatarLoraSchedule? LoraMix = null);
+    AdjunctGate? LoraGate = null, bool OffloadKv = false, LongCatAvatarLoraSchedule? LoraMix = null, LongCatSpeakers? Speakers = null);
 
 /// <summary>The 1.6 two-LoRA schedule (the upstream <c>enable_lora_mix</c>): for steps below <see cref="MixSteps"/> the DMD LoRA runs at
 /// <see cref="Alpha"/> and the OPSD LoRA at <c>1 − Alpha</c>; from then on the OPSD LoRA runs alone at 1. The gates are switched per step.</summary>
@@ -146,8 +148,8 @@ public sealed class LongCatAvatarPipeline
 
         // The audio each pass reads is fixed for the whole run: copy it once, not per step.
         int audioFrom = useCache ? cond : 0, audioCount = useCache ? noisy : frames;
-        float[] audioCond = AudioRows(run.AudioTokens, audioFrom, audioCount);
-        float[]? audioUncond = guided ? AudioRows(run.UnconditionalAudioTokens!, audioFrom, audioCount) : null;
+        float[] audioCond = AudioRows(run, run.AudioTokens, audioFrom, audioCount);
+        float[]? audioUncond = guided ? AudioRows(run, run.UnconditionalAudioTokens!, audioFrom, audioCount) : null;
 
         // The conditioning frames are fixed for the run; the noisy frames are the scheduler state. Both live on the device, per channel, so a step
         // never round-trips the latents through the host. The noisy state has the velocity's own layout, [channels·noisy, hw].
@@ -243,7 +245,7 @@ public sealed class LongCatAvatarPipeline
             : LongCatFrameOps.ModelInput(_backend, state, condState, channels, cond, noisy, hw, new TensorShape([1, channels, frames, run.Height, run.Width]));
         return Guided(run, guided, (promptIsPositive, audioOn) =>
         {
-            using Tensor output = Predict(input, inputFrames, promptIsPositive ? run.Positive : run.Negative, audioOn ? audioCond : audioUncond!,
+            using Tensor output = Predict(run, input, inputFrames, promptIsPositive ? run.Positive : run.Negative, audioOn ? audioCond : audioUncond!,
                 timesteps, conditioning, cache, tensors);
             if (cached)
                 return LongCatFrameOps.Reshape(_backend, output, new TensorShape(channels * noisy, hw));
@@ -302,20 +304,23 @@ public sealed class LongCatAvatarPipeline
         return difference;
     }
 
-    private Tensor Predict(Tensor input, int frames, LongCatPrompt prompt, float[] audio, float[] frameTimesteps, LongCatConditioning conditioning,
-        LongCatKvCache? cache, LongCatRunTensors tensors)
+    private Tensor Predict(LongCatAvatarRun run, Tensor input, int frames, LongCatPrompt prompt, float[] audio, float[] frameTimesteps,
+        LongCatConditioning conditioning, LongCatKvCache? cache, LongCatRunTensors tensors)
     {
         Tensor text = tensors.Text(prompt);
-        Tensor audioTokens = tensors.Audio(audio, frames * _dit.Config.AudioContextTokens);
+        Tensor audioTokens = tensors.Audio(audio, frames * AudioTokensPerFrame(run));
         return cache is null
-            ? _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens, audioTokens)
-            : _dit.ForwardCached(_backend, input, text, frameTimesteps, in conditioning, cache, prompt.ValidTokens, audioTokens);
+            ? _dit.Forward(_backend, input, text, frameTimesteps, in conditioning, prompt.ValidTokens, audioTokens, run.Speakers)
+            : _dit.ForwardCached(_backend, input, text, frameTimesteps, in conditioning, cache, prompt.ValidTokens, audioTokens, run.Speakers);
     }
 
+    /// <summary>Audio token rows of one latent frame: one track's context tokens, times the tracks of a multi-speaker run.</summary>
+    private int AudioTokensPerFrame(LongCatAvatarRun run) => _dit.Config.AudioContextTokens * (run.Speakers?.Tracks ?? 1);
+
     /// <summary>The audio tokens of <paramref name="count"/> frames from <paramref name="from"/>, copied out of <paramref name="tokens"/>.</summary>
-    private float[] AudioRows(float[] tokens, int from, int count)
+    private float[] AudioRows(LongCatAvatarRun run, float[] tokens, int from, int count)
     {
-        int ctx = _dit.Config.AudioContextTokens, audioWidth = _dit.Config.AudioOutputDim;
+        int ctx = AudioTokensPerFrame(run), audioWidth = _dit.Config.AudioOutputDim;
         float[] result = new float[count * ctx * audioWidth];
         Array.Copy(tokens, from * ctx * audioWidth, result, 0, result.Length);
         return result;
@@ -345,7 +350,16 @@ public sealed class LongCatAvatarPipeline
         // Below 1 the reference's guidance form is not what this loop computes (a scale under 1 would reduce the text or audio term), so refuse it.
         if (!float.IsFinite(run.TextGuidance) || run.TextGuidance < 1f || !float.IsFinite(run.AudioGuidance) || run.AudioGuidance < 1f)
             throw new ArgumentOutOfRangeException(nameof(run), "The guidance scales must be finite and at least 1 (1 means no guidance on that term).");
-        int expectedAudio = run.Frames * _dit.Config.AudioContextTokens * _dit.Config.AudioOutputDim;
+        if (run.Speakers is { } speakers)
+        {
+            if (run.Mode == LongCatAvatarMode.At2v)
+                throw new ArgumentException("Multi-speaker runs only from an image or as a continuation, as the reference does.", nameof(run));
+            (_, int patchHeight, int patchWidth) = _dit.Config.PatchSize;
+            if (speakers.GridHeight != run.Height / patchHeight || speakers.GridWidth != run.Width / patchWidth)
+                throw new ArgumentException($"The speaker masks are on a {speakers.GridHeight}×{speakers.GridWidth} token grid; the run's latent "
+                    + $"gives {run.Height / patchHeight}×{run.Width / patchWidth}.", nameof(run));
+        }
+        int expectedAudio = run.Frames * AudioTokensPerFrame(run) * _dit.Config.AudioOutputDim;
         if (run.AudioTokens is null || run.AudioTokens.Length != expectedAudio)
             throw new ArgumentException($"The audio tokens hold {run.AudioTokens?.Length ?? 0} values; expected {expectedAudio}.", nameof(run));
         bool guided = run.TextGuidance > 1f || run.AudioGuidance > 1f;

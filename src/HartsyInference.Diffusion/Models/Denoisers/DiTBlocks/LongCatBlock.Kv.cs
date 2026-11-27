@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -53,16 +54,25 @@ public sealed partial class LongCatBlock
         }
     }
 
-    /// <summary>Self-attention of the rows over the cached rows followed by themselves (the reference's <c>forward_with_kv_cache</c>, without the
-    /// reference-map masking). The cached rows are keys and values only. The caller owns the result.</summary>
-    private Tensor CachedSelfAttention(IBackend backend, Tensor input, Tensor cos, Tensor sin, in LongCatPastKv past)
+    /// <summary>Self-attention of the rows over the cached rows followed by themselves (the reference's <c>forward_with_kv_cache</c>). The cached
+    /// rows are keys and values only. With several speakers, <paramref name="speakerMap"/> is the reference map of these rows against the cache's
+    /// first frame. The caller owns the result.</summary>
+    private Tensor CachedSelfAttention(IBackend backend, Tensor input, Tensor cos, Tensor sin, in LongCatPastKv past, LongCatSpeakerPass? speakers,
+        int tokensPerFrame, out float[]? speakerMap)
     {
+        speakerMap = null;
         int s = (int)input.Shape[0];
         (Tensor q, Tensor k, Tensor v) = ProjectRotated(backend, input, cos, sin);
         Tensor? queries = null, keys = null, values = null;
         Tensor attended;
         try
         {
+            if (speakers is not null)
+            {
+                using Tensor referenceKeys = new(new TensorShape(1, _config.NumHeads, tokensPerFrame, _config.HeadDim), DType.F32);
+                backend.CopyStrided(referenceKeys, past.Keys, StridedCopySpec.Gather(StridedView.Of(past.Keys.Shape).Slice(2, 0, tokensPerFrame)));
+                speakerMap = speakers.ReferenceMap(backend, _selfAttention!, q, 0, referenceKeys);
+            }
             queries = HeadMajor(backend, q);
             keys = WithPast(backend, past.Keys, k);
             values = WithPast(backend, past.Values, v);

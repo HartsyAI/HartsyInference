@@ -156,6 +156,84 @@ public sealed class LongCatVideoRouteTests : IAsyncLifetime
         Assert.Contains("does not support: Lora", text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ATwoSpeakerAvatarChainIsPlannedThenStreamedWithTheMixedSoundtrack(bool onePointSix)
+    {
+        Engine.Requests.ImageData portrait = LongCatTinyAvatarRelease.Portrait(Size);
+        AudioClip first = LongCatTinyAvatarRelease.Speech(1.2), second = LongCatTinyAvatarRelease.Speech(1.5);
+        object body = new
+        {
+            model = onePointSix ? AvatarFamily + ":1.6" : AvatarFamily,
+            modelPath = (onePointSix ? _avatar16 : _avatar15).Checkpoint,
+            save = false,
+            request = new
+            {
+                prompt = "two people speaking",
+                width = Size,
+                height = Size,
+                frames = SegmentFrames,
+                fps = LongCatAvatarRecipe.OutputFps,
+                seed = 3,
+                chainTotalFrames = ChainFrames,
+                initImage = new { rgb = portrait.Rgb, width = portrait.Width, height = portrait.Height },
+                speakers = new
+                {
+                    first = new { audio = new { data = first.Data, format = first.Format }, box = new { yMin = 0, xMin = 0, yMax = 16, xMax = 8 } },
+                    second = new
+                    {
+                        audio = new { data = second.Data, format = second.Format },
+                        box = new { yMin = 0, xMin = 8, yMax = 16, xMax = 16 },
+                    },
+                    timing = (int)Engine.Requests.VideoSpeakerTiming.Sequential,
+                    silentBoxes = new[] { new { yMin = 0, xMin = 0, yMax = 4, xMax = 4 } },
+                },
+            },
+        };
+
+        string events = await PlanThenStream(body);
+
+        Assert.Equal(Steps * Segments, Count(events, "event: progress"));
+        AssertFrames(events, ChainFrames);
+        using JsonDocument audio = Data(events, "audio");
+        Assert.Equal(16_000, audio.RootElement.GetProperty("sampleRate").GetInt32());
+        byte[] wav = Convert.FromBase64String(audio.RootElement.GetProperty("wav").GetString()!);
+        Assert.Equal(ChainFrames * 16_000 / LongCatAvatarRecipe.OutputFps * 2, wav.Length - 44);
+    }
+
+    [Theory]
+    [InlineData("longcat-video", "does not support: MultiSpeaker")]
+    [InlineData("longcat-avatar", "needs an init image")]
+    [InlineData("longcat-avatar-1.6", "needs an init image")]
+    public async Task SpeakersAreRefusedAtPlanningWithTheirReason(string model, string reason)
+    {
+        string checkpoint = model switch
+        {
+            "longcat-video" => BaseCheckpoint,
+            "longcat-avatar" => _avatar15.Checkpoint,
+            _ => _avatar16.Checkpoint,
+        };
+        AudioClip speech = LongCatTinyAvatarRelease.Speech(0.5);
+        object body = new
+        {
+            model,
+            modelPath = checkpoint,
+            save = false,
+            request = new
+            {
+                prompt = "two people speaking",
+                speakers = new { first = new { audio = new { data = speech.Data, format = speech.Format } }, second = new { } },
+            },
+        };
+
+        HttpResponseMessage response = await _http.PostAsJsonAsync("/v1/native/video/plan", body);
+        string text = await response.Content.ReadAsStringAsync();
+
+        Assert.True(response.StatusCode == HttpStatusCode.UnprocessableEntity, $"{response.StatusCode}: {text}");
+        Assert.Contains(reason, text, StringComparison.Ordinal);
+    }
+
     /// <summary>A continuation request reaches VideoRequest.VideoContinuation through the JSON route, so the base family plans it; the planner refuses
     /// it for a family that does not declare the feature.</summary>
     [Fact]

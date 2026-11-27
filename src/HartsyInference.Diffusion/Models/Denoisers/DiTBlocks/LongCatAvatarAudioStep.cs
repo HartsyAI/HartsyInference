@@ -74,8 +74,11 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
     /// <param name="x">The stream after the text cross-attention, <c>[frames·S, dim]</c>.</param>
     /// <param name="audioTokens">The per-frame audio tokens, <c>[frames·ctx, encoderDim]</c>.</param>
     /// <param name="timeEmbed">The per-frame timestep embedding, <c>[frames, adaLnWidth]</c>.</param>
+    /// <param name="rotation">The multi-speaker L-RoPE tables of the noisy frames; null for one speaker.</param>
+    /// <param name="probe">Receives the cross-attention output of the noisy rows as <paramref name="probeName"/> when set.</param>
     /// <returns>A new <c>[frames·S, dim]</c> stream; the conditioning rows are the input rows.</returns>
-    public Tensor Apply(IBackend backend, Tensor x, Tensor audioTokens, Tensor timeEmbed, int numCond, int tokensPerFrame)
+    public Tensor Apply(IBackend backend, Tensor x, Tensor audioTokens, Tensor timeEmbed, int numCond, int tokensPerFrame,
+        LongCatSpeakerRotation? rotation = null, Action<string, Tensor>? probe = null, string probeName = "")
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         if (_adaW is null)
@@ -96,9 +99,10 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         // Audio cross-attention over the full stream after the affine video pre-norm; the conditioning rows come back as zeros.
         using Tensor preNormed = new(x.Shape, DType.F32);
         backend.LayerNorm(preNormed, x, _preW!, _preB!, NormEps);
-        using Tensor audioOut = _attention.Forward(backend, preNormed, audioTokens, frames, numCond);
+        using Tensor audioOut = _attention.Forward(backend, preNormed, audioTokens, frames, numCond, rotation);
         using Tensor noiseOut = new(new TensorShape(noisyRows, _dim), DType.F32);
         backend.SliceRows(noiseOut, audioOut, condRows);
+        probe?.Invoke(probeName, noiseOut);
 
         // Output norm with shift and scale of the noisy frames (1 + scale, then + shift), then the gated residual on the noisy rows.
         using Tensor modulated = LongCatOps.NormModulate(backend, noiseOut, modulation, _dim, 0, tokensPerFrame);
