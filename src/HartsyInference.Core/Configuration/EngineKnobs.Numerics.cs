@@ -157,12 +157,16 @@ public static partial class EngineKnobs
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
     /// <summary>LongCat's <c>int8_tensorwise</c> linears dequantize the weight and leave the activations as they are, as the release's reference computes
-    /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. CUDA only: the resident weight is unpacked to
-    /// BF16 on the device into a dense GEMM on every call, a tiled projection once per tile. Where the backend cannot do that (no unpack kernel,
-    /// a rotated weight) it dequantizes on the host instead, and that dense linear is eligible for <c>numerics.w8a8</c>, which would quantize the
-    /// activations again.</summary>
+    /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. On by default for LongCat's INT8 releases (a run
+    /// with it on: step 1 noise relRMS 0.024218, against 0.026643 for weight-only before the rounding change and 0.098540 with it off, on the
+    /// resident route; 4090, reference inputs, engine 1a1946df4, LC-CMP5). At engine b92f66419 with it on by default (LC-CMP7, 4090),
+    /// the step-0 noise relRMS with substituted inputs is 0.025196, slightly worse than 0.024218 at 1a1946df4, so step 0 is over the 2e-2 bound. Every
+    /// weight is dequantized with the reference's rounding for its input dtype (BF16 nearest-even, or the exact float32 product for float32-input
+    /// layers). CUDA only: the device unpacks the weight on every call, a tiled projection once per tile. Where the backend cannot do that it
+    /// dequantizes on the host instead, and that dense linear is eligible for <c>numerics.w8a8</c>, which would quantize the activations again.
+    /// Off is the resident route (activations quantized per row), which is not the reference's arithmetic.</summary>
     public static readonly Knob<bool> LongcatInt8WeightOnly =
-        Bool("numerics.longcatInt8WeightOnly", false, KnobScope.Construction, KnobDomain.Numerics, "LongCat INT8 linears dequantize the weight and keep the activations unquantized, as the reference does. CUDA unpacks each weight on the device on every call. Leave numerics.w8a8 off.");
+        Bool("numerics.longcatInt8WeightOnly", true, KnobScope.Construction, KnobDomain.Numerics, "LongCat INT8 linears dequantize the weight and keep the activations unquantized, as the reference does (on by default). CUDA unpacks each weight on the device on every call. Leave numerics.w8a8 off.");
 
     /// <summary>Builds LTX-2.5's diffusion video decoder instead of the ~40x faster conv decoder when the checkpoint has both.</summary>
     public static readonly Knob<bool> Ltx2DiffusionVae =

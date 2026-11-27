@@ -161,8 +161,11 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     /// Returns <c>[1, z, T, H, W]</c>.</summary>
     /// <paramref name="audioTokens"/> are the avatar's per-frame audio tokens <c>[frames·contextTokens, audioOutputDim]</c> from
     /// <see cref="ProjectAudio"/>; a checkpoint with audio weights needs them, and a base checkpoint must not get them.
+    /// <paramref name="speakers"/> turns on the avatar's multi-speaker path: the audio tokens then hold every track,
+    /// <c>[frames·tracks·contextTokens, audioOutputDim]</c> (<see cref="LongCatAvatarAudio.JoinTracks"/>), and each block places its noisy
+    /// tokens by its reference attention map. It needs at least one conditioning frame, as the reference does.
     public Tensor Forward(IBackend backend, Tensor latent, Tensor encoder, ReadOnlySpan<float> frameTimesteps, in LongCatConditioning conditioning,
-        int validTextTokens = -1, Tensor? audioTokens = null)
+        int validTextTokens = -1, Tensor? audioTokens = null, LongCatSpeakers? speakers = null)
     {
         if (!_loaded)
             throw new InvalidOperationException("The transformer has no weights: LoadWeights was never called, or it failed.");
@@ -181,6 +184,13 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
             throw new ArgumentException(
                 $"Give one timestep or one per latent frame ({frames}); got {frameTimesteps.Length}.", nameof(frameTimesteps));
         conditioning.Validate(frames);
+        if (speakers is not null)
+        {
+            if (conditioning.NumCondLatents < 1)
+                throw new ArgumentException("Multi-speaker runs only from an image or as a continuation: it needs a conditioning frame.",
+                    nameof(speakers));
+            RequireSpeakers(speakers, audioTokens, frames, gridH, gridW);
+        }
 
         // The caption and timestep embeddings run first: they can throw (a bad validTextTokens), and the patch embedding is the one tensor
         // that would leak on that path.
@@ -188,6 +198,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         Probe?.Invoke("t_embedder", timeEmbed);
         using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
         Probe?.Invoke("y_embedder", text);
+        using LongCatSpeakerPass? speakerPass = speakers is null ? null : SpeakerPass(speakers, frames - conditioning.NumCondLatents);
 
         Tensor hidden = WanDitOps.Patchify(backend, latent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
         Probe?.Invoke("x_embedder", hidden);
@@ -207,7 +218,8 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         for (int i = 0; i < _blocks.Length; i++)
         {
             BeforeBlockForward?.Invoke(i);
-            Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, Probe, Probe is null ? "" : $"block{i}", audioTokens);
+            Tensor next = _blocks[i].Forward(backend, cur, text, timeEmbed, in inputs, null, Probe, Probe is null ? "" : $"block{i}", audioTokens,
+                speakerPass);
             cur.Dispose();
             cur = next;
         }
@@ -253,6 +265,24 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
             throw new InvalidOperationException("This checkpoint has no audio projection.");
         return LongCatAvatarAudio.FrameTokens(backend, _audioProjection, rawAudio, frames, _config.AudioWindow, _config.AudioBlock,
             _config.AudioChannel, _config.AudioVaeScale);
+    }
+
+    /// <summary>The per-forward tensors of a multi-speaker pass over <paramref name="noisyFrames"/> noisy frames.</summary>
+    private LongCatSpeakerPass SpeakerPass(LongCatSpeakers speakers, int noisyFrames) =>
+        new(speakers, _config.NumHeads, _config.HeadDim, _config.AudioContextTokens, noisyFrames);
+
+    /// <summary>The masks must sit on this latent's token grid, and the audio tokens must hold every track of every frame.</summary>
+    private void RequireSpeakers(LongCatSpeakers speakers, Tensor? audioTokens, int frames, int gridH, int gridW)
+    {
+        if (_audioProjection is null || audioTokens is null)
+            throw new ArgumentException("Multi-speaker applies to an avatar checkpoint with its audio tokens.", nameof(speakers));
+        if (speakers.GridHeight != gridH || speakers.GridWidth != gridW)
+            throw new ArgumentException($"The speaker masks are on a {speakers.GridHeight}×{speakers.GridWidth} token grid; the latent's is "
+                + $"{gridH}×{gridW}.", nameof(speakers));
+        long rows = (long)frames * speakers.Tracks * _config.AudioContextTokens;
+        if (audioTokens.Shape.Rank != 2 || audioTokens.Shape[0] != rows || audioTokens.Shape[1] != _config.AudioOutputDim)
+            throw new ArgumentException($"The audio tokens of {speakers.Tracks} tracks over {frames} frames are [{rows}, {_config.AudioOutputDim}], "
+                + $"got {audioTokens.Shape}.", nameof(audioTokens));
     }
 
     private Tensor CaptionEmbedding(IBackend backend, Tensor encoder, int validTextTokens)

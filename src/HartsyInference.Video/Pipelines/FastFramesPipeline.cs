@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
@@ -160,8 +161,9 @@ public sealed class FastFramesPipeline : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
         // A pinned prefix from an earlier clip is still on the device, so the free VRAM read here does not show what the placement
         // will have free. The placement releases or keeps that prefix; the check after it decides, so skip this one.
-        if (!_generatorPin.Resident)
-            CheckKvFitsNow(latentFrames);
+        // Auto (null) decides the mode in the rollout and checks that mode there; only a forced resident cache is refused at admission.
+        if (!_generatorPin.Resident && OffloadFrameCache == false)
+            CheckKvFitsNow(latentFrames, offload: false);
     }
 
     /// <summary>The frame-cache need of a clip of <paramref name="latentFrames"/> on this pipeline: the cache in the slot dtype, plus one
@@ -170,14 +172,93 @@ public sealed class FastFramesPipeline : IDisposable
         KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim,
             _transformer.BranchActivation(_backend, singleGroup: true));
 
-    /// <summary>Checks the clip's frame cache against the free VRAM the backend reports now. Called at admission and again once the
-    /// block placement has run, so the weights it uploaded are counted as used.</summary>
-    private void CheckKvFitsNow(int latentFrames)
+    /// <summary>The device bytes of a clip whose frame cache is offloaded: one block's cache and its join, the most a block's attention holds.</summary>
+    private long OffloadedKvNeedBytes(int latentFrames) =>
+        KvNeedBytes(1, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim, _transformer.BranchActivation(_backend, singleGroup: true));
+
+    /// <summary>The frame cache's device need in the mode the clip runs in: the whole cache, or one block's share when offloaded.</summary>
+    private long KvNeedFor(int latentFrames, bool offload) => offload ? OffloadedKvNeedBytes(latentFrames) : ClipKvNeedBytes(latentFrames);
+
+    /// <summary>Whether this clip's frame cache lives on the host. Forced by <see cref="OffloadFrameCache"/>; in auto mode, when a resident cache
+    /// would not pass the check after the placement (<see cref="ResidentCacheFits"/>). A pinned prefix the placement keeps counts as used, as the
+    /// check after it does; one the placement releases counts as free. A backend that reports no VRAM is not offloaded.</summary>
+    private bool ResolveFrameCacheOffload(int latentFrames)
+    {
+        if (OffloadFrameCache is bool forced)
+            return forced;
+        (long freeBytes, long totalBytes) = _backend.GetVramInfo();
+        if (totalBytes <= 0)
+            return false;
+        if (_generatorPin.Resident && PlacementReleasesPin(latentFrames))
+            freeBytes += PinnedPrefixBytes();
+        long window = StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead);
+        return !ResidentCacheFits(freeBytes, window, ClipKvNeedBytes(latentFrames));
+    }
+
+    /// <summary>The activation allowance the block placement keeps free beyond the clip's frame cache. The refiner and the decoder are not in it:
+    /// they are uploaded before the placement, so the planner counts them as used.</summary>
+    public const long DefaultStreamingHeadroomBytes = 1L << 30;
+
+    /// <summary>The bytes the block placement keeps free: the chosen mode's frame-cache need, <see cref="DefaultStreamingHeadroomBytes"/> and the
+    /// streaming window, which is uploaded right after the placement. An override replaces the sum.</summary>
+    public static long PlacementHeadroomBytes(long kvNeedBytes, long windowBytes, long? overrideBytes) =>
+        overrideBytes ?? kvNeedBytes + DefaultStreamingHeadroomBytes + windowBytes;
+
+    /// <summary>The check for a resident cache in the auto mode, in the same terms as the placement's headroom: the cache must fit beside the
+    /// window and the activation allowance, so a resident choice never leaves less than the placement reserves.</summary>
+    public static bool ResidentCacheFits(long freeBytes, long windowBytes, long kvNeedBytes) =>
+        freeBytes - windowBytes - DefaultStreamingHeadroomBytes >= kvNeedBytes;
+
+    /// <summary>The placement releases a pinned prefix when the clip is longer than the prefix was sized for, or streaming is forced; mirrors the
+    /// release in BlockStreamingScope.</summary>
+    private bool PlacementReleasesPin(int latentFrames) =>
+        StreamingMode == LowVramMode.ForceOn || _generatorPin.SizedTokens < (long)latentFrames * _gridHeight * _gridWidth;
+
+    /// <summary>Device bytes of the pinned resident prefix (all blocks when the pin is unsized).</summary>
+    private long PinnedPrefixBytes()
+    {
+        int count = _generatorPin.PinnedBlocks >= 0 ? _generatorPin.PinnedBlocks : _transformer.BlockCount;
+        long bytes = 0;
+        for (int b = 0; b < count && b < _transformer.BlockCount; b++)
+            bytes += _transformer.GetBlock(b).EstimatedWeightBytes;
+        return bytes;
+    }
+
+    /// <summary>Refuses an offloaded clip whose frame cache does not fit the host's available memory, before any frame is denoised. A host with
+    /// unknown memory is not checked.</summary>
+    private void CheckHostCacheFits(int latentFrames, bool offload)
+    {
+        if (!offload)
+            return;
+        DType slot = _transformer.BranchActivation(_backend, singleGroup: true);
+        int tokens = _gridHeight * _gridWidth, hidden = _transformer.Config.InnerDim;
+        long cache = FrameKvCache.EstimateBytes(_transformer.BlockCount, latentFrames, tokens, hidden, slot);
+        long oneBlockJoin = FrameKvCache.EstimateBytes(1, latentFrames, tokens, hidden, slot);
+        CheckHostFits(_config.Name, HostNeedBytes(cache, oneBlockJoin), latentFrames, HostMemoryInfo.AvailableBytes());
+    }
+
+    /// <summary>The host bytes an offloaded clip holds: the whole frame cache, plus one block's join staging. Each join copies the stored host slots of
+    /// one block to fresh host tensors before the device concat reads them, so one block's keys and values sit on the host beside the cache.</summary>
+    internal static long HostNeedBytes(long cacheBytes, long oneBlockJoinBytes) => cacheBytes + oneBlockJoinBytes;
+
+    /// <summary>Throws when an offloaded cache's host bytes exceed the host's available bytes (no check when the host reports none).</summary>
+    /// <exception cref="InvalidOperationException">The offloaded cache does not fit host memory.</exception>
+    public static void CheckHostFits(string name, long needBytes, int latentFrames, long? availableBytes)
+    {
+        if (availableBytes is not long available || needBytes <= available)
+            return;
+        throw new InvalidOperationException(
+            $"{name} needs {needBytes >> 20} MiB of host memory for the offloaded frame cache ({latentFrames} latent frames); the host has "
+            + $"{available >> 20} MiB available. Generate fewer frames, or free host memory first.");
+    }
+
+    /// <summary>Checks the clip's frame cache, in the mode it runs in, against the free VRAM the backend reports now. Called at admission and
+    /// again once the block placement has run, so the weights it uploaded are counted as used.</summary>
+    private void CheckKvFitsNow(int latentFrames, bool offload)
     {
         (long freeBytes, long totalBytes) = _backend.GetVramInfo();
         DType slot = _transformer.BranchActivation(_backend, singleGroup: true);
-        long need = KvNeedBytes(_transformer.BlockCount, latentFrames, _gridHeight * _gridWidth, _transformer.Config.InnerDim, slot);
-        CheckFits(_config.Name, need, latentFrames, slot, freeBytes, totalBytes);
+        CheckFits(_config.Name, KvNeedFor(latentFrames, offload), latentFrames, slot, freeBytes, totalBytes);
     }
 
     /// <summary>Refuses a clip whose frame-wise cache cannot fit in the free VRAM, before any frame is denoised. The cache keeps every
@@ -213,20 +294,26 @@ public sealed class FastFramesPipeline : IDisposable
     {
         // The body runs on the first MoveNext, so a rollout enumerated after Dispose is refused here.
         ObjectDisposedException.ThrowIf(_disposed, this);
-        using FrameKvCache cache = new(_backend, _transformer.BlockCount, latentFrames);
         using FastFramesPixelDecoder.State decoderState = _decoder.CreateState();
         using FastFramesKvRefiner.Conditioning conditioning = _refiner.Prepare(_backend, _config.RefineTimestep);
-        // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
-        // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
-        long kvNeed = ClipKvNeedBytes(latentFrames);
         // The refiner and the decoder stay on the device for the clip. Uploading them before the placement lets the planner size the
         // prefix beside them, so the headroom only has to cover activations. A failure from here to the first frame releases them and
         // the generator, so a refused clip leaves nothing it uploaded on the device.
         BlockStreamingScope? placed = null;
+        FrameKvCache? cache = null;
+        long kvNeed;
         try
         {
             _refinerWeights.Preload();
             _decoderWeights.Preload();
+            // The mode is decided after the preloads, so the free VRAM read counts them, and with the terms of the check after the placement.
+            bool offload = ResolveFrameCacheOffload(latentFrames);
+            kvNeed = KvNeedFor(latentFrames, offload);
+            CheckHostCacheFits(latentFrames, offload);
+            // An offloaded cache keeps only the slots a block's join stages on the device.
+            cache = new FrameKvCache(_backend, _transformer.BlockCount, latentFrames, offload);
+            // The block placement reserves this clip's frame-cache need, in the slot dtype, so the planner keeps it free before it decides how
+            // many blocks stay resident. The same estimate backs the check after the placement. On a CPU backend the scope is resident-only.
             // The pin keeps the resident prefix across clips on this pipeline. A longer clip needs a bigger cache reservation, so the
             // prefix is sized again then; a shorter or equal one reuses it. TokenLoad is the clip's token count, as Wan's pin takes it.
             placed = BlockStreamingScope.Open(new BlockStreamingOptions
@@ -234,24 +321,29 @@ public sealed class FastFramesPipeline : IDisposable
                 Backend = _backend,
                 Denoiser = _transformer,
                 ModelName = _config.Name,
-                HeadroomBytes = StreamingHeadroomOverride ?? kvNeed + DefaultStreamingHeadroomBytes,
+                // The headroom is the chosen mode's frame-cache need, the activation allowance and the window (prefetchAhead + 1 streamed blocks),
+                // which is uploaded right after the placement.
+                HeadroomBytes = PlacementHeadroomBytes(kvNeed, StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead),
+                    StreamingHeadroomOverride),
                 Mode = StreamingMode,
                 Pin = _generatorPin,
                 TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
             });
             LastStreamedBlocks = placed.StreamedBlocks;
             // Free VRAM is read again now that the placement has uploaded its prefix; the admission check ran before that upload.
-            CheckKvFitsNow(latentFrames);
+            CheckKvFitsNow(latentFrames, offload);
         }
         catch
         {
             placed?.Dispose();
+            cache?.Dispose();
             FreeGenerator();
             _refinerWeights.Release(force: true);
             _decoderWeights.Release(force: true);
             throw;
         }
         BlockStreamingScope streaming = placed!;
+        FrameKvCache frames = cache!;
         bool streamed = streaming.StreamedBlocks > 0;
         try
         {
@@ -260,7 +352,7 @@ public sealed class FastFramesPipeline : IDisposable
                 cancel.ThrowIfCancellationRequested();
                 // Refuses a frame started after Dispose. A Dispose while the consumer held the previous frame is caught after the yield below.
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, cache, decoderState);
+                (float[] latent, Tensor pixels) = DenoiseAndDecode(promptEmbeds, noise, frame, frames, decoderState);
                 FastFramesFrame output;
                 using (pixels)
                     output = new FastFramesFrame(frame, latent, pixels.AsReadOnlySpan<float>().ToArray(), _decoder.Config.PatchT,
@@ -273,9 +365,9 @@ public sealed class FastFramesPipeline : IDisposable
                 // The next frame reads this frame's cache slot, so the clean pass or the refinement runs before it. It runs after the
                 // consumer has the frame, so a frame is not held back by the cache work of the one after it.
                 if (frame == 0)
-                    CleanPass(promptEmbeds, latent, frame, cache);
+                    CleanPass(promptEmbeds, latent, frame, frames);
                 else
-                    Refine(latent, frame, cache, conditioning);
+                    Refine(latent, frame, frames, conditioning);
                 streaming.EndStep();
                 progress?.Invoke(frame + 1, latentFrames);
             }
@@ -284,6 +376,7 @@ public sealed class FastFramesPipeline : IDisposable
         {
             // Disposing the scope evicts the streamed window; the release below then decides what the next clip finds on the device.
             streaming.Dispose();
+            frames.Dispose();
             ReleaseOrKeepGenerator(streamed);
         }
     }
@@ -309,13 +402,17 @@ public sealed class FastFramesPipeline : IDisposable
         _generatorPin.Resident = true;
     }
 
-    /// <summary>Bytes the block placement keeps free beyond the clip's frame cache: activations, the refiner and the decoder. When
-    /// null, <see cref="DefaultStreamingHeadroomBytes"/> is used.</summary>
+    /// <summary>Replaces the placement headroom (the cache need, the activation allowance and the window) when set; null uses the sum.</summary>
     public long? StreamingHeadroomOverride { get; set; }
 
     /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
     /// (for tests); ForceOff keeps every block resident.</summary>
     public LowVramMode? StreamingMode { get; set; }
+
+    /// <summary>Where a clip's frame cache lives: null (auto) offloads it to host memory when the whole cache does not fit the free VRAM
+    /// (each written slot leaves the device; a block's join stages back what it reads), true always offloads, false keeps it resident and refuses
+    /// a clip that does not fit. The output is the same in every mode.</summary>
+    public bool? OffloadFrameCache { get; set; }
 
     /// <summary>Blocks the last clip streamed (the generator's block count when every block streams). Zero before the first clip.</summary>
     public int LastStreamedBlocks { get; private set; }
@@ -350,10 +447,6 @@ public sealed class FastFramesPipeline : IDisposable
         _backend.TrimMemoryPool();
         _generatorPin.Resident = false;
     }
-
-    /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
-    /// they are uploaded before the placement, so the planner counts them as used.</summary>
-    public const long DefaultStreamingHeadroomBytes = 1L << 30;
 
     private IEnumerable<VideoFrame> GenerateCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)

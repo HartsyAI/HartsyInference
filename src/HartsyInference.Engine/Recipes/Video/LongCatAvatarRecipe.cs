@@ -5,6 +5,7 @@ using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
@@ -19,7 +20,9 @@ internal delegate float[] LongCatDrivingFeatures(float[] speech16k, int fps);
 
 /// <summary>LongCat-Video-Avatar, the 1.5 and 1.6 layout: speech-driven video from one portrait (<see cref="LongCatAvatarMode.Ai2v"/>) or from
 /// speech alone (<see cref="LongCatAvatarMode.At2v"/>). The driving speech goes through Whisper-large-v3 and the avatar audio projection in
-/// every block. One 93-frame segment at 25 fps; the multi-segment chain is wired in the pipeline; multi-speaker is not.</summary>
+/// every block. One 93-frame segment at 25 fps; a longer request runs as a chain of segments. With <c>VideoRequest.Speakers</c>, two people in
+/// the portrait are each driven by their own speech (<see cref="LongCatSpeakers"/>), on the same weights: 1.5 and 1.6 ship no separate
+/// multi-speaker checkpoint. Avatar 1.0, whose multi-speaker weights are the separate <c>avatar_multi</c> folder, is not built.</summary>
 /// <remarks>Likeness warning: the output is a generated talking person. Use it only with the consent of the person depicted.</remarks>
 public sealed class LongCatAvatarRecipe : IVideoRecipe, IVideoDeviceCheck
 {
@@ -82,8 +85,16 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe, IVideoDeviceCheck
     /// <inheritdoc/>
     public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings)
     {
-        if (request.VideoAudioReference is null)
-            return "LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference; the avatar has no speech-free path.";
+        if (request.Speakers is { } speakers)
+        {
+            if (LongCatAvatarSpeakers.Refusal(request, speakers) is { } refusal)
+                return refusal;
+        }
+        else if (request.VideoAudioReference is null)
+        {
+            return "LongCat-Video-Avatar needs driving speech in VideoRequest.VideoAudioReference (or two speakers in VideoRequest.Speakers); "
+                + "the avatar has no speech-free path.";
+        }
         return ChainIssue(request.ChainTotalFrames, settings.Frames, settings.Width, settings.Height, settings.Fps) is { } issue
             ? issue.Message
             : null;
@@ -116,8 +127,9 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe, IVideoDeviceCheck
     };
 
     /// <inheritdoc/>
-    /// <remarks>The init image is the identity reference (the first latent frame). The driving speech is <c>VideoRequest.VideoAudioReference</c>.</remarks>
-    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain;
+    /// <remarks>The init image is the identity reference (the first latent frame). The driving speech is <c>VideoRequest.VideoAudioReference</c>,
+    /// or per speaker in <c>VideoRequest.Speakers</c>.</remarks>
+    public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingAudio | VideoFeatures.LongFormChain | VideoFeatures.MultiSpeaker;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => LongCatAvatarVariants.RowIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);

@@ -176,10 +176,7 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         (int pT, int pH, int pW) = config.PatchSize;
         long tokens = (long)(lt / pT) * (lh / pH) * (lw / pW);
         long perToken = 4L * (12L * config.VidDim + 2L * config.MlpDim);
-        long largestBlock = 0;
-        for (int i = 0; i < _dit.BlockCount; i++)
-            largestBlock = Math.Max(largestBlock, _dit.GetBlock(i).EstimatedWeightBytes);
-        long window = (BlockStreamingOptions.DefaultPrefetchAhead + 1) * largestBlock;
+        long window = StreamingWindow.Bytes(_dit, BlockStreamingOptions.DefaultPrefetchAhead);
         return tokens * perToken + window + VaeDecodeReserveBytes(lt, lh, lw) + 256L * 1024 * 1024;
     }
 

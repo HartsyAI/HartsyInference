@@ -13,8 +13,9 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The LongCat paths on CUDA and Vulkan against the CPU backend, on the tiny config: the same weights and inputs, and the same final
 /// latent within <see cref="Bound"/>. Covered: the uncached avatar modes, the row-tiled self-attention projection and FFN, the offloaded
-/// key and value cache, the gated distillation LoRA and the two-LoRA mix, and (Vulkan only; CUDA has <see cref="LongCatCudaParityTests"/>) the
-/// cached video and avatar loops. CUDA runs under <see cref="ExactGemmScope"/>. Skipped where the device does not open.</summary>
+/// key and value cache, the gated distillation LoRA and the two-LoRA mix, the multi-speaker loops (uncached, cached and offloaded cache), and
+/// (Vulkan only; CUDA has <see cref="LongCatCudaParityTests"/>) the cached video and avatar loops. CUDA runs under <see cref="ExactGemmScope"/>.
+/// Skipped where the device does not open.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class LongCatDevicePathsGpuTests(ITestOutputHelper output)
 {
@@ -50,6 +51,12 @@ public sealed class LongCatDevicePathsGpuTests(ITestOutputHelper output)
     [VulkanDeviceFact]
     public void Vulkan_GatedDistillationLoras_MatchTheCpu() => GatedLoras(Device.Vulkan);
 
+    [CudaDeviceFact]
+    public void Cuda_MultiSpeakerLoops_MatchTheCpu() => MultiSpeaker(Device.Cuda);
+
+    [VulkanDeviceFact]
+    public void Vulkan_MultiSpeakerLoops_MatchTheCpu() => MultiSpeaker(Device.Vulkan);
+
     [VulkanDeviceFact]
     public void Vulkan_CachedVideoAndAvatarLoops_MatchTheCpu()
     {
@@ -77,6 +84,23 @@ public sealed class LongCatDevicePathsGpuTests(ITestOutputHelper output)
         Compare(device, "offloaded cache",
             reference: backend => RunAvatar(backend, config, weights, LongCatAvatarMode.Avc, cached: true),
             onDevice: backend => RunAvatar(backend, config, weights, LongCatAvatarMode.Avc, cached: true, offload: true)));
+
+    private void MultiSpeaker(Device device) => WithWeights(LongCatTestData.TinyAvatar, avatar: true, (config, weights) =>
+    {
+        // Two speakers and a silent track over the 2 x 2 token grid: one region each, and one silent person.
+        LongCatSpeakers speakers = new(3, 4, Height / 2, Width / 2, [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+        foreach ((LongCatAvatarMode mode, bool cached, bool offload) in new[]
+        {
+            (LongCatAvatarMode.Ai2v, false, false), (LongCatAvatarMode.Avc, false, false), (LongCatAvatarMode.Avc, true, false),
+            (LongCatAvatarMode.Avc, true, true),
+        })
+        {
+            // The reference side holds the cache on the CPU either way; the device side stages it block by block when offloaded.
+            Compare(device, $"speakers {mode}{(cached ? offload ? " offloaded" : " cached" : "")}",
+                reference: backend => RunAvatar(backend, config, weights, mode, cached, speakers: speakers),
+                onDevice: backend => RunAvatar(backend, config, weights, mode, cached, offload: offload, speakers: speakers));
+        }
+    });
 
     private void GatedLoras(Device device) => WithWeights(LongCatTestData.TinyAvatar, avatar: true, (config, weights) =>
     {
@@ -155,7 +179,8 @@ public sealed class LongCatDevicePathsGpuTests(ITestOutputHelper output)
 
     /// <summary>One avatar segment: the three-pass guidance on the linear schedule, or the distilled 8-step path when gates are given.</summary>
     private static float[] RunAvatar(IBackend backend, LongCatConfig config, Dictionary<string, Tensor> weights, LongCatAvatarMode mode, bool cached,
-        bool offload = false, int? tileRows = null, AdjunctGate? gate = null, LongCatAvatarLoraSchedule? mix = null)
+        bool offload = false, int? tileRows = null, AdjunctGate? gate = null, LongCatAvatarLoraSchedule? mix = null,
+        LongCatSpeakers? speakers = null)
     {
         int cond = mode switch { LongCatAvatarMode.At2v => 0, LongCatAvatarMode.Ai2v => 1, _ => 2 };
         bool distilled = gate is not null || mix is not null;
@@ -163,7 +188,7 @@ public sealed class LongCatDevicePathsGpuTests(ITestOutputHelper output)
         LongCatPrompt positive = Prompt(rng, config), negative = Prompt(rng, config);
         float[] noise = LongCatTestData.RandomValues(rng, config.InChannels * Frames * Hw);
         float[]? condLatents = cond == 0 ? null : LongCatTestData.RandomValues(rng, config.InChannels * cond * Hw);
-        float[] audio = LongCatTestData.RandomValues(rng, Frames * config.AudioContextTokens * config.AudioOutputDim);
+        float[] audio = LongCatTestData.RandomValues(rng, Frames * (speakers?.Tracks ?? 1) * config.AudioContextTokens * config.AudioOutputDim);
         float[] unconditionalAudio = LongCatTestData.RandomValues(rng, audio.Length);
         using LongCatTransformer transformer = new(config);
         transformer.LoadWeights(weights);
@@ -179,7 +204,7 @@ public sealed class LongCatDevicePathsGpuTests(ITestOutputHelper output)
         LongCatAvatarRun run = new(config.InChannels, Frames, Height, Width, noise, positive, negative, audio,
             distilled ? null : unconditionalAudio, distilled ? DistillSteps : Steps,
             distilled ? LongCatAvatarSchedule.Kind.Distill8 : LongCatAvatarSchedule.Kind.Linear, 7f, distilled ? 1f : 2f, distilled ? 1f : 1.5f,
-            mode, cond, condLatents, UseKvCache: cached, LoraGate: gate, OffloadKv: offload, LoraMix: mix);
+            mode, cond, condLatents, UseKvCache: cached, LoraGate: gate, OffloadKv: offload, LoraMix: mix, Speakers: speakers);
         return new LongCatAvatarPipeline(backend, transformer).Denoise(run).Latents;
     }
 

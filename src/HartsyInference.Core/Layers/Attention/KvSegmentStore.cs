@@ -146,17 +146,25 @@ public sealed class KvSegmentStore : IDisposable
     public void MoveLayerToHost(int layer)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        int count = Layer(layer).Count;
+        for (int slot = 0; slot < count; slot++)
+            MoveSlotToHost(layer, slot);
+    }
+
+    /// <summary>Moves one slot's segment of <paramref name="layer"/> to host memory (see <see cref="MoveLayerToHost"/>); an empty or
+    /// already-host slot is left alone.</summary>
+    public void MoveSlotToHost(int layer, int slot)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         List<Segment?> segments = Layer(layer);
-        for (int slot = 0; slot < segments.Count; slot++)
-        {
-            Segment? segment = segments[slot];
-            if (segment is null || segment.Host)
-                continue;
-            Tensor hostKeys = CopyToHost(segment.Keys), hostValues = CopyToHost(segment.Values);
-            segments[slot] = new Segment(hostKeys, hostValues, Host: true);
-            Free(segment.Keys, host: false);
-            Free(segment.Values, host: false);
-        }
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(slot, segments.Count);
+        Segment? segment = segments[slot];
+        if (segment is null || segment.Host)
+            return;
+        Tensor hostKeys = CopyToHost(segment.Keys), hostValues = CopyToHost(segment.Values);
+        segments[slot] = new Segment(hostKeys, hostValues, Host: true);
+        Free(segment.Keys, host: false);
+        Free(segment.Values, host: false);
     }
 
     // Copied as bytes, so any dtype (F32, BF16, F16) moves unchanged: the span's length is the tensor's byte count.
@@ -177,22 +185,43 @@ public sealed class KvSegmentStore : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(first);
         ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
         Tensor[] keys = new Tensor[count], values = new Tensor[count];
-        for (int i = 0; i < count; i++)
-        {
-            Segment at = At(layer, first + i);
-            keys[i] = at.Keys;
-            values[i] = at.Values;
-        }
-        Tensor joinedKeys = Join(keys);
+        List<Tensor> staged = [];
         try
         {
-            return (joinedKeys, Join(values));
+            for (int i = 0; i < count; i++)
+            {
+                Segment at = At(layer, first + i);
+                // A host segment is staged to the device for the join (a device concat cannot read host tensors); the staged copies are
+                // freed once the join has read them, and the stored host segment is left as it is.
+                keys[i] = at.Host ? Stage(at.Keys, staged) : at.Keys;
+                values[i] = at.Host ? Stage(at.Values, staged) : at.Values;
+            }
+            Tensor joinedKeys = Join(keys);
+            try
+            {
+                return (joinedKeys, Join(values));
+            }
+            catch
+            {
+                joinedKeys.Dispose();
+                throw;
+            }
         }
-        catch
+        finally
         {
-            joinedKeys.Dispose();
-            throw;
+            foreach (Tensor temp in staged)
+                temp.Dispose();
         }
+    }
+
+    // A fresh copy of the stored host bytes, held for the join only: the stored segment is never handed to the backend, so a backend that
+    // uploads its host inputs does so into a temporary and never promotes the stored slot into device memory.
+    private static Tensor Stage(Tensor host, List<Tensor> staged)
+    {
+        Tensor copy = new(host.Shape, host.DType);
+        host.AsReadOnlySpan<byte>().CopyTo(copy.AsSpan<byte>());
+        staged.Add(copy);
+        return copy;
     }
 
     /// <summary>Replaces the segments of <paramref name="layer"/> by one that holds all their tokens in order, so every later read is a borrowed one.
