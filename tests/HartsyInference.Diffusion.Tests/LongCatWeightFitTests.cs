@@ -149,8 +149,10 @@ public sealed class LongCatWeightFitTests : IDisposable
     private static async Task<VideoPlan> Plan(IBackend backend, string model, string checkpoint)
     {
         using InferenceEngine engine = new(backend, "cpu");
+        // The avatar refuses a request without driving speech at planning; this test is about the weights, so it gives the avatar a speech clip.
+        AudioClip? speech = model.Contains("avatar", StringComparison.OrdinalIgnoreCase) ? new AudioClip { Data = [1, 2, 3], Format = "wav" } : null;
         return await engine.VideoPlanning.PlanAsync(ModelResolver.Resolve(model, checkpoint, Modality.Video),
-            new VideoRequest { Prompt = "a lighthouse at dusk" });
+            new VideoRequest { Prompt = "a lighthouse at dusk", VideoAudioReference = speech });
     }
 
     /// <summary>A device backend as the check sees one: a total device memory and a streaming cache or none; everything else is the CPU's.</summary>
