@@ -53,6 +53,8 @@ HARTSY_LONGCAT_REFINE_DIR=/out/longcat_refine_reference_tensors dotnet test test
     --filter FullyQualifiedName~LongCatRefinementParityTests
 ```
 
+The test takes a `--triton` dump. For a stand-in dump set `HARTSY_LONGCAT_REFINE_ATTENTION=stand-in` as well.
+
 The VAE and the pixel preparation are not verified by it: the latents of the upsampled clip and of the condition frames are queued.
 
 ## Real-weight runner

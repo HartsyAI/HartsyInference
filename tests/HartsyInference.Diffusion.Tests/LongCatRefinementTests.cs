@@ -100,17 +100,20 @@ public sealed class LongCatRefinementTests
         });
     }
 
-    [Fact]
-    public void ARefinementStartsAtTheMixedLatentKeepsItsConditionAndStepsFiveTimes()
+    /// <summary>A threshold of 0.25 as well as 0.5, where the latent's and the noise's weights differ.</summary>
+    [Theory]
+    [InlineData(0.5f, 5)]
+    [InlineData(0.25f, 3)]
+    public void ARefinementStartsAtTheMixedLatentKeepsItsConditionAndSteps(float threshold, int steps)
     {
         WithTiny(sparsity: 0.5, (transformer, backend, config) =>
         {
             LongCatVideoPipeline pipeline = new(backend, transformer);
-            LongCatRefineRun run = RefineRun(config, Cond);
+            LongCatRefineRun run = RefineRun(config, Cond) with { Threshold = threshold };
 
             LongCatResult result = pipeline.Refine(run);
 
-            Assert.Equal(5, result.Steps.Count);
+            Assert.Equal(steps, result.Steps.Count);
             int hw = Height * Width;
             for (int c = 0; c < config.InChannels; c++)
                 for (int e = 0; e < Cond * hw; e++)
@@ -123,10 +126,26 @@ public sealed class LongCatRefinementTests
                 for (int e = 0; e < noisy * hw; e++)
                 {
                     int at = c * Frames * hw + Cond * hw + e, row = c * noisy * hw + e;
-                    float start = 0.5f * run.Latent[at] + 0.5f * run.Noise[at];
+                    float start = (1f - threshold) * run.Latent[at] + threshold * run.Noise[at];
                     Assert.InRange(first[row] - (start - dt * -result.Steps[0].Velocity[row]), -1e-5f, 1e-5f);
                 }
         });
+    }
+
+    /// <summary>The refinement's forwards are block-sparse: reading every key block, which is dense attention, gives other
+    /// latents than reading half of them.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(Cond)]
+    public void ARefinementRunsBlockSparseSelfAttention(int cond)
+    {
+        float[] half = [], every = [];
+        WithTiny(sparsity: 0.5, (transformer, backend, config) =>
+            half = new LongCatVideoPipeline(backend, transformer).Refine(RefineRun(config, cond)).Latents);
+        WithTiny(sparsity: 0.0, (transformer, backend, config) =>
+            every = new LongCatVideoPipeline(backend, transformer).Refine(RefineRun(config, cond)).Latents);
+
+        Assert.True(LongCatTestData.RelRms(half, every) > 1e-3, $"relRMS {LongCatTestData.RelRms(half, every):E3}");
     }
 
     [Theory]
@@ -142,24 +161,65 @@ public sealed class LongCatRefinementTests
         });
     }
 
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{"bsa_params":null}""")]
+    [InlineData("""{"bsa_params":{"sparsity":0.9375,"cdf_threshold":null}}""")]
+    public void TheConfigTakesTheReleasedBlockSparseParameters(string json)
+    {
+        LongCatSparseAttention read = LongCatConfig.FromJson(json).SparseAttention;
+
+        Assert.Equal(LongCatSparseAttention.Released, read);
+        Assert.Equal(0.9375, read.Options(4, 4, 4, 8).Sparsity);
+    }
+
     [Fact]
-    public void TheConfigReadsTheBlockSparseParametersAndRefusesOnesItDoesNotRun()
+    public void TheConfigReadsItsBlockSparseParameters()
     {
         LongCatConfig read = LongCatConfig.FromJson(
             """{"bsa_params":{"sparsity":0.5,"chunk_3d_shape_q":[2,4,4],"chunk_3d_shape_k":[4,2,2]}}""");
 
         Assert.Equal(new LongCatSparseAttention(0.5, new TokenGrid3D(2, 4, 4), new TokenGrid3D(4, 2, 2)), read.SparseAttention);
-        Assert.Equal(LongCatSparseAttention.Released, LongCatConfig.FromJson("{}").SparseAttention);
-        Assert.Throws<InvalidDataException>(() => LongCatConfig.FromJson("""{"bsa_params":{"cdf_threshold":0.9}}"""));
-        Assert.Throws<InvalidDataException>(() => LongCatConfig.FromJson("""{"bsa_params":{"chunk_3d_shape_q":[4,4]}}"""));
-        Assert.Throws<InvalidDataException>(() => LongCatConfig.FromJson("""{"bsa_params":{"sparsity":2}}"""));
     }
 
-    private static void WithTiny(double sparsity, Action<LongCatTransformer, CpuBackend, LongCatConfig> body)
+    /// <summary>The model still loads, and only a block-sparse forward refuses.</summary>
+    [Theory]
+    [InlineData("""{"bsa_params":{"cdf_threshold":0.9}}""", "cdf_threshold")]
+    [InlineData("""{"bsa_params":{"another":1}}""", "another")]
+    [InlineData("""{"bsa_params":{"chunk_3d_shape_q":[4,4]}}""", "chunk_3d_shape_q")]
+    [InlineData("""{"bsa_params":{"chunk_3d_shape_k":[4,4,0.5]}}""", "chunk_3d_shape_k")]
+    [InlineData("""{"bsa_params":{"sparsity":2}}""", "sparsity")]
+    [InlineData("""{"bsa_params":{"sparsity":null}}""", "sparsity")]
+    [InlineData("""{"bsa_params":[1]}""", "not an object")]
+    public void BlockSparseParametersThatCannotRunAreRefusedByTheRefinementAndNotByTheLoad(string json, string named)
+    {
+        LongCatSparseAttention read = LongCatConfig.FromJson(json).SparseAttention;
+
+        InvalidDataException refused = Assert.Throws<InvalidDataException>(() => read.Options(4, 4, 4, 4));
+        Assert.Contains(named, refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AModelWhoseBlockSparseParametersCannotRunStillRunsDense()
+    {
+        WithTiny(sparsity: 0.5, (transformer, backend, config) =>
+        {
+            Assert.All(Forward(transformer, backend, config, Cond, blockSparse: false), static v => Assert.True(float.IsFinite(v)));
+            InvalidDataException refused = Assert.Throws<InvalidDataException>(
+                () => Forward(transformer, backend, config, Cond, blockSparse: true));
+            Assert.Contains("cdf_threshold", refused.Message, StringComparison.Ordinal);
+        }, unsupported: "bsa_params.cdf_threshold = 0.9 is not supported");
+    }
+
+    private static void WithTiny(double sparsity, Action<LongCatTransformer, CpuBackend, LongCatConfig> body,
+        string? unsupported = null)
     {
         LongCatConfig config = LongCatTestData.Tiny with
         {
-            SparseAttention = new LongCatSparseAttention(sparsity, new TokenGrid3D(2, 2, 2), new TokenGrid3D(2, 2, 2)),
+            SparseAttention = new LongCatSparseAttention(sparsity, new TokenGrid3D(2, 2, 2), new TokenGrid3D(2, 2, 2))
+            {
+                Unsupported = unsupported,
+            },
         };
         Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, seed: 23);
         try

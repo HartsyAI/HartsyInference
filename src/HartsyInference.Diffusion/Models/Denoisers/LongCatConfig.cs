@@ -170,37 +170,51 @@ public sealed record LongCatConfig
         shapeOf(key) ?? throw new ArgumentException($"The checkpoint has no {key}.");
 
     /// <summary>The <c>bsa_params</c> of a config, or <paramref name="fallback"/> when it has none. Only the top-k form is
-    /// implemented, so any other parameter is refused rather than ignored.</summary>
+    /// implemented (a null <c>cdf_threshold</c> is the reference's default for it). Anything else is recorded in
+    /// <see cref="LongCatSparseAttention.Unsupported"/> and refused by the block-sparse forward: the model still loads.</summary>
     private static LongCatSparseAttention SparseAttentionOf(JsonElement root, LongCatSparseAttention fallback)
     {
-        if (!root.TryGetProperty("bsa_params", out JsonElement parameters) || parameters.ValueKind != JsonValueKind.Object)
+        if (!root.TryGetProperty("bsa_params", out JsonElement parameters) || parameters.ValueKind == JsonValueKind.Null)
             return fallback;
+        if (parameters.ValueKind != JsonValueKind.Object)
+            return fallback with { Unsupported = "The LongCat config's bsa_params is not an object." };
         LongCatSparseAttention sparse = fallback;
         foreach (JsonProperty parameter in parameters.EnumerateObject())
         {
             JsonElement value = parameter.Value;
-            sparse = parameter.Name switch
+            LongCatSparseAttention? read = parameter.Name switch
             {
                 "sparsity" when value.ValueKind == JsonValueKind.Number && value.GetDouble() is >= 0.0 and <= 1.0 =>
                     sparse with { Sparsity = value.GetDouble() },
-                "chunk_3d_shape_q" => sparse with { QueryBlock = Block(value, parameter.Name) },
-                "chunk_3d_shape_k" => sparse with { KeyBlock = Block(value, parameter.Name) },
-                _ => throw new InvalidDataException($"The LongCat config's bsa_params.{parameter.Name} is not supported: "
-                    + "sparsity in [0, 1], chunk_3d_shape_q and chunk_3d_shape_k are."),
+                "chunk_3d_shape_q" when Block(value) is { } box => sparse with { QueryBlock = box },
+                "chunk_3d_shape_k" when Block(value) is { } box => sparse with { KeyBlock = box },
+                "cdf_threshold" when value.ValueKind == JsonValueKind.Null => sparse,
+                _ => null,
+            };
+            sparse = read ?? sparse with
+            {
+                Unsupported = $"The LongCat config's bsa_params.{parameter.Name} = {value.GetRawText()} is not supported: "
+                    + "the top-k form runs, with a sparsity in [0, 1] and chunk_3d_shape_q and chunk_3d_shape_k of three positive "
+                    + "whole numbers.",
             };
         }
         return sparse;
     }
 
-    private static TokenGrid3D Block(JsonElement value, string name)
+    /// <summary>Three positive whole numbers as a block, or null.</summary>
+    private static TokenGrid3D? Block(JsonElement value)
     {
-        if (value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 3)
+        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() != 3)
+            return null;
+        Span<int> extents = stackalloc int[3];
+        for (int i = 0; i < extents.Length; i++)
         {
-            (int frames, int height, int width) = (Whole(value[0], name), Whole(value[1], name), Whole(value[2], name));
-            if (frames > 0 && height > 0 && width > 0)
-                return new TokenGrid3D(frames, height, width);
+            JsonElement extent = value[i];
+            if (extent.ValueKind != JsonValueKind.Number || extent.GetDouble() is not (>= 1 and <= int.MaxValue) || extent.GetDouble() % 1 != 0)
+                return null;
+            extents[i] = (int)extent.GetDouble();
         }
-        throw new InvalidDataException($"The LongCat config's bsa_params.{name} must be three positive whole numbers.");
+        return new TokenGrid3D(extents[0], extents[1], extents[2]);
     }
 
     private static int Int(JsonElement root, string name, int fallback) =>

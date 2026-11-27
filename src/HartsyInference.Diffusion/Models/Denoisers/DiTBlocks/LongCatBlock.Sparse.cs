@@ -35,6 +35,13 @@ public sealed partial class LongCatBlock
         Tensor output = new(new TensorShape(tokens, _config.HiddenSize), DType.F32);
         try
         {
+            // A scatter into part of a tensor first uploads it. A fill that covers the whole output places it on the device
+            // instead; every element is then overwritten.
+            using (Tensor zero = new(new TensorShape(1), DType.F32))
+            {
+                zero.AsSpan<float>()[0] = 0f;
+                StridedCopies.FillFrom(backend, output, zero);
+            }
             for (int i = 0; i < segments.Length; i++)
             {
                 AttentionSegment segment = segments[i];
