@@ -48,12 +48,24 @@ public sealed class LongCatCheckpoint : IDisposable
     {
         ArgumentNullException.ThrowIfNull(source);
         Tensor bf16 = new(source.Shape, DType.BF16);
-        ReadOnlySpan<float> values = source.AsReadOnlySpan<float>();
-        Span<ushort> bits = bf16.AsSpan<ushort>();
-        for (int i = 0; i < values.Length; i++)
-            bits[i] = BFloat16Bits.FromFloat(values[i]);
+        // A tensor's host buffer is allocated lazily by its first AsSpan/DataPointer (Tensor's contract), so touch both serially here: if
+        // the workers made that first call, two of them could each allocate a buffer and the conversion would land in a discarded one.
+        _ = source.AsReadOnlySpan<float>();
+        _ = bf16.AsSpan<ushort>();
+        // Each range writes only its own elements, so the result is the same at any worker count (CpuParallel.ForRanges' contract).
+        // The conversion is elementwise, so the ranges can be any size; 2^18 elements keeps each range a few hundred microseconds.
+        CpuParallel.ForRanges(source.ElementCount, RangeElements, workPerElement: 4, (source, bf16), static (start, length, state) =>
+        {
+            ReadOnlySpan<float> values = state.source.AsReadOnlySpan<float>().Slice((int)start, (int)length);
+            Span<ushort> bits = state.bf16.AsSpan<ushort>().Slice((int)start, (int)length);
+            for (int i = 0; i < values.Length; i++)
+                bits[i] = BFloat16Bits.FromFloat(values[i]);
+        });
         return bf16;
     }
+
+    /// <summary>Elements per parallel range of the BF16 conversion.</summary>
+    internal const int RangeElements = 1 << 18;
 
     /// <summary>The index <see cref="Open"/> reads in <paramref name="directory"/>: the dense one when both are present, the INT8 one only in a
     /// folder that has no dense one.</summary>
