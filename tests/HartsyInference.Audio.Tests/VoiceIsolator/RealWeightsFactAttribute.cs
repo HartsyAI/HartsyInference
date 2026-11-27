@@ -5,7 +5,7 @@ namespace HartsyInference.Audio.Tests.VoiceIsolator;
 /// <summary>A <see cref="FactAttribute"/> reported as <i>skipped</i> (never passed) when a named environment variable is unset or names
 /// no existing file or folder. With <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> it runs anyway, so a missing resource fails the test.</summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
-public sealed class RealWeightsFactAttribute : FactAttribute
+public class RealWeightsFactAttribute : FactAttribute
 {
     public RealWeightsFactAttribute(params string[] environmentVariables)
     {

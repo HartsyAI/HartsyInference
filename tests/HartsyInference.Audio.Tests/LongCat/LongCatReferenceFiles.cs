@@ -35,6 +35,12 @@ internal static class LongCatReferenceFiles
         return doc.RootElement.GetProperty(key).GetInt32();
     }
 
+    public static double MetaDouble(string key)
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(FullPath("meta.json")));
+        return doc.RootElement.GetProperty(key).GetDouble();
+    }
+
     public static bool MetaBool(string key)
     {
         using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(FullPath("meta.json")));
@@ -73,6 +79,6 @@ public sealed class LongCatWeightsFactAttribute : FactAttribute
         string? weights = Environment.GetEnvironmentVariable(weightsVariable);
         Skip = string.IsNullOrWhiteSpace(weights) || !File.Exists(weights)
             ? $"SKIPPED: {weightsVariable} is unset or not an existing file; the real-weight comparison did not run."
-            : LongCatReferenceFiles.Missing(files);
+            : files.Length == 0 ? null : LongCatReferenceFiles.Missing(files);
     }
 }

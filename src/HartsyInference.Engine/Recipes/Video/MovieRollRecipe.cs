@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -74,6 +75,11 @@ public sealed class MovieRollRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool RefusesUnhonouredPlacements => true;
 
+    /// <summary>The source dtypes the DiT casts to F16 at load on this backend. BF16 is cast on every backend, as before; FP32 (the released file's
+    /// dtype) is cast on CUDA only, because the F16 path for FP32 weights is proven there and not on the CPU backend, which keeps them.</summary>
+    public static IReadOnlyList<DType> DitHalfCastSources(IBackend backend) =>
+        backend is HartsyInference.Cuda.CudaBackend ? [DType.BF16, DType.F32] : [DType.BF16];
+
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
@@ -98,8 +104,9 @@ public sealed class MovieRollRecipe : IVideoRecipe
             // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
             // block the DiT streams. The BF16 to F16 copies below are made once on the host, and they are what the DiT keeps.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
-            // BF16 -> F16 for the native F16 GEMM, as the HunyuanVideo recipe does. Only the cast copies are owned here; the rest are the container's.
-            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, [DType.BF16], DType.F16);
+            // F16 for the native F16 GEMM: BF16 on every backend, FP32 (the released file) on CUDA only. Only the cast copies are owned here; the rest
+            // are the container's.
+            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, DitHalfCastSources(context.Backend), DType.F16);
             HashSet<Tensor> converted = new(ditWeights.Values, ReferenceEqualityComparer.Instance);
             foreach (Tensor copy in ditF16.Values)
             {

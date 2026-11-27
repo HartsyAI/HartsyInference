@@ -1,14 +1,13 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.Diffusion.Models.TextEncoders;
-using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Requests;
-using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -19,14 +18,106 @@ namespace HartsyInference.Diffusion.Tests;
 [Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatRecipeEndToEndTests
 {
-    private const int UmT5Vocab = 256384, UmT5Buckets = 32, Tokens = 8;
+    [Theory]
+    [InlineData("base")]
+    [InlineData("1.5")]
+    [InlineData("1.6")]
+    public void ConstructingARecipeWithAUserLoraIsRefused(string build)
+    {
+        using LongCatTinyAvatarRelease release = new(onePointSix: build == "1.6");
+        LongCatConfig config = LongCatTinyAvatarRelease.Config;
+        // Stand-ins, so a build that stopped refusing would fail here without fetching anything.
+        using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
+        IVideoRecipe recipe = build == "base" ? new LongCatVideoRecipe(standIns.Sides)
+            : new LongCatAvatarRecipe(standIns.Sides, LongCatTinyAvatarRelease.Features(seed: 1));
+        using CpuBackend backend = new();
+
+        RecipeContext context = new()
+        {
+            CheckpointPath = release.Checkpoint, Backend = backend,
+            VariantHints = build == "1.6" ? [LongCatAvatarVariants.Avatar16FamilyId] : [],
+            Loras = new LoraStack { Entries = [new LoraEntry { Model = "some-lora" }] },
+        };
+
+        // A pipeline built anyway is disposed, so the release folder can still be removed and the assertion is what fails.
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => recipe.Construct(context).Dispose());
+
+        Assert.Contains("user LoRA", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASavedNoiseFileReplacesTheSeededNoise()
+    {
+        LongCatConfig config = LongCatTestData.Tiny;
+        using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
+        string directory = Path.Combine(Path.GetTempPath(), "longcat-noise-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            Dictionary<string, Tensor> weights = LongCatTestData.Weights(config, seed: 71);
+            LongCatTestData.WriteCheckpoint(directory, weights);
+            LongCatTestData.DisposeAll(weights);
+            // 5 frames at 16x16 are 2 latent frames of 2x2.
+            int[] shape = [1, config.InChannels, 2, 2, 2];
+            string first = WriteNoise(directory, "first.npy", shape, seed: 11), second = WriteNoise(directory, "second.npy", shape, seed: 12);
+
+            using CpuBackend backend = new();
+            using IVideoRecipePipeline pipeline = new LongCatVideoRecipe(standIns.Sides).Construct(new RecipeContext
+            {
+                CheckpointPath = directory, Backend = backend,
+            });
+
+            float[] Latents(string? noise, int seed)
+            {
+                VideoRequest request = new() { Prompt = "a lighthouse at dusk", NegativePrompt = "", Seed = seed };
+                VideoEffectiveSettings settings = new()
+                {
+                    Width = 16, Height = 16, Frames = 5, Fps = 8, Steps = 2, CfgScale = 1f, Seed = seed,
+                    ReferenceSizing = VideoReferenceSizing.Native, LockedFields = default,
+                };
+                using IDisposable? scope = noise is null ? null
+                    : KnobProfile.Create("longcat-noise").With(EngineKnobs.LongCatNoiseNpy, noise).Push();
+                pipeline.Generate(request, settings, progress: null, CancellationToken.None);
+                return standIns.Vae.Decoded[^1].Values;
+            }
+
+            // With a file the seed no longer matters, and the file does.
+            Assert.Equal(Latents(first, seed: 3), Latents(first, seed: 4));
+            Assert.NotEqual(Latents(first, seed: 3), Latents(second, seed: 3));
+            Assert.NotEqual(Latents(null, seed: 3), Latents(null, seed: 4));
+            string wrong = WriteNoise(directory, "wrong.npy", [1, config.InChannels, 3, 2, 2], seed: 13);
+            Assert.Throws<InvalidDataException>(() => Latents(wrong, seed: 3));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static string WriteNoise(string directory, string name, int[] shape, int seed)
+    {
+        float[] values = LongCatTestData.RandomValues(new Random(seed), shape.Aggregate(1, (a, d) => a * d));
+        string path = Path.Combine(directory, name);
+        File.WriteAllBytes(path, NpyFile.Float32(values, shape));
+        return path;
+    }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void TheBaseRecipeGeneratesTheRequestedClipFromATinyCheckpoint(bool int8)
     {
-        List<Dictionary<string, Tensor>> umt5Weights = [];
+        VideoGenerationResult result = RunBaseClip(int8, () => new CpuBackend());
+
+        Assert.Equal(5, result.Frames.Count);
+        Assert.All(result.Frames, frame => Assert.NotNull(frame));
+    }
+
+    /// <summary>Runs the base recipe on a tiny checkpoint written to disk, on the backend <paramref name="makeBackend"/> makes (CPU, CUDA or
+    /// Vulkan). Shared by the CPU smoke test above and the device parity tests (<c>LongCatRecipeGpuParityTests</c>), so the two run the same body.</summary>
+    internal static VideoGenerationResult RunBaseClip(bool int8, Func<IBackend> makeBackend)
+    {
+        using LongCatRecipeStandIns standIns = new(LongCatTestData.Tiny.CaptionChannels, LongCatTestData.Tiny.InChannels);
         string directory = Path.Combine(Path.GetTempPath(), "longcat-e2e-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
@@ -49,18 +140,8 @@ public sealed class LongCatRecipeEndToEndTests
             }
             LongCatTestData.DisposeAll(weights);
 
-            // The encoder reads its weight tensors for as long as it lives, so they are disposed only after the pipeline is.
-            LongCatSideModels sides = new(
-                () =>
-                {
-                    (T5TextEncoder encoder, Dictionary<string, Tensor> weights) = TinyUmT5(LongCatTestData.Tiny.CaptionChannels, seed: 72);
-                    umt5Weights.Add(weights);
-                    return (encoder, T5Tokenizer.CreateUmt5(maxLength: Tokens));
-                },
-                () => { StandIn vae = new(LongCatTestData.Tiny.InChannels); return (vae, vae); });
-
-            using CpuBackend backend = new();
-            IVideoRecipePipeline pipeline = new LongCatVideoRecipe(sides).Construct(new RecipeContext
+            using IBackend backend = makeBackend();
+            IVideoRecipePipeline pipeline = new LongCatVideoRecipe(standIns.Sides).Construct(new RecipeContext
             {
                 CheckpointPath = directory, Backend = backend,
             });
@@ -68,7 +149,7 @@ public sealed class LongCatRecipeEndToEndTests
             {
                 VideoRequest request = new()
                 {
-                    Prompt = "a lighthouse at dusk", NegativePrompt = "", Seed = 3,  
+                    Prompt = "a lighthouse at dusk", NegativePrompt = "", Seed = 3,
                 };
                 VideoEffectiveSettings settings = new()
                 {
@@ -76,10 +157,7 @@ public sealed class LongCatRecipeEndToEndTests
                     ReferenceSizing = VideoReferenceSizing.Native, LockedFields = default,
                 };
 
-                VideoGenerationResult result = pipeline.Generate(request, settings, progress: null, CancellationToken.None);
-
-                Assert.Equal(5, result.Frames.Count);
-                Assert.All(result.Frames, frame => Assert.NotNull(frame));
+                return pipeline.Generate(request, settings, progress: null, CancellationToken.None);
             }
             finally
             {
@@ -88,59 +166,7 @@ public sealed class LongCatRecipeEndToEndTests
         }
         finally
         {
-            foreach (Dictionary<string, Tensor> weights in umt5Weights)
-                LongCatTestData.DisposeAll(weights);
             Directory.Delete(directory, recursive: true);
         }
-    }
-
-    /// <summary>A tiny umT5 encoder whose width is the DiT's caption width, with the real 256k vocabulary so the tokenizer's ids are in range.
-    /// The weights are returned, not disposed: the encoder reads them while it lives.</summary>
-    private static (T5TextEncoder Encoder, Dictionary<string, Tensor> Weights) TinyUmT5(int dModel, int seed)
-    {
-        const int heads = 2, dKv = 8, dFf = 2 * 48;
-        Tensor R(int r, int c, int s) => LongCatTestData.Random(new TensorShape([r, c]), seed + s, 0.2f);
-        Tensor V(int n, int s) => LongCatTestData.Random(new TensorShape([n]), seed + s, 0.2f);
-        Dictionary<string, Tensor> weights = new()
-        {
-            ["shared.weight"] = R(UmT5Vocab, dModel, 1),
-            ["encoder.final_layer_norm.weight"] = V(dModel, 2),
-            ["encoder.block.0.layer.0.layer_norm.weight"] = V(dModel, 3),
-            ["encoder.block.0.layer.0.SelfAttention.q.weight"] = R(heads * dKv, dModel, 4),
-            ["encoder.block.0.layer.0.SelfAttention.k.weight"] = R(heads * dKv, dModel, 5),
-            ["encoder.block.0.layer.0.SelfAttention.v.weight"] = R(heads * dKv, dModel, 6),
-            ["encoder.block.0.layer.0.SelfAttention.o.weight"] = R(dModel, heads * dKv, 7),
-            ["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"] = R(UmT5Buckets, heads, 8),
-            ["encoder.block.0.layer.1.layer_norm.weight"] = V(dModel, 9),
-            ["encoder.block.0.layer.1.DenseReluDense.wi_0.weight"] = R(dFf, dModel, 10),
-            ["encoder.block.0.layer.1.DenseReluDense.wi_1.weight"] = R(dFf, dModel, 11),
-            ["encoder.block.0.layer.1.DenseReluDense.wo.weight"] = R(dModel, dFf, 12),
-        };
-        T5TextEncoder encoder = new(new T5TextEncoderConfig
-        {
-            DModel = dModel, DFf = dFf, DKv = dKv, NumHeads = heads, NumLayers = 1, VocabSize = UmT5Vocab,
-            RelativeAttentionNumBuckets = UmT5Buckets,
-        });
-        encoder.LoadWeights(weights);
-        return (encoder, weights);
-    }
-
-    /// <summary>Returns tensors of the Wan VAE's shapes for a latent with <paramref name="channels"/> channels, without weights.</summary>
-    private sealed class StandIn : IWanVaeEncoder, IWanVaeDecoder
-    {
-        private readonly int _channels;
-
-        public StandIn(int channels) => _channels = channels;
-
-        public Tensor Encode(IBackend backend, Tensor rgbClip) =>
-            new(new TensorShape([1, _channels, (rgbClip.Shape[2] - 1) / 4 + 1, rgbClip.Shape[3] / 8, rgbClip.Shape[4] / 8]), DType.F32);
-
-        public Tensor Decode(IBackend backend, Tensor latent) =>
-            new(new TensorShape([1, 3, 1 + 4 * (latent.Shape[2] - 1), latent.Shape[3] * 8, latent.Shape[4] * 8]), DType.F32);
-
-        public Tensor EncodeRgbFrame(IBackend backend, ReadOnlySpan<byte> rgb24, int width, int height) =>
-            throw new NotSupportedException("The end-to-end test uses the clip path only.");
-
-        public IEnumerable<Tensor> EnumerateWeights() => [];
     }
 }

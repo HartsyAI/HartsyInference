@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.Engine;
@@ -56,7 +57,15 @@ public sealed class Hy4FlashTextPathTests : IDisposable
         foreach (string literal in literals)
         {
             if (literal is "<｜hy_start:opensource｜>" or "<｜hy_end:opensource｜>") continue;
-            added.Add(new { id = next++, content = literal, special = true });
+            // The image literals take the tiny config's image ids (250 to 252): the loader checks them against config.json.
+            int id = literal switch
+            {
+                Hy4FlashChatTemplate.ImagePadLiteral => 250,
+                Hy4FlashChatTemplate.ImageStartLiteral => 251,
+                Hy4FlashChatTemplate.ImageEndLiteral => 252,
+                _ => next++,
+            };
+            added.Add(new { id, content = literal, special = true });
         }
         File.WriteAllText(Path.Combine(dir, "tokenizer.json"), JsonSerializer.Serialize(new
         {
@@ -85,6 +94,75 @@ public sealed class Hy4FlashTextPathTests : IDisposable
         using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
         Assert.IsType<Hy4FlashTextModel>(model);
         Assert.Equal(1, model.Tokenizer.BosId);
+    }
+
+    [Fact]
+    public void OpenReasoningCloseId_IsTheHy4CloseMarker_OnlyWhenThinkingIsOpen()
+    {
+        string dir = Synthetic();
+        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(dir) ?? throw new InvalidOperationException("not probed as a Hugging Face checkpoint");
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        Hy4FlashTextModel hy4 = Assert.IsType<Hy4FlashTextModel>(model);
+        int close = hy4.Tokenizer.SpecialId(Hy4FlashChatTemplate.ReasoningMarkers[1]) ?? throw new InvalidOperationException("no close marker");
+        List<TextMessage> messages = [new() { Role = TextRole.User, Content = "hello" }];
+        GenerationRequest genRequest = new() { Messages = [new ChatMessage("user", "hello")] };
+        TextRequest request = new() { Messages = messages };
+
+        // The default prompt prefills the think block, so the close marker is the reasoning close.
+        Assert.Equal(close, TextService.OpenReasoningCloseId(hy4.Template, hy4.Tokenizer, genRequest, request, rawCompletion: false));
+        // Thinking switched off renders the empty pair: nothing is open, so no reasoning close.
+        TextRequest thinkingOff = request with { EnableThinking = false };
+        Assert.Null(TextService.OpenReasoningCloseId(hy4.Template, hy4.Tokenizer, genRequest, thinkingOff, rawCompletion: false));
+        // A raw completion never splits.
+        Assert.Null(TextService.OpenReasoningCloseId(hy4.Template, hy4.Tokenizer, genRequest, request, rawCompletion: true));
+    }
+
+    // The engine route end to end: the synthetic checkpoint is loaded as the request's model on the CPU and the image request runs through RunHy4Vision.
+    [Fact]
+    public async Task ImageRequest_RunsThroughTheEngineRoute_AndIsDeterministic()
+    {
+        string dir = Synthetic();
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = new() { Requested = dir, Modality = Modality.Text, LocalPath = dir };
+        byte[] rgb = new byte[8 * 8 * 3];
+        for (int i = 0; i < rgb.Length; i++) rgb[i] = (byte)((i * 31) % 256);
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "What is this?", Images = [new ImageData { Rgb = rgb, Width = 8, Height = 8 }] }],
+            Device = "cpu",
+            Temperature = 0,
+            MaxTokens = 3,
+        };
+
+        TextResult first = await engine.Text.GenerateAsync(spec, request);
+        TextResult second = await engine.Text.GenerateAsync(spec, request);
+        Assert.Equal(first.Text, second.Text);
+        Assert.Equal(first.Reasoning, second.Reasoning);
+    }
+
+    // The route's split, on the Hy4 markers: the reasoning before the close is reasoning, the rest is the answer; a reply that never opened a block is all answer.
+    [Fact]
+    public void SplitVisionReasoning_SplitsOnTheHy4Markers()
+    {
+        string open = Hy4FlashChatTemplate.ReasoningMarkers[0], close = Hy4FlashChatTemplate.ReasoningMarkers[1];
+        (string reasoning, string answer) = TextService.SplitVisionReasoning($"plan it{close}the answer", reasoningOpen: true, stoppedOnToken: true, open, close);
+        Assert.Equal("plan it", reasoning);
+        Assert.Equal("the answer", answer);
+
+        (reasoning, answer) = TextService.SplitVisionReasoning($"{open}plan it{close}the answer", reasoningOpen: true, stoppedOnToken: true, open, close);
+        Assert.Equal("plan it", reasoning);
+        Assert.Equal("the answer", answer);
+
+        // Out of budget inside the block: the text is reasoning and there is no answer yet.
+        (reasoning, answer) = TextService.SplitVisionReasoning("still thinking", reasoningOpen: true, stoppedOnToken: false, open, close);
+        Assert.Equal("still thinking", reasoning);
+        Assert.Equal("", answer);
+
+        // No block opened: the whole text is the answer.
+        (reasoning, answer) = TextService.SplitVisionReasoning("plain answer", reasoningOpen: false, stoppedOnToken: true, open, close);
+        Assert.Equal("", reasoning);
+        Assert.Equal("plain answer", answer);
     }
 
     [Fact]

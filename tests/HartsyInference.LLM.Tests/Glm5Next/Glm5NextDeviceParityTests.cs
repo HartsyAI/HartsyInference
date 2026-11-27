@@ -11,6 +11,7 @@ namespace HartsyInference.LLM.Tests.Glm5Next;
 
 /// <summary>The tiny-config glm5_next decoder on a GPU backend against transformers' logits: the same fixture and tolerance as
 /// <see cref="Glm5NextReferenceParityTests"/>, the prefill and the token-by-token decode. A lane with no device or kernels is reported as skipped (see <see cref="DeviceProbe"/>).</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class Glm5NextDeviceParityTests(ITestOutputHelper output)
 {
     private const float Tolerance = 5e-4f;

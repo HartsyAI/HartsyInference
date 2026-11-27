@@ -13,6 +13,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
     private readonly JinjaEngine _engine;
     private readonly string _toolRole;
     private readonly bool _prependBos;
+    private readonly bool _renderImageBlocks;
 
     public string Name => "jinja";
 
@@ -24,12 +25,15 @@ public sealed class JinjaChatTemplate : IChatTemplate
     /// <param name="prependBos">Starts every encoded prompt with exactly one tokenizer BOS, adding it when the render does not begin with
     /// it: the GGUF <c>add_bos_token</c> contract as llama.cpp applies it, whether or not the template writes <c>bos_token</c>.</param>
     /// <param name="hfWhitespace">Renders with transformers' <c>trim_blocks</c> and <c>lstrip_blocks</c>, which a template written for the Hugging Face environment relies on.</param>
-    public JinjaChatTemplate(string chatTemplate, bool prependBos = false, bool hfWhitespace = false)
+    /// <param name="renderImageBlocks">Renders a turn with an <see cref="ImageBlock"/> as the content list its template reads (text items and image items).
+    /// Off by default: every other template keeps the plain content string, so a turn's image blocks do not change its prompt.</param>
+    public JinjaChatTemplate(string chatTemplate, bool prependBos = false, bool hfWhitespace = false, bool renderImageBlocks = false)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
         _engine = new JinjaEngine(chatTemplate, hfWhitespace);
         Source = chatTemplate;
         _prependBos = prependBos;
+        _renderImageBlocks = renderImageBlocks;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
         // Only a template whose parsed expressions compare the role to "observation" is remapped (a comment, text or string literal
         // naming it is not an expression), and a template that also compares the role to "tool" keeps the tool role.
@@ -79,18 +83,33 @@ public sealed class JinjaChatTemplate : IChatTemplate
         return WithBos(tokenizer, SpecialLiteralEscaper.EncodeRendered(rendered, tokenizer));
     }
 
+    /// <summary>The text this template renders after a user turn's content, with the generation prompt (for a Qwen-style template: the
+    /// im_end and assistant header, then whatever think prefix it writes for <paramref name="enableThinking"/>). Rendered from the loaded
+    /// template, so a model's own switch decides the prefix rather than a constant in the caller.</summary>
+    public string TurnTailAfterUser(ILlmTokenizer tokenizer, bool? enableThinking)
+    {
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        const string sentinel = "QWERTY_TURN_TAIL_SENTINEL";
+        string text = Render(tokenizer, [new ChatMessage("user", sentinel)], addGenerationPrompt: true, enableThinking, null);
+        int at = text.LastIndexOf(sentinel, StringComparison.Ordinal);
+        if (at < 0) throw new InvalidOperationException("The chat template did not render the user content.");
+        return text[(at + sentinel.Length)..];
+    }
+
     /// <summary>How the prompt for <paramref name="messages"/> ends: reasoning is open when the generation prompt the template appends
     /// writes a <c>&lt;think&gt;</c> it does not close (Dory, Nemotron and Qwen3-Thinking prefill one), so the completion starts inside the
     /// think block. Only the appended tail is read, because message content keeps its reasoning markers literal.</summary>
     /// <remarks>Content when the tokenizer lacks either marker as a control token, when the template does not render, or when the render
     /// without the generation prompt is not a prefix of the render with it.</remarks>
+    /// <param name="reasoningMarkers">The open and close think literals this template writes; null for the <c>&lt;think&gt;</c> and <c>&lt;/think&gt;</c> pair.</param>
     public ParserInitialState ResolveParserState(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking,
-        IReadOnlyList<ToolSpec>? tools)
+        IReadOnlyList<ToolSpec>? tools, IReadOnlyList<string>? reasoningMarkers = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(messages);
-        string open = SpecialLiteralEscaper.ReasoningMarkers[0];
-        string close = SpecialLiteralEscaper.ReasoningMarkers[1];
+        IReadOnlyList<string> markers = reasoningMarkers ?? SpecialLiteralEscaper.ReasoningMarkers;
+        string open = markers[0];
+        string close = markers[1];
         if (tokenizer.SpecialId(open) is null || tokenizer.SpecialId(close) is null) return new ParserInitialState(false);
         string withPrompt, withoutPrompt;
         try
@@ -137,11 +156,30 @@ public sealed class JinjaChatTemplate : IChatTemplate
     }
 
     /// <summary>The OpenAI-shaped message dictionary Hugging Face templates expect: <c>tool_calls[i].function.{name,arguments}</c> with arguments as a parsed object when they are JSON, plus <c>tool_call_id</c>, <c>name</c> and <c>reasoning_content</c> when set.</summary>
+    // With render-image-blocks on, a turn with images renders its body as the content list the template reads: a text item per text block and an
+    // image item per image block. Otherwise, or without an image block, the body is the plain string, as it always was.
+    private object? ContentValue(ChatMessage m, IReadOnlyList<string> literals)
+    {
+        if (!_renderImageBlocks || m.Blocks is not { Count: > 0 } blocks || !blocks.Any(static b => b is ImageBlock))
+            return SpecialLiteralEscaper.Escape(m.Content, literals);
+        List<object?> items = new(blocks.Count);
+        foreach (ContentBlock block in blocks)
+        {
+            items.Add(block switch
+            {
+                TextBlock text => new Dictionary<string, object?> { ["type"] = "text", ["text"] = SpecialLiteralEscaper.Escape(text.Text, literals) },
+                ImageBlock => new Dictionary<string, object?> { ["type"] = "image" },
+                _ => throw new NotSupportedException($"The Jinja templates do not render a {block.GetType().Name} in a message body."),
+            });
+        }
+        return items;
+    }
+
     private Dictionary<string, object?> MessageValue(ChatMessage m, IReadOnlyList<string> literals)
     {
         // Every string here came from the conversation (the user, a tool result or the model), so each one is escaped against the control literals.
         string role = m.Role == ToolRoleName ? _toolRole : m.Role;
-        Dictionary<string, object?> value = new() { ["role"] = role, ["content"] = SpecialLiteralEscaper.Escape(m.Content, literals) };
+        Dictionary<string, object?> value = new() { ["role"] = role, ["content"] = ContentValue(m, literals) };
         if (m.ToolCalls is { Count: > 0 })
         {
             List<object?> calls = new(m.ToolCalls.Count);

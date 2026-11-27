@@ -119,7 +119,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
             if (img2img is not null)
                 sourceLatent = EncodeInitLatent(img2img.SourceImage);
-            latent = BuildStartLatent(scheduler, SeedGenerator.CreateNoise(latentShape, resolvedSeed), sourceLatent, plan.StartStep);
+            latent = BuildStartLatent(scheduler, SavedNoise.Create(EngineKnobs.Fibo2NoiseNpy, latentShape, resolvedSeed, "Fibo2"), sourceLatent,
+                plan.StartStep);
             LatentInpaint? inpaint = null;
             if (plan.MaskPixel is not null)
             {
@@ -203,7 +204,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     /// The caller owns the returned tensor.</summary>
     private Tensor Denoise(Tensor latent, float sigma, Tensor conditional, Tensor? unconditional, float guidanceScale)
     {
-        DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={sigma:F4}");
+        if (DeviceMemoryTrace.Enabled)
+            DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={sigma:F4}");
         Tensor conditionalVelocity = _transformer.Forward(Backend, latent, sigma, conditional);
         if (unconditional is null)
             return conditionalVelocity;

@@ -19,4 +19,7 @@ public enum CatalogFeatures
 
     /// <summary>A vocal separator <c>fx separate</c> runs through the MDX-Net loop. Only Kim_Vocal_2's weights loader exists, so a second entry needs its own.</summary>
     MdxNetSeparator = 8,
+
+    /// <summary>A speech isolator <c>fx separate</c> runs on the voice-isolator network (voice and background stems); it takes a backend choice.</summary>
+    VoiceIsolator = 16,
 }

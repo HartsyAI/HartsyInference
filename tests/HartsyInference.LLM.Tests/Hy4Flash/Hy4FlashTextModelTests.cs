@@ -47,8 +47,15 @@ public sealed class Hy4FlashTextModelTests(ITestOutputHelper output)
         foreach (string literal in literals)
         {
             if (literal is "<｜hy_start:opensource｜>" or "<｜hy_end:opensource｜>") continue;
-            added.Add(new { id = next, content = literal, special = true });
-            next++;
+            // The image literals take the tiny config's image ids (250, 251, 252): the model reads image runs by those ids, and the loader checks them.
+            int id = literal switch
+            {
+                Hy4FlashChatTemplate.ImagePadLiteral => 250,
+                Hy4FlashChatTemplate.ImageStartLiteral => 251,
+                Hy4FlashChatTemplate.ImageEndLiteral => 252,
+                _ => next++,
+            };
+            added.Add(new { id, content = literal, special = true });
         }
         if (next > 256) throw new InvalidOperationException($"The synthetic vocabulary needs {next} ids; the tiny config has 256.");
         return JsonSerializer.Serialize(new
@@ -176,6 +183,70 @@ public sealed class Hy4FlashTextModelTests(ITestOutputHelper output)
             Assert.Equal(noThinkLow, noThinkMin);
             Assert.Equal(noThinkLow, thinkingOff);
             Assert.Equal(noThinkLow, thinkingOffHighEffort);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void EncodeWithImages_ExpandsEachPadToItsFeatureRows_BetweenTheStartAndEnd()
+    {
+        string dir = SyntheticCheckpoint();
+        try
+        {
+            using Hy4FlashTextModel model = Hy4FlashTextModel.Load(new CpuBackend(), dir, 64);
+            Hy4FlashChatTemplate template = Assert.IsType<Hy4FlashChatTemplate>(model.Template);
+            ChatMessage user = new("user", "look") { Blocks = [new TextBlock("look"), new ImageBlock(0)] };
+            int pad = model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ImagePadLiteral) ?? throw new InvalidOperationException("no pad id");
+            int start = model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ImageStartLiteral) ?? throw new InvalidOperationException("no start id");
+            int end = model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ImageEndLiteral) ?? throw new InvalidOperationException("no end id");
+            Hy4FlashConfig config = Hy4FlashConfig.Load(Path.Combine(dir, "config.json"));
+            Assert.Equal(config.ImageTokenId, pad);
+            Assert.Equal(config.ImageStartTokenId, start);
+            Assert.Equal(config.ImageEndTokenId, end);
+
+            // A 4 x 6 patch grid with merge 2: 2 merged rows of 3 columns each plus a newline, so 2 * 4 = 8 feature tokens.
+            int[] ids = template.EncodeWithImages(model.Tokenizer, [user], true, null, null, null, [(4, 6)], 2);
+            int[] padRun = [.. ids.Select((id, i) => (id, i)).Where(p => p.id == pad).Select(p => p.i)];
+            Assert.Equal(8, padRun.Length);
+            Assert.Equal(padRun[0], Array.IndexOf(ids, pad));
+            Assert.Equal(padRun[^1] - padRun[0] + 1, padRun.Length);
+            Assert.Equal(start, ids[padRun[0] - 1]);
+            Assert.Equal(end, ids[padRun[^1] + 1]);
+
+            // Text-only turns encode exactly as Encode does.
+            List<ChatMessage> text = [new("user", "hello")];
+            Assert.Equal(template.Encode(model.Tokenizer, text, true, null, null, null), template.EncodeWithImages(model.Tokenizer, text, true, null, null, null, [], 2));
+
+            // A grid that does not match the pads is refused.
+            Assert.Throws<ArgumentException>(() => template.EncodeWithImages(model.Tokenizer, [user], true, null, null, null, [], 2));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ReasoningState_OpensOnThinkingAndCloses_OnTheHy4Markers()
+    {
+        string dir = SyntheticCheckpoint();
+        try
+        {
+            using Hy4FlashTextModel model = Hy4FlashTextModel.Load(new CpuBackend(), dir, 64);
+            List<ChatMessage> messages = [new("user", "hello")];
+            Assert.NotNull(model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ReasoningMarkers[0]));
+            Assert.NotNull(model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ReasoningMarkers[1]));
+
+            // The default prompt prefills the think block the template does not close, so the completion starts inside it.
+            Hy4FlashChatTemplate template = Assert.IsType<Hy4FlashChatTemplate>(model.Template);
+            Assert.True(template.ResolveParserState(model.Tokenizer, messages, null, null, null).ReasoningOpen);
+            Assert.True(template.ResolveParserState(model.Tokenizer, messages, true, null, 75).ReasoningOpen);
+            // The no_think variant writes the empty pair, so nothing is left open.
+            Assert.False(template.ResolveParserState(model.Tokenizer, messages, false, null, null).ReasoningOpen);
+            Assert.False(template.ResolveParserState(model.Tokenizer, messages, null, null, 50).ReasoningOpen);
         }
         finally
         {

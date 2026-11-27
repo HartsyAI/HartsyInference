@@ -30,11 +30,24 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Engine surface
 
-`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. It always runs on the CPU backend: `FxService` pins both isolators to CPU, and the CLI forces CPU for every `fx separate`. The GPU route has not been run, and the STFT is on the host either way; `IBackend.SelectiveScan` has a host reference (no CUDA kernel yet). 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
+`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. Where it runs (`FxService.IsolateVoiceAsync`): **both models** on the engine's backend when that is CUDA or Vulkan, with a CPU rerun when the card is full. The CLI passes `-b` through for both isolators (Demucs still forces CPU). The STFT is on the host on every backend (`IBackend.Stft` has no GPU path). The Mamba causal-conv runs on CUDA and Vulkan backend ops (no host round trip per block); on the CPU it keeps the host loop, which is faster there. The network runs under `ExactGemmScope`, so CUDA matches the CPU to the same level as Vulkan.
+
+Measured on the 3060 against the CPU on the same golden clips (fp32, wall time of the render/stream call):
+
+| Case | CPU | CUDA | Vulkan |
+|---|---|---|---|
+| offline 3 s | 25.8 s | 4.8 s | 6.6 s |
+| offline 11 s | 184 s | 21.0 s | 30.5 s |
+| realtime 3 s | 38.0 s | 7.6 s | 18.7 s |
+| realtime 11 s | 213 s | 32.4 s | 68.9 s |
+
+On the final head the device runs beat the CPU in every case, so both models route to the engine backend. Times are the log time of the render or stream call, measured 2026-11-26 on commit f9b2a2178 (the device conv and exact-GEMM code; the later commits change docs and routing only, not the goldens' path). The CPU column is from the baseline run at 5bf639317 (the CPU path is unchanged since; CPU reruns on the shared machine took 30 to 396 s). Every device case passes the 1e-4 tolerance, and the device errors are at the CPU level (CUDA 1.2e-7 to 1.8e-7, Vulkan 1.7e-7 to 5.7e-7) because the network runs under exact GEMMs. The earlier CUDA error (2.6e-5 to 8.5e-5) was TF32 GEMMs.
+
+16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
 
 ## Reuse map
 
-`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1). The LLM `MambaModel` keeps its own host scan until the item C change (#1191) moves it onto this op.
+`IBackend` Linear, LayerNorm, SDPA with additive mask and Add; `Fft`/`FftPlan` for the host STFT; `ModelAssets` safetensors loader; `FxService.SeparateAsync` and `StemsResult` from the Kim_Vocal_2 separator. New: `IBackend.SelectiveScan` (Mamba-1), with CUDA (`ssm_selective_scan_f32`) and Vulkan (`ssm_selective_scan`) kernels, verified against `SelectiveScanReference`. The stream attention cache runs on backend ops (`CopyStrided`, `Rotary`). The LLM `MambaModel` keeps its own host scan until the item C change (#1191) moves it onto this op.
 
 ## Reference runs
 
@@ -42,4 +55,4 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Not verified
 
-GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read.
+GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 37 s, on CUDA; 2026-11-26, commit f9b2a2178). The STFT stays on the host; the Mamba conv runs on the device (CUDA and Vulkan) and on the host on the CPU (see Engine surface).

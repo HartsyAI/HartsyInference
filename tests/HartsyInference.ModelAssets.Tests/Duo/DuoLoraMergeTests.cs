@@ -110,6 +110,28 @@ public sealed class DuoLoraMergeTests
     }
 
     [Fact]
+    public void MergeRows_AnF32WeightMergesAtARowOffsetAndLeavesTheOtherRowsAlone()
+    {
+        using Tensor weight = F32(3, 2, 1f, 1f, 1f, 1f, 1f, 1f);
+        using Tensor a = F32(1, 2, 1f, 2f);
+        using Tensor b = F32(1, 1, 4f);
+
+        DuoLoraMerge.MergeRows(weight, rowStart: 2, a, b, scale: 0.5f, swapHalves: false);
+
+        Assert.Equal(new[] { 1f, 1f, 1f, 1f, 3f, 5f }, weight.AsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void MergeRows_RefusesASwappedModuleWithAnOddRowCount()
+    {
+        using Tensor weight = F32(3, 2, 0, 0, 0, 0, 0, 0);
+        using Tensor a = F32(1, 2, 1, 1);
+        using Tensor b = F32(3, 1, 1, 1, 1);
+
+        Assert.Throws<ArgumentException>(() => DuoLoraMerge.MergeRows(weight, 0, a, b, 1f, swapHalves: true));
+    }
+
+    [Fact]
     public void MergeRows_ValidatesShapesAndDTypes()
     {
         using Tensor weight = Bf16Tensor(2, 2, 0, 0, 0, 0);

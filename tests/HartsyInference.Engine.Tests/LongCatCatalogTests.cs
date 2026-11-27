@@ -1,4 +1,6 @@
 using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Registry;
 using Xunit;
@@ -11,6 +13,41 @@ namespace HartsyInference.Engine.Tests;
 [Trait("Category", "SyntheticSmoke")]
 public sealed class LongCatCatalogTests
 {
+    [Fact]
+    public void TheBaseRowDeclaresTheSixShardsTheirIndexAndConfigAndTheSideModels()
+    {
+        CatalogEntry entry = ModelCatalog.Find("longcat-video")!;
+
+        Assert.Equal(Modality.Video, entry.Modality);
+        Assert.Equal("meituan-longcat/LongCat-Video", entry.HuggingFaceRepo);
+        List<ModelAsset> transformer = entry.Assets.Where(a => a.Role == "transformer").ToList();
+        Assert.Equal(6, transformer.Count);
+        Assert.All(transformer, shard =>
+        {
+            Assert.StartsWith("dit/diffusion_pytorch_model-", shard.RepoPath, StringComparison.Ordinal);
+            Assert.Equal(64, shard.Sha256!.Length);
+        });
+        Assert.Equal(6, transformer.Select(shard => shard.Sha256).Distinct().Count());
+        List<ModelAsset> config = entry.Assets.Where(a => a.Role == "config").ToList();
+        Assert.Equal(["dit/config.json", "dit/diffusion_pytorch_model.safetensors.index.json"],
+            config.Select(a => a.RepoPath).Order(StringComparer.Ordinal).ToArray());
+        // The recipe reads one folder: every DiT file lands in it.
+        Assert.Equal("LongCat/LongCat-Video/dit", Assert.Single(transformer.Concat(config).Select(a => a.TargetSubdir).Distinct()));
+        Assert.Contains(entry.Assets, a => a.Repo == SideModels.Umt5Xxl.Repo && a.RepoPath == SideModels.Umt5Xxl.RepoPath);
+        Assert.Contains(entry.Assets, a => a.Repo == SideModels.Wan21Vae.Repo && a.RepoPath == SideModels.Wan21Vae.RepoPath);
+        Assert.DoesNotContain(entry.Assets, a => a.Role == "lora");
+        Assert.Equal("dit/diffusion_pytorch_model-00001-of-00006.safetensors", ModelDownloader.PrimaryAsset(entry)!.RepoPath);
+    }
+
+    [Fact]
+    public void TheBaseIdSelectsItsRowAndItsRecipe()
+    {
+        ModelSpec spec = ModelResolver.Resolve("longcat-video", null, Modality.Video);
+
+        Assert.Equal("longcat-video", spec.Catalog!.Id);
+        Assert.Equal("longcat-video", VideoRecipeRegistry.Resolve(spec.Catalog.Id)!.Name);
+    }
+
     [Fact]
     public void TheAvatarRowDeclaresEachFileWithItsRole()
     {
@@ -33,6 +70,23 @@ public sealed class LongCatCatalogTests
         Assert.Contains(entry.Assets, a => a.Repo == SideModels.Umt5Xxl.Repo && a.RepoPath == SideModels.Umt5Xxl.RepoPath);
         Assert.Contains(entry.Assets, a => a.Repo == SideModels.Wan21Vae.Repo && a.RepoPath == SideModels.Wan21Vae.RepoPath);
         Assert.DoesNotContain(entry.Assets, a => a.Repo == "openai/whisper-large-v3");
+    }
+
+    [Fact]
+    public void TheAvatarRowPutsTheDmdLoraWhereTheRecipeReadsIt()
+    {
+        CatalogEntry entry = ModelCatalog.Find("longcat-avatar")!;
+        ModelAsset lora = Assert.Single(entry.Assets, a => a.Role == "lora");
+        ModelAsset primary = ModelDownloader.PrimaryAsset(entry)!;
+        string root = Path.GetFullPath("models");
+        // The checkpoint's folder, which is what the recipe resolves the primary shard to.
+        string checkpoint = Path.Combine(root, primary.TargetSubdir);
+
+        string downloaded = Path.Combine(root, lora.TargetSubdir, lora.TargetName!);
+
+        Assert.Equal("lora/dmd_lora.safetensors", lora.RepoPath);
+        Assert.Equal(64, lora.Sha256!.Length);
+        Assert.Equal(Path.GetFullPath(LongCatRecipeSupport.DmdLoraPath(checkpoint)), Path.GetFullPath(downloaded));
     }
 
     [Fact]

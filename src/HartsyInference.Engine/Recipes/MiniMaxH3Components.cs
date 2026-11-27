@@ -24,6 +24,14 @@ internal static class MiniMaxH3Components
         CheckpointSource source = CheckpointSource.Open(file,
             CheckpointOpenOptions.ForResidentNvfp4(backends) with { ResidentNvfp4DenseDType = null });
         loaders.Add(source);
+        return BuildTransformer(source, bodyDType, out config, out transformerWeights);
+    }
+
+    /// <summary><see cref="LoadTransformer"/> over a checkpoint the caller already opened, such as a shard set. The caller keeps the source
+    /// open for as long as the weights are used.</summary>
+    internal static MiniMaxH3Transformer BuildTransformer(CheckpointSource source, DType bodyDType, out MiniMaxH3Config config,
+        out Dictionary<string, Tensor> transformerWeights)
+    {
         Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         // The bf16 DiT is larger than host RAM, so it stays bf16 and the backend casts per call.
         MiniMaxH3CheckpointConverter.ConvertedWeights converted =

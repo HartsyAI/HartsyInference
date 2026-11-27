@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -86,7 +87,7 @@ internal static class LongCatRecipeSupport
         long? measuredPeakBytes = null)
     {
         long headroom = BudgetHeadroomBytes(tokens, parts.Dit.Config.HiddenSize, parts.Dit.Config.FfnHiddenDim, measuredPeakBytes, cacheBytes);
-        if (cacheBytes > 0)
+        if (cacheBytes > 0 && HasDeviceBudget(backend))
         {
             // The planner's own inputs, read after the shared weights are placed and the pool trimmed, as BlockStreamingScope does.
             backend.PreloadWeights(parts.Dit.EnumerateSharedWeights());
@@ -199,9 +200,15 @@ internal static class LongCatRecipeSupport
     internal static void RequireChainRoom(IBackend backend, LongCatParts parts, long laterTokens, long stagedBytes, long? measuredPeakBytes = null)
     {
         backend.TrimMemoryPool();
+        if (!HasDeviceBudget(backend))
+            return;
         RequireRoom(backend.FreeMemoryBytes(), NonResidentSharedBytes(backend, parts.Dit), LaterRunHeadroom(parts, laterTokens, measuredPeakBytes),
             stagedBytes, "The chain's later run");
     }
+
+    /// <summary>Whether the backend has device memory to budget. One without it (the CPU, which reports a total of 0) has no room to check: its 0 free
+    /// bytes mean "not applicable", not "full".</summary>
+    private static bool HasDeviceBudget(IBackend backend) => backend.GetVramInfo().TotalBytes > 0;
 
     /// <summary>The bytes of the DiT's shared weights that are not yet on the device, at their stored dtype.</summary>
     internal static long NonResidentSharedBytes(IBackend backend, LongCatTransformer dit)
@@ -258,6 +265,11 @@ internal static class LongCatRecipeSupport
         // The placements the engine sets that LongCat cannot honour: CFG-parallel, DiT shards and context parallel are refused; a separate text-encoder
         // or VAE backend is warned about by the engine, which checks first (UnhonouredBackends); this second check does not warn again.
         UnhonouredBackends.Refuse(context, "LongCat", warn: false);
+        // Planning refuses a request's LoRAs; a caller that constructs the recipe directly is told too, instead of running without them.
+        if (context.Loras is { Entries.Count: > 0 })
+        {
+            throw new NotSupportedException("LongCat does not take a user LoRA; the release's own LoRAs are the only ones applied.");
+        }
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
@@ -366,6 +378,14 @@ internal static class LongCatRecipeSupport
     internal static float[] Noise(int seed, int channels, int frames, int height, int width)
     {
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape([1L, channels, frames, height, width]), seed);
+        return noise.AsReadOnlySpan<float>().ToArray();
+    }
+
+    /// <summary>The noise of a request's first (or only) generation: the file of <c>diagnostics.longcatNoiseNpy</c> when it is set, else
+    /// <see cref="Noise"/>. A chain's later segments keep their seeded noise.</summary>
+    internal static float[] InitialNoise(int seed, int channels, int frames, int height, int width)
+    {
+        using Tensor noise = SavedNoise.Create(EngineKnobs.LongCatNoiseNpy, new TensorShape([1L, channels, frames, height, width]), seed, "LongCat");
         return noise.AsReadOnlySpan<float>().ToArray();
     }
 

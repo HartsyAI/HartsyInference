@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Dinov2;
@@ -147,12 +148,10 @@ public sealed class DepthPro2FocalEstimator : IDisposable
         {
             int tokens = (int)taps[0].Shape[1], hidden = _trunkPreset.HiddenSize, width = hidden * taps.Length;
             Tensor joined = new(new TensorShape(1, tokens, width), DType.F32);
-            Span<float> dst = joined.AsSpan<float>();
-            for (int t = 0; t < taps.Length; t++)
-            {
-                ReadOnlySpan<float> src = taps[t].AsReadOnlySpan<float>();
-                for (int r = 0; r < tokens; r++) src.Slice(r * hidden, hidden).CopyTo(dst.Slice(r * width + t * hidden, hidden));
-            }
+            // A first write over the whole output, then one strided copy per tap: a GPU backend uploads no host buffer, and CUDA's Concat of
+            // more than two inputs along the channels would copy row by row.
+            StridedCopies.FillFrom(backend, joined, taps[0]);
+            for (int t = 0; t < taps.Length; t++) StridedCopies.ScatterAxis(backend, joined, taps[t], 2, t * hidden);
 
             return joined;
         }

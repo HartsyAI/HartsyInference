@@ -27,6 +27,15 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\RealWeightsFactAttribute.cs" Link="Shared\RealWeightsFactAttribute.cs" />
+    <!-- The synthetic Duo release the engine tests build, with the checkpoint writers it uses. -->
+    <Compile Include="..\HartsyInference.Engine.Tests\Duo\DuoReleaseFixture.cs" Link="Shared\DuoReleaseFixture.cs" />
+    <Compile Include="..\HartsyInference.ModelAssets.Tests\Duo\DcpFixture.cs" Link="Shared\DcpFixture.cs" />
+    <Compile Include="..\HartsyInference.ModelAssets.Tests\Duo\PickleBuilder.cs" Link="Shared\PickleBuilder.cs" />
+    <!-- The tiny LongCat avatar release and side-model stand-ins the recipe tests use. -->
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatTestData.cs" Link="Shared\LongCatTestData.cs" />
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatLoraFixture.cs" Link="Shared\LongCatLoraFixture.cs" />
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatRecipeStandIns.cs" Link="Shared\LongCatRecipeStandIns.cs" />
+    <Compile Include="..\HartsyInference.Diffusion.Tests\LongCatTinyAvatarRelease.cs" Link="Shared\LongCatTinyAvatarRelease.cs" />
   </ItemGroup>
 
   <ItemGroup>

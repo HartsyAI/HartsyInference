@@ -49,17 +49,7 @@ public static class DuoRepacker
         if (string.Equals(Path.GetFullPath(backboneDir).TrimEnd('\\', '/'), Path.GetFullPath(outputDir).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("The output folder must differ from the backbone folder; sources are never overwritten.", nameof(outputDir));
 
-        Dictionary<string, List<(string Module, DuoLoraTarget Target)>> byKey = new(StringComparer.Ordinal);
-        List<string> unmapped = [];
-        foreach (string module in lora.Modules)
-        {
-            if (!DuoLoraKeyMap.TryMap(module, out DuoLoraTarget target)) { unmapped.Add(module); continue; }
-            if (!byKey.TryGetValue(target.BackboneKey, out List<(string, DuoLoraTarget)>? list)) byKey[target.BackboneKey] = list = [];
-            list.Add((module, target));
-        }
-        if (unmapped.Count > 0)
-            throw new InvalidDataException($"{unmapped.Count} LoRA module(s) have no backbone weight to merge into, for example '{unmapped[0]}'.");
-
+        Dictionary<string, List<(string Module, DuoLoraTarget Target)>> byKey = ModulesByKey(lora);
         Dictionary<string, TensorShape> shapes = new(StringComparer.Ordinal);
         foreach (string shard in shards)
         {
@@ -69,41 +59,9 @@ public static class DuoRepacker
             {
                 if (!shapes.TryAdd(tensor.Key, tensor.Value.Shape))
                     throw new InvalidDataException($"Tensor '{tensor.Key}' is in more than one shard; the repack would be ambiguous. Nothing was written.");
-                if (tensor.Key.EndsWith(".attn.qkv_proj.bias", StringComparison.Ordinal) && options.InputQkv == DuoQkvInput.HeadInterleaved)
-                    throw new InvalidDataException(
-                        $"'{tensor.Key}' is a fused qkv bias in per-head order, which this repack does not reorder; refusing rather than write a mismatched bias. Nothing was written.");
             }
         }
-
-        Dictionary<string, long[]> loraShapes = lora.Describe().ToDictionary(t => t.Key, t => t.Shape, StringComparer.Ordinal);
-        foreach ((string key, List<(string Module, DuoLoraTarget Target)> modules) in byKey)
-        {
-            if (!shapes.TryGetValue(key, out TensorShape weight))
-                throw new InvalidDataException(
-                    $"LoRA module '{modules[0].Module}' targets '{key}', which no backbone shard holds; the shards are not the Duo backbone. Nothing was written.");
-            if (weight.Rank != 2)
-                throw new InvalidDataException($"'{key}' must be a matrix, got {weight}. Nothing was written.");
-            foreach ((string module, DuoLoraTarget target) in modules)
-            {
-                long[] a = loraShapes[module + DuoLoraKeyMap.LoraASuffix], b = loraShapes[module + DuoLoraKeyMap.LoraBSuffix];
-                bool fits = a.Length == 2 && b.Length == 2 && a[0] == b[1] && a[1] == weight[1]
-                    && weight[0] % target.Slots == 0 && b[0] == weight[0] / target.Slots;
-                if (!fits)
-                    throw new InvalidDataException(
-                        $"LoRA module '{module}' (A [{string.Join(", ", a)}], B [{string.Join(", ", b)}]) does not fit '{key}' {weight}; "
-                        + $"expected B with {weight[0] / target.Slots} rows and A with {weight[1]} columns. Nothing was written.");
-            }
-            if (key.EndsWith(".attn.qkv_proj.weight", StringComparison.Ordinal) && options.InputQkv == DuoQkvInput.HeadInterleaved)
-            {
-                if (weight[0] != 3L * options.Heads * options.HeadDim)
-                    throw new InvalidDataException(
-                        $"'{key}' has {weight[0]} rows, not 3 * {options.Heads} heads * {options.HeadDim}; check --heads and --head-dim. Nothing was written.");
-                string norm = key[..^"qkv_proj.weight".Length] + "q_norm.weight";
-                if (shapes.TryGetValue(norm, out TensorShape qNorm) && (qNorm.Rank != 1 || qNorm[0] != options.HeadDim))
-                    throw new InvalidDataException(
-                        $"'{norm}' has {qNorm} elements, not the head dim {options.HeadDim}; check --heads and --head-dim. Nothing was written.");
-            }
-        }
+        CheckTargets(shapes, byKey, lora, options);
         Directory.CreateDirectory(outputDir);
         HashSet<string> merged = new(StringComparer.Ordinal);
         Dictionary<string, string> weightMap = new(StringComparer.Ordinal);
@@ -120,7 +78,7 @@ public static class DuoRepacker
                 if (options.DropBlockAdalnProj && IsBlockAdalnProj(name)) continue;
                 List<(string Module, DuoLoraTarget Target)>? modules = byKey.GetValueOrDefault(name);
                 if (modules is not null) foreach ((string module, _) in modules) merged.Add(module);
-                bool qkv = name.EndsWith(".attn.qkv_proj.weight", StringComparison.Ordinal);
+                bool qkv = IsQkvWeight(name);
                 entries.Add(new SafeTensorsStreamWriter.Entry(name, tensor.Value.DType, tensor.Value.Shape,
                     () => Materialize(loader.GetTensor(name), qkv, modules, lora, options)));
                 weightMap[name] = Path.GetFileName(shard);
@@ -143,6 +101,47 @@ public static class DuoRepacker
         WriteIndex(Path.Combine(outputDir, IndexFileName), weightMap, totalBytes);
         written.Add(IndexFileName);
         return written;
+    }
+
+    /// <summary>The merge of <see cref="MergeBackbone"/> on loaded weights, with the same rounding and, for per-head input, the same qkv
+    /// reorder. Every check runs before any entry changes. Each rewritten entry is replaced by a new tensor, and the caller disposes the returned
+    /// tensors once the weights are no longer used; the replaced tensors stay the caller's.</summary>
+    /// <exception cref="InvalidDataException">A module has no target or does not fit it, or the qkv layout does not match the options.</exception>
+    /// <exception cref="NotSupportedException">A tensor that would be rewritten is neither BF16 nor F32.</exception>
+    public static IReadOnlyList<Tensor> MergeInto(IDictionary<string, Tensor> weights, DuoLoraSource lora, DuoMergeOptions options,
+        Action<string>? log = null)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        ArgumentNullException.ThrowIfNull(lora);
+        ArgumentNullException.ThrowIfNull(options);
+        Dictionary<string, List<(string Module, DuoLoraTarget Target)>> byKey = ModulesByKey(lora);
+        Dictionary<string, TensorShape> shapes = weights.ToDictionary(w => w.Key, w => w.Value.Shape, StringComparer.Ordinal);
+        CheckTargets(shapes, byKey, lora, options);
+        bool reorder = options.InputQkv == DuoQkvInput.HeadInterleaved;
+        string[] rewritten = [.. weights.Keys.Where(k => byKey.ContainsKey(k) || (reorder && IsQkvWeight(k))).Order(StringComparer.Ordinal)];
+        foreach (string key in rewritten)
+        {
+            if (weights[key].DType != DType.BF16 && weights[key].DType != DType.F32)
+                throw new NotSupportedException($"The Duo LoRA merges into BF16 or F32 weights; '{key}' is {weights[key].DType}. Nothing was changed.");
+        }
+
+        List<(string Key, Tensor Tensor)> staged = [];
+        try
+        {
+            foreach (string key in rewritten)
+            {
+                (Tensor tensor, _) = Materialize(weights[key], IsQkvWeight(key), byKey.GetValueOrDefault(key), lora, options);
+                staged.Add((key, tensor));
+            }
+        }
+        catch
+        {
+            foreach ((_, Tensor tensor) in staged) tensor.Dispose();
+            throw;
+        }
+        foreach ((string key, Tensor tensor) in staged) weights[key] = tensor;
+        log?.Invoke($"merged {lora.Modules.Count} LoRA modules into {byKey.Count} weights; rewrote {staged.Count} tensors");
+        return [.. staged.Select(s => s.Tensor)];
     }
 
     /// <summary>Computes the AdaLN tables of <paramref name="times"/> for every block of the backbone in <paramref name="backboneDir"/>, and writes them to <paramref name="outputPath"/> as <c>blocks.N.adaln_proj.table</c> <c>[times * 3, 6 * hidden]</c> F32
@@ -218,6 +217,71 @@ public static class DuoRepacker
             foreach (SafeTensorsLoader loader in loaders) loader.Dispose();
         }
     }
+
+    /// <summary>The LoRA modules grouped by the backbone weight each merges into; a module with no target fails.</summary>
+    private static Dictionary<string, List<(string Module, DuoLoraTarget Target)>> ModulesByKey(DuoLoraSource lora)
+    {
+        Dictionary<string, List<(string Module, DuoLoraTarget Target)>> byKey = new(StringComparer.Ordinal);
+        List<string> unmapped = [];
+        foreach (string module in lora.Modules)
+        {
+            if (!DuoLoraKeyMap.TryMap(module, out DuoLoraTarget target)) { unmapped.Add(module); continue; }
+            if (!byKey.TryGetValue(target.BackboneKey, out List<(string, DuoLoraTarget)>? list)) byKey[target.BackboneKey] = list = [];
+            list.Add((module, target));
+        }
+        if (unmapped.Count > 0)
+            throw new InvalidDataException($"{unmapped.Count} LoRA module(s) have no backbone weight to merge into, for example '{unmapped[0]}'.");
+        return byKey;
+    }
+
+    /// <summary>Shape checks of every target and of the qkv layout, from the backbone's shapes alone.</summary>
+    private static void CheckTargets(Dictionary<string, TensorShape> shapes,
+        Dictionary<string, List<(string Module, DuoLoraTarget Target)>> byKey, DuoLoraSource lora, DuoMergeOptions options)
+    {
+        bool interleaved = options.InputQkv == DuoQkvInput.HeadInterleaved;
+        string? bias = interleaved ? shapes.Keys.FirstOrDefault(k => k.EndsWith(".attn.qkv_proj.bias", StringComparison.Ordinal)) : null;
+        if (bias is not null)
+            throw new InvalidDataException(
+                $"'{bias}' is a fused qkv bias in per-head order, which this repack does not reorder; refusing rather than write a mismatched bias. Nothing was written.");
+
+        Dictionary<string, long[]> loraShapes = lora.Describe().ToDictionary(t => t.Key, t => t.Shape, StringComparer.Ordinal);
+        foreach ((string key, List<(string Module, DuoLoraTarget Target)> modules) in byKey)
+        {
+            if (!shapes.TryGetValue(key, out TensorShape weight))
+                throw new InvalidDataException(
+                    $"LoRA module '{modules[0].Module}' targets '{key}', which no backbone shard holds; the shards are not the Duo backbone. Nothing was written.");
+            if (weight.Rank != 2)
+                throw new InvalidDataException($"'{key}' must be a matrix, got {weight}. Nothing was written.");
+            foreach ((string module, DuoLoraTarget target) in modules)
+            {
+                long[] a = loraShapes[module + DuoLoraKeyMap.LoraASuffix], b = loraShapes[module + DuoLoraKeyMap.LoraBSuffix];
+                bool fits = a.Length == 2 && b.Length == 2 && a[0] == b[1] && a[1] == weight[1]
+                    && weight[0] % target.Slots == 0 && b[0] == weight[0] / target.Slots;
+                if (!fits)
+                    throw new InvalidDataException(
+                        $"LoRA module '{module}' (A [{string.Join(", ", a)}], B [{string.Join(", ", b)}]) does not fit '{key}' {weight}; "
+                        + $"expected B with {weight[0] / target.Slots} rows and A with {weight[1]} columns. Nothing was written.");
+            }
+        }
+
+        if (!interleaved)
+        {
+            return;
+        }
+        foreach (string key in shapes.Keys.Where(IsQkvWeight))
+        {
+            TensorShape weight = shapes[key];
+            if (weight.Rank != 2 || weight[0] != 3L * options.Heads * options.HeadDim)
+                throw new InvalidDataException(
+                    $"'{key}' is {weight}, not 3 * {options.Heads} heads * {options.HeadDim} rows; check --heads and --head-dim. Nothing was written.");
+            string norm = key[..^"qkv_proj.weight".Length] + "q_norm.weight";
+            if (shapes.TryGetValue(norm, out TensorShape qNorm) && (qNorm.Rank != 1 || qNorm[0] != options.HeadDim))
+                throw new InvalidDataException(
+                    $"'{norm}' has {qNorm} elements, not the head dim {options.HeadDim}; check --heads and --head-dim. Nothing was written.");
+        }
+    }
+
+    private static bool IsQkvWeight(string name) => name.EndsWith(".attn.qkv_proj.weight", StringComparison.Ordinal);
 
     private static unsafe (Tensor Tensor, bool Owned) Materialize(Tensor source, bool qkv, List<(string Module, DuoLoraTarget Target)>? modules,
         DuoLoraSource lora, DuoMergeOptions options)

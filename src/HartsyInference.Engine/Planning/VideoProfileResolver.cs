@@ -86,6 +86,10 @@ internal static class VideoProfileResolver
                 $"Profile '{spec.ProfileId}' is not registered for video family '{familyId}'.", nameof(ModelSpec.ProfileId)));
         }
         VideoEffectiveSettings settings = EffectiveFromResolved(resolved, defaults.LockedFields);
+        if (recipe.RequestRefusal?.Invoke(settings.Apply(request), settings) is { } refusal)
+        {
+            issues.Add(Error("video.request.unsupported", refusal, "request"));
+        }
         return new VideoPlan
         {
             SourceRequest = request,

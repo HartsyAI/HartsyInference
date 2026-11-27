@@ -310,7 +310,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// <remarks>This one runs at construction and the recipe is cached, so the reserve reflects the policy in force
     /// when the pipeline was first built — the same binding the per-request levers have (see ImagesService's scope
     /// comment). Per-request feasibility is re-measured every generation.</remarks>
-    private static long MinimumActivationReserveBytes(MiniMaxH3Config config, IBackend? backend)
+    internal static long MinimumActivationReserveBytes(MiniMaxH3Config config, IBackend? backend)
     {
         int inner = config.NumAttentionHeads * config.AttentionHeadDim;
         int ffn = config.FfnHiddenSize;
@@ -506,7 +506,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     }
 
     /// <summary>The decoder, plus the encoder when the file carries its weights — the vendor VAE ships both halves, but a decode-only repack would leave keyframe and reference conditioning unavailable rather than failing to load.</summary>
-    private static (MiniMaxH3VideoVaeDecoder Decoder, MiniMaxH3VideoVaeEncoder? Encoder) LoadVideoVae(
+    internal static (MiniMaxH3VideoVaeDecoder Decoder, MiniMaxH3VideoVaeEncoder? Encoder) LoadVideoVae(
         string file, List<IDisposable> loaders)
     {
         string dir = Path.GetDirectoryName(file)!;
@@ -547,7 +547,7 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     }
 
     /// <summary>The decoder, plus the encoder when the file carries its half — reference audio needs the encoder, but a decode-only build must still generate soundtracks.</summary>
-    private static (MiniMaxH3AudioVaeDecoder? Decoder, MiniMaxH3AudioVaeEncoder? Encoder) LoadAudioVae(
+    internal static (MiniMaxH3AudioVaeDecoder? Decoder, MiniMaxH3AudioVaeEncoder? Encoder) LoadAudioVae(
         string? file, List<IDisposable> loaders)
     {
         if (file is null)

@@ -74,9 +74,17 @@ public sealed class MiniMaxH3FlatLayoutResolutionTests
 
             MiniMaxH3ImageAssets assets = MiniMaxH3ImageAssets.Resolve(dit, components: null);
 
-            Assert.Equal(vae, assets.ImageVae);
-            Assert.Equal(encoder, assets.TextEncoder);
+            // The resolver probes "vae" before "VAE", so a case-insensitive file system returns the probed spelling of the same folder.
+            Assert.True(SameFile(vae, assets.ImageVae), $"VAE resolved to '{assets.ImageVae}', expected '{vae}'");
+            Assert.True(SameFile(encoder, assets.TextEncoder), $"encoder resolved to '{assets.TextEncoder}', expected '{encoder}'");
         });
+    }
+
+    /// <summary>Two paths name the same file: compared case-insensitively where the file system is (Windows, macOS), exactly elsewhere.</summary>
+    private static bool SameFile(string want, string got)
+    {
+        StringComparison how = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return string.Equals(Path.GetFullPath(want), Path.GetFullPath(got), how);
     }
 
     private static void WithTempRoot(Action<string> test)

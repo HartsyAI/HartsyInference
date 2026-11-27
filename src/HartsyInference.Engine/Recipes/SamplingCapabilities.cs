@@ -109,6 +109,8 @@ public static class SamplingCapabilities
         ["ltx-2.5-distilled"] = SolverOwned,
         ["minimax-h3"] = SolverOwned,
         ["minimax-h3-image"] = SolverOwned,
+        // Duo runs each release's own solver (causal Euler, distilled re-noise); no sampler or schedule is selectable.
+        ["duo-v1"] = SolverOwned,
     };
 
     /// <summary>What the image family <paramref name="familyId"/> accepts, or <see cref="Unknown"/> if unrecognized.</summary>

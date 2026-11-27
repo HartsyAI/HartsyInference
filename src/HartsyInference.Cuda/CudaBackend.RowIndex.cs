@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
@@ -15,6 +16,12 @@ public sealed partial class CudaBackend
         using NvtxRange _nvtx = NvtxRange.Push("GatherRows");
         RowIndexGeometry g = RowIndexContract.ValidateGather(output, input, indices);
         if (g.Rows == 0) return;
+        // The device gather kernel reads F32 rows. A BF16 table takes the host reference, which widens each row it copies.
+        if (input.DType != DType.F32)
+        {
+            RowIndexReference.Gather(output, input, indices);
+            return;
+        }
         using OpScope _op = EnterOp();
         EnsureKernels();
         ulong pIn = 0, pIdx = 0, pOut = 0;
@@ -41,6 +48,8 @@ public sealed partial class CudaBackend
     public bool TryGatherRowsResident(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
     {
         using OpScope _op = EnterOp();
+        // Only F32 rows have a device gather; a BF16 table is gathered on the host by the caller (GatherRows takes the host path).
+        if (input.DType != DType.F32) return false;
         if (!GpuTransferHelper.IsWeightCached(input) && !GpuTransferHelper.IsActivationCached(input))
             return false;
         using Tensor indices = IndexTensor.Rows(rowIndices);

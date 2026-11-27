@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Metadata;
 
@@ -39,6 +41,11 @@ public interface IVideoRecipe
 
     /// <summary>What this family can generate: limits planning validates a request against, which its own defaults satisfy.</summary>
     VideoConstraints Constraints { get; }
+
+    /// <summary>Why this family cannot run a request, when the request and its resolved settings alone show it; null otherwise. Planning
+    /// reports it as a blocking issue, before any weight is read. <paramref name="request"/> has <paramref name="settings"/> applied.
+    /// The exact-hash profile path (MiniMax-H3) does not ask.</summary>
+    string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => null;
 
     /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
     ModelVariantCatalog? Variants => null;

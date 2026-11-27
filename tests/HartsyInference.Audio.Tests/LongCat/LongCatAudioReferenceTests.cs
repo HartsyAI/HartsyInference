@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Loudness;
 using HartsyInference.Audio.Models.LongCat;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
@@ -21,8 +22,8 @@ public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
 {
     private const double Tolerance = 1e-5;
 
-    // The mel front end documents a 1e-4 per-element target; HF computes its STFT in torch F32, so the first run sets what holds.
-    private const double MelTolerance = 1e-4;
+    // The mel stage holds the same relRMS bound as the rest; its per-element max difference is printed, not asserted.
+    private const double MelTolerance = Tolerance;
     private readonly List<(string Stage, double RelRms)> _stages = [];
 
     private readonly Dictionary<string, double> _limits = [];
@@ -98,6 +99,23 @@ public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
             for (int i = 0; i < actual.Length; i++) maxAbs = Math.Max(maxAbs, Math.Abs(actual[i] - reference[i]));
             output.WriteLine($"mel128 chunk {c}: max |diff| {maxAbs:E2}");
             Stage($"mel128 chunk {c}", actual, reference, MelTolerance);
+        }
+        AssertStages();
+    }
+
+    [LongCatReferenceFact("speech16k.f32", "prep_cut.f32", "prep_pad.f32", "meta.json")]
+    public void DrivingAudioPreparation_MatchesTheReference()
+    {
+        float[] speech = Files.Read("speech16k.f32");
+        foreach ((string name, int frames) in new[] { ("cut", 93), ("pad", 253) })
+        {
+            float[] unnormalised = LongCatDrivingAudio.Prepare(speech, frames, 25, normalizeLoudness: false);
+            double loudness = Bs1770Loudness.Integrated(unnormalised, LongCatDrivingAudio.SampleRate);
+            double expected = Files.MetaDouble($"prep_{name}_lufs");
+            output.WriteLine($"{name}: loudness {loudness:F9} LUFS, reference {expected:F9}");
+            Assert.Equal(expected, loudness, 1e-4);
+            Stage($"{name}: prepared and normalised speech", LongCatDrivingAudio.Prepare(speech, frames, 25, normalizeLoudness: true),
+                Files.Read($"prep_{name}.f32"));
         }
         AssertStages();
     }
