@@ -14,6 +14,7 @@ internal static class LongCatConditioningDiagnostics
     public const string TextMask = "text_mask_step00";
     public const string AudioEmbedding = "audio_embedding_step00";
     public const string InputLatent = "input_latent_step00";
+    public const string AudioTokens = "audio_tokens_step00";
     public const string Speech = "speech_16k_mono_step00";
 
     /// <summary>Writes <paramref name="values"/> as float32 .npy <paramref name="name"/>.npy in <paramref name="directory"/>; a null or blank directory writes nothing.</summary>

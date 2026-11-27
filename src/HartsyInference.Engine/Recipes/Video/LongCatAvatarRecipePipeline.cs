@@ -143,6 +143,14 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
         float[] firstWindows = rawAudio.Length == frames * RowWidth ? rawAudio : rawAudio[..(frames * RowWidth)];
         (float[] audioTokens, float[] unconditionalTokens) = ProjectAudio(firstWindows, frames, latentFrames);
+        // The DiT's audio input after the projection: [frames·contextTokens, outputDim] here, written as the reference's [1, frames, contextTokens, outputDim]
+        // (audio_tokens_step00: its audio_proj output, the same row-major elements). A substitute must hold the same element count.
+        int audioDim = _parts.Dit.Config.AudioOutputDim, audioContext = audioTokens.Length / (latentFrames * audioDim);
+        LongCatConditioningDiagnostics.Dump(conditionDump, LongCatConditioningDiagnostics.AudioTokens, audioTokens,
+            [1, latentFrames, audioContext, audioDim]);
+        if (LongCatConditioningDiagnostics.TryRead(conditionSubstitute, LongCatConditioningDiagnostics.AudioTokens, audioTokens.Length,
+            out float[] tokensSubstitute))
+            audioTokens = tokensSubstitute;
         byte[][] decoded;
         if (plan is null)
         {

@@ -14,7 +14,7 @@ public sealed class LongCatConditioningRoundTripTests
 {
     private static readonly string[] Names =
     [
-        "text_embeddings_step00", "text_mask_step00", "audio_embedding_step00", "input_latent_step00", "speech_16k_mono_step00",
+        "text_embeddings_step00", "text_mask_step00", "audio_embedding_step00", "audio_tokens_step00", "input_latent_step00", "speech_16k_mono_step00",
     ];
 
     [Fact]
