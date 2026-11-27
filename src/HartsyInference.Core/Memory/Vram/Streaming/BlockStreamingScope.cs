@@ -196,13 +196,13 @@ public sealed class BlockStreamingScope : IDisposable
         int prefix;
         if (pin is null)
         {
-            prefix = ResidentPrefixSizing.Size(freeAfterShared, headroom, blockBytes);
+            prefix = ResidentPrefixSizing.SizeWithStreamingWindow(freeAfterShared, headroom, blockBytes, options.PrefetchAhead);
         }
         else
         {
             if (pin.PinnedBlocks < 0 || options.TokenLoad > pin.SizedTokens)
             {
-                pin.PinnedBlocks = ResidentPrefixSizing.Size(freeAfterShared, headroom, blockBytes);
+                pin.PinnedBlocks = ResidentPrefixSizing.SizeWithStreamingWindow(freeAfterShared, headroom, blockBytes, options.PrefetchAhead);
                 pin.SizedTokens = options.TokenLoad;
             }
             prefix = pin.PinnedBlocks;
@@ -210,7 +210,7 @@ public sealed class BlockStreamingScope : IDisposable
             {
                 // Re-upload path: free VRAM can be tighter than the sizing generation saw. Squeeze THIS generation
                 // to what fits but keep the pin, so a later one tops back up instead of re-sizing downward forever.
-                int fit = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes);
+                int fit = ResidentPrefixSizing.SizeWithStreamingWindow(backend.FreeMemoryBytes(), headroom, blockBytes, options.PrefetchAhead);
                 if (fit < prefix)
                 {
                     Logs.Info($"[VRAM] {options.ModelName}/denoise: pinned prefix {prefix} squeezed to {fit} for " +
