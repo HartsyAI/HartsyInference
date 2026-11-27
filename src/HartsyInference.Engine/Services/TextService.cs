@@ -527,6 +527,7 @@ public sealed partial class TextService : ITextService, IDisposable
                 if (slot.MossVl is null) RequireNoVideo(request);
                 outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
                     : image is not null && slot.HostReference is KimiK31TextModel kimi ? RunKimiVision(kimi, request, sink, cancel)
+                    : image is not null && slot.HostReference is Hy4FlashTextModel hy4 ? RunHy4Vision(hy4, request, sink, cancel)
                     : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
@@ -951,13 +952,15 @@ public sealed partial class TextService : ITextService, IDisposable
     /// (<paramref name="reasoningOpen"/>). Without one, the whole text is content: a non-reasoning model that spends its budget keeps its answer.
     /// With one, the text before the first closing think marker is reasoning and the rest is content; with no marker, it is content when
     /// decoding stopped on a token, and reasoning when the budget ran out inside the reasoning block.</summary>
-    internal static (string Reasoning, string Content) SplitVisionReasoning(string raw, bool reasoningOpen, bool stoppedOnToken)
+    /// <param name="open">The open think literal the reasoning block is written with; <c>&lt;think&gt;</c> unless the template writes its own.</param>
+    /// <param name="close">The close think literal.</param>
+    internal static (string Reasoning, string Content) SplitVisionReasoning(string raw, bool reasoningOpen, bool stoppedOnToken,
+        string open = "<think>", string close = "</think>")
     {
-        const string close = "</think>";
         if (!reasoningOpen) return ("", raw);
         int at = raw.IndexOf(close, StringComparison.Ordinal);
-        if (at < 0) return stoppedOnToken ? ("", raw) : (raw.Replace("<think>", "", StringComparison.Ordinal).Trim(), "");
-        string reasoning = raw[..at].Replace("<think>", "", StringComparison.Ordinal).Trim();
+        if (at < 0) return stoppedOnToken ? ("", raw) : (raw.Replace(open, "", StringComparison.Ordinal).Trim(), "");
+        string reasoning = raw[..at].Replace(open, "", StringComparison.Ordinal).Trim();
         return (reasoning, raw[(at + close.Length)..].TrimStart());
     }
 

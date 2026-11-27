@@ -66,13 +66,21 @@ public static class Hy4FlashImagePreprocessor
     /// <param name="rgb">The pixels, <c>height * width * 3</c> bytes.</param>
     /// <param name="width">Image width.</param>
     /// <param name="height">Image height.</param>
-    public static Hy4FlashPatchedImage Preprocess(ReadOnlySpan<byte> rgb, int width, int height)
+    /// <param name="patchSize">The vision tower's patch edge; the released checkpoint's is <see cref="PatchSize"/>.</param>
+    /// <param name="mergeSize">The vision tower's spatial merge; the released checkpoint's is <see cref="MergeSize"/>.</param>
+    /// <param name="minPixels">The lower pixel bound of the resize.</param>
+    /// <param name="maxPixels">The upper pixel bound of the resize.</param>
+    public static Hy4FlashPatchedImage Preprocess(ReadOnlySpan<byte> rgb, int width, int height, int patchSize = PatchSize, int mergeSize = MergeSize,
+        long minPixels = MinPixels, long maxPixels = MaxPixels)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(width, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(height, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(patchSize, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(mergeSize, 1);
         if (rgb.Length != checked(width * height * 3)) throw new ArgumentException($"Expected {width * height * 3} bytes of RGB, got {rgb.Length}.", nameof(rgb));
-        (int rh, int rw) = SmartResize(height, width, PatchSize * MergeSize, MinPixels, MaxPixels);
-        int gridH = rh / PatchSize, gridW = rw / PatchSize;
+        int featureDim = 3 * patchSize * patchSize;
+        (int rh, int rw) = SmartResize(height, width, patchSize * mergeSize, minPixels, maxPixels);
+        int gridH = rh / patchSize, gridW = rw / patchSize;
 
         // Resized pixels as floats in 0..255: the input itself when no resize is needed, else the bicubic resample quantised like an 8-bit image.
         float[] pixels = new float[rh * rw * 3];
@@ -85,18 +93,18 @@ public static class Hy4FlashImagePreprocessor
             Resample.BicubicHwc8(rgb, width, height, 3, pixels, rw, rh, a: -0.5f, antialias: true, quantizeU8: true);
         }
 
-        float[] values = new float[gridH * gridW * FeatureDim];
+        float[] values = new float[gridH * gridW * featureDim];
         for (int gy = 0; gy < gridH; gy++)
         for (int gx = 0; gx < gridW; gx++)
         {
-            int rowBase = (gy * gridW + gx) * FeatureDim;
+            int rowBase = (gy * gridW + gx) * featureDim;
             for (int c = 0; c < 3; c++)
-            for (int py = 0; py < PatchSize; py++)
-            for (int px = 0; px < PatchSize; px++)
+            for (int py = 0; py < patchSize; py++)
+            for (int px = 0; px < patchSize; px++)
             {
-                int srcY = gy * PatchSize + py, srcX = gx * PatchSize + px;
+                int srcY = gy * patchSize + py, srcX = gx * patchSize + px;
                 float scaled = pixels[(srcY * rw + srcX) * 3 + c] * RescaleFactor;
-                values[rowBase + c * PatchSize * PatchSize + py * PatchSize + px] = (scaled - Mean) / Std;
+                values[rowBase + c * patchSize * patchSize + py * patchSize + px] = (scaled - Mean) / Std;
             }
         }
         return new Hy4FlashPatchedImage(values, gridH, gridW, rh, rw);
