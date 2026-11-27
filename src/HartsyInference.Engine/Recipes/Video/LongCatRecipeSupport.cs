@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
@@ -396,17 +397,23 @@ internal static class LongCatRecipeSupport
         return noise.AsReadOnlySpan<float>().ToArray();
     }
 
-    /// <summary>Rounds each finite value to the nearest bfloat16, ties to even, in place.</summary>
+    /// <summary>Rounds each value to the nearest bfloat16, ties to even, in place (<see cref="BFloat16Bits"/>).</summary>
     internal static void RoundToBf16(float[] values)
     {
         ArgumentNullException.ThrowIfNull(values);
         for (int i = 0; i < values.Length; i++)
-        {
-            if (!float.IsFinite(values[i])) continue;
-            uint bits = BitConverter.SingleToUInt32Bits(values[i]);
-            uint rounded = bits + 0x7FFFu + ((bits >> 16) & 1u);
-            values[i] = BitConverter.UInt32BitsToSingle(rounded & 0xFFFF0000u);
-        }
+            values[i] = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(values[i]));
+    }
+
+    /// <summary>Encodes a clip after rounding it to bf16, as the reference does before the VAE encode: the first frame
+    /// (pipeline_longcat_video_avatar.py:1152; base I2V pipeline_longcat_video.py:753) and each continuation's context
+    /// (generate_avc casts the video at line 1466 before its encode at 1468).</summary>
+    internal static Tensor EncodeClipAsBf16(IBackend backend, IWanVaeEncoder encoder, Tensor clip, int channels)
+    {
+        float[] values = clip.AsReadOnlySpan<float>().ToArray();
+        RoundToBf16(values);
+        using Tensor rounded = LongCatFrameOps.FromHost(values, clip.Shape);
+        return LongCatVaeSeam.EncodeClip(backend, encoder, rounded, channels);
     }
 
     /// <summary>The normalized latent of a single RGB24 frame, <c>[channels, 1, height / 8, width / 8]</c>, used as the conditioning frame.</summary>
@@ -415,12 +422,7 @@ internal static class LongCatRecipeSupport
         return WithWeightsPlaced(encoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
         {
             using Tensor clip = VideoRecipeUtils.TileRgbToClip(rgb24, width, height, 1);
-            // The reference casts the preprocessed image to the DiT's bf16 before the VAE encode (pipeline_longcat_video_avatar.py:1152; the base
-            // I2V path casts at pipeline_longcat_video.py:753), so the encoder sees bf16-rounded values.
-            float[] clipValues = clip.AsReadOnlySpan<float>().ToArray();
-            RoundToBf16(clipValues);
-            using Tensor bf16Clip = LongCatFrameOps.FromHost(clipValues, clip.Shape);
-            using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, bf16Clip, channels);
+            using Tensor latent = EncodeClipAsBf16(backend, encoder, clip, channels);
             using Tensor host = VideoRecipeUtils.HostCopy(latent);
             return host.AsReadOnlySpan<float>().ToArray();
         }, backend.TrimMemoryPool);
@@ -513,7 +515,7 @@ internal static class LongCatRecipeSupport
         return WithWeightsPlaced(encoder.EnumerateWeights(), backend.PreloadWeights, backend.FreeWeights, () =>
         {
             using Tensor clip = VideoRecipeUtils.PackRgbFramesToClip(decoded[^contextPixels..], width, height);
-            using Tensor latent = LongCatVaeSeam.EncodeClip(backend, encoder, clip, channels);
+            using Tensor latent = EncodeClipAsBf16(backend, encoder, clip, channels);
             using Tensor host = VideoRecipeUtils.HostCopy(latent);
             return host.AsReadOnlySpan<float>().ToArray();
         }, backend.TrimMemoryPool);
