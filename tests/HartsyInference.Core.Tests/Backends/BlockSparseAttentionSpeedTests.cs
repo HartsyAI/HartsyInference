@@ -9,7 +9,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Core.Tests.Backends;
 
-/// <summary>Times a device's block-sparse attention beside its dense attention on the same operands, on the token grids of
+/// <summary>Times a device's block-sparse attention, and on CUDA its dense attention on the same operands, on token grids of
 /// LongCat-Video's 720p refinement (benchmarks/attention/reports/block-sparse-3060.md). It asserts nothing about speed.</summary>
 [Trait("Category", "GpuBenchmark")]
 public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
@@ -25,17 +25,17 @@ public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
         Record(cuda, frames, height, width, heads, dense: true);
     }
 
-    /// <summary>Dense attention is timed on the 4-frame grid only: Vulkan dense attention loses the device at 12 frames and
-    /// 8 heads on Windows. On a card driving a display, run the cases one at a time, smallest first.</summary>
+    /// <summary>No dense attention here: on a Windows RTX 3060 it has lost the device on these grids. On a card driving a
+    /// display, run the cases one at a time, smallest first.</summary>
     [VulkanTheory]
-    [InlineData(4, 44, 80, 1, true)]
-    [InlineData(4, 44, 80, 4, true)]
-    [InlineData(12, 44, 80, 8, false)]
-    [InlineData(12, 44, 80, 32, false)]
-    public void VulkanBlockSparseBesideDense(int frames, int height, int width, int heads, bool dense)
+    [InlineData(4, 44, 80, 1)]
+    [InlineData(4, 44, 80, 4)]
+    [InlineData(12, 44, 80, 8)]
+    [InlineData(12, 44, 80, 32)]
+    public void VulkanBlockSparse(int frames, int height, int width, int heads)
     {
         using VulkanBackend vulkan = new();
-        Record(vulkan, frames, height, width, heads, dense);
+        Record(vulkan, frames, height, width, heads, dense: false);
     }
 
     private void Record(IBackend backend, int frames, int height, int width, int heads, bool dense)
