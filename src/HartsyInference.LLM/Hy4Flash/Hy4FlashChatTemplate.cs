@@ -12,6 +12,10 @@ public sealed class Hy4FlashChatTemplate : IChatTemplate
     /// <summary>The named effort "low" on the 1 to 100 scale. Efforts at or below it, and thinking switched off, select the no_think variant.</summary>
     public const int LowEffort = 50;
 
+    /// <summary>The think literals the template writes, <c>&lt;think:opensource&gt;</c> and <c>&lt;/think:opensource&gt;</c> (the template's <c>think_begin_token</c> and <c>think_end_token</c>).
+    /// They are not the <c>&lt;think&gt;</c> pair the other templates use, so the reasoning split reads these.</summary>
+    public static IReadOnlyList<string> ReasoningMarkers { get; } = ["<think:opensource>", "</think:opensource>"];
+
     private readonly JinjaChatTemplate _default;
     private readonly JinjaChatTemplate _noThink;
 
@@ -42,6 +46,12 @@ public sealed class Hy4FlashChatTemplate : IChatTemplate
     public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking,
         IReadOnlyList<ToolSpec>? tools, int? reasoningEffort)
         => Variant(enableThinking, reasoningEffort).Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools);
+
+    /// <summary>Whether the prompt for <paramref name="messages"/> ends inside a think block: the variant the request selects writes the
+    /// <see cref="ReasoningMarkers"/> open and does not close them.</summary>
+    public ParserInitialState ResolveParserState(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking,
+        IReadOnlyList<ToolSpec>? tools, int? reasoningEffort) =>
+        Variant(enableThinking, reasoningEffort).ResolveParserState(tokenizer, messages, enableThinking, tools, ReasoningMarkers);
 
     // no_think when thinking is off or the effort is low (LowEffort or less); otherwise the checkpoint's own default, which is high.
     private JinjaChatTemplate Variant(bool? enableThinking, int? reasoningEffort) =>
