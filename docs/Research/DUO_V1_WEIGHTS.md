@@ -45,7 +45,24 @@ Over HTTP (`/v1/native/video/plan` and `/stream`) the run folder must exist unde
 
 `Extra["DuoWindowFrames"]` sets the history window (default 144, the default of upstream's `--sliding-window-size` option, `data/inference_options.py`: seven clean blocks behind the current one; upstream's demo runtime passes 238, thirteen; -1 keeps all). Upstream facts the recipe follows (@068e357): the demo runtime sets the `new` RoPE policy (`inference_runtime/engine.py`, which also sets an `adaln_timestep` flag that no Python file there reads); each audio block is decoded alone and cut to `ceil(stop * 32000 / 24) - ceil(start * 32000 / 24)` samples (`serving/common.py::clock_block`). The latent mean and std of `video_vae.yaml` and `audio_vae.yaml` equal the engine's H3 defaults to F32 precision (compared 2026-11-26).
 
-Memory, computed and not measured: the load-time merge makes about 40 GB of host copies beside the mapped BF16 backbone, and the history is held in F32, about 2.9 MB per row, so the default window at 576x768 (about 16,000 rows) needs about 46 GB on the backend.
+Memory: the load-time merge makes about 40 GB of host copies beside the mapped BF16 backbone (computed; the measured figure is below). The history is held in F32, about 2.9 MB per row, so the default window at 576x768 (about 16,000 rows) needs about 46 GB on the backend (computed, not measured).
+
+## First run on released weights (2026-11-27)
+
+`duo-v1-causal` on the `Duo-1.0-causal-base` release, `main` at `981965f36`, RTX 4090, host with 62 GiB of RAM (56 GiB available), the run's cgroup capped at 54 GiB, `vram.noAutopromote=true`, 320x384, 2 steps (the release runs 50), history window 34 frames. **The Intent rows, reference latent and noise were random draws, so the pictures mean nothing. This shows loading, merging, shapes, memory and time. It is not parity.**
+
+| | A: 1 block | B: 2 blocks |
+|---|---|---|
+| Exit | 0 | 0 |
+| Output | 17 PNG frames, 22,667 audio samples per channel | 34 PNG frames, 45,334 samples in each of 2 channels, mp4 muxed |
+| Wall | 660 s | 942 s (`time -v` 15:42.66), budget 1800 s |
+| Step intervals printed by the CLI | [2/2] 93,795 ms | [2/4] 93,652 ms, [3/4] 188,486 ms, [4/4] 93,652 ms |
+| Peak host RSS | 56,564,256 kB (53.9 GiB) | 56,744,172 kB (54.1 GiB) |
+| GPU-wide memory peak | 16,697 MiB, about 436 MiB of it SwarmUI's | 16,898 MiB |
+
+Both merged 317 LoRA modules into 213 weights, loaded 560 video VAE and 1087 audio VAE tensors, held 842 history rows and produced no nonfinite latent. A logged the DiT as streamed (68.06 GB with its reserve against 13.99 GB free). The CLI prints the time since the previous step, so the first step has none, and B's [3/4] covers block 0's commit as well as a step. Load, merge and decode times are not logged. A first attempt at B, on a 754 s budget, was killed after 757 s in step 4 of 4, before any decode. Evidence on the server: `/home/hartsy/evidence/peer-job-bl-2026-11-27/` (B in `outB/`).
+
+Host memory, sampled every 3 s from start to exit of B: `RssAnon` peaked at 40,394,248 kB (38.5 GiB) and `RssFile` at 27,962,684 kB (26.7 GiB), not at the same moment; the cgroup peaked at its cap while page cache was reclaimed. A sample over only the last 61 s of the killed attempt read `RssAnon` 38.2 GiB, `RssFile` 9.0 GiB, cgroup anonymous 38.2 GiB and cgroup file 15.6 GiB. The anonymous peak (41.4 GB) agrees with the computed 40 GB of merge copies. Peak RSS is higher than that because it also counts the mapped checkpoint pages resident at the time, which the kernel can drop. B's peak reads 0.1 GiB over the cap; mapped pages that another cgroup had cached would count in RSS and not against the cap (a possible cause, not checked).
 
 ## Licence
 
@@ -62,3 +79,8 @@ All four upstream repos ship the MiniMax H3 Community License (`license_name: mi
 
 - The qkv order of the Comfy-Org H3 builds the engine runs (the `minimax-h3` catalog entry) is inferred from those runs working, not read from a file.
 - A real-weight LoRA merge against upstream's merged tensors (plan level L2) needs the 2.78 GB LoRA and backbone shards; not run.
+- Host memory, two options, neither built, figures computed and not measured:
+  1. Precomputed AdaLN tables in place of the 26 GB of `adaln_proj` weights that every forward reads: about 1 GB in F32 for the causal schedule. `DuoRepacker.WriteAdalnTables` writes them; the transformer cannot read them. Merge copies plus tables would be about 41 GB, with almost nothing read from disk per forward.
+  2. Merged weights on disk (a `DuoRepack merge` output, or a scratch file) in place of about 37 GiB of heap copies. Every forward would then read from disk unless about 66 GB of RAM were free for the page cache.
+- Auto-promotion during a run: weights a run did not preload are freed after it (`471f605f5`), but a streamed run still promotes them while it runs, until about 1.5 GB of device memory is free (read from the code, not run). Real-weight runs pass `vram.noAutopromote=true`.
+- The distilled and 1.2 releases have not run on released weights.
