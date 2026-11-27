@@ -59,5 +59,17 @@ measured. The attention pass goes in 14 submissions at 8 heads and 55 at 32 (com
 submission at 32 heads takes at most 58 ms on average. The driver logged no event during these runs. The outputs were not
 compared with the reference. The 48-frame grid was not timed.
 
-Dense attention is not timed on Vulkan. On this card it lost the device (`ErrorDeviceLost`) at 12×44×80 with 8 heads on F32
-operands and at 4×44×80 with 1 head on BF16 operands; the cause is not established.
+### Device losses in earlier runs
+
+No Vulkan dense comparison is reported. Two earlier timing runs on this card (2026-11-27, driver 610.88, default watchdog
+settings) failed with `ErrorDeviceLost`, and the driver logged event `nvlddmkm` 153 for each. Both losses surfaced during a
+dense attention call.
+
+| Commit | Grid, heads | Returned and logged a figure before the loss | Call in progress when the loss surfaced |
+|---|---|---|---|
+| `1feb4e55c` | 12×44×80, 8 | block-sparse F32 | dense, F32 operands |
+| `5d27c0979` | 4×44×80, 1 | block-sparse F32 and BF16, dense F32 | dense, BF16 operands |
+
+The cause is not established. Block-sparse attention had run in the same process just before both losses, at `1feb4e55c` as
+one unsplit dispatch (754 ms). No other grid or head count is reported to have lost the device. The timing test no longer calls
+dense attention on Vulkan.

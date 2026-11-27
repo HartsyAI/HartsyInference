@@ -25,8 +25,10 @@ public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
         Record(cuda, frames, height, width, heads, dense: true);
     }
 
-    /// <summary>No dense attention here: on a Windows RTX 3060 it has lost the device on these grids. On a card driving a
-    /// display, run the cases one at a time, smallest first.</summary>
+    /// <summary>No dense attention here. Two runs on a Windows RTX 3060 lost the device, surfacing during a dense call (12 frames
+    /// with 8 heads, and 4 frames with 1 head), each after block-sparse calls in the same process; the cause is not established
+    /// (benchmarks/attention/reports/block-sparse-3060.md). On a card driving a display, run the cases one at a time, smallest
+    /// first.</summary>
     [VulkanTheory]
     [InlineData(4, 44, 80, 1)]
     [InlineData(4, 44, 80, 4)]
