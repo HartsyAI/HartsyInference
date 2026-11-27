@@ -66,12 +66,48 @@ public sealed class BlockSparseAttentionVulkanTests(ITestOutputHelper log)
     }
 
     [VulkanFact]
+    public void AnOperandPastTheStorageBufferRangeIsRefused()
+    {
+        using VulkanBackend vulkan = new() { BlockSparseMaxOperandBytes = 1024 };
+        Checks.Refused(vulkan, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 }, 16,
+            "past the device's storage-buffer range of 1024");
+    }
+
+    [VulkanFact]
     public void ACallSplitIntoManySubmissionsMatchesTheCpuReference()
     {
         // One unit of work a submission: every workgroup along x of the selection and the attention goes alone.
         using VulkanBackend vulkan = new() { BlockSparseWorkPerSubmit = 1 };
         Checks.MatchesTheCpuReferenceOnRandomShapes(vulkan, log, seed: 9, batch: 2, heads: 3, dim: 32, queryGrid: [4, 8, 16],
             keyGrid: [8, 8, 8], queryBlock: [4, 4, 8], keyBlock: [4, 4, 4], sparsity: 0.75, scale: 0f);
+
+        // Two calls (F32 and BF16 operands) of 4 query blocks for the selection and 16 workgroups along x for the attention.
+        Assert.Equal(2 * (4 + 16), vulkan.BlockSparseDispatches);
+    }
+
+    [VulkanFact]
+    public void ACallPastTheDefaultSubmissionBudgetMatchesTheCpuReference()
+    {
+        using VulkanBackend vulkan = new();
+        Checks.MatchesTheCpuReferenceOnRandomShapes(vulkan, log, seed: 12, batch: 1, heads: 8, dim: 128, queryGrid: [4, 44, 80],
+            keyGrid: [4, 44, 80], queryBlock: [4, 4, 4], keyBlock: [4, 4, 4], sparsity: 0.9375, scale: 0f);
+
+        // Two calls, each a selection in one part and an attention of 440 workgroups along x in two.
+        Assert.Equal(2 * (1 + 2), vulkan.BlockSparseDispatches);
+    }
+
+    [VulkanFact]
+    public void BlockMeansAreDividedWithCorrectRounding()
+    {
+        using VulkanBackend vulkan = new();
+        Checks.BlockMeansAreDividedWithCorrectRounding(vulkan);
+    }
+
+    [VulkanFact]
+    public void ANaNValueStaysNaNInABf16Output()
+    {
+        using VulkanBackend vulkan = new();
+        Checks.ANaNValueStaysNaNInABf16Output(vulkan, log);
     }
 
     [VulkanFact]

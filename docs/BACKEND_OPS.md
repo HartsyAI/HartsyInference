@@ -377,11 +377,14 @@ the call by name.
   reference's; the attention is an online softmax over chunks of 64 key rows.
   [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).
 - Vulkan (`block_sparse_*.spv`) takes head dim up to 128 and up to 7680 key blocks on a device with 32 KiB of workgroup
-  memory, and BF16 on one with 16-bit storage; anything else is refused by name. Its means and scores are `precise` in the
-  reference's order, with the divide through `divRn`, so the selection is the reference's where the driver keeps
-  subnormal values (no float-controls mode is declared). The attention is an online softmax over chunks of 16 key rows.
-  A selection or attention pass above 2^33 element operations goes out in several submissions, split along its workgroups,
-  to keep a large call under the Windows GPU watchdog. A captured step graph is submitted whole.
+  memory, operands and outputs within the storage-buffer range, and BF16 on a device with 16-bit storage and `shaderInt16`;
+  anything else is refused by name. Its means and scores are `precise` in the reference's order, with the divide through
+  `divRn`, so the selection is the reference's where the driver keeps subnormal values and rounds to nearest even (no
+  float-controls mode is declared). The attention is an online softmax over chunks of 16 key rows.
+  A selection or attention pass estimated above 2^33 element operations goes out in several submissions, split along its
+  workgroups, to keep a large call under the Windows GPU watchdog. That is not a hard bound on a submission: a smaller pass
+  shares one with the dispatches recorded before it, and a part is never less than one workgroup column across all heads.
+  A captured step graph is submitted whole.
   [Times](../benchmarks/attention/reports/block-sparse-3060.md#vulkan).
 
 The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in

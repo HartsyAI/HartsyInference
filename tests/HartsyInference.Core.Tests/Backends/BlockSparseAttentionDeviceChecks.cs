@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
@@ -26,8 +27,8 @@ internal static class BlockSparseAttentionDeviceChecks
 
     private static readonly Lazy<string?> VulkanReason = new(static () =>
     {
-        if (!VulkanContext.IsAvailable()) return "SKIPPED: Vulkan unavailable.";
-        using VulkanBackend backend = new();
+        if (GpuDevices.VulkanFailure is { } failure) return $"SKIPPED: no usable Vulkan device ({failure}).";
+        using VulkanBackend backend = GpuDevices.OpenVulkan();
         return backend.HasBlockSparseAttention ? null : "SKIPPED: the Vulkan device has less than 32 KiB of workgroup memory.";
     });
 
@@ -241,6 +242,64 @@ internal static class BlockSparseAttentionDeviceChecks
             chosen.AddRange(Enumerable.Range(0, options.KeyBlocks).OrderByDescending(Score).Take(options.SelectedBlocks).Order());
         }
         return [.. chosen];
+    }
+
+    /// <summary>Key blocks of 27 tokens whose sums are consecutive floats, so their means, and their scores, differ by the
+    /// rounding of a divide by 27 alone. A selected count is found at which a divide through a rounded reciprocal would take other
+    /// blocks, and the backend must take the reference's.</summary>
+    public static void BlockMeansAreDividedWithCorrectRounding(IBackend backend)
+    {
+        const int Dim = 16, Length = 27, Blocks = 200;
+        TokenGrid3D box = new(3, 3, 3);
+        float[] sums = new float[Blocks];
+        int first = BitConverter.SingleToInt32Bits(1000f);
+        for (int n = 0; n < Blocks; n++) sums[n] = BitConverter.Int32BitsToSingle(first + n * 73 % Blocks);
+        float reciprocal = 1f / Length;
+        int[] Taken(Func<float, float> mean, int count) =>
+            [.. Enumerable.Range(0, Blocks).OrderByDescending(n => mean(sums[n])).Take(count).Order()];
+        int count = Enumerable.Range(1, Blocks - 1)
+            .FirstOrDefault(c => !Taken(s => s / Length, c).SequenceEqual(Taken(s => s * reciprocal, c)));
+        Assert.True(count > 0, "No selected count tells the two divides apart.");
+
+        BlockSparseAttentionOptions options = new()
+        {
+            QueryGrid = box, KeyGrid = new(3, 60, 30), QueryBlock = box, KeyBlock = box, Sparsity = 1.0 - (count + 0.5) / Blocks,
+        };
+        Assert.Equal(count, options.SelectedBlocks);
+        Random random = new(43);
+        // The query block's mean is (1, 0, ...) exactly, and a key block's one nonzero value is its sum.
+        using Tensor query = new(new TensorShape(1, 1, Length, Dim), DType.F32);
+        for (int row = 0; row < Length; row++) query.AsSpan<float>()[row * Dim] = 1f;
+        using Tensor key = new(new TensorShape(1, 1, options.KeyGrid.Tokens, Dim), DType.F32);
+        for (int n = 0; n < Blocks; n++) key.AsSpan<float>()[options.KeyRow(n, n % Length) * Dim] = sums[n];
+        using Tensor value = Noise(random, 1, 1, (int)options.KeyGrid.Tokens, Dim);
+        TensorShape report = new(1, 1, 1, count);
+        using CpuBackend cpu = new();
+        using Tensor output = new(query.Shape, DType.F32);
+        using Tensor expected = new(report, DType.I32), actual = new(report, DType.I32);
+        cpu.BlockSparseAttention(output, query, key, value, options, expected);
+        Assert.Equal(Taken(s => s / Length, count), expected.AsReadOnlySpan<int>().ToArray());
+
+        backend.BlockSparseAttention(output, query, key, value, options, actual);
+
+        Assert.Equal(expected.AsReadOnlySpan<int>().ToArray(), actual.AsReadOnlySpan<int>().ToArray());
+    }
+
+    /// <summary>A NaN value with an all-ones payload, which a rounding bias would carry out of the exponent, in a BF16 output.</summary>
+    public static void ANaNValueStaysNaNInABf16Output(IBackend backend, ITestOutputHelper log)
+    {
+        BlockSparseAttentionOptions options = new() { QueryGrid = new(4, 4, 8), KeyGrid = new(4, 4, 8), Sparsity = 0.0 };
+        Random random = new(47);
+        using Tensor query = Noise(random, 1, 1, 128, 16);
+        using Tensor key = Noise(random, 1, 1, 128, 16);
+        using Tensor value = Noise(random, 1, 1, 128, 16);
+        value.AsSpan<float>()[9 * 16 + 3] = BitConverter.Int32BitsToSingle(0x7FFFFFFF);
+        using CpuBackend cpu = new();
+        using Tensor reference = new(query.Shape, DType.BF16);
+        cpu.BlockSparseAttention(reference, query, key, value, options);
+        Assert.Contains(reference.AsReadOnlySpan<ushort>().ToArray(), static bits => (bits & 0x7FFF) > 0x7F80);
+
+        Compare(backend, log, query, key, value, options, DType.F32, DType.BF16, "NaN value");
     }
 
     /// <summary>The backend has the operation, refuses the call with a message that holds <paramref name="named"/>, and writes
