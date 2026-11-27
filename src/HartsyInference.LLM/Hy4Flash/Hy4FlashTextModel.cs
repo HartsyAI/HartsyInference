@@ -18,9 +18,12 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
 
     private readonly Hy4FlashCheckpoint _checkpoint;
 
-    private Hy4FlashTextModel(Hy4FlashGenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template, Hy4FlashCheckpoint checkpoint)
+    private Hy4FlashTextModel(Hy4FlashGenerationModel generation, Hy4FlashModel model, Hy4FlashVisionTower vision, ILlmTokenizer tokenizer,
+        IChatTemplate template, Hy4FlashCheckpoint checkpoint)
     {
         Generation = generation;
+        Model = model;
+        Vision = vision;
         Tokenizer = tokenizer;
         Template = template;
         _checkpoint = checkpoint;
@@ -28,6 +31,12 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
 
     /// <summary>The engine-facing model.</summary>
     public Hy4FlashGenerationModel Generation { get; }
+
+    /// <summary>The loaded model, owned by <see cref="Generation"/>; the image route runs it directly, so it is not disposed here.</summary>
+    public Hy4FlashModel Model { get; }
+
+    /// <summary>The vision tower the checkpoint's image weights built; the image route encodes each image through it.</summary>
+    public Hy4FlashVisionTower Vision { get; }
 
     /// <inheritdoc />
     public ILlmTokenizer Tokenizer { get; }
@@ -98,15 +107,22 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
 
         Hy4FlashCheckpoint checkpoint = Hy4FlashCheckpoint.Open(directory);
         Hy4FlashModel? model = null;
+        Hy4FlashVisionTower? vision = null;
         try
         {
             model = new Hy4FlashModel(backend, config, checkpoint, maxSequenceTokens);
-            return new Hy4FlashTextModel(new Hy4FlashGenerationModel(model, backend, maxSequenceTokens), tokenizer, template, checkpoint);
+            vision = new Hy4FlashVisionTower(backend, config.Vision, checkpoint);
+            Hy4FlashGenerationModel generation = new(model, backend, maxSequenceTokens);
+            // the generation model owns the model from its constructor on, so it is not released here
+            Hy4FlashModel owned = model;
+            model = null;
+            return new Hy4FlashTextModel(generation, owned, vision, tokenizer, template, checkpoint);
         }
         catch
         {
-            // the generation model did not take ownership, so a model built before the failure is released here
+            // whatever was built and not handed over is released here
             model?.Dispose();
+            vision?.Dispose();
             checkpoint.Dispose();
             throw;
         }
@@ -115,6 +131,7 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
     /// <inheritdoc />
     public void Dispose()
     {
+        Vision.Dispose();
         Generation.Dispose();
         _checkpoint.Dispose();
     }
