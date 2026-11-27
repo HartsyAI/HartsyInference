@@ -16,6 +16,7 @@ using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Maxwell;
@@ -857,9 +858,24 @@ public sealed partial class TextService : ITextService, IDisposable
     internal static int? OpenReasoningCloseId(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest, TextRequest request,
         bool rawCompletion)
     {
-        if (rawCompletion || template is not JinjaChatTemplate jinja || genRequest.EffectiveMessages() is not { } messages) return null;
-        if (tokenizer.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]) is not int close) return null;
-        return jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools).ReasoningOpen ? close : null;
+        if (rawCompletion || genRequest.EffectiveMessages() is not { } messages) return null;
+        IReadOnlyList<string> markers;
+        ParserInitialState state;
+        switch (template)
+        {
+            case JinjaChatTemplate jinja:
+                markers = SpecialLiteralEscaper.ReasoningMarkers;
+                state = jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools);
+                break;
+            case Hy4FlashChatTemplate hy4:
+                markers = Hy4FlashChatTemplate.ReasoningMarkers;
+                state = hy4.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools, request.ReasoningEffort);
+                break;
+            default:
+                return null;
+        }
+        if (tokenizer.SpecialId(markers[1]) is not int close) return null;
+        return state.ReasoningOpen ? close : null;
     }
 
     /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
