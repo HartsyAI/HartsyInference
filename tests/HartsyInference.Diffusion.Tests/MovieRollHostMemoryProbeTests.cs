@@ -2,7 +2,7 @@ using System.Diagnostics;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
-using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -19,9 +19,7 @@ public sealed class MovieRollHostMemoryProbeTests(ITestOutputHelper output)
     {
         string dit = Environment.GetEnvironmentVariable("MOVIEROLL_DIT_PATH")!;
         HunyuanVideo15Config config = HunyuanVideo15Config.Full;
-        using SafeTensorsLoader weights = new();
-        weights.Load(dit);
-        Dictionary<string, Tensor> source = weights.GetAllTensors();
+        using CheckpointSource checkpoint = CheckpointSource.Open(dit);
 
         void Report(string step)
         {
@@ -32,7 +30,7 @@ public sealed class MovieRollHostMemoryProbeTests(ITestOutputHelper output)
 
         Report("mapped checkpoint");
         using HunyuanVideo15Dit dit15 = new(config);
-        using HunyuanVideo15BlockLoader loader = new(dit15, config, source, [DType.F32]);
+        using HunyuanVideo15BlockLoader loader = HunyuanVideo15BlockLoader.FromCheckpoint(dit15, config, checkpoint, [DType.F32]);
         loader.LoadShared();
         Report("shared weights loaded");
         loader.LoadBlock(0);

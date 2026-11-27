@@ -4,6 +4,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
@@ -35,12 +36,15 @@ public sealed class HunyuanVideo15BlockLoaderTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void StreamedBlocks_GiveTheResidentVelocityBitForBit(bool castToF16)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void StreamedBlocks_GiveTheResidentVelocityBitForBit(bool castToF16, bool readFromFile)
     {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
         using SafeTensorsLoader loader = new();
-        loader.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors"));
+        loader.Load(path);
         HunyuanVideo15Config config = TinyConfig();
         Dictionary<string, Tensor> source = Source(loader);
         List<DType> castSources = castToF16 ? [DType.F32] : [];
@@ -59,7 +63,9 @@ public sealed class HunyuanVideo15BlockLoaderTests
 
         // Streamed: the shared weights once, then each block as the forward reaches it.
         using HunyuanVideo15Dit streamed = new(config);
-        using HunyuanVideo15BlockLoader loader2 = new(streamed, config, source, castSources);
+        using HunyuanVideo15BlockLoader loader2 = readFromFile
+            ? HunyuanVideo15BlockLoader.FromFile(streamed, config, source, castSources, path, CheckpointHeader.Read(path).Descriptors)
+            : new HunyuanVideo15BlockLoader(streamed, config, source, castSources);
         loader2.LoadShared();
         streamed.LoadBlock = loader2.LoadBlock;
 
