@@ -105,6 +105,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
                 nextAudio = new LongCatAudioProjection(_config.AudioWindow, _config.AudioWindow + _config.AudioVaeScale - 1,
                     _config.AudioBlock, _config.AudioChannel, _config.AudioIntermediateDim, _config.AudioOutputDim, _config.AudioContextTokens);
                 nextAudio.LoadWeights(w, "audio_proj.");
+                nextAudio.Bf16Route = _bf16Route;
             }
         }
         catch
@@ -239,10 +240,12 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         }
 
         using Tensor finalModulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _finalAdaW!, _finalAdaB);
-        using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw);
+        using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw, _bf16Route);
         cur.Dispose();
-        using Tensor projected = new(new TensorShape((long)frames * hw, _finalW!.Shape[0]), DType.F32);
-        backend.Linear(projected, modulated, _finalW!, _finalB);
+        // The final linear's output is BF16 on the BF16 route (the velocity it feeds is the rounded projection).
+        Tensor projectedRaw = new(new TensorShape((long)frames * hw, _finalW!.Shape[0]), DType.F32);
+        backend.Linear(projectedRaw, modulated, _finalW!, _finalB);
+        using Tensor projected = LongCatOps.RoundOwned(backend, projectedRaw, _bf16Route);
         Probe?.Invoke("final_layer", projected);
         Tensor velocity = WanDitOps.Unpatchify(projected, _config.OutChannels, frames / pt, gridH, gridW, _config.PatchSize);
         Probe?.Invoke("velocity", velocity);
@@ -323,7 +326,8 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     private Tensor CaptionEmbedding(IBackend backend, Tensor encoder, int validTextTokens)
     {
         int dim = _config.HiddenSize;
-        Tensor projected = _caches.TextProj(backend, encoder, dim, _text1W!, _text1B, _text2W!, _text2B);
+        // The caption projection's output is BF16 on the BF16 route: the reference's y_embedder runs outside autocast (line 497).
+        Tensor projected = LongCatOps.RoundOwned(backend, _caches.TextProj(backend, encoder, dim, _text1W!, _text1B, _text2W!, _text2B), _bf16Route);
         int rows = (int)projected.Shape[0];
         int valid = validTextTokens < 0 ? rows : validTextTokens;
         if (valid < 1 || valid > rows)

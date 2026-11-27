@@ -23,10 +23,10 @@ public sealed partial class LongCatBlock
             throw new ArgumentException($"The timestep embedding has {timeEmbed.Shape[0]} rows for {inputs.Frames} frames.", nameof(timeEmbed));
 
         using Tensor modulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _adaWeight!, _adaBias);
-        using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
+        using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw, _bf16Residual);
         using Tensor attn = Sub(backend, StoredSelfAttention(backend, normed1, in inputs, store, layer));
         using Tensor afterSelf = Residual(backend, LongCatOps.GatedResidual(backend, hidden, attn, modulation, 2 * dim, dim, inputs.FrameRowIndex));
-        using Tensor normed3 = LongCatOps.NormModulate(backend, afterSelf, modulation, 4 * dim, 3 * dim, hw);
+        using Tensor normed3 = LongCatOps.NormModulate(backend, afterSelf, modulation, 4 * dim, 3 * dim, hw, _bf16Residual);
         using Tensor ffn = Sub(backend, FeedForward(backend, normed3));
         return Residual(backend, LongCatOps.GatedResidual(backend, afterSelf, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex));
     }

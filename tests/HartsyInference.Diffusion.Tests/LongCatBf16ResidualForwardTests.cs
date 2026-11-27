@@ -83,8 +83,9 @@ public sealed class LongCatBf16ResidualForwardTests
 
     private static readonly string[] AudioStageNames =
     [
-        "block0.self_attn", "block0.after_self", "block0.cross_attn", "block0.after_cross", "block0.audio_cross_attn",
-        "block0.after_audio", "block0.ffn", "block0.out",
+        "block0.attn_in", "block0.self_attn", "block0.after_self", "block0.cross_norm", "block0.cross_attn", "block0.after_cross",
+        "block0.audio_cross_attn_norm", "block0.audio_cross_attn_modulated", "block0.audio_cross_attn", "block0.after_audio",
+        "block0.ffn_in", "block0.ffn", "block0.out",
     ];
 
     /// <summary>Runs the avatar block (BF16 qkv, the audio step) with a probe, the knob on or off, and returns each stage.</summary>
@@ -129,21 +130,55 @@ public sealed class LongCatBf16ResidualForwardTests
         return stages;
     }
 
-    /// <summary>The patch embedding of the transformer: its probe output is on the BF16 grid on the BF16 route, and off it with the knob off.</summary>
+    /// <summary>The transformer's embedding, caption, final-layer and velocity stages on the BF16 route are on the grid; with the knob off they are not.</summary>
     [Fact]
-    public void ThePatchEmbeddingIsOnTheBf16GridOnTheBf16Route()
+    public void TheTransformerEmbeddingFinalAndVelocityAreOnTheBf16GridOnTheBf16Route()
     {
-        Assert.All(PatchEmbeddingProbe(knob: true), v => Assert.True(OnBf16Grid(v), $"x_embedder: {v:R} is not a BF16 value"));
+        Dictionary<string, float[]> stages = TransformerStages(knob: true);
+        foreach (string name in new[] { "x_embedder", "y_embedder", "final_layer", "velocity" })
+        {
+            Assert.True(stages.ContainsKey(name), $"no probe {name}");
+            Assert.All(stages[name], v => Assert.True(OnBf16Grid(v), $"{name}: {v:R} is not a BF16 value"));
+        }
     }
 
     [Fact]
-    public void ThePatchEmbeddingLeavesTheGridWithTheKnobOff()
+    public void TheTransformerPatchEmbeddingLeavesTheGridWithTheKnobOff()
     {
-        Assert.Contains(PatchEmbeddingProbe(knob: false), v => !OnBf16Grid(v));
+        Dictionary<string, float[]> stages = TransformerStages(knob: false);
+        Assert.Contains(stages["x_embedder"], v => !OnBf16Grid(v));
+        Assert.Contains(stages["velocity"], v => !OnBf16Grid(v));
     }
 
-    /// <summary>The tiny transformer's x_embedder output with a BF16 projection weight, the knob on or off.</summary>
-    private static float[] PatchEmbeddingProbe(bool knob)
+    /// <summary>The audio projection's output and inputs are on the BF16 grid on the BF16 route; with the route off they are not.</summary>
+    [Fact]
+    public void TheAudioProjectionIsOnTheBf16GridOnTheBf16Route()
+    {
+        Assert.All(AudioProjectionOutput(route: true), v => Assert.True(OnBf16Grid(v), $"audio projection: {v:R} is not a BF16 value"));
+        Assert.Contains(AudioProjectionOutput(route: false), v => !OnBf16Grid(v));
+    }
+
+    private static float[] AudioProjectionOutput(bool route)
+    {
+        LongCatConfig config = LongCatTestData.TinyAvatar;
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = LongCatTestData.AvatarWeights(config, 12);
+        using LongCatAudioProjection projection = new(config.AudioWindow, config.AudioWindow + config.AudioVaeScale - 1, config.AudioBlock,
+            config.AudioChannel, config.AudioIntermediateDim, config.AudioOutputDim, config.AudioContextTokens);
+        projection.LoadWeights(weights, "audio_proj.");
+        projection.Bf16Route = route;
+        int inFirst = config.AudioWindow * config.AudioBlock * config.AudioChannel;
+        int inLatter = (config.AudioWindow + config.AudioVaeScale - 1) * config.AudioBlock * config.AudioChannel;
+        using Tensor first = LongCatTestData.Random(new TensorShape(1, inFirst), 13);
+        using Tensor latter = LongCatTestData.Random(new TensorShape(2, inLatter), 14);
+        using Tensor output = projection.Forward(backend, first, latter);
+        float[] values = output.AsReadOnlySpan<float>().ToArray();
+        foreach (Tensor t in weights.Values) t.Dispose();
+        return values;
+    }
+
+    /// <summary>The probes of one tiny-transformer forward on the BF16 route (knob on) or the F32 one, by stage name.</summary>
+    private static Dictionary<string, float[]> TransformerStages(bool knob)
     {
         LongCatConfig config = LongCatTestData.Tiny;
         using CpuBackend backend = new();
@@ -151,18 +186,18 @@ public sealed class LongCatBf16ResidualForwardTests
         Tensor proj = weights["x_embedder.proj.weight"];
         weights["x_embedder.proj.weight"] = proj.CastTo(DType.BF16);
         proj.Dispose();
-        float[]? probed = null;
-        using (KnobProfile.Create("bf16-patch-probe").With(EngineKnobs.LongcatBf16Residual, knob).Push())
+        Dictionary<string, float[]> stages = new(StringComparer.Ordinal);
+        using (KnobProfile.Create("bf16-transformer-probe").With(EngineKnobs.LongcatBf16Residual, knob).Push())
         {
             using LongCatTransformer transformer = new(config);
             transformer.LoadWeights(weights);
-            transformer.Probe = (name, t) => { if (name == "x_embedder") probed = t.AsReadOnlySpan<float>().ToArray(); };
+            transformer.Probe = (name, t) => stages[name] = t.AsReadOnlySpan<float>().ToArray();
             using Tensor latent = LongCatTestData.Random(new TensorShape(new long[] { 1, config.InChannels, 2, 4, 6 }), 10);
             using Tensor encoder = LongCatTestData.Encoder(config, 4, 11);
             using Tensor velocity = transformer.Forward(backend, latent, encoder, [600f], LongCatConditioning.None);
         }
         foreach (Tensor t in weights.Values) t.Dispose();
-        return probed ?? throw new InvalidOperationException("no x_embedder probe");
+        return stages;
     }
 
     private static bool OnBf16Grid(float v) => BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(v)) == v;

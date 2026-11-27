@@ -97,8 +97,10 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         backend.Linear(modulation, activated, _adaW!, _adaB);
 
         // Audio cross-attention over the full stream after the affine video pre-norm; the conditioning rows come back as zeros.
-        using Tensor preNormed = new(x.Shape, DType.F32);
-        backend.LayerNorm(preNormed, x, _preW!, _preB!, NormEps);
+        Tensor preNormedRaw = new(x.Shape, DType.F32);
+        backend.LayerNorm(preNormedRaw, x, _preW!, _preB!, NormEps);
+        using Tensor preNormed = LongCatOps.RoundOwned(backend, preNormedRaw, roundSubLayer);
+        if (probeName.Length > 0) probe?.Invoke(probeName + "_norm", preNormed);
         using Tensor audioOut = _attention.Forward(backend, preNormed, audioTokens, frames, numCond, rotation);
         Tensor noiseSlice = new(new TensorShape(noisyRows, _dim), DType.F32);
         backend.SliceRows(noiseSlice, audioOut, condRows);
@@ -107,7 +109,8 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         probe?.Invoke(probeName, noiseOut);
 
         // Output norm with shift and scale of the noisy frames (1 + scale, then + shift), then the gated residual on the noisy rows.
-        using Tensor modulated = LongCatOps.NormModulate(backend, noiseOut, modulation, _dim, 0, tokensPerFrame);
+        using Tensor modulated = LongCatOps.NormModulate(backend, noiseOut, modulation, _dim, 0, tokensPerFrame, roundSubLayer);
+        if (probeName.Length > 0) probe?.Invoke(probeName + "_modulated", modulated);
         using Tensor noisyX = new(new TensorShape(noisyRows, _dim), DType.F32);
         backend.SliceRows(noisyX, x, condRows);
         using Tensor frameIndex = LongCatOps.FrameRowIndex(noisy, tokensPerFrame);

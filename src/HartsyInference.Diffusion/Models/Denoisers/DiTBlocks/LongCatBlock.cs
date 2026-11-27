@@ -174,7 +174,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         probe?.Invoke($"{stage}.modulation", modulation);
 
         // 1. self-attention: modulation columns are [shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp].
-        using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw);
+        using Tensor normed1 = LongCatOps.NormModulate(backend, hidden, modulation, dim, 0, hw, _bf16Residual);
         probe?.Invoke($"{stage}.attn_in", normed1);
         // With a cache (the denoising pass), the rows attend to the cached conditioning keys in front of their own.
         // With several speakers the self-attention also yields the reference map the audio step positions its queries from.
@@ -205,7 +205,8 @@ public sealed partial class LongCatBlock : IStreamingBlock
         try
         {
             // 3. SwiGLU FFN.
-            using Tensor normed3 = LongCatOps.NormModulate(backend, stream, modulation, 4 * dim, 3 * dim, hw);
+            using Tensor normed3 = LongCatOps.NormModulate(backend, stream, modulation, 4 * dim, 3 * dim, hw, _bf16Residual);
+            probe?.Invoke($"{stage}.ffn_in", normed3);
             using Tensor ffn = Sub(backend, FeedForward(backend, normed3));
             probe?.Invoke($"{stage}.ffn", ffn);
             Tensor output = Residual(backend, LongCatOps.GatedResidual(backend, stream, ffn, modulation, 5 * dim, dim, inputs.FrameRowIndex));
@@ -221,12 +222,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
     /// <summary>Whether this block rounds its residual sums to BF16 (the reference's x dtype on a BF16 or INT8 release).</summary>
     internal bool Bf16Residual => _bf16Residual;
 
-    /// <summary>The residual after an update: on a BF16 route the sum is rounded to BF16 (nearest-even) and kept as F32 values on the BF16 grid;
-    /// otherwise it is returned unchanged. The sum is disposed when it is rounded.</summary>
     /// <summary>A sub-layer output (self-attention, cross-attention, audio cross-attention, FFN) before its gated or added residual: rounded to BF16
     /// on the BF16 route, as the reference's sub-layer outputs are. The input is disposed when it is rounded.</summary>
     private Tensor Sub(IBackend backend, Tensor output) => LongCatOps.RoundOwned(backend, output, _bf16Residual);
 
+    /// <summary>The residual after an update: on a BF16 route the sum is rounded to BF16 (nearest-even) and kept as F32 values on the BF16 grid;
+    /// otherwise it is returned unchanged. The sum is disposed when it is rounded.</summary>
     private Tensor Residual(IBackend backend, Tensor sum)
     {
         if (!_bf16Residual)
@@ -375,8 +376,10 @@ public sealed partial class LongCatBlock : IStreamingBlock
         if (noisyRows <= 0)
             return LongCatOps.Copy(backend, x);
 
-        using Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, _crossNormWeight!, _crossNormBias!, LongCatConfig.NormEps);
+        Tensor normedRaw = new(x.Shape, DType.F32);
+        backend.LayerNorm(normedRaw, x, _crossNormWeight!, _crossNormBias!, LongCatConfig.NormEps);
+        using Tensor normed = LongCatOps.RoundOwned(backend, normedRaw, _bf16Residual);
+        probe?.Invoke($"{stage}.cross_norm", normed);
         using Tensor? noisyRowsInput = condRows == 0 ? null : SliceRows(backend, normed, condRows, noisyRows, dim);
         using Tensor update = Sub(backend, CrossAttention(backend, noisyRowsInput ?? normed, text));
         probe?.Invoke($"{stage}.cross_attn", update);

@@ -22,12 +22,14 @@ internal static class LongCatOps
 
     /// <summary><c>LayerNorm(x) · (1 + scale) + shift</c> with scale and shift read from <paramref name="packed"/> at the given column offsets,
     /// one row per frame.</summary>
-    public static Tensor NormModulate(IBackend backend, Tensor x, Tensor packed, int scaleOffset, int shiftOffset, int tokensPerFrame)
+    /// <param name="roundOutput">Rounds the output to the BF16 grid: the reference's modulate_fp32 casts back to the input's dtype.</param>
+    public static Tensor NormModulate(IBackend backend, Tensor x, Tensor packed, int scaleOffset, int shiftOffset, int tokensPerFrame,
+        bool roundOutput = false)
     {
         Tensor output = new(x.Shape, DType.F32);
         ModulationSpec modulation = ModulationSpec.Packed(packed, packed.Shape[1], scaleOffset, shiftOffset, tokensPerFrame, ScaleMode.OnePlus);
         backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, LongCatConfig.NormEps).WithModulation(in modulation));
-        return output;
+        return RoundOwned(backend, output, roundOutput);
     }
 
     /// <summary>The tensor rounded to the BF16 grid when <paramref name="on"/>: the input is disposed and a new tensor returned. Otherwise the

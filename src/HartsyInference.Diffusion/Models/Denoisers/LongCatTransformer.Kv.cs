@@ -243,11 +243,12 @@ public sealed partial class LongCatTransformer
             }
 
             using Tensor finalModulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _finalAdaW!, _finalAdaB);
-            using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw);
+            using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw, _bf16Route);
             cur.Dispose();
             cur = null;
-            using Tensor projected = new(new TensorShape((long)rows, _finalW!.Shape[0]), DType.F32);
-            backend.Linear(projected, modulated, _finalW!, _finalB);
+            Tensor projectedRaw = new(new TensorShape((long)rows, _finalW!.Shape[0]), DType.F32);
+            backend.Linear(projectedRaw, modulated, _finalW!, _finalB);
+            using Tensor projected = LongCatOps.RoundOwned(backend, projectedRaw, _bf16Route);
             Probe?.Invoke("final_layer", projected);
             return WanDitOps.Unpatchify(projected, _config.OutChannels, frames / _config.PatchSize.T, gridH, gridW, _config.PatchSize);
         }
