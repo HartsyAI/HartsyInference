@@ -273,6 +273,9 @@ internal static class LongCatRecipeSupport
         {
             if (request.InitImage is not null)
                 return "A LongCat-Video continuation takes its conditioning from the clip; it cannot also take an init image.";
+            // The result's size is the clip's, so an explicit size would be silently ignored.
+            if (request.Width is not null || request.Height is not null)
+                return "A LongCat-Video continuation takes its size from the clip; leave width and height unset.";
             // The reference's generate_vc asserts `not (use_distill and enhance_hf)`, and a continuation runs with enhance_hf.
             if (distilled)
                 return "The distilled LongCat-Video build cannot continue a clip: its 16-step schedule excludes the continuation's enhance_hf tail. Use longcat-video.";

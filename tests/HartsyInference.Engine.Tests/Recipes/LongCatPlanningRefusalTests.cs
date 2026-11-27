@@ -74,4 +74,13 @@ public sealed class LongCatPlanningRefusalTests
         Assert.NotNull(new LongCatVideoRecipe().RequestRefusal(continuation with { InitImage = new ImageData { Rgb = [1, 2, 3], Width = 1, Height = 1 } },
             Settings()));
     }
+
+    [Fact]
+    public void AContinuationRefusesAnExplicitWidthOrHeightSinceTheClipSetsTheSize()
+    {
+        VideoRequest continuation = new() { Prompt = "p", VideoContinuation = new VideoClip { Data = [1] } };
+        Assert.Null(new LongCatVideoRecipe().RequestRefusal(continuation with { Width = null, Height = null }, Settings(fps: 15)));
+        Assert.NotNull(new LongCatVideoRecipe().RequestRefusal(continuation with { Width = 832 }, Settings(fps: 15)));
+        Assert.NotNull(new LongCatVideoRecipe().RequestRefusal(continuation with { Height = 480 }, Settings(fps: 15)));
+    }
 }

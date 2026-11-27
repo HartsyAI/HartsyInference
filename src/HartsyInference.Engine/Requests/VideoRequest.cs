@@ -115,8 +115,10 @@ public sealed record VideoRequest
     /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling <see cref="InitImage"/> across frames.</summary>
     public VideoClip? DrivingVideo { get; init; }
 
-    /// <summary>The clip a continuation extends (LongCat-Video's video continuation): its last 13 frames condition the generation, and the
-    /// output begins with them, as the reference returns them. Null for an ordinary generation.</summary>
+    /// <summary>The clip a continuation extends (LongCat-Video's video continuation, the base build only). The clip is stride-sampled to 15 fps; its
+    /// last 13 sampled frames condition the generation. The result is the sampled clip followed by the generated frames after the 13-frame
+    /// context: its size is the clip's own size, its frame rate is 15 fps, and its frame count is the sampled clip's count plus the recipe's
+    /// frame count minus 13. Width and height must be unset, and fps must be unset or 15. Null for an ordinary generation.</summary>
     public VideoClip? VideoContinuation { get; init; }
 
     /// <summary>Pre-rendered pose/skeleton driving video; overrides auto-preprocessing for the pose branch.</summary>
