@@ -21,7 +21,7 @@ public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
 {
     private const double Tolerance = 1e-5;
 
-    // The mel front end documents a 1e-4 per-element target; HF computes its STFT in torch F32, so the first run sets what holds.
+    // The mel stage holds the same relRMS bound as the rest; its per-element max difference is printed, not asserted.
     private const double MelTolerance = Tolerance;
     private readonly List<(string Stage, double RelRms)> _stages = [];
 
