@@ -42,7 +42,10 @@ the dump as `pipeline-parity-report.txt`.
 `dump_longcat_refine.py` runs the pinned `generate_refine` with the DiT's block-sparse attention enabled, with an image condition
 and without one, on the same tiny checkpoint. The reference's attention kernel is Triton and needs CUDA: the dump replaces
 `flash_attn_bsa_3d` with the reference's own blocking and top-k selection (compiled from `block_sparse_attention/bsa_interface.py`)
-and torch SDPA over the selected blocks. It needs the whole pinned checkout, because it reads that file.
+and torch SDPA over the selected blocks. It needs the whole pinned checkout, because it reads that file. With `--triton` the
+reference's own kernel runs instead: that needs a CUDA card and an image with torch, triton, einops, safetensors, tqdm, Pillow,
+regex and a C compiler (`TRITON_F32_DEFAULT=ieee`); the DiT stays on the CPU. The tiny blocks are the released 4x4x4, because the
+kernel does not compile 2x2x2.
 
 ```
 TORCHDYNAMO_DISABLE=1 python dump_longcat_refine.py --repo /src --ckpt /b1/ckpt --out /out/longcat_refine_reference_tensors

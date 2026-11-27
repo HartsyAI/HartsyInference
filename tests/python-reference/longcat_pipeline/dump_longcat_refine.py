@@ -34,11 +34,11 @@ import torch.nn.functional as F
 import dump_longcat_pipeline as base
 
 SPARSITY = 0.5
-BLOCK = [2, 2, 2]
+BLOCK = [4, 4, 4]                # the released block; the Triton kernel does not compile 2x2x2
 SHIFT = 12.0                     # the released base scheduler's shift; with 50 steps and t 0.5 the refinement runs five
 STEPS = 50
 THRESHOLD = 0.5
-HEIGHT, WIDTH = 64, 128          # pixel size the pipeline is told: latent 8 x 16, token grid 4 x 8
+HEIGHT, WIDTH = 128, 192          # pixel size the pipeline is told: latent 16 x 24, token grid 8 x 12
 STAGE1_FRAMES = 5                # doubled to 10, padded to multiples of four latents
 NOISY_LATENTS = 4
 SELECTION = []                   # (query blocks, key blocks, selected) of every attention call
