@@ -125,7 +125,7 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
 
         /// <summary>The clip a continuation extends (LongCat-Video's video continuation).</summary>
         [CommandOption("--continue-video")]
-        [Description("Path to a clip to continue (LongCat-Video): its last 13 frames condition the video, which begins with them. Written at 15 fps.")]
+        [Description("Path to a clip to continue (LongCat-Video, base build only): the output begins with the whole clip, sampled to 15 fps, and its last 13 sampled frames condition the generated frames after them. Leave width and height unset; the result is 15 fps.")]
         public string? ContinueVideo { get; init; }
 
         /// <summary>Pre-rendered pose/skeleton video overriding the pose branch's auto-preprocess.</summary>
