@@ -75,13 +75,34 @@ public sealed class MovieRollDitLoaderTests(ITestOutputHelper output)
         try
         {
             Dictionary<string, Tensor> converted = HunyuanVideo15CheckpointConverter.Convert(subset, numBlocks: 1, hidden: config.HiddenSize);
-            output.WriteLine($"converter output {converted.Count} tensors for the top level and block 0");
-            Assert.True(converted.Count > 0);
-            // Pass-through tensors are the loader's mapped views and are released with the loader; only the converter's copies are disposed here.
-            HashSet<Tensor> borrowed = new(subset.Values, ReferenceEqualityComparer.Instance);
-            foreach (Tensor tensor in converted.Values)
+            try
             {
-                if (!borrowed.Contains(tensor)) tensor.Dispose();
+                // The engine's names and shapes for the top level and block 0, from the config: a missing or extra name, or a wrong shape, fails.
+                Dictionary<string, long[]> expected = ExpectedConverted(config);
+                List<string> problems = [];
+                foreach (string name in expected.Keys.Where(name => !converted.ContainsKey(name))) problems.Add($"missing {name}");
+                foreach (string name in converted.Keys.Where(name => !expected.ContainsKey(name))) problems.Add($"unexpected {name}");
+                foreach ((string name, long[] dims) in expected)
+                {
+                    if (converted.TryGetValue(name, out Tensor? tensor) && tensor.Shape != new TensorShape(dims))
+                        problems.Add($"{name} is {tensor.Shape}, expected [{string.Join(", ", dims)}]");
+                }
+                output.WriteLine($"converter output {converted.Count} tensors, expected {expected.Count}; problems {problems.Count}");
+                Assert.True(problems.Count == 0, string.Join("; ", problems));
+
+                // Load the one-block weights into a one-block DiT: the loader fails on any missing or misshapen weight it needs.
+                using HunyuanVideo15Dit dit = new(config with { NumBlocks = 1 });
+                dit.LoadWeights(converted);
+                Assert.NotEmpty(dit.EnumerateWeights());
+            }
+            finally
+            {
+                // Pass-through tensors are the loader's mapped views and are released with the loader; only the converter's copies are disposed here.
+                HashSet<Tensor> borrowed = new(subset.Values, ReferenceEqualityComparer.Instance);
+                foreach (Tensor tensor in converted.Values)
+                {
+                    if (!borrowed.Contains(tensor)) tensor.Dispose();
+                }
             }
         }
         finally
@@ -89,6 +110,62 @@ public sealed class MovieRollDitLoaderTests(ITestOutputHelper output)
             // The mapped views borrow the loader's memory: they are not disposed on their own.
             subset.Clear();
         }
+    }
+
+    /// <summary>The engine's converted names and shapes for the top level and block 0, from the config. The refiner has two blocks in the released
+    /// file, and the timestep embedding is 256 wide.</summary>
+    private static Dictionary<string, long[]> ExpectedConverted(HunyuanVideo15Config config)
+    {
+        long h = config.HiddenSize, mlp = config.MlpDim, text = config.TextDim, byt5 = config.ByT5Dim, latent = config.LatentChannels;
+        long headDim = h / config.NumHeads;
+        long imageIn = 2 * latent + 1;
+        const long TimestepWidth = 256;
+        Dictionary<string, long[]> e = new(StringComparer.Ordinal);
+        void Add(string name, params long[] dims) => e[name] = dims;
+        void Linear(string name, long outDim, long inDim) { Add($"{name}.weight", outDim, inDim); Add($"{name}.bias", outDim); }
+        void Norm(string name, long dim) { Add($"{name}.weight", dim); Add($"{name}.bias", dim); }
+
+        Norm("byt5_in.layernorm", byt5);
+        Linear("byt5_in.fc1", h, byt5);
+        Linear("byt5_in.fc2", h, h);
+        Linear("byt5_in.fc3", h, h);
+        Add("cond_type_embedding.weight", 3, h);
+        Linear("final_layer.adaLN_modulation.1", 2 * h, h);
+        Linear("final_layer.linear", latent, h);
+        Linear("img_in.proj", h, imageIn);
+        Linear("time_in.mlp.0", h, TimestepWidth);
+        Linear("time_in.mlp.2", h, h);
+        Linear("txt_in.c_embedder.in_layer", h, text);
+        Linear("txt_in.c_embedder.out_layer", h, h);
+        Linear("txt_in.input_embedder", h, text);
+        Linear("txt_in.t_embedder.in_layer", h, TimestepWidth);
+        Linear("txt_in.t_embedder.out_layer", h, h);
+        for (int i = 0; i < 2; i++)
+        {
+            string p = $"txt_in.individual_token_refiner.blocks.{i}";
+            Linear($"{p}.adaLN_modulation.1", 2 * h, h);
+            Linear($"{p}.mlp.0", mlp, h);
+            Linear($"{p}.mlp.2", h, mlp);
+            Norm($"{p}.norm1", h);
+            Norm($"{p}.norm2", h);
+            Linear($"{p}.self_attn.proj", h, h);
+            Linear($"{p}.self_attn.qkv", 3 * h, h);
+        }
+        const string block = "transformer_blocks.0";
+        foreach (string proj in new[] { "attn.add_k_proj", "attn.add_q_proj", "attn.add_v_proj", "attn.to_k", "attn.to_q", "attn.to_v", "attn.to_add_out", "attn.to_out.0" })
+            Linear($"{block}.{proj}", h, h);
+        Add($"{block}.attn.norm_added_q.weight", headDim);
+        Add($"{block}.attn.norm_added_k.weight", headDim);
+        Add($"{block}.attn.norm_q.weight", headDim);
+        Add($"{block}.attn.norm_k.weight", headDim);
+        foreach (string ff in new[] { "ff", "ff_context" })
+        {
+            Linear($"{block}.{ff}.net.0.proj", mlp, h);
+            Linear($"{block}.{ff}.net.2", h, mlp);
+        }
+        Linear($"{block}.norm1.linear", 6 * h, h);
+        Linear($"{block}.norm1_context.linear", 6 * h, h);
+        return e;
     }
 
     /// <summary>Splits <c>double_blocks.N.suffix</c> into its block and suffix; any other name has no block.</summary>
