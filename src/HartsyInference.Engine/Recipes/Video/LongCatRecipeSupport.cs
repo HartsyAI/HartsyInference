@@ -335,6 +335,9 @@ internal static class LongCatRecipeSupport
         }
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
+        // numerics.longcatFp8Ffn holds those weights at a byte an element; a cached 16-bit cast of each would add twice that back.
+        if (EngineKnobs.LongCatFp8Ffn.Value)
+            RecipeBackendFlags.DisableCacheWeightCasts(context, "LongCatRecipeSupport");
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
         // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
