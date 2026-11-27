@@ -3148,8 +3148,9 @@ public static class ModelCatalog
             {
                 // LongCat-Video, the base family, from the upstream repo pinned to meituan-longcat/LongCat-Video @ 03b55529 (the F32 DiT, 54.3 GB;
                 // shard sha256 are the HF tree's LFS oids; the index and config are git blobs and carry no hash here). Licence: MIT, as the model
-                // card, the README's licence section and the LICENSE file state it. The distillation and refinement LoRAs are not row assets: the
-                // recipe does not read them.
+                // card, the README's licence section and the LICENSE file state it. The base project page (meituan-longcat.github.io/LongCat-Video)
+                // states no licence or use restriction; the academic-use-only statement and upstream issue #165 recorded on the avatar rows
+                // concern the avatar releases. The distillation and refinement LoRAs are not row assets: the recipe does not read them.
                 Id = "longcat-video", Modality = vid, DisplayName = "LongCat-Video (text and image to video)",
                 Architecture = "flow-matching DiT, 13.6B", Status = vp, CliDrivable = true,
                 HuggingFaceRepo = "meituan-longcat/LongCat-Video",
