@@ -10,7 +10,7 @@ public static class BlockSparseCases
 {
     public const string Family = "blocksparse";
 
-    private static readonly string[] Required = ["cpu", "cuda"];
+    private static readonly string[] Required = ["cpu", "cuda", "vulkan"];
 
     private static readonly Acceptance Selection = Acceptance.AgainstHost(0, 0, "the selection is the reference's");
     private static readonly Acceptance Wide = Acceptance.AgainstHost(1e-5, 0, "the softmax's exp and the key accumulation order follow each backend");

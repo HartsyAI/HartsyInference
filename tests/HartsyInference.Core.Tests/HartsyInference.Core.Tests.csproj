@@ -19,6 +19,7 @@
     <Compile Include="../../benchmarks/HartsyInference.GpuBenchmarks/Attention/AttentionBenchShape.cs" Link="Evidence/AttentionBenchShape.cs" />
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
   </ItemGroup>
 
   <ItemGroup>
