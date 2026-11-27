@@ -14,10 +14,26 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Engine.Tests;
 
-/// <summary>The released S generator, KV refiner and pixel decoder against Apple's own FP32 run on the same saved inputs. The
+/// <summary>A fact that is reported as skipped, not passed, unless <c>FF_REAL_PARITY_DIR</c> names a folder.</summary>
+internal sealed class RealWeightsParityFactAttribute : FactAttribute
+{
+    public RealWeightsParityFactAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FF_REAL_PARITY_DIR")))
+        {
+            Skip = "SKIPPED: FF_REAL_PARITY_DIR is not set; the real-weights parity run needs the released weights and the reference.";
+        }
+    }
+}
+
+/// <summary>The released FastFrames generator, KV refiner and pixel decoder (S or L) against Apple's own run on the same saved inputs. The
 /// reference comes from <c>tools/parity/dump_fastframes_reference.py checkpoint</c>, which writes <c>io.safetensors</c> (saved noise,
 /// transitions, prompt embeddings, latents and pixels). This test loads the same weights through the recipe's own readers and runs
 /// the engine rollout on the backend chosen by the environment.
+///
+/// Reference precision: S is compared with upstream's FP32 run; L with upstream's BF16 run, which is L's native precision (an FP32 L
+/// reference does not fit an 80 GB card with the DiT). A BF16 reference agrees with the engine only to about the BF16 floor: on S,
+/// upstream's own BF16 run differs from its FP32 run by 0.10 to 0.12 in latent relative RMS.
 ///
 /// Environment (the test is skipped unless <c>FF_REAL_PARITY_DIR</c> is set):
 ///   FF_REAL_PARITY_DIR      folder with framewise-2step.pt, kv_refiner.safetensors, pixel_decoder.safetensors and io.safetensors
@@ -32,15 +48,12 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
 {
     private const int AlignedDroppedPixelFrames = 3;
 
-    [Fact]
-    public void RealSWeightsMatchUpstreamFp32Run()
+    [RealWeightsParityFact]
+    [Trait("Category", "GpuIntegration")]
+    public void RealWeightsMatchUpstreamReference()
     {
-        string? dir = Environment.GetEnvironmentVariable("FF_REAL_PARITY_DIR");
+        string dir = Environment.GetEnvironmentVariable("FF_REAL_PARITY_DIR")!;
         string generatorFile = Environment.GetEnvironmentVariable("FF_REAL_PARITY_GENERATOR") ?? "framewise-2step.pt";
-        if (string.IsNullOrWhiteSpace(dir))
-        {
-            return;
-        }
 
         string backendName = Environment.GetEnvironmentVariable("FF_REAL_PARITY_BACKEND") ?? "cuda";
         double bound = double.TryParse(Environment.GetEnvironmentVariable("FF_REAL_PARITY_BOUND"), NumberStyles.Float,
