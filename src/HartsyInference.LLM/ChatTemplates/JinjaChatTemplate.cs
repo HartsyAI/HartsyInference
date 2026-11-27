@@ -152,11 +152,29 @@ public sealed class JinjaChatTemplate : IChatTemplate
     }
 
     /// <summary>The OpenAI-shaped message dictionary Hugging Face templates expect: <c>tool_calls[i].function.{name,arguments}</c> with arguments as a parsed object when they are JSON, plus <c>tool_call_id</c>, <c>name</c> and <c>reasoning_content</c> when set.</summary>
+    // A turn with images renders its body as the content list the template reads: a text item per text block and an image item per image block.
+    // Without an image block the body is the plain string, as it always was.
+    private static object? ContentValue(ChatMessage m, IReadOnlyList<string> literals)
+    {
+        if (m.Blocks is not { Count: > 0 } blocks || !blocks.Any(static b => b is ImageBlock)) return SpecialLiteralEscaper.Escape(m.Content, literals);
+        List<object?> items = new(blocks.Count);
+        foreach (ContentBlock block in blocks)
+        {
+            items.Add(block switch
+            {
+                TextBlock text => new Dictionary<string, object?> { ["type"] = "text", ["text"] = SpecialLiteralEscaper.Escape(text.Text, literals) },
+                ImageBlock => new Dictionary<string, object?> { ["type"] = "image" },
+                _ => throw new NotSupportedException($"The Jinja templates do not render a {block.GetType().Name} in a message body."),
+            });
+        }
+        return items;
+    }
+
     private Dictionary<string, object?> MessageValue(ChatMessage m, IReadOnlyList<string> literals)
     {
         // Every string here came from the conversation (the user, a tool result or the model), so each one is escaped against the control literals.
         string role = m.Role == ToolRoleName ? _toolRole : m.Role;
-        Dictionary<string, object?> value = new() { ["role"] = role, ["content"] = SpecialLiteralEscaper.Escape(m.Content, literals) };
+        Dictionary<string, object?> value = new() { ["role"] = role, ["content"] = ContentValue(m, literals) };
         if (m.ToolCalls is { Count: > 0 })
         {
             List<object?> calls = new(m.ToolCalls.Count);

@@ -52,6 +52,13 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the Hy4 Flash Text path needs to build its prompt.");
     }
 
+    // A literal the tokenizer does not know is not checked (a tokenizer without image tokens is a text-only one); one it knows must have the config's id.
+    private static void CheckImageId(ILlmTokenizer tokenizer, string literal, int configId)
+    {
+        if (tokenizer.SpecialId(literal) is not int id || id == configId) return;
+        throw new HartsyInferenceException($"tokenizer.json puts {literal} at {id}, but config.json says {configId}.");
+    }
+
     /// <summary>Loads <paramref name="directory"/>; the result owns everything it opened.</summary>
     /// <exception cref="HartsyInferenceException">The checkpoint is larger than <see cref="MaxHostWeightBytes"/>, the config is not runnable, the tokenizer is missing or
     /// unusable, or its special ids disagree with <c>config.json</c>.</exception>
@@ -84,6 +91,10 @@ public sealed class Hy4FlashTextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
         if (config.EosTokenId is { } eos && tokenizer.EosId != eos)
             throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
+        // The model reads image runs by these ids, so a tokenizer that disagrees would place the features on the wrong tokens.
+        CheckImageId(tokenizer, Hy4FlashChatTemplate.ImagePadLiteral, config.ImageTokenId);
+        CheckImageId(tokenizer, Hy4FlashChatTemplate.ImageStartLiteral, config.ImageStartTokenId);
+        CheckImageId(tokenizer, Hy4FlashChatTemplate.ImageEndLiteral, config.ImageEndTokenId);
 
         Hy4FlashCheckpoint checkpoint = Hy4FlashCheckpoint.Open(directory);
         Hy4FlashModel? model = null;
