@@ -24,6 +24,12 @@ public partial interface IBackend
     /// default) instead of edge-clamping them.</summary>
     unsafe void BuildPaddedFrames(Tensor padded, Tensor input, Tensor? cache, int zeroPad,
         bool replicateFirst = false, int padH = 0, int padW = 0, bool reflectSpatial = false)
+        => BuildPaddedFramesReference(padded, input, cache, zeroPad, replicateFirst, padH, padW, reflectSpatial);
+
+    /// <summary>The managed <see cref="BuildPaddedFrames"/> body, callable directly. A backend override that cannot serve a call calls THIS to fall
+    /// back; calling <c>((IBackend)this).BuildPaddedFrames(...)</c> would re-enter the override.</summary>
+    static unsafe void BuildPaddedFramesReference(Tensor padded, Tensor input, Tensor? cache, int zeroPad,
+        bool replicateFirst = false, int padH = 0, int padW = 0, bool reflectSpatial = false)
     {
         int paddedT = (int)padded.Shape[0], cIn = (int)padded.Shape[1];
         int h = (int)input.Shape[3], w = (int)input.Shape[4];

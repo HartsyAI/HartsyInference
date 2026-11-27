@@ -112,6 +112,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
         try
         {
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            Logs.Info($"[Fibo2Recipe] DiT file: {context.CheckpointPath}");
             owned.Add(source);
             // Hints are validated and their backends named here, before HalfPrecisionWeights drops them.
             foreach (string backend in Fibo2AttentionHints.Requested(source.Weights))
@@ -141,6 +142,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
             (Dictionary<string, Tensor> encoderWeights, CheckpointSource encoderSource) = ComponentLoader.Load(
                 encoderPath, "Fibo2Recipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             owned.Add(encoderSource);
+            Logs.Info($"[Fibo2Recipe] text encoder file: {encoderPath}");
             Fibo2WeightPreparation.WidenUnsupported(encoderWeights, [context.TextEncoderBackendOrDefault], DType.BF16, owned);
             LlamaStyleEncoderConfig encoderConfig = Fibo2TextEncoderConfig.FromWeights(encoderWeights);
             Fibo2TextEncoderConfig.ValidateFor(encoderConfig, config);
@@ -150,6 +152,7 @@ public sealed class Fibo2Recipe : IArchitectureRecipe
 
             string vaePath = ModelFileLocator.RequireOrEnsure(context.Components?.Vae, SideModels.Fibo2Vae, "FLUX.2 VAE (Fibo 2.0)",
                 context.Cancel, "VAE", "vae");
+            Logs.Info($"[Fibo2Recipe] VAE file: {vaePath}");
             Flux2VaeComponents vae = Flux2VaeComponents.Load(vaePath, "Fibo2Recipe");
             owned.Add(vae);
 
