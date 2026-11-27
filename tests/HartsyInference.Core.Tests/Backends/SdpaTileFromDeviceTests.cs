@@ -41,12 +41,20 @@ public sealed class SdpaTileFromDeviceTests
     }
 
     [Fact]
-    public void TheOneGateBudgetIsHalfTheTotalOrTheFreeWhenThatIsLess()
+    public void TheGateBudgetIsHalfTheTotalWhenTheResidentPlanLeavesRoom()
     {
-        // Ample free memory: the gate reads the device total only, so the path is the same on every run of one card.
-        Assert.Equal(Card24Gb / 2, CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 20UL << 30));
-        // Free below half the total: the free clamp applies (a buffer the card does not have free is not chosen).
-        Assert.Equal(6UL << 30, CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 6UL << 30));
+        // No free-memory argument exists: the budget is a function of the device total and the planned resident bytes only.
+        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 0));
+        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 8UL << 30));
+    }
+
+    [Fact]
+    public void TheGateBudgetShrinksToWhatThePlanLeavesAndNeverGoesNegative()
+    {
+        // 24 GiB card, 20 GiB planned resident: 24 - 20 - 1 reserve leaves 3 GiB, under half the total.
+        Assert.Equal(3UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 20UL << 30));
+        // A plan that leaves no room gives no budget (the materialized gates then refuse), not an underflow.
+        Assert.Equal(0UL, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 23UL << 30));
     }
 
     [Fact]
@@ -54,7 +62,7 @@ public sealed class SdpaTileFromDeviceTests
     {
         // A 1 GiB rung on a 24 GB card: a 2 GiB score matrix is under the gate, so it stays materialized.
         Assert.Equal(1L << 30, CudaBackend.TileRungBytes(Card24Gb));
-        Assert.True(2UL << 30 <= CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 20UL << 30));
+        Assert.True(2UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 0));
     }
 
     [Fact]

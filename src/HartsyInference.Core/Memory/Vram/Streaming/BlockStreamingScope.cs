@@ -186,6 +186,11 @@ public sealed class BlockStreamingScope : IDisposable
         // The planner's inputs, read once after the shared preload and the trim: the sizing spends free memory minus the headroom on whole blocks.
         long freeAfterShared = backend.FreeMemoryBytes();
         long sharedBytes = SumBytes(denoiser.EnumerateSharedWeights());
+        // Model-derived planned residency for the attention gate budget: the shared weights plus two of the largest blocks (one resident, one
+        // staging). It reads no free memory, so the budget does not move with the planner's free-memory prefix above.
+        long largestBlock = 0;
+        foreach (long bytes in blockBytes) largestBlock = Math.Max(largestBlock, bytes);
+        backend.NoteAttentionPlannedResident(sharedBytes + 2 * largestBlock);
         int prefix;
         if (pin is null)
         {

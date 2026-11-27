@@ -331,13 +331,13 @@ public sealed partial class CudaBackend
     internal readonly record struct GateReading(ulong Budget, ulong Free, ulong Total);
 
     /// <summary>Reads free and total VRAM once and returns the gate budget: half of free VRAM, or under <c>numerics.tileFromDevice</c> the one
-    /// device gate budget (<see cref="DeviceGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
+    /// device gate budget (<see cref="PlannedGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
     private GateReading ReadGate()
     {
         (nuint memFree, nuint memTotal) = _context.GetMemoryInfo();
         ulong free = (ulong)(TestFreeVramOverride?.Invoke() ?? memFree);
         ulong total = memTotal;
-        ulong budget = EngineKnobs.TileFromDevice.Value == true ? DeviceGateBudget(total, free) : free / 2;
+        ulong budget = EngineKnobs.TileFromDevice.Value == true ? PlannedGateBudget(total, PlannedResidentBytes) : free / 2;
         return new GateReading(budget, free, total);
     }
 
@@ -353,7 +353,26 @@ public sealed partial class CudaBackend
     /// total half makes a gate's path the same on every run of one device while free VRAM is ample; the free clamp stops a gate choosing a buffer
     /// the card does not have free now. So the path can still move when free falls below half the total: the A/B rows name the free reading of
     /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
-    internal static ulong DeviceGateBudget(ulong deviceTotalBytes, ulong freeBytes) => Math.Min(deviceTotalBytes / 2, freeBytes);
+    /// <remarks>Under the knob the budget reads no free memory: the streaming planner's known resident bytes (see <see cref="PlannedResidentBytes"/>)
+    /// and the device total set it, so two runs of one card and model take the same gate path whatever else holds the card's memory.</remarks>
+    internal static ulong PlannedGateBudget(ulong deviceTotalBytes, ulong plannedResidentBytes)
+    {
+        ulong reserved = plannedResidentBytes + AttentionReserveBytes;
+        ulong spendable = deviceTotalBytes > reserved ? deviceTotalBytes - reserved : 0;
+        return Math.Min(deviceTotalBytes / 2, spendable);
+    }
+
+    /// <summary>Activation and context headroom kept free of the planned budget, under <c>numerics.tileFromDevice</c> (1 GiB).</summary>
+    internal const ulong AttentionReserveBytes = 1UL << 30;
+
+    /// <summary>Bytes the streaming planner keeps resident, as the planner computed them from the model, not from free memory. Set through
+    /// <see cref="NoteAttentionPlannedResident"/> at each denoise plan; 0 until a plan is noted.</summary>
+    internal ulong PlannedResidentBytes => (ulong)Math.Max(0L, _attentionPlannedResident);
+
+    private long _attentionPlannedResident;
+
+    /// <inheritdoc/>
+    public void NoteAttentionPlannedResident(long bytes) => _attentionPlannedResident = bytes;
 
 
     /// <summary>Whether the equal-head form of a grouped call runs on INT8 v2, Sage or the F16 flash kernel: the kernels the
