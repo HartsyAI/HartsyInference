@@ -1,59 +1,25 @@
-using HartsyInference.Cuda;
-using HartsyInference.Vulkan;
+using HartsyInference.Audio.Tests.VoiceIsolator;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests;
 
-/// <summary>A <see cref="FactAttribute"/> reported as skipped (never passed) when no CUDA device opens.</summary>
-public sealed class CudaFactAttribute : FactAttribute
-{
-    public CudaFactAttribute()
-    {
-        if (!CudaContext.IsAvailable()) Skip = "SKIPPED: no usable CUDA device; GPU check did not run.";
-    }
-}
-
-/// <summary>A <see cref="TheoryAttribute"/> reported as skipped (never passed) when no CUDA device opens.</summary>
-public sealed class CudaTheoryAttribute : TheoryAttribute
-{
-    public CudaTheoryAttribute()
-    {
-        if (!CudaContext.IsAvailable()) Skip = "SKIPPED: no usable CUDA device; GPU check did not run.";
-    }
-}
-
-/// <summary>Real-weights fact that also needs a CUDA device; skipped (never passed) when either the weights or the device are missing.</summary>
-public sealed class CudaRealWeightsFactAttribute : HartsyInference.Audio.Tests.VoiceIsolator.RealWeightsFactAttribute
+/// <summary>Real-weights fact that also needs a CUDA device; reported as skipped (never passed) when the weights or the device are missing.
+/// The device check is the shared probe in tests/Shared/GpuDeviceFacts.cs (the same one <c>CudaDeviceFactAttribute</c> uses).</summary>
+public sealed class CudaRealWeightsFactAttribute : RealWeightsFactAttribute
 {
     public CudaRealWeightsFactAttribute(params string[] environmentVariables) : base(environmentVariables)
     {
-        if (Skip is null && !CudaContext.IsAvailable()) Skip = "SKIPPED: no usable CUDA device; GPU check did not run.";
+        if (Skip is null && GpuDevices.CudaFailure is { } failure) Skip = $"SKIPPED: no usable CUDA device ({failure}); GPU check did not run.";
     }
 }
 
-/// <summary>Real-weights fact that also needs a Vulkan device; skipped (never passed) when either the weights or the device are missing.</summary>
-public sealed class VulkanRealWeightsFactAttribute : HartsyInference.Audio.Tests.VoiceIsolator.RealWeightsFactAttribute
+/// <summary>Real-weights fact that also needs a Vulkan device; reported as skipped (never passed) when the weights or the device are missing.
+/// The device check is the shared probe in tests/Shared/GpuDeviceFacts.cs (the same one <c>VulkanDeviceFactAttribute</c> uses).</summary>
+public sealed class VulkanRealWeightsFactAttribute : RealWeightsFactAttribute
 {
     public VulkanRealWeightsFactAttribute(params string[] environmentVariables) : base(environmentVariables)
     {
-        if (Skip is null && !VulkanContext.IsAvailable()) Skip = "SKIPPED: no usable Vulkan device; GPU check did not run.";
-    }
-}
-
-/// <summary>A <see cref="FactAttribute"/> reported as skipped (never passed) when no Vulkan device opens.</summary>
-public sealed class VulkanFactAttribute : FactAttribute
-{
-    public VulkanFactAttribute()
-    {
-        if (!VulkanContext.IsAvailable()) Skip = "SKIPPED: no usable Vulkan device; GPU check did not run.";
-    }
-}
-
-/// <summary>A <see cref="TheoryAttribute"/> reported as skipped (never passed) when no Vulkan device opens.</summary>
-public sealed class VulkanTheoryAttribute : TheoryAttribute
-{
-    public VulkanTheoryAttribute()
-    {
-        if (!VulkanContext.IsAvailable()) Skip = "SKIPPED: no usable Vulkan device; GPU check did not run.";
+        if (Skip is null && GpuDevices.VulkanFailure is { } failure) Skip = $"SKIPPED: no usable Vulkan device ({failure}); GPU check did not run.";
     }
 }

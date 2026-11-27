@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
@@ -23,14 +24,14 @@ public sealed class VoiceIsolatorStreamCacheGpuTests(ITestOutputHelper output)
     private const int Cache = 80;     // grows past 64 slots; capacity = 120 forces a compaction every 40 frames
     private const float Tol = 1e-4f;
 
-    [CudaFact]
+    [CudaDeviceFact]
     public void Cuda_StreamCacheMatchesTheCpuStream()
     {
         using CudaBackend cuda = new(0, PtxDirectory());
         CompareWithCpu(cuda);
     }
 
-    [VulkanFact]
+    [VulkanDeviceFact]
     public void Vulkan_StreamCacheMatchesTheCpuStream()
     {
         using VulkanBackend vulkan = new();

@@ -106,7 +106,7 @@ public sealed class FxService : IFxService
         // when the card is full. Realtime stays on the CPU: neither GPU was faster than the CPU on the golden clips (see
         // docs/Research/VOICE_ISOLATOR_ARCHITECTURE.md). The STFT (VoiceIsolatorSpectral) stays on the host whichever backend runs.
         IBackend gpu = realtime ? _cpuBackend.Value : _engine.Backend;
-        return RunWithCpuFallbackAsync(gpu, _cpuBackend.Value,
+        return WithCpuFallbackAsync(gpu, _cpuBackend.Value,
             backend => IsolateVoiceOnAsync(backend, selector, request, realtime, cacheKey, cancel), cancel);
     }
 
@@ -152,12 +152,12 @@ public sealed class FxService : IFxService
     private Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
     {
         RejectDemucsOnlyKnobs(request);
-        return RunWithCpuFallbackAsync(_engine.Backend, _cpuBackend.Value, backend => SeparateVocalsOnAsync(backend, selector, request, cancel), cancel);
+        return WithCpuFallbackAsync(_engine.Backend, _cpuBackend.Value, backend => SeparateVocalsOnAsync(backend, selector, request, cancel), cancel);
     }
 
     /// <summary>Runs <paramref name="run"/> on <paramref name="engine"/> when that is CUDA or Vulkan, and on <paramref name="cpu"/> otherwise. A GPU run that still ends
     /// out of video memory after the audio runtime's own retry, wrapped or not, runs again on the CPU. Shared by the Kim_Vocal_2 and voice-isolator routes.</summary>
-    internal static async Task<T> RunWithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
+    internal static async Task<T> WithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
     {
         if (engine.Device.Type is not (DeviceType.Cuda or DeviceType.Vulkan))
         {
