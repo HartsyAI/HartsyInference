@@ -23,16 +23,12 @@ public sealed class LongCatProbeDumpTests
     public void TheFirstStepWritesEmbeddersBlockOutputsAndTheNamedBlocksStages()
     {
         string dir = Path.Combine(Path.GetTempPath(), "longcat-probe-" + Guid.NewGuid().ToString("N"));
-        KnobStore.Set(EngineKnobs.LongCatProbeDump, dir);
-        KnobStore.Set(EngineKnobs.LongCatProbeBlocks, "0");
-        try
+        using (KnobProfile.Create("longcat-probe-dump")
+                   .With(EngineKnobs.LongCatProbeDump, dir)
+                   .With(EngineKnobs.LongCatProbeBlocks, "0")
+                   .Push())
         {
             LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.LongCatProbeDump);
-            KnobStore.Clear(EngineKnobs.LongCatProbeBlocks);
         }
 
         string[] names = Directory.GetFiles(dir).Select(Path.GetFileName).Select(n => n!).ToArray();

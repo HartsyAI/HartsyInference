@@ -21,7 +21,8 @@ namespace HartsyInference.API.Tests;
 /// <summary>The native video routes over HTTP with the Duo recipe on a synthetic release and the CPU: both <c>Extra</c> keys arriving as
 /// JSON, planning and generation through the video service, and the run-folder rule. The recipe is registered under a test family name and
 /// builds fake codec decoders, so the public <c>Construct</c> and the codec loaders do not run here.</summary>
-[Collection(nameof(DuoVideoRouteCollection))]
+// The models root is process-global: this class shares the "ModelsRootKnob" collection with every other test that sets it, so they never overlap.
+[Collection("ModelsRootKnob")]
 public sealed class DuoVideoRouteTests : IAsyncLifetime
 {
     private const string Family = "duo-http-test";
@@ -203,10 +204,4 @@ public sealed class DuoVideoRouteTests : IAsyncLifetime
         public IVideoRecipePipeline Construct(RecipeContext context) =>
             _duo.Build(context, (_, _) => DuoReleaseFixture.Codecs());
     }
-}
-
-/// <summary>Runs alone: the test sets the process-wide models root.</summary>
-[CollectionDefinition(nameof(DuoVideoRouteCollection), DisableParallelization = true)]
-public sealed class DuoVideoRouteCollection
-{
 }

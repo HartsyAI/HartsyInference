@@ -23,22 +23,21 @@ public sealed class LongCatConditioningRoundTripTests
         string dump = Path.Combine(Path.GetTempPath(), "longcat-cond-" + Guid.NewGuid().ToString("N"));
         try
         {
-            KnobStore.Set(EngineKnobs.LongCatConditioningDump, dump);
-            VideoGenerationResult first = LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1).Result;
-            KnobStore.Clear(EngineKnobs.LongCatConditioningDump);
+            VideoGenerationResult first;
+            using (KnobProfile.Create("longcat-cond-dump").With(EngineKnobs.LongCatConditioningDump, dump).Push())
+                first = LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1).Result;
             foreach (string name in Names)
                 Assert.True(File.Exists(Path.Combine(dump, name + ".npy")), name);
 
-            KnobStore.Set(EngineKnobs.LongCatConditioningSubstitute, dump);
-            VideoGenerationResult second = LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1).Result;
+            VideoGenerationResult second;
+            using (KnobProfile.Create("longcat-cond-substitute").With(EngineKnobs.LongCatConditioningSubstitute, dump).Push())
+                second = LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1).Result;
             Assert.Equal(first.Frames.Count, second.Frames.Count);
             for (int i = 0; i < first.Frames.Count; i++)
                 Assert.Equal(first.Frames[i].Rgb, second.Frames[i].Rgb);
         }
         finally
         {
-            KnobStore.Clear(EngineKnobs.LongCatConditioningDump);
-            KnobStore.Clear(EngineKnobs.LongCatConditioningSubstitute);
             if (Directory.Exists(dump)) Directory.Delete(dump, recursive: true);
         }
     }
@@ -49,18 +48,15 @@ public sealed class LongCatConditioningRoundTripTests
         string dump = Path.Combine(Path.GetTempPath(), "longcat-cond-bad-" + Guid.NewGuid().ToString("N"));
         try
         {
-            KnobStore.Set(EngineKnobs.LongCatConditioningDump, dump);
-            LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1);
-            KnobStore.Clear(EngineKnobs.LongCatConditioningDump);
+            using (KnobProfile.Create("longcat-cond-bad-dump").With(EngineKnobs.LongCatConditioningDump, dump).Push())
+                LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1);
             // The audio file holds three values, not the clip's windows.
             File.WriteAllBytes(Path.Combine(dump, "audio_embedding_step00.npy"), NpyFile.Float32([1f, 2f, 3f], [3]));
-            KnobStore.Set(EngineKnobs.LongCatConditioningSubstitute, dump);
-            Assert.ThrowsAny<Exception>(() => LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1));
+            using (KnobProfile.Create("longcat-cond-bad-substitute").With(EngineKnobs.LongCatConditioningSubstitute, dump).Push())
+                Assert.ThrowsAny<Exception>(() => LongCatAvatarRecipeEndToEndTests.Run(onePointSix: false, audioSeed: 1));
         }
         finally
         {
-            KnobStore.Clear(EngineKnobs.LongCatConditioningDump);
-            KnobStore.Clear(EngineKnobs.LongCatConditioningSubstitute);
             if (Directory.Exists(dump)) Directory.Delete(dump, recursive: true);
         }
     }

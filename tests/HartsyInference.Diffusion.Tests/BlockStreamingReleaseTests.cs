@@ -102,15 +102,10 @@ public sealed class BlockStreamingReleaseTests : IDisposable
         using (BlockStreamingScope unset = BlockStreamingScope.Open(Options(backend, dit, new ResidentPrefixPin(), tokenLoad: 100)))
             Assert.Equal(blocks, unset.ResidentPrefixBlocks);
 
-        KnobStore.Set(EngineKnobs.StreamResidentPrefix, 1);
-        try
+        using (KnobProfile.Create("stream-resident-prefix").With(EngineKnobs.StreamResidentPrefix, 1).Push())
         {
             using BlockStreamingScope pinned = BlockStreamingScope.Open(Options(backend, dit, new ResidentPrefixPin(), tokenLoad: 100));
             Assert.Equal(Math.Min(1, blocks), pinned.ResidentPrefixBlocks);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.StreamResidentPrefix);
         }
     }
 

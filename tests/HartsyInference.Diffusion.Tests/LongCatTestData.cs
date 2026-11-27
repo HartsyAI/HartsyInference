@@ -10,17 +10,10 @@ namespace HartsyInference.Diffusion.Tests;
 internal static class LongCatTestData
 {
     /// <summary>Keeps a checkpoint's DiT in F32 for the scope: the tiny parity references are F32 runs, so their comparison pins the F32 load
-    /// (numerics.longcatDitBf16 is on by default, the reference's BF16 load). Restored on dispose.</summary>
-    public static IDisposable PinF32Dit()
-    {
-        KnobStore.Set(EngineKnobs.LongCatDitBf16, false);
-        return new KnobRestore();
-    }
-
-    private sealed class KnobRestore : IDisposable
-    {
-        public void Dispose() => KnobStore.Clear(EngineKnobs.LongCatDitBf16);
-    }
+    /// (numerics.longcatDitBf16 is on by default, the reference's BF16 load). A knob profile pushed on this thread's async flow, so parallel
+    /// tests keep their own load dtype; the process-wide knob store is never written.</summary>
+    public static IDisposable PinF32Dit() =>
+        KnobProfile.Create("longcat-f32-dit").With(EngineKnobs.LongCatDitBf16, false).Push();
 
     public static LongCatConfig Tiny { get; } = new()
     {
