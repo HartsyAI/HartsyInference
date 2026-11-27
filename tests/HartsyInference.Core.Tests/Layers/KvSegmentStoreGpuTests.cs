@@ -48,6 +48,40 @@ public sealed class KvSegmentStoreGpuTests
         Assert.Equal(cpuValues, gpuValues);
     }
 
+    /// <summary>Host-moved slots joined on CUDA, twice: the staged device copies must hold the stored bytes on both joins, and the stored host
+    /// slots must stay on the host (a device concat fed them would promote them into VRAM).</summary>
+    [CudaFact]
+    public void AJoinOfHostSlotsOnCudaMatchesTheCpuTwice()
+    {
+        using CpuBackend cpu = new();
+        using CudaBackend cuda = new(0, PtxDirectory());
+        (float[] cpuKeys, float[] cpuValues) = JoinHostSlots(cpu, Lengths);
+        (float[] gpuKeys, float[] gpuValues) = JoinHostSlots(cuda, Lengths);
+        (float[] againKeys, float[] againValues) = JoinHostSlots(cuda, Lengths);
+
+        Assert.Equal(cpuKeys, gpuKeys);
+        Assert.Equal(cpuValues, gpuValues);
+        Assert.Equal(cpuKeys, againKeys);
+        Assert.Equal(cpuValues, againValues);
+    }
+
+    /// <summary>Builds the store, moves its layer to host memory, joins it, and reads the result back.</summary>
+    private static (float[] Keys, float[] Values) JoinHostSlots(IBackend backend, int[] lengths)
+    {
+        using KvSegmentStore store = Store(backend, lengths, headMajor: true);
+        store.MoveLayerToHost(0);
+        (Tensor keys, Tensor values) = store.Join(0, 0, lengths.Length);
+        try
+        {
+            return (keys.AsSpan<float>().ToArray(), values.AsSpan<float>().ToArray());
+        }
+        finally
+        {
+            keys.Dispose();
+            values.Dispose();
+        }
+    }
+
     [CudaFact]
     public void TimeOneBlockJoinOnCuda()
     {

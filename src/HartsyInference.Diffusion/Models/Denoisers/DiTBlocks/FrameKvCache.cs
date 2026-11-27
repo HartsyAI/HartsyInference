@@ -15,13 +15,19 @@ public sealed class FrameKvCache : IDisposable
 {
     private readonly KvSegmentStore _store;
 
-    /// <summary>A cache of <paramref name="layers"/> layers with room for <paramref name="maxFrames"/> frame slots each.</summary>
-    public FrameKvCache(IBackend backend, int layers, int maxFrames)
+    /// <summary>A cache of <paramref name="layers"/> layers with room for <paramref name="maxFrames"/> frame slots each. With
+    /// <paramref name="offload"/>, each slot leaves the device as it is written: the device holds only the slots a block's join stages (see
+    /// <see cref="KvSegmentStore.Join(int, int, int)"/>), and the values are the same, so the output is the same.</summary>
+    public FrameKvCache(IBackend backend, int layers, int maxFrames, bool offload = false)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxFrames, 1);
         _store = new KvSegmentStore(backend, layers, tokenAxis: 0);
         MaxFrames = maxFrames;
+        Offloaded = offload;
     }
+
+    /// <summary>True when written slots move to host memory and each join stages them back to the device.</summary>
+    public bool Offloaded { get; }
 
     /// <summary>Layers the cache spans.</summary>
     public int Layers => _store.Layers;
@@ -63,6 +69,8 @@ public sealed class FrameKvCache : IDisposable
             throw new ArgumentException($"A slot is token-major [S, C]; got {shape}.");
         }
         _store.Set(layer, frame, keys, values);
+        if (Offloaded)
+            _store.MoveSlotToHost(layer, frame);
     }
 
     /// <summary>Joins slots 0 through <paramref name="lastFrame"/> of <paramref name="layer"/> along the token axis into fresh

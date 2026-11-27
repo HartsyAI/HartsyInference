@@ -390,6 +390,30 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
         Assert.Throws<InvalidOperationException>(() => pipeline.GenerateFrames(prompt, new NaNNoise(), Frames).ToList());
     }
 
+    /// <summary>The frame cache's placement does not change the frames: a clip with the cache offloaded to host memory (each slot leaves the device
+    /// as written, each join stages it back) gives the same latents as a resident cache, on the CPU, with the same noise.</summary>
+    [Fact]
+    public void AnOffloadedFrameCacheGivesTheSameFramesAsAResidentOne()
+    {
+        using TinyModel model = new(f16Branches: false);
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend cpu = new();
+        List<FastFramesFrame> resident = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            OffloadFrameCache = false,
+        }.Rollout(prompt, noise, Frames).ToList();
+        List<FastFramesFrame> offloaded = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            OffloadFrameCache = true,
+        }.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, offloaded.Count);
+        for (int f = 0; f < Frames; f++)
+            Assert.Equal(resident[f].Latent, offloaded[f].Latent);
+    }
+
     private static Tensor PaddedPrompt(TinyModel model) =>
         // An owned copy: the fixture's prompt embeddings are already padded to the generator's 8 rows.
         FastFramesOps.CopyF32(model.Io["prompt_embeds"], new TensorShape(8, 16));
