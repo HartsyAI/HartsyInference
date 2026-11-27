@@ -1,6 +1,8 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Models.LongCat;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Pipelines.LongCat;
@@ -11,6 +13,9 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
+/// <summary>The driving features of 16 kHz mono speech at a video frame rate, <c>[frames, 5, 1280]</c> (Whisper-large-v3's pooled states).</summary>
+internal delegate float[] LongCatDrivingFeatures(float[] speech16k, int fps);
+
 /// <summary>LongCat-Video-Avatar, the 1.5 and 1.6 layout: speech-driven video from one portrait (<see cref="LongCatAvatarMode.Ai2v"/>) or from
 /// speech alone (<see cref="LongCatAvatarMode.At2v"/>). The driving speech goes through Whisper-large-v3 and the avatar audio projection in
 /// every block. One 93-frame segment at 25 fps; the multi-segment chain is wired in the pipeline; multi-speaker is not.</summary>
@@ -19,6 +24,22 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
 {
     /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
     public bool RefusesUnhonouredPlacements => true;
+
+    private readonly LongCatSideModels? _sides;
+    private readonly LongCatDrivingFeatures? _drivingFeatures;
+
+    /// <summary>The production recipe: umT5, the VAE and Whisper come from the engine's downloads.</summary>
+    public LongCatAvatarRecipe() : this(null, null)
+    {
+    }
+
+    /// <summary>A recipe whose umT5 and VAE come from <paramref name="sides"/> and whose audio features come from
+    /// <paramref name="drivingFeatures"/> (null for the downloads); the tests inject stand-ins here.</summary>
+    internal LongCatAvatarRecipe(LongCatSideModels? sides, LongCatDrivingFeatures? drivingFeatures)
+    {
+        _sides = sides;
+        _drivingFeatures = drivingFeatures;
+    }
 
     /// <summary>Upper bound of one segment; the avatar DiT and its audio windows are built for it.</summary>
     internal const int SegmentFrames = 93;
@@ -131,7 +152,7 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
         try
         {
             LongCatRecipeSupport.LongCatLoraFiles? mixed = is16 ? LongCatRecipeSupport.Avatar16LoraFiles(context.CheckpointPath) : null;
-            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, sides: null, attachDmd: !is16, mixedLoras: mixed);
+            LongCatParts parts = LongCatRecipeSupport.LoadParts(context, loaders, _sides, attachDmd: !is16, mixedLoras: mixed);
             LongCatAvatarLoraSchedule? loraMix = is16
                 ? new LongCatAvatarLoraSchedule(parts.DmdGate!, parts.OpsdGate!, LongCatAvatarVariants.Avatar16MixAlpha, LongCatAvatarVariants.Avatar16MixSteps)
                 : null;
@@ -141,24 +162,12 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
                     $"'{context.CheckpointPath}' has no audio_proj weights, so it is not a LongCat-Video-Avatar checkpoint. Point longcat-avatar at the avatar DiT.");
             }
 
-            // The Whisper-large-v3 copy the audio stack already caches (stt/openai--whisper-large-v3), at the pinned upstream revision.
-            IReadOnlyDictionary<string, string> fetched = AudioModelCache.FetchAllAsync(WhisperRepo, [new AudioModelFile("model.safetensors")],
-                category: "stt", revision: WhisperRevision, ct: context.Cancel).GetAwaiter().GetResult();
-            SafeTensorsLoader whisperLoader = new SafeTensorsLoader();
-            whisperLoader.Load(fetched["model.safetensors"]);
-            loaders.Add(whisperLoader);
-            // Only the encoder's tensors go to the encoder; the decoder's are never read.
-            Dictionary<string, Tensor> encoderWeights = whisperLoader.GetAllTensors()
-                .Where(pair => pair.Key.StartsWith("model.encoder.", StringComparison.Ordinal))
-                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            WhisperEncoder whisper = new WhisperEncoder(WhisperConfig.LargeV3);
-            whisper.LoadWeights(encoderWeights);
-            loaders.Add(whisper);
-            MelSpectrogramExtractor mel = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(WhisperConfig.LargeV3.NumMelBins));
+            LongCatDrivingFeatures drivingFeatures = _drivingFeatures ?? LoadWhisperFeatures(context, loaders);
 
             LongCatAvatarPipeline pipeline = new LongCatAvatarPipeline(context.Backend, parts.Dit);
             Logs.Info("[LongCatAvatarRecipe] LongCat-Video-Avatar ready (speech and image to video, one segment).");
-            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, whisper, mel, loaders, distilled: true, is16 ? null : parts.DmdGate, loraMix);
+            return new LongCatAvatarRecipePipeline(context.Backend, pipeline, parts, drivingFeatures, loaders, distilled: true,
+                is16 ? null : parts.DmdGate, loraMix);
         }
         catch (Exception ex)
         {
@@ -167,6 +176,39 @@ public sealed class LongCatAvatarRecipe : IVideoRecipe
                 loader.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The production features: the Whisper-large-v3 copy the audio stack already caches (stt/openai--whisper-large-v3), at the pinned
+    /// upstream revision. What it loads joins <paramref name="loaders"/>.</summary>
+    private static LongCatDrivingFeatures LoadWhisperFeatures(RecipeContext context, List<IDisposable> loaders)
+    {
+        IReadOnlyDictionary<string, string> fetched = AudioModelCache.FetchAllAsync(WhisperRepo, [new AudioModelFile("model.safetensors")],
+            category: "stt", revision: WhisperRevision, ct: context.Cancel).GetAwaiter().GetResult();
+        SafeTensorsLoader whisperLoader = new SafeTensorsLoader();
+        whisperLoader.Load(fetched["model.safetensors"]);
+        loaders.Add(whisperLoader);
+        // Only the encoder's tensors go to the encoder; the decoder's are never read.
+        Dictionary<string, Tensor> encoderWeights = whisperLoader.GetAllTensors()
+            .Where(pair => pair.Key.StartsWith("model.encoder.", StringComparison.Ordinal))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        WhisperEncoder whisper = new WhisperEncoder(WhisperConfig.LargeV3);
+        whisper.LoadWeights(encoderWeights);
+        loaders.Add(whisper);
+        MelSpectrogramExtractor mel = new MelSpectrogramExtractor(MelSpectrogramExtractor.WhisperConfig(WhisperConfig.LargeV3.NumMelBins));
+        IBackend backend = context.Backend;
+        return (speech16k, fps) =>
+        {
+            // Whisper is only needed for these features. Its device copies are released as soon as they are read, so they do not sit in VRAM
+            // through the denoise (the pipeline is cached, and the next request uploads them again on demand).
+            try
+            {
+                return LongCatWhisperFeatures.Extract(backend, whisper, mel, speech16k, fps);
+            }
+            finally
+            {
+                backend.FreeWeights(whisper.EnumerateWeights());
+            }
+        };
     }
 }
 
