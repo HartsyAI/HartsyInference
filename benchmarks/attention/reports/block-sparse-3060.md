@@ -6,7 +6,7 @@ LongCat-Video's 720p refinement, head dim 128, sparsity 0.9375 and 4×4×4 block
 - Commit `c665f9ca8`, RTX 3060 12 GB, driver 610.88, Windows 11, .NET 10 Release, default engine settings (TF32 allowed for
   dense F32, cuDNN on). No other test or inference process on the card; its processor was busy with other work.
 - One untimed call, then the median of three synchronized calls. Output in the operands' dtype.
-- `dotnet test tests/HartsyInference.Core.Tests -c Release --filter FullyQualifiedName~BlockSparseAttentionSpeedTests`
+- `dotnet test tests/HartsyInference.Core.Tests -c Release --filter FullyQualifiedName~BlockSparseAttentionSpeedTests.BlockSparseBesideDense`
 
 | Token grid (T×H×W) | Tokens | Heads | Key blocks read | Operands | Block-sparse | Dense | Dense / block-sparse |
 |---|---|---|---|---|---|---|---|
@@ -55,8 +55,9 @@ all its channels split into.
 | 12×44×80 | 42,240 | 32 | 41 of 660 | 3,182 ms | 3,179 ms |
 
 At 12×44×80 with 32 heads Vulkan takes 3.6 times CUDA's time in the table above (CUDA measured at `c665f9ca8`); why was not
-measured. The attention pass goes in 14 submissions at 8 heads and 55 at 32 (computed from the submission budget), and the
-driver logged no event during these runs. The outputs were not compared with the reference. The 48-frame grid was not timed.
+measured. The attention pass goes in 14 submissions at 8 heads and 55 at 32 (computed from the submission budget), so a
+submission at 32 heads takes at most 58 ms on average. The driver logged no event during these runs. The outputs were not
+compared with the reference. The 48-frame grid was not timed.
 
 Dense attention is not timed on Vulkan. On this card it lost the device (`ErrorDeviceLost`) at 12×44×80 with 8 heads on F32
 operands and at 4×44×80 with 1 head on BF16 operands; the cause is not established.
