@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Duo;
 using HartsyInference.Diffusion.Models.Vae;
@@ -36,6 +37,8 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
     private readonly long _ditResidentBytes;
     private readonly bool _distilled;
     private readonly IReadOnlyList<IDisposable> _owned;
+    private readonly ResidentWeights _dit;
+    private readonly ResidentWeights _codecWeights;
     private int _disposed;
 
     /// <param name="ditResidentBytes">What the resident DiT needs beside the history: its weights and the activation reserve.</param>
@@ -49,6 +52,8 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         _ditResidentBytes = ditResidentBytes;
         _distilled = distilled;
         _owned = owned ?? throw new ArgumentNullException(nameof(owned));
+        _dit = new ResidentWeights(_backend, _transformer.EnumerateWeights);
+        _codecWeights = new ResidentWeights(_backend, _codecs.Weights);
     }
 
     /// <inheritdoc/>
@@ -65,14 +70,13 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         Logs.Info($"[Duo] {input.Sample.Blocks.Count} blocks, {input.Run.Steps} steps each, {input.CacheRows} history rows; "
             + "the prompt and seed are unused (Intent rows and noise come from the run folder).");
 
-        ResidentWeights dit = new(_backend, _transformer.EnumerateWeights);
-        ResidentWeights codecWeights = new(_backend, _codecs.Weights);
         try
         {
-            TryPreload(codecWeights, "codec");
-            if (DitFits(input.HistoryBytes(_config)))
+            TryPreload(_codecWeights, "codec");
+            // A DiT kept from an earlier run already takes its share of the free memory, so the fit test would turn it down.
+            if (_dit.IsResident || DitFits(input.HistoryBytes(_config)))
             {
-                TryPreload(dit, "DiT");
+                TryPreload(_dit, "DiT");
             }
             using DuoStreamCache cache = new(_backend, _config.NumLayers,
                 _config.NumAttentionHeads * _config.AttentionHeadDim, input.CacheRows);
@@ -85,10 +89,31 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
             DuoOutput output = session.Run(input.Run, onStep, cancel);
             return Result(output, request, settings);
         }
+        catch (OutOfVramException)
+        {
+            // The engine frees all device memory after this, so the DiT is no longer held and the next run runs the fit test again.
+            _dit.Release(force: true);
+            throw;
+        }
         finally
         {
-            codecWeights.Release();
-            dit.Release();
+            EndRun(_codecWeights, _codecs.Weights);
+            EndRun(_dit, _transformer.EnumerateWeights);
+        }
+    }
+
+    /// <summary>Releases a preloaded model as the VRAM profile says. One that was not preloaded can still have weights on the device, because
+    /// CUDA makes a weight resident the second time an op uploads it; those are freed here, or they would stay while the pipeline is
+    /// cached.</summary>
+    private void EndRun(ResidentWeights model, Func<IEnumerable<Tensor>> weights)
+    {
+        if (model.IsResident)
+        {
+            model.Release();
+        }
+        else
+        {
+            _backend.FreeWeights(weights());
         }
     }
 
