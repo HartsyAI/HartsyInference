@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using System.Linq;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
@@ -112,6 +113,10 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
         }
         _owned = owned;
         _loaded = true;
+        int rounded = _blocks.Count(static block => block.Bf16Residual);
+        HartsyInference.Core.Logging.Logs.Info(rounded > 0
+            ? $"LongCat residual sums round to BF16 in {rounded} of {_blocks.Length} blocks (numerics.longcatBf16Residual, int8Release={int8Release})."
+            : $"LongCat residual sums stay F32 (numerics.longcatBf16Residual off, or an F32 release; int8Release={int8Release}).");
         foreach (Tensor stale in previous)
             stale.Dispose();
         LongCatAudioProjection? staleAudio = _audioProjection;
