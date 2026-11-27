@@ -542,6 +542,28 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>The base LongCat-Video DiT's files (the six shards, their index and config), shared by the base and the distilled rows. The shard
+    /// sha256 are the HF tree's LFS oids at 03b55529.</summary>
+    private static ModelAsset[] LongCatVideoDitAssets() =>
+    [
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00001-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "4a64ebfe319eaea7144a3e38acaf79e031736c254b53cd3d59643d5673444b7c" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00002-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "711a92e5bb38be84508869d62f451e8a1cb14cd903faf34b8291b1b3e299bab7" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00003-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "977b90558908fa725ff66995ac72993e4092e9c040092893766acd60ad8e086f" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00004-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "902f38deacdb75d97639968c98a2b520d97d268cfde9698c55810ed26e9170e2" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00005-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "f3e7ef21120757e658d501fa70fa8db2af3ff95945de72c4904fbe5ccbe0050b" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00006-of-00006.safetensors",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "dac297b544a030ce961648994ea791f58bab0e3d722092ac8c11a1475b2f4989" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model.safetensors.index.json",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+        new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/config.json",
+            TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+    ];
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -3150,32 +3172,39 @@ public static class ModelCatalog
                 // shard sha256 are the HF tree's LFS oids; the index and config are git blobs and carry no hash here). Licence: MIT, as the model
                 // card, the README's licence section and the LICENSE file state it. The base project page (meituan-longcat.github.io/LongCat-Video)
                 // states no licence or use restriction; the academic-use-only statement and upstream issue #165 recorded on the avatar rows
-                // concern the avatar releases. The distillation and refinement LoRAs are not row assets: the recipe does not read them.
+                // concern the avatar releases. The distilled build is its own row (longcat-video-distilled, which carries cfg_step_lora); the refinement LoRA is not a row asset.
                 Id = "longcat-video", Modality = vid, DisplayName = "LongCat-Video (text and image to video)",
                 Architecture = "flow-matching DiT, 13.6B", Status = vp, CliDrivable = true,
                 HuggingFaceRepo = "meituan-longcat/LongCat-Video",
-                Assets = new ModelAsset[]
-                {
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00001-of-00006.safetensors",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "4a64ebfe319eaea7144a3e38acaf79e031736c254b53cd3d59643d5673444b7c" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00002-of-00006.safetensors",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "711a92e5bb38be84508869d62f451e8a1cb14cd903faf34b8291b1b3e299bab7" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00003-of-00006.safetensors",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "977b90558908fa725ff66995ac72993e4092e9c040092893766acd60ad8e086f" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00004-of-00006.safetensors",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "902f38deacdb75d97639968c98a2b520d97d268cfde9698c55810ed26e9170e2" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00005-of-00006.safetensors",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "f3e7ef21120757e658d501fa70fa8db2af3ff95945de72c4904fbe5ccbe0050b" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00006-of-00006.safetensors",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "dac297b544a030ce961648994ea791f58bab0e3d722092ac8c11a1475b2f4989" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model.safetensors.index.json",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
-                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/config.json",
-                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+                Assets =
+                [
+                    .. LongCatVideoDitAssets(),
                     // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
                     SideModels.Umt5Xxl,
                     SideModels.Wan21Vae,
-                },
+                ],
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video, the base family, from the upstream repo pinned to meituan-longcat/LongCat-Video @ 03b55529 (the F32 DiT, 54.3 GB;
+                // shard sha256 are the HF tree's LFS oids; the index and config are git blobs and carry no hash here). Licence: MIT, as the model
+                // card, the README's licence section and the LICENSE file state it. The base project page (meituan-longcat.github.io/LongCat-Video)
+                // states no licence or use restriction; the academic-use-only statement and upstream issue #165 recorded on the avatar rows
+                // concern the avatar releases. The distilled build is its own row (longcat-video-distilled, which carries cfg_step_lora); the refinement LoRA is not a row asset.
+                Id = "longcat-video-distilled", Modality = vid, DisplayName = "LongCat-Video distilled (text and image to video, 16 steps)",
+                Architecture = "flow-matching DiT, 13.6B", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video",
+                Assets =
+                [
+                    .. LongCatVideoDitAssets(),
+                    // The distilled path's LoRA: the recipe reads it from lora/ beside the checkpoint's dit/ folder and refuses to run without it.
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "lora/cfg_step_lora.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/lora", TargetName = "cfg_step_lora.safetensors", Role = "lora",
+                        Sha256 = "1a903b49d62571e343258211300668f4b8d375842388092781bd11e364ae65a9" },
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                ],
             },
             new CatalogEntry
             {
