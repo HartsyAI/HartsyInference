@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.Engine;
@@ -85,6 +86,28 @@ public sealed class Hy4FlashTextPathTests : IDisposable
         using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
         Assert.IsType<Hy4FlashTextModel>(model);
         Assert.Equal(1, model.Tokenizer.BosId);
+    }
+
+    [Fact]
+    public void OpenReasoningCloseId_IsTheHy4CloseMarker_OnlyWhenThinkingIsOpen()
+    {
+        string dir = Synthetic();
+        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(dir) ?? throw new InvalidOperationException("not probed as a Hugging Face checkpoint");
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        Hy4FlashTextModel hy4 = Assert.IsType<Hy4FlashTextModel>(model);
+        int close = hy4.Tokenizer.SpecialId(Hy4FlashChatTemplate.ReasoningMarkers[1]) ?? throw new InvalidOperationException("no close marker");
+        List<TextMessage> messages = [new() { Role = TextRole.User, Content = "hello" }];
+        GenerationRequest genRequest = new() { Messages = [new ChatMessage("user", "hello")] };
+        TextRequest request = new() { Messages = messages };
+
+        // The default prompt prefills the think block, so the close marker is the reasoning close.
+        Assert.Equal(close, TextService.OpenReasoningCloseId(hy4.Template, hy4.Tokenizer, genRequest, request, rawCompletion: false));
+        // Thinking switched off renders the empty pair: nothing is open, so no reasoning close.
+        TextRequest thinkingOff = request with { EnableThinking = false };
+        Assert.Null(TextService.OpenReasoningCloseId(hy4.Template, hy4.Tokenizer, genRequest, thinkingOff, rawCompletion: false));
+        // A raw completion never splits.
+        Assert.Null(TextService.OpenReasoningCloseId(hy4.Template, hy4.Tokenizer, genRequest, request, rawCompletion: true));
     }
 
     [Fact]
