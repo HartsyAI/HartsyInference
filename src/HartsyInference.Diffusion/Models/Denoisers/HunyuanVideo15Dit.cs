@@ -60,6 +60,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// block weights keep their dtype.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
+        LoadSharedWeights(w);
+        for (int i = 0; i < _blocks.Length; i++) LoadBlockWeights(i, w);
+    }
+
+    /// <summary>The weights outside the blocks: the input and timestep projections, the ByT5 and text embedders, the token refiner and the final layer.
+    /// <see cref="LoadWeights"/> calls this and then <see cref="LoadBlockWeights"/> for every block.</summary>
+    internal void LoadSharedWeights(IReadOnlyDictionary<string, Tensor> w)
+    {
         _imgInW = F32(w, "img_in.proj.weight"); _imgInB = F32(w, "img_in.proj.bias");
         _timeW0 = F32(w, "time_in.mlp.0.weight"); _timeB0 = F32(w, "time_in.mlp.0.bias");
         _timeW1 = F32(w, "time_in.mlp.2.weight"); _timeB1 = F32(w, "time_in.mlp.2.bias");
@@ -73,8 +81,10 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         _finalModW = F32(w, "final_layer.adaLN_modulation.1.weight"); _finalModB = F32(w, "final_layer.adaLN_modulation.1.bias");
         _finalW = F32(w, "final_layer.linear.weight"); _finalB = F32(w, "final_layer.linear.bias");
         _refiner.LoadWeights(w, "txt_in");
-        for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"transformer_blocks.{i}");
     }
+
+    /// <summary>One block's weights under <c>transformer_blocks.{index}</c>. The block keeps references to these tensors until its next load.</summary>
+    internal void LoadBlockWeights(int index, IReadOnlyDictionary<string, Tensor> w) => _blocks[index].LoadWeights(w, $"transformer_blocks.{index}");
 
     /// <inheritdoc/>
     public IEnumerable<Tensor> EnumerateSharedWeights()
