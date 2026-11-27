@@ -8875,9 +8875,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     #region Data Movement
 
-    /// <summary>Copies tensor data between host and device or device to device.</summary>
+    /// <summary>Copies tensor data between host and device or device to device. A CUDA-labelled destination must borrow a
+    /// device pointer; one over host memory that a tensor owns is refused.</summary>
+    /// <exception cref="ArgumentException">The CUDA-labelled destination has no device buffer.</exception>
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
+        if (destination.Device.IsCuda)
+            RequireDeviceBuffer(destination);
         using OpScope _op = EnterOp();
         nuint byteSize = (nuint)(source.ElementCount * source.DType.SizeInBytes);
 
@@ -8909,6 +8913,20 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             // Both CPU - direct memory copy
             Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, (long)byteSize, (long)byteSize);
+        }
+    }
+
+    // A tensor that owns its memory, and any view of one, answers DataPointer with a host address, which the driver must
+    // not be given as a device pointer. The check comes first so a refused call allocates and syncs nothing.
+    private static void RequireDeviceBuffer(Tensor destination)
+    {
+        for (Tensor? at = destination; at is not null; at = at.KeepAliveOwner as Tensor)
+        {
+            if (at.OwnsMemory)
+                throw new ArgumentException($"CopyTo destination {destination.Shape} {destination.DType.Name} is labelled "
+                    + $"{destination.Device} but has no device buffer: its data pointer is host memory. A device in the Tensor "
+                    + "constructor only labels the tensor; create it without one and fill it with a backend op such as "
+                    + "CopyStrided.", nameof(destination));
         }
     }
 

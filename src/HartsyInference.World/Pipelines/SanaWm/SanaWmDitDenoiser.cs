@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.SanaWm;
+using HartsyInference.Diffusion.Streaming;
 using HartsyInference.World.Camera;
 
 namespace HartsyInference.World.Pipelines.SanaWm;
@@ -45,7 +46,7 @@ public sealed class SanaWmDitDenoiser : ISanaWmDenoiser, IDisposable
 
         BranchInputs inputs = Inputs(branches);
         Tensor host;
-        using (Tensor x = Upload(latents))
+        using (Tensor x = StreamingTensors.Clone(_backend, latents))
         using (Tensor velocity = _dit.Forward(x, timesteps, inputs.Text, inputs.Mask, inputs.Conditions, inputs.Plucker))
         {
             host = new(velocity.Shape, DType.F32, DeviceKind.Cpu);
@@ -133,7 +134,7 @@ public sealed class SanaWmDitDenoiser : ISanaWmDenoiser, IDisposable
                 throw new InvalidOperationException($"Caption tensors of the two branches differ in shape: {first.Shape} and {source.Shape}.");
             source.AsReadOnlySpan<float>().CopyTo(destination.Slice(b * length, length));
         }
-        Tensor device = Upload(host);
+        Tensor device = StreamingTensors.Clone(_backend, host);
         built.Add(device);
         return device;
     }
@@ -149,24 +150,9 @@ public sealed class SanaWmDitDenoiser : ISanaWmDenoiser, IDisposable
         int length = (int)single.Shape.ElementCount;
         for (int b = 0; b < batch; b++)
             single.AsReadOnlySpan<float>().CopyTo(destination.Slice(b * length, length));
-        Tensor device = Upload(host);
+        Tensor device = StreamingTensors.Clone(_backend, host);
         built.Add(device);
         return device;
-    }
-
-    private Tensor Upload(Tensor host)
-    {
-        Tensor device = new(host.Shape, DType.F32, _backend.Device);
-        try
-        {
-            _backend.CopyTo(device, host);
-            return device;
-        }
-        catch
-        {
-            device.Dispose();
-            throw;
-        }
     }
 
     /// <summary>The device inputs of one branch layout.</summary>
