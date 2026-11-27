@@ -12,8 +12,10 @@ namespace HartsyInference.Core.Backends.Attention;
 /// its queries attends exactly those blocks' keys, one softmax over them. With no selected block the output rows are zero.</para>
 /// <para>The reference ranks with <c>torch.topk</c>, which leaves equal scores in no stated order. Here the lower block index wins a
 /// tie and a NaN score ranks above every number, so a NaN in the keys reaches the output while any block is selected.</para>
-/// <para>Operands are F32 head-major <c>[B, H, S, D]</c>. It computes in F32 in plain loops and holds no approximation: a GPU port is
-/// compared with it, not the other way round.</para>
+/// <para>Operands are head-major <c>[B, H, S, D]</c>, F32 or BF16. BF16 operands are widened to F32, exactly, before anything is
+/// computed, so the means, the selection and the attention are F32; a BF16 output is the F32 result rounded to nearest even. It runs in
+/// plain loops and holds no approximation: a GPU port is compared with it, not the other way round. The pinned kernel run on BF16
+/// operands rounds its block means and scores to BF16 and can read other blocks; that behaviour is not reproduced.</para>
 /// </remarks>
 public static class BlockSparseAttentionReference
 {
@@ -25,10 +27,26 @@ public static class BlockSparseAttentionReference
         Tensor? selected = null)
     {
         BlockSparseAttentionContract.Validate(output, query, key, value, options, selected);
-        if (query.DType != DType.F32 || key.DType != DType.F32 || value.DType != DType.F32 || output.DType != DType.F32)
-            throw new ArgumentException(
-                $"The block-sparse attention reference reads and writes F32; got Q={query.DType}, K={key.DType}, V={value.DType}, O={output.DType}.");
+        if (query.DType == DType.F32 && output.DType == DType.F32)
+        {
+            Compute(output, query, key, value, options, selected);
+            return;
+        }
+        using Tensor? wideQuery = query.DType == DType.F32 ? null : query.CastTo(DType.F32);
+        using Tensor? wideKey = key.DType == DType.F32 ? null : key.CastTo(DType.F32);
+        using Tensor? wideValue = value.DType == DType.F32 ? null : value.CastTo(DType.F32);
+        using Tensor? wideOutput = output.DType == DType.F32 ? null : new Tensor(output.Shape, DType.F32);
+        Compute(wideOutput ?? output, wideQuery ?? query, wideKey ?? key, wideValue ?? value, options, selected);
+        if (wideOutput is null) return;
+        ReadOnlySpan<float> wide = wideOutput.AsReadOnlySpan<float>();
+        Span<ushort> narrow = output.AsSpan<ushort>();
+        for (int i = 0; i < wide.Length; i++) narrow[i] = TensorCasts.F32ToBf16BitsRounded(wide[i]);
+    }
 
+    /// <summary>The definition on F32 operands the contract has accepted.</summary>
+    private static void Compute(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
+        Tensor? selected)
+    {
         int heads = (int)query.Shape[1], dim = (int)query.Shape[3];
         int sequences = (int)query.Shape[0] * heads, queryTokens = (int)query.Shape[2], keyTokens = (int)key.Shape[2];
         int queryBlocks = options.QueryBlocks, keyBlocks = options.KeyBlocks, chosen = options.SelectedBlocks;
