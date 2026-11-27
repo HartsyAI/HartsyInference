@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests.Separation;
@@ -23,11 +24,11 @@ public sealed unsafe class KimVocal2NetworkTests
     [Fact]
     public void ForwardMatchesThePlainLoopReference() => AssertMatchesReference("cpu");
 
-    [GpuBackendFact("cuda")]
+    [CudaDeviceFact]
     [Trait("Category", "GpuIntegration")]
     public void ForwardOnCudaMatchesThePlainLoopReference() => AssertMatchesReference("cuda");
 
-    [GpuBackendFact("vulkan")]
+    [VulkanDeviceFact]
     [Trait("Category", "GpuIntegration")]
     public void ForwardOnVulkanMatchesThePlainLoopReference() => AssertMatchesReference("vulkan");
 

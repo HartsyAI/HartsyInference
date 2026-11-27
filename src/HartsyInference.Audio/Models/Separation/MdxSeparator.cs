@@ -53,16 +53,13 @@ public sealed class MdxSeparator
         return stem;
     }
 
-    /// <summary>LongCat's 16 kHz mono input from the float stem, used by the video pre-step and the parity harness. Averages the channels, resamples to <paramref name="targetRate"/> with the SoXR-HQ stand-in, and crops to
-    /// <c>ceil(samples × targetRate / sourceRate)</c> when <paramref name="targetSamplesAtSourceRate"/> is given.</summary>
-    public float[] ToMono(float[][] stereo, int targetRate, int? targetSamplesAtSourceRate = null)
+    /// <summary>LongCat's 16 kHz mono input from the float stem, used by the video pre-step and the parity harness: averages the channels and
+    /// resamples from <paramref name="sourceRate"/> to <paramref name="targetRate"/> with the SoXR-HQ stand-in. Cropping to a clip's length is the recipe's.</summary>
+    public static float[] ToMono(float[][] stereo, int sourceRate, int targetRate)
     {
         ArgumentNullException.ThrowIfNull(stereo);
-        float[] mono = new WavFile.DecodedAudio(stereo, _settings.SampleRate).ToMono();
-        float[] resampled = SincResampler.ResampleSoxrHqStandIn(mono, _settings.SampleRate, targetRate);
-        if (targetSamplesAtSourceRate is null) return resampled;
-        int keep = (int)Math.Ceiling(targetSamplesAtSourceRate.Value * (double)targetRate / _settings.SampleRate);
-        return keep < resampled.Length ? resampled.AsSpan(0, keep).ToArray() : resampled;
+        float[] mono = new WavFile.DecodedAudio(stereo, sourceRate).ToMono();
+        return SincResampler.ResampleSoxrHqStandIn(mono, sourceRate, targetRate);
     }
 
     /// <summary>Overlap-add over chunks. <paramref name="mix"/> is <c>[2][N]</c>; the result is <c>[2][N]</c> already scaled by the compensation gain.</summary>

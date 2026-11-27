@@ -17,9 +17,11 @@ public static class UnhonouredBackends
     /// VAE placement. A null or primary-equal backend is the default and passes.</summary>
     /// <param name="context">The recipe context the engine built for the request.</param>
     /// <param name="family">The model family named in the messages, for example <c>FLUX.2</c>.</param>
+    /// <param name="warn">False for a second check of the same context (a recipe re-checking what the engine already checked): the refusal is
+    /// still enforced, and the warning is not logged twice.</param>
     /// <remarks>After this returns, <see cref="RecipeContext.TransformerBackends"/> is the primary backend alone: its other members are the
     /// three refused placements, and they are the only ones that add a transformer backend.</remarks>
-    public static void Refuse(RecipeContext context, string family)
+    public static void Refuse(RecipeContext context, string family, bool warn = true)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentException.ThrowIfNullOrWhiteSpace(family);
@@ -45,7 +47,7 @@ public static class UnhonouredBackends
         List<string> primary = [];
         AddIfSeparate(primary, context, context.TextEncoderBackend, "TextEncoderBackend");
         AddIfSeparate(primary, context, context.VaeBackend, "VaeBackend");
-        if (primary.Count > 0)
+        if (primary.Count > 0 && warn)
         {
             Logs.Warning($"{family} runs the {string.Join(" and the ", primary)} on the primary backend; the placement set by --te-gpu " +
                 "and --vae-gpu is ignored for this model.");

@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Pipelines;
 
 /// <summary>Whether one model's weights are preloaded on a backend; a release frees them unless the VRAM profile keeps models resident.</summary>
-internal sealed class ResidentWeights
+public sealed class ResidentWeights
 {
     private readonly IBackend _backend;
     private readonly Func<IEnumerable<Tensor>> _weights;

@@ -15,7 +15,7 @@ namespace HartsyInference.Audio.Models.Separation;
 /// Weight names are those <c>KimVocal2OnnxConverter</c> writes. The affines are the inference BatchNorms after each TDF MatMul.
 /// <para><see cref="Forward"/> runs under an <see cref="ExactGemmScope"/>: with CUDA's default TF32 GEMMs the real weights landed 2.25e-3 relRMS from the
 /// plain-F32 reference on an RTX 4090, against 2.9e-6 with exact ones.</para>
-/// <para>Every op writes a whole tensor, so any backend can run it; the engine's separator service still picks the CPU backend until a real-weight GPU run is on record.</para></summary>
+/// <para>Every op writes a whole tensor, so any backend can run it. <c>fx separate</c> runs it on the engine's GPU backend; the video driving-audio pre-step uses the CPU.</para></summary>
 public sealed class KimVocal2Network : IDisposable
 {
     private const int TfcLayers = 3;

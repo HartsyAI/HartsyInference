@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Tests.PlacementChecks;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Gguf;
@@ -9,6 +10,7 @@ namespace HartsyInference.Engine.Tests.Services;
 
 /// <summary>An SSM backbone (Qwen3.5-VL) takes only a Qwen3-VL projector: its image grid comes from the Qwen3-VL tower. Any other sidecar is refused at
 /// load time, so the model stays text-only instead of answering with a wrong grid. No weights are read.</summary>
+[Collection(GlobalLogSink.Name)]
 public sealed class SsmVisionRefusalTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "hartsy-ssm-vision-" + Guid.NewGuid().ToString("N"));
