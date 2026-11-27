@@ -67,7 +67,9 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
             {
                 "cpu" => new CpuBackend(),
                 "vulkan" => BackendFactory.CreateVulkan(),
-                _ => BackendFactory.CreateCuda(0),
+                "cuda" => BackendFactory.CreateCuda(0),
+                _ => throw new ArgumentException(
+                    $"FF_REAL_PARITY_BACKEND must be cuda, vulkan or cpu; got '{backendName}'."),
             };
             bool castForCpu = backend is CpuBackend;
             DType pickleDType = castForCpu ? DType.F32 : DType.F16;
