@@ -13,12 +13,13 @@ internal sealed class LongCatTinyAvatarRelease : IDisposable
     private const int SampleRate = 16_000;
 
     /// <summary>Writes the release under a new temporary folder; <paramref name="onePointSix"/> writes the INT8 DiT and the two LoRAs.</summary>
-    public LongCatTinyAvatarRelease(bool onePointSix)
+    public LongCatTinyAvatarRelease(bool onePointSix, bool? int8 = null)
     {
+        bool useInt8 = int8 ?? onePointSix;
         Root = Path.Combine(Path.GetTempPath(), "longcat-avatar-" + Guid.NewGuid().ToString("N"));
-        Checkpoint = Path.Combine(Root, onePointSix ? "base_model_int8" : "base_model");
+        Checkpoint = Path.Combine(Root, useInt8 ? "base_model_int8" : "base_model");
         Directory.CreateDirectory(Checkpoint);
-        WriteCheckpoint(Checkpoint, onePointSix);
+        WriteCheckpoint(Checkpoint, useInt8);
         foreach ((string folder, string file, int seed) in onePointSix
             ? new[] { ("loraA", "lora.safetensors", 81), ("loraB", "lora.safetensors", 82) }
             : [("lora", "dmd_lora.safetensors", 81)])

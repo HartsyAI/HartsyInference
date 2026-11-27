@@ -71,10 +71,10 @@ public sealed class LongCatAvatarRecipeEndToEndTests
 
     /// <summary>Runs the chain on the backend <paramref name="makeBackend"/> makes (CPU by default). Shared by the CPU tests above and the device parity tests.</summary>
     internal static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(float[] Speech, int Fps)> FeatureCalls) Run(bool onePointSix,
-        int audioSeed, Func<IBackend>? makeBackend = null)
+        int audioSeed, Func<IBackend>? makeBackend = null, bool? int8 = null)
     {
         LongCatConfig config = LongCatTinyAvatarRelease.Config;
-        using LongCatTinyAvatarRelease release = new(onePointSix);
+        using LongCatTinyAvatarRelease release = new(onePointSix, int8);
         List<(float[] Speech, int Fps)> featureCalls = [];
 
         using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Engine.Requests;
@@ -35,6 +36,40 @@ public sealed class LongCatRecipeGpuParityTests
     [CudaDeviceFact]
     public void Cuda_AvatarChain16_MatchesCpu() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true);
 
+    /// <summary>Diagnosis of the CUDA 1.6 chain: the same case with exact GEMMs (HighPrecisionGemm on), to see whether the difference is TF32 accumulation.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_HighPrecisionGemm_MatchesCpu() => AvatarParity(() =>
+    {
+        IBackend backend = GpuDevices.OpenCuda();
+        backend.HighPrecisionGemm = true;
+        return backend;
+    }, onePointSix: true);
+
+    /// <summary>Diagnosis: the 1.6 INT8 chain with F32 DiT activations (numerics.ditF16 = false, pinned by the reference profile) instead of the CUDA default F16.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_F32Activations_MatchesCpu()
+    {
+        using IDisposable scope = KnobProfile.Create("longcat-ditf16-off").With(EngineKnobs.DitF16, false).Push();
+        AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true);
+    }
+
+    /// <summary>Diagnosis: the 1.6 INT8 chain with the dp4a decode GEMV off (numerics.dp4aOn = false, pinned by the reference profile). That GEMV quantizes
+    /// activations to Q8_1, which the CPU widened path does not, so a gap here names activation quantization.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_Dp4aOff_MatchesCpu()
+    {
+        using IDisposable scope = KnobProfile.Create("longcat-dp4a-off").With(EngineKnobs.Dp4aOn, false).Push();
+        AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true);
+    }
+
+    /// <summary>Diagnosis: the 1.5 chain with INT8 weights and the single DMD LoRA (no mix), to split INT8 from the 1.6 LoRA mix.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain15_Int8Weights_MatchesCpu() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: false, int8: true);
+
+    /// <summary>Diagnosis: the 1.6 chain with dense (not INT8) weights and the same two LoRAs, to split INT8 from the LoRA mix.</summary>
+    [CudaDeviceFact]
+    public void Cuda_AvatarChain16_DenseWeights_MatchesCpu() => AvatarParity(() => GpuDevices.OpenCuda(), onePointSix: true, int8: false);
+
     [VulkanDeviceFact]
     public void Vulkan_AvatarChain15_MatchesCpu() => AvatarParity(() => GpuDevices.OpenVulkan(), onePointSix: false);
 
@@ -57,10 +92,10 @@ public sealed class LongCatRecipeGpuParityTests
         Assert.True(worst <= FrameLevels, $"largest 8-bit frame difference {worst} levels, allowed {FrameLevels}");
     }
 
-    private static void AvatarParity(Func<IBackend> device, bool onePointSix)
+    private static void AvatarParity(Func<IBackend> device, bool onePointSix, bool? int8 = null)
     {
-        List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1).Vae.Decoded;
-        List<(int Frames, float[] Values)> gpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, device).Vae.Decoded;
+        List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, int8: int8).Vae.Decoded;
+        List<(int Frames, float[] Values)> gpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, device, int8).Vae.Decoded;
 
         Assert.Equal(cpu.Count, gpu.Count);
         for (int segment = 0; segment < cpu.Count; segment++)
