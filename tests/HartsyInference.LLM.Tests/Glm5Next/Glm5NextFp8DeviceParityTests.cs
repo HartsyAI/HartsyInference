@@ -12,6 +12,7 @@ namespace HartsyInference.LLM.Tests.Glm5Next;
 /// <summary>The tiny block-scaled FP8 glm5_next checkpoint on a GPU backend against transformers on the dequantized weights (the same fixture
 /// and bound as <see cref="Glm5NextFp8ParityTests"/>). The packed FP8 projections run through <c>Fp8BlockLinear</c> on the device. A lane with no
 /// device or kernels is reported as skipped (see <see cref="DeviceProbe"/>).</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class Glm5NextFp8DeviceParityTests(ITestOutputHelper output)
 {
     private const int Block = 16;
