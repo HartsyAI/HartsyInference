@@ -38,7 +38,7 @@ internal sealed class RealWeightsParityFactAttribute : FactAttribute
 /// Environment (the test is skipped unless <c>FF_REAL_PARITY_DIR</c> is set):
 ///   FF_REAL_PARITY_DIR      folder with framewise-2step.pt, kv_refiner.safetensors, pixel_decoder.safetensors and io.safetensors
 ///   FF_REAL_PARITY_GENERATOR  generator file name in that folder (default framewise-2step.pt for S; dit.safetensors for L)
-///   FF_REAL_PARITY_BACKEND  cuda (default) or cpu
+///   FF_REAL_PARITY_BACKEND  cuda (default), vulkan or cpu
 ///   FF_REAL_PARITY_BOUND    relative RMS bound per frame (default 1e-2; provisional until the BF16-vs-FP32 floor is measured)
 ///
 /// The metric is relative RMS, ||engine - upstream|| / ||upstream||, for each latent frame and each pixel frame. The pixel comparison
@@ -63,7 +63,12 @@ public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
         List<IDisposable> loaders = [];
         try
         {
-            using IBackend backend = backendName == "cpu" ? new CpuBackend() : BackendFactory.CreateCuda(0);
+            using IBackend backend = backendName switch
+            {
+                "cpu" => new CpuBackend(),
+                "vulkan" => BackendFactory.CreateVulkan(),
+                _ => BackendFactory.CreateCuda(0),
+            };
             bool castForCpu = backend is CpuBackend;
             DType pickleDType = castForCpu ? DType.F32 : DType.F16;
 
