@@ -86,3 +86,9 @@ Refused, not run differently: `--use_fp8`, `--compile_dit`, context parallel > 1
 Check (CPU, tiny umT5, real pipeline class from the pinned package): `h1_seq_check.py <pristine reference root> <dir with h1_seq.py>`.
 It covers the cache result equal to a fresh encode, the three cache misses, pipe.to with the shim, the frame override, the DiT and
 LoRA move, and the forward and decode hooks. It does not cover the demo's H1 block, the GPU residency, or the memory numbers.
+
+## Per-step dump, reference side (h1-step-dump.patch, H1_STEP_DUMP_DIR; off by default)
+Apply after h1-seq.patch: `git -c core.autocrlf=false apply h1-step-dump.patch` (it edits `longcat_video/pipeline_longcat_video_avatar.py`
+at three denoise loops and adds `h1_step_dump.py`). With `H1_STEP_DUMP_DIR` unset nothing is written or copied. Set, each denoise step
+writes `call{n:02d}_step{i:02d}_{t,noise,latent}.npy` (float32): the timestep, the model output after the pipeline's sign flip, and the
+latents after the scheduler step. Call n counts denoise calls from 0 (one per generate stage). Check: `python h1_step_dump_check.py <dir with h1_step_dump.py>`.

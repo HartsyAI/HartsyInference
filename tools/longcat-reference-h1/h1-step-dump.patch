@@ -1,0 +1,73 @@
+diff --git a/h1_step_dump.py b/h1_step_dump.py
+new file mode 100644
+index 0000000..169a946
+--- /dev/null
++++ b/h1_step_dump.py
+@@ -0,0 +1,28 @@
++"""Per-step dump for the reference denoise loops (H1_STEP_DUMP_DIR). Off unless the variable is set; read-only when on.
++
++Each denoise call starts with step index 0 and gets the next call number n. For each step it writes, as float32 .npy:
++  call{n:02d}_step{i:02d}_t.npy      the timestep (float)
++  call{n:02d}_step{i:02d}_noise.npy  the model output noise_pred, after the sign flip the pipeline applies before the scheduler
++  call{n:02d}_step{i:02d}_latent.npy the latents after the scheduler step
++Tensors are copied to the host only when the variable is set, so the default path does no work and no sync.
++"""
++
++import os
++
++import numpy as np
++
++_CALL = [-1]
++
++
++def maybe_dump(i, t, noise_pred, latents):
++    directory = os.environ.get("H1_STEP_DUMP_DIR")
++    if not directory:
++        return
++    if i == 0:
++        _CALL[0] += 1
++    os.makedirs(directory, exist_ok=True)
++    tag = f"call{max(_CALL[0], 0):02d}_step{i:02d}"
++    t_value = float(t.item()) if hasattr(t, "item") else float(t)
++    np.save(os.path.join(directory, f"{tag}_t.npy"), np.asarray(t_value, dtype=np.float32))
++    np.save(os.path.join(directory, f"{tag}_noise.npy"), noise_pred.detach().float().cpu().numpy())
++    np.save(os.path.join(directory, f"{tag}_latent.npy"), latents.detach().float().cpu().numpy())
+diff --git a/pipeline_longcat_video_avatar.py b/pipeline_longcat_video_avatar.py
+index 26e1716..18edc76 100644
+--- a/pipeline_longcat_video_avatar.py
++++ b/pipeline_longcat_video_avatar.py
+@@ -2,6 +2,7 @@ import os
+ from typing import Any, Dict, List, Optional, Union, Literal
+ 
+ import gc
++import h1_step_dump  # H1: per-step dump, off unless H1_STEP_DUMP_DIR is set
+ import math
+ import torch
+ import loguru
+@@ -965,6 +966,8 @@ class LongCatVideoAvatarPipeline:
+                 # compute the previous noisy sample x_t -> x_t-1
+                 latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+ 
++                h1_step_dump.maybe_dump(i, t, noise_pred, latents)
++
+                 # call the callback, if provided
+                 if i == len(timesteps) - 1 or (i + 1) % self.scheduler.order == 0:
+                     progress_bar.update()
+@@ -1250,6 +1253,8 @@ class LongCatVideoAvatarPipeline:
+                 # compute the previous noisy sample x_t -> x_t-1
+                 latents[:, :, 1:] = self.scheduler.step(noise_pred[:, :, 1:], t, latents[:, :, 1:], return_dict=False)[0]
+ 
++                h1_step_dump.maybe_dump(i, t, noise_pred, latents)
++
+                 # call the callback, if provided
+                 if i == len(timesteps) - 1 or (i + 1) % self.scheduler.order == 0:
+                     progress_bar.update()
+@@ -1612,6 +1617,8 @@ class LongCatVideoAvatarPipeline:
+                 else:
+                     latents[:, :, num_cond_latents:] = self.scheduler.step(noise_pred[:, :, num_cond_latents:], t, latents[:, :, num_cond_latents:], return_dict=False)[0]
+ 
++                h1_step_dump.maybe_dump(i, t, noise_pred, latents)
++
+                 # call the callback, if provided
+                 if i == len(timesteps) - 1 or (i + 1) % self.scheduler.order == 0:
+                     progress_bar.update()
