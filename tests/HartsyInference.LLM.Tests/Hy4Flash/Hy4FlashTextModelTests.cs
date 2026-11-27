@@ -184,6 +184,31 @@ public sealed class Hy4FlashTextModelTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ReasoningState_OpensOnThinkingAndCloses_OnTheHy4Markers()
+    {
+        string dir = SyntheticCheckpoint();
+        try
+        {
+            using Hy4FlashTextModel model = Hy4FlashTextModel.Load(new CpuBackend(), dir, 64);
+            List<ChatMessage> messages = [new("user", "hello")];
+            Assert.NotNull(model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ReasoningMarkers[0]));
+            Assert.NotNull(model.Tokenizer.SpecialId(Hy4FlashChatTemplate.ReasoningMarkers[1]));
+
+            // The default prompt prefills the think block the template does not close, so the completion starts inside it.
+            Hy4FlashChatTemplate template = Assert.IsType<Hy4FlashChatTemplate>(model.Template);
+            Assert.True(template.ResolveParserState(model.Tokenizer, messages, null, null, null).ReasoningOpen);
+            Assert.True(template.ResolveParserState(model.Tokenizer, messages, true, null, 75).ReasoningOpen);
+            // The no_think variant writes the empty pair, so nothing is left open.
+            Assert.False(template.ResolveParserState(model.Tokenizer, messages, false, null, null).ReasoningOpen);
+            Assert.False(template.ResolveParserState(model.Tokenizer, messages, null, null, 50).ReasoningOpen);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Reset_ClearsTheImageRunFlagAndTheCounters()
     {
         using Hy4FlashSequenceState state = new([], new Hy4FlashMropeRows(2, 8, 10000.0, [2, 0, 0]), new Hy4FlashMropeRows(2, 8, 10000.0, [2, 0, 0])) { EndsInImageRun = true, NextPosition = 5, ImagesUsed = 1 };
