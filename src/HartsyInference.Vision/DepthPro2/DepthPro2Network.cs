@@ -69,9 +69,9 @@ public sealed class DepthPro2Network : IDisposable
     /// Focal-normalised inverse depth <c>[T, 1, H, W]</c> for the normalised frames <c>[T, 3, H, W]</c> of one clip or the views of one scene
     /// (upstream <c>predict_inverse_depth</c> on a clip): the frames attend to each other in the cross-frame blocks, so the result is equivariant
     /// to their order but not per-frame independent. With a <paramref name="ring"/> the input is one frame that attends to the frames the ring
-    /// holds as well, and is then stored in it (unbuffered video).
+    /// holds as well, and is then stored in it (unbuffered video). A <paramref name="rope"/> cache keeps the backbone's RoPE tables for the next call.
     /// </summary>
-    public Tensor PredictInverseDepthFrames(IBackend backend, Tensor frames, CrossFrameKvRing? ring = null)
+    public Tensor PredictInverseDepthFrames(IBackend backend, Tensor frames, CrossFrameKvRing? ring = null, Dinov3RopeCache? rope = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(frames);
@@ -81,7 +81,7 @@ public sealed class DepthPro2Network : IDisposable
         int height = (int)frames.Shape[2], width = (int)frames.Shape[3];
         using ExactGemmScope exact = new(backend);
         using Tensor? padded = PadToMultiple(backend, frames);
-        Tensor full = InverseDepthOfPadded(backend, padded ?? frames, null, ring);
+        Tensor full = InverseDepthOfPadded(backend, padded ?? frames, null, ring, rope);
         if (padded is null) return full;
         using (full) return Crop(backend, full, height, width);
     }
@@ -95,12 +95,13 @@ public sealed class DepthPro2Network : IDisposable
         return _encoder.EncodeIntermediates(backend, paddedPixels, _preset.ReassembledBlocks, _preset.CrossFrameBlocks);
     }
 
-    private Tensor InverseDepthOfPadded(IBackend backend, Tensor padded, Action<string, Tensor>? observe, CrossFrameKvRing? ring = null)
+    private Tensor InverseDepthOfPadded(IBackend backend, Tensor padded, Action<string, Tensor>? observe, CrossFrameKvRing? ring = null,
+        Dinov3RopeCache? rope = null)
     {
         int patch = _preset.Backbone.PatchSize, prefix = 1 + _preset.Backbone.NumRegisterTokens;
         int frames = (int)padded.Shape[0], gridH = (int)padded.Shape[2] / patch, gridW = (int)padded.Shape[3] / patch;
         Tensor[] taps = frames == 1 && ring is null ? EncodeTaps(backend, padded)
-            : _encoder.EncodeFrameIntermediates(backend, padded, _preset.ReassembledBlocks, _preset.CrossFrameBlocks, ring);
+            : _encoder.EncodeFrameIntermediates(backend, padded, _preset.ReassembledBlocks, _preset.CrossFrameBlocks, ring, rope);
         try
         {
             if (frames == 1) return _head.Forward(backend, taps, prefix, gridH, gridW, observe);
