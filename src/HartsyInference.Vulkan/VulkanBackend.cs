@@ -3505,12 +3505,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             float* dst = (float*)output.DataPointer;
             for (long i = 0; i < input.ElementCount; i++) dst[i] = BFloat16Bits.ToFloat(src[i]);
         }
-        else if (input.DType == DType.F16 && output.DType == DType.F32)
-        {
-            Half* src = (Half*)input.DataPointer;
-            float* dst = (float*)output.DataPointer;
-            for (long i = 0; i < input.ElementCount; i++) dst[i] = (float)src[i];
-        }
         else if (input.DType == DType.F32 && output.DType == DType.F32)
         {
             // A same-dtype widen is a copy; the F16 path it used to take read the F32 bytes as halves.

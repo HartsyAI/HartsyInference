@@ -156,10 +156,12 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> NeighborhoodAttentionTiled =
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
-    /// <summary>LongCat's residual sums round to BF16 on a BF16 or INT8 release, as the reference's x is BF16 there (nearest-even, after the
-    /// self-attention and cross-attention residuals and after the FFN residual). Read at construction. The F32 route is unchanged. Effect is
-    /// judged on a 4090 comparison against the reference. Off by default: with it on, the CUDA avatar parity lanes exceed the 0.2% bound (0.235% to
-    /// 0.369%), so the default route keeps the F32 sums until that is resolved.</summary>
+    /// <summary>Rounds the residual stream of LongCat's blocks to BF16 (nearest even) after the self-attention, cross-attention and audio residuals
+    /// and the FFN residual, on a BF16 or INT8 release; the reference's x is BF16 there (reference lines 152-153, 178-179, 185-186 at 58eb336).
+    /// Read at construction and logged at load. It rounds only the residual sums: the sub-layer outputs (self-attention, audio cross-attention,
+    /// FFN) stay F32, where the reference also rounds them to BF16, and the patch embedding stays F32. The F32 route is unchanged. Off by default:
+    /// the CUDA avatar parity lanes exceed the 0.2% bound with it on, and the 4090 comparison at 9998155f6 (LC-CMP8) is worse than the
+    /// engine without it (6 of 8 steps over the 2e-2 bound, against 1 step with the knob off).</summary>
     public static readonly Knob<bool> LongcatBf16Residual =
         Bool("numerics.longcatBf16Residual", false, KnobScope.Construction, KnobDomain.Numerics, "Rounds LongCat's residual sums to BF16 on a BF16 or INT8 release, as the reference does (off by default; the CUDA avatar parity lanes exceed their bound with it on).");
 

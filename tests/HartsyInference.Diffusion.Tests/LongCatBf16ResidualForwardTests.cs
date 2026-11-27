@@ -57,6 +57,53 @@ public sealed class LongCatBf16ResidualForwardTests
         Assert.Contains(off, v => !OnBf16Grid(v));
     }
 
+    /// <summary>The probe stages of a BF16 avatar block with audio: the self-attention, cross-attention and audio residuals are each on the BF16 grid.</summary>
+    [Fact]
+    public void TheAudioBlockProbeStagesAreOnTheBf16Grid()
+    {
+        LongCatConfig config = LongCatTestData.TinyAvatar;
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = LongCatTestData.AvatarWeights(config, 8);
+        Tensor qkv = weights["blocks.0.attn.qkv.weight"];
+        weights["blocks.0.attn.qkv.weight"] = qkv.CastTo(DType.BF16);
+        qkv.Dispose();
+        List<Tensor> owned = [];
+        LongCatBlock block = new(config);
+        using (KnobProfile.Create("bf16-audio-probe").With(EngineKnobs.LongcatBf16Residual, true).Push())
+        {
+            block.LoadWeights(weights, "blocks.0", owned);
+        }
+        Assert.True(block.Bf16Residual);
+
+        const int frames = 5, gridH = 2, gridW = 3, textRows = 4;
+        int hw = gridH * gridW, tokens = frames * hw;
+        using Tensor hidden = LongCatTestData.Random(new TensorShape(tokens, config.HiddenSize), 31);
+        using Tensor text = LongCatTestData.Random(new TensorShape(textRows, config.HiddenSize), 32);
+        using Tensor timeEmbed = LongCatTestData.Random(new TensorShape(frames, config.AdalnTembedDim), 33);
+        using Tensor audio = LongCatTestData.Random(new TensorShape(frames * config.AudioContextTokens, config.AudioOutputDim), 34);
+        WanRope rope = new(config.HeadDim, LongCatConfig.RopeTheta, 0);
+        (Tensor cos, Tensor sin) = rope.BuildCosSin(frames, gridH, gridW);
+        using Tensor index = new(new TensorShape(tokens), DType.I32);
+        Span<int> rowFrame = index.AsSpan<int>();
+        for (int i = 0; i < tokens; i++)
+            rowFrame[i] = i / hw;
+        LongCatBlockInputs inputs = new(frames, hw, 0, cos, sin, [AttentionSegment.Dense(tokens)], index);
+
+        Dictionary<string, float[]> stages = new(StringComparer.Ordinal);
+        using Tensor output = block.Forward(backend, hidden, text, timeEmbed, in inputs,
+            (name, t) => stages[name] = t.AsReadOnlySpan<float>().ToArray(), "block0", audio);
+
+        foreach (string name in new[] { "block0.after_self", "block0.after_cross", "block0.after_audio" })
+        {
+            Assert.True(stages.ContainsKey(name), $"no probe stage {name}");
+            Assert.All(stages[name], v => Assert.True(OnBf16Grid(v), $"{name}: {v:R} is not a BF16 value"));
+        }
+        cos.Dispose();
+        sin.Dispose();
+        foreach (Tensor t in owned) t.Dispose();
+        foreach (Tensor t in weights.Values) t.Dispose();
+    }
+
     private static bool OnBf16Grid(float v) => BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(v)) == v;
 
     /// <summary>One block forward on the tiny config, with the given weight dtype, release flag and knob. The cached path runs the build pass into a
@@ -116,10 +163,9 @@ public sealed class LongCatBf16ResidualForwardTests
 /// <summary>The Vulkan F32 widening of a BF16 tensor: the bits of each value widen by its top 16, which the F16 path used to misread.</summary>
 public sealed class VulkanBf16WidenTests
 {
-    [Fact]
+    [VulkanBf16Fact]
     public void VulkanWidensBf16ByItsBits()
     {
-        if (!VulkanContext.IsAvailable()) return;
         float[] values = [1.0f, 1.00390625f, -2.71828f, 3.14159f, 1e-3f, 65504f];
         using Tensor bf16 = new(new TensorShape(values.Length), DType.BF16);
         ushort[] bits = values.Select(BFloat16Bits.FromFloat).ToArray();
@@ -132,5 +178,14 @@ public sealed class VulkanBf16WidenTests
         ReadOnlySpan<float> got = f32.AsReadOnlySpan<float>();
         for (int i = 0; i < values.Length; i++)
             Assert.Equal(BFloat16Bits.ToFloat(bits[i]), got[i]);
+    }
+}
+
+/// <summary>A fact reported as skipped, never passed, when no Vulkan device opens.</summary>
+public sealed class VulkanBf16FactAttribute : FactAttribute
+{
+    public VulkanBf16FactAttribute()
+    {
+        if (!VulkanContext.IsAvailable()) Skip = "SKIPPED: no Vulkan device.";
     }
 }
