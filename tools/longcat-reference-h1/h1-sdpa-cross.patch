@@ -1,0 +1,63 @@
+diff --git a/longcat_video/modules/attention.py b/longcat_video/modules/attention.py
+index bb5630f..96fea25 100644
+--- a/longcat_video/modules/attention.py
++++ b/longcat_video/modules/attention.py
+@@ -8,6 +8,28 @@ from einops import rearrange
+ from .rope_3d import RotaryPositionalEmbedding
+ from .blocks import RMSNorm_FP32
+ from ..block_sparse_attention.bsa_interface import flash_attn_bsa_3d
++
++import os as _h1_os
++
++
++def _h1_use_sdpa():
++    return _h1_os.environ.get("H1_ATTN") == "sdpa"
++
++
++def _h1_varlen_sdpa(q, k, v, cu_q, cu_k):
++    """H1: torch SDPA with flash_attn_varlen_func's semantics: no causal mask, scale 1/sqrt(D), and query segment b attends only
++    to key segment b (cu_q and cu_k are cumulative lengths with a leading 0). q is [Tq, H, D]; k and v are [Tk, H, D]."""
++    outs = []
++    for b in range(len(cu_q) - 1):
++        qs, qe = int(cu_q[b]), int(cu_q[b + 1])
++        ks, ke = int(cu_k[b]), int(cu_k[b + 1])
++        o = torch.nn.functional.scaled_dot_product_attention(
++            q[qs:qe].transpose(0, 1).unsqueeze(0),
++            k[ks:ke].transpose(0, 1).unsqueeze(0),
++            v[ks:ke].transpose(0, 1).unsqueeze(0),
++        )
++        outs.append(o.squeeze(0).transpose(0, 1))
++    return torch.cat(outs, 0)
+ from ..context_parallel.ulysses_wrapper import ulysses_wrapper
+ 
+ 
+@@ -230,16 +252,19 @@ class MultiHeadCrossAttention(nn.Module):
+                 max_seqlen_k=max(kv_seqlen),
+             )[0]
+         elif self.enable_flashattn2:
+-            from flash_attn import flash_attn_varlen_func
+-            x = flash_attn_varlen_func(
+-                q=q[0],
+-                k=k[0],
+-                v=v[0],
+-                cu_seqlens_q=torch.tensor([0] + [N] * B, device=q.device).cumsum(0).to(torch.int32),
+-                cu_seqlens_k=torch.tensor([0] + kv_seqlen, device=q.device).cumsum(0).to(torch.int32),
+-                max_seqlen_q=N,
+-                max_seqlen_k=max(kv_seqlen),
+-            )
++            if _h1_use_sdpa():
++                x = _h1_varlen_sdpa(q[0], k[0], v[0], [0] + [N] * B, [0] + [int(s) for s in kv_seqlen])
++            else:
++                from flash_attn import flash_attn_varlen_func
++                x = flash_attn_varlen_func(
++                    q=q[0],
++                    k=k[0],
++                    v=v[0],
++                    cu_seqlens_q=torch.tensor([0] + [N] * B, device=q.device).cumsum(0).to(torch.int32),
++                    cu_seqlens_k=torch.tensor([0] + kv_seqlen, device=q.device).cumsum(0).to(torch.int32),
++                    max_seqlen_q=N,
++                    max_seqlen_k=max(kv_seqlen),
++                )
+         elif self.enable_xformers:
+             import xformers.ops
+             attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens([N] * B, kv_seqlen)
