@@ -18,12 +18,14 @@ public sealed class FastFramesDecoderGpuParityTests
     /// <summary>Plain F32 GEMMs (the exact lane), the synthetic decoder of this file on CUDA against CpuBackend. Measured on a 4090
     /// (RTX 4090) at 498c3f228: relative difference 6.36367e-8, 6.34626e-8 and 6.38269e-8 at frames 0, 1 and 2, against a bound of 1e-5.</summary>
     [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
     public void DecodeFrameOnCudaWithExactGemmsMatchesCpuAcrossFrames() => Compare(exactGemm: true, tolerance: 1e-5);
 
     /// <summary>The default lane a generation runs: the engine's TF32 GEMMs, on this test's synthetic decoder (64 wide, one block
     /// per side, seed 21). Measured on a 4090 on this setup: relative difference 1.19e-4 at frame 0 (the earlier failure at a 1e-4
     /// bound). The real S decoder is not run here, and its TF32 error need not match this number.</summary>
     [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
     public void DecodeFrameOnCudaWithDefaultGemmsStaysWithinTheTf32Tolerance() => Compare(exactGemm: false, tolerance: 1e-3);
 
     private static void Compare(bool exactGemm, double tolerance)

@@ -17,6 +17,7 @@ public sealed class FastFramesRefinerGpuSyncTests
         StemBlocks: 1, StemHeads: 4, StemMlpMultiplier: 2, HeadMlpMultiplier: 2, FrequencyDim: 32);
 
     [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
     public void RepairLayerOnCudaReadsNothingBackToTheHost()
     {
         Dictionary<string, Tensor> weights = RandomWeights(seed: 31);
