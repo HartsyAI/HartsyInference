@@ -5875,7 +5875,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             castTarget);
 
     /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit the gate budget (logged as gate "causal"): half of free VRAM, or under
-    /// <c>numerics.tileFromDevice</c> the shared <see cref="DeviceGateBudget"/> (cuMemGetInfo counts pool reservations as used).</summary>
+    /// <c>numerics.tileFromDevice</c> the shared gate budget (<see cref="PlannedGateBudget"/>), which reads no free memory.</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
@@ -6315,7 +6315,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>The fixed score-tile rung of a device, for <c>numerics.tileFromDevice</c>: 1 GiB at 20 GiB total or more, else 512 MiB. The 20 GiB
     /// boundary is binary (<c>20 &lt;&lt; 30</c> bytes): a card marketed as 20 GB reports about 18.6 GiB and gets 512 MiB; a 24 GB card gets 1 GiB.
-    /// The rung sets the tile height only, not a gate (see <c>DeviceGateBudget</c>).</summary>
+    /// The rung sets the tile height, and is the gate budget when no streaming scope is open (see <c>PlannedGateBudget</c>).</summary>
     internal static long TileRungBytes(ulong deviceTotalBytes) => deviceTotalBytes >= 20UL << 30 ? 1L << 30 : 512L << 20;
 
     /// <summary>The query tile's height from the device total (<c>numerics.tileFromDevice</c>): the rung over the row bytes, never past the rows of
@@ -6388,7 +6388,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     scoresBuf = CudaMemory.Allocate((nuint)(perRow * Br));
                     break;
                 }
-                catch (OutOfVramException) when (Br > 1)
+                // Under numerics.tileFromDevice a failed allocation is not retried at a smaller height: the height is a function of the device
+                // only, so the failure surfaces instead of changing the path mid-run.
+                catch (OutOfVramException) when (Br > 1 && !fromDevice)
                 {
                     Br = Math.Max(1, Br / 2);
                     halved = true;

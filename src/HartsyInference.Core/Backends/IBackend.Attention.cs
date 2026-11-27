@@ -10,6 +10,10 @@ namespace HartsyInference.Core.Backends;
 // hyper-connection primitives. Backends without a kernel refuse attention; host execution is an explicit caller choice.
 public partial interface IBackend
 {
+    /// <summary>Notes the headroom a streaming scope's planner leaves free (<c>HeadroomBytes</c>, model- and token-derived, not free memory) while the
+    /// scope is open. Under <c>numerics.tileFromDevice</c> the attention gate budget is half of it. 0 clears the note (scope disposed). The default ignores it.</summary>
+    void NoteAttentionHeadroom(long bytes) { }
+
     /// <summary>Runs one attention call (docs/ATTENTION_CONTRACT.md). A backend with kernel rows overrides this with its
     /// planner; the default validates then refuses the call. Call <see cref="AttentionHostReference.Run"/> explicitly for host execution.</summary>
     void Attention(in AttentionCall call)

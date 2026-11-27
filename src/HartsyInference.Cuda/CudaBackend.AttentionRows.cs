@@ -331,13 +331,13 @@ public sealed partial class CudaBackend
     internal readonly record struct GateReading(ulong Budget, ulong Free, ulong Total);
 
     /// <summary>Reads free and total VRAM once and returns the gate budget: half of free VRAM, or under <c>numerics.tileFromDevice</c> the one
-    /// device gate budget (<see cref="DeviceGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
+    /// device gate budget (<see cref="PlannedGateBudget"/>) shared by the tiling, BF16 cast and causal-mask gates.</summary>
     private GateReading ReadGate()
     {
         (nuint memFree, nuint memTotal) = _context.GetMemoryInfo();
         ulong free = (ulong)(TestFreeVramOverride?.Invoke() ?? memFree);
         ulong total = memTotal;
-        ulong budget = EngineKnobs.TileFromDevice.Value == true ? DeviceGateBudget(total, free) : free / 2;
+        ulong budget = EngineKnobs.TileFromDevice.Value == true ? PlannedGateBudget(total, AttentionHeadroomBytes) : free / 2;
         return new GateReading(budget, free, total);
     }
 
@@ -353,7 +353,23 @@ public sealed partial class CudaBackend
     /// total half makes a gate's path the same on every run of one device while free VRAM is ample; the free clamp stops a gate choosing a buffer
     /// the card does not have free now. So the path can still move when free falls below half the total: the A/B rows name the free reading of
     /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
-    internal static ulong DeviceGateBudget(ulong deviceTotalBytes, ulong freeBytes) => Math.Min(deviceTotalBytes / 2, freeBytes);
+    /// <remarks>Under the knob the budget reads no free memory. While a streaming scope is open it is half its noted headroom
+    /// (<c>BudgetHeadroomBytes</c>, the planner's free-after-prefix, a function of model and tokens), capped at half the device total: the
+    /// same "half of free" the knob-off path uses, with the free replaced by the planner's figure. With no scope open it is the tile rung of
+    /// the device (<see cref="TileRungBytes"/>), small and free-independent.</remarks>
+    internal static ulong PlannedGateBudget(ulong deviceTotalBytes, ulong headroomBytes)
+    {
+        if (headroomBytes == 0) return (ulong)TileRungBytes(deviceTotalBytes);
+        return Math.Min(deviceTotalBytes / 2, headroomBytes / 2);
+    }
+
+    /// <summary>The headroom a streaming scope noted, 0 when none is open.</summary>
+    internal ulong AttentionHeadroomBytes => (ulong)Math.Max(0L, _attentionHeadroom);
+
+    private long _attentionHeadroom;
+
+    /// <inheritdoc/>
+    public void NoteAttentionHeadroom(long bytes) => _attentionHeadroom = bytes;
 
 
     /// <summary>Whether the equal-head form of a grouped call runs on INT8 v2, Sage or the F16 flash kernel: the kernels the

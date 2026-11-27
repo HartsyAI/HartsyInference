@@ -41,12 +41,31 @@ public sealed class SdpaTileFromDeviceTests
     }
 
     [Fact]
-    public void TheOneGateBudgetIsHalfTheTotalOrTheFreeWhenThatIsLess()
+    public void WhileAScopeIsOpenTheBudgetIsHalfItsHeadroomCappedAtHalfTheTotal()
     {
-        // Ample free memory: the gate reads the device total only, so the path is the same on every run of one card.
-        Assert.Equal(Card24Gb / 2, CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 20UL << 30));
-        // Free below half the total: the free clamp applies (a buffer the card does not have free is not chosen).
-        Assert.Equal(6UL << 30, CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 6UL << 30));
+        // Free-independent: a function of the device total and the scope's headroom only.
+        Assert.Equal(1UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
+        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 40UL << 30));
+    }
+
+    [Fact]
+    public void TheBudgetDoesNotDependOnThePrefixCountAndNeverExceedsTheHeadroom()
+    {
+        // The budget takes no prefix argument; for any headroom it is at most half of that headroom (so within it).
+        foreach (ulong headroom in new[] { 512UL << 20, 2UL << 30, 6UL << 30, 12UL << 30 })
+        {
+            ulong budget = CudaBackend.PlannedGateBudget(Card24Gb, headroom);
+            Assert.True(budget <= headroom);
+            Assert.Equal(budget, CudaBackend.PlannedGateBudget(Card24Gb, headroom));
+        }
+    }
+
+    [Fact]
+    public void WithNoScopeOpenTheBudgetIsTheDeviceTileRung()
+    {
+        // Headroom 0 means no open scope (cleared on dispose): the budget is the device's rung, never unbounded or zero.
+        Assert.Equal(1L << 30, (long)CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 0));
+        Assert.Equal(512L << 20, (long)CudaBackend.PlannedGateBudget(Card8Gb, headroomBytes: 0));
     }
 
     [Fact]
@@ -54,7 +73,7 @@ public sealed class SdpaTileFromDeviceTests
     {
         // A 1 GiB rung on a 24 GB card: a 2 GiB score matrix is under the gate, so it stays materialized.
         Assert.Equal(1L << 30, CudaBackend.TileRungBytes(Card24Gb));
-        Assert.True(2UL << 30 <= CudaBackend.DeviceGateBudget(Card24Gb, freeBytes: 20UL << 30));
+        Assert.True(1UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
     }
 
     [Fact]
@@ -73,15 +92,15 @@ public sealed class SdpaTileFromDeviceTests
     }
 
     [Fact]
-    public void TheFreeLogNamesTheGateAndWhetherFreeSetItsBudget()
+    public void TheFreeLogNamesEachGateAndItsDecisions()
     {
         using IDisposable isolated = TileFreeLog.Isolate();
-        // 24 GiB total: half is 12 GiB. Free of 6 GiB is below half, so free set the budget; free of 20 GiB is not.
+        // Free no longer enters a gate's line: the decisions and the over count are what is logged.
         TileFreeLog.RecordGate("bf16cast", 6UL << 30, 24UL << 30, over: true);
         TileFreeLog.RecordGate("bf16cast", 20UL << 30, 24UL << 30, over: false);
         TileFreeLog.RecordGate("causal", 20UL << 30, 24UL << 30, over: true);
 
-        Assert.Equal("tileFromDevice gate=bf16cast decisions=2 over=1 freeLimited=1\ntileFromDevice gate=causal decisions=1 over=1 freeLimited=0",
+        Assert.Equal("tileFromDevice gate=bf16cast decisions=2 over=1\ntileFromDevice gate=causal decisions=1 over=1",
             TileFreeLog.Summary());
     }
 

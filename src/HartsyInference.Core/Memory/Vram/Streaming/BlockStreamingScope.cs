@@ -16,15 +16,20 @@ namespace HartsyInference.Core.Memory.Vram.Streaming;
 public sealed class BlockStreamingScope : IDisposable
 {
     private readonly IStreamableDenoiser _denoiser;
+    private readonly IBackend _backend;
     private readonly string _modelName;
     private readonly bool _perStepTrim;
     private readonly BlockStreamingController? _streamer;
     private bool _disposed;
 
-    private BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
+    internal BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
         BlockStreamingController? streamer)
     {
         _denoiser = options.Denoiser;
+        // The planner leaves this much free while the scope is open; the attention gate budget is half of it (see NoteAttentionHeadroom).
+        // Noted for every scope, including forced-stream ones. Cleared in Dispose.
+        _backend = options.Backend;
+        _backend.NoteAttentionHeadroom(options.HeadroomBytes);
         _modelName = options.ModelName;
         _perStepTrim = options.PerStepTrim;
         _streamer = streamer;
@@ -127,6 +132,7 @@ public sealed class BlockStreamingScope : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _backend.NoteAttentionHeadroom(0);
         _denoiser.BeforeBlockForward = null;
         if (_streamer is null) return;
         if (_perStepTrim && StepsEnded == 0)
