@@ -91,6 +91,9 @@ public sealed class LongCatInt8LinearOpTests
     }
 
     /// <summary>Per-row symmetric int8 of the activations, dequantized (the model of a W8A8 path).</summary>
+    /// <summary>Per-row activation quantization as the CUDA F32 path does it (w8a8_quant_rowwise_f32, Kernels/dequant/w8a8.cu lines 96-106):
+    /// rowScale = amax/127 and inv = 127/amax, both in F32; q = round-half-to-even(x*inv) (__float2int_rn), clamped to ±127; the value is q*rowScale.
+    /// The earlier model divided by the step and rounded the quotient, which differs from the kernel's multiply by the reciprocal at ties.</summary>
     private static float[] ActQuant(float[] x, int rows, int cols)
     {
         float[] y = new float[x.Length];
@@ -98,8 +101,14 @@ public sealed class LongCatInt8LinearOpTests
         {
             float max = 0f;
             for (int c = 0; c < cols; c++) max = MathF.Max(max, MathF.Abs(x[r * cols + c]));
-            float step = max / 127f;
-            for (int c = 0; c < cols; c++) y[r * cols + c] = step == 0f ? 0f : MathF.Round(x[r * cols + c] / step) * step;
+            float step = max > 0f ? max / 127f : 1f;
+            float inv = max > 0f ? 127f / max : 0f;
+            for (int c = 0; c < cols; c++)
+            {
+                float q = MathF.Round(x[r * cols + c] * inv);
+                q = MathF.Min(127f, MathF.Max(-127f, q));
+                y[r * cols + c] = q * step;
+            }
         }
         return y;
     }
