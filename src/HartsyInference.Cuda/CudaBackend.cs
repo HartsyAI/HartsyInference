@@ -2407,7 +2407,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
                 // numerics.bf16Gemv=false to fall back to cuBLAS.
                 DType gemvDtype = int8Unpack ? DType.BF16 : blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
-                if (EnableBf16Gemv && _kernels!.HasFloatGemv && (gemvDtype == DType.BF16 || gemvDtype == DType.F16))
+                // A float32-input INT8 layer (mode 2) keeps its exact float32 product: the GEMV reads a BF16 unpack, so it takes the float32 GEMM instead.
+                bool exactF32Int8 = int8Unpack && Int8RoundingMode(weight) == 2;
+                if (EnableBf16Gemv && !exactF32Int8 && _kernels!.HasFloatGemv && (gemvDtype == DType.BF16 || gemvDtype == DType.F16))
                 {
                     // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
                     // linears in 16-bit float ship the bias in the SAME dtype (Krea2 fp8_scaled: BF16

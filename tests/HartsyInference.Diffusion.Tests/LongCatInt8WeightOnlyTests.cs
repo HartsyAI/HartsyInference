@@ -19,17 +19,18 @@ public sealed class LongCatInt8WeightOnlyTests
     private const float RouteSeparation = 1e-4f;
 
     [Fact]
-    public void TheSettingIsOffByDefaultAndThenMarksNothing()
+    public void TheSettingIsOnByDefaultAndAnOffRunMarksNothing()
     {
         using Tensor weight = Int8Weight(seed: 1, out Tensor scale);
         using Tensor rowScale = scale;
 
-        Assert.False(EngineKnobs.LongcatInt8WeightOnly.Default);
-        // A whole-run lane that names the knob (HARTSY_GPU_TEST_KNOBS) turns it on for every test in the run, so then it marks by design.
-        if (Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar) is { } run && run.Contains("numerics.longcatInt8WeightOnly", StringComparison.Ordinal))
-            return;
-        Assert.Equal(0, LongCatRecipeSupport.ApplyInt8WeightOnly(new Dictionary<string, Tensor> { ["linear.weight"] = weight }));
-        Assert.False(weight.QuantInfo!.FullPrecisionMatMul);
+        // On by default for LongCat's INT8 releases; a run that turns it off (the resident route) marks nothing.
+        Assert.True(EngineKnobs.LongcatInt8WeightOnly.Default);
+        using (KnobProfile.Create("longcat-int8-off").With(EngineKnobs.LongcatInt8WeightOnly, false).Push())
+        {
+            Assert.Equal(0, LongCatRecipeSupport.ApplyInt8WeightOnly(new Dictionary<string, Tensor> { ["linear.weight"] = weight }));
+            Assert.False(weight.QuantInfo!.FullPrecisionMatMul);
+        }
     }
 
     [Fact]
