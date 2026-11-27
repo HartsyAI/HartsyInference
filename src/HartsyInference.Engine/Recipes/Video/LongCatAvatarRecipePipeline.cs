@@ -76,7 +76,7 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
 
         (LongCatPrompt positive, LongCatPrompt negative) = LongCatRecipeSupport.EncodePrompts(_backend, _parts, request.Prompt,
             request.NegativePrompt ?? "");
-        float[] noise = LongCatRecipeSupport.Noise(seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
+        float[] noise = LongCatRecipeSupport.InitialNoise(seed, _parts.Channels, latentFrames, latentHeight, latentWidth);
 
         LongCatAvatarMode mode = LongCatAvatarMode.At2v;
         int condLatents = 0;

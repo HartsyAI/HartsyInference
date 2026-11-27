@@ -119,7 +119,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
             TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
             if (img2img is not null)
                 sourceLatent = EncodeInitLatent(img2img.SourceImage);
-            latent = BuildStartLatent(scheduler, Fibo2NoiseSource.Create(latentShape, resolvedSeed), sourceLatent, plan.StartStep);
+            latent = BuildStartLatent(scheduler, SavedNoise.Create(EngineKnobs.Fibo2NoiseNpy, latentShape, resolvedSeed, "Fibo2"), sourceLatent,
+                plan.StartStep);
             LatentInpaint? inpaint = null;
             if (plan.MaskPixel is not null)
             {
