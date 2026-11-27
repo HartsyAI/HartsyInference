@@ -17,6 +17,7 @@ public sealed class LongCatRecipeTests
 {
     [Theory]
     [InlineData("longcat-video", typeof(LongCatVideoRecipe))]
+    [InlineData("longcat-video-distilled", typeof(LongCatVideoDistilledRecipe))]
     [InlineData("LongCat-Avatar", typeof(LongCatAvatarRecipe))]
     public void TheFamilyResolvesToItsRecipe(string familyId, Type recipeType)
     {
@@ -30,6 +31,7 @@ public sealed class LongCatRecipeTests
     public void BothRecipesPassTheRegistryValidator()
     {
         Assert.Empty(RecipeRegistryValidator.Problems(new LongCatVideoRecipe()));
+        Assert.Empty(RecipeRegistryValidator.Problems(new LongCatVideoDistilledRecipe()));
         Assert.Empty(RecipeRegistryValidator.Problems(new LongCatAvatarRecipe()));
     }
 
@@ -101,6 +103,28 @@ public sealed class LongCatRecipeTests
         Assert.Equal(4, row.Assets.Count(asset => asset.Role == "transformer" && asset.Sha256 is not null));
         Assert.Equal(2, row.Assets.Count(asset => asset.Role == "lora"));
         Assert.All(row.Assets.Where(asset => asset.Role == "transformer"), asset => Assert.StartsWith("base_model_int8/", asset.RepoPath, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheDistilledBaseDefaultsAreSixteenStepsAtGuidanceOne()
+    {
+        LongCatVideoDistilledRecipe distilled = new();
+        Assert.Equal(16, distilled.Defaults.Steps);
+        Assert.Equal(1f, distilled.Defaults.CfgScale);
+        Assert.Equal(50, new LongCatVideoRecipe().Defaults.Steps);
+        Assert.True(distilled.Matches("longcat-video-distilled"));
+        Assert.False(distilled.Matches("longcat-video"));
+    }
+
+    [Fact]
+    public void ADistilledBaseWithoutItsCfgStepLoraIsRefusedBeforeAnyWeightIsRead()
+    {
+        using CpuBackend backend = new();
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => new LongCatVideoDistilledRecipe().Construct(new RecipeContext
+        {
+            CheckpointPath = "no-such-folder/dit", Backend = backend,
+        }));
+        Assert.Contains("cfg_step_lora.safetensors", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]

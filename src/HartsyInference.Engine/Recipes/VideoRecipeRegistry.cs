@@ -70,6 +70,7 @@ public static class VideoRecipeRegistry
         new Video.DuoRecipe(),
         new Video.DuoRecipe(distilled: true),
         new Video.LongCatVideoRecipe(),
+        new Video.LongCatVideoDistilledRecipe(),
         new Video.LongCatAvatarRecipe(),
     };
 }
