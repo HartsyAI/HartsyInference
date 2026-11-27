@@ -214,12 +214,14 @@ public sealed class KvSegmentStore : IDisposable
         }
     }
 
-    private Tensor Stage(Tensor host, List<Tensor> staged)
+    // A fresh copy of the stored host bytes, held for the join only: the stored segment is never handed to the backend, so a backend that
+    // uploads its host inputs does so into a temporary and never promotes the stored slot into device memory.
+    private static Tensor Stage(Tensor host, List<Tensor> staged)
     {
-        Tensor device = new(host.Shape, host.DType, _backend.Device);
-        staged.Add(device);
-        _backend.CopyTo(device, host);
-        return device;
+        Tensor copy = new(host.Shape, host.DType);
+        host.AsReadOnlySpan<byte>().CopyTo(copy.AsSpan<byte>());
+        staged.Add(copy);
+        return copy;
     }
 
     /// <summary>Replaces the segments of <paramref name="layer"/> by one that holds all their tokens in order, so every later read is a borrowed one.
