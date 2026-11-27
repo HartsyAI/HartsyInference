@@ -22,6 +22,12 @@ public sealed class Int8DeviceDequantCudaTests(ITestOutputHelper output)
     /// linear with and without the bias epilogue differs by 4.7e-8 there, so the difference is the tiling's.</summary>
     private const double TiledBound = 1e-5;
 
+    /// <summary>The same where the output is F16. Through an F32 input this GEMM writes BF16 first, which alone is 2e-3 to 3e-3 from the CPU, and
+    /// cuBLAS rounds it differently for a different output count: tiled against dense measured 2.0e-3 on an RTX 3060, with the tiled result no
+    /// farther from the CPU than the dense one. The first bound, 1e-3, was written before that run and failed there. A row tile written at the
+    /// wrong place would differ by order one.</summary>
+    private const double TiledF16Bound = 5e-3;
+
     /// <summary>The tiled GEMM against the CPU backend on the weight widened to F32, relative RMS: the device GEMM rounds its operands to
     /// BF16.</summary>
     private const double CpuBound = 1e-2;
@@ -99,7 +105,8 @@ public sealed class Int8DeviceDequantCudaTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>A weight of 72 MiB unpacked, above one 64 MiB tile, whole and over a row window that starts inside the first tile.</summary>
+    /// <summary>A weight of 72 MiB in BF16, above one 64 MiB tile, whole and over a row window that starts inside the first tile: F32, F32 into
+    /// an F16 output (through the GEMM's cast buffer), F16, and F32 with the high-precision GEMM (an F32 tile).</summary>
     [CudaDeviceFact]
     public void ATiledWeightMatchesTheDenseLinearAndTheCpu()
     {
@@ -113,22 +120,37 @@ public sealed class Int8DeviceDequantCudaTests(ITestOutputHelper output)
         using (CpuBackend reference = new())
         using (Tensor wide = dense.CastTo(DType.F32))
             cpu = Linear(reference, input, wide, bias, DType.F32);
-        using CudaBackend backend = GpuDevices.OpenCuda();
-        float[] whole = Linear(backend, input, dense, bias, DType.F32);
-        float[] window = Window(backend, input, dense, bias, Offset, Rows - Offset, DType.F32);
-        PreloadThenZeroTheHost(backend, weight);
+        List<string> failures = [];
+        foreach ((string lane, DType activations, DType results, bool highPrecision, double bound) in new[]
+        {
+            ("F32", DType.F32, DType.F32, false, TiledBound), ("F32 to F16", DType.F32, DType.F16, false, TiledF16Bound),
+            ("F16", DType.F16, DType.F16, false, TiledF16Bound), ("F32, high-precision GEMM", DType.F32, DType.F32, true, TiledBound),
+        })
+        {
+            using Tensor x = Random(new TensorShape(Tokens, Columns), 22, activations);
+            using Tensor b = Random(new TensorShape(Rows), 23, results);
+            using CudaBackend backend = GpuDevices.OpenCuda();
+            backend.HighPrecisionGemm = highPrecision;
+            float[] whole = Linear(backend, x, dense, b, results);
+            float[] window = Window(backend, x, dense, b, Offset, Rows - Offset, results);
+            // A copy per lane: the host bytes are zeroed once the device holds them.
+            using Tensor packed = Int8Weight(Rows, Columns, seed: 21, out Tensor packedScale);
+            using Tensor packedRowScale = packedScale;
+            PreloadThenZeroTheHost(backend, packed);
 
-        float[] unpacked = Linear(backend, input, weight, bias, DType.F32);
-        float[] unpackedWindow = Window(backend, input, weight, bias, Offset, Rows - Offset, DType.F32);
+            float[] unpacked = Linear(backend, x, packed, b, results);
+            float[] unpackedWindow = Window(backend, x, packed, b, Offset, Rows - Offset, results);
 
-        double tiled = LongCatTestData.RelRms(unpacked, whole), tiledWindow = LongCatTestData.RelRms(unpackedWindow, window);
-        double againstCpu = LongCatTestData.RelRms(unpacked, cpu);
-        output.WriteLine(FormattableString.Invariant(
-            $"{backend.Capabilities.Name}: tiled against dense {tiled:E3}, window {tiledWindow:E3} (bound {TiledBound:E0}); against the CPU ")
-            + FormattableString.Invariant($"{againstCpu:E3} (bound {CpuBound:E0})"));
-        Assert.True(tiled <= TiledBound && tiledWindow <= TiledBound, $"tiled differs from dense by {tiled:E3} and {tiledWindow:E3}");
-        Assert.True(againstCpu <= CpuBound, $"tiled differs from the CPU by {againstCpu:E3}");
-        backend.FreeWeights([weight, dense, bias]);
+            double tiled = LongCatTestData.RelRms(unpacked, whole), tiledWindow = LongCatTestData.RelRms(unpackedWindow, window);
+            double againstCpu = LongCatTestData.RelRms(unpacked, cpu);
+            output.WriteLine(FormattableString.Invariant(
+                $"{backend.Capabilities.Name}, {lane}: tiled against dense {tiled:E3}, window {tiledWindow:E3} (bound {bound:E0}); against the ")
+                + FormattableString.Invariant($"CPU {againstCpu:E3} (bound {CpuBound:E0})"));
+            if (tiled > bound || tiledWindow > bound) failures.Add($"{lane}: tiled differs from dense by {tiled:E3} and {tiledWindow:E3}");
+            if (againstCpu > CpuBound) failures.Add($"{lane}: tiled differs from the CPU by {againstCpu:E3}");
+            backend.FreeWeights([packed, dense, b]);
+        }
+        Assert.True(failures.Count == 0, string.Join("; ", failures));
     }
 
     [CudaDeviceFact]
