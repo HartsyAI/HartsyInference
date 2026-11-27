@@ -260,6 +260,17 @@ internal static class LongCatRecipeSupport
     internal static string DmdLoraPath(string checkpointPath) =>
         Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
 
+    /// <summary>The planning refusals of the base family (the base and the distilled build): no driving speech, and a chain length the base recipe
+    /// does not read. Null when the request is one the base family can run.</summary>
+    internal static string? BaseRequestRefusal(HartsyInference.Engine.Requests.VideoRequest request)
+    {
+        if (request.VideoAudioReference is not null)
+            return "LongCat-Video has no driving audio; speech-driven video is longcat-avatar.";
+        if (request.ChainTotalFrames is not null)
+            return "Long video on LongCat-Video is not wired yet; the request's chain length would be ignored.";
+        return null;
+    }
+
     /// <summary>The base distilled LoRA's path, which must exist: the distilled build is refused rather than run as the undistilled base.</summary>
     internal static string RequireCfgStepLora(string checkpointPath)
     {

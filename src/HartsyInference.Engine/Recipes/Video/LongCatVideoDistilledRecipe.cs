@@ -65,14 +65,7 @@ public sealed class LongCatVideoDistilledRecipe : IVideoRecipe, IVideoDeviceChec
 
     /// <summary>Planning refusals, as the base family's: no driving speech (the base has none), and a chain length the base recipe does not read.</summary>
     /// <inheritdoc/>
-    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings)
-    {
-        if (request.VideoAudioReference is not null)
-            return "LongCat-Video has no driving audio; speech-driven video is longcat-avatar.";
-        if (request.ChainTotalFrames is not null)
-            return "Long video on LongCat-Video is not wired yet; the request's chain length would be ignored.";
-        return null;
-    }
+    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request);
 
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
