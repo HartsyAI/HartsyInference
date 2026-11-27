@@ -73,7 +73,17 @@ public sealed class Hy4FlashImagePreprocessorTests
         Assert.Equal(resizedW, actual.ResizedWidth);
         Assert.Equal(gridH, actual.GridH);
         Assert.Equal(gridW, actual.GridW);
+
+        // The resampler differs from the processor's, so the values are bounded, not equal. Measured on these three images: 0.007843 and 0.015686,
+        // one and two 8-bit grey levels after normalisation (a level is 1/127.5). The bound is two levels.
+        (long[] shape, float[] expected) = NpyReader.ReadFloat32(Path.Combine(Dir, name + "__pixel_values.npy"));
+        Assert.Equal(gridH * gridW, shape[0]);
+        float maxDifference = 0;
+        for (int i = 0; i < expected.Length; i++) maxDifference = MathF.Max(maxDifference, MathF.Abs(expected[i] - actual.PixelValues[i]));
+        Assert.True(maxDifference <= MaxUnalignedDifference, $"{name}: max difference {maxDifference.ToString("R", CultureInfo.InvariantCulture)} exceeds {MaxUnalignedDifference}");
     }
+
+    private const float MaxUnalignedDifference = 0.0157f;
 
     private static (int Height, int Width, int GridH, int GridW) ReadGrid(string name)
     {
