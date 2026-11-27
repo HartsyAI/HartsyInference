@@ -14,9 +14,11 @@ Memory: torch.cuda peaks are reset at each stage and logged after every denoise 
 
 import gc
 import os
+import time
 import torch
 
 GIB = float(2 ** 30)
+_T0 = time.monotonic()
 MEM_LOG = os.environ.get("H1_MEM_LOG", "h1_mem.log")
 
 
@@ -57,7 +59,7 @@ def log(stage, **fields):
     else:
         body = "cuda unavailable (CPU check)"
     extra = " ".join(f"{k}={v}" for k, v in fields.items())
-    line = f"[H1_MEM] stage={stage} {extra} {body}".rstrip()
+    line = f"[H1_MEM] t={time.monotonic() - _T0:9.1f}s stage={stage} {extra} {body}".rstrip()
     print(line, flush=True)
     with open(MEM_LOG, "a", encoding="utf-8") as f:
         f.write(line + "\n")

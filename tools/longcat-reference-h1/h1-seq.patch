@@ -1,9 +1,9 @@
 diff --git a/h1_seq.py b/h1_seq.py
 new file mode 100644
-index 0000000..6e60616
+index 0000000..ddcd178
 --- /dev/null
 +++ b/h1_seq.py
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,188 @@
 +"""H1 sequential device placement and memory log (H1_SEQ=1). Device placement only: no tensor value or dtype changes.
 +
 +Order on one GPU (23.52 GiB):
@@ -20,9 +20,11 @@ index 0000000..6e60616
 +
 +import gc
 +import os
++import time
 +import torch
 +
 +GIB = float(2 ** 30)
++_T0 = time.monotonic()
 +MEM_LOG = os.environ.get("H1_MEM_LOG", "h1_mem.log")
 +
 +
@@ -63,7 +65,7 @@ index 0000000..6e60616
 +    else:
 +        body = "cuda unavailable (CPU check)"
 +    extra = " ".join(f"{k}={v}" for k, v in fields.items())
-+    line = f"[H1_MEM] stage={stage} {extra} {body}".rstrip()
++    line = f"[H1_MEM] t={time.monotonic() - _T0:9.1f}s stage={stage} {extra} {body}".rstrip()
 +    print(line, flush=True)
 +    with open(MEM_LOG, "a", encoding="utf-8") as f:
 +        f.write(line + "\n")
