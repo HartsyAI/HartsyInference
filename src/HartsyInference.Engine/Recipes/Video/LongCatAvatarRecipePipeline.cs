@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -86,7 +87,8 @@ public sealed class LongCatAvatarRecipePipeline : IVideoRecipePipeline
         float[]? firstFrame = null;
         if (request.InitImage is not null)
         {
-            byte[] rgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
+            // The avatar reference's init image: diffusers' resize_mode "crop" (cover, Lanczos, centre crop), not a stretch.
+            byte[] rgb = FeatureImaging.ResizeCropRgb24Lanczos(request.InitImage, width, height);
             firstFrame = LongCatRecipeSupport.EncodeFirstFrame(_backend, _parts.Encoder, rgb, width, height, _parts.Channels);
             mode = LongCatAvatarMode.Ai2v;
             condLatents = 1;

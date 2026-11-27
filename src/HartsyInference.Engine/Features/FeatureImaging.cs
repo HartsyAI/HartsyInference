@@ -62,6 +62,37 @@ public static class FeatureImaging
         return dst;
     }
 
+    /// <summary>Resizes RGB24 like diffusers' <c>VaeImageProcessor</c> with <c>resize_mode="crop"</c>, the init-image preparation of the LongCat
+    /// avatar reference (<c>pipeline_longcat_video_avatar.py</c> <c>preprocess</c> at line 1148, <c>resize_mode</c> default "crop" at line 1012): the
+    /// image is scaled by the larger of the two factors (integer floor arithmetic in <c>_resize_and_crop</c>, diffusers image_processor.py 435-466),
+    /// Lanczos-resampled, and centre-cropped to the target size. Unlike <see cref="CoverCrop"/>, this keeps the reference's filter and arithmetic.</summary>
+    public static byte[] ResizeCropRgb24Lanczos(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), $"Target size must be positive; got {width}x{height}.");
+        double ratio = width / (double)height;
+        double sourceRatio = image.Width / (double)image.Height;
+        int sourceW = ratio > sourceRatio ? width : (int)((long)image.Width * height / image.Height);
+        int sourceH = ratio <= sourceRatio ? height : (int)((long)image.Height * width / image.Width);
+        byte[] resized = ResizeRgb24Lanczos(image, sourceW, sourceH);
+        // The reference pastes the scaled image at (w//2 - sw//2, h//2 - sh//2) on a blank canvas; the part outside the canvas is cropped away.
+        int left = width / 2 - sourceW / 2, top = height / 2 - sourceH / 2;
+        byte[] dst = new byte[(long)width * height * 3];
+        for (int y = 0; y < height; y++)
+        {
+            int sy = y - top;
+            if (sy < 0 || sy >= sourceH) continue;
+            for (int x = 0; x < width; x++)
+            {
+                int sx = x - left;
+                if (sx < 0 || sx >= sourceW) continue;
+                Array.Copy(resized, ((long)sy * sourceW + sx) * 3, dst, ((long)y * width + x) * 3, 3);
+            }
+        }
+        return dst;
+    }
+
     /// <summary>Covers <paramref name="width"/>×<paramref name="height"/> at the image's own aspect (a bicubic scale, then the
     /// smaller overhang centred and cropped away); the same size as the image returns it unchanged.</summary>
     public static ImageData CoverCrop(ImageData image, int width, int height)
