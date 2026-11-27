@@ -106,8 +106,22 @@ public sealed class LongCatInt8Tests : IDisposable
         {
             if (checkpoint.Weights[key].DType != DType.I8)
                 continue;
-            foreach (float value in wide.AsReadOnlySpan<float>())
-                Assert.Equal(0u, BitConverter.SingleToUInt32Bits(value) & 0xFFFFu);
+            Tensor packed = checkpoint.Weights[key];
+            if (packed.ForceF32Gemm)
+            {
+                // A float32-input layer (the time embedder and adaLN linears) keeps the exact float32 product, not a BF16 value.
+                ReadOnlySpan<sbyte> levels = packed.AsReadOnlySpan<sbyte>();
+                ReadOnlySpan<float> rowScales = packed.QuantInfo!.RowScale!.AsReadOnlySpan<float>();
+                long cols = packed.Shape[1];
+                ReadOnlySpan<float> got = wide.AsReadOnlySpan<float>();
+                for (int i = 0; i < got.Length; i++)
+                    Assert.Equal((float)levels[i] * rowScales[rowScales.Length == 1 ? 0 : (int)(i / cols)], got[i]);
+            }
+            else
+            {
+                foreach (float value in wide.AsReadOnlySpan<float>())
+                    Assert.Equal(0u, BitConverter.SingleToUInt32Bits(value) & 0xFFFFu);
+            }
             checkedWeights++;
         }
         Assert.Equal(2 + 2 + 1 + _config.Depth * 9, checkedWeights);
