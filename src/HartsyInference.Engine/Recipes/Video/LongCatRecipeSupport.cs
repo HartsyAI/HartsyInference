@@ -258,6 +258,28 @@ internal static class LongCatRecipeSupport
     internal static string DmdLoraPath(string checkpointPath) =>
         Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
 
+    /// <summary>The base distilled LoRA's path, which must exist: the distilled build is refused rather than run as the undistilled base.</summary>
+    internal static string RequireCfgStepLora(string checkpointPath)
+    {
+        string path = CfgStepLoraPath(checkpointPath);
+        if (!File.Exists(path))
+            throw new NotSupportedException($"The distilled base build needs its cfg_step LoRA at '{path}', which is not there. "
+                + "Refusing to run the undistilled base as the distilled model.");
+        return path;
+    }
+
+    /// <summary>A LoRA the recipe relies on must apply every unit it carries: a unit whose target the checkpoint lacks, or whose shape differs, is
+    /// skipped silently by a partial stack. Refused, naming the counts, rather than run without it.</summary>
+    internal static void RequireFullyApplied(LoraStack.ApplyReport report, string name)
+    {
+        if (report.Applied == 0 || report.SkippedMissing > 0 || report.SkippedShape > 0)
+        {
+            throw new NotSupportedException($"LoRA '{name}' did not apply in full: {report.Applied} units applied, "
+                + $"{report.SkippedMissing} with no target in this checkpoint, {report.SkippedShape} with a mismatched shape. "
+                + "The distilled base build needs all of them; refusing to run a partly applied LoRA.");
+        }
+    }
+
     /// <summary>Where the base distilled LoRA sits: <c>lora/cfg_step_lora.safetensors</c> beside the checkpoint's folder (the reference layout).</summary>
     internal static string CfgStepLoraPath(string checkpointPath) =>
         Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "cfg_step_lora.safetensors");
@@ -323,11 +345,7 @@ internal static class LongCatRecipeSupport
         if (attachCfgStep)
         {
             // The base distilled path (16 steps, guidance 1.0): the cfg_step LoRA is a runtime gated term, on only while the distilled run is.
-            string cfgStepPath = CfgStepLoraPath(context.CheckpointPath);
-            if (!File.Exists(cfgStepPath))
-                throw new NotSupportedException($"The distilled base build needs its cfg_step LoRA at '{cfgStepPath}', which is not there. "
-                    + "Refusing to run the undistilled base as the distilled model.");
-            LoraFile cfgStep = LoraFile.Load(cfgStepPath);
+            LoraFile cfgStep = LoraFile.Load(RequireCfgStepLora(context.CheckpointPath));
             loaders.Add(cfgStep);
             cfgStepGate = new AdjunctGate();
             gatedLoras.Add(new GatedLora(cfgStep, cfgStepGate, 1f));
@@ -335,8 +353,21 @@ internal static class LongCatRecipeSupport
         if (gatedLoras.Count > 0)
         {
             // The one LoRA path: RecipeLoraMerge merges the gated adapters into the transformer weights before the DiT captures them.
-            loaders.Add(RecipeLoraMerge.Apply((IReadOnlyList<LoraResolver.LoraSpec>?)null, context.Backend,
-                new LoraMergeTargets { Transformer = weights }, "LongCat", gatedLoras)!);
+            LoraStack merged = RecipeLoraMerge.Apply((IReadOnlyList<LoraResolver.LoraSpec>?)null, context.Backend,
+                new LoraMergeTargets { Transformer = weights }, "LongCat", gatedLoras)!;
+            if (attachCfgStep)
+            {
+                try
+                {
+                    RequireFullyApplied(merged.Report, "cfg_step_lora.safetensors");
+                }
+                catch
+                {
+                    merged.Dispose();
+                    throw;
+                }
+            }
+            loaders.Add(merged);
         }
         dit.LoadWeights(weights);
 

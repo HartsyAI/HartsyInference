@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Planning;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -51,6 +52,7 @@ public sealed class LongCatVideoDistilledRecipe : IVideoRecipe, IVideoDeviceChec
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
         Steps = 16, CfgScale = 1.0f, Width = 832, Height = 480, Frames = 93, Fps = 15, FlowShift = LongCatRecipeSupport.BaseFlowShift,
+        LockedFields = VideoLockedFields.Steps | VideoLockedFields.CfgScale,
     };
 
     /// <inheritdoc/>
@@ -71,10 +73,7 @@ public sealed class LongCatVideoDistilledRecipe : IVideoRecipe, IVideoDeviceChec
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // Refused before any weight is read: the distilled build without its cfg_step LoRA would run the undistilled base as the distilled model.
-        string cfgStepPath = LongCatRecipeSupport.CfgStepLoraPath(context.CheckpointPath);
-        if (!File.Exists(cfgStepPath))
-            throw new NotSupportedException($"The distilled base build needs its cfg_step LoRA at '{cfgStepPath}', which is not there. "
-                + "Refusing to run the undistilled base as the distilled model.");
+        LongCatRecipeSupport.RequireCfgStepLora(context.CheckpointPath);
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
