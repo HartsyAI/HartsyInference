@@ -31,7 +31,7 @@ internal static class TileFreeLog
 
     private sealed class GateTally
     {
-        public long Decisions, Over, FreeLimited;
+        public long Decisions, Over;
     }
 
     /// <summary>Records one executed attention row by its capability id: a call that ran, not a planner probe. This is the count to read as calls.</summary>
@@ -74,7 +74,6 @@ internal static class TileFreeLog
             }
             tally.Decisions++;
             if (over) tally.Over++;
-            if (freeBytes < totalBytes / 2) tally.FreeLimited++;
         }
     }
 
@@ -115,8 +114,7 @@ internal static class TileFreeLog
         }
         foreach (KeyValuePair<string, GateTally> gate in a.Gates)
         {
-            lines.Add($"tileFromDevice gate={gate.Key} decisions={gate.Value.Decisions} over={gate.Value.Over} " +
-                      $"freeLimited={gate.Value.FreeLimited}");
+            lines.Add($"tileFromDevice gate={gate.Key} decisions={gate.Value.Decisions} over={gate.Value.Over}");
         }
         return string.Join('\n', lines);
     }

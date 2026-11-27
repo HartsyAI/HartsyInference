@@ -92,15 +92,15 @@ public sealed class SdpaTileFromDeviceTests
     }
 
     [Fact]
-    public void TheFreeLogNamesTheGateAndWhetherFreeSetItsBudget()
+    public void TheFreeLogNamesEachGateAndItsDecisions()
     {
         using IDisposable isolated = TileFreeLog.Isolate();
-        // 24 GiB total: half is 12 GiB. Free of 6 GiB is below half, so free set the budget; free of 20 GiB is not.
+        // Free no longer enters a gate's line: the decisions and the over count are what is logged.
         TileFreeLog.RecordGate("bf16cast", 6UL << 30, 24UL << 30, over: true);
         TileFreeLog.RecordGate("bf16cast", 20UL << 30, 24UL << 30, over: false);
         TileFreeLog.RecordGate("causal", 20UL << 30, 24UL << 30, over: true);
 
-        Assert.Equal("tileFromDevice gate=bf16cast decisions=2 over=1 freeLimited=1\ntileFromDevice gate=causal decisions=1 over=1 freeLimited=0",
+        Assert.Equal("tileFromDevice gate=bf16cast decisions=2 over=1\ntileFromDevice gate=causal decisions=1 over=1",
             TileFreeLog.Summary());
     }
 

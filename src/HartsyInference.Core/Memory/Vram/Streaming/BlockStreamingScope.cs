@@ -22,7 +22,7 @@ public sealed class BlockStreamingScope : IDisposable
     private readonly BlockStreamingController? _streamer;
     private bool _disposed;
 
-    private BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
+    internal BlockStreamingScope(BlockStreamingOptions options, int residentPrefixBlocks,
         BlockStreamingController? streamer)
     {
         _denoiser = options.Denoiser;
