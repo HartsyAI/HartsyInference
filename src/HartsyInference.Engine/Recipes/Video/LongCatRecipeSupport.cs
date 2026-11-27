@@ -22,7 +22,8 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <summary>What every LongCat recipe loads: the DiT from the checkpoint directory, the VAE, and umT5 with its tokenizer. The latent channel count
 /// is the DiT's own <see cref="LongCatConfig.InChannels"/>, so a tiny config and the release (16 channels) share one path.</summary>
 internal sealed record LongCatParts(LongCatTransformer Dit, int Channels, int CaptionChannels, bool HasAudio, IWanVaeDecoder Decoder,
-    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer, AdjunctGate? DmdGate = null, AdjunctGate? OpsdGate = null);
+    IWanVaeEncoder Encoder, T5TextEncoder Umt5, T5Tokenizer Tokenizer, AdjunctGate? DmdGate = null, AdjunctGate? OpsdGate = null,
+    AdjunctGate? CfgStepGate = null);
 
 /// <summary>Where the umT5 and VAE come from. Null in production (the engine's side-model downloads); a test injects small stand-ins here, so the
 /// recipe path runs end to end without the multi-gigabyte files. Each factory returns objects the caller owns.</summary>
@@ -257,11 +258,37 @@ internal static class LongCatRecipeSupport
     internal static string DmdLoraPath(string checkpointPath) =>
         Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "dmd_lora.safetensors");
 
+    /// <summary>The base distilled LoRA's path, which must exist: the distilled build is refused rather than run as the undistilled base.</summary>
+    internal static string RequireCfgStepLora(string checkpointPath)
+    {
+        string path = CfgStepLoraPath(checkpointPath);
+        if (!File.Exists(path))
+            throw new NotSupportedException($"The distilled base build needs its cfg_step LoRA at '{path}', which is not there. "
+                + "Refusing to run the undistilled base as the distilled model.");
+        return path;
+    }
+
+    /// <summary>A LoRA the recipe relies on must apply every unit it carries: a unit whose target the checkpoint lacks, or whose shape differs, is
+    /// skipped silently by a partial stack. Refused, naming the counts, rather than run without it.</summary>
+    internal static void RequireFullyApplied(LoraStack.ApplyReport report, string name)
+    {
+        if (report.Applied == 0 || report.SkippedMissing > 0 || report.SkippedShape > 0)
+        {
+            throw new NotSupportedException($"LoRA '{name}' did not apply in full: {report.Applied} units applied, "
+                + $"{report.SkippedMissing} with no target in this checkpoint, {report.SkippedShape} with a mismatched shape. "
+                + "The distilled base build needs all of them; refusing to run a partly applied LoRA.");
+        }
+    }
+
+    /// <summary>Where the base distilled LoRA sits: <c>lora/cfg_step_lora.safetensors</c> beside the checkpoint's folder (the reference layout).</summary>
+    internal static string CfgStepLoraPath(string checkpointPath) =>
+        Path.Combine(Path.GetDirectoryName(CheckpointDirectory(checkpointPath)) ?? ".", "lora", "cfg_step_lora.safetensors");
+
     /// <summary>Loads the parts. With <paramref name="attachDmd"/>, the DMD LoRA is attached as a runtime gated term on the DiT's weights (the
     /// INT8 base included), so it is live only while its <see cref="AdjunctGate"/> is enabled. A missing LoRA file is refused here, before any
     /// weight is read, so a distilled request never runs on the bare base.</summary>
     internal static LongCatParts LoadParts(RecipeContext context, List<IDisposable> loaders, LongCatSideModels? sides, bool attachDmd = false,
-        LongCatLoraFiles? mixedLoras = null)
+        LongCatLoraFiles? mixedLoras = null, bool attachCfgStep = false)
     {
         // The placements the engine sets that LongCat cannot honour: CFG-parallel, DiT shards and context parallel are refused; a separate text-encoder
         // or VAE backend is warned about by the engine, which checks first (UnhonouredBackends); this second check does not warn again.
@@ -290,6 +317,7 @@ internal static class LongCatRecipeSupport
         loaders.Add(dit);
         AdjunctGate? dmdGate = null;
         AdjunctGate? opsdGate = null;
+        AdjunctGate? cfgStepGate = null;
         List<GatedLora> gatedLoras = [];
         if (mixedLoras is { } mixed)
         {
@@ -314,11 +342,32 @@ internal static class LongCatRecipeSupport
             dmdGate = new AdjunctGate();
             gatedLoras.Add(new GatedLora(dmd, dmdGate, DmdMultiplier));
         }
+        if (attachCfgStep)
+        {
+            // The base distilled path (16 steps, guidance 1.0): the cfg_step LoRA is a runtime gated term, on only while the distilled run is.
+            LoraFile cfgStep = LoraFile.Load(RequireCfgStepLora(context.CheckpointPath));
+            loaders.Add(cfgStep);
+            cfgStepGate = new AdjunctGate();
+            gatedLoras.Add(new GatedLora(cfgStep, cfgStepGate, 1f));
+        }
         if (gatedLoras.Count > 0)
         {
             // The one LoRA path: RecipeLoraMerge merges the gated adapters into the transformer weights before the DiT captures them.
-            loaders.Add(RecipeLoraMerge.Apply((IReadOnlyList<LoraResolver.LoraSpec>?)null, context.Backend,
-                new LoraMergeTargets { Transformer = weights }, "LongCat", gatedLoras)!);
+            LoraStack merged = RecipeLoraMerge.Apply((IReadOnlyList<LoraResolver.LoraSpec>?)null, context.Backend,
+                new LoraMergeTargets { Transformer = weights }, "LongCat", gatedLoras)!;
+            if (attachCfgStep)
+            {
+                try
+                {
+                    RequireFullyApplied(merged.Report, "cfg_step_lora.safetensors");
+                }
+                catch
+                {
+                    merged.Dispose();
+                    throw;
+                }
+            }
+            loaders.Add(merged);
         }
         dit.LoadWeights(weights);
 
@@ -338,7 +387,7 @@ internal static class LongCatRecipeSupport
         // The avatar's audio modules are the audio_proj.* weights; a base checkpoint has none.
         bool hasAudio = checkpoint.Weights.Keys.Any(key => key.StartsWith("audio_proj.", StringComparison.Ordinal));
         return new LongCatParts(dit, checkpoint.Config.InChannels, checkpoint.Config.CaptionChannels, hasAudio, decoder, encoder, umt5, tokenizer, dmdGate,
-            opsdGate);
+            opsdGate, cfgStepGate);
     }
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>

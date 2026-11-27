@@ -9,7 +9,8 @@ using HartsyInference.ModelAssets.Metadata;
 namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>LongCat-Video, the base family: text-to-video and image-to-video on the 13.6B DiT, flow-match Euler with CFG-Zero* guidance
-/// (<see cref="LongCatVideoPipeline"/>). Long video, video continuation and the 720p refinement are not wired here yet.</summary>
+/// (<see cref="LongCatVideoPipeline"/>). The distilled sibling is <see cref="LongCatVideoDistilledRecipe"/>. Long video, video continuation and
+/// the 720p refinement are not wired here yet.</summary>
 public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
 {
     /// <summary>Refuses the CFG-parallel, DiT-shard and context-parallel placements before the memory report (see IArchitectureRecipe).</summary>
@@ -45,8 +46,8 @@ public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "longcat-video", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The base family's sampling settings: 50 steps, shift 12 (research plan, sampler variants). The guidance scale and the
-    /// output frame rate are not recorded in the research plan yet; they are confirmed against the pinned reference at the real-weight run (B8).</summary>
+    /// <summary>The base family's sampling settings, the pinned demos' defaults: 50 steps, guidance 4.0, 832x480, 93 frames, 15 fps
+    /// (run_demo_text_to_video.py:79-90, run_demo_image_to_video.py:86-98 @ 58eb336), shift 12 (LongCatRecipeSupport.BaseFlowShift).</summary>
     public VideoDefaults Defaults { get; } = new VideoDefaults
     {
         Steps = 50, CfgScale = 4.0f, Width = 832, Height = 480, Frames = 93, Fps = 15, FlowShift = LongCatRecipeSupport.BaseFlowShift,
