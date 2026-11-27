@@ -3,6 +3,7 @@ using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Pipelines.LongCat;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -51,7 +52,8 @@ public sealed class LongCatVideoRecipePipeline : IVideoRecipePipeline
         float[]? firstFrame = null;
         if (request.InitImage is not null)
         {
-            byte[] rgb = VideoRecipeUtils.ResizeRgb24(request.InitImage, width, height);
+            // The base reference's I2V init image: diffusers' default resize (a Lanczos stretch to the target size).
+            byte[] rgb = FeatureImaging.ResizeRgb24Lanczos(request.InitImage, width, height);
             firstFrame = LongCatRecipeSupport.EncodeFirstFrame(_backend, _parts.Encoder, rgb, width, height, _parts.Channels);
             mode = LongCatConditioningMode.Image;
             condLatents = 1;
