@@ -36,13 +36,17 @@ public sealed class LongCatCheckpoint : IDisposable
     /// <summary>Every tensor by checkpoint key.</summary>
     public IReadOnlyDictionary<string, Tensor> Weights { get; }
 
-    /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors. When both index
-    /// files are present the dense one is used; the INT8 index is read only in a folder that has no dense one.</summary>
+    /// <summary>The index <see cref="Open"/> reads in <paramref name="directory"/>: the dense one when both are present, the INT8 one only in a
+    /// folder that has no dense one.</summary>
+    public static string IndexNameIn(string directory) =>
+        File.Exists(Path.Combine(directory, IndexFileName)) || !File.Exists(Path.Combine(directory, Int8IndexFileName))
+            ? IndexFileName : Int8IndexFileName;
+
+    /// <summary>Opens <paramref name="directory"/>, checks every expected key and shape and every dtype, and maps the tensors, from the index
+    /// <see cref="IndexNameIn"/> names.</summary>
     public static LongCatCheckpoint Open(string directory)
     {
-        string indexName = File.Exists(Path.Combine(directory, IndexFileName)) || !File.Exists(Path.Combine(directory, Int8IndexFileName))
-            ? IndexFileName : Int8IndexFileName;
-        ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, indexName);
+        ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(directory, null, IndexNameIn(directory));
         try
         {
             bool int8 = LongCatInt8Converter.IsInt8Layout(shards.Inventory.Keys);

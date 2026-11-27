@@ -28,6 +28,7 @@ absent locally, so the run says nothing about the backend. `untested` means exac
 | LLM | Qwen2.5-0.5B Q4_K_M | runs | same text as the CPU backend over 128 greedy tokens; step graph 215 tok/s against 104 eager |
 | Video | Wan 2.2 5B | incomplete | text-encoder weights not present locally |
 | Video | LTX-2 | untested | no weights in the local model tree |
+| Video | LongCat-Video, LongCat-Video-Avatar | untested | the released DiT does not fit 24 GB without weight streaming (29.5 GiB as BF16), so planning refuses it there; block 0 of Avatar 1.6 agrees with the CPU on the RTX 3060 (relative RMS 4.3e-4 with the default GEMMs, 2026-11-27) |
 | Vision | RT-DETR | runs | detect over a real photo |
 | Vision | Depth Pro 2 S, B, L, H+ | runs | image, three joint views and 24-frame video (buffered and unbuffered) match the CPU backend within 3e-5; `ConvTranspose2d` ran on the host in that measurement, which made the head about 1.8 s of a 256x384 image. It has a Vulkan shader since 2026-11-26: the head's reassemble step, on synthetic weights, then reads nothing back (`DeviceShapedOutputGpuTests`); the head's time was not re-measured; rechecked on the RTX 4090 (2026-11-26) at `5c2568ec5` and `ef7d4eadb` at 1e-4; B, L and H+ match the CPU backend (inverse depth within 2.9e-6, RTX 3060, `15e1c2e20`, 2026-11-26, before the shader; again with it at `586847e90`, same bound, L and H+ 2 to 12 s a case with load) |
 | Audio | Whisper | runs | transcribed a real clip |

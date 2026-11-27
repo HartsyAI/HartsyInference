@@ -270,6 +270,13 @@ internal static class LongCatRecipeSupport
         {
             throw new NotSupportedException("LongCat does not take a user LoRA; the release's own LoRAs are the only ones applied.");
         }
+        // Planning refuses a device that cannot hold the weights; a caller that skipped it, or planned before the download, is refused here,
+        // before an INT8 release is widened on the host.
+        foreach (IBackend backend in context.TransformerBackends)
+        {
+            if (LongCatWeightFit.Refusal(backend, CheckpointDirectory(context.CheckpointPath)) is { } refusal)
+                throw new NotSupportedException(refusal);
+        }
         LongCatCheckpoint checkpoint = LongCatCheckpoint.Open(CheckpointDirectory(context.CheckpointPath));
         loaders.Add(checkpoint);
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy

@@ -77,14 +77,9 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             {
                 sparseBackendSupported = _engine.Backend.SupportsVideoSparseAttention;
             }
-            // Constructing the backend is part of the probe, so its construction failures are probe failures: a
-            // Vulkan loader present with no compatible device throws VulkanException, and an out-of-range ordinal
-            // throws ArgumentOutOfRangeException. Left unlisted they fault planning instead of producing the
-            // video.vsa.backend_unsupported issue this block exists to produce. Adding a backend package means
-            // adding its construction exception here, until the backend registry makes the probe generic.
-            catch (Exception error) when (error is CudaException or VulkanException or DllNotFoundException
-                or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException
-                or NotSupportedException or ArgumentOutOfRangeException)
+            // Left uncaught, a probe failure faults planning instead of producing the video.vsa.backend_unsupported
+            // issue this block exists to produce.
+            catch (Exception error) when (IsBackendProbeFailure(error))
             {
                 RecordSparseBackendFailure(error);
             }
@@ -113,7 +108,56 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             };
             plan = plan with { Issues = issues };
         }
+        if (plan.IsValid && recipe is IVideoDeviceCheck check)
+        {
+            plan = ApplyDeviceCheck(plan, check);
+        }
         return VideoRequestExecutionBinding.BindPlan(plan);
+    }
+
+    /// <summary>What constructing or asking the engine's backend can throw. Constructing the backend is part of a plan-time probe, so its
+    /// construction failures are probe failures: a Vulkan loader present with no compatible device throws VulkanException, and an out-of-range
+    /// ordinal throws ArgumentOutOfRangeException. Adding a backend package means adding its construction exception here, until the backend
+    /// registry makes the probe generic.</summary>
+    private static bool IsBackendProbeFailure(Exception error) => error is CudaException or VulkanException or DllNotFoundException
+        or EntryPointNotFoundException or BadImageFormatException or PlatformNotSupportedException or NotSupportedException
+        or ArgumentOutOfRangeException;
+
+    /// <summary>Adds the recipe's refusal of this engine's device. A checkpoint that is not on disk yet adds nothing, and neither does a backend
+    /// that does not construct or a checkpoint whose headers do not read (both logged): generation reports those itself, and the recipe asks
+    /// again when it loads.</summary>
+    private VideoPlan ApplyDeviceCheck(VideoPlan plan, IVideoDeviceCheck check)
+    {
+        if (plan.Model.LocalPath is not { Length: > 0 } path || !(File.Exists(path) || Directory.Exists(path)))
+        {
+            return plan;
+        }
+        string? refusal;
+        try
+        {
+            refusal = check.DeviceRefusal(_engine.Backend, path);
+        }
+        catch (Exception error) when (IsBackendProbeFailure(error) || error is IOException or UnauthorizedAccessException
+            or InvalidDataException or System.Text.Json.JsonException or HartsyInference.Core.Exceptions.HartsyInferenceException)
+        {
+            Logs.Warning($"[VideoPlan] The device check of '{plan.Profile.FamilyId}' did not run: {error.Message}");
+            return plan;
+        }
+        if (refusal is null)
+        {
+            return plan;
+        }
+        List<VideoPlanIssue> issues = new List<VideoPlanIssue>(plan.Issues)
+        {
+            new VideoPlanIssue
+            {
+                Code = "video.memory.weights_do_not_fit",
+                Severity = VideoPlanIssueSeverity.Error,
+                Message = refusal,
+                Field = "backend",
+            },
+        };
+        return plan with { Issues = issues };
     }
 
     /// <summary>Refuses <see cref="VideoRequest.SeparateDrivingVocals"/> when there is no driving audio to separate.</summary>
