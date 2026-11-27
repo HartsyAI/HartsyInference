@@ -306,9 +306,10 @@ public sealed class FastFramesPipeline : IDisposable
                 Backend = _backend,
                 Denoiser = _transformer,
                 ModelName = _config.Name,
-                // The window (prefetchAhead + 1 streamed blocks) is uploaded right after the placement, so it is part of the headroom.
+                // The headroom is the chosen mode's frame-cache need plus the window (prefetchAhead + 1 streamed blocks), which is uploaded
+                // right after the placement.
                 HeadroomBytes = StreamingHeadroomOverride
-                    ?? kvNeed + DefaultStreamingHeadroomBytes + StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead),
+                    ?? kvNeed + StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead),
                 Mode = StreamingMode,
                 Pin = _generatorPin,
                 TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
@@ -386,8 +387,8 @@ public sealed class FastFramesPipeline : IDisposable
         _generatorPin.Resident = true;
     }
 
-    /// <summary>Bytes the block placement keeps free beyond the clip's frame cache: activations, the refiner and the decoder. When
-    /// null, <see cref="DefaultStreamingHeadroomBytes"/> is used.</summary>
+    /// <summary>Bytes the block placement keeps free beyond the clip's frame cache. When null, the chosen mode's cache need plus the streaming
+    /// window is used.</summary>
     public long? StreamingHeadroomOverride { get; set; }
 
     /// <summary>The low-VRAM policy the placement runs under; null resolves from the process setting. ForceOn streams even when everything fits
@@ -432,10 +433,6 @@ public sealed class FastFramesPipeline : IDisposable
         _backend.TrimMemoryPool();
         _generatorPin.Resident = false;
     }
-
-    /// <summary>The activation allowance on top of the frame cache when the placement is planned. The refiner and the decoder are not in it:
-    /// they are uploaded before the placement, so the planner counts them as used.</summary>
-    public const long DefaultStreamingHeadroomBytes = 1L << 30;
 
     private IEnumerable<VideoFrame> GenerateCore(Tensor promptEmbeds, IFastFramesNoise noise, int latentFrames,
         Action<int, int>? progress, CancellationToken cancel)
