@@ -36,10 +36,20 @@ public sealed class ImageDataCodecAlphaTests
     }
 
     [Fact]
-    public void DecodeBase64WithAlpha_RejectsNonPng()
+    public void DecodeBase64WithAlpha_RefusesAFormatThatIsNeitherPngNorJpeg()
     {
+        // A GIF header: not PNG and not JPEG, so the codec names the format it does not decode (NotSupported; the API answers 501).
+        string gif = Convert.ToBase64String([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00]);   // "GIF89a" plus a 1x1 logical screen
+
+        Assert.Throws<NotSupportedException>(() => ImageDataCodec.DecodeBase64WithAlpha(gif));
+    }
+
+    [Fact]
+    public void DecodeBase64WithAlpha_AMalformedJpegIsAnArgumentErrorTheApiAnswersAs400()
+    {
+        // JPEG magic, then a truncated header: the JPEG decoder rejects it as bad input (ArgumentException; the API maps it to 400).
         string jpeg = Convert.ToBase64String([0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]);
 
-        Assert.Throws<NotSupportedException>(() => ImageDataCodec.DecodeBase64WithAlpha(jpeg));
+        Assert.Throws<ArgumentException>(() => ImageDataCodec.DecodeBase64WithAlpha(jpeg));
     }
 }
