@@ -196,6 +196,10 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         {
             return;
         }
+        // A kept model's device copies are freed by name, while its tensors still exist: the engine sweeps the device only when it
+        // keeps no other pipeline.
+        _dit.Release(force: true);
+        _codecWeights.Release(force: true);
         _transformer.Dispose();
         for (int i = _owned.Count - 1; i >= 0; i--)
         {

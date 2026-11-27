@@ -110,6 +110,24 @@ public sealed class DuoResidencyTests : IDisposable
         Assert.DoesNotContain(_device.Calls, c => c.Kind == nameof(IBackend.PreloadWeights) && c.Tensors.Overlaps(dit));
     }
 
+    /// <summary>An engine that keeps other pipelines cached sweeps nothing after disposing this one.</summary>
+    [Fact]
+    public async Task DisposingThePipelineFreesWhatItKept()
+    {
+        using DuoRecipePipeline pipeline = Build();
+        VideoRequest request = Request();
+        VideoEffectiveSettings settings = await Settings(request);
+        using IDisposable keeping = KeepModels(true);
+
+        HashSet<Tensor> dit = Preloaded(() => Run(pipeline, request, settings));
+        _device.Calls.Clear();
+        pipeline.Dispose();
+
+        HashSet<Tensor> freed = [.. _device.Calls.Where(c => c.Kind == nameof(IBackend.FreeWeights)).SelectMany(c => c.Tensors)];
+        Assert.Subset(freed, dit);
+        Assert.Contains(_codecWeight, freed);
+    }
+
     private static IDisposable KeepModels(bool keep) =>
         KnobProfile.Create("duo-residency").With(EngineKnobs.KeepModels, keep).Push();
 
