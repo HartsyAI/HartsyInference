@@ -69,7 +69,7 @@ public sealed class DuoSessionTests
         using MiniMaxH3Transformer transformer = Transformer();
         IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, []));
         using DuoAudioStreamDecoder audio = Audio(backend);
         DuoSampleInput sample = Sample() with
         {
@@ -87,7 +87,7 @@ public sealed class DuoSessionTests
         using MiniMaxH3Transformer transformer = Transformer();
         IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, []));
         using DuoAudioStreamDecoder audio = Audio(backend);
         DuoSampleInput sample = Sample() with
         {
@@ -105,7 +105,7 @@ public sealed class DuoSessionTests
         using MiniMaxH3Transformer transformer = Transformer();
         IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, []));
         using DuoAudioStreamDecoder audio = Audio(backend);
         DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
         session.Run(Run(seed: 0));
@@ -119,7 +119,7 @@ public sealed class DuoSessionTests
         using MiniMaxH3Transformer transformer = Transformer();
         IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, []));
         using DuoAudioStreamDecoder audio = Audio(backend);
         DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
         DuoRun run = Run(seed: 0) with { BodyText = Run(seed: 0).BodyText.Take(Blocks - 1).ToArray() };
@@ -132,7 +132,7 @@ public sealed class DuoSessionTests
     {
         IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, windows, seed));
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, windows));
         using DuoAudioStreamDecoder audio = Audio(backend);
         DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
         return session.Run(Run(seed));
@@ -144,8 +144,8 @@ public sealed class DuoSessionTests
     /// <summary>A recorded window: its latent steps, and the values in [channel][step][height][width] order.</summary>
     private sealed record Window(int Steps, float[] Values);
 
-    /// <summary>A fake video decoder. It records the window it was given and returns pixels that depend on the window's values and the seed.</summary>
-    private static Tensor Fake(Tensor window, List<Window> windows, int seed)
+    /// <summary>A fake video decoder. It records the window it was given and returns pixels that depend only on the window's values.</summary>
+    private static Tensor Fake(Tensor window, List<Window> windows)
     {
         int steps = (int)window.Shape[2];
         float[] values = window.AsSpan<float>().ToArray();
@@ -160,7 +160,7 @@ public sealed class DuoSessionTests
             {
                 for (int p = 0; p < Height * Width; p++)
                 {
-                    o[((c * frames) + f) * Height * Width + p] = MathF.Tanh(mean * 8f + 0.1f * c + 0.01f * f + 0.001f * p + 0.5f * seed);
+                    o[((c * frames) + f) * Height * Width + p] = MathF.Tanh(mean * 8f + 0.1f * c + 0.01f * f + 0.001f * p);
                 }
             }
         }
