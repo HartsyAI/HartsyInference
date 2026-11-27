@@ -357,6 +357,9 @@ the call by name.
 - A token whose every score is negative infinity gets a zero row; a NaN score propagates
   ([attention contract §3](ATTENTION_CONTRACT.md#3-scores)).
 - The optional `selected` tensor, I32 `[B, H, queryBlocks, K]`, receives each query block's key blocks, ascending.
+- A kernel is held to the reference on F32 operands: the same `selected` report and an output within a relative RMS of
+  1e-5. The reference sums a block mean in the block's raster order and a score in channel order, both in F32; a kernel
+  that sums in another order can rank two blocks differently only where their scores differ by rounding alone.
 
 The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in
 top-k mode, whose `bsa_params` ship as sparsity 0.9375 and 4×4×4 blocks. Its CDF-threshold selection has no option here.
