@@ -56,6 +56,9 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   verification, an arbitrary local file pays one visible exact-hash pass first.
 - Planning errors and non-bypassable release gates return before backend probing or model construction, and
   execution rechecks planned artifact stamps, so a replaced checkpoint needs a new plan.
+- A recipe may refuse the engine's device for an otherwise valid plan whose checkpoint is on disk
+  (`IVideoDeviceCheck`; `video.memory.weights_do_not_fit`), and asking constructs the backend. A backend that does not
+  construct, or headers that do not read, add no issue, so such a recipe checks again when it loads.
 
 ## Recipe Contract
 - A recipe is the only owner of a family's defaults. `Defaults` (and a video recipe's `Constraints`) are abstract
