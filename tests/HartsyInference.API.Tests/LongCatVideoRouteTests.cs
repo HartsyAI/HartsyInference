@@ -22,7 +22,8 @@ namespace HartsyInference.API.Tests;
 /// frame, and the avatar recipe's 1.5 and 1.6 builds running a three-segment chain from a portrait and a driving WAV. The recipes are registered
 /// under test family names with stand-ins for umT5, the VAE and the Whisper features, so no download or real weight is touched. The LoRA refusal
 /// is checked on the production family ids, which plan without loading a model.</summary>
-[Collection(nameof(LongCatVideoRouteCollection))]
+// The models root is process-global: this class shares the "ModelsRootKnob" collection with every other test that sets it, so they never overlap.
+[Collection("ModelsRootKnob")]
 public sealed class LongCatVideoRouteTests : IAsyncLifetime
 {
     private const string AvatarFamily = "longcat-avatar-http-test", BaseFamily = "longcat-video-http-test";
@@ -231,10 +232,4 @@ public sealed class LongCatVideoRouteTests : IAsyncLifetime
 
         public IVideoRecipePipeline Construct(RecipeContext context) => inner.Construct(context);
     }
-}
-
-/// <summary>Runs alone: the test sets the process-wide models root.</summary>
-[CollectionDefinition(nameof(LongCatVideoRouteCollection), DisableParallelization = true)]
-public sealed class LongCatVideoRouteCollection
-{
 }

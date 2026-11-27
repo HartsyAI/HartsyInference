@@ -24,7 +24,8 @@ public static class MappedTensorPrefetch
 
     private static readonly SemaphoreSlim BatchGate = new(1, 1);
     private static readonly SemaphoreSlim Wake = new(0);
-    private static readonly ManualResetEventSlim Finished = new(false);
+    // Progress and the readers' completion share one monitor. ManualResetEventSlim would be the natural signal, but it creates its kernel event
+    // lazily on the first blocking wait, which allocates on whichever caller blocks first; a monitor allocates nothing per wait.
     private static readonly object Progress = new();
     private static Chunk[] _chunks = new Chunk[256];
     private static int[] _tensorChunksLeft = new int[64];
@@ -86,7 +87,6 @@ public static class MappedTensorPrefetch
                 int readers = Math.Min(Math.Min(threads, MaxReaders), _chunkCount);
                 EnsureReaderThreads(readers);
                 Volatile.Write(ref _busyReaders, readers);
-                Finished.Reset();
                 Wake.Release(readers);
             }
             int generation = ++_generations;
@@ -139,7 +139,7 @@ public static class MappedTensorPrefetch
         public long Finish()
         {
             if (!IsLive) return 0;
-            if (_chunkCount > 0) Finished.Wait();
+            if (_chunkCount > 0) WaitForReaders();
             return Interlocked.Read(ref _bytesRead);
         }
 
@@ -148,7 +148,7 @@ public static class MappedTensorPrefetch
         {
             // Claim the end atomically, so only one Dispose of this batch releases the gate.
             if (_generation == 0 || Interlocked.CompareExchange(ref _liveGeneration, 0, _generation) != _generation) return;
-            if (_chunkCount > 0) Finished.Wait();
+            if (_chunkCount > 0) WaitForReaders();
             // Drop the handles so a finished prefetch does not keep a disposed model's mappings reachable.
             Array.Clear(_chunks, 0, _chunkCount);
             _chunkCount = 0;
@@ -200,7 +200,20 @@ public static class MappedTensorPrefetch
                     lock (Progress) Monitor.PulseAll(Progress);
                 }
             }
-            if (Interlocked.Decrement(ref _busyReaders) == 0) Finished.Set();
+            if (Interlocked.Decrement(ref _busyReaders) == 0)
+            {
+                lock (Progress) Monitor.PulseAll(Progress);
+            }
+        }
+    }
+
+    // Blocks until every reader of the running batch has finished its chunks. The count is checked under the monitor the last reader pulses,
+    // so the wake-up cannot be missed.
+    private static void WaitForReaders()
+    {
+        lock (Progress)
+        {
+            while (Volatile.Read(ref _busyReaders) > 0) Monitor.Wait(Progress);
         }
     }
 
