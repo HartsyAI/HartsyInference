@@ -36,6 +36,9 @@ public sealed class LongCatCheckpoint : IDisposable
 
     private readonly List<Tensor> _converted;
 
+    /// <summary>True when the weights came from a GGUF repack: its block quants widen to BF16 where a backend cannot hold them packed.</summary>
+    public bool IsGguf => _files is CheckpointSource;
+
     /// <summary>True for the per-row INT8 release: its linears are I8 tensors carrying <see cref="Tensor.QuantInfo"/>. Those need
     /// <c>QuantizedWeightPolicy.PrepareForBackends</c> (or a backend with a resident int8 path) before a forward.</summary>
     public bool IsInt8 { get; }

@@ -11,9 +11,10 @@ internal static class LongCatGgufTestData
 {
     /// <summary>Writes <c>model.gguf</c> into <paramref name="directory"/>: every block linear whose rows hold whole blocks quantized
     /// (<paramref name="valueQuant"/> for the two value projections), the rest F32. Returns each engine weight as the file decodes it, F32, which
-    /// the caller disposes. <paramref name="skip"/> leaves one stored tensor out.</summary>
+    /// the caller disposes. <paramref name="skip"/> leaves one stored tensor out; <paramref name="quantized"/> receives the
+    /// names of the weights stored as block quants.</summary>
     public static Dictionary<string, Tensor> Write(string directory, IReadOnlyDictionary<string, Tensor> weights, string quant, string valueQuant,
-        string? skip = null)
+        string? skip = null, HashSet<string>? quantized = null)
     {
         Dictionary<string, Tensor> decoded = new(StringComparer.Ordinal);
         List<Tensor> written = [];
@@ -49,6 +50,8 @@ internal static class LongCatGgufTestData
                         writer.AddTensor(names[part], stored);
                 }
                 decoded[key] = whole;
+                if (linear)
+                    quantized?.Add(key);
             }
             writer.Flush();
         }

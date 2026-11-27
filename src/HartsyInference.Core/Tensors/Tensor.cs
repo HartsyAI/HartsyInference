@@ -666,6 +666,8 @@ public sealed unsafe class Tensor : IDisposable
     {
         target.Fp8ScaleFactor = Fp8ScaleFactor;
         target.Fp8InputScaleFactor = Fp8InputScaleFactor;
+        // The GEMM dtype of a float32-input layer is per tensor: a view or copy that dropped it would take the BF16 GEMM.
+        target.ForceF32Gemm = ForceF32Gemm;
         if (LowRankAdjunct is not null)
         {
             // The adjunct's up matrix is output-row-indexed and its down matrix input-column-indexed, so a view that

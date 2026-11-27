@@ -82,8 +82,13 @@ public sealed class LongCatAvatarRecipeEndToEndTests
         Dictionary<string, Tensor>? decoded = null;
         try
         {
+            HashSet<string> quantized = new(StringComparer.Ordinal);
             List<(int Frames, float[] Values)> repack = Run(onePointSix: false, audioSeed: 1,
-                writeDit: directory => decoded = LongCatGgufTestData.Write(directory, weights, "Q8_0", "Q8_0")).Vae.Decoded;
+                writeDit: directory => decoded = LongCatGgufTestData.Write(directory, weights, "Q8_0", "Q8_0", quantized: quantized)).Vae.Decoded;
+            // The CPU widens each block quant to BF16, so the dense run takes the same rounded values.
+            foreach (string key in quantized)
+                foreach (ref float value in decoded![key].AsSpan<float>())
+                    value = BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(value));
             List<(int Frames, float[] Values)> dense = Run(onePointSix: false, audioSeed: 1, dense: decoded).Vae.Decoded;
             List<(int Frames, float[] Values)> original = Run(onePointSix: false, audioSeed: 1, dense: weights).Vae.Decoded;
 

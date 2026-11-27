@@ -338,7 +338,7 @@ internal static class LongCatRecipeSupport
         // An INT8 checkpoint arrives as dense keys whose linears are I8 with their row scale attached (LongCatCheckpoint). The weight policy
         // keeps an int8 linear packed only where a backend runs it, and widens it elsewhere, before the DiT captures the weights.
         Dictionary<string, Tensor> weights = new(checkpoint.Weights, StringComparer.Ordinal);
-        loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, DType.F32));
+        loaders.Add(QuantizedWeightPolicy.PrepareForBackends(weights, context.TransformerBackends, WidenedDType(checkpoint)));
         // Before the LoRAs and the DiT, which carry a weight's companions on from here.
         ApplyInt8WeightOnly(weights);
         // The DiT is registered before any LoRA or weight is read, so a failure at any later step disposes it, and the LoRA files and their
@@ -432,13 +432,19 @@ internal static class LongCatRecipeSupport
         {
             if (weight.DType != DType.I8 || weight.QuantInfo is not { Format: "int8_tensorwise", RowScale: not null } info)
                 continue;
-            weight.QuantInfo = info with { FullPrecisionMatMul = true };
+            // LongCat's reference dequantizes in BF16 with nearest-even rounding (quantization.py @ 58eb336, lines 27-31): the flag selects that
+            // for this layer only; other families keep their own dequant.
+            weight.QuantInfo = info with { FullPrecisionMatMul = true, ReferenceRounding = true };
             marked++;
         }
         Logs.Info($"[LongCatRecipeSupport] numerics.longcatInt8WeightOnly: {marked} INT8 linears marked weight-only (CUDA unpacks each for a dense "
             + "GEMM on every call).");
         return marked;
     }
+
+    /// <summary>The dtype a packed weight a backend cannot hold widens to. A GGUF block quant takes BF16: at F32 an 11.7 GiB repack would hold
+    /// about 57 GiB on the host. An INT8 release takes F32, which keeps the exact products of its float32-input layers.</summary>
+    internal static DType WidenedDType(LongCatCheckpoint checkpoint) => checkpoint.IsGguf ? DType.BF16 : DType.F32;
 
     /// <summary>The checkpoint's folder. The catalog's primary asset is the first shard, so a file path resolves to the folder it sits in.</summary>
     internal static string CheckpointDirectory(string path) =>
