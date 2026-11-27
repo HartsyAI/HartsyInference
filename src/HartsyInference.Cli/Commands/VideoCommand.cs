@@ -17,8 +17,8 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
     public sealed class Settings : PlacementCliSettings
     {
         /// <summary>The video description.</summary>
-        [CommandArgument(0, "<prompt>")]
-        [Description("The video description.")]
+        [CommandArgument(0, "[prompt]")]
+        [Description("The video description. Required, except for a Duo run, which takes its condition from --duo-run-folder.")]
         public string Prompt { get; init; } = "";
 
         /// <summary>Model id (catalog) or path. Optional when <c>--model-path</c> is given.</summary>
@@ -312,6 +312,16 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         [Description("Restore target-area height (default 720).")]
         public int? RestoreHeight { get; init; }
 
+        /// <summary>The folder a Duo run reads its Intent rows, reference latent and noise from.</summary>
+        [CommandOption("--duo-run-folder")]
+        [Description("Duo only: folder with manifest.json naming the Intent rows, reference latent and noise. Use with no prompt; --frames is 17 per block.")]
+        public string? DuoRunFolder { get; init; }
+
+        /// <summary>The Duo history window in frames.</summary>
+        [CommandOption("--duo-window-frames")]
+        [Description("Duo only: history window in frames, counting the current 17-frame block (default 144; -1 keeps all). Bounds device memory.")]
+        public int? DuoWindowFrames { get; init; }
+
         /// <summary>Directory to write the frame sequence into.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to write the frame sequence into (defaults to the output root).")]
@@ -331,7 +341,14 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (!CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out int exitCode))
+        int exitCode;
+        bool duo = settings.DuoRunFolder is not null || settings.DuoWindowFrames is not null;
+        if (duo && !DuoCliGate.IsDuo(ModelSelector.Parse(settings.Model).Id))
+        {
+            AnsiConsole.MarkupLine("[red]--duo-run-folder and --duo-window-frames need -m duo-v1-causal or -m duo-v1-2-causal.[/]");
+            return 1;
+        }
+        if (!duo && !CommandRunner.RequireNonEmpty(settings.Prompt, "A prompt is required.", out exitCode))
             return exitCode;
 
         if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
@@ -371,6 +388,8 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         parameters.PutIfSet("swap-model", settings.SwapModel);
         parameters.PutIfSet("swap-percent", settings.SwapPercent);
         parameters.PutIfSet("preview-output", settings.PreviewOutput);
+        parameters.PutIfSet("duo-run-folder", settings.DuoRunFolder);
+        parameters.PutIfSet("duo-window-frames", settings.DuoWindowFrames);
         // Repeatable options collapse to one newline-joined value: the parameter bag is flat strings, and a path
         // cannot contain a newline.
         if (settings.ReferenceImages is { Length: > 0 })
@@ -454,6 +473,14 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         return CommandRunner.Run(Modality.Video, spec, settings.Prompt, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false, gpu, engineOptions);
     }
+}
+
+/// <summary>Keeps the Duo run options on the Duo recipe, so another family cannot be run without a prompt by passing one.</summary>
+internal static class DuoCliGate
+{
+    /// <summary>True when <paramref name="family"/> resolves to the Duo recipe.</summary>
+    internal static bool IsDuo(string? family) =>
+        !string.IsNullOrEmpty(family) && VideoRecipeRegistry.Resolve(family) is DuoRecipe;
 }
 
 /// <summary>The LongCat-Video-Avatar gates the video command applies. Keyed on the family the request resolves to through the recipe

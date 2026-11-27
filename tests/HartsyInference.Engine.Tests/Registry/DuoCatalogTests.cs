@@ -7,13 +7,13 @@ public sealed class DuoCatalogTests
     private static readonly string[] Ids = ["duo-v1-distill", "duo-v1-causal", "duo-v1-2-causal"];
 
     [Fact]
-    public void EveryDuoReleaseIsCataloguedAsValidationPendingAndNotYetRunnable()
+    public void EveryDuoReleaseIsValidationPendingAndOnlyTheCausalOnesAreCliDrivable()
     {
         foreach (string id in Ids)
         {
             CatalogEntry entry = ModelCatalog.All.Single(e => e.Id == id);
             Assert.Equal(ModelStatus.ValidationPending, entry.Status);
-            Assert.False(entry.CliDrivable);
+            Assert.Equal(id != "duo-v1-distill", entry.CliDrivable);
             Assert.StartsWith("inclusionAI/Duo-", entry.HuggingFaceRepo, StringComparison.Ordinal);
         }
     }

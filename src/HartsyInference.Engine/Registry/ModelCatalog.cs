@@ -3285,8 +3285,8 @@ public static class ModelCatalog
                 },
             },
 
-            // Duo v1 (inclusionAI): a LoRA on MiniMax-H3's Ref2VA DiT, driven chunk by chunk by a LoRA-tuned Qwen3-VL-32B. The DuoRecipe runs the two causal releases from supplied Intent rows (no Intent model, no ASR, no CLI route, nothing
-            // verified on released weights). The assets are the Duo-specific LoRA files only: the user places the release's realization/backbone shards and codec/ VAEs (MiniMax-H3's own files) beside them in the release folder.
+            // Duo v1 (inclusionAI): a LoRA on MiniMax-H3's Ref2VA DiT, driven chunk by chunk by a LoRA-tuned Qwen3-VL-32B. The DuoRecipe runs the two causal releases from supplied Intent rows (`hartsy video --duo-run-folder`; no Intent model, no ASR,
+            // nothing verified on released weights). The assets are the Duo-specific LoRA files only: the user places the release's realization/backbone shards and codec/ VAEs (MiniMax-H3's own files) beside them in the release folder.
             // The distilled release needs a re-noise solver the engine does not have, so no recipe matches it.
             // Licence: the MiniMax H3 Community License (repo LICENSE, Exhibit A). Its default terms grant rights only outside the EU, UK, Republic of Korea and United States (use and distribution), require the licence and NOTICE
             // beside any distributed file and a notice on modified files, bind recipients to the same restrictions (including no use of outputs to improve another model), and ask for "MiniMax H3" on a commercial UI and a
@@ -3304,7 +3304,7 @@ public static class ModelCatalog
             {
                 Id = "duo-v1-causal", Modality = vid, DisplayName = "Duo 1.0 causal base (full-duplex audio-video, 50 steps)",
                 Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the release's backbone and codec files",
-                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.0-causal-base",
+                Status = vp, CliDrivable = true, HuggingFaceRepo = "inclusionAI/Duo-1.0-causal-base",
                 Assets = DuoLoraAssets("inclusionAI/Duo-1.0-causal-base", "duo-1.0-causal-base",
                     "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
                     "36a14c91142a15321d0d1e40257afb8ab4ddf1c5eddbb8723eca18d83d0620e1"),
@@ -3313,7 +3313,7 @@ public static class ModelCatalog
             {
                 Id = "duo-v1-2-causal", Modality = vid, DisplayName = "Duo 1.2 causal base (full-duplex audio-video, 50 steps)",
                 Architecture = "H3 Ref2VA DiT + rank-128 LoRA (causal student, shift 1.0); needs the release's backbone and codec files",
-                Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.2-causal-base",
+                Status = vp, CliDrivable = true, HuggingFaceRepo = "inclusionAI/Duo-1.2-causal-base",
                 Assets = DuoLoraAssets("inclusionAI/Duo-1.2-causal-base", "duo-1.2-causal-base",
                     "e0a1e8802adb2fde9ddb6231056fca479a683014cad387ca39f8fc4f8f6cfd0e",
                     "05332963e83056c3b3352329fdd55e84fb46881170f7889ddebf7ce7eede88a7"),

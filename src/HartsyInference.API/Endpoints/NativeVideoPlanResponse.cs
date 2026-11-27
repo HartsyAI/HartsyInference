@@ -65,6 +65,15 @@ public sealed class NativeVideoPlanResponse
         return issue with { Message = message };
     }
 
+    /// <summary>A generation error as the remote contract may carry it: the message, or a general one when it names a host path.</summary>
+    internal static string SanitizeError(string message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return ContainsRootedPath(message)
+            ? "The generation failed; local artifact details were omitted. See the server log."
+            : _sha256.Replace(message, "<redacted-sha256>");
+    }
+
     private static bool ContainsRootedPath(string message)
     {
         char[] separators = [' ', '\t', '\r', '\n', '\'', '"', '`', '(', ')', '[', ']', '{', '}', ',', ';', '='];

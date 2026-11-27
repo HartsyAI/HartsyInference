@@ -1,4 +1,5 @@
 using System.Globalization;
+using HartsyInference.Core.Backends;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Duo;
 using HartsyInference.Engine.Planning;
@@ -63,6 +64,29 @@ internal sealed record DuoRunInput(DuoSampleInput Sample, DuoRun Run, int CacheR
                 nameof(settings));
         }
         return new DuoRunInput(sample, run, cacheRows);
+    }
+
+    /// <summary>Bytes of the history this run keeps on the backend: F32 keys and values for every row of every block.</summary>
+    public long HistoryBytes(MiniMaxH3Config config) =>
+        (long)CacheRows * config.NumLayers * 2 * config.NumAttentionHeads * config.AttentionHeadDim * sizeof(float);
+
+    /// <summary>Refuses a history that cannot fit the memory the backend can still hand out (free plus its pool's unused reserve). A
+    /// backend that reports no memory figure is not checked.</summary>
+    /// <exception cref="ArgumentException">The history is larger than that.</exception>
+    public void RequireHistoryFits(MiniMaxH3Config config, DeviceMemoryUsage memory)
+    {
+        if (memory.TotalBytes <= 0)
+        {
+            return;
+        }
+        long available = memory.FreeBytes + Math.Max(0, memory.PoolReservedBytes - memory.PoolUsedBytes);
+        long history = HistoryBytes(config);
+        if (history > available)
+        {
+            throw new ArgumentException(string.Create(CultureInfo.InvariantCulture,
+                $"The Duo history needs {history / 1e9:F1} GB on the device and {available / 1e9:F1} GB is available. Lower "
+                + $"Extra[\"{DuoRecipePipeline.WindowFramesKey}\"] or the resolution."));
+        }
     }
 
     /// <summary>Block <paramref name="index"/> on the 24 fps clock: each latent frame starts where the frames before it end.</summary>
