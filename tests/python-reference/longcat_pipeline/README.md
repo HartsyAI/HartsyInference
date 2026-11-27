@@ -37,6 +37,21 @@ C# side: set `HARTSY_LONGCAT_PIPELINE_DIR` to the output directory and run
 evidence, until the variable is set. Tolerance relRMS 1e-5 per schedule, velocity, stepped latent and final latent; the report is written next to
 the dump as `pipeline-parity-report.txt`.
 
+## Refinement dump
+
+`dump_longcat_refine.py` runs the pinned `generate_refine` with the DiT's block-sparse attention enabled, with an image condition
+and without one, on the same tiny checkpoint. The reference's attention kernel is Triton and needs CUDA: the dump replaces
+`flash_attn_bsa_3d` with the reference's own blocking and top-k selection (compiled from `block_sparse_attention/bsa_interface.py`)
+and torch SDPA over the selected blocks. It needs the whole pinned checkout, because it reads that file.
+
+```
+TORCHDYNAMO_DISABLE=1 python dump_longcat_refine.py --repo /src --ckpt /b1/ckpt --out /out/longcat_refine_reference_tensors
+HARTSY_LONGCAT_REFINE_DIR=/out/longcat_refine_reference_tensors dotnet test tests/HartsyInference.Diffusion.Tests \
+    --filter FullyQualifiedName~LongCatRefinementParityTests
+```
+
+The VAE and the pixel preparation are not verified by it: the latents of the upsampled clip and of the condition frames are queued.
+
 ## Real-weight runner
 
 `run_base_reference.py` runs the pinned base pipeline on the released weights for a comparison with the engine, on a card that cannot hold the BF16 DiT
