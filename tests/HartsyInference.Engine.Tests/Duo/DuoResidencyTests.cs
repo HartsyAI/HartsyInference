@@ -128,6 +128,23 @@ public sealed class DuoResidencyTests : IDisposable
         Assert.Contains(_codecWeight, freed);
     }
 
+    /// <summary>A backend being torn down refuses ops; the pipeline releases its host memory all the same.</summary>
+    [Fact]
+    public async Task ARefusedFreeAtDisposalStillReleasesTheHostMemory()
+    {
+        Probe loader = new();
+        using DuoRecipePipeline pipeline = Build(loader);
+        VideoRequest request = Request();
+        VideoEffectiveSettings settings = await Settings(request);
+        using IDisposable keeping = KeepModels(true);
+        Preloaded(() => Run(pipeline, request, settings));
+        _device.RefuseFrees = true;
+
+        Assert.Throws<ObjectDisposedException>(pipeline.Dispose);
+
+        Assert.True(loader.Disposed);
+    }
+
     private static IDisposable KeepModels(bool keep) =>
         KnobProfile.Create("duo-residency").With(EngineKnobs.KeepModels, keep).Push();
 
@@ -152,16 +169,23 @@ public sealed class DuoResidencyTests : IDisposable
     private static void Run(DuoRecipePipeline pipeline, VideoRequest request, VideoEffectiveSettings settings) =>
         Assert.Throws<StopRun>(() => pipeline.Generate(request, settings, null, default));
 
-    private DuoRecipePipeline Build() => new DuoRecipe().Build(
+    private DuoRecipePipeline Build(IDisposable? loader = null) => new DuoRecipe().Build(
         new RecipeContext { CheckpointPath = _release.Release, Backend = _backend },
-        (_, _) => DuoReleaseFixture.Codecs() with
+        (_, loaders) =>
         {
-            Video = _ =>
+            if (loader is not null)
             {
-                _device.Calls.Add((Stopped, []));
-                throw _stop();
-            },
-            Weights = () => [_codecWeight],
+                loaders.Add(loader);
+            }
+            return DuoReleaseFixture.Codecs() with
+            {
+                Video = _ =>
+                {
+                    _device.Calls.Add((Stopped, []));
+                    throw _stop();
+                },
+                Weights = () => [_codecWeight],
+            };
         });
 
     private VideoRequest Request() => new()
@@ -182,6 +206,13 @@ public sealed class DuoResidencyTests : IDisposable
 
     private sealed class StopRun : Exception;
 
+    private sealed class Probe : IDisposable
+    {
+        public bool Disposed { get; private set; }
+
+        public void Dispose() => Disposed = true;
+    }
+
     /// <summary>Forwards every call to the CPU backend, logging each preload and free.</summary>
     public class Recorder : DispatchProxy
     {
@@ -194,6 +225,9 @@ public sealed class DuoResidencyTests : IDisposable
 
         /// <summary>A preload that includes this tensor runs out of memory.</summary>
         public Tensor? RefusePreloadOf { get; set; }
+
+        /// <summary>Every free is refused, as by a backend that takes no new ops.</summary>
+        public bool RefuseFrees { get; set; }
 
         public static IBackend Create(IBackend inner, out Recorder recorder)
         {
@@ -218,6 +252,7 @@ public sealed class DuoResidencyTests : IDisposable
                     {
                         throw new OutOfVramException("refused by the test");
                     }
+                    ObjectDisposedException.ThrowIf(RefuseFrees && targetMethod.Name == nameof(IBackend.FreeWeights), this);
                     break;
             }
             return targetMethod.Invoke(_inner, args);
