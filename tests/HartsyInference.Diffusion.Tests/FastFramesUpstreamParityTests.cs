@@ -174,6 +174,32 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             AssertClose(expected[f].Latent, actual[f].Latent, $"F16-branch latent frame {f}", 2e-2);
     }
 
+    /// <summary>The rollout on Vulkan against the F32 CPU rollout of the same model. A Vulkan fact: without a device it is reported as
+    /// skipped. Tolerance 2e-2: the Vulkan kernels are not bit-identical to the CPU path.</summary>
+    [VulkanDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void TheRolloutOnVulkanMatchesTheCpuRollout()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend cpu = new();
+        List<FastFramesFrame> expected = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+            .Rollout(prompt, noise, Frames).ToList();
+
+        using IBackend vulkan = HartsyInference.Engine.BackendFactory.CreateVulkan();
+        FastFramesPipeline pipeline = new(vulkan, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        List<FastFramesFrame> actual = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, actual.Count);
+        for (int f = 0; f < Frames; f++)
+            AssertClose(expected[f].Latent, actual[f].Latent, $"Vulkan latent frame {f}", 2e-2);
+    }
+
     /// <summary>The CUDA rollout (resident, TF32 default GEMMs) against the CPU rollout on the same tiny model and inputs. The tolerance
     /// is the TF32 lane's: a looser bound than the exact-GEMM decoder test, because the refiner and the blocks run the default GEMMs.</summary>
     [CudaDeviceFact]

@@ -59,7 +59,8 @@ internal sealed class DuoChunkSession
 
     /// <summary>Denoises block <paramref name="block"/> against the committed history, then commits its clean media. It must be the next
     /// block in order. <paramref name="bodyText"/> holds this block's body Intent rows. Returns the committed clean video and audio.</summary>
-    public (float[] Video, float[] Audio) GenerateBlock(int block, float[] bodyText, float[] noiseVideo, float[] noiseAudio, int steps, double shift)
+    public (float[] Video, float[] Audio) GenerateBlock(int block, float[] bodyText, float[] noiseVideo, float[] noiseAudio, int steps, double shift,
+        Action<int>? onStep = null, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(bodyText);
         ArgumentNullException.ThrowIfNull(noiseVideo);
@@ -119,6 +120,8 @@ internal sealed class DuoChunkSession
         {
             for (int index = 0; index < steps; index++)
             {
+                // A cancelled block leaves the cache as it was: nothing is evicted or committed before the loop ends.
+                cancel.ThrowIfCancellationRequested();
                 float t = schedule[index];
                 float remaining = schedule[index + 1] - t;
                 using Forwarded predicted = ForwardTensors(_transformer, _backend, noisy, refiner, textTensor, video, audio, [1f, t], _cache,
@@ -142,6 +145,7 @@ internal sealed class DuoChunkSession
                 audio?.Dispose();
                 video = nextVideo;
                 audio = nextAudio;
+                onStep?.Invoke(index + 1);
             }
 
             // The check comes before any change to the cache: a non-finite block is refused with the history exactly as it was.

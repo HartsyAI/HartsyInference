@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -32,6 +33,8 @@ public sealed class Glm5NextModel : IDisposable
             // checkpoints store the table plain (the FP8 index has no embed_tokens scale), so a scaled one is refused rather than read wrong.
             if (embedding.QuantInfo?.Fp8BlockScaleInv is not null)
                 throw new InvalidDataException("'embed_tokens' is stored FP8 with block scales; the glm5_next row gather cannot apply that grid, so it is refused.");
+            if (embedding.DType != DType.F32 && embedding.DType != DType.BF16)
+                throw new InvalidDataException($"'embed_tokens' is {embedding.DType}; the glm5_next row gather takes F32 or BF16 tables.");
             // The final norm is read as F32 whatever the checkpoint stores: the norm kernel reads its weight as F32.
             finalNorm = Glm5NextLayer.F32(source, Glm5NextWeightNames.FinalNorm, config.Hidden);
             lmHead = source.Read(Glm5NextWeightNames.LmHead);
@@ -62,22 +65,16 @@ public sealed class Glm5NextModel : IDisposable
     public float[] Embed(ReadOnlySpan<int> ids)
     {
         int d = _c.Hidden;
-        float[] rows = new float[ids.Length * d];
-        for (int t = 0; t < ids.Length; t++)
+        if (ids.Length == 0) return [];
+        // The device gather only when the table is resident (TryGatherRowsResident). Otherwise the needed rows are gathered on the host by the
+        // row-index reference, so a non-resident table is never uploaded to the card for one lookup. Out-of-range ids are refused by the contract.
+        using Tensor rows = new(new TensorShape(ids.Length, d), DType.F32);
+        if (!_backend.TryGatherRowsResident(rows, _embedding, ids))
         {
-            if ((uint)ids[t] >= (uint)_c.Vocab) throw new ArgumentOutOfRangeException(nameof(ids), $"Token id {ids[t]} is outside the {_c.Vocab}-entry vocabulary.");
-            using Tensor row = _embedding.SliceRows(ids[t], 1);
-            Tensor f32 = ProjectionOps.EnsureF32(row);
-            try
-            {
-                f32.AsReadOnlySpan<float>().CopyTo(rows.AsSpan(t * d, d));
-            }
-            finally
-            {
-                if (!ReferenceEquals(f32, row)) f32.Dispose();
-            }
+            using Tensor index = IndexTensor.Rows(ids);
+            RowIndexReference.Gather(rows, _embedding, index);
         }
-        return rows;
+        return rows.AsReadOnlySpan<float>().ToArray();
     }
 
     /// <summary>Runs <paramref name="embeddings"/> <c>[tokens, hidden]</c> through the decoder at positions <c>state.Length ..</c>, advancing the state, and
