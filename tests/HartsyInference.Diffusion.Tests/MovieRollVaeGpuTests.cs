@@ -15,7 +15,7 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The MovieRoll decode on a device, through <see cref="MovieRollPipeline.Generate"/>: the tiny 4-channel VAE is placed for the decode and
 /// released after it, and the frames must match the CPU run within <see cref="FrameErrorBound"/>. The sampling and the decode must read nothing
-/// back from the device before the frames are compared. Runs only through the GPU session (Category=GpuIntegration); it is skipped where no
+/// back from the device before the frames are compared. Runs as a GPU integration test (Category=GpuIntegration); it is skipped where no
 /// CUDA device is present.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollVaeGpuTests(ITestOutputHelper output)
