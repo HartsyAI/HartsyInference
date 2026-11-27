@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Dsa;
@@ -16,7 +17,8 @@ namespace HartsyInference.LLM.Glm5Next;
 /// pick its own pool or not, by score. With fewer selectable pools than slots every one is kept. Tail: the <c>(position + 1) mod Pool</c> newest slots up
 /// to the query, as raw tokens, when <c>AlwaysSelectTail</c>.</para>
 /// <para>Equal scores resolve to the lower pool index; the reference <c>topk</c> leaves them undefined, so a parity input must keep the last kept and first
-/// dropped score apart. Pools are rebuilt from the cached keys on every call, so cost grows with context; this is the host reference, not the fast path.
+/// dropped score apart. Scores run through <c>IndexerScores</c> and the selection through <c>SparseTopK</c>, as DsaIndexer does. Pool keys are still
+/// built on the host from the cached keys on every call (the open pool-key device op), so cost grows with context.
 /// Slots equal positions (text only).</para>
 /// </remarks>
 public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
@@ -78,32 +80,27 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
     public DsaKeySelection Select(ReadOnlySpan<float> x, ReadOnlySpan<float> qLatent, ReadOnlySpan<int> positions, int length, Tensor keyStore)
     {
         int tokens = positions.Length, hd = _c.IndexHeadDim, nh = _c.IndexHeads, pool = _c.IndexPool, pools = length / pool, width = 2 * hd;
-        float[] poolKeys = PoolKeys(keyStore.AsReadOnlySpan<float>(), pools, width);
         float[] q = HostOps.Project(_backend, qLatent, tokens, _qLoraRank, _wqB, nh * hd);
         float[] w = HostOps.Project(_backend, x, tokens, _dim, _weightsProj, nh);
-        float scale = MathF.Pow(hd, -0.5f), headScale = MathF.Pow(nh, -0.5f);
+        float headScale = MathF.Pow(nh, -0.5f);
+        for (int i = 0; i < w.Length; i++) w[i] *= headScale;
         int keep = Math.Min(_c.IndexSelectedPools, pools);
+        int[] visible = new int[tokens];
+        for (int t = 0; t < tokens; t++) visible[t] = Math.Min((positions[t] + 1) / pool, pools);
+        int[] picked = keep == 0 || pools == 0 ? [] : SelectPools(keyStore, pools, width, q, w, visible, keep);
 
         List<int>[] rows = new List<int>[tokens];
-        float[] scores = new float[pools];
         for (int t = 0; t < tokens; t++)
         {
-            int position = positions[t], visiblePools = Math.Min((position + 1) / pool, pools);
-            for (int g = 0; g < visiblePools; g++)
-            {
-                float sum = 0f;
-                for (int h = 0; h < nh; h++)
-                {
-                    float dot = 0f;
-                    for (int d = 0; d < hd; d++) dot += q[(t * nh + h) * hd + d] * poolKeys[g * hd + d];
-                    float s = dot * scale;
-                    if (s > 0f) sum += w[t * nh + h] * headScale * s;
-                }
-                scores[g] = sum;
-            }
+            int position = positions[t];
             List<int> row = [];
-            foreach (int g in DsaCompressedPool.TopK(scores.AsSpan(0, visiblePools), keep).Order())
+            // Device selection is ascending with -1 for picks past the visible pools.
+            for (int j = 0; j < keep && picked.Length > 0; j++)
+            {
+                int g = picked[t * keep + j];
+                if (g < 0) continue;
                 for (int i = 0; i < pool; i++) row.Add(g * pool + i);
+            }
             if (_c.IndexAlwaysSelectTail)
             {
                 int tail = (position + 1) % pool;
@@ -117,6 +114,24 @@ public sealed class Glm5NextKpoolIndexer : IDsaKeySelector
     /// <inheritdoc />
     public void Dispose()
     {
+    }
+
+    // Scores every query against every pool with IndexerScores (scale HeadDim^-0.5, head weights already times Heads^-0.5, pools past a query's
+    // visible count masked) and takes the best keep per query with SparseTopK. Returns I32 [tokens, keep] ascending, -1 past the visible pools.
+    // The pool keys are still built on the host (PoolKeys); that is the open pool-key device op.
+    private int[] SelectPools(Tensor keyStore, int pools, int width, float[] q, float[] w, int[] visible, int keep)
+    {
+        int tokens = visible.Length, hd = _c.IndexHeadDim, nh = _c.IndexHeads;
+        float[] poolKeys = PoolKeys(keyStore.AsReadOnlySpan<float>(), pools, width);
+        using Tensor keys = HostMath.Tensor(poolKeys, pools, hd);
+        using Tensor query = HostMath.Tensor(q, tokens, nh, hd);
+        using Tensor weights = HostMath.Tensor(w, tokens, nh);
+        using Tensor limits = HostMath.Tensor(visible.AsSpan(), tokens);
+        using Tensor scores = new(new TensorShape(tokens, pools), DType.F32);
+        _backend.IndexerScores(scores, query, new LatentSource(LatentEncoding.F32, keys, null, pools, hd), weights, limits, null, MathF.Pow(hd, -0.5f));
+        using Tensor picked = new(new TensorShape(tokens, keep), DType.I32);
+        _backend.SparseTopK(picked, scores, limits, keep, 0);
+        return picked.AsReadOnlySpan<int>().ToArray();
     }
 
     // The pool key of every complete pool: per channel, sum_j softmax_j(gate_j + ape_j) * k_j over the pool's slots, F32.
