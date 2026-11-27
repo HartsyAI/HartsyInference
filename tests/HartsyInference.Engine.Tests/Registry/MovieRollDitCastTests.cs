@@ -7,16 +7,16 @@ using Xunit;
 
 namespace HartsyInference.Engine.Tests.Registry;
 
-/// <summary>The MovieRoll DiT's load-time F16 cast is chosen per backend: the released FP32 (and BF16) weights go to F16 on CUDA only. The CPU backend
-/// keeps its F32 weights, because the F16 path is not proven there. The CUDA case needs a device and is skipped without one.</summary>
+/// <summary>The MovieRoll DiT's load-time F16 cast is chosen per backend: BF16 goes to F16 on every backend, as before; FP32 (the released file) goes to
+/// F16 on CUDA only, and the CPU backend keeps those weights in F32. The CUDA case needs a device and is skipped without one.</summary>
 [Trait("Category", "Integration")]
 public sealed class MovieRollDitCastTests
 {
     [Fact]
-    public void CpuBackend_KeepsTheFp32DitWeights()
+    public void CpuBackend_CastsOnlyBf16ToF16_KeepingTheFp32DitWeights()
     {
         using CpuBackend cpu = new();
-        Assert.Empty(MovieRollRecipe.DitHalfCastSources(cpu));
+        Assert.Equal([DType.BF16], MovieRollRecipe.DitHalfCastSources(cpu));
     }
 
     [CudaDeviceFact]
