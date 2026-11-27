@@ -477,6 +477,14 @@ Real bugs surfaced by the parity loop — kept here so the patterns repeat-catch
 | RNNoise (`RnnoiseStream`) | `LatencySamples` counted the denoiser's delay as a whole analysis window plus the lookahead frame (three 10 ms frames); it is two — overlap-add holds window minus hop, and the analysis adds nothing because priming completes the first window on arrival. At 16 kHz it declared 800 samples for a real 640. Nothing in production aligned on it yet | Real-speech check at 16 kHz cross-correlated output against the clean clip: best lag 640, not the declared 800; upstream's C library measures 960 samples (20 ms) at 48 kHz the same way | Denoiser latency is one window (`RnnoiseDenoiser.WindowSize`, scaled to the source rate); `RnnoiseRealSpeechTests` asserts the measured lag equals the declared one |
 | Vulkan `ConvTranspose1d` (Kokoro pool, Mimi, PocketTTS, AntiAliasedSnake) | The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so every depthwise or grouped caller failed on Vulkan. Kokoro and StyleTTS 2 both stopped at `groups=512`. | Vulkan audio window on alpha.421, 2026-11-11: Kokoro and StyleTTS 2 failed on the op while 8 of 11 providers passed. | `conv_transpose1d.comp.glsl` takes `groups` (weight `[C_in, C_out/groups, K]`). `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference (synthetic). End-to-end on Vulkan (live, branch build, 2026-11-11): Kokoro and StyleTTS 2 pass a Whisper round trip with WER 0. |
 
+## Duo v1 — parity not run
+
+| Model | Parity | What ran (synthetic, not parity) | Commits |
+|---|---|---|---|
+| **Duo v1** (inclusionAI) | not run | CPU tiny-model cached-vs-dense blocks, session driver, duo_5_17 video and audio stream decoders. CUDA on an RTX 3060 with synthetic weights (JOBs T, U, AF, AG, 2026-11-26): chunk session 3.9e-6 of CPU, audio stream 1e-5, video stream bytes equal. | `f57482995` (#1338 session driver); chunk session and stream decoders on main |
+
+Upstream parity is held: the licence hold stands and no upstream code or released-weight run has happened. Intent, ASR, the CLI and service route, Vulkan and quantization are not built or not run; see `MODEL_STATUS_VIDEO.md`.
+
 ## Engine checks (not model parity)
 
 | Check | Result | Notes |
