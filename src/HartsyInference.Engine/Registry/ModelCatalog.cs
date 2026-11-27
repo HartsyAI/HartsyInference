@@ -3146,6 +3146,38 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // LongCat-Video, the base family, from the upstream repo pinned to meituan-longcat/LongCat-Video @ 03b55529 (the F32 DiT, 54.3 GB;
+                // shard sha256 are the HF tree's LFS oids; the index and config are git blobs and carry no hash here). Licence: MIT, as the model
+                // card, the README's licence section and the LICENSE file state it. The distillation and refinement LoRAs are not row assets: the
+                // recipe does not read them.
+                Id = "longcat-video", Modality = vid, DisplayName = "LongCat-Video (text and image to video)",
+                Architecture = "flow-matching DiT, 13.6B", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video",
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00001-of-00006.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "4a64ebfe319eaea7144a3e38acaf79e031736c254b53cd3d59643d5673444b7c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00002-of-00006.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "711a92e5bb38be84508869d62f451e8a1cb14cd903faf34b8291b1b3e299bab7" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00003-of-00006.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "977b90558908fa725ff66995ac72993e4092e9c040092893766acd60ad8e086f" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00004-of-00006.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "902f38deacdb75d97639968c98a2b520d97d268cfde9698c55810ed26e9170e2" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00005-of-00006.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "f3e7ef21120757e658d501fa70fa8db2af3ff95945de72c4904fbe5ccbe0050b" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model-00006-of-00006.safetensors",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "transformer", Sha256 = "dac297b544a030ce961648994ea791f58bab0e3d722092ac8c11a1475b2f4989" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/diffusion_pytorch_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video", RepoPath = "dit/config.json",
+                        TargetSubdir = "LongCat/LongCat-Video/dit", Role = "config" },
+                    // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 // LongCat-Video-Avatar 1.5 weights from the upstream repo, pinned to meituan-longcat/LongCat-Video-Avatar-1.5 @ 92016c71
                 // (bf16 base_model; shard sha256 are the HF tree's LFS oids; index and config are git blobs and carry no hash here).
                 // Licence conflict, recorded not resolved: MIT on the model card, "academic use only and commercial use is not permitted" on the
