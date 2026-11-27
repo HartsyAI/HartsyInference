@@ -1,25 +1,26 @@
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
 /// <summary>The starting noise of a Fibo 2.0 generation. Normally the seeded generator draws it. For the diffusers parity check the
-/// environment variable <c>HARTSY_FIBO2_NOISE_NPY</c> names a float32 <c>.npy</c> file of the same shape, so the engine and the diffusers
-/// reference start from the same tensor. That is a diagnostic hook: it is not a setting, and a shape or dtype mismatch is an error, never
-/// a silent fallback.</summary>
+/// <see cref="EngineKnobs.Fibo2NoiseNpy"/> setting (<c>diagnostics.fibo2NoiseNpy</c>) names a float32 <c>.npy</c> of the same shape, so the
+/// engine and the diffusers reference start from the same tensor. It is a diagnostic: each use logs a warning, and a shape, dtype or
+/// order mismatch throws rather than falling back to the seeded draw.</summary>
 internal static class Fibo2NoiseSource
 {
-    /// <summary>The environment variable that names the saved noise file.</summary>
-    internal const string EnvVar = "HARTSY_FIBO2_NOISE_NPY";
-
-    /// <summary>Noise of <paramref name="shape"/>: the saved file when <see cref="EnvVar"/> is set, else the seeded draw.</summary>
+    /// <summary>Noise of <paramref name="shape"/>: the saved file when the setting names one, else the seeded draw.</summary>
     internal static Tensor Create(TensorShape shape, int seed)
     {
-        string? path = Environment.GetEnvironmentVariable(EnvVar);
+        string? path = EngineKnobs.Fibo2NoiseNpy.Value;
         if (string.IsNullOrWhiteSpace(path))
             return SeedGenerator.CreateNoise(shape, seed);
+        Logs.Warning($"[Fibo2] diagnostics.fibo2NoiseNpy replaces the seeded noise with {path} (shape {shape}).");
         return LoadFloat32Npy(path, shape);
     }
 
@@ -32,24 +33,28 @@ internal static class Fibo2NoiseSource
         int headerLength = file[6] == 1
             ? BinaryPrimitives.ReadUInt16LittleEndian(file.AsSpan(8, 2))
             : checked((int)BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(8, 4)));
-        int dataStart = (file[6] == 1 ? 10 : 12) + headerLength;
-        string header = Encoding.ASCII.GetString(file, file[6] == 1 ? 10 : 12, headerLength);
-        if (!header.Contains("'<f4'", StringComparison.Ordinal) && !header.Contains("'|f4'", StringComparison.Ordinal))
+        int headerStart = file[6] == 1 ? 10 : 12;
+        int dataStart = headerStart + headerLength;
+        if (dataStart > file.Length)
+            throw new InvalidDataException($"{path} header runs past the end of the file.");
+        string header = Encoding.ASCII.GetString(file, headerStart, headerLength);
+        string compact = header.Replace(" ", string.Empty);
+        if (!compact.Contains("'descr':'<f4'", StringComparison.Ordinal) && !compact.Contains("'descr':'|f4'", StringComparison.Ordinal))
             throw new InvalidDataException($"{path} must be float32 little-endian: {header}");
-        if (header.Contains("'fortran_order': True", StringComparison.Ordinal))
+        if (compact.Contains("'fortran_order':True", StringComparison.Ordinal))
             throw new InvalidDataException($"{path} must be C-ordered.");
 
-        string wanted = "(" + string.Join(", ", Enumerable.Range(0, shape.Rank).Select(i => shape[i].ToString())) + (shape.Rank == 1 ? ",)" : ")");
-        string wantedNoSpace = wanted.Replace(" ", string.Empty);
-        if (!header.Replace(" ", string.Empty).Contains("'shape':" + wantedNoSpace, StringComparison.Ordinal))
+        string wanted = "(" + string.Join(",", Enumerable.Range(0, shape.Rank).Select(i => shape[i].ToString())) + (shape.Rank == 1 ? ",)" : ")");
+        if (!compact.Contains("'shape':" + wanted, StringComparison.Ordinal))
             throw new InvalidDataException($"{path} shape does not match {shape}: {header}");
 
         long count = shape.ElementCount;
-        if (file.Length - dataStart != count * sizeof(float))
-            throw new InvalidDataException($"{path} holds {file.Length - dataStart} data bytes; {shape} needs {count * sizeof(float)}.");
+        long dataBytes = file.Length - dataStart;
+        if (dataBytes != count * sizeof(float))
+            throw new InvalidDataException($"{path} holds {dataBytes} data bytes; {shape} needs {count * sizeof(float)}.");
 
         Tensor tensor = new(shape, DType.F32);
-        file.AsSpan(dataStart, (int)(count * sizeof(float))).CopyTo(System.Runtime.InteropServices.MemoryMarshal.AsBytes(tensor.AsSpan<float>()));
+        file.AsSpan(dataStart, (int)(count * sizeof(float))).CopyTo(MemoryMarshal.AsBytes(tensor.AsSpan<float>()));
         return tensor;
     }
 }

@@ -28,13 +28,11 @@ public sealed class Fibo2DecodeSweepGpuTests(ITestOutputHelper output)
         string? vaePath = Environment.GetEnvironmentVariable("HARTSY_FLUX2_VAE");
         if (string.IsNullOrWhiteSpace(vaePath) || !File.Exists(vaePath))
         {
-            output.WriteLine("SKIPPED: set HARTSY_FLUX2_VAE to the catalog FLUX.2 VAE file");
-            return;
+            throw Xunit.Sdk.SkipException.ForSkip("set HARTSY_FLUX2_VAE to the catalog FLUX.2 VAE file");
         }
         if (!CudaContext.IsAvailable())
         {
-            output.WriteLine("SKIPPED: CUDA unavailable");
-            return;
+            throw Xunit.Sdk.SkipException.ForSkip("CUDA unavailable");
         }
 
         using CudaBackend backend = new(0, PtxDirectory());
