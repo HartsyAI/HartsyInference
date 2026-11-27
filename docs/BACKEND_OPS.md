@@ -343,8 +343,12 @@ Reference: `BlockSparseAttentionReference.Apply`. Contract: `BlockSparseAttentio
 `IBackend.BlockSparseAttention`; `HasBlockSparseAttention` says whether a backend runs it, and one that does not refuses
 the call by name.
 
-- Operands are F32 head-major `[B, H, Sq|Sk, D]` in raster order of their grids, already normed and rotated, with one head
+- Operands are head-major `[B, H, Sq|Sk, D]` in raster order of their grids, already normed and rotated, with one head
   count for Q, K and V. The output is `[B, H, Sq, D]` in query raster order and is not an input.
+- Q, K and V share one dtype, F32 or BF16, and the output is F32 or BF16. A BF16 operand is widened to F32, exactly,
+  before anything is computed: means, scores, weights and sums are F32, and a BF16 output is the F32 result rounded to
+  nearest even. The pinned kernel run on BF16 operands rounds its block means and scores to BF16 and can read other
+  blocks; that behaviour is not reproduced.
 - `BlockSparseAttentionOptions` carries a query grid and a key grid (`TokenGrid3D`, `Frames × Height × Width`; they may
   differ on every axis), a block per side (default 4×4×4, and the two may differ), the sparsity in `[0, 1]` and the score
   multiplier (null is `D^-1/2`). A grid that is not a multiple of its block on every axis is refused: the caller pads.
@@ -357,9 +361,17 @@ the call by name.
 - A token whose every score is negative infinity gets a zero row; a NaN score propagates
   ([attention contract §3](ATTENTION_CONTRACT.md#3-scores)).
 - The optional `selected` tensor, I32 `[B, H, queryBlocks, K]`, receives each query block's key blocks, ascending.
-- A kernel is held to the reference on F32 operands: the same `selected` report and an output within a relative RMS of
-  1e-5. The reference sums a block mean in the block's raster order and a score in channel order, both in F32; a kernel
-  that sums in another order can rank two blocks differently only where their scores differ by rounding alone.
+- A kernel is held to the reference on the same operands: the same `selected` report; an F32 output within a relative RMS
+  of 1e-5; a BF16 output that is the kernel's own F32 result rounded to nearest even, and within a relative RMS of 1e-4
+  of the reference's. A per-value BF16 bound would not do: near zero a BF16 step is finer than the F32 rounding two
+  summation orders differ by. The reference sums a block mean in the block's raster order and a score in channel order,
+  both in F32; a kernel that sums in another order can rank two blocks differently only where their scores differ by
+  rounding alone.
+- CUDA (`block_sparse_attention.ptx`) takes head dim 16, 32, 64 or 128 and at most one key block per 4 bytes of a block's
+  default shared memory (12288 at 48 KB). Head dim 128 takes 83 KB of shared memory per kernel block, so there is no
+  Turing build. Any other call is refused by name, with no host fallback. Its means and scores are the reference's bit for
+  bit (round-to-nearest intrinsics in the reference's order), so its selection is the reference's; the attention is an
+  online softmax over chunks of 64 key rows. [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).
 
 The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in
 top-k mode, whose `bsa_params` ship as sparsity 0.9375 and 4×4×4 blocks. Its CDF-threshold selection has no option here.
@@ -535,7 +547,7 @@ Every implementation of these ops:
 | `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
 | `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
-| `BlockSparseAttention` | reference | refused | refused |
+| `BlockSparseAttention` | reference | `block_sparse_attention.ptx` (`bsa_means_f32/bf16`, `bsa_select`, `bsa_attend_<f32\|bf16>_d16/32/64/128`) | refused |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
 | `SparseTopK` | reference | `sparse_index.ptx` (`sparse_topk_f32`) | `sparse_topk` |

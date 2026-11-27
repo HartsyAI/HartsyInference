@@ -22,6 +22,19 @@ internal sealed record BlockSparseAttentionCase(string Name, int Batch, int Head
 
     public static BlockSparseAttentionCase Named(string name) => All.Single(c => c.Name == name);
 
+    /// <summary>The reference kernel's sampled output rows, as F32 bits, and its selection; no block selected leaves that empty.</summary>
+    public (uint[] Output, int[] Selected) Vectors => Name switch
+    {
+        "Shipped" => (BlockSparseAttentionVectors.ShippedOutput, BlockSparseAttentionVectors.ShippedSelected),
+        "CrossLength" => (BlockSparseAttentionVectors.CrossLengthOutput, BlockSparseAttentionVectors.CrossLengthSelected),
+        "Batched" => (BlockSparseAttentionVectors.BatchedOutput, BlockSparseAttentionVectors.BatchedSelected),
+        "UnequalBlocks" => (BlockSparseAttentionVectors.UnequalBlocksOutput, BlockSparseAttentionVectors.UnequalBlocksSelected),
+        "HeadDim128" => (BlockSparseAttentionVectors.HeadDim128Output, BlockSparseAttentionVectors.HeadDim128Selected),
+        "Truncated" => (BlockSparseAttentionVectors.TruncatedOutput, BlockSparseAttentionVectors.TruncatedSelected),
+        "NoneSelected" => (BlockSparseAttentionVectors.NoneSelectedOutput, []),
+        _ => throw new ArgumentException($"No reference vectors for {Name}."),
+    };
+
     public BlockSparseAttentionOptions Options => new()
     {
         QueryGrid = QueryGrid, KeyGrid = KeyGrid, QueryBlock = QueryBlock, KeyBlock = KeyBlock, Sparsity = Sparsity,
@@ -30,19 +43,25 @@ internal sealed record BlockSparseAttentionCase(string Name, int Batch, int Head
     /// <summary>Runs the case on <paramref name="backend"/>; returns the output and, ascending, each query block's key blocks.</summary>
     public (float[] Output, int[] Selected) Run(IBackend backend)
     {
-        int queryTokens = (int)QueryGrid.Tokens, keyTokens = (int)KeyGrid.Tokens;
-        using Tensor query = Operand(queryTokens, Seed, 2f);
-        using Tensor key = Operand(keyTokens, Seed + 1, 2f);
-        using Tensor value = Operand(keyTokens, Seed + 2, 1f);
-        using Tensor output = new(query.Shape, DType.F32);
-        BlockSparseAttentionOptions options = Options;
-        using Tensor selected = new(new TensorShape(Batch, Heads, options.QueryBlocks, options.SelectedBlocks), DType.I32);
-        output.AsSpan<float>().Fill(-7f);
-        backend.BlockSparseAttention(output, query, key, value, options, selected);
-        // A report of no blocks holds no bytes to read.
-        int[] blocks = options.SelectedBlocks > 0 ? selected.AsReadOnlySpan<int>().ToArray() : [];
-        return (output.AsReadOnlySpan<float>().ToArray(), blocks);
+        (Tensor query, Tensor key, Tensor value) = Operands();
+        using (query)
+        using (key)
+        using (value)
+        {
+            using Tensor output = new(query.Shape, DType.F32);
+            BlockSparseAttentionOptions options = Options;
+            using Tensor selected = new(new TensorShape(Batch, Heads, options.QueryBlocks, options.SelectedBlocks), DType.I32);
+            output.AsSpan<float>().Fill(-7f);
+            backend.BlockSparseAttention(output, query, key, value, options, selected);
+            // A report of no blocks holds no bytes to read.
+            int[] blocks = options.SelectedBlocks > 0 ? selected.AsReadOnlySpan<int>().ToArray() : [];
+            return (output.AsReadOnlySpan<float>().ToArray(), blocks);
+        }
     }
+
+    /// <summary>The case's F32 query, key and value, which the caller owns.</summary>
+    public (Tensor Query, Tensor Key, Tensor Value) Operands() =>
+        (Operand((int)QueryGrid.Tokens, Seed, 2f), Operand((int)KeyGrid.Tokens, Seed + 1, 2f), Operand((int)KeyGrid.Tokens, Seed + 2, 1f));
 
     /// <summary>Every <see cref="RowStep"/>-th query row of a full output, in the vectors' order.</summary>
     public float[] SampledRows(ReadOnlySpan<float> output)
