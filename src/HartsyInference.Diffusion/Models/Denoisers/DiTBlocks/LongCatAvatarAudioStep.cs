@@ -78,7 +78,7 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
     /// <param name="probe">Receives the cross-attention output of the noisy rows as <paramref name="probeName"/> when set.</param>
     /// <returns>A new <c>[frames·S, dim]</c> stream; the conditioning rows are the input rows.</returns>
     public Tensor Apply(IBackend backend, Tensor x, Tensor audioTokens, Tensor timeEmbed, int numCond, int tokensPerFrame,
-        LongCatSpeakerRotation? rotation = null, Action<string, Tensor>? probe = null, string probeName = "")
+        LongCatSpeakerRotation? rotation = null, Action<string, Tensor>? probe = null, string probeName = "", bool roundSubLayer = false)
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         if (_adaW is null)
@@ -97,15 +97,20 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
         backend.Linear(modulation, activated, _adaW!, _adaB);
 
         // Audio cross-attention over the full stream after the affine video pre-norm; the conditioning rows come back as zeros.
-        using Tensor preNormed = new(x.Shape, DType.F32);
-        backend.LayerNorm(preNormed, x, _preW!, _preB!, NormEps);
+        Tensor preNormedRaw = new(x.Shape, DType.F32);
+        backend.LayerNorm(preNormedRaw, x, _preW!, _preB!, NormEps);
+        using Tensor preNormed = LongCatOps.RoundOwned(backend, preNormedRaw, roundSubLayer);
+        if (probeName.Length > 0) probe?.Invoke(probeName + "_norm", preNormed);
         using Tensor audioOut = _attention.Forward(backend, preNormed, audioTokens, frames, numCond, rotation);
-        using Tensor noiseOut = new(new TensorShape(noisyRows, _dim), DType.F32);
-        backend.SliceRows(noiseOut, audioOut, condRows);
+        Tensor noiseSlice = new(new TensorShape(noisyRows, _dim), DType.F32);
+        backend.SliceRows(noiseSlice, audioOut, condRows);
+        // The attention output rounds before its probe and its modulate and gate, as the reference's audio_cross_attn does on the BF16 route.
+        using Tensor noiseOut = LongCatOps.RoundOwned(backend, noiseSlice, roundSubLayer);
         probe?.Invoke(probeName, noiseOut);
 
         // Output norm with shift and scale of the noisy frames (1 + scale, then + shift), then the gated residual on the noisy rows.
-        using Tensor modulated = LongCatOps.NormModulate(backend, noiseOut, modulation, _dim, 0, tokensPerFrame);
+        using Tensor modulated = LongCatOps.NormModulate(backend, noiseOut, modulation, _dim, 0, tokensPerFrame, roundSubLayer);
+        if (probeName.Length > 0) probe?.Invoke(probeName + "_modulated", modulated);
         using Tensor noisyX = new(new TensorShape(noisyRows, _dim), DType.F32);
         backend.SliceRows(noisyX, x, condRows);
         using Tensor frameIndex = LongCatOps.FrameRowIndex(noisy, tokensPerFrame);

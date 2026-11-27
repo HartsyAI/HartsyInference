@@ -36,6 +36,7 @@ public sealed partial class CudaKernels
     private void LoadAttentionKernels()
     {
         LoadSolAttentionKernels();
+        LoadBlockSparseAttentionKernels();
         string attentionPath = Ptx("latent_attention");
         if (CanLoad(attentionPath))
         {

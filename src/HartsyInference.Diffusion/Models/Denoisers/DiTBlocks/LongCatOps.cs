@@ -22,12 +22,35 @@ internal static class LongCatOps
 
     /// <summary><c>LayerNorm(x) · (1 + scale) + shift</c> with scale and shift read from <paramref name="packed"/> at the given column offsets,
     /// one row per frame.</summary>
-    public static Tensor NormModulate(IBackend backend, Tensor x, Tensor packed, int scaleOffset, int shiftOffset, int tokensPerFrame)
+    /// <param name="roundOutput">Rounds the output to the BF16 grid: the reference's modulate_fp32 casts back to the input's dtype.</param>
+    public static Tensor NormModulate(IBackend backend, Tensor x, Tensor packed, int scaleOffset, int shiftOffset, int tokensPerFrame,
+        bool roundOutput = false)
     {
         Tensor output = new(x.Shape, DType.F32);
         ModulationSpec modulation = ModulationSpec.Packed(packed, packed.Shape[1], scaleOffset, shiftOffset, tokensPerFrame, ScaleMode.OnePlus);
         backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, LongCatConfig.NormEps).WithModulation(in modulation));
-        return output;
+        return RoundOwned(backend, output, roundOutput);
+    }
+
+    /// <summary>The tensor rounded to the BF16 grid when <paramref name="on"/>: the input is disposed and a new tensor returned. Otherwise the
+    /// input itself is returned, so the caller's <c>using</c> disposes it either way.</summary>
+    public static Tensor RoundOwned(IBackend backend, Tensor owned, bool on)
+    {
+        if (!on)
+            return owned;
+        Tensor rounded = RoundToBf16(backend, owned);
+        owned.Dispose();
+        return rounded;
+    }
+
+    /// <summary>Rounds an F32 tensor to BF16 (nearest-even) and back, so the values sit on the BF16 grid the reference's x holds. A new tensor.</summary>
+    public static Tensor RoundToBf16(IBackend backend, Tensor values)
+    {
+        using Tensor bf16 = new(values.Shape, DType.BF16);
+        backend.CastToBf16(bf16, values);
+        Tensor rounded = new(values.Shape, DType.F32);
+        backend.CastToF32(rounded, bf16);
+        return rounded;
     }
 
     /// <summary><c>residual + gate · value</c> with the gate of each token's frame, read from <paramref name="packed"/> at

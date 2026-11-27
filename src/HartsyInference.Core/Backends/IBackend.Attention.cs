@@ -74,11 +74,12 @@ public partial interface IBackend
     /// <summary>Block-sparse attention over a 3D token grid (<see cref="BlockSparseAttentionReference"/>): each query block scores
     /// every key block by the dot product of the two blocks' mean rows, keeps the highest, and its tokens attend exactly those
     /// blocks' keys. Operands and output are in <c>(T, H, W)</c> raster order.</summary>
-    /// <param name="output">F32 <c>[B, H, Sq, D]</c>; must not be an input.</param>
-    /// <param name="query">F32 <c>[B, H, Sq, D]</c>, already normed and rotated.</param>
-    /// <param name="key">F32 <c>[B, H, Sk, D]</c>.</param>
-    /// <param name="value">F32 <c>[B, H, Sk, D]</c>.</param>
-    /// <param name="options">The grids, blocks, sparsity and score multiplier.</param>
+    /// <param name="output">F32 or BF16 <c>[B, H, Sq, D]</c>; must not be an input.</param>
+    /// <param name="query">F32 or BF16 <c>[B, H, Sq, D]</c>, already normed and rotated.</param>
+    /// <param name="key">The query's dtype, <c>[B, H, Sk, D]</c>.</param>
+    /// <param name="value">The query's dtype, <c>[B, H, Sk, D]</c>.</param>
+    /// <param name="options">The grids, blocks, sparsity and score multiplier. A backend may refuse a head dim or a block count it
+    /// has no kernel for.</param>
     /// <param name="selected">When not null, receives each query block's key blocks, ascending, as I32
     /// <c>[B, H, QueryBlocks, SelectedBlocks]</c>.</param>
     /// <exception cref="NotSupportedException">The backend has no block-sparse attention; see

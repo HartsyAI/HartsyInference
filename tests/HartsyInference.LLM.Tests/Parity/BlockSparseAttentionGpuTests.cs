@@ -1,23 +1,16 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
 
 namespace HartsyInference.LLM.Tests.Parity;
 
-/// <summary>CUDA and Vulkan have no block-sparse attention kernel: each says so and refuses the call by name, writing nothing.</summary>
+/// <summary>Vulkan has no block-sparse attention kernel: it says so and refuses the call by name, writing nothing. CUDA's kernel is
+/// compared with the reference in HartsyInference.Core.Tests.</summary>
 [Trait("Category", "GpuIntegration")]
 [Collection("AttentionSemantics")]
 public sealed class BlockSparseAttentionGpuTests
 {
-    [CudaFact]
-    public void CudaRefusesByName()
-    {
-        using CudaBackend backend = new(0, CudaPtxDirectory.Resolve());
-        RefusesByName(backend);
-    }
-
     [VulkanFact]
     public void VulkanRefusesByName()
     {

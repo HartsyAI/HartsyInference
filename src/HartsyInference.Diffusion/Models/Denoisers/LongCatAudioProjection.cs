@@ -45,6 +45,10 @@ public sealed class LongCatAudioProjection : IDisposable
     }
 
     /// <summary>Audio tokens per frame (the reference's <c>context_tokens</c>).</summary>
+    /// <summary>On the BF16 route the inputs and each linear, norm output are rounded to the BF16 grid: the reference's audio_cond is cast to the
+    /// x_embedder's dtype (avatar DiT line 505), and its nn.Linear and nn.LayerNorm return that dtype. Set by the transformer at load.</summary>
+    public bool Bf16Route { get; set; }
+
     public int ContextTokens => _contextTokens;
 
     /// <summary>Width of each output token (the reference's <c>output_dim</c>).</summary>
@@ -113,32 +117,42 @@ public sealed class LongCatAudioProjection : IDisposable
         if (f2 == 0)
             throw new ArgumentException("The latter-frame audio has no rows. A one-latent-frame clip has no latter frames; the DiT must not call this with one.", nameof(audioLatter));
 
-        // proj1 and proj1_vf, each with ReLU (LeakyRelu at slope 0 is ReLU).
-        using Tensor firstLinear = new(new TensorShape(f1, _intermediate), DType.F32);
-        backend.Linear(firstLinear, audioFirst, _proj1W!, _proj1B);
+        // The audio inputs round to the BF16 grid on the BF16 route (the reference's audio_cond cast, avatar DiT line 505).
+        using Tensor? firstRounded = Bf16Route ? LongCatOps.RoundToBf16(backend, audioFirst) : null;
+        using Tensor? latterRounded = Bf16Route ? LongCatOps.RoundToBf16(backend, audioLatter) : null;
+        Tensor first = firstRounded ?? audioFirst, latter = latterRounded ?? audioLatter;
+
+        // proj1 and proj1_vf, each with ReLU (LeakyRelu at slope 0 is ReLU). Each linear's output rounds on the BF16 route; ReLU keeps a BF16 value
+        // on the grid, so the activations need no rounding of their own.
+        Tensor firstLinearRaw = new(new TensorShape(f1, _intermediate), DType.F32);
+        backend.Linear(firstLinearRaw, first, _proj1W!, _proj1B);
+        using Tensor firstLinear = LongCatOps.RoundOwned(backend, firstLinearRaw, Bf16Route);
         using Tensor firstAct = new(firstLinear.Shape, DType.F32);
         backend.LeakyRelu(firstAct, firstLinear, 0f);
 
-        using Tensor latterLinear = new(new TensorShape(f2, _intermediate), DType.F32);
-        backend.Linear(latterLinear, audioLatter, _proj1VfW!, _proj1VfB);
+        Tensor latterLinearRaw = new(new TensorShape(f2, _intermediate), DType.F32);
+        backend.Linear(latterLinearRaw, latter, _proj1VfW!, _proj1VfB);
+        using Tensor latterLinear = LongCatOps.RoundOwned(backend, latterLinearRaw, Bf16Route);
         using Tensor latterAct = new(latterLinear.Shape, DType.F32);
         backend.LeakyRelu(latterAct, latterLinear, 0f);
 
         // Join along frames, then proj2 with ReLU.
         using Tensor joined = new(new TensorShape(frames, _intermediate), DType.F32);
         backend.Concat(joined, [firstAct, latterAct], 0);
-        using Tensor second = new(joined.Shape, DType.F32);
-        backend.Linear(second, joined, _proj2W!, _proj2B);
+        Tensor secondRaw = new(joined.Shape, DType.F32);
+        backend.Linear(secondRaw, joined, _proj2W!, _proj2B);
+        using Tensor second = LongCatOps.RoundOwned(backend, secondRaw, Bf16Route);
         using Tensor secondAct = new(second.Shape, DType.F32);
         backend.LeakyRelu(secondAct, second, 0f);
 
         // proj3 expands each frame to context_tokens · output_dim, read as one row per token, then LayerNorm over output_dim. Linear sizes
         // itself from the weight and the input, so the output takes the per-token shape directly; a Reshape would read it on the host.
-        using Tensor tokens = new(new TensorShape(frames * _contextTokens, _outputDim), DType.F32);
-        backend.Linear(tokens, secondAct, _proj3W!, _proj3B);
-        Tensor output = new(tokens.Shape, DType.F32);
-        backend.LayerNorm(output, tokens, _normW!, _normB!, NormEps);
-        return output;
+        Tensor tokensRaw = new(new TensorShape(frames * _contextTokens, _outputDim), DType.F32);
+        backend.Linear(tokensRaw, secondAct, _proj3W!, _proj3B);
+        using Tensor tokens = LongCatOps.RoundOwned(backend, tokensRaw, Bf16Route);
+        Tensor outputRaw = new(tokens.Shape, DType.F32);
+        backend.LayerNorm(outputRaw, tokens, _normW!, _normB!, NormEps);
+        return LongCatOps.RoundOwned(backend, outputRaw, Bf16Route);
     }
 
     /// <summary>The loaded weights: matrices as stored, vectors widened; empty before a load.</summary>
