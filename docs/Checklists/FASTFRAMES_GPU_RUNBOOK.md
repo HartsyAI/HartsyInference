@@ -63,9 +63,8 @@ Run every step below on the newest `main`, so each step runs on the code under t
 5. Renorm device-sync test (#1209): `run_pod.sh renorm`. The log must show the test as passed, not skipped: it is a CUDA-only fact, so a
    machine without a device skips it and `dotnet test` still exits 0. A skip is not a result; record it as a skip.
 6. S clip: `run_pod.sh clip-s`. Reference from the 4090 run: 93 s total, steps 0.85 to 1.1 s, peak VRAM 20.0 GB, all 30 blocks resident.
-7. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog flag `CliDrivable=false` is metadata only; no
-   command reads it, so the CLI is expected to run `fastframes-l`. If it does refuse, that is a finding, not something to work around on a
-   merged branch.
+7. L clip: `run_pod.sh clip-l`. It refuses unless the card reports at least 79 GB. The catalog flag is `CliDrivable=true` for `fastframes-l` (set once an L clip ran through the CLI on an H100). If the CLI refuses,
+   that is a finding, not something to work around on a merged branch.
 
 Each run writes its log and an `nvidia-smi` sample (every 2 s) under `OUT`. `run_pod.sh all` runs steps 1 to 7 in order and stops at the first
 failure; on a card under 79 GB it skips L with a message.
