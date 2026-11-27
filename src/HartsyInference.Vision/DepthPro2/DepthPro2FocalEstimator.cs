@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Dinov2;
@@ -10,9 +11,10 @@ namespace HartsyInference.Vision.DepthPro2;
 /// Depth Pro 2's focal estimator (upstream <c>FOVEstimator</c>, checkpoint <c>apple/DepthPro2-focal</c>): the frame is resized (antialiased bilinear) so its
 /// short side is at most 512 and both sides are multiples of 32, centre-cropped when wider than 16:9, encoded by a DINOv3 ViT-S/16 trunk (blocks 2, 5, 8 and
 /// 11 tapped with their prefix tokens; blocks 5, 7, 9 and 11 restore the prefix, as a lone frame does upstream), and <see cref="DepthPro2FovHead"/> regresses
-/// the field of view as <c>1 + sigmoid(logit)·178</c> degrees, converted back to the full frame after a crop. Weights are borrowed from the caller, F32.
+/// the field of view as <c>1 + sigmoid(logit)·178</c> degrees, converted back to the full frame after a crop. F32 weights are borrowed from the
+/// caller; disposing frees the copies the trunk made of 16-bit ones.
 /// </summary>
-public sealed class DepthPro2FocalEstimator
+public sealed class DepthPro2FocalEstimator : IDisposable
 {
     private const int MaxShortSide = 512;
     private const int SizeMultiple = 32;
@@ -33,8 +35,18 @@ public sealed class DepthPro2FocalEstimator
         _trunkPreset = DepthPro2Preset.TimmBackbone(Dinov2Preset.V3Small16);
         _trunk = new Dinov3VisionEncoder(_trunkPreset);
         _trunk.LoadWeights(Dinov3TimmKeys.ToHuggingFace(weights, "trunk.", _trunkPreset));
-        _head = new DepthPro2FovHead(weights, "head.", _trunkPreset.HiddenSize, TappedBlocks.Length, 1 + _trunkPreset.NumRegisterTokens);
+        try
+        {
+            _head = new DepthPro2FovHead(weights, "head.", _trunkPreset.HiddenSize, TappedBlocks.Length, 1 + _trunkPreset.NumRegisterTokens);
+        }
+        catch
+        {
+            _trunk.Dispose();
+            throw;
+        }
     }
+
+    public void Dispose() => _trunk.Dispose();
 
     /// <summary>The trunk's and the head's tensors.</summary>
     public IEnumerable<Tensor> EnumerateWeights() => _trunk.EnumerateWeights().Concat(_head.EnumerateWeights());
@@ -136,12 +148,10 @@ public sealed class DepthPro2FocalEstimator
         {
             int tokens = (int)taps[0].Shape[1], hidden = _trunkPreset.HiddenSize, width = hidden * taps.Length;
             Tensor joined = new(new TensorShape(1, tokens, width), DType.F32);
-            Span<float> dst = joined.AsSpan<float>();
-            for (int t = 0; t < taps.Length; t++)
-            {
-                ReadOnlySpan<float> src = taps[t].AsReadOnlySpan<float>();
-                for (int r = 0; r < tokens; r++) src.Slice(r * hidden, hidden).CopyTo(dst.Slice(r * width + t * hidden, hidden));
-            }
+            // A first write over the whole output, then one strided copy per tap: a GPU backend uploads no host buffer, and CUDA's Concat of
+            // more than two inputs along the channels would copy row by row.
+            StridedCopies.FillFrom(backend, joined, taps[0]);
+            for (int t = 0; t < taps.Length; t++) StridedCopies.ScatterAxis(backend, joined, taps[t], 2, t * hidden);
 
             return joined;
         }

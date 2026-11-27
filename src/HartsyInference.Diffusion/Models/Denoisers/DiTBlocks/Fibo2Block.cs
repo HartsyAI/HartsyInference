@@ -91,6 +91,27 @@ public sealed unsafe class Fibo2Block : IDisposable
             _ownedSplits);
     }
 
+    /// <summary>Every weight the block holds, for a residency owner to preload or free. The tensors are borrowed or split at load, and
+    /// this only lists them.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[]
+                 {
+                     _adaLnWeight, _adaLnBias, _attentionNorm1, _attentionNorm2, _ffnNorm1, _ffnNorm2,
+                     _crossNorm1, _crossNorm2, _crossGate,
+                 })
+            if (t is not null)
+                yield return t;
+        if (_selfAttention is not null)
+            foreach (Tensor t in _selfAttention.EnumerateWeights())
+                yield return t;
+        if (_crossAttention is not null)
+            foreach (Tensor t in _crossAttention.EnumerateWeights())
+                yield return t;
+        foreach (Tensor t in _ffn.EnumerateWeights())
+            yield return t;
+    }
+
     /// <summary>Runs the block on <paramref name="x"/> <c>[1, S, dim]</c>. <paramref name="groupEmbeddings"/> holds one
     /// <c>[1, 256]</c> adaLN embedding per layout group. <paramref name="rope"/> must be precomputed for the S positions.
     /// The caller keeps <paramref name="x"/>, <paramref name="textBundle"/> and the rope; the result is new.</summary>

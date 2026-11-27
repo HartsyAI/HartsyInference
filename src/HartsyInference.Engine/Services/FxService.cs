@@ -1,8 +1,10 @@
 using System.Globalization;
+using HartsyInference.Audio.Models.Separation;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
@@ -26,7 +28,7 @@ public sealed class FxService : IFxService
     {
         ArgumentNullException.ThrowIfNull(request);
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
-        if (IsKimVocal2(selector, request))
+        if (IsMdxSeparator(selector, request))
         {
             return SeparateVocalsAsync(selector, request, cancel);
         }
@@ -82,7 +84,8 @@ public sealed class FxService : IFxService
     }
 
     /// <summary>Voice-isolator route of <see cref="SeparateAsync"/>: a <c>voice</c> and a <c>background</c> stem (mono, 48 kHz; the
-    /// background is the input minus the voice). Always runs on the CPU backend with the STFT on the host.</summary>
+    /// background is the input minus the voice). Both models run on the engine's backend (CPU rerun when the card is full). The STFT stays on the host (IBackend.Stft has no
+    /// GPU path). On CUDA and Vulkan the network's scan, the Mamba causal convolution and the attention run on backend ops; on the CPU the causal convolution keeps its host loop, which is faster there.</summary>
     private Task<StemsResult> IsolateVoiceAsync(AudioModelSelector selector, FxSeparateRequest request, bool realtime, CancellationToken cancel)
     {
         if (request.Shifts != 0 || request.Segment is not null || request.Overlap is not null)
@@ -99,8 +102,17 @@ public sealed class FxService : IFxService
                 $"LookaheadFrames must be one of {string.Join(", ", FxCatalog.VoiceIsolatorRealtimeLookaheads)}.");
         }
         string cacheKey = selector.LocalPath ?? (realtime ? FxCatalog.VoiceIsolatorRealtimeId : FxCatalog.VoiceIsolatorId);
-        // CPU for now: the STFT, the per-band layers and the scan reference run on the host, and the GPU route has not been run.
-        IBackend backend = _cpuBackend.Value;
+        // Both models run on the engine's backend (CUDA or Vulkan), with a CPU rerun when the card is full: on the final head the
+        // device runs beat the CPU on every golden case (see docs/Research/VOICE_ISOLATOR_ARCHITECTURE.md). The STFT (VoiceIsolatorSpectral)
+        // stays on the host whichever backend runs.
+        IBackend gpu = _engine.Backend;
+        return WithCpuFallbackAsync(gpu, _cpuBackend.Value,
+            backend => IsolateVoiceOnAsync(backend, selector, request, realtime, cacheKey, cancel), cancel);
+    }
+
+    private Task<StemsResult> IsolateVoiceOnAsync(IBackend backend, AudioModelSelector selector, FxSeparateRequest request, bool realtime,
+        string cacheKey, CancellationToken cancel)
+    {
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Isolator, cacheKey), async ct =>
         {
             float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.VoiceIsolatorSampleRate);
@@ -126,31 +138,60 @@ public sealed class FxService : IFxService
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
-        }, cancel);
+        }, cancel, callerFallsBackFromOutOfVram: HasCpuFallback(backend));
     }
 
-    private static bool IsKimVocal2(AudioModelSelector selector, FxSeparateRequest request) =>
-        string.Equals(request.Model, FxCatalog.KimVocal2Id, StringComparison.OrdinalIgnoreCase)
-        || (string.IsNullOrWhiteSpace(request.Model) && string.Equals(selector.Id, FxCatalog.KimVocal2Id, StringComparison.OrdinalIgnoreCase));
+    private static bool IsMdxSeparator(AudioModelSelector selector, FxSeparateRequest request)
+    {
+        string id = string.IsNullOrWhiteSpace(request.Model) ? selector.Id : request.Model;
+        return ModelCatalog.Find(id)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
+    }
 
-    /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The network runs on the CPU backend like Demucs; no GPU run is claimed.</summary>
+    /// <summary>Kim_Vocal_2 route of <see cref="SeparateAsync"/>: one <c>vocals</c> stem (44.1 kHz stereo, peak-normalized to 0.9 as the reference does). The network runs on
+    /// the engine's backend when that is CUDA or Vulkan, and falls back to the CPU when the card has no room for it (a resident image or video model).</summary>
     private Task<StemsResult> SeparateVocalsAsync(AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
     {
         RejectDemucsOnlyKnobs(request);
+        return WithCpuFallbackAsync(_engine.Backend, _cpuBackend.Value, backend => SeparateVocalsOnAsync(backend, selector, request, cancel), cancel);
+    }
+
+    /// <summary>Runs <paramref name="run"/> on <paramref name="engine"/> when that is CUDA or Vulkan, and on <paramref name="cpu"/> otherwise. A GPU run that still ends
+    /// out of video memory after the audio runtime's own retry, wrapped or not, runs again on the CPU. Shared by the Kim_Vocal_2 and voice-isolator routes.</summary>
+    internal static async Task<T> WithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
+    {
+        if (!HasCpuFallback(engine))
+        {
+            return await run(cpu).ConfigureAwait(false);
+        }
+        try
+        {
+            return await run(engine).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (AudioRuntime.IsUncancelledOutOfVram(ex, cancel))
+        {
+            Logs.Warning($"[Audio] Not enough video memory on {engine.Device}; running on the CPU instead, which takes far longer.");
+            return await run(cpu).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Whether a run on <paramref name="backend"/> under <see cref="WithCpuFallbackAsync{T}"/> has a CPU run to fall back to.</summary>
+    private static bool HasCpuFallback(IBackend backend) => backend.Device.Type is DeviceType.Cuda or DeviceType.Vulkan;
+
+    private Task<StemsResult> SeparateVocalsOnAsync(IBackend backend, AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
+    {
         string cacheKey = selector.LocalPath ?? FxCatalog.KimVocal2Id;
-        IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, cacheKey), async ct =>
         {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(request.Audio, MdxSampleRate);
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(request.Audio, MdxSettings.KimVocal2.SampleRate);
             if (left.Length == 0)
             {
                 throw new ArgumentException("The audio to separate decoded to no samples.", nameof(request));
             }
             ct.ThrowIfCancellationRequested();
-            MdxVocalRunner runner = await LoadKimVocal2Async(selector, cacheKey, backend, ct).ConfigureAwait(false);
+            MdxVocalRunner runner = await LoadKimVocal2Async(selector, cacheKey, ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
-            float[][] vocals = runner.Separate(left, right, request.Overlap, progress: LogProgress, cancel: ct);
-            Logs.Verbose($"[Audio][Kim-Vocal-2] Separated {AudioClipCodec.Seconds(left.Length, MdxSampleRate):0.0}s in {Environment.TickCount64 - started}ms.");
+            float[][] vocals = runner.Separate(backend, left, right, request.Overlap, progress: LogProgress, cancel: ct);
+            Logs.Verbose($"[Audio][Kim-Vocal-2] Separated {AudioClipCodec.Seconds(left.Length, MdxSettings.KimVocal2.SampleRate):0.0}s on {backend.Device} in {Environment.TickCount64 - started}ms.");
             return new StemsResult
             {
                 Stems = new Dictionary<string, byte[]>(StringComparer.Ordinal)
@@ -160,35 +201,36 @@ public sealed class FxService : IFxService
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
-        }, cancel);
+        }, cancel, callerFallsBackFromOutOfVram: HasCpuFallback(backend));
     }
 
-    /// <summary>The vocals of <paramref name="audio"/> as a 44.1 kHz stereo WAV clip (16-bit PCM, as <see cref="AudioClipCodec.EncodeWav(float[], float[]?, int)"/> writes), for the video driving-audio pre-step: the recipe decodes it to the rate and channels it needs.</summary>
-    internal Task<AudioClip> SeparateVocalsClipAsync(AudioClip audio, double? maxSeconds, CancellationToken cancel)
+    /// <summary>The vocals of <paramref name="audio"/> for the video driving-audio pre-step, in both forms: a 44.1 kHz stereo WAV clip (16-bit PCM) for a soundtrack or a recipe that decodes it, and 16 kHz mono taken from the float stem the way the reference does, for a speech encoder.</summary>
+    internal Task<SeparatedVocals> SeparateVocalsClipAsync(AudioClip audio, double? maxSeconds, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(audio);
         AudioModelSelector selector = new(FxCatalog.KimVocal2Id, FxCatalog.KimVocal2Id, null);
+        // CPU on purpose: this runs just before a video model that needs the card.
         IBackend backend = _cpuBackend.Value;
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Mdx, FxCatalog.KimVocal2Id), async ct =>
         {
-            (float[] left, float[] right) = AudioClipCodec.DecodeStereo(audio, MdxSampleRate);
+            (float[] left, float[] right) = AudioClipCodec.DecodeStereoSoxrHq(audio, MdxSettings.KimVocal2.SampleRate);
             if (left.Length == 0)
             {
                 throw new ArgumentException("The driving audio decoded to no samples.", nameof(audio));
             }
-            MdxVocalRunner runner = await LoadKimVocal2Async(selector, FxCatalog.KimVocal2Id, backend, ct).ConfigureAwait(false);
-            float[][] vocals = runner.Separate(left, right, null, maxSeconds, LogProgress, ct);
-            return new AudioClip { Data = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate), Format = "wav" };
+            MdxVocalRunner runner = await LoadKimVocal2Async(selector, FxCatalog.KimVocal2Id, ct).ConfigureAwait(false);
+            float[][] vocals = runner.Separate(backend, left, right, null, maxSeconds, LogProgress, ct);
+            AudioClip stem = new() { Data = AudioClipCodec.EncodeWav(vocals[0], vocals[1], runner.SampleRate), Format = "wav" };
+            // Uncropped: the recipe cuts it to the length of the clip it actually generates, which a chain rounds up.
+            return new SeparatedVocals(stem, MdxSeparator.ToMono(vocals, runner.SampleRate, SeparatedVocals.SpeechSampleRate));
         }, cancel);
     }
 
-    private const int MdxSampleRate = 44_100;
-
-    private Task<MdxVocalRunner> LoadKimVocal2Async(AudioModelSelector selector, string cacheKey, IBackend backend, CancellationToken cancel) =>
+    private Task<MdxVocalRunner> LoadKimVocal2Async(AudioModelSelector selector, string cacheKey, CancellationToken cancel) =>
         _engine.AudioRuntime.Mdx.GetOrLoadAsync(cacheKey, async ct =>
         {
             string path = await FxCatalog.EnsureKimVocal2PathAsync(selector.LocalPath, ct).ConfigureAwait(false);
-            return FxCatalog.LoadKimVocal2(path, backend);
+            return FxCatalog.LoadKimVocal2(path);
         }, cancel);
 
     private static void LogIsolatorProgress(int done, int total) => Logs.Verbose($"[Audio][Voice-Isolator] window {done}/{total}");

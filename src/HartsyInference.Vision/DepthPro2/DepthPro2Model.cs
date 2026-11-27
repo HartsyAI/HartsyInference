@@ -11,7 +11,7 @@ namespace HartsyInference.Vision.DepthPro2;
 /// <see cref="DepthPro2FocalEstimator"/>'s angles over the images, so every view shares one focal length as upstream's clips do. Video runs
 /// through <see cref="DepthPro2VideoStream"/>.
 /// </summary>
-public sealed class DepthPro2Model
+public sealed class DepthPro2Model : IDisposable
 {
     /// <summary>The most patch tokens (16 × 16 pixels each, after padding to 32) one image may have: 2048 × 2048. The network runs at the image's own size
     /// with global attention over every token, so a larger image is refused rather than left to exhaust memory deep inside attention.</summary>
@@ -30,6 +30,9 @@ public sealed class DepthPro2Model
     }
 
     public DepthPro2Network Network => _network;
+
+    /// <summary>Disposes the network, which the model owns from construction.</summary>
+    public void Dispose() => _network.Dispose();
 
     /// <summary>The maps of <paramref name="images"/> (RGB24, all <paramref name="width"/> × <paramref name="height"/>), in order.</summary>
     /// <param name="focalLengthPx">The focal length in pixels, or null to estimate it with <paramref name="focalEstimator"/>.</param>
@@ -63,15 +66,21 @@ public sealed class DepthPro2Model
     /// <summary>Throws when a <paramref name="width"/> × <paramref name="height"/> image is over <see cref="MaxPatchTokens"/> once padded to 32.</summary>
     public static void CheckSize(int width, int height)
     {
-        long padH = (height + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
-        long padW = (width + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
-        long tokens = padH / 16 * (padW / 16);
+        long tokens = PatchTokens(width, height);
         if (tokens > MaxPatchTokens)
         {
             throw new ArgumentException(
                 $"A {width}x{height} image is {tokens} patch tokens; Depth Pro 2 runs at the image's own size with global attention and this build takes at "
                 + $"most {MaxPatchTokens} (2048x2048 or an equal area). Downscale the image first.");
         }
+    }
+
+    // One frame's patch tokens (16 x 16 pixels each) once padded to the network's input multiple.
+    internal static long PatchTokens(int width, int height)
+    {
+        long padH = (height + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
+        long padW = (width + DepthPro2Preset.InputMultiple - 1L) / DepthPro2Preset.InputMultiple * DepthPro2Preset.InputMultiple;
+        return padH / 16 * (padW / 16);
     }
 
     /// <summary>

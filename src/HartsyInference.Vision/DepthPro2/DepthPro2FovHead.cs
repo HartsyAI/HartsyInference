@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.DinoVit;
 
@@ -132,7 +133,7 @@ public sealed class DepthPro2FovHead
             }
 
             using Tensor query = new(new TensorShape(1, _dim), DType.F32);
-            seq.AsReadOnlySpan<float>()[.._dim].CopyTo(query.AsSpan<float>());
+            backend.CopyStrided(query, seq, StridedCopySpec.Gather(StridedView.Of(seq.Shape).Slice(1, 0, 1)));
             using Tensor queryNormed = new(query.Shape, DType.F32);
             backend.LayerNorm(queryNormed, query, W("norm.weight", _dim), W("norm.bias", _dim), TapNormEps);
             Tensor logits = new(new TensorShape(1, 2), DType.F32);
@@ -214,15 +215,13 @@ public sealed class DepthPro2FovHead
         {
             using Tensor slice = new(new TensorShape(1, tokens, _embed), DType.F32);
             using Tensor sliceNormed = new(slice.Shape, DType.F32);
-            ReadOnlySpan<float> src = taps.AsReadOnlySpan<float>();
-            Span<float> dst = normed.AsSpan<float>();
+            // The first write covers the whole output, so a GPU backend allocates it on the device instead of uploading a host buffer.
+            StridedCopies.FillFrom(backend, normed, taps);
             for (int t = 0; t < _taps; t++)
             {
-                Span<float> s = slice.AsSpan<float>();
-                for (int r = 0; r < tokens; r++) src.Slice(r * width + t * _embed, _embed).CopyTo(s.Slice(r * _embed, _embed));
+                StridedCopies.SliceAxis(backend, slice, taps, 2, t * _embed, _embed);
                 backend.LayerNorm(sliceNormed, slice, W($"tap_norms.{t}.weight", _embed), W($"tap_norms.{t}.bias", _embed), TapNormEps);
-                ReadOnlySpan<float> o = sliceNormed.AsReadOnlySpan<float>();
-                for (int r = 0; r < tokens; r++) o.Slice(r * _embed, _embed).CopyTo(dst.Slice(r * width + t * _embed, _embed));
+                StridedCopies.ScatterAxis(backend, normed, sliceNormed, 2, t * _embed);
             }
 
             return normed;

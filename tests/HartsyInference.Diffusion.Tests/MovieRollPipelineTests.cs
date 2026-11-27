@@ -12,8 +12,8 @@ using Xunit;
 namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>The MovieRoll pipeline on the tiny DiT. <c>SyntheticSmoke</c>: the checks are wiring (the pipeline's latents equal the sampler's on the same
-/// noise, and a rerun with the same seed is identical), not parity. Parity for the sampler loop is in <see cref="MovieRollRollingParityTests"/>. The tiny
-/// VAE fixture has two latent channels and this DiT has four, so <see cref="MovieRollPipeline.Generate"/>'s decode is not exercised here; the VAE tests cover it.</summary>
+/// noise, a rerun with the same seed is identical, and the decode of the scaled latents matches a hand decode on a 4-channel tiny VAE), not parity.
+/// Parity for the sampler loop is in <see cref="MovieRollRollingParityTests"/>.</summary>
 [Trait("Category", "SyntheticSmoke")]
 public sealed class MovieRollPipelineTests
 {

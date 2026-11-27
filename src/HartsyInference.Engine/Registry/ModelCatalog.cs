@@ -2550,18 +2550,19 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = vp,
+                Id = "kim-vocal-2", Modality = fx, DisplayName = "Kim_Vocal_2 (vocal separator)", Architecture = "TFC-TDF-UNet (UVR MDX-Net) vocal separator", Status = ok,
                 CliDrivable = true, // `hartsy fx separate <wav> -m kim-vocal-2`, and `hartsy video --driving-audio <wav> --separate-vocals`.
+                Features = CatalogFeatures.MdxNetSeparator,
                 // Weights: the vocal_separator/Kim_Vocal_2.onnx file of meituan-longcat/LongCat-Video-Avatar-1.6 (66,759,214 bytes, sha256 pinned in
                 // FxCatalog), read straight from the .onnx by ModelAssets/Onnx. Licence: not stated by the file, the repo or UVR's model repository
                 // (the UVR GUI code is MIT; nothing says the weights are), recorded as unknown (identity row: "other"). Runs on the CPU backend.
-                // The network and stem match onnxruntime (docs/Checklists/PARITY_VERIFICATION.md); the audio-separator driver and the librosa
-                // resample are uncompared, hence ValidationPending.
+                // Matches audio-separator 0.30.2 and LongCat's separate_vocals on CPU F32 (docs/Checklists/PARITY_VERIFICATION.md).
             },
 
             new CatalogEntry
             {
                 Id = "voice-isolator", Modality = fx, DisplayName = "Inworld Voice Isolator (offline)", Architecture = "Band-split dual-path attention and Mamba speech isolator, 48 kHz, 64M", Status = vp,
+                Features = CatalogFeatures.VoiceIsolator,
                 CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator` writes a `voice` and a `background` stem (mono, 48 kHz).
                 // Weights: inworld/voice-isolator denoiser.safetensors (256,260,128 bytes, sha256 pinned in FxCatalog). Licence: Apache-2.0 for code and
                 // weights; trained on Inworld first-party data plus VocalSet (CC BY 4.0), IndicVoices-R (CC BY 4.0) and VCTK (ODC-By 1.0), credited in the
@@ -2570,6 +2571,7 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "voice-isolator-realtime", Modality = fx, DisplayName = "Inworld Voice Isolator (realtime)", Architecture = "Causal band-split dual-path attention and Mamba speech isolator, 48 kHz, 58M, look-ahead 0/20/40 ms", Status = vp,
+                Features = CatalogFeatures.VoiceIsolator,
                 CliDrivable = true, // `hartsy fx separate <wav> -m voice-isolator-realtime` runs the causal stream over the clip (look-ahead 20 ms, about 63 ms latency).
                 // Weights: inworld/voice-isolator denoiser_realtime.safetensors (232,780,800 bytes, sha256 pinned in FxCatalog); same licence as the offline model.
             },
@@ -3081,6 +3083,19 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Gated: yunyangge/MovieRoll asks for acceptance of its access conditions. The sha256 is the LFS object id from the repo's raw
+                // pointer file (33,291,800,480 bytes, a full-precision DiT). The entry stays ValidationPending until a real-weight run validates it.
+                Id = "movieroll", Modality = vid, DisplayName = "MovieRoll (distilled T2V)", Architecture = "HunyuanVideo-1.5 DiT + rolling KV sampler",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "yunyangge/MovieRoll", RepoPath = "distilled/t2v/model.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MovieRoll/distilled-t2v", Role = "transformer",
+                        Sha256 = "410694c3e24f6c5d3a53485fbebdfe8e9cc18165f103623eee21f6ff3b91b169" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "hunyuan-video", Modality = vid, DisplayName = "HunyuanVideo 13B (T2V)", Architecture = "MMDiT + 3D causal VAE", Status = vp,
                 CliDrivable = true,
                 Assets = new ModelAsset[]
@@ -3112,10 +3127,9 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "fastframes-l", Modality = vid, DisplayName = "FastFrames L (14B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
-                // Block streaming is in (#1178), but the frame KV cache is not streamed, so 81 frames need an 80 GB card. The flag
-                // stays false until a pod run confirms the L clip (docs/Checklists/FASTFRAMES_GPU_RUNBOOK.md). The recipe constructs
-                // for engine-level runs.
-                CliDrivable = false,
+                // The frame KV cache is not streamed, so 81 frames need an 80 GB card (block streaming alone does not fit them). An 81-frame
+                // clip ran through this CLI on an H100 80GB (docs/Checklists/PARITY_VERIFICATION.md).
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     // Apple's FastFrames-L, all three files.
@@ -3162,6 +3176,45 @@ public static class ModelCatalog
                     new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.5", RepoPath = "base_model/config.json",
                         TargetSubdir = "LongCat/avatar-1.5/base_model", Role = "config" },
                     // The text encoder and VAE are the engine's existing pinned side models, shared rather than fetched twice.
+                    SideModels.Umt5Xxl,
+                    SideModels.Wan21Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // LongCat-Video-Avatar 1.6, the per-row INT8 release (base_model_int8) from meituan-longcat/LongCat-Video-Avatar-1.6. The 1.6 build
+                // runs the 8-step distilled path with its loraA (DMD) and loraB (OPSD) mixed per step (upstream --use_distill, mix_steps 4). The INT8 files share the
+                // layout the 1.5 INT8 release uses (15,880,145,024 B across four shards); the loader reads the INT8 index and converts the weights.
+                // Shards, index and configs are pinned by the HF tree (lfs oids; the index and config are git blobs and carry no hash here). Sizes in bytes.
+                // The LoRAs are the DMD (loraA) and OPSD (loraB) adapters of the 1.6 card, laid out as the release does (loraA/lora.safetensors, loraB/lora.safetensors).
+                // Licence conflict as the 1.5 row: MIT on the model card, "academic use only and commercial use is not permitted" on the project page.
+                // Likeness generation: the depicted person's consent is required. Routed by the id "longcat-avatar-1.6" (CLI: longcat-avatar:1.6).
+                Id = HartsyInference.Engine.Recipes.Video.LongCatAvatarVariants.Avatar16FamilyId, Modality = vid, DisplayName = "LongCat-Video-Avatar 1.6 INT8 (speech and image to video, consent required)",
+                Architecture = "flow-matching DiT with per-block audio cross-attention", Status = vp, CliDrivable = true,
+                HuggingFaceRepo = "meituan-longcat/LongCat-Video-Avatar-1.6",
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00001-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "59bc93c0100bbeb2f1cd4fcb274e556270248beadbcd5ce3386a1b35070ed2b5" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00002-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "2e132eb2b8277a8c34ed6ac1ff823af35e7105219e18f7f619b943d8144b06f4" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00003-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "e382678dea3e8da14b9c0947381005b39268accba26df3aef0cb1b5e91852c2f" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model-00004-of-00004.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "transformer", Sha256 = "69d819629f55e5a06c295dc03c55ba94b3557c885879802237ce593b74fb4df6" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantized_model.safetensors.index.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/config.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "base_model_int8/quantization_config.json",
+                        TargetSubdir = "LongCat/avatar-1.6/base_model_int8", Role = "config" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraA/lora.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/loraA", TargetName = "lora.safetensors", Role = "lora",
+                        Sha256 = "6e0d1ce0d8b3fdfd63fbdae4c25e1bbbb286b1cb198a2ec07d4c945e883c188c" },
+                    new() { Repo = "meituan-longcat/LongCat-Video-Avatar-1.6", RepoPath = "loraB/lora.safetensors",
+                        TargetSubdir = "LongCat/avatar-1.6/loraB", TargetName = "lora.safetensors", Role = "lora",
+                        Sha256 = "5efc11d8eaa298cfa60fa20ce8f57e894df07deff61c922166aed8f4503e660b" },
+                    // The text encoder and VAE are the engine's existing pinned side models, shared with the 1.5 row.
                     SideModels.Umt5Xxl,
                     SideModels.Wan21Vae,
                 },

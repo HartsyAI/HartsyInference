@@ -1020,6 +1020,8 @@ public sealed class VisionService : IVisionService, IDisposable
         lock (_embedLock)
         {
             foreach (BiRefNetMatter matter in _birefnetCache.Values) matter.Dispose();
+            foreach (DepthPro2Model model in _depthPro2Cache.Values) model.Dispose();
+            foreach (DepthPro2FocalEstimator estimator in _depthPro2FocalCache.Values) estimator.Dispose();
             foreach (ClipModelLoader loader in _clipCache.Values) loader.Dispose();
             foreach (SafeTensorsLoader loader in _embedLoaders) loader.Dispose();
             foreach (PytorchPickleLoader loader in _annotatorLoaders) loader.Dispose();

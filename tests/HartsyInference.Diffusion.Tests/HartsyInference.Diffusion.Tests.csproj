@@ -17,6 +17,7 @@
     <None Include="Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Duo\*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\flux2_edit_tiny\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Fibo2\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\fastframes_tiny\*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\LtxVideo2VaeEncoder\*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\sana_wm_s4_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
@@ -33,7 +34,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Engine\HartsyInference.Engine.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
   </ItemGroup>
@@ -42,4 +42,7 @@
     <Compile Include="..\Shared\GpuDeviceFacts.cs" Link="Shared\GpuDeviceFacts.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\GpuRunKnobs.cs" Link="Shared\GpuRunKnobs.cs" />
+  </ItemGroup>
 </Project>

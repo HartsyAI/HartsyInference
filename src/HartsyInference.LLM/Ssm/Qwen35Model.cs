@@ -287,7 +287,9 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     }
 
     /// <param name="maxSequenceLength">Tokens the full-attention KV caches hold; the default is the fixed 8192 every earlier caller got.</param>
-    public static Qwen35Model Load(string ggufPath, int maxSequenceLength = MaxAttnSeqLen)
+    /// <param name="dequantizeToF32">Expands every quantized weight to F32 at load, for a backend that cannot multiply by quantized weights (the CPU).
+    /// The expansion is the whole model in F32, so it is for a backend that can hold that; the engine checks the host RAM first.</param>
+    public static Qwen35Model Load(string ggufPath, int maxSequenceLength = MaxAttnSeqLen, bool dequantizeToF32 = false)
     {
         // QUANT-RESIDENT load (2026-07-24): weights stay in their GGUF quantization so every
         // backend.Linear dispatches the fused quant GEMV / dp4a decode paths — the previous
@@ -295,9 +297,21 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         // RelabelRank2ToPyTorchOrder is a pure metadata swap (GGUF rank-2 bytes are already
         // [out, in]), so it is quant-safe — unlike the old memcpy Relabel, which was F32-only.
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(ggufPath);
+        // The F32 copies made by the expansion are owned by the model (disposed with it), and freed here if the load fails.
+        List<Tensor> expanded = [];
         try
         {
             Dictionary<string, Tensor> w = GgufModelLoader.RelabelRank2ToPyTorchOrder(handle.Weights);
+            if (dequantizeToF32)
+            {
+                foreach (string key in w.Keys.ToList())
+                {
+                    if (!w[key].DType.IsQuantized) continue;
+                    Tensor f32 = GgufDequantizer.Dequantize(w[key], DType.F32);
+                    expanded.Add(f32);
+                    w[key] = f32;
+                }
+            }
             // Host-consumed / non-Linear tensors must be F32:
             //  - every rank-1 tensor (norm weights, ssm_a, ssm_dt.bias — RmsNorm and the host SSM
             //    math read them as float*),
@@ -418,6 +432,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
                 convK, headKvDim, headVDim, numKHeads, numVHeads, moe, maxSequenceLength);
             model._ownedTensors.AddRange(converted);
+            model._ownedTensors.AddRange(expanded);
             if (loop is not null) model.ConfigureLoop(loop, routers!, ropeScaling);
             else model.ConfigureRope(ropeScaling);
             int[]? sections = m.GetIntArray($"{arch}.rope.dimension_sections");
@@ -425,7 +440,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 model.MropeSection = Array.FindAll(sections, static s => s > 0);
             return model;
         }
-        catch { handle.Dispose(); throw; }
+        catch { foreach (Tensor t in expanded) t.Dispose(); handle.Dispose(); throw; }
     }
 
     private Tensor W(string key) => _w[key];
@@ -636,7 +651,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         int d = DModel;
         string p = $"blk.{i}";
         TensorShape flat = new(1, seq, d);
-        Tensor attnOut = FullAttnCore(backend, hIn, i, seq, ropeCos, ropeSin);
+        // A decode step passes the one table RunTrunk built for the token; without it each layer rebuilt the rope on the host.
+        Tensor attnOut = FullAttnCore(backend, hIn, i, seq, ropeCos ?? stepCos, ropeSin ?? stepSin);
         Tensor afterAttn = new(flat, DType.F32);
         backend.Add(afterAttn, hIn, attnOut);
         attnOut.Dispose();
@@ -661,15 +677,17 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         Tensor xn = new(flat, DType.F32);
         backend.RmsNorm(xn, x, W($"{p}.attn_norm.weight"), Eps);
 
-        // wq outputs [query | gate] fused, each hq*hd wide (double width); each head's row is
-        // [query_0..query_{hd-1}, gate_0..gate_{hd-1}] — a strided de-interleave, not a flat slice — done
-        // host-side since it's a one-time small reshuffle per call, not a hot loop.
+        // wq outputs [query | gate] fused per head: each head's hd*2 row is [query_0..query_{hd-1}, gate_0..gate_{hd-1}]. Viewed as
+        // [seq*hq, 2*hd] that is one row per (token, head), so each half is a device last-dim slice (no host read).
         Tensor qgFull = new(new TensorShape(1, seq, hq * hd * 2), DType.F32);
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
+        // IntoShape moves the device buffer; Reshape would read it back to the host first.
+        Tensor qgRows = qgFull.IntoShape(new TensorShape(seq * hq, hd * 2));
         Tensor q = new(new TensorShape(1, seq, hq, hd), DType.F32);
         Tensor gate = new(new TensorShape(1, seq, hq, hd), DType.F32);
-        SplitInterleavedQueryGate(qgFull, q, gate, seq, hq, hd);
-        qgFull.Dispose();
+        backend.SliceLastDim(q, qgRows, 0);
+        backend.SliceLastDim(gate, qgRows, hd);
+        qgRows.Dispose();
 
         Tensor qN = new(q.Shape, DType.F32);
         backend.RmsNorm(qN, q, W($"{p}.attn_q_norm.weight"), Eps);
@@ -714,10 +732,10 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Permute0213(attnFlat, attn, hq, seq, hd);
         attn.Dispose();
 
-        Tensor gateFlat = gate.Reshape(new TensorShape(1, seq, hq * hd));   // view, no copy — same layout already
+        Tensor gateFlat = gate.IntoShape(new TensorShape(1, seq, hq * hd));   // same layout; the device buffer moves, no readback
         Tensor gateSig = new(gateFlat.Shape, DType.F32);
         backend.Sigmoid(gateSig, gateFlat);
-        gate.Dispose();
+        gateFlat.Dispose();
         Tensor gated = new(attnFlat.Shape, DType.F32);
         backend.Mul(gated, attnFlat, gateSig);
         attnFlat.Dispose(); gateSig.Dispose();
@@ -726,26 +744,6 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Linear(attnOut, gated, W($"{p}.attn_output.weight"), null);
         gated.Dispose();
         return attnOut;
-    }
-
-    /// <summary>Splits the fused <c>[query | gate]</c> projection into two <c>[1,seq,hq,hd]</c> tensors — each head's output row is <c>[query_0..query_{hd-1}, gate_0..gate_{hd-1}]</c>, a per-head strided de-interleave, not a contiguous slice.</summary>
-    private static void SplitInterleavedQueryGate(Tensor qgFull, Tensor q, Tensor gate, int seq, int hq, int hd)
-    {
-        float* src = (float*)qgFull.DataPointer;
-        float* qp = (float*)q.DataPointer;
-        float* gp = (float*)gate.DataPointer;
-        int headStride = hd * 2;
-        for (int s = 0; s < seq; s++)
-        {
-            long rowBase = (long)s * hq * headStride;
-            long outBase = (long)s * hq * hd;
-            for (int hh = 0; hh < hq; hh++)
-            {
-                float* srcHead = src + rowBase + hh * headStride;
-                Buffer.MemoryCopy(srcHead, qp + outBase + (long)hh * hd, hd * 4, hd * 4);
-                Buffer.MemoryCopy(srcHead + hd, gp + outBase + (long)hh * hd, hd * 4, hd * 4);
-            }
-        }
     }
 
     private void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta)

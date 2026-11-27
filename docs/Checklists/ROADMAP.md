@@ -236,3 +236,10 @@ with its first consumer and is removed here once it ships.
   Ming-Image text encoder, MiniMax-H3.
 - [ ] A BailingMoeV2 safetensors config factory for `GenericTransformer` + `MoeFeedForward` (the Ming-Image text
   encoder).
+
+## 14. Audio front ends
+
+- [ ] Re-run Chatterbox and IndexTTS-2 reference-conditioning parity on real weights. Their recorded `soxr_hq` stand-in figures ([PARITY_VERIFICATION](PARITY_VERIFICATION.md))
+  predate the 2026-11-26 filter, which was measured at the resampler only ([KIM_VOCAL2_SEPARATOR](../Research/KIM_VOCAL2_SEPARATOR.md)). The parity tests and dump
+  scripts they cite are no longer in the tree. `AudioClipCodec.DecodeStereoSoxrHq`, the separator's input resampling from any source rate, uses the same filter and
+  was likewise measured at the resampler only.

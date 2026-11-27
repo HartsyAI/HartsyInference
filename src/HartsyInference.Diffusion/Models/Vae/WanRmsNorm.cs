@@ -5,24 +5,32 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Vae;
 
 /// <summary>Wan2.2 VAE channel-wise RMS norm (<c>RMS_norm</c> in <c>vae2_2.py</c>: <c>F.normalize(x, dim=channel)·√dim·gamma</c>, which equals RMS-over-channels × gamma). Normalizes the channel vector at each spatial-temporal position of a <c>[B, C, T, H, W]</c> tensor and scales by a per-channel learnable <c>gamma</c>. Reusable by any Wan-family video VAE.</summary>
-public sealed unsafe class WanRmsNorm(int channels, float eps = 1e-12f)
+public sealed unsafe class WanRmsNorm(int channels, float eps = 1e-12f) : IVaeModule
 {
     private readonly int _channels = channels;
     private readonly float _eps = eps;
-    private Tensor? _gamma;   // [C] (flattened from [C,1,1,1])
+    private Tensor? _gamma;   // [C] (flattened from [C,1,1,1]), an owned F32 copy
 
-    /// <summary>Loads the per-channel scale (<c>gamma</c>), cast to F32. Accepts any shape whose element count is the channel count.</summary>
+    /// <summary>Loads the per-channel scale (<c>gamma</c>) as an owned F32 copy. Accepts any shape whose element count is the channel count.</summary>
     public void LoadWeights(Tensor gamma)
     {
         if (gamma.Shape.ElementCount != _channels)
             throw new ArgumentException($"gamma has {gamma.Shape.ElementCount} elements, expected {_channels}.", nameof(gamma));
-        _gamma = gamma.DType == DType.F32 ? gamma : gamma.CastTo(DType.F32);
+        _gamma?.Dispose();
+        _gamma = gamma.CastTo(DType.F32);
     }
 
     /// <summary>Enumerates the gamma weight for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_gamma is not null) yield return _gamma;
+    }
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+        _gamma?.Dispose();
+        _gamma = null;
     }
 
     /// <summary>GPU-resident overload: keeps the norm on-device (host <see cref="Forward(Tensor)"/> would force a

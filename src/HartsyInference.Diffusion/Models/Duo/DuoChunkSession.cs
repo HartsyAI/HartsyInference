@@ -1,14 +1,16 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.ModelAssets.Duo;
 
 namespace HartsyInference.Diffusion.Models.Duo;
 
 /// <summary>Chunk-by-chunk Duo generation on the H3 stack for one conversation. <see cref="Prefill"/> commits the reference and the shared
 /// Intent rows once; <see cref="GenerateBlock"/> then denoises the next block against the committed history and commits its clean result.
-/// Blocks must come in order from 0, and every input is length-checked against the layout before anything is computed. The denoise is the
-/// shared Euler loop, so the cached path and a full forward over the same history take the same schedule and noise.
-/// CPU reference: it allocates per call and is for tiny-config self-consistency tests, not production.</summary>
+/// Blocks must come in order from 0, and every input is length-checked against the layout before anything is computed. The denoise runs on
+/// the backend with the Euler schedule, so the cached path and a full forward over the same history take the same schedule and noise.
+/// The state stays device-resident across the Euler steps, and the clean block is read back once, before the eviction and the commit.
+/// <see cref="FullBlock"/> is the dense host reference that the tests compare against.</summary>
 internal sealed class DuoChunkSession
 {
     private readonly MiniMaxH3Transformer _transformer;
@@ -49,7 +51,7 @@ internal sealed class DuoChunkSession
 
         DuoLayout prefix = DuoLayoutBuilder.BuildPrefix(_sample, _rope);
         Forward(prefix, [SharedGroup(sharedRows)], sharedText, referenceVideo, null, [1f, 1f], commit: true).Dispose();
-        _sharedText = sharedText;
+        _sharedText = (float[])sharedText.Clone();
         _textWidth = textWidth;
         _videoWidth = videoWidth;
         _nextBlock = 0;
@@ -90,16 +92,114 @@ internal sealed class DuoChunkSession
             throw new ArgumentException($"Block {block} noise audio has {noiseAudio.Length} values; expected {audioRows} rows.", nameof(noiseAudio));
         }
 
+        // Refuse a block that cannot fit even after every clean block is dropped, before any work is done or anything is evicted.
+        int committedRows = input.Video.VideoRows + audioRows;
+        int evictable = _cache.Groups.Where(g => g.Kind == DuoGroupKind.Clean).Sum(g => g.End - g.Start);
+        if (_cache.Length - evictable + committedRows > _cache.CapacityRows)
+        {
+            throw new InvalidOperationException(
+                $"Block {block} commits {committedRows} rows; the reference and shared rows leave room for {_cache.CapacityRows - (_cache.Length - evictable)}.");
+        }
+
         float[] text = Concat(_sharedText, bodyText);
         IReadOnlyList<DuoGroup> refiner = ChunkRefiner(block, shared, bodyRows);
         DuoLayout noisy = DuoLayoutBuilder.BuildChunk(_sample, block, _rope, clean: false);
-        (float[] video, float[] audio) = DuoSampling.Sample(noiseVideo, noiseAudio, steps, shift, DuoSolver.Euler,
-            (v, a, time) => Velocity(noisy, refiner, text, v, a, time), renoise: null);
-
         DuoLayout clean = DuoLayoutBuilder.BuildChunk(_sample, block, _rope, clean: true);
-        Forward(clean, refiner, text, video, audio, [1f, 1f], commit: true).Dispose();
-        _nextBlock++;
-        return (video, audio);
+
+        // The denoise stays on the backend: text and noise are uploaded once, each step's velocity comes back as device tensors, and the
+        // Euler update is two device ops. The host reads the clean block once, at the end.
+        int textRows = refiner.Count == 0 ? 0 : refiner[^1].End;
+        using Tensor textTensor = DuoDeviceWindow.Upload(new TensorShape(textRows, RowWidth(text, textRows, "text")), text);
+        Tensor video = DuoDeviceWindow.Upload(new TensorShape(noisy.VideoRows.Length, RowWidth(noiseVideo, noisy.VideoRows.Length, "noise video")), noiseVideo);
+        Tensor? audio = noisy.AudioRows.Length == 0 || noiseAudio.Length == 0
+            ? null
+            : DuoDeviceWindow.Upload(new TensorShape(noisy.AudioRows.Length, RowWidth(noiseAudio, noisy.AudioRows.Length, "noise audio")), noiseAudio);
+        float[] schedule = DuoSchedule.Grid(steps, shift);
+        try
+        {
+            for (int index = 0; index < steps; index++)
+            {
+                float t = schedule[index];
+                float remaining = schedule[index + 1] - t;
+                using Forwarded predicted = ForwardTensors(_transformer, _backend, noisy, refiner, textTensor, video, audio, [1f, t], _cache,
+                    commit: false);
+                Tensor nextVideo = Euler(video, predicted.Video, remaining);
+                Tensor? nextAudio;
+                try
+                {
+                    if ((audio is null) != (predicted.Audio is null))
+                    {
+                        throw new InvalidOperationException("The forward returned audio for one stream of the block and not the other.");
+                    }
+                    nextAudio = audio is null || predicted.Audio is null ? null : Euler(audio, predicted.Audio, remaining);
+                }
+                catch
+                {
+                    nextVideo.Dispose();
+                    throw;
+                }
+                video.Dispose();
+                audio?.Dispose();
+                video = nextVideo;
+                audio = nextAudio;
+            }
+
+            // The check comes before any change to the cache: a non-finite block is refused with the history exactly as it was.
+            float[] outVideo = video.AsSpan<float>().ToArray();
+            float[] outAudio = audio is null ? [] : audio.AsSpan<float>().ToArray();
+            if (!IsFinite(outVideo) || !IsFinite(outAudio))
+            {
+                throw new InvalidOperationException("Nonfinite generated Duo latent.");
+            }
+
+            // The window slides: the oldest clean blocks go, reference and shared rows stay, so this block's rows fit.
+            while (_cache.Length + committedRows > _cache.CapacityRows)
+            {
+                _cache.EvictOldestClean();
+            }
+            ForwardTensors(_transformer, _backend, clean, refiner, textTensor, video, audio, [1f, 1f], _cache, commit: true).Dispose();
+            _nextBlock++;
+            return (outVideo, outAudio);
+        }
+        finally
+        {
+            video.Dispose();
+            audio?.Dispose();
+        }
+    }
+
+    /// <summary>One Euler step on the device: <c>state + remaining · velocity</c>, the same arithmetic as <see cref="DuoSampler.Euler"/>.</summary>
+    private Tensor Euler(Tensor state, Tensor velocity, float remaining)
+    {
+        Tensor next = new(state.Shape, DType.F32);
+        Tensor scaled = new(velocity.Shape, DType.F32);
+        try
+        {
+            _backend.Scale(scaled, velocity, remaining);
+            _backend.Add(next, state, scaled);
+        }
+        catch
+        {
+            next.Dispose();
+            throw;
+        }
+        finally
+        {
+            scaled.Dispose();
+        }
+        return next;
+    }
+
+    private static bool IsFinite(float[] values)
+    {
+        foreach (float value in values)
+        {
+            if (!float.IsFinite(value))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>Reference for the session: one full forward over reference, shared rows, clean blocks <c>0..block-1</c> and block
@@ -133,13 +233,6 @@ internal sealed class DuoChunkSession
             renoise: null);
     }
 
-    private (float[] Video, float[] Audio) Velocity(DuoLayout layout, IReadOnlyList<DuoGroup> refiner, float[] text, float[] video,
-        float[] audio, float time)
-    {
-        using Forwarded result = Forward(layout, refiner, text, video, audio, [1f, time], commit: false);
-        return result.Read();
-    }
-
     private static (float[] Video, float[] Audio) FullVelocity(MiniMaxH3Transformer transformer, IBackend backend, DuoLayout layout,
         IReadOnlyList<DuoGroup> refiner, float[] text, float[] fixedVideo, float[] fixedAudio, float[] video, float[] audio, float time)
     {
@@ -161,18 +254,14 @@ internal sealed class DuoChunkSession
         {
             throw new ArgumentException("A Duo forward needs text rows: the shared Intent rows are always present.", nameof(refiner));
         }
-        Tensor textTensor = HostTensor(textRows, RowWidth(text, textRows, "text"), text);
-        Tensor videoTensor = HostTensor(layout.VideoRows.Length, RowWidth(video, layout.VideoRows.Length, "video"), video);
+        Tensor textTensor = DuoDeviceWindow.Upload(new TensorShape(textRows, RowWidth(text, textRows, "text")), text);
+        Tensor videoTensor = DuoDeviceWindow.Upload(new TensorShape(layout.VideoRows.Length, RowWidth(video, layout.VideoRows.Length, "video")), video);
         Tensor? audioTensor = audio is null || layout.AudioRows.Length == 0
             ? null
-            : HostTensor(layout.AudioRows.Length, RowWidth(audio, layout.AudioRows.Length, "audio"), audio);
+            : DuoDeviceWindow.Upload(new TensorShape(layout.AudioRows.Length, RowWidth(audio, layout.AudioRows.Length, "audio")), audio);
         try
         {
-            (Tensor v, Tensor? a) = cache is null
-                ? transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal, refiner, textTensor, videoTensor, audioTensor, times)
-                : transformer.ForwardDuoCached(backend, layout, DuoAttentionMode.Causal, refiner, textTensor, videoTensor, audioTensor,
-                    times, cache, commit);
-            return new Forwarded(v, a);
+            return ForwardTensors(transformer, backend, layout, refiner, textTensor, videoTensor, audioTensor, times, cache, commit);
         }
         finally
         {
@@ -182,8 +271,22 @@ internal sealed class DuoChunkSession
         }
     }
 
+    /// <summary>The forward over device tensors the caller owns. The outputs are new tensors, owned by the returned <see cref="Forwarded"/>.</summary>
+    private static Forwarded ForwardTensors(MiniMaxH3Transformer transformer, IBackend backend, DuoLayout layout,
+        IReadOnlyList<DuoGroup> refiner, Tensor text, Tensor video, Tensor? audio, float[] times, DuoStreamCache? cache, bool commit)
+    {
+        (Tensor v, Tensor? a) = cache is null
+            ? transformer.ForwardDuo(backend, layout, DuoAttentionMode.Causal, refiner, text, video, audio, times)
+            : transformer.ForwardDuoCached(backend, layout, DuoAttentionMode.Causal, refiner, text, video, audio, times, cache, commit);
+        return new Forwarded(v, a);
+    }
+
     private sealed class Forwarded(Tensor video, Tensor? audio) : IDisposable
     {
+        public Tensor Video => video;
+
+        public Tensor? Audio => audio;
+
         public (float[] Video, float[] Audio) Read()
         {
             float[] v = video.AsSpan<float>().ToArray();
@@ -215,12 +318,6 @@ internal sealed class DuoChunkSession
         }
     }
 
-    private static Tensor HostTensor(int rows, int width, float[] values)
-    {
-        Tensor tensor = new(new TensorShape(rows, width), DType.F32);
-        values.AsSpan().CopyTo(tensor.AsSpan<float>());
-        return tensor;
-    }
 
     private static DuoSampleInput Truncate(DuoSampleInput sample, int block) => sample with
     {

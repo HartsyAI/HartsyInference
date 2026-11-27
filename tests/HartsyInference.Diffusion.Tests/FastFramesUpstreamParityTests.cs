@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.FastFrames;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.Tests.Shared;
 using HartsyInference.Video;
 using HartsyInference.Video.Pipelines;
 using Xunit;
@@ -54,14 +55,12 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
     }
 
     /// <summary>Block streaming must not change the clip: the tiny model on CUDA with every block resident, then with every block
-    /// streamed (ForceOn and a headroom larger than the device, so the planner keeps no prefix resident). Runs only with
-    /// FF_GPU_TESTS=1 and a CUDA device.</summary>
-    [Fact]
+    /// streamed (ForceOn and a headroom larger than the device, so the planner keeps no prefix resident). A CUDA fact: without a
+    /// device it is reported as skipped.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
     public void TheStreamedRolloutMatchesTheResidentOneOnCuda()
     {
-        if (Environment.GetEnvironmentVariable("FF_GPU_TESTS") != "1")
-            return;
-
         using TinyModel model = new();
         using Tensor prompt = PaddedPrompt(model);
         SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
@@ -91,6 +90,228 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             AssertClose(expected[f].Latent, actual[f].Latent, $"streamed latent frame {f}", 1e-5);
             AssertClose(expected[f].Pixels, actual[f].Pixels, $"streamed pixels, latent frame {f}", 1e-5);
         }
+    }
+
+    /// <summary>A cached pipeline runs clip after clip: the second clip reproduces the first from the same inputs. On CPU the placement is
+    /// resident-only, so this checks the bookkeeping between clips; the CUDA variants below stream.</summary>
+    [Fact]
+    public void TwoClipsInARowOnOnePipelineMatch()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        List<FastFramesFrame> first = pipeline.Rollout(prompt, noise, Frames).ToList();
+        // CPU is resident-only, so a clip that stayed resident leaves the generator marked resident for the next clip.
+        Assert.True(pipeline.GeneratorResident, "a resident clip must leave the generator marked resident");
+        List<FastFramesFrame> second = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, second.Count);
+        for (int f = 0; f < Frames; f++)
+            Assert.True(first[f].Latent.AsSpan().SequenceEqual(second[f].Latent), $"latent frame {f} changed between clips.");
+    }
+
+    /// <summary>A resident clip, then a streamed clip, on one CUDA pipeline. The residency query is the check. After the resident clip the
+    /// generator's weights are on the device and the pin is marked resident. After the streamed clip no generator weight is still on the
+    /// device. Without the release in ReleaseOrKeepGenerator the resident clip's weights stay bound, and this test fails.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void ResidentThenStreamedClipsOnCudaReleaseTheGenerator()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
+        FastFramesPipeline pipeline = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        List<FastFramesFrame> resident = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.True(pipeline.GeneratorResident, "a resident clip must leave the pin resident");
+        Assert.True(model.Transformer.EnumerateWeights().Any(cuda.IsWeightResident),
+            "a resident clip must leave generator weights on the device");
+
+        pipeline.StreamingMode = LowVramMode.ForceOn;
+        pipeline.StreamingHeadroomOverride = long.MaxValue / 4;
+        List<FastFramesFrame> streamed = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(model.Transformer.BlockCount, pipeline.LastStreamedBlocks);
+        Assert.False(pipeline.GeneratorResident, "a streamed clip must release the generator");
+        Assert.False(model.Transformer.EnumerateWeights().Any(cuda.IsWeightResident),
+            "no generator weight may stay on the device after a streamed clip");
+        for (int f = 0; f < Frames; f++)
+            AssertClose(resident[f].Latent, streamed[f].Latent, $"streamed latent frame {f}", 1e-5);
+    }
+
+    /// <summary>The F16 attention and FFN branches, the path L takes, on CUDA against the F32 CPU rollout of the same model. The test asserts
+    /// the F16 branch was chosen, so a pass cannot come from the F32 path. A CUDA fact.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void TheF16BranchRolloutOnCudaMatchesTheF32CpuRollout()
+    {
+        using TinyModel model = new(f16Branches: true);
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend cpu = new();
+        List<FastFramesFrame> expected = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+            .Rollout(prompt, noise, Frames).ToList();
+
+        using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
+        Assert.Equal(DType.F16, model.Transformer.BranchActivation(cuda, singleGroup: true));
+        FastFramesPipeline pipeline = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        List<FastFramesFrame> actual = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, actual.Count);
+        for (int f = 0; f < Frames; f++)
+            AssertClose(expected[f].Latent, actual[f].Latent, $"F16-branch latent frame {f}", 2e-2);
+    }
+
+    /// <summary>The rollout on Vulkan against the F32 CPU rollout of the same model. A Vulkan fact: without a device it is reported as
+    /// skipped. Tolerance 2e-2: the Vulkan kernels are not bit-identical to the CPU path.</summary>
+    [VulkanDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void TheRolloutOnVulkanMatchesTheCpuRollout()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend cpu = new();
+        List<FastFramesFrame> expected = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+            .Rollout(prompt, noise, Frames).ToList();
+
+        using IBackend vulkan = HartsyInference.Engine.BackendFactory.CreateVulkan();
+        FastFramesPipeline pipeline = new(vulkan, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        List<FastFramesFrame> actual = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, actual.Count);
+        for (int f = 0; f < Frames; f++)
+            AssertClose(expected[f].Latent, actual[f].Latent, $"Vulkan latent frame {f}", 2e-2);
+    }
+
+    /// <summary>The CUDA rollout (resident, TF32 default GEMMs) against the CPU rollout on the same tiny model and inputs. The tolerance
+    /// is the TF32 lane's: a looser bound than the exact-GEMM decoder test, because the refiner and the blocks run the default GEMMs.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void TheRolloutOnCudaMatchesTheCpuRollout()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend cpu = new();
+        List<FastFramesFrame> expected = new FastFramesPipeline(cpu, model.Transformer, model.Refiner, model.Decoder, Tiny)
+            .Rollout(prompt, noise, Frames).ToList();
+
+        using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
+        FastFramesPipeline pipeline = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        List<FastFramesFrame> actual = pipeline.Rollout(prompt, noise, Frames).ToList();
+
+        Assert.Equal(Frames, actual.Count);
+        for (int f = 0; f < Frames; f++)
+        {
+            AssertClose(expected[f].Latent, actual[f].Latent, $"CUDA latent frame {f}", 1e-3);
+            AssertClose(expected[f].Pixels, actual[f].Pixels, $"CUDA pixels, latent frame {f}", 1e-3);
+        }
+    }
+
+    /// <summary>A resident clip leaves the generator marked resident. Disposing the pipeline releases it and makes a further clip refuse; a second
+    /// dispose does nothing.</summary>
+    [Fact]
+    public void DisposingAResidentPipelineReleasesItsGenerator()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        pipeline.Rollout(prompt, noise, Frames).ToList();
+        Assert.True(pipeline.GeneratorResident);
+
+        pipeline.Dispose();
+        Assert.False(pipeline.GeneratorResident, "disposing must release a resident generator");
+        pipeline.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => pipeline.Rollout(prompt, noise, Frames).ToList());
+    }
+
+    /// <summary>A pipeline disposed after the first frame of a clip stops at the next frame: the enumerator refuses to continue.</summary>
+    [Fact]
+    public void DisposingMidClipStopsAtTheNextFrame()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        // A finished clip leaves the generator resident, so the clip disposed mid-way starts from a resident generator.
+        pipeline.Rollout(prompt, noise, Frames).ToList();
+        Assert.True(pipeline.GeneratorResident);
+
+        int progressCalls = 0;
+        using IEnumerator<FastFramesFrame> clip = pipeline.Rollout(prompt, noise, Frames, (_, _) => progressCalls++).GetEnumerator();
+        Assert.True(clip.MoveNext());
+
+        pipeline.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => clip.MoveNext());
+        // The refusal comes before the frame's cache work and its progress report, and the finally has freed the generator.
+        Assert.Equal(0, progressCalls);
+        Assert.False(pipeline.GeneratorResident, "a clip disposed mid-way must leave the generator released");
+    }
+
+    /// <summary>A rollout created before Dispose and enumerated after it is refused, not run on a released pipeline.</summary>
+    [Fact]
+    public void EnumeratingARolloutAfterDisposeRefuses()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using CpuBackend backend = new();
+        FastFramesPipeline pipeline = new(backend, model.Transformer, model.Refiner, model.Decoder, Tiny);
+        IEnumerable<FastFramesFrame> clip = pipeline.Rollout(prompt, noise, Frames);
+        pipeline.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => clip.ToList());
+    }
+
+    /// <summary>The CUDA form of the dispose test: after a resident clip some generator weight is on the device, and disposing the pipeline
+    /// frees it. Without the release in Dispose this test fails.</summary>
+    [CudaDeviceFact]
+    [Trait("Category", "GpuIntegration")]
+    public void DisposingAResidentPipelineFreesTheGeneratorOnCuda()
+    {
+        using TinyModel model = new();
+        using Tensor prompt = PaddedPrompt(model);
+        SavedNoise noise = new(model.Io["noise"], model.Io["transition"]);
+
+        using IBackend cuda = HartsyInference.Engine.BackendFactory.CreateCuda(0);
+        FastFramesPipeline pipeline = new(cuda, model.Transformer, model.Refiner, model.Decoder, Tiny)
+        {
+            StreamingMode = LowVramMode.ForceOff,
+        };
+        pipeline.Rollout(prompt, noise, Frames).ToList();
+        Assert.True(model.Transformer.EnumerateWeights().Any(cuda.IsWeightResident),
+            "a resident clip must leave generator weights on the device");
+
+        pipeline.Dispose();
+        Assert.False(model.Transformer.EnumerateWeights().Any(cuda.IsWeightResident),
+            "disposing must free the generator's device weights");
     }
 
     [Fact]
@@ -197,7 +418,7 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
     {
         private readonly CheckpointSource _generator, _refinerSource, _decoderSource, _io;
 
-        public TinyModel()
+        public TinyModel(bool f16Branches = false)
         {
             string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "fastframes_tiny");
             _generator = CheckpointSource.Open(Path.Combine(dir, "generator.safetensors"));
@@ -209,6 +430,7 @@ public sealed class FastFramesUpstreamParityTests(Xunit.Abstractions.ITestOutput
             {
                 NumHeads = 2, HeadDim = 32, NumLayers = 2, FfnDim = 32, InChannels = Channels, OutChannels = Channels,
                 VaeLatentChannels = Channels, TextDim = 16, FreqDim = 256, VaeSpatialCompression = 8,
+                F16Branches = f16Branches,
             };
             Transformer = new WanVideoTransformer(wan);
             Transformer.LoadWeights(WanVideoCheckpointConverter.Convert(_generator.Weights, _generator.Header.Metadata).Transformer);

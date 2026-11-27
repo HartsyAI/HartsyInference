@@ -119,7 +119,7 @@ public sealed class FastFramesRecipeTests
     {
         CatalogEntry? entry = ModelCatalog.Find(id);
         Assert.NotNull(entry);
-        Assert.Equal(id == "fastframes-s", entry.CliDrivable);
+        Assert.True(entry.CliDrivable, "both FastFrames variants run through the CLI");
         Assert.Equal(3, entry.Assets.Count);
         Assert.Equal(new[] { generator, refiner, decoder }, entry.Assets.Select(a => a.TargetName).ToArray());
         foreach (ModelAsset asset in entry.Assets)

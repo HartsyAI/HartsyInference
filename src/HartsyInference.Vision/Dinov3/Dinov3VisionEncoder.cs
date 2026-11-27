@@ -11,10 +11,12 @@ namespace HartsyInference.Vision.Dinov3;
 /// reference order (CLS, storage tokens, patch tokens) after the final LayerNorm applied to every token. Patch tokens
 /// get RoPE inside attention; CLS and storage tokens are not rotated and carry no position embedding.
 /// <para>Load a checkpoint with <see cref="LoadWeights"/> from the HF DINOv3 layout (<c>embeddings.*</c>, <c>layer.N.*</c>,
-/// <c>norm.*</c>), using a preset from <see cref="Dinov2Preset.FromDinov3Weights"/>. Weights are borrowed; the loader owns
-/// them. Input is ImageNet-normalized pixels from <see cref="Dinov2ImagePreprocessor"/>.</para></summary>
-public sealed unsafe class Dinov3VisionEncoder
+/// <c>norm.*</c>), using a preset from <see cref="Dinov2Preset.FromDinov3Weights"/>. F32 weights are borrowed (the loader owns them); a 16-bit
+/// tensor is widened into a copy the encoder owns and frees on the next load or <see cref="Dispose"/>. Input is ImageNet-normalized pixels from
+/// <see cref="Dinov2ImagePreprocessor"/>.</para></summary>
+public sealed class Dinov3VisionEncoder : IDisposable
 {
+    internal const string Family = "DINOv3";
     private const int HeadDim = 64;
 
     private readonly Dinov2Preset _preset;
@@ -24,6 +26,8 @@ public sealed unsafe class Dinov3VisionEncoder
     private Tensor? _clsToken;          // [1,1,hidden]
     private Tensor? _storageTokens;     // [1,storage,hidden]
     private Tensor? _finalLnW, _finalLnB;
+    private readonly List<Tensor> _owned = [];   // the F32 copies made at load
+    private bool _loaded, _disposed;
 
     public Dinov3VisionEncoder(Dinov2Preset preset)
     {
@@ -44,22 +48,57 @@ public sealed unsafe class Dinov3VisionEncoder
     /// <summary>Tokens per image at <see cref="Dinov2Preset.ImageSize"/>: CLS, storage tokens and patches.</summary>
     public int SequenceLength => 1 + _preset.NumRegisterTokens + _preset.NumPatches;
 
-    /// <summary>Loads the HF-layout DINOv3 tensors under <paramref name="prefix"/>; shapes are checked against the preset.</summary>
+    /// <summary>Loads the HF-layout DINOv3 tensors under <paramref name="prefix"/>; shapes are checked against the preset. Free the previous
+    /// weights from a device first. A load that throws leaves the encoder without weights.</summary>
+    /// <exception cref="KeyNotFoundException">The checkpoint lacks a tensor the preset needs.</exception>
+    /// <exception cref="InvalidDataException">A tensor has another shape than the preset's.</exception>
+    /// <exception cref="NotSupportedException">The checkpoint's MLP or attention bias does not match the preset, or a 16-bit tensor is quantized.
+    /// </exception>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "")
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(weights);
+        ReleaseWeights();
         string p = prefix.Length == 0 ? "" : prefix + ".";
         int hidden = _preset.HiddenSize, storage = _preset.NumRegisterTokens;
-        _patchW = F32(Require(weights, $"{p}embeddings.patch_embeddings.weight", hidden, 3, _preset.PatchSize, _preset.PatchSize));
-        _patchB = F32(Require(weights, $"{p}embeddings.patch_embeddings.bias", hidden));
-        _clsToken = F32(Require(weights, $"{p}embeddings.cls_token", 1, 1, hidden));
-        _storageTokens = F32(Require(weights, $"{p}embeddings.register_tokens", 1, storage, hidden));
-        for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(weights, $"{p}layer.{i}");
-        if (_preset.HasFinalNorm)
+        Tensor Take(string key, params long[] shape) => CheckpointTensors.RequireF32(weights, Family, p + key, _owned, shape);
+        try
         {
-            _finalLnW = F32(Require(weights, $"{p}norm.weight", hidden));
-            _finalLnB = F32(Require(weights, $"{p}norm.bias", hidden));
+            _patchW = Take("embeddings.patch_embeddings.weight", hidden, 3, _preset.PatchSize, _preset.PatchSize);
+            _patchB = Take("embeddings.patch_embeddings.bias", hidden);
+            _clsToken = Take("embeddings.cls_token", 1, 1, hidden);
+            _storageTokens = Take("embeddings.register_tokens", 1, storage, hidden);
+            for (int i = 0; i < _layers.Length; i++) _layers[i].LoadWeights(weights, $"{p}layer.{i}", _owned);
+            if (_preset.HasFinalNorm)
+            {
+                _finalLnW = Take("norm.weight", hidden);
+                _finalLnB = Take("norm.bias", hidden);
+            }
+
+            _loaded = true;
         }
+        catch
+        {
+            ReleaseWeights();
+            throw;
+        }
+    }
+
+    /// <summary>Frees the copies the encoder made at load; borrowed tensors stay with their owner. Free the weights from a device first.</summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        ReleaseWeights();
+    }
+
+    private void ReleaseWeights()
+    {
+        _loaded = false;
+        _patchW = _patchB = _clsToken = _storageTokens = _finalLnW = _finalLnB = null;
+        foreach (Dinov3Layer layer in _layers) layer.ReleaseWeights();
+        foreach (Tensor copy in _owned) copy.Dispose();
+        _owned.Clear();
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -112,17 +151,18 @@ public sealed unsafe class Dinov3VisionEncoder
     /// <c>[T, 3, H, W]</c>: the blocks in <paramref name="crossFrameBlocks"/> run every frame as one sequence (<see cref="CrossFrameTokens"/>),
     /// each frame keeping its prefix tokens, and the others run each frame on its own. With a <paramref name="ring"/> the input is one frame
     /// (<c>T = 1</c>) whose patches in the cross-frame blocks attend to the frames the ring holds as well (<see cref="CrossFrameKvRing"/>).
+    /// A <paramref name="rope"/> cache keeps the RoPE tables for the next call of the same shape; without one they are built for this call.
     /// Taps are <c>[T, prefix + patches, hidden]</c>; the caller owns them.
     /// </summary>
     public Tensor[] EncodeFrameIntermediates(IBackend backend, Tensor frames, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> crossFrameBlocks,
-        CrossFrameKvRing? ring = null)
+        CrossFrameKvRing? ring = null, Dinov3RopeCache? rope = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(frames);
         if (ring is not null && frames.Shape.Rank == 4 && frames.Shape[0] != 1)
             throw new ArgumentException($"A cached frame runs alone; got {frames.Shape[0]} frames.", nameof(frames));
         int last = CheckTaps(blockIndices, crossFrameBlocks, nameof(crossFrameBlocks));
-        return CollectTaps(backend, frames, last, blockIndices, prefixResetBlocks: default, crossFrameBlocks, ring);
+        return CollectTaps(backend, frames, last, blockIndices, prefixResetBlocks: default, crossFrameBlocks, ring, rope);
     }
 
     // The highest tapped block, after checking the taps are distinct and every block named is in range.
@@ -146,13 +186,13 @@ public sealed unsafe class Dinov3VisionEncoder
     }
 
     private Tensor[] CollectTaps(IBackend backend, Tensor pixelValues, int last, ReadOnlySpan<int> blockIndices, ReadOnlySpan<int> prefixResetBlocks,
-        ReadOnlySpan<int> crossFrameBlocks, CrossFrameKvRing? ring)
+        ReadOnlySpan<int> crossFrameBlocks, CrossFrameKvRing? ring, Dinov3RopeCache? rope = null)
     {
         Tensor?[] taps = new Tensor?[_layers.Length];
         try
         {
             // The last block run is always tapped, so every kept tensor is in taps.
-            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks, crossFrameBlocks, ring);
+            Tensor final = RunBlocks(backend, pixelValues, last, blockIndices, taps, prefixResetBlocks, crossFrameBlocks, ring, rope);
             System.Diagnostics.Debug.Assert(ReferenceEquals(final, taps[last]), "the last block run must be a tapped block");
             Tensor[] result = new Tensor[blockIndices.Length];
             for (int i = 0; i < result.Length; i++)
@@ -171,8 +211,11 @@ public sealed unsafe class Dinov3VisionEncoder
     // Runs blocks 0..lastBlock. A block listed in tapBlocks has its output stored in taps[block] and is not disposed when the next block starts, so the
     // caller can keep it. Without taps the last block's output is returned for the caller to dispose; with taps it is the last tapped tensor, owned by taps.
     private Tensor RunBlocks(IBackend backend, Tensor pixelValues, int lastBlock, ReadOnlySpan<int> tapBlocks, Tensor?[]? taps,
-        ReadOnlySpan<int> prefixResetBlocks = default, ReadOnlySpan<int> crossFrameBlocks = default, CrossFrameKvRing? ring = null)
+        ReadOnlySpan<int> prefixResetBlocks = default, ReadOnlySpan<int> crossFrameBlocks = default, CrossFrameKvRing? ring = null,
+        Dinov3RopeCache? rope = null)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!_loaded) throw new InvalidOperationException("Call LoadWeights first.");
         int p = _preset.PatchSize;
         if (pixelValues.Shape.Rank != 4 || pixelValues.Shape[1] != 3 || pixelValues.Shape[2] % p != 0 || pixelValues.Shape[3] % p != 0
             || pixelValues.Shape[2] == 0 || pixelValues.Shape[3] == 0)
@@ -186,52 +229,46 @@ public sealed unsafe class Dinov3VisionEncoder
         int seqLen = prefix + numPatches;
 
         Tensor seq = EmbedTokens(backend, pixelValues, batch, hidden, gridH, gridW, prefix, seqLen);
-        (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(batch, prefix, gridH, gridW, HeadDim, _preset.RoundRopePeriodsToBf16, _preset.RopeNormalizesByLongSide);
-        CrossFrameRope? frameRope = crossFrameBlocks.IsEmpty ? null : new CrossFrameRope(this, ring is null ? batch : 0, prefix, gridH, gridW);
-        try
+        // Without a caller's cache the tables live for this call.
+        using Dinov3RopeCache? ownRope = rope is null ? new Dinov3RopeCache() : null;
+        (Tensor cos, Tensor sin, Tensor? crossCos, Tensor? crossSin) = (rope ?? ownRope!).Get(new Dinov3RopeCache.Key(batch, prefix, gridH, gridW,
+            HeadDim, _preset.RoundRopePeriodsToBf16, _preset.RopeNormalizesByLongSide,
+            crossFrameBlocks.IsEmpty ? null : ring is null ? batch : 0), rope is null ? null : backend);
+        Tensor h = seq;
+        bool hIsTap = false;
+        for (int i = 0; i <= lastBlock; i++)
         {
-            Tensor h = seq;
-            bool hIsTap = false;
-            for (int i = 0; i <= lastBlock; i++)
-            {
-                Tensor next = !crossFrameBlocks.Contains(i) ? _layers[i].Forward(backend, h, cos, sin)
-                    : ring is null ? JointBlock(backend, _layers[i], h, prefix, frameRope!)
-                    : CachedBlock(backend, i, h, prefix, frameRope!, ring);
-                if (prefixResetBlocks.Contains(i)) CrossFrameTokens.RestorePrefix(backend, next, h, prefix);
-                if (!hIsTap) h.Dispose();
-                h = next;
-                hIsTap = taps is not null && tapBlocks.Contains(i);
-                if (hIsTap) taps![i] = h;
-            }
-            return h;   // with taps, the last block is always tapped: the tensor is in taps and the caller must not dispose it
+            Tensor next = !crossFrameBlocks.Contains(i) ? _layers[i].Forward(backend, h, cos, sin)
+                : ring is null ? JointBlock(backend, _layers[i], h, prefix, crossCos!, crossSin!)
+                : CachedBlock(backend, i, h, prefix, crossCos!, crossSin!, ring);
+            if (prefixResetBlocks.Contains(i)) CrossFrameTokens.RestorePrefix(backend, next, h, prefix);
+            if (!hIsTap) h.Dispose();
+            h = next;
+            hIsTap = taps is not null && tapBlocks.Contains(i);
+            if (hIsTap) taps![i] = h;
         }
-        finally
-        {
-            cos.Dispose();
-            sin.Dispose();
-            frameRope?.Dispose();
-        }
+        return h;   // with taps, the last block is always tapped: the tensor is in taps and the caller must not dispose it
     }
 
     // One block over every frame as one sequence; each frame keeps the prefix it went in with.
     // A lone frame is its own joint sequence (the mean of one prefix is that prefix, and the rope table of one frame is the ordinary one), so it
     // skips Join and Split and only puts its prefix back.
-    private static Tensor JointBlock(IBackend backend, Dinov3Layer layer, Tensor frames, int prefix, CrossFrameRope rope)
+    private static Tensor JointBlock(IBackend backend, Dinov3Layer layer, Tensor frames, int prefix, Tensor cos, Tensor sin)
     {
         if (frames.Shape[0] == 1)
         {
-            Tensor alone = layer.Forward(backend, frames, rope.Cos, rope.Sin);
+            Tensor alone = layer.Forward(backend, frames, cos, sin);
             CrossFrameTokens.RestorePrefix(backend, alone, frames, prefix);
             return alone;
         }
 
         using Tensor joint = CrossFrameTokens.Join(backend, frames, prefix);
-        using Tensor output = layer.Forward(backend, joint, rope.Cos, rope.Sin);
+        using Tensor output = layer.Forward(backend, joint, cos, sin);
         return CrossFrameTokens.Split(backend, output, frames, prefix);
     }
 
     // One block over one frame whose patches attend to [pooled-prefix keys, the ring's patch keys]; the prefix passes through unchanged.
-    private Tensor CachedBlock(IBackend backend, int block, Tensor frame, int prefix, CrossFrameRope rope, CrossFrameKvRing ring)
+    private Tensor CachedBlock(IBackend backend, int block, Tensor frame, int prefix, Tensor cos, Tensor sin, CrossFrameKvRing ring)
     {
         int hidden = _preset.HiddenSize, seqLen = (int)frame.Shape[1], patches = seqLen - prefix;
         Dinov3Layer layer = _layers[block];
@@ -242,34 +279,38 @@ public sealed unsafe class Dinov3VisionEncoder
         StridedCopies.SliceAxis(backend, prefixRows, frame, 1, 0, prefix);
         StridedCopies.SliceAxis(backend, patchRows, frame, 1, prefix, patches);
 
-        int live;
-        Tensor? qMh = null, keys = null, values = null;
+        Tensor? qMh = null;
+        Tensor keys, values;
         try
         {
-            (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, rope.Cos, rope.Sin);
+            (Tensor q, Tensor k, Tensor v) = layer.ProjectAttention(backend, patchRows, cos, sin);
             using (q)
-            using (k)
-            using (v)
             {
-                using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
-                (Tensor pq, Tensor pk, Tensor pv) = layer.ProjectAttention(backend, pooled, null, null);
-                pq.Dispose();
-                using (pk)
-                using (pv)
-                    live = ring.Update(backend, block, k, v, pk, pv);
+                Tensor pk, pv;
+                try
+                {
+                    using Tensor pooled = ring.UpdatePrefix(backend, block, prefixRows);
+                    (Tensor pq, pk, pv) = layer.ProjectAttention(backend, pooled, null, null);
+                    pq.Dispose();
+                }
+                catch
+                {
+                    k.Dispose();
+                    v.Dispose();
+                    throw;
+                }
+
+                ring.Update(block, k, v, pk, pv);   // the ring owns all four from here
                 qMh = new(new TensorShape(1, _preset.NumHeads, patches, HeadDim), DType.F32);
                 backend.Permute0213(qMh, q, patches, _preset.NumHeads, HeadDim);
             }
 
-            // Exact-length copies of the live rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
-            keys = CrossFrameKvRing.LiveCopy(backend, ring.Keys(block), live);
-            values = CrossFrameKvRing.LiveCopy(backend, ring.Values(block), live);
+            // Exact-length rows take the dense attention entry, which is faster on the CPU than the cache-view entry.
+            (keys, values) = ring.Read(block);
         }
         catch
         {
             qMh?.Dispose();
-            keys?.Dispose();
-            values?.Dispose();
             throw;
         }
 
@@ -284,82 +325,40 @@ public sealed unsafe class Dinov3VisionEncoder
         return next;
     }
 
-    // The RoPE tables of the cross-frame blocks: the joint sequence's (prefix rows, then the patch rows once per frame), or with zero
-    // frames the patch rows alone, which a cached frame's patches take.
-    private sealed class CrossFrameRope : IDisposable
-    {
-        public CrossFrameRope(Dinov3VisionEncoder encoder, int frames, int prefix, int gridH, int gridW)
-        {
-            Dinov2Preset preset = encoder._preset;
-            (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(1, 0, gridH, gridW, HeadDim, preset.RoundRopePeriodsToBf16,
-                preset.RopeNormalizesByLongSide);
-            if (frames == 0)
-            {
-                (Cos, Sin) = (cos, sin);
-                return;
-            }
-
-            using (cos)
-            using (sin)
-            {
-                Cos = CrossFrameTokens.TileRope(cos, frames, prefix, 1f);
-                Sin = CrossFrameTokens.TileRope(sin, frames, prefix, 0f);
-            }
-        }
-
-        public Tensor Cos { get; }
-
-        public Tensor Sin { get; }
-
-        public void Dispose()
-        {
-            Cos.Dispose();
-            Sin.Dispose();
-        }
-    }
-
-    // Patch projection, then [CLS, storage, patches] per batch item. No position embedding is added: RoPE does that in attention.
+    // Patch projection, then [CLS, storage, patches] per batch item. No position embedding is added: RoPE does that in attention. Every step is a
+    // backend op or a reshape that keeps the storage, so on a GPU backend the tokens never pass through the host.
     private Tensor EmbedTokens(IBackend backend, Tensor pixelValues, int batch, int hidden, int gridH, int gridW, int prefix, int seqLen)
     {
-        int p = _preset.PatchSize, numPatches = gridH * gridW, storage = _preset.NumRegisterTokens;
+        int p = _preset.PatchSize, numPatches = gridH * gridW;
+        using Tensor patches = new(new TensorShape(batch, numPatches, hidden), DType.F32);
         Tensor patch = new(new TensorShape(batch, hidden, gridH, gridW), DType.F32);
-        backend.Conv2D(patch, pixelValues, _patchW!, _patchB!, p, p, 0, 0);
-        Tensor flat = patch.Reshape(new TensorShape(batch, hidden, numPatches));
-        Tensor patches = new(new TensorShape(batch, numPatches, hidden), DType.F32);
-        backend.Transpose2D(patches, flat, hidden, numPatches);
-        patch.Dispose();
+        try
+        {
+            backend.Conv2D(patch, pixelValues, _patchW!, _patchB!, p, p, 0, 0);
+            patch = patch.IntoShape(new TensorShape(batch, hidden, numPatches));
+            backend.Transpose2D(patches, patch, hidden, numPatches);
+        }
+        finally
+        {
+            patch.Dispose();
+        }
+
+        // The prefix rows of one image, [CLS, storage], repeated for every batch item.
+        using Tensor one = new(new TensorShape(1, prefix, hidden), DType.F32);
+        backend.Concat(one, [_clsToken!, _storageTokens!], 1);
+        using Tensor prefixRows = new(new TensorShape(batch, prefix, hidden), DType.F32);
+        StridedCopies.RepeatInterleave(backend, prefixRows, one, 0, batch);
 
         Tensor seq = new(new TensorShape(batch, seqLen, hidden), DType.F32);
-        float* dp = (float*)seq.DataPointer;
-        float* cls = (float*)_clsToken!.DataPointer;
-        float* reg = (float*)_storageTokens!.DataPointer;
-        float* pat = (float*)patches.DataPointer;
-        for (int b = 0; b < batch; b++)
+        try
         {
-            long rowBase = (long)b * seqLen * hidden;
-            for (int c = 0; c < hidden; c++) dp[rowBase + c] = cls[c];
-            for (int r = 0; r < storage; r++)
-                for (int c = 0; c < hidden; c++) dp[rowBase + (long)(1 + r) * hidden + c] = reg[r * hidden + c];
-            long patchBase = (long)b * numPatches * hidden;
-            for (long i = 0; i < (long)numPatches * hidden; i++)
-                dp[rowBase + (long)prefix * hidden + i] = pat[patchBase + i];
+            backend.Concat(seq, [prefixRows, patches], 1);
+            return seq;
         }
-        patches.Dispose();
-        return seq;
+        catch
+        {
+            seq.Dispose();
+            throw;
+        }
     }
-
-    /// <summary>The named weight, checked against its exact shape.</summary>
-    internal static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] expected)
-    {
-        if (!weights.TryGetValue(key, out Tensor? t))
-            throw new ArgumentException($"DINOv3 checkpoint is missing '{key}'.", nameof(weights));
-        bool match = t.Shape.Rank == expected.Length;
-        for (int d = 0; match && d < expected.Length; d++)
-            match = t.Shape[d] == expected[d];
-        if (!match)
-            throw new ArgumentException($"'{key}' must have shape [{string.Join(", ", expected)}]; got {t.Shape}.", nameof(weights));
-        return t;
-    }
-
-    internal static Tensor F32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }

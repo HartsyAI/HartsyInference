@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.VoiceIsolator;
@@ -31,6 +32,7 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
 
     private readonly float[] _cos;
     private readonly float[] _sin;
+    private readonly float[] _negSin;
 
     public VoiceIsolatorStreamAttention(int cacheFrames, int capacity, int window, int headDim)
     {
@@ -39,6 +41,7 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
         // Each query sees at most CacheFrames keys, its own included, and the checkpoint's window when that is shorter.
         SlidingWindow = window > 0 ? Math.Min(window, cacheFrames) : cacheFrames;
         (_cos, _sin) = VoiceIsolatorOps.RopeTables(capacity, headDim);
+        _negSin = Array.ConvertAll(_sin, s => -s);
     }
 
     public int CacheFrames { get; }
@@ -59,22 +62,15 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
     {
         if (lane.End + count > Capacity)
         {
-            Compact(lane, bands, heads, hd);
+            Compact(backend, lane, bands, heads, hd);
         }
-        Reserve(lane, lane.End + count, bands, heads, hd);
+        Reserve(backend, lane, lane.End + count, bands, heads, hd);
         int first = lane.End;
         VoiceIsolatorOps.Rope(backend, q, count, hd, first, _cos, _sin);
         VoiceIsolatorOps.Rope(backend, k, count, hd, first, _cos, _sin);
-        int held = (int)lane.Keys!.Shape[2];
-        float* kc = (float*)lane.Keys.DataPointer;
-        float* vc = (float*)lane.Values!.DataPointer;
-        float* ks = (float*)k.DataPointer;
-        float* vs = (float*)v.DataPointer;
-        for (int bh = 0; bh < bands * heads; bh++)
-        {
-            Buffer.MemoryCopy(ks + (long)bh * count * hd, kc + ((long)bh * held + first) * hd, (long)count * hd * 4, (long)count * hd * 4);
-            Buffer.MemoryCopy(vs + (long)bh * count * hd, vc + ((long)bh * held + first) * hd, (long)count * hd * 4, (long)count * hd * 4);
-        }
+        // The new keys and values land in their slots on the backend: the cache stays where the attention reads it.
+        Place(backend, lane.Keys!, k, first);
+        Place(backend, lane.Values!, v, first);
         lane.End = first + count;
         // The cached buffers are attended in place: rows [0, first + count) are valid, query row i sits at first + i, and the
         // sliding window keeps each query to the last SlidingWindow keys. No past is copied.
@@ -85,7 +81,7 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
         return attended;
     }
 
-    private void Reserve(VoiceIsolatorAttentionLane lane, int slots, int bands, int heads, int hd)
+    private void Reserve(IBackend backend, VoiceIsolatorAttentionLane lane, int slots, int bands, int heads, int hd)
     {
         int held = lane.Keys is null ? 0 : (int)lane.Keys.Shape[2];
         if (slots <= held)
@@ -97,12 +93,8 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
         Tensor values = new(new TensorShape(bands, heads, size, hd), DType.F32);
         if (lane.End > 0)
         {
-            for (int bh = 0; bh < bands * heads; bh++)
-            {
-                long used = (long)lane.End * hd * 4;
-                Buffer.MemoryCopy((float*)lane.Keys!.DataPointer + (long)bh * held * hd, (float*)keys.DataPointer + (long)bh * size * hd, used, used);
-                Buffer.MemoryCopy((float*)lane.Values!.DataPointer + (long)bh * held * hd, (float*)values.DataPointer + (long)bh * size * hd, used, used);
-            }
+            Move(backend, keys, lane.Keys!, lane.End);
+            Move(backend, values, lane.Values!, lane.End);
         }
         lane.Dispose();
         lane.Keys = keys;
@@ -110,7 +102,7 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
     }
 
     /// <summary>Moves the last <see cref="CacheFrames"/> keys and values to the front, the keys rotated back by the distance they moved.</summary>
-    private void Compact(VoiceIsolatorAttentionLane lane, int bands, int heads, int hd)
+    private void Compact(IBackend backend, VoiceIsolatorAttentionLane lane, int bands, int heads, int hd)
     {
         int keep = Math.Min(lane.End, CacheFrames);
         int shift = lane.End - keep;
@@ -118,30 +110,32 @@ internal sealed unsafe class VoiceIsolatorStreamAttention
         {
             return;
         }
-        int half = hd / 2;
-        int held = (int)lane.Keys!.Shape[2];
-        float* kc = (float*)lane.Keys.DataPointer;
-        float* vc = (float*)lane.Values!.DataPointer;
-        for (int bh = 0; bh < bands * heads; bh++)
-        {
-            float* keys = kc + (long)bh * held * hd;
-            float* values = vc + (long)bh * held * hd;
-            for (int s = 0; s < keep; s++)
-            {
-                float* src = keys + (long)(shift + s) * hd;
-                float* dst = keys + (long)s * hd;
-                for (int i = 0; i < half; i++)
-                {
-                    float c = _cos[(long)shift * half + i];
-                    float sn = -_sin[(long)shift * half + i];
-                    float x1 = src[i];
-                    float x2 = src[half + i];
-                    dst[i] = x1 * c - x2 * sn;
-                    dst[half + i] = x1 * sn + x2 * c;
-                }
-                Buffer.MemoryCopy(values + (long)(shift + s) * hd, values + (long)s * hd, hd * 4L, hd * 4L);
-            }
-        }
+        // The kept slots are gathered into fresh buffers, their keys rotate back by the distance they moved (every row by the same
+        // angle, so the negated sine table at that position), and they are written back to the front of the cache.
+        Tensor keys = new(new TensorShape(bands, heads, keep, hd), DType.F32);
+        Tensor values = new(new TensorShape(bands, heads, keep, hd), DType.F32);
+        StridedView kept = StridedView.Of(lane.Keys!.Shape).Slice(2, shift, keep);
+        StridedView keptValues = StridedView.Of(lane.Values!.Shape).Slice(2, shift, keep);
+        backend.CopyStrided(keys, lane.Keys, new StridedCopySpec(StridedView.Of(keys.Shape), kept));
+        backend.CopyStrided(values, lane.Values, new StridedCopySpec(StridedView.Of(values.Shape), keptValues));
+        VoiceIsolatorOps.RopeFixed(backend, keys, keep, hd, shift, _cos, _negSin);
+        Place(backend, lane.Keys, keys, 0);
+        Place(backend, lane.Values, values, 0);
+        keys.Dispose();
+        values.Dispose();
         lane.End = keep;
+    }
+
+    /// <summary>Writes <paramref name="src"/> <c>[bands, heads, count, hd]</c> into slots <c>[first, first + count)</c> of a cache buffer.</summary>
+    private static void Place(IBackend backend, Tensor buffer, Tensor src, int first)
+    {
+        StridedView slots = StridedView.Of(buffer.Shape).Slice(2, first, src.Shape[2]);
+        backend.CopyStrided(buffer, src, new StridedCopySpec(slots, StridedView.Of(src.Shape)));
+    }
+
+    /// <summary>Copies the first <paramref name="used"/> slots of <paramref name="from"/> into the same slots of <paramref name="to"/>.</summary>
+    private static void Move(IBackend backend, Tensor to, Tensor from, int used)
+    {
+        backend.CopyStrided(to, from, new StridedCopySpec(StridedView.Of(to.Shape).Slice(2, 0, used), StridedView.Of(from.Shape).Slice(2, 0, used)));
     }
 }

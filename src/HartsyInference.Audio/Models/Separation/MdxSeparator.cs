@@ -53,17 +53,13 @@ public sealed class MdxSeparator
         return stem;
     }
 
-    /// <summary>Not used by the engine path (the video pre-step keeps the stereo stem); LongCat's own 16 kHz mono input for the Avatar recipe and the parity harness use it. Averages the channels, resamples to <paramref name="targetRate"/> with the SoXR-HQ stand-in, and crops to
-    /// <c>ceil(samples × targetRate / sourceRate)</c> when <paramref name="targetSamplesAtSourceRate"/> is given.</summary>
-    public float[] ToMono(float[][] stereo, int targetRate, int? targetSamplesAtSourceRate = null)
+    /// <summary>LongCat's 16 kHz mono input from the float stem, used by the video pre-step and the parity harness: averages the channels and
+    /// resamples from <paramref name="sourceRate"/> to <paramref name="targetRate"/> with the SoXR-HQ stand-in. Cropping to a clip's length is the recipe's.</summary>
+    public static float[] ToMono(float[][] stereo, int sourceRate, int targetRate)
     {
         ArgumentNullException.ThrowIfNull(stereo);
-        float[] mono = new float[stereo[0].Length];
-        for (int i = 0; i < mono.Length; i++) mono[i] = 0.5f * (stereo[0][i] + stereo[1][i]);
-        float[] resampled = SincResampler.ResampleSoxrHqStandIn(mono, _settings.SampleRate, targetRate);
-        if (targetSamplesAtSourceRate is null) return resampled;
-        int keep = (int)Math.Ceiling(targetSamplesAtSourceRate.Value * (double)targetRate / _settings.SampleRate);
-        return keep < resampled.Length ? resampled.AsSpan(0, keep).ToArray() : resampled;
+        float[] mono = new WavFile.DecodedAudio(stereo, sourceRate).ToMono();
+        return SincResampler.ResampleSoxrHqStandIn(mono, sourceRate, targetRate);
     }
 
     /// <summary>Overlap-add over chunks. <paramref name="mix"/> is <c>[2][N]</c>; the result is <c>[2][N]</c> already scaled by the compensation gain.</summary>
@@ -184,7 +180,12 @@ public sealed class MdxSeparator
     }
 
     /// <summary>No blending window, as the reference uses when chunks do not overlap: a Hann window would zero the outermost sample of each chunk.</summary>
-    private static double[] Ones(int m) => Enumerable.Repeat(1d, m).ToArray();
+    private static double[] Ones(int m)
+    {
+        double[] w = new double[m];
+        Array.Fill(w, 1d);
+        return w;
+    }
 
     /// <summary><c>numpy.hanning(m)</c>: the symmetric window, <c>0.5 − 0.5·cos(2πn/(m−1))</c>.</summary>
     internal static double[] SymmetricHann(int m)

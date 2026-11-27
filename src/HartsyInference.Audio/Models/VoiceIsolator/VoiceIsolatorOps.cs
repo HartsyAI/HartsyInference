@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Numerics;
@@ -56,6 +57,32 @@ internal static unsafe class VoiceIsolatorOps
         sinRows.Dispose();
     }
 
+    /// <summary>Rotates every row of <paramref name="x"/> (<c>[..., seq, hd]</c>) by the one table position <paramref name="position"/>.
+    /// Used by the cache compaction, where every kept slot moves by the same distance.</summary>
+    public static void RopeFixed(IBackend backend, Tensor x, int seq, int hd, int position, float[] cos, float[] sin)
+    {
+        int h = hd / 2;
+        Tensor cosRows = new(new TensorShape(seq, hd), DType.F32);
+        Tensor sinRows = new(new TensorShape(seq, hd), DType.F32);
+        float* cp = (float*)cosRows.DataPointer;
+        float* sp = (float*)sinRows.DataPointer;
+        for (int s = 0; s < seq; s++)
+        {
+            for (int i = 0; i < h; i++)
+            {
+                float c = cos[(long)position * h + i];
+                float sn = sin[(long)position * h + i];
+                cp[(long)s * hd + i] = c;
+                cp[(long)s * hd + h + i] = c;
+                sp[(long)s * hd + i] = sn;
+                sp[(long)s * hd + h + i] = sn;
+            }
+        }
+        backend.Rotary(RotaryCall.HeadMajor(x, cosRows, sinRows, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        cosRows.Dispose();
+        sinRows.Dispose();
+    }
+
     /// <summary>The cos and sin tables <c>[positions, hd / 2]</c> of the reference's <c>rope_tables</c> (base 10000).</summary>
     public static (float[] Cos, float[] Sin) RopeTables(int positions, int hd)
     {
@@ -106,6 +133,56 @@ internal static unsafe class VoiceIsolatorOps
     /// <summary>Splits <c>[.., dtRank + 2 * states]</c> into the step input <c>[.., dtRank]</c>, B and C <c>[.., states]</c>.</summary>
     public static void SplitDtBc(IBackend backend, Tensor input, Tensor dt, Tensor b, Tensor c)
         => backend.Split([dt, b, c], input, input.Shape.Rank - 1);
+
+    /// <summary>Causal depthwise convolution plus SiLU over <c>[1, rows * frames, channels]</c>, on the backend. The result is a new
+    /// tensor of the same shape. <paramref name="history"/> holds the <c>taps - 1</c> frames before the first one per row
+    /// (<c>[rows, taps - 1, channels]</c>) and is rewritten with the last ones; null means zeros before the start and keeps nothing.
+    /// The frames are gathered frame-major, convolved with the backend's depthwise op, biased with a broadcast copy and activated.</summary>
+    public static Tensor CausalDepthwiseSiluOn(IBackend backend, Tensor x, Tensor weight, Tensor bias, Tensor? history,
+        int rows, int frames, int channels, int taps)
+    {
+        int carry = taps - 1;
+        int total = carry + frames;
+        // Frame-major input [total, rows, channels]: the carried frames, then the new ones. Zeros fill whatever no history covers.
+        Tensor padded = new(new TensorShape(total, rows, channels), DType.F32);
+        backend.Fill(padded, 0f);
+        if (history is not null)
+        {
+            backend.CopyStrided(padded, history, new StridedCopySpec(
+                StridedView.Of(padded.Shape).Slice(0, 0, carry),
+                StridedView.Of(history.Shape).Permute([1, 0, 2])));
+        }
+        backend.CopyStrided(padded, x, new StridedCopySpec(
+            StridedView.Of(padded.Shape).Slice(0, carry, frames),
+            StridedView.Of(x.Shape).Reshape([rows, frames, channels]).Permute([1, 0, 2])));
+        // Output t uses padded frames t .. t + taps - 1, so a zero-padded convolution with no extra pad gives the causal result.
+        Tensor convolved = new(padded.Shape, DType.F32);
+        backend.DepthwiseConvFrames(convolved, padded, weight, total, rows, channels, taps, 0);
+        Tensor biasFull = new(padded.Shape, DType.F32);
+        backend.CopyStrided(biasFull, bias, new StridedCopySpec(StridedView.Of(biasFull.Shape),
+            StridedView.Of(bias.Shape).Broadcast(0, rows).Broadcast(0, total)));
+        Tensor biased = new(padded.Shape, DType.F32);
+        backend.Add(biased, convolved, biasFull);
+        Tensor activated = new(padded.Shape, DType.F32);
+        backend.Silu(activated, biased);
+        // The carry for the next call is the last taps - 1 padded frames, per row.
+        if (history is not null)
+        {
+            backend.CopyStrided(history, padded, new StridedCopySpec(
+                StridedView.Of(history.Shape),
+                StridedView.Of(padded.Shape).Slice(0, frames, carry).Permute([1, 0, 2])));
+        }
+        Tensor output = new(x.Shape, DType.F32);
+        backend.CopyStrided(output, activated, new StridedCopySpec(
+            StridedView.Of(output.Shape).Reshape([rows, frames, channels]),
+            StridedView.Of(activated.Shape).Slice(0, 0, frames).Permute([1, 0, 2])));
+        padded.Dispose();
+        convolved.Dispose();
+        biasFull.Dispose();
+        biased.Dispose();
+        activated.Dispose();
+        return output;
+    }
 
     /// <summary>Causal depthwise convolution plus SiLU in place over <c>[rows, frames, channels]</c>. <paramref name="history"/> holds
     /// the <c>taps - 1</c> frames before the first one per row (<c>[rows, taps - 1, channels]</c>) and is rewritten with the last

@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -30,6 +33,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
     private readonly float _bnEps;
     private readonly Fibo2Config _config;
     private readonly VaeEncoder? _vaeEncoder;
+    private readonly ResidentWeights _textEncoderWeights;
+    private readonly ResidentWeights _denoiserWeights;
 
     /// <summary>Creates a Fibo 2.0 pipeline over borrowed components. <paramref name="bnMean"/> and <paramref name="bnVar"/> are the
     /// FLUX.2 VAE's F32 BatchNorm statistics over the patchified 128-channel latent.</summary>
@@ -54,6 +59,8 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         _bnEps = bnEps;
         _config = config;
         _vaeEncoder = vaeEncoder;
+        _textEncoderWeights = new ResidentWeights(backend, textEncoder.EnumerateWeights);
+        _denoiserWeights = new ResidentWeights(backend, transformer.EnumerateWeights);
     }
 
     /// <summary>Generates one image from the conditional caption tokens and the null-caption tokens (the CFG branch). Both sequences come
@@ -93,14 +100,26 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         Tensor? latentMask = null;
         try
         {
-            conditional = EncodeBundles(conditionalTokens);
-            unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
+            // The text encoder leaves the device before the denoiser loads: on a 12 GB card the two do not fit together. A denoiser kept
+            // resident from an earlier generation is freed here unless the encoder fits beside it (FreeDenoiserForEncoder).
+            FreeDenoiserForEncoder(() => _textEncoder.EnumerateWeights());
+            _textEncoderWeights.Preload();
+            try
+            {
+                conditional = EncodeBundles(conditionalTokens);
+                unconditional = guided ? EncodeBundles(unconditionalTokens) : null;
+            }
+            finally
+            {
+                _textEncoderWeights.Release(force: true);
+            }
+            AfterWeightRelease(() => _textEncoder.EnumerateWeights(), "text encoder");
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
             TensorShape latentShape = new(1, _config.InChannels, latentHeight, latentWidth);
             if (img2img is not null)
                 sourceLatent = EncodeInitLatent(img2img.SourceImage);
-            latent = BuildStartLatent(scheduler, SeedGenerator.CreateNoise(latentShape, resolvedSeed), sourceLatent, plan.StartStep);
+            latent = BuildStartLatent(scheduler, Fibo2NoiseSource.Create(latentShape, resolvedSeed), sourceLatent, plan.StartStep);
             LatentInpaint? inpaint = null;
             if (plan.MaskPixel is not null)
             {
@@ -108,10 +127,21 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
                 inpaint = new LatentInpaint(scheduler, sourceLatent!, latentMask, resolvedSeed);
             }
 
-            SampleFlow(scheduler, ref latent, plan.StartStep, steps,
-                (current, sigma) => Denoise(current, sigma, conditional!, unconditional, guidanceScale), inpaint, onProgress);
+            _denoiserWeights.Preload();
+            try
+            {
+                SampleFlow(scheduler, ref latent, plan.StartStep, steps,
+                    (current, sigma) => Denoise(current, sigma, conditional!, unconditional, guidanceScale), inpaint, onProgress);
+            }
+            finally
+            {
+                _denoiserWeights.Release();
+            }
+            AfterWeightRelease(() => _transformer.EnumerateWeights(), "denoiser");
 
+            DeviceMemoryTrace.Record(Backend, "fibo2: before VAE decode");
             using Tensor decoded = DecodeLatent(latent!);
+            DeviceMemoryTrace.Record(Backend, "fibo2: after VAE decode");
             // Suppresses the VAE round trip in the kept region; the host recomposites itself when it owns the mask.
             if (plan.MaskPixel is not null && img2img!.RecompositeAtEnd)
                 MaskBlendUtilities.BlendChannelsInPlace(decoded, img2img.SourceImage, plan.MaskPixel);
@@ -127,10 +157,54 @@ public sealed unsafe partial class Fibo2Pipeline : DiffusionPipelineBase
         }
     }
 
+    /// <summary>After a weight release: trims the device pool so freed blocks leave the reservation, records the device usage at this
+    /// stage, and logs how many of the released tensors are still resident. A nonzero count means the release did not leave the GPU.</summary>
+    private void AfterWeightRelease(Func<IEnumerable<Tensor>> released, string label)
+    {
+        Backend.TrimMemoryPool();
+        DeviceMemoryTrace.Record(Backend, $"fibo2: {label} released");
+        int total = 0, resident = 0;
+        foreach (Tensor tensor in released())
+        {
+            total++;
+            if (Backend.IsWeightResident(tensor))
+                resident++;
+        }
+        string outcome = resident == 0 ? "freed" : "kept resident (the VRAM policy kept them, or the free did not reach the device)";
+        Logs.Info($"[Fibo2][Residency] {label}: {resident} of {total} tensors resident; {outcome}");
+    }
+
+    /// <summary>Whether <paramref name="needBytes"/> fit in the device memory free now, with <see cref="HeadroomBytes"/> to spare. A backend
+    /// that reports no free memory (0) is never a fit, so the caller takes the release path.</summary>
+    internal static bool Fits(long freeBytes, long needBytes, long headroomBytes) =>
+        freeBytes > 0 && needBytes >= 0 && freeBytes >= needBytes + headroomBytes;
+
+    /// <summary>The smallest headroom a fit keeps. The fit uses the larger of this and <c>vram.preloadHeadroomMb</c>, the room
+    /// <c>PreloadWeights</c> itself keeps, so a fit cannot make the encoder preload skip tensors.</summary>
+    internal const long HeadroomFloorBytes = 1L << 30;
+
+    /// <summary>Frees the denoiser before an encoder preloads, unless the encoder fits next to it. The pool is trimmed first, so the free figure
+    /// counts memory the allocator is holding for nothing. The denoiser is already on the device when it is kept, so its bytes are not in the
+    /// free figure; a fit therefore keeps both, and the next generation skips the re-upload. Whether the keep path is cheaper on a large card
+    /// is not measured.</summary>
+    private void FreeDenoiserForEncoder(Func<IEnumerable<Tensor>> encoderWeights)
+    {
+        long encoderBytes = 0;
+        foreach (Tensor tensor in encoderWeights())
+            encoderBytes += tensor.DType.ComputeByteCount(tensor.ElementCount);
+        Backend.TrimMemoryPool();
+        long headroom = Math.Max(HeadroomFloorBytes, EngineKnobs.PreloadHeadroomMb.Value << 20);
+        if (Fits(Backend.FreeMemoryBytes(), encoderBytes, headroom))
+            return;
+        _denoiserWeights.Release(force: true);
+    }
+
     /// <summary>One guided velocity: <c>uncond + g · (cond − uncond)</c> when CFG is active, otherwise the conditional velocity alone.
     /// The caller owns the returned tensor.</summary>
     private Tensor Denoise(Tensor latent, float sigma, Tensor conditional, Tensor? unconditional, float guidanceScale)
     {
+        if (DeviceMemoryTrace.Enabled)
+            DeviceMemoryTrace.Record(Backend, "fibo2: denoise", $"sigma={sigma:F4}");
         Tensor conditionalVelocity = _transformer.Forward(Backend, latent, sigma, conditional);
         if (unconditional is null)
             return conditionalVelocity;

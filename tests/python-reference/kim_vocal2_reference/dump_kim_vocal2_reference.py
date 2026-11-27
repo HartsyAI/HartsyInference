@@ -4,7 +4,8 @@ Runs LongCat-Video's own ``separate_vocals`` (audio-separator 0.30.2 + onnxrunti
 compared against: the normalized mix, the first chunks' STFT input and ONNX output, every TFC-TDF block output of the network
 for chunk 0, the stereo stem, and the 16 kHz mono vocals that LongCat feeds to Whisper.
 
-Environment (WSL or a pod; never the Windows venv, and onnxruntime never enters the engine):
+Environment (Linux container, WSL or a pod; never the Windows venv, and onnxruntime never enters the engine). audio-separator checks for
+ffmpeg at start, and its diffq dependency builds from source, so a slim image needs them first (apt-get install ffmpeg gcc libc6-dev):
     pip install "audio-separator[cpu]==0.30.2" onnx numpy librosa
     git clone https://github.com/meituan-longcat/LongCat-Video && git -C LongCat-Video checkout 58eb336edc5c8c63389838727e40b8c18434e54e
     python dump_kim_vocal2_reference.py --longcat LongCat-Video --onnx vocal_separator/Kim_Vocal_2.onnx --wav clip.wav --out ref_dir
@@ -17,6 +18,7 @@ the longcat_video package would run package __init__ files that pull in unrelate
 """
 import argparse
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import math
@@ -75,7 +77,6 @@ def main():
         sys.exit(f"Kim_Vocal_2.onnx sha256 {digest} is not the pinned {EXPECTED_SHA256}")
     os.makedirs(args.out, exist_ok=True)
 
-    import audio_separator
     import librosa
     import onnxruntime
     import torch
@@ -166,7 +167,7 @@ def main():
         "stage_names": stage_names,
         "samples_44k": int(mix.shape[-1]),
         "target_samples_44k": target_samples,
-        "versions": {"audio_separator": getattr(audio_separator, "__version__", "?"), "onnxruntime": onnxruntime.__version__,
+        "versions": {"audio_separator": importlib.metadata.version("audio-separator"), "onnxruntime": onnxruntime.__version__,
                      "torch": torch.__version__, "numpy": np.__version__, "librosa": librosa.__version__},
         "official_matches_replay": bool(same),
     }

@@ -629,6 +629,18 @@ public static class SideModels
         Sha256 = "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb"
     };
 
+    /// <summary>HunyuanVideo-1.5 VAE (fp32 diffusers file, 5.04 GB) as the MovieRoll reference loads it (<c>vae/</c> of <c>tencent/HunyuanVideo-1.5</c>).
+    /// The hash is the LFS object id from the repo's public metadata; the repo is not gated.</summary>
+    public static readonly ModelAsset MovieRollVae = new ModelAsset
+    {
+        Repo = "tencent/HunyuanVideo-1.5",
+        RepoPath = "vae/diffusion_pytorch_model.safetensors",
+        TargetSubdir = "HunyuanVideo-1.5/vae",
+        TargetName = "diffusion_pytorch_model.safetensors",
+        Role = "vae",
+        Sha256 = "2609ed7033c052fdf164afcac71e8a7c82afccdbb001d673444a72f194fbb918"
+    };
+
     /// <summary>HunyuanVideo 3D causal VAE (bf16) — Comfy-Org's standard HunyuanVideo repack; shared architecture with Kandinsky-5 Video's bundled diffusers VAE.</summary>
     public static readonly ModelAsset HunyuanVideoVae3D = new ModelAsset
     {

@@ -226,6 +226,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
             for (int i = 0; i < _blocks.Length; i++)
             {
+                BeforeBlockForward?.Invoke(i);
                 string layer = StreamLayerName(i);
                 if (encode && i >= fullHistoryBlocks) cache.TrimToSink(layer, MovieRollSinkChunks);
                 if (encode && i == _blocks.Length - 1)
@@ -318,7 +319,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             throw new ArgumentException($"The cache holds {cache.Height}×{cache.Width} latent tokens per frame; this latent is {height}×{width}.", nameof(latent));
         int perFrame = height * width;
 
-        cache.RequireFits(MovieRollKvCache.BytesPerFrame(_blocks.Length, height, width, _config.HiddenSize) * frames);
+        // Checked before the cache is cleared, and against what this pass keeps, so a refusal leaves the cache as it was and no later layer
+        // write can exceed the budget.
+        cache.RequireFits(RecomputeBytes(chunkFrames, frames, fullHistoryBlocks, height, width));
         cache.SoftClear();
         using Tensor image = EmbedImage(backend, latent, null, frames * perFrame);
         Tensor[]? chunks = null;
@@ -438,6 +441,14 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         }
     }
 
+    /// <summary>The K and V bytes a recompute keeps: full-history blocks keep every frame, sink-recent blocks keep the sink chunk and the most recent chunk.</summary>
+    private long RecomputeBytes(int[] chunkFrames, int frames, int fullHistoryBlocks, int height, int width)
+    {
+        long perLayerFrame = MovieRollKvCache.BytesPerFrame(1, height, width, _config.HiddenSize);
+        int sinkRecentFrames = chunkFrames[0] + (chunkFrames.Length > 1 ? chunkFrames[^1] : 0);
+        return (fullHistoryBlocks * (long)frames + (long)(_blocks.Length - fullHistoryBlocks) * sinkRecentFrames) * perLayerFrame;
+    }
+
     /// <summary>One block over the chunks of a clip, with block-causal attention done chunk by chunk. Chunk <c>c</c> runs as a window whose cache is
     /// the pre-RoPE K and V of chunks <c>0..c-1</c>, and its RoPE positions are the packed frames before it plus its own. Each chunk's output
     /// replaces <paramref name="chunks"/>[c] in place, so the next block reads it. The running prefix is the clip's K and V so far, so the final
@@ -446,6 +457,8 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private (Tensor Keys, Tensor Values) StreamChunkedBlock(IBackend backend, int block, Tensor[] chunks, int[] frames, int height, int width,
         Tensor[] temb, TokenSegmentLayout[] layouts)
     {
+        // One hook per block, before any of its chunks run, so the streamer stages the block for the whole chunked pass.
+        BeforeBlockForward?.Invoke(block);
         bool lastBlock = block == _blocks.Length - 1;
         if (lastBlock)
         {
@@ -545,8 +558,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <summary>A copy of a flat <c>[1, S, hidden]</c> tensor.</summary>
     private static Tensor CopyOf(IBackend backend, Tensor source)
     {
+        // A device-side copy of the whole flat tensor. CopyTo would read a device source back to the host.
         Tensor copy = new(source.Shape, DType.F32);
-        backend.CopyTo(copy, source);
+        StridedCopies.SliceAxis(backend, copy, source, 1, 0, source.Shape[1]);
         return copy;
     }
 
@@ -556,7 +570,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         int total = 0;
         foreach (Tensor part in parts) total += (int)part.Shape[1];
         Tensor joined = new(new TensorShape(1, total, _config.NumHeads, _config.HeadDim), DType.F32);
-        if (parts.Length == 1) backend.CopyTo(joined, parts[0]);
+        if (parts.Length == 1) StridedCopies.SliceAxis(backend, joined, parts[0], 1, 0, parts[0].Shape[1]);
         else backend.Concat(joined, parts, 1);
         return joined;
     }
@@ -643,6 +657,26 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         return (frames, height, width);
     }
 
+    /// <summary>The same elements as <paramref name="x"/> in <paramref name="shape"/> (row-major, contiguous), copied on the backend. <c>Tensor.Reshape</c>
+    /// takes the data pointer, which reads a device-resident tensor back to the host, so a window built on the device must not use it.</summary>
+    private static Tensor FlatView(IBackend backend, Tensor x, TensorShape shape)
+    {
+        if (x.ElementCount != shape.ElementCount)
+            throw new ArgumentException($"Cannot view {x.Shape} as {shape}: the element counts differ.", nameof(x));
+        Tensor output = new(shape, x.DType);
+        Span<long> dims = stackalloc long[shape.Rank];
+        shape.CopyDimsTo(dims);
+        Span<long> strides = stackalloc long[shape.Rank];
+        long stride = 1;
+        for (int d = shape.Rank - 1; d >= 0; d--)
+        {
+            strides[d] = stride;
+            stride *= dims[d];
+        }
+        backend.CopyStrided(output, x, StridedCopySpec.Gather(new StridedView(dims, strides)));
+        return output;
+    }
+
     /// <summary>Channel-concat the latent with the conditioning block (zeros when absent), move channels last and project. Everything runs on the
     /// backend: the latent and conditioning are read as <c>[1, channels, tokens]</c> views and concatenated on channels, the conditioning is not
     /// copied first, and only a null conditioning allocates the zero block.</summary>
@@ -651,7 +685,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         int latentChannels = _config.LatentChannels;
         int extraChannels = _config.ImgInChannels - latentChannels;
         long extraCount = (long)extraChannels * tokens;
-        using Tensor latentRows = latent.Reshape(new TensorShape(1, latentChannels, tokens));
+        using Tensor latentRows = FlatView(backend, latent, new TensorShape(1, latentChannels, tokens));
         Tensor? zeros = null, conditioningRows = null;
         try
         {
@@ -666,7 +700,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             {
                 if (conditioning.Shape.ElementCount != extraCount)
                     throw new ArgumentException($"conditioning must hold {extraChannels} channels over {tokens} tokens, got {conditioning.Shape}.", nameof(conditioning));
-                conditioningRows = conditioning.Reshape(new TensorShape(1, extraChannels, tokens));
+                conditioningRows = FlatView(backend, conditioning, new TensorShape(1, extraChannels, tokens));
             }
             Tensor extraRows = conditioningRows ?? zeros!;
 

@@ -3,22 +3,29 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Tests.Shared;
+using HartsyInference.Vision.CrossFrame;
 using HartsyInference.Vision.DepthPro2;
+using HartsyInference.Vision.Dinov2;
+using HartsyInference.Vision.Dinov3;
 using Xunit.Abstractions;
 
 namespace HartsyInference.Engine.Tests;
 
-/// <summary>Model stages that used to reshape a device result on the host (<see cref="Tensor.Reshape"/> and <see cref="Tensor.SliceRows"/> read it
-/// back): on a GPU they must run without one device-to-host sync and agree with <see cref="CpuBackend"/>. Synthetic tiny weights, no downloads.</summary>
+/// <summary>Model stages that used to read a device result back to the host (a <see cref="Tensor.Reshape"/>, a <see cref="Tensor.SliceRows"/> or a
+/// host loop): on a GPU they must run without one device-to-host sync and agree with <see cref="CpuBackend"/>. Synthetic tiny weights, no
+/// downloads.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
 {
+    private const int ViewHeight = 32, ViewWidth = 48, DinoHidden = 128, DinoLayers = 3;
+    private static readonly int[] DinoTaps = [0, 1, 2];
+    private static readonly int[] DinoCrossFrameBlocks = [1, 2];
+
     [CudaDeviceFact]
     public void Cuda_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenCuda);
 
     [VulkanDeviceFact]
-    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan,
-        hostConvTransposes: 2);
+    public void Vulkan_DepthPro2Reassemble_StaysOnTheDevice() => DepthPro2Reassemble(GpuDevices.OpenVulkan);
 
     [CudaDeviceFact]
     public void Cuda_LongCatAudioProjection_StaysOnTheDevice() => LongCatAudioProjectionForward(GpuDevices.OpenCuda);
@@ -27,8 +34,147 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
     public void Vulkan_LongCatAudioProjection_StaysOnTheDevice() =>
         LongCatAudioProjectionForward(GpuDevices.OpenVulkan);
 
-    // On Vulkan ConvTranspose2d has no shader and runs on the host (VULKAN_STATUS.md). Levels 0 and 1 each have one, and each reads its input back.
-    private void DepthPro2Reassemble(Func<IBackend> open, int hostConvTransposes = 0)
+    [CudaDeviceFact]
+    public void Cuda_CrossFrameJointViews_StayOnTheDevice() => CrossFrameJoint(GpuDevices.OpenCuda);
+
+    [VulkanDeviceFact]
+    public void Vulkan_CrossFrameJointViews_StayOnTheDevice() => CrossFrameJoint(GpuDevices.OpenVulkan);
+
+    [CudaDeviceFact]
+    public void Cuda_CrossFrameRing_SurvivesAnActivationSweepBetweenFrames() => CrossFrameRing(GpuDevices.OpenCuda);
+
+    [VulkanDeviceFact]
+    public void Vulkan_CrossFrameRing_SurvivesAnActivationSweepBetweenFrames() => CrossFrameRing(GpuDevices.OpenVulkan);
+
+    // Three views attending to each other in the last two of three blocks (Join and Split).
+    private void CrossFrameJoint(Func<IBackend> open)
+    {
+        Random rng = new(13);
+        Dictionary<string, Tensor> weights = DinoWeights(rng);
+        using Tensor views = Filled(rng, 3, 3, ViewHeight, ViewWidth);
+        try
+        {
+            Dinov3VisionEncoder encoder = new(DinoPreset());
+            encoder.LoadWeights(weights);
+            float[][] expected = Values(encoder.EncodeFrameIntermediates(new CpuBackend(), views, DinoTaps, DinoCrossFrameBlocks));
+            float[][] apart = Values(encoder.EncodeIntermediates(new CpuBackend(), views, DinoTaps, DinoCrossFrameBlocks));
+            // The views must see each other, or a Join and Split that did nothing would still agree between the two backends.
+            Assert.True(expected[^1].Zip(apart[^1]).Max(pair => MathF.Abs(pair.First - pair.Second)) > 1e-2f);
+            using IBackend device = open();
+            using ExactGemmScope exact = new(device);
+            using Tensor resident = OnDevice(device, views);
+            device.ResetD2hSyncCount();
+            Tensor[] taps = encoder.EncodeFrameIntermediates(device, resident, DinoTaps, DinoCrossFrameBlocks);
+            long syncs = device.GetD2hSyncCount();
+            output.WriteLine($"D2H_SYNCS cross-frame joint views: {syncs}");
+            AssertClose(expected, Values(taps), 1e-4f);
+            Assert.Equal(0, syncs);
+        }
+        finally
+        {
+            DisposeAll(weights.Values);
+        }
+    }
+
+    // Four frames through a ring of two, so it wraps. After each frame the device frees its unpinned activations, which is what another request on
+    // the same backend does between two frames of a stream: a cache that was not pinned comes back stale.
+    private void CrossFrameRing(Func<IBackend> open)
+    {
+        const int frames = 4, window = 2;
+        Random rng = new(17);
+        Dictionary<string, Tensor> weights = DinoWeights(rng);
+        Tensor[] video = [.. Enumerable.Range(0, frames).Select(_ => Filled(rng, 1, 3, ViewHeight, ViewWidth))];
+        try
+        {
+            Dinov3VisionEncoder encoder = new(DinoPreset());
+            encoder.LoadWeights(weights);
+            CpuBackend cpu = new();
+            List<float[][]> expected = [];
+            using (CrossFrameKvRing ring = new(window))
+            {
+                for (int t = 0; t < frames; t++)
+                {
+                    float[][] cached = Values(encoder.EncodeFrameIntermediates(cpu, video[t], DinoTaps, DinoCrossFrameBlocks, ring));
+                    float[][] alone = Values(encoder.EncodeIntermediates(cpu, video[t], DinoTaps, DinoCrossFrameBlocks));
+                    // The cached frames must matter, or a lost cache would go unnoticed.
+                    if (t > 0) Assert.True(cached[^1].Zip(alone[^1]).Max(pair => MathF.Abs(pair.First - pair.Second)) > 1e-2f);
+                    expected.Add(cached);
+                }
+            }
+
+            using IBackend device = open();
+            using ExactGemmScope exact = new(device);
+            using CrossFrameKvRing deviceRing = new(window);
+            for (int t = 0; t < frames; t++)
+            {
+                using (Tensor resident = OnDevice(device, video[t]))
+                {
+                    device.ResetD2hSyncCount();
+                    Tensor[] taps = encoder.EncodeFrameIntermediates(device, resident, DinoTaps, DinoCrossFrameBlocks, deviceRing);
+                    long syncs = device.GetD2hSyncCount();
+                    output.WriteLine($"D2H_SYNCS cross-frame ring frame {t}: {syncs}");
+                    AssertClose(expected[t], Values(taps), 1e-4f);
+                    Assert.Equal(0, syncs);
+                }
+
+                device.FreeActivations();
+            }
+        }
+        finally
+        {
+            DisposeAll(video);
+            DisposeAll(weights.Values);
+        }
+    }
+
+    // A DINOv3 of three blocks with two 64-wide heads, laid out like Depth Pro 2's backbone.
+    private static Dinov2Preset DinoPreset() => new()
+    {
+        Name = "tiny-dinov3", HiddenSize = DinoHidden, NumLayers = DinoLayers, NumHeads = 2, IntermediateSize = 2 * DinoHidden, ImageSize = ViewWidth,
+        PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, RoundRopePeriodsToBf16 = false, AttentionQkvBias = false,
+        HasFinalNorm = false, RopeNormalizesByLongSide = true,
+    };
+
+    private static Dictionary<string, Tensor> DinoWeights(Random rng)
+    {
+        const int h = DinoHidden;
+        Dictionary<string, Tensor> w = new()
+        {
+            ["embeddings.patch_embeddings.weight"] = Scaled(rng, 0.05f, 0, h, 3, 16, 16),
+            ["embeddings.patch_embeddings.bias"] = Scaled(rng, 0.05f, 0, h),
+            ["embeddings.cls_token"] = Scaled(rng, 0.5f, 0, 1, 1, h),
+            ["embeddings.register_tokens"] = Scaled(rng, 0.5f, 0, 1, 4, h),
+        };
+        for (int i = 0; i < DinoLayers; i++)
+        {
+            string p = $"layer.{i}.";
+            w[p + "norm1.weight"] = Scaled(rng, 0.2f, 1, h);
+            w[p + "norm1.bias"] = Scaled(rng, 0.1f, 0, h);
+            foreach (string proj in new[] { "q_proj", "k_proj", "v_proj", "o_proj" })
+                w[$"{p}attention.{proj}.weight"] = Scaled(rng, 0.2f, 0, h, h);
+            w[p + "attention.o_proj.bias"] = Scaled(rng, 0.1f, 0, h);
+            w[p + "layer_scale1.lambda1"] = Scaled(rng, 0.2f, 0.5f, h);
+            w[p + "norm2.weight"] = Scaled(rng, 0.2f, 1, h);
+            w[p + "norm2.bias"] = Scaled(rng, 0.1f, 0, h);
+            w[p + "mlp.up_proj.weight"] = Scaled(rng, 0.15f, 0, 2 * h, h);
+            w[p + "mlp.up_proj.bias"] = Scaled(rng, 0.1f, 0, 2 * h);
+            w[p + "mlp.down_proj.weight"] = Scaled(rng, 0.1f, 0, h, 2 * h);
+            w[p + "mlp.down_proj.bias"] = Scaled(rng, 0.1f, 0, h);
+            w[p + "layer_scale2.lambda1"] = Scaled(rng, 0.2f, 0.5f, h);
+        }
+
+        return w;
+    }
+
+    // Uniform in offset +/- scale.
+    private static Tensor Scaled(Random rng, float scale, float offset, params long[] shape)
+    {
+        Tensor t = new(new TensorShape(shape), DType.F32);
+        foreach (ref float v in t.AsSpan<float>()) v = offset + scale * (float)(rng.NextDouble() * 2 - 1);
+        return t;
+    }
+
+    private void DepthPro2Reassemble(Func<IBackend> open)
     {
         const int width = 5, prefix = 2, gridH = 2, gridW = 4, decoder = 4;
         int[] dims = [3, 4, 5, 6];
@@ -48,7 +194,7 @@ public sealed class DeviceShapedOutputGpuTests(ITestOutputHelper output)
                 long syncs = device.GetD2hSyncCount();
                 output.WriteLine($"D2H_SYNCS depthpro2 reassemble: {syncs}");
                 AssertClose(expected, Values(levels), 1e-4f);
-                Assert.Equal(hostConvTransposes, syncs);
+                Assert.Equal(0, syncs);
             }
             finally
             {

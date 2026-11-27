@@ -54,8 +54,8 @@ public sealed class FastFramesKvRefiner : IDisposable
     /// layer count from the stacked head weights, <c>dim</c>-dependent head count from <paramref name="heads"/>.</summary>
     public static FastFramesKvRefinerConfig DetectConfig(IReadOnlyDictionary<string, Tensor> weights, int heads)
     {
-        Tensor stemIn = weights["stem_in.weight"];
-        Tensor dK = weights["heads_grouped.gemms.0.dK_w"];
+        Tensor stemIn = CheckpointTensors.Require(weights, "FastFrames refiner", "stem_in.weight");
+        Tensor dK = CheckpointTensors.Require(weights, "FastFrames refiner", "heads_grouped.gemms.0.dK_w");
         int stemBlocks = 0;
         while (weights.ContainsKey($"stem_blocks.{stemBlocks}.qkv.weight"))
             stemBlocks++;
@@ -110,10 +110,7 @@ public sealed class FastFramesKvRefiner : IDisposable
         foreach ((string name, long[] shape) in ExpectedShapes(_config))
         {
             // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
-            if (!weights.TryGetValue(name, out Tensor? tensor))
-                throw new ArgumentException($"The refiner checkpoint has no '{name}'.", nameof(weights));
-            if (tensor.Shape.Rank != shape.Length || !Enumerable.Range(0, shape.Length).All(i => tensor.Shape[i] == shape[i]))
-                throw new ArgumentException($"'{name}' is {tensor.Shape}; the refiner expects [{string.Join(", ", shape)}].", nameof(weights));
+            CheckpointTensors.Require(weights, "FastFrames refiner", name, shape);
         }
         int dA = _config.AdapterDim, dim = _config.Dim, layers = _config.Layers;
         _tEmbed0W = Own(F32(weights, "t_embed.mlp.0.weight")); _tEmbed0B = Own(F32(weights, "t_embed.mlp.0.bias"));
@@ -337,6 +334,13 @@ public sealed class FastFramesKvRefiner : IDisposable
     {
         Tensor source = CheckpointTensors.Require(weights, "FastFrames refiner", key);
         return FastFramesOps.CopyF32(source, source.Shape);
+    }
+
+    /// <summary>The refiner's owned device-uploadable weights, for a caller that places them before a clip.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        RequireLoaded();
+        return _owned.AsReadOnly();
     }
 
     private void RequireLoaded()

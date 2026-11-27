@@ -22,7 +22,66 @@ public sealed record LongCatAvatarRun(
     float TextGuidance, float AudioGuidance,
     LongCatAvatarMode Mode, int NumCondLatents = 0, float[]? CondLatents = null,
     int RefImgIndex = 10, bool UseKvCache = true, Action<GenerationProgress>? OnProgress = null, CancellationToken Cancel = default,
-    AdjunctGate? LoraGate = null, bool OffloadKv = false);
+    AdjunctGate? LoraGate = null, bool OffloadKv = false, LongCatAvatarLoraSchedule? LoraMix = null);
+
+/// <summary>The 1.6 two-LoRA schedule (the upstream <c>enable_lora_mix</c>): for steps below <see cref="MixSteps"/> the DMD LoRA runs at
+/// <see cref="Alpha"/> and the OPSD LoRA at <c>1 − Alpha</c>; from then on the OPSD LoRA runs alone at 1. The gates are switched per step.</summary>
+public sealed class LongCatAvatarLoraSchedule
+{
+    /// <summary>Checks the inputs the way <see cref="LongCatLoraMix"/> does: two distinct gates, a finite Alpha in [0, 1] and a non-negative MixSteps.</summary>
+    public LongCatAvatarLoraSchedule(AdjunctGate Dmd, AdjunctGate Opsd, float Alpha, int MixSteps)
+    {
+        ArgumentNullException.ThrowIfNull(Dmd);
+        ArgumentNullException.ThrowIfNull(Opsd);
+        if (ReferenceEquals(Dmd, Opsd))
+            throw new ArgumentException("The DMD and OPSD gates must be distinct.", nameof(Opsd));
+        if (!float.IsFinite(Alpha) || Alpha < 0f || Alpha > 1f)
+            throw new ArgumentOutOfRangeException(nameof(Alpha), Alpha, "The mix alpha must be finite and in [0, 1].");
+        ArgumentOutOfRangeException.ThrowIfNegative(MixSteps);
+        this.Dmd = Dmd;
+        this.Opsd = Opsd;
+        this.Alpha = Alpha;
+        this.MixSteps = MixSteps;
+    }
+
+    /// <summary>The DMD gate (loraA).</summary>
+    public AdjunctGate Dmd { get; }
+
+    /// <summary>The OPSD gate (loraB).</summary>
+    public AdjunctGate Opsd { get; }
+
+    /// <summary>The DMD weight during the mixed steps; the OPSD weight is 1 − Alpha.</summary>
+    public float Alpha { get; }
+
+    /// <summary>Steps (0-based) that run the mixed pair; later steps run OPSD alone.</summary>
+    public int MixSteps { get; }
+
+    /// <summary>The multipliers of the two LoRAs at a step: DMD, then OPSD. Before <see cref="MixSteps"/> both run (DMD at Alpha, OPSD at
+    /// 1 − Alpha), so unlike <see cref="LongCatLoraMix"/> the two gates are live together on those steps.</summary>
+    public (float Dmd, float Opsd) ScalesAt(int step)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(step);
+        if (step < MixSteps)
+            return (Alpha, 1f - Alpha);
+        return (0f, 1f);
+    }
+
+    /// <summary>Enables the DMD gate at this step's scale until the scope is disposed; null when its scale is zero.</summary>
+    public IDisposable? EnterDmd(int step) => Enter(Dmd, ScalesAt(step).Dmd, "DMD");
+
+    /// <summary>Enables the OPSD gate at this step's scale until the scope is disposed; null when its scale is zero.</summary>
+    public IDisposable? EnterOpsd(int step) => Enter(Opsd, ScalesAt(step).Opsd, "OPSD");
+
+    /// <summary>Refuses to enable a gate that is still on from an earlier step, which means that step's scope was never disposed.</summary>
+    private static IDisposable? Enter(AdjunctGate gate, float scale, string name)
+    {
+        if (scale <= 0f)
+            return null;
+        if (gate.Enabled)
+            throw new InvalidOperationException($"The {name} LoRA gate is already enabled; a scope from an earlier step was not disposed.");
+        return gate.Enable(scale);
+    }
+}
 
 /// <summary>The sigmas (shifted, with the terminal zero), the timesteps (sigma·1000), and the final latents.</summary>
 public sealed record LongCatAvatarResult(float[] Latents, float[] Sigmas, float[] Timesteps);
@@ -53,16 +112,18 @@ public sealed class LongCatAvatarPipeline
     {
         ArgumentNullException.ThrowIfNull(run);
         // The distilled schedule is valid only with its LoRA live: on bare weights the 8-step path is not the distilled model.
-        if (run.Kind == LongCatAvatarSchedule.Kind.Distill8 && run.LoraGate is null)
+        if (run.Kind == LongCatAvatarSchedule.Kind.Distill8 && run.LoraGate is null && run.LoraMix is null)
             throw new InvalidOperationException("The 8-step distilled schedule needs its DMD LoRA gate; refusing to run the bare base at 8 steps.");
         Validate(run);
         // The gate stays on for every step of this run; the stacked LoRA's strength (0.8) is its own, so the gate scale is 1.
-        using IDisposable? loraScope = run.LoraGate?.Enable(1f);
+        // A mixed schedule switches its two gates per step below; a single gate stays on for the whole run.
+        using IDisposable? loraScope = run.LoraMix is null ? run.LoraGate?.Enable(1f) : null;
         using LongCatRunTensors tensors = new(_dit.Config.CaptionChannels, _dit.Config.AudioOutputDim);
         int channels = run.Channels, frames = run.Frames, hw = run.Height * run.Width;
         int cond = run.Mode == LongCatAvatarMode.At2v ? 0 : run.NumCondLatents;
         int noisy = frames - cond;
-        bool useCache = run.Mode == LongCatAvatarMode.Avc && run.UseKvCache && cond > 0;
+        // The KV cache is built once, before the loop: a mixed LoRA schedule changes the cond keys and values between steps, so it runs without one (upstream).
+        bool useCache = run.Mode == LongCatAvatarMode.Avc && run.UseKvCache && cond > 0 && run.LoraMix is null;
         bool guided = run.TextGuidance > 1f || run.AudioGuidance > 1f;
 
         // The reference's sigma path, then the scheduler's static shift, then the terminal zero.
@@ -104,6 +165,9 @@ public sealed class LongCatAvatarPipeline
             {
                 run.Cancel.ThrowIfCancellationRequested();
                 float t = timesteps[i], dt = sigmasWithZero[i + 1] - sigmasWithZero[i];
+                // The mixed schedule: the step's DMD and OPSD multipliers; a zero multiplier leaves its gate off (no scope), as upstream does.
+                using IDisposable? dmdScope = run.LoraMix?.EnterDmd(i);
+                using IDisposable? opsdScope = run.LoraMix?.EnterOpsd(i);
                 using Tensor velocity = Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond,
                     tensors);
 

@@ -51,15 +51,15 @@ public sealed class FastFramesPixelDecoder : IDisposable
     public static FastFramesPixelDecoderConfig DetectConfig(IReadOnlyDictionary<string, Tensor> weights)
     {
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";
-        int dim = (int)weights[prefix + "modulation"].Shape[2];
+        int dim = (int)CheckpointTensors.Require(weights, "FastFrames decoder", prefix + "modulation").Shape[2];
         int inputDim = weights.TryGetValue("bridge.weight", out Tensor? bridge) ? (int)bridge.Shape[1] : dim;
         int low = 0, high = 0;
         while (weights.ContainsKey($"{prefix}conv_low.{low}.dw.weight"))
             low++;
         while (weights.ContainsKey($"{prefix}conv_high.{high}.dw.weight"))
             high++;
-        int ffn = (int)(weights[$"{prefix}conv_low.0.pw1.weight"].Shape[0] / dim);
-        int patch = (int)(weights[prefix + "fc_out.weight"].Shape[0]);
+        int ffn = (int)(CheckpointTensors.Require(weights, "FastFrames decoder", $"{prefix}conv_low.0.pw1.weight").Shape[0] / dim);
+        int patch = (int)CheckpointTensors.Require(weights, "FastFrames decoder", prefix + "fc_out.weight").Shape[0];
         // fc_out emits PatchT·PatchH·PatchW·OutChannels = 3072 for (4, 16, 16, 3); the patch is the released one.
         FastFramesPixelDecoderConfig defaults = new();
         if (patch != defaults.PatchT * defaults.PatchH * defaults.PatchW * defaults.OutChannels)
@@ -105,10 +105,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
         foreach ((string name, long[] shape) in ExpectedShapes(_config, prefixed))
         {
             // Checked before anything is copied, so a checkpoint that fails here can be fixed and loaded again.
-            if (!weights.TryGetValue(name, out Tensor? tensor))
-                throw new ArgumentException($"The decoder checkpoint has no '{name}'.", nameof(weights));
-            if (!ShapeIs(tensor.Shape, shape))
-                throw new ArgumentException($"'{name}' is {tensor.Shape}; the decoder expects [{string.Join(", ", shape)}].", nameof(weights));
+            CheckpointTensors.Require(weights, "FastFrames decoder", name, shape);
         }
         string prefix = weights.ContainsKey("pixel_head.modulation") ? "pixel_head." : "";
         int dim = _config.Dim;
@@ -244,7 +241,7 @@ public sealed class FastFramesPixelDecoder : IDisposable
         state.Previous2[index] = previous1;
         state.Previous1[index] = current;
 
-        Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
+        using Tensor tokenMajor = new(new TensorShape(tokens, dim), DType.F32);
         backend.Transpose2D(tokenMajor, conv, dim, tokens);
         conv.Dispose();
         using Tensor normed = FastFramesOps.LayerNormAffine(backend, tokenMajor, block.NormW, block.NormB, _config.Eps);
@@ -338,16 +335,11 @@ public sealed class FastFramesPixelDecoder : IDisposable
         return FastFramesOps.CopyF32(source, source.Shape);
     }
 
-    private static bool ShapeIs(TensorShape actual, long[] expected)
+    /// <summary>The decoder's owned device-uploadable weights, for a caller that places them before a clip.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
     {
-        if (actual.Rank != expected.Length)
-            return false;
-        for (int i = 0; i < expected.Length; i++)
-        {
-            if (actual[i] != expected[i])
-                return false;
-        }
-        return true;
+        RequireLoaded();
+        return _owned.AsReadOnly();
     }
 
     private void RequireLoaded()
