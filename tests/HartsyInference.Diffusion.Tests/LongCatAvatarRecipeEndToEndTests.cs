@@ -1,4 +1,6 @@
+using HartsyInference.Core.Tensors;
 using HartsyInference.Audio.Dsp.Loudness;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Planning;
@@ -68,15 +70,16 @@ public sealed class LongCatAvatarRecipeEndToEndTests
         }
     }
 
-    private static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(float[] Speech, int Fps)> FeatureCalls) Run(bool onePointSix,
-        int audioSeed)
+    /// <summary>Runs the chain on the backend <paramref name="makeBackend"/> makes (CPU by default). Shared by the CPU tests above and the device parity tests.</summary>
+    internal static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(float[] Speech, int Fps)> FeatureCalls) Run(bool onePointSix,
+        int audioSeed, Func<IBackend>? makeBackend = null, bool? int8 = null, Dictionary<string, Tensor>? dense = null)
     {
         LongCatConfig config = LongCatTinyAvatarRelease.Config;
-        using LongCatTinyAvatarRelease release = new(onePointSix);
+        using LongCatTinyAvatarRelease release = new(onePointSix, int8, dense);
         List<(float[] Speech, int Fps)> featureCalls = [];
 
         using LongCatRecipeStandIns standIns = new(config.CaptionChannels, config.InChannels);
-        using CpuBackend backend = new();
+        using IBackend backend = (makeBackend ?? (() => new CpuBackend()))();
         using IVideoRecipePipeline pipeline = new LongCatAvatarRecipe(standIns.Sides, LongCatTinyAvatarRelease.Features(audioSeed, featureCalls))
             .Construct(new RecipeContext
             {
