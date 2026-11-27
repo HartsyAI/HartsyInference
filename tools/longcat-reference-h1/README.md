@@ -133,11 +133,13 @@ engine does not read.
 - Disk, at 93 frames with the default four named blocks (computed): about 22 GB for the reference dump and about 34 GB for the
   engine's probe, which writes more stages per named block. Fewer named blocks (the same list on both sides) save about 1 GB
   each on the reference side and 4 GB each on the engine side; the 48 block outputs take 17 GB per side regardless.
+- The example's assets (`assets/avatar/multi/`) were not read here, so neither side has decoded these WAV files. If either
+  side cannot read them, convert both once to 16 kHz mono 16-bit PCM, give both sides the converted files and say so.
 - The reference compiles the map function with `torch.compile`, and the multi-speaker path is the only one that runs it. If it
   fails, run again with `H1_EAGER_MAP=1` (the same function, uncompiled) and say so with the results.
 
 ### Engine arm and comparison
-The same portrait, speech files and timing, `--width 640 --height 368 --frames 93`, no boxes, with
+The same portrait, speech files and timing, `--width 640 --height 368 --frames 93`, no boxes and no `--separate-vocals`, with
 `--set diagnostics.longcatConditioningSubstitute=$E/multi-dump/conditioning --set diagnostics.longcatProbeDump=<dir>`
 `--set diagnostics.longcatProbeBlocks=0,1,24,47 --set diagnostics.longcatConditioningDump=<dir2>`, then
 `python h1_multi_compare.py $E/multi-dump <dir> <dir2>`. The substitution gives both sides the same text, audio embedding and step-0
@@ -153,7 +155,7 @@ rank-4 LoRAs), 93 frames at 64x96. Reference side (`h1_multi_cpu_check.py`):
 
 Engine side (CPU, HartsyInference at `e181dd033`, a temporary test that is not committed: the avatar recipe with stand-in umT5 and
 VAE, the same checkpoint, portrait and speech, the four substitutes), against the F32 reference run, `h1_multi_compare.py`:
-- 17 shared probes and the audio tokens: relative RMS 1.2e-6 at most (blocks 0 and 1: self-attention, FFN, audio
+- 17 shared probes and the audio tokens: relative RMS 1.3e-6 at most (blocks 0 and 1: self-attention, FFN, audio
   cross-attention, outputs, the reference map; the embedders and the velocity). Key positions equal; query positions 8e-8.
 - All 552 noisy tokens take the same region on both sides in both maps (all three regions occupied).
 - The engine's step-0 input latent is the substituted one, element for element.
