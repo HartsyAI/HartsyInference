@@ -1475,7 +1475,8 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         if (ssm)
         {
-            slot.SsmModel = SsmLanguageModel.Load(path, architecture);
+            // A backend with no quantized multiply (the CPU) takes the F32 expansion; quantized backends keep the packed weights.
+            slot.SsmModel = SsmLanguageModel.Load(path, architecture, dequantizeToF32: !backend.Capabilities.SupportsQuantized);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
             // SSM has its own loader with no EnumerateWeights/redundant-split concept at all.
             slot.PreloadRedundantWeightSplitsApplied = null;

@@ -287,7 +287,9 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
     }
 
     /// <param name="maxSequenceLength">Tokens the full-attention KV caches hold; the default is the fixed 8192 every earlier caller got.</param>
-    public static Qwen35Model Load(string ggufPath, int maxSequenceLength = MaxAttnSeqLen)
+    /// <param name="dequantizeToF32">Expands every quantized weight to F32 at load, for a backend that cannot multiply by quantized weights (the CPU).
+    /// The expansion is the whole model in F32, so it is for a backend that can hold that; the engine checks the host RAM first.</param>
+    public static Qwen35Model Load(string ggufPath, int maxSequenceLength = MaxAttnSeqLen, bool dequantizeToF32 = false)
     {
         // QUANT-RESIDENT load (2026-07-24): weights stay in their GGUF quantization so every
         // backend.Linear dispatches the fused quant GEMV / dp4a decode paths — the previous
@@ -298,6 +300,11 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         try
         {
             Dictionary<string, Tensor> w = GgufModelLoader.RelabelRank2ToPyTorchOrder(handle.Weights);
+            if (dequantizeToF32)
+            {
+                foreach (string key in w.Keys.ToList())
+                    if (w[key].DType.IsQuantized) w[key] = GgufDequantizer.Dequantize(w[key], DType.F32);
+            }
             // Host-consumed / non-Linear tensors must be F32:
             //  - every rank-1 tensor (norm weights, ssm_a, ssm_dt.bias — RmsNorm and the host SSM
             //    math read them as float*),
