@@ -28,10 +28,10 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         [Description("Path to a local htdemucs checkpoint (.th/.safetensors).")]
         public string? ModelPath { get; init; }
 
-        /// <summary>Compute backend selector. Only an MDX-Net separator (kim-vocal-2) honours it; Demucs and the voice isolator run on the CPU.</summary>
-        /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet.</remarks>
+        /// <summary>Compute backend selector. Honoured by kim-vocal-2 (MDX-Net) and the voice isolator; Demucs always runs on the CPU.</summary>
+        /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet. The voice isolator runs its offline network on the device and its realtime stream on the CPU.</remarks>
         [CommandOption("-b|--backend")]
-        [Description("Backend selector for kim-vocal-2 (auto, cpu, cuda, vulkan). auto, the default, uses the GPU when there is one; pass cpu to keep the work off it. Demucs and the voice isolator always run on the CPU.")]
+        [Description("Backend selector for kim-vocal-2 and the voice isolator (auto, cpu, cuda, vulkan). auto, the default, uses the GPU when there is one; pass cpu to keep the work off it. Demucs always runs on the CPU (its STFT has no GPU path).")]
         public string Backend { get; init; } = "auto";
 
         /// <summary>Directory to write the stems into.</summary>
@@ -52,8 +52,11 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
             return exitCode;
 
         // Demucs' STFT/ISTFT (DemucsSpec.Spec) only has a CPU implementation (CudaBackend.Stft throws
-        // NotSupportedException) and the voice isolator has not run on a GPU, so only an MDX-Net separator takes -b.
-        bool usesBackend = ModelCatalog.Find(settings.Model)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
+        // NotSupportedException), so Demucs forces CPU whatever -b says. The MDX-Net separator and the voice isolator take -b:
+        // the isolator's STFT stays on the host, but its network runs on the requested backend.
+        bool voiceIsolator = string.Equals(settings.Model, "voice-isolator", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(settings.Model, "voice-isolator-realtime", StringComparison.OrdinalIgnoreCase);
+        bool usesBackend = voiceIsolator || ModelCatalog.Find(settings.Model)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
         string backend = usesBackend ? settings.Backend : "cpu";
         ParamState parameters = new ParamState(Modality.Fx) { Backend = backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "separate");
