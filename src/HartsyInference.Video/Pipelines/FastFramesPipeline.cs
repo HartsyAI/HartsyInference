@@ -306,7 +306,9 @@ public sealed class FastFramesPipeline : IDisposable
                 Backend = _backend,
                 Denoiser = _transformer,
                 ModelName = _config.Name,
-                HeadroomBytes = StreamingHeadroomOverride ?? kvNeed + DefaultStreamingHeadroomBytes,
+                // The window (prefetchAhead + 1 streamed blocks) is uploaded right after the placement, so it is part of the headroom.
+                HeadroomBytes = StreamingHeadroomOverride
+                    ?? kvNeed + DefaultStreamingHeadroomBytes + StreamingWindow.Bytes(_transformer, BlockStreamingOptions.DefaultPrefetchAhead),
                 Mode = StreamingMode,
                 Pin = _generatorPin,
                 TokenLoad = (long)latentFrames * _gridHeight * _gridWidth,
