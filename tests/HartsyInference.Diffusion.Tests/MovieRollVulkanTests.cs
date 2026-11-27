@@ -32,6 +32,9 @@ public sealed class MovieRollVulkanTests(ITestOutputHelper output)
         KvRecomputeEnabled = true, KvRecomputeThreshold = 3, KvRecomputeRecentK = 1, Cfg = new MovieRollCfg(1f, 4f),
     };
 
+    /// <summary>The bound on the frame max error: about twice the measured 4.917e-6.</summary>
+    private const float FrameErrorBound = 1e-5f;
+
     [VulkanDeviceFact]
     public void Vulkan_PipelineDecode_ReadsNothingBackAndPrintsTheMaxErrorAgainstCpu()
     {
@@ -58,6 +61,9 @@ public sealed class MovieRollVulkanTests(ITestOutputHelper output)
         output.WriteLine($"MAX_ERR MovieRollVulkanDecode frames: {max:E3} at flat index {at} of {e.Length} (cpu {e[at]:G9}, device {a[at]:G9})");
         output.WriteLine($"SWITCHES MovieRollVulkanDecode: HighPrecisionGemm={device.Backend.HighPrecisionGemm}");
 
+        // The frame error bound is the measured figure with room to spare: 4.917e-6 on a local RTX 3060 (Vulkan) before the composed padding;
+        // the composed padding copies values unchanged, so the same figure is expected after it.
+        Assert.True(max <= FrameErrorBound, $"frame max abs error {max:E3} exceeds {FrameErrorBound:E0}.");
         Assert.Equal(0, reads);
     }
 
