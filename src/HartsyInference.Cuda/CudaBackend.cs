@@ -8875,8 +8875,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     #region Data Movement
 
-    /// <summary>Copies tensor data between host and device or device to device. A CUDA-labelled destination must borrow a
-    /// device pointer; one over host memory that a tensor owns is refused.</summary>
+    /// <summary>Copies tensor data between host and device or device to device; a CUDA destination must borrow a device pointer.</summary>
     /// <exception cref="ArgumentException">The CUDA-labelled destination has no device buffer.</exception>
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
@@ -8916,8 +8915,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    // A tensor that owns its memory, and any view of one, answers DataPointer with a host address, which the driver must
-    // not be given as a device pointer. The check comes first so a refused call allocates and syncs nothing.
+    // An owned tensor, or a view of one, only ever answers DataPointer with a host address, never a device pointer.
     private static void RequireDeviceBuffer(Tensor destination)
     {
         for (Tensor? at = destination; at is not null; at = at.KeepAliveOwner as Tensor)

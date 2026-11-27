@@ -37,8 +37,7 @@ internal static class SanaWmSyntheticLayout
 
     public static float PatternValue(int index) => (index % 251) * 0.004f - 0.5f;
 
-    /// <summary>Writes the layout of <paramref name="config"/> (default <see cref="Config"/>) to <paramref name="path"/>.
-    /// <paramref name="edit"/> may drop, add or reshape specs first.</summary>
+    /// <summary>Writes <paramref name="config"/>'s layout (default <see cref="Config"/>) after any <paramref name="edit"/> of its specs.</summary>
     public static void WriteFile(string path, Action<List<SanaWmTensorSpec>>? edit = null, SanaWmConfig? config = null)
     {
         List<SanaWmTensorSpec> specs = [.. SanaWmCheckpointConverter.ExpectedTensors(config ?? Config)];
