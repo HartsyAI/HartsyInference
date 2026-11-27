@@ -189,17 +189,17 @@ public sealed class DuoAudioStreamDecoder : IDisposable
         float[] samples;
         try
         {
-            Tensor pixels = _decodeWindow(window);
+            Tensor decoded = _decodeWindow(window);
             try
             {
-                samples = Crop(pixels, steps);
+                samples = Crop(decoded, steps);
             }
             finally
             {
                 // A decoder may hand back the window itself; it is disposed once, below.
-                if (!ReferenceEquals(pixels, window))
+                if (!ReferenceEquals(decoded, window))
                 {
-                    pixels.Dispose();
+                    decoded.Dispose();
                 }
             }
         }
