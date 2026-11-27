@@ -21,7 +21,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// chat template with the crop measured from the tokenised prompt, and Glyph-ByT5-small on the quoted text only. The VAE is the HunyuanVideo-1.5 VAE the
 /// reference loads. The distilled chain runs five steps with no classifier-free guidance, context noise 0.15, and the full-history block count 6.
 /// Construction is not validated against real weights yet: the DiT is gated, so its catalog entry is <c>ValidationPending</c> and carries no pin.</summary>
-public sealed class MovieRollRecipe : IVideoRecipe
+public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
 {
     /// <summary>Latent frames of each emitted chunk after the first, and the first chunk's <c>1 + ChunkFrames</c> (upstream <c>check_and_get_chunk_sizes</c>).</summary>
     internal const int ChunkFrames = 4;
@@ -74,6 +74,28 @@ public sealed class MovieRollRecipe : IVideoRecipe
 
     /// <inheritdoc/>
     public bool RefusesUnhonouredPlacements => true;
+
+    /// <summary>Why a backend cannot hold the released DiT at <paramref name="weightBytes"/>, or null. A backend with a streaming cache moves the blocks
+    /// through the device and is not refused here. One without keeps every block on the device, and the DiT is held at its load dtype: FP32 off CUDA
+    /// (the F16 cast is CUDA only), so a file larger than the usable device memory cannot run there.</summary>
+    public static string? WeightsRefusal(bool streams, long totalBytes, long weightBytes, string backendName)
+    {
+        if (streams || totalBytes <= 0) return null;
+        long usable = Math.Max(0, totalBytes - HartsyInference.Engine.Placement.PlacementPlanner.PerDeviceReserveBytes);
+        if (weightBytes <= usable) return null;
+        return $"MovieRoll cannot run on {backendName}: this backend has no weight streaming, so every DiT block stays on the device, and the DiT is held at its "
+            + $"FP32 load dtype (the F16 cast is CUDA only), {HartsyInference.Core.Memory.Vram.ByteFormat.GbF1(weightBytes)}. The device has "
+            + $"{HartsyInference.Core.Memory.Vram.ByteFormat.GbF1(usable)} usable of {HartsyInference.Core.Memory.Vram.ByteFormat.GbF1(totalBytes)}. "
+            + "The CUDA backend streams the blocks.";
+    }
+
+    /// <inheritdoc/>
+    string? IVideoDeviceCheck.DeviceRefusal(IBackend backend, string checkpointPath)
+    {
+        if (!File.Exists(checkpointPath)) return null;
+        long bytes = new FileInfo(checkpointPath).Length;
+        return WeightsRefusal(backend.StreamingCache is not null, backend.GetVramInfo().TotalBytes, bytes, backend.Capabilities.Name);
+    }
 
     /// <summary>The source dtypes the DiT casts to F16 at load on this backend. BF16 is cast on every backend, as before; FP32 (the released file's
     /// dtype) is cast on CUDA only, because the F16 path for FP32 weights is proven there and not on the CPU backend, which keeps them.</summary>
