@@ -213,6 +213,21 @@ public static partial class EngineKnobs
         Str("diagnostics.longcatNoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain). Unset draws the seeded noise.");
 
+    /// <summary>Directory where a LongCat avatar generation writes its step-0 conditioning as float32 .npy under the reference's names (text_embeddings_step00,
+    /// text_mask_step00, audio_embedding_step00, input_latent_step00, speech_16k_mono_step00). The last generation's files overwrite the earlier ones.
+    /// Unset writes nothing.</summary>
+    public static readonly Knob<string?> LongCatConditioningDump =
+        Str("diagnostics.longcatConditioningDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar's step-0 conditioning as float32 .npy (text_embeddings_step00, text_mask_step00, audio_embedding_step00, "
+            + "input_latent_step00, speech_16k_mono_step00); unset writes nothing.");
+
+    /// <summary>Directory whose reference-named .npy files replace the matching step-0 conditioning of a LongCat avatar generation; a file that is absent
+    /// keeps the engine's tensor. The element count of each file must match the engine's tensor; its shape may differ.</summary>
+    public static readonly Knob<string?> LongCatConditioningSubstitute =
+        Str("diagnostics.longcatConditioningSubstitute", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory of float32 .npy files (text_embeddings_step00, text_mask_step00, audio_embedding_step00, input_latent_step00, "
+            + "speech_16k_mono_step00) that replace the matching step-0 conditioning of LongCat avatar generations; absent files keep the engine's tensor.");
+
     /// <summary>Directory for the LongCat avatar DiT's probe tensors of the first denoise step of the first call; unset writes nothing.</summary>
     public static readonly Knob<string?> LongCatProbeDump =
         Str("diagnostics.longcatProbeDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
