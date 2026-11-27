@@ -42,8 +42,9 @@ internal sealed class RealWeightsParityFactAttribute : FactAttribute
 ///   FF_REAL_PARITY_BOUND    relative RMS bound per frame (default 1e-2; provisional until the BF16-vs-FP32 floor is measured)
 ///
 /// The metric is relative RMS, ||engine - upstream|| / ||upstream||, for each latent frame and each pixel frame. The pixel comparison
-/// drops the first three decoded frames, as upstream's align_frames does. The engine's lane is F16 on CUDA and F32 on CPU, so the
-/// result is compared against the FP32 reference, not against an identical lane.</summary>
+/// drops the first three decoded frames, as upstream's align_frames does. The engine's lane is F16 on CUDA and F32 on CPU. The
+/// reference is upstream's FP32 run for S and its BF16 run for L (the dump's <c>--precision</c>), so compare a result only with a
+/// reference of the same model and precision.</summary>
 public sealed class FastFramesRealWeightsParityTests(ITestOutputHelper output)
 {
     private const int AlignedDroppedPixelFrames = 3;

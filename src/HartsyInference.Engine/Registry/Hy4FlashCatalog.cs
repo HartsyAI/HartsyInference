@@ -35,6 +35,8 @@ internal static class Hy4FlashCatalog
         Id = id, Modality = Modality.Text, DisplayName = displayName,
         Architecture = "42 layers: gated MLA (indexed layers with a compressed group indexer, sliding layers), identity hyper-connections (4 streams), "
             + "latent MoE (512 routed experts, 16 active, clamped SwiGLU) with Engram n-gram memories on four layers; 1M-token context",
+        // CliDrivable false: the released checkpoints are refused by size on the host reference, so a catalog id would only refuse. A tiny checkpoint runs
+        // through the CLI by --model-path (recorded in MODEL_STATUS_LLM.md).
         Status = ModelStatus.Structural, CliDrivable = false, HuggingFaceRepo = repo,
         Variants =
         [
