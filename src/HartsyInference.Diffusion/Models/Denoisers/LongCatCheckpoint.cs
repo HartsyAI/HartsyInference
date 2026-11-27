@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -40,6 +41,19 @@ public sealed class LongCatCheckpoint : IDisposable
 
     /// <summary>Every tensor by checkpoint key.</summary>
     public IReadOnlyDictionary<string, Tensor> Weights { get; }
+
+    /// <summary>An F32 tensor as BF16, each value rounded to nearest, ties to even (<see cref="BFloat16Bits"/>), as the reference's bf16 load rounds it.
+    /// <c>Tensor.CastTo</c> truncates, which is not what the reference does.</summary>
+    internal static Tensor ToBf16RoundToNearest(Tensor source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        Tensor bf16 = new(source.Shape, DType.BF16);
+        ReadOnlySpan<float> values = source.AsReadOnlySpan<float>();
+        Span<ushort> bits = bf16.AsSpan<ushort>();
+        for (int i = 0; i < values.Length; i++)
+            bits[i] = BFloat16Bits.FromFloat(values[i]);
+        return bf16;
+    }
 
     /// <summary>The index <see cref="Open"/> reads in <paramref name="directory"/>: the dense one when both are present, the INT8 one only in a
     /// folder that has no dense one.</summary>
@@ -96,7 +110,7 @@ public sealed class LongCatCheckpoint : IDisposable
                     Tensor source = weights[name];
                     if (source.DType != DType.F32)
                         continue;
-                    Tensor bf16 = source.CastTo(DType.BF16);
+                    Tensor bf16 = ToBf16RoundToNearest(source);
                     converted.Add(bf16);
                     weights[name] = bf16;
                 }

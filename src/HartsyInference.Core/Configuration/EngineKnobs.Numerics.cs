@@ -76,13 +76,13 @@ public static partial class EngineKnobs
         Bool("numerics.cudnnDeterministic", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Skips cuDNN backend-graph engines marked CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC during heuristic search, falling through to the next candidate or the direct-kernel fallback.");
 
-    /// <summary>Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.</summary>
     /// <summary>Keeps the dense LongCat DiT's weights as BF16 (the reference's <c>torch_dtype=torch.bfloat16</c> load) when the checkpoint is F32:
     /// the released base DiT is 54.3 GB of F32, which exceeds a 48 GB host cap and halves the bytes a streamed block moves. Off: the F32 weights as stored.</summary>
     public static readonly Knob<bool> LongCatDitBf16 =
         Bool("numerics.longcatDitBf16", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Converts a dense F32 LongCat DiT to BF16 at load, as the reference loads it (54.3 GB F32 is more than the host cap); off keeps F32.");
 
+    /// <summary>Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.</summary>
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
 

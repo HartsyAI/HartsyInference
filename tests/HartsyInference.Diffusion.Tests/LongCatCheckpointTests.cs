@@ -26,6 +26,24 @@ public sealed class LongCatCheckpointTests : IDisposable
     }
 
     [Fact]
+    public void TheBf16ConversionRoundsToNearestWithTiesToEven()
+    {
+        // 0.1 is 0x3DCCCCCD: its upper half rounds up to 0x3DCD (truncation would give 0x3DCC). A tie to an even upper half stays; to an odd one rounds up.
+        using Tensor values = new(new TensorShape(4), DType.F32);
+        values.AsSpan<float>()[0] = 0.1f;
+        values.AsSpan<float>()[1] = 1f + 1f / 256f;
+        values.AsSpan<float>()[2] = 1f + 3f / 256f;
+        values.AsSpan<float>()[3] = -0.1f;
+        using Tensor bf16 = LongCatCheckpoint.ToBf16RoundToNearest(values);
+        Assert.Equal(DType.BF16, bf16.DType);
+        ReadOnlySpan<ushort> bits = bf16.AsReadOnlySpan<ushort>();
+        Assert.Equal(0x3DCD, bits[0]);
+        Assert.Equal(0x3F80, bits[1]);
+        Assert.Equal(0x3F82, bits[2]);
+        Assert.Equal(0xBDCD, bits[3]);
+    }
+
+    [Fact]
     public void ADenseF32CheckpointOpensAsBf16ByDefaultAndRunsWithinBf16Tolerance()
     {
         Dictionary<string, Tensor> source = WriteCheckpoint(writeConfig: true);
