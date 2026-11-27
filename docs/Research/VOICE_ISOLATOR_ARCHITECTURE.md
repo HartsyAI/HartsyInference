@@ -30,18 +30,18 @@ STFT (n_fft 2048, hop 480, periodic Hann, centred) at 48 kHz mono, cut into 46 b
 
 ## Engine surface
 
-`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. Where it runs (`FxService.IsolateVoiceAsync`): **offline** on the engine's backend when that is CUDA or Vulkan, with a CPU rerun when the card is full; **realtime** always on the CPU. The CLI passes `-b` through for both isolators (Demucs still forces CPU). The STFT is on the host on every backend (`IBackend.Stft` has no GPU path), and the Mamba causal-conv history round-trips the host each block, so the network is not fully device-resident.
+`hartsy fx separate in.wav -m voice-isolator[-realtime]` (or `IFxService.SeparateAsync`) returns a `voice` and a `background` stem, mono 48 kHz, `background = input - voice`. Where it runs (`FxService.IsolateVoiceAsync`): **both models** on the engine's backend when that is CUDA or Vulkan, with a CPU rerun when the card is full. The CLI passes `-b` through for both isolators (Demucs still forces CPU). The STFT is on the host on every backend (`IBackend.Stft` has no GPU path). The Mamba causal-conv runs on CUDA and Vulkan backend ops (no host round trip per block); on the CPU it keeps the host loop, which is faster there. The network runs under `ExactGemmScope`, so CUDA matches the CPU to the same level as Vulkan.
 
 Measured on the 3060 against the CPU on the same golden clips (fp32, wall time of the render/stream call):
 
 | Case | CPU | CUDA | Vulkan |
 |---|---|---|---|
-| offline 3 s | 25.8 s | 15 s | 34 s |
-| offline 11 s | 184 s | 59 s | 69 s |
-| realtime 3 s | 38.0 s | 54 s | 237 s |
-| realtime 11 s | 213 s | 208 s | 116 s |
+| offline 3 s | 25.8 s | 4.8 s | 6.6 s |
+| offline 11 s | 184 s | 21.0 s | 30.5 s |
+| realtime 3 s | 38.0 s | 7.6 s | 18.7 s |
+| realtime 11 s | 213 s | 32.4 s | 68.9 s |
 
-CUDA is faster offline at both lengths and no faster realtime, so offline uses it and realtime stays on CPU. Vulkan is faster only offline at 11 s; the 3 s offline and the realtime runs were slower, so Vulkan is not routed by the service. Timings include the GPU's shared load from other sessions. Every GPU case passes the 1e-4 tolerance. Max abs error: CPU up to 5.7e-7; Vulkan 1.6e-7 to 5.7e-7; CUDA 2.6e-5 to 8.5e-5 (relRMS up to 1.2e-4). The CUDA gap is about 150 times the Vulkan error and is not explained yet (check GEMM precision such as TF32 before tightening).
+On the final head the device runs beat the CPU in every case, so both models route to the engine backend. Times are the log time of the render or stream call, measured on the final head; the CPU column is from the baseline run (CPU reruns on the shared machine took 30 to 396 s). Every device case passes the 1e-4 tolerance, and the device errors are at the CPU level (CUDA 1.2e-7 to 1.8e-7, Vulkan 1.7e-7 to 5.7e-7) because the network runs under exact GEMMs. The earlier CUDA error (2.6e-5 to 8.5e-5) was TF32 GEMMs.
 
 16-bit PCM output clamps peaks; the reference scales a peak above 1.0 down instead.
 
@@ -55,4 +55,4 @@ CUDA is faster offline at both lengths and no faster realtime, so offline uses i
 
 ## Not verified
 
-GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 208 s, on CPU by design). The STFT and the Mamba conv history stay on the host (see Engine surface).
+GPUs below Ampere (the card lists A100, H100, B200, B300 and CPU only); third-party ports (GGUF, MLX, WebGPU, ExecuTorch) were not read. The `fx separate sample_14.wav` CLI runs for both models passed on the 3060 (offline `-b cuda` 25 s; realtime `-b cuda` 208 s, on CPU by design). The STFT stays on the host; the Mamba conv runs on the device (CUDA and Vulkan) and on the host on the CPU (see Engine surface).

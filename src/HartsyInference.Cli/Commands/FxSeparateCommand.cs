@@ -29,7 +29,7 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         public string? ModelPath { get; init; }
 
         /// <summary>Compute backend selector. Honoured by kim-vocal-2 (MDX-Net) and the voice isolator; Demucs always runs on the CPU.</summary>
-        /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet. The voice isolator runs its offline network on the device and its realtime stream on the CPU.</remarks>
+        /// <remarks>Demucs' STFT/ISTFT has no CUDA/Vulkan implementation yet. The voice isolator runs on the engine's backend (CUDA or Vulkan), with a CPU rerun when the card is full.</remarks>
         [CommandOption("-b|--backend")]
         [Description("Backend selector for kim-vocal-2 and the voice isolator (auto, cpu, cuda, vulkan). auto, the default, uses the GPU when there is one; pass cpu to keep the work off it. Demucs always runs on the CPU (its STFT has no GPU path).")]
         public string Backend { get; init; } = "auto";
