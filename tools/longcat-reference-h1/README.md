@@ -20,8 +20,11 @@ and the patched demo parses. NOT run anywhere: the runner has not been executed 
   `MultiHeadCrossAttention` from this file (`longcat_video_dit_avatar.py` line 17), and its `enable_flashattn2` branch calls
   `flash_attn_varlen_func`. The patch replaces that call with `_h1_varlen_sdpa`: one SDPA per sample, with each query segment
   attending only to its own key segment (cu_seqlens semantics). Active only with `H1_ATTN=sdpa`.
-- `h1_sdpa_check.py`: a CPU check of `_h1_varlen_sdpa` against a naive float64 attention, with uneven key lengths and a length-1
-  segment, and a no-leakage check. It does not run flash-attn (not installed).
+- `h1_sdpa_check.py`: a CPU check that runs the PATCHED call sites. It builds `MultiHeadCrossAttention` and compares the patched
+  path (`H1_ATTN=sdpa`) with the flash contract, using a fake `flash_attn_varlen_func` that takes the cu_seqlens the original call builds
+  (cumsum). Batch sizes 1 and 3, uneven key lengths, and a length-1 segment. It also checks the helper's assertions and the no-leakage
+  property. Run: `python h1_sdpa_check.py <reference root with both attention patches applied>`. It does not run flash-attn, and the
+  block-sparse module is stubbed (not used here).
 - `h1_runner.py`: imports the patched demo, fixes the size to `H1_SIZE` (default `368x640`, height by width) by replacing
   `LongCatVideoAvatarPipeline.get_condition_shape`, then calls the demo's `_parse_args` and `generate`.
 
