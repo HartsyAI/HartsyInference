@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Loudness;
 using HartsyInference.Audio.Models.LongCat;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
@@ -98,6 +99,23 @@ public sealed class LongCatAudioReferenceTests(ITestOutputHelper output)
             for (int i = 0; i < actual.Length; i++) maxAbs = Math.Max(maxAbs, Math.Abs(actual[i] - reference[i]));
             output.WriteLine($"mel128 chunk {c}: max |diff| {maxAbs:E2}");
             Stage($"mel128 chunk {c}", actual, reference, MelTolerance);
+        }
+        AssertStages();
+    }
+
+    [LongCatReferenceFact("speech16k.f32", "prep_cut.f32", "prep_pad.f32", "meta.json")]
+    public void DrivingAudioPreparation_MatchesTheReference()
+    {
+        float[] speech = Files.Read("speech16k.f32");
+        foreach ((string name, int frames) in new[] { ("cut", 93), ("pad", 253) })
+        {
+            float[] unnormalised = LongCatDrivingAudio.Prepare(speech, frames, 25, normalizeLoudness: false);
+            double loudness = Bs1770Loudness.Integrated(unnormalised, LongCatDrivingAudio.SampleRate);
+            double expected = Files.MetaDouble($"prep_{name}_lufs");
+            output.WriteLine($"{name}: loudness {loudness:F9} LUFS, reference {expected:F9}");
+            Assert.Equal(expected, loudness, 1e-4);
+            Stage($"{name}: prepared and normalised speech", LongCatDrivingAudio.Prepare(speech, frames, 25, normalizeLoudness: true),
+                Files.Read($"prep_{name}.f32"));
         }
         AssertStages();
     }

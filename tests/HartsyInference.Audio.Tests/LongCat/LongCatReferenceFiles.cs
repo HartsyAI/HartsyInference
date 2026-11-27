@@ -35,6 +35,12 @@ internal static class LongCatReferenceFiles
         return doc.RootElement.GetProperty(key).GetInt32();
     }
 
+    public static double MetaDouble(string key)
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(FullPath("meta.json")));
+        return doc.RootElement.GetProperty(key).GetDouble();
+    }
+
     public static bool MetaBool(string key)
     {
         using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(FullPath("meta.json")));
