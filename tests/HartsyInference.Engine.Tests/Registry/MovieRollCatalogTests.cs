@@ -17,7 +17,7 @@ public sealed class MovieRollCatalogTests
     }
 
     [Fact]
-    public void MovieRoll_CarriesOnlyTheGatedDiTAndNoPin()
+    public void MovieRoll_CarriesOnlyTheGatedDiTAndItsPin()
     {
         CatalogEntry entry = ModelCatalog.Find("movieroll")!;
 
@@ -25,8 +25,8 @@ public sealed class MovieRollCatalogTests
         Assert.Equal("yunyangge/MovieRoll", asset.Repo);
         Assert.Equal("distilled/t2v/model.safetensors", asset.RepoPath);
         Assert.Equal("transformer", asset.Role);
-        // The LFS object id is masked in the public listing of this gated repo, so nothing is pinned.
-        Assert.Null(asset.Sha256);
+        // The LFS object id from the repo's raw pointer file, checked against the 33.3 GB file downloaded through a logged-in browser session.
+        Assert.Equal("410694c3e24f6c5d3a53485fbebdfe8e9cc18165f103623eee21f6ff3b91b169", asset.Sha256);
     }
 
     [Fact]
