@@ -17,6 +17,13 @@ public sealed class LongCatRecipeGpuParityTests
 {
     /// <summary>The largest allowed difference, as a fraction of the CPU output's largest magnitude (floats), and in 8-bit levels for frames.</summary>
     private const double RelativeTolerance = 2e-3;
+
+    /// <summary>The INT8 lanes' bound, as a fraction of scale, written before the rerun that uses it. Derived from
+    /// <c>LongCatInt8LinearOpTests</c>: over all 40 avatar linears the CUDA INT8 output is 3.7 to 4.0e-3 relative RMS from exact q·s with the
+    /// same F32 activations, and matches the per-row int8 activation model to 5e-8, so the gap is the activation quantization of the resident path
+    /// (a stated precision limit). The largest segment figure measured on the 1.6 chain is 0.80% of scale (CPU as widened), and this bound is that
+    /// figure plus about 25%. The dense lanes keep <see cref="RelativeTolerance"/>.</summary>
+    private const double Int8RelativeTolerance = 1.0e-2;
     private const int FrameLevels = 2;
 
     [CudaDeviceFact]
@@ -147,6 +154,8 @@ public sealed class LongCatRecipeGpuParityTests
 
     private static void AvatarParity(Func<IBackend> device, bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? cpuDense = null)
     {
+        // INT8 weights on the device are the INT8 lane; a dense checkpoint (or cpuDense, which is dense) is the dense lane.
+        double tolerance = (int8 ?? onePointSix) && cpuDense is null ? Int8RelativeTolerance : RelativeTolerance;
         List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, int8: int8, dense: cpuDense).Vae.Decoded;
         List<(int Frames, float[] Values)> gpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, device, int8).Vae.Decoded;
 
@@ -157,8 +166,8 @@ public sealed class LongCatRecipeGpuParityTests
             float worst = 0f;
             for (int i = 0; i < cpu[segment].Values.Length; i++)
                 worst = Math.Max(worst, Math.Abs(cpu[segment].Values[i] - gpu[segment].Values[i]));
-            Assert.True(worst <= RelativeTolerance * scale,
-                $"segment {segment}: largest difference {worst:G4}, allowed {RelativeTolerance * scale:G4} (scale {scale:G4})");
+            Assert.True(worst <= tolerance * scale,
+                $"segment {segment}: largest difference {worst:G4}, allowed {tolerance * scale:G4} (scale {scale:G4}, tolerance {tolerance:G3})");
         }
     }
 }
