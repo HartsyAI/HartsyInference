@@ -3,6 +3,7 @@ using HartsyInference.Core.Configuration;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Backends.Gpu;
@@ -3497,11 +3498,28 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 throw;
             }
         }
-        else
+        else if (input.DType == DType.BF16 && output.DType == DType.F32)
+        {
+            // BF16 widens by its bits (the top 16 of an F32); reading it as F16 would misread every value.
+            ushort* src = (ushort*)input.DataPointer;
+            float* dst = (float*)output.DataPointer;
+            for (long i = 0; i < input.ElementCount; i++) dst[i] = BFloat16Bits.ToFloat(src[i]);
+        }
+        else if (input.DType == DType.F16 && output.DType == DType.F32)
         {
             Half* src = (Half*)input.DataPointer;
             float* dst = (float*)output.DataPointer;
             for (long i = 0; i < input.ElementCount; i++) dst[i] = (float)src[i];
+        }
+        else if (input.DType == DType.F32 && output.DType == DType.F32)
+        {
+            // A same-dtype widen is a copy; the F16 path it used to take read the F32 bytes as halves.
+            long bytes = input.ElementCount * DType.F32.SizeInBytes;
+            Buffer.MemoryCopy((void*)input.DataPointer, (void*)output.DataPointer, bytes, bytes);
+        }
+        else
+        {
+            throw new NotSupportedException($"CastToF32: {input.DType} to {output.DType} is not supported.");
         }
     }
 

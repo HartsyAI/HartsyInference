@@ -51,12 +51,14 @@ public sealed partial class LongCatBlock : IStreamingBlock
     public long EstimatedWeightBytes { get; private set; }
 
     /// <summary>Reads the block's tensors under <paramref name="prefix"/> (<c>blocks.N</c>).</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, List<Tensor> owned)
+    /// <param name="int8Release">True when the checkpoint is the per-row INT8 release. Its linears are widened before this call, so the release is
+    /// read from the checkpoint, not from the widened tensors' dtype.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, List<Tensor> owned, bool int8Release = false)
     {
         _adaWeight = w[$"{prefix}.adaLN_modulation.1.weight"];
         _adaBias = LongCatOps.WidenF32(w, $"{prefix}.adaLN_modulation.1.bias", owned);
         _qkv = w[$"{prefix}.attn.qkv.weight"];
-        _bf16Residual = EngineKnobs.LongcatBf16Residual.Value && (_qkv.DType == DType.BF16 || _qkv.DType == DType.I8);
+        _bf16Residual = EngineKnobs.LongcatBf16Residual.Value && (int8Release || _qkv.DType == DType.BF16);
         _qkvBias = LongCatOps.WidenF32(w, $"{prefix}.attn.qkv.bias", owned);
         _qNorm = LongCatOps.WidenF32(w, $"{prefix}.attn.q_norm.weight", owned);
         _kNorm = LongCatOps.WidenF32(w, $"{prefix}.attn.k_norm.weight", owned);
@@ -194,9 +196,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         {
             if (_audio is null)
                 throw new InvalidOperationException("The block has no avatar audio weights, but audio tokens were given.");
-            afterAudio = speakers is null
+            afterAudio = Residual(backend, speakers is null
                 ? _audio.Apply(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw)
-                : SpeakerAudio(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw, speakers, speakerMap!, probe, stage);
+                : SpeakerAudio(backend, afterCross, audio, timeEmbed, inputs.CondFrames, hw, speakers, speakerMap!, probe, stage));
             probe?.Invoke($"{stage}.after_audio", afterAudio);
         }
         Tensor stream = afterAudio ?? afterCross;

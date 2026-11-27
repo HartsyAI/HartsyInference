@@ -63,7 +63,8 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
     /// <remarks>All-or-nothing: the new widened copies are collected apart, and the previous ones are released only after every
     /// tensor has loaded. A load that throws releases both sets and leaves the transformer unloaded, so <see cref="Forward"/> refuses
     /// (it never reads a released tensor).</remarks>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
+    /// <param name="int8Release">True for the per-row INT8 release (see <see cref="LongCatBlock.LoadWeights"/>).</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, bool int8Release = false)
     {
         List<Tensor> previous = _owned;
         List<Tensor> owned = [];
@@ -89,7 +90,7 @@ public sealed unsafe partial class LongCatTransformer : IDisposable, IStreamable
             _finalW = w["final_layer.linear.weight"];
             _finalB = LongCatOps.WidenF32(w, "final_layer.linear.bias", owned);
             for (int i = 0; i < _blocks.Length; i++)
-                _blocks[i].LoadWeights(w, $"blocks.{i}", owned);
+                _blocks[i].LoadWeights(w, $"blocks.{i}", owned, int8Release);
             // The avatar projection loads into a local and is swapped in only when the whole load has succeeded. A base checkpoint has no
             // audio_proj keys: nextAudio stays null and the previous projection (if any) is released on the swap.
             if (w.ContainsKey("audio_proj.proj1.weight"))
