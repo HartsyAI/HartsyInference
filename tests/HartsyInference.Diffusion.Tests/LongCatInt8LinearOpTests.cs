@@ -32,6 +32,7 @@ public sealed class LongCatInt8LinearOpTests
         Dictionary<string, Tensor> weights = LongCatTestData.AvatarWeights(LongCatTinyAvatarRelease.Config, seed: 71);
         Dictionary<string, Tensor> quantized = LongCatTestData.QuantizePerRow(weights);
         using CudaBackend backend = GpuDevices.OpenCuda();
+        List<string> failures = [];
         _output.WriteLine($"{"linear",-40} {"shape",-14} {"exact",10} {"upstream",10} {"a8-model",10} {"clip-128",9}");
 
         foreach (string key in weights.Keys.OrderBy(k => k, StringComparer.Ordinal))
@@ -58,12 +59,11 @@ public sealed class LongCatInt8LinearOpTests
             double eExact = RelRms(device, MatMul(x, exact, Tokens, n, k));
             double eUpstream = RelRms(device, MatMul(x, upstream, Tokens, n, k));
             double eActivation = RelRms(device, MatMul(xq, exact, Tokens, n, k));
-            Assert.True(eActivation <= ModelRelativeBound,
-                $"{stem} ({n}x{k}): relative RMS {eActivation:E3} against the per-row int8 activation model, bound {ModelRelativeBound:E0}");
             int clipped = values.Count(v => v == -128f);
             _output.WriteLine($"{stem,-40} {$"{n}x{k}",-14} {eExact,10:E3} {eUpstream,10:E3} {eActivation,10:E3} {clipped,9}");
-            Assert.False(double.IsNaN(eExact));
+            if (double.IsNaN(eExact) || !(eActivation <= ModelRelativeBound)) failures.Add($"{stem} ({n}x{k}): {eActivation:E3}");
         }
+        Assert.True(failures.Count == 0, $"relative RMS against the per-row int8 activation model above {ModelRelativeBound:E0}: " + string.Join("; ", failures));
     }
 
     private static float[] Activations(int rows, int cols, int seed)
