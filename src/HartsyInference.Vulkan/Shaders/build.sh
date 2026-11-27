@@ -281,6 +281,15 @@ compile_one "sol_attn_attend" -- ""
 compile_one "sol_attn_coarse_logits" -- ""
 compile_one "sol_attn_coarse" -- ""
 
+# 3D block-sparse attention. The means and the attention read F32 or BF16; the attention also writes either.
+compile_one "block_sparse_means" -DOPERAND_BF16=0 -- "_f32"
+compile_one "block_sparse_means" -DOPERAND_BF16=1 -- "_bf16"
+compile_one "block_sparse_select" -- ""
+compile_one "block_sparse_attend" -DOPERAND_BF16=0 -DOUTPUT_BF16=0 -- "_f32"
+compile_one "block_sparse_attend" -DOPERAND_BF16=0 -DOUTPUT_BF16=1 -- "_f32_to_bf16"
+compile_one "block_sparse_attend" -DOPERAND_BF16=1 -DOUTPUT_BF16=0 -- "_bf16_to_f32"
+compile_one "block_sparse_attend" -DOPERAND_BF16=1 -DOUTPUT_BF16=1 -- "_bf16"
+
 # sdpa_flash_wide: F32 unmasked FlashAttention with sinks or a soft-cap and head dims up to 1024 (AttentionFlashLowering).
 compile_one "sdpa_flash_wide" -- ""
 

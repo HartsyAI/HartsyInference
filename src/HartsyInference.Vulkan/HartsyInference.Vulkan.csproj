@@ -11,6 +11,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Core.Tests" />
     <InternalsVisibleTo Include="HartsyInference.Vulkan.Tests" />
     <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
   </ItemGroup>

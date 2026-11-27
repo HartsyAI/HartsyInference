@@ -347,5 +347,6 @@ The planner reproduces these until the row that owns each is rewritten.
   `IBackend.BlockSparseAttention`, defined by `BlockSparseAttentionReference` and specified in
   [backend op contracts](BACKEND_OPS.md#blocksparseattention). It keeps this contract's head-major `[B, H, S, D]`
   operands, its plain scale multiplier and its zero row for a token with no key; it takes no mask, no grouped K/V and no
-  numerical permissions: it reads F32 or BF16 and computes in F32. The CPU backend runs the reference and CUDA has a
-  kernel; Vulkan has none and refuses the call by name. No model calls it yet.
+  numerical permissions: it reads F32 or BF16 and computes in F32. The CPU backend runs the reference; CUDA and Vulkan
+  have kernels. Which key blocks a query block reads is the reference's on CUDA, and on Vulkan wherever the driver keeps
+  subnormals. No model calls it yet.

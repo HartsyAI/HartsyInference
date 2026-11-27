@@ -370,10 +370,19 @@ the call by name.
   both in F32; a kernel that sums in another order can rank two blocks differently only where their scores differ by
   rounding alone.
 - CUDA (`block_sparse_attention.ptx`) takes head dim 16, 32, 64 or 128 and at most one key block per 4 bytes of what the
-  selection's 544 static bytes leave of a block's default shared memory (12152 at 48 KB). Head dim 128 takes 83 KB of shared memory per kernel block, so there is no
-  Turing build. Any other call is refused by name, with no host fallback. Its means and scores are the reference's bit for
-  bit (round-to-nearest intrinsics in the reference's order), so its selection is the reference's; the attention is an
-  online softmax over chunks of 64 key rows. [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).
+  selection's 544 static bytes leave of a block's default shared memory (12152 at 48 KiB). Head dims 64 and 128 take more
+  than that default per kernel block (50,176 and 82,944 bytes), which the card has to grant; 128 takes more than a Turing
+  block holds, so there is no Turing build. Any other call is refused by name, with no host fallback. Its means and scores
+  are the reference's bit for bit (round-to-nearest intrinsics in the reference's order), so its selection is the
+  reference's; the attention is an online softmax over chunks of 64 key rows.
+  [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).
+- Vulkan (`block_sparse_*.spv`) takes head dim up to 128 and up to 7680 key blocks on a device with 32 KiB of workgroup
+  memory, and BF16 on one with 16-bit storage; anything else is refused by name. Its means and scores are `precise` in the
+  reference's order, with the divide through `divRn`, so the selection is the reference's where the driver keeps
+  subnormal values (no float-controls mode is declared). The attention is an online softmax over chunks of 16 key rows.
+  A selection or attention pass above 2^33 element operations goes out in several submissions, split along its workgroups,
+  to keep a large call under the Windows GPU watchdog. A captured step graph is submitted whole.
+  [Times](../benchmarks/attention/reports/block-sparse-3060.md#vulkan).
 
 The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in
 top-k mode, whose `bsa_params` ship as sparsity 0.9375 and 4×4×4 blocks. Its CDF-threshold selection has no option here.
@@ -549,7 +558,7 @@ Every implementation of these ops:
 | `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
 | `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
-| `BlockSparseAttention` | reference | `block_sparse_attention.ptx` (`bsa_means_f32/bf16`, `bsa_select`, `bsa_attend_<f32\|bf16>_d16/32/64/128`) | refused |
+| `BlockSparseAttention` | reference | `block_sparse_attention.ptx` (`bsa_means_f32/bf16`, `bsa_select`, `bsa_attend_<f32\|bf16>_d16/32/64/128`) | `block_sparse_means_f32/bf16`, `block_sparse_select`, `block_sparse_attend_*` |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
 | `SparseTopK` | reference | `sparse_index.ptx` (`sparse_topk_f32`) | `sparse_topk` |

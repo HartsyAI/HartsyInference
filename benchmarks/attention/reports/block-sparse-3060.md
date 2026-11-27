@@ -6,7 +6,7 @@ LongCat-Video's 720p refinement, head dim 128, sparsity 0.9375 and 4×4×4 block
 - Commit `c665f9ca8`, RTX 3060 12 GB, driver 610.88, Windows 11, .NET 10 Release, default engine settings (TF32 allowed for
   dense F32, cuDNN on). No other test or inference process on the card; its processor was busy with other work.
 - One untimed call, then the median of three synchronized calls. Output in the operands' dtype.
-- `dotnet test tests/HartsyInference.Core.Tests -c Release --filter FullyQualifiedName~BlockSparseAttentionSpeedTests`
+- `dotnet test tests/HartsyInference.Core.Tests -c Release --filter FullyQualifiedName~BlockSparseAttentionSpeedTests.BlockSparseBesideDense`
 
 | Token grid (T×H×W) | Tokens | Heads | Key blocks read | Operands | Block-sparse | Dense | Dense / block-sparse |
 |---|---|---|---|---|---|---|---|
@@ -18,12 +18,12 @@ LongCat-Video's 720p refinement, head dim 128, sparsity 0.9375 and 4×4×4 block
 The 48-frame grid runs 8 heads rather than the model's 32: four operands of 32 heads do not fit in 12 GB. Which dense kernel
 row served each call was not recorded.
 
-The block-sparse kernel computes in F32 whatever it reads, so BF16 operands save memory and load traffic and little time. A
-query block reads 1/16 of the keys, and the time falls by less than that: the kernel is F32 arithmetic in the CUDA cores.
+The block-sparse kernel computes in F32 whatever it reads. BF16 operands save memory; their times differ from F32 by 5
+percent or less. A query block reads 1/16 of the keys and the time falls 9 to 11 times; why not 16 was not measured.
 Its workspace beside the operands is the block means and the selection, 34 MiB at the 48-frame, 8-head size (computed from the
 shapes).
 
-## Tile layout
+## CUDA tile layout
 
 The attention stage alone, F32, 12×44×80 with 8 heads and 41 blocks read, synthetic selection, median of three. Each row is one
 build of the kernel with other tile constants.
@@ -38,3 +38,38 @@ build of the kernel with other tile constants.
 
 Groups of 2 query rows instead of 4 gave 288 ms (64 × 64) and 320 ms (64 × 32). Head dim 16 keeps 16 threads a group, which is
 all its channels split into.
+
+## Vulkan
+
+`IBackend.BlockSparseAttention` on Vulkan, same card, driver, options and head dim, output in the operands' dtype.
+
+- Commit `39a037a11`, Windows 11, .NET 10 Release. One untimed call, then the median of three synchronized calls.
+- One case per run, smallest first:
+  `dotnet test tests/HartsyInference.Core.Tests -c Release --filter "FullyQualifiedName~BlockSparseAttentionSpeedTests.VulkanBlockSparse&DisplayName~heads: 32"`
+
+| Token grid (T×H×W) | Tokens | Heads | Key blocks read | F32 | BF16 |
+|---|---|---|---|---|---|
+| 4×44×80 | 14,080 | 1 | 13 of 220 | 20.7 ms | 16.7 ms |
+| 4×44×80 | 14,080 | 4 | 13 of 220 | 45.0 ms | 43.4 ms |
+| 12×44×80 | 42,240 | 8 | 41 of 660 | 795 ms | 784 ms |
+| 12×44×80 | 42,240 | 32 | 41 of 660 | 3,182 ms | 3,179 ms |
+
+At 12×44×80 with 32 heads Vulkan takes 3.6 times CUDA's time in the table above (CUDA measured at `c665f9ca8`); why was not
+measured. The attention pass goes in 14 submissions at 8 heads and 55 at 32 (computed from the submission budget), so a
+submission at 32 heads takes at most 58 ms on average. The driver logged no event during these runs. The outputs were not
+compared with the reference. The 48-frame grid was not timed.
+
+### Device losses in earlier runs
+
+No Vulkan dense comparison is reported. Two earlier timing runs on this card (2026-11-27, driver 610.88, default watchdog
+settings) failed with `ErrorDeviceLost`, and the driver logged event `nvlddmkm` 153 for each. Both losses surfaced during a
+dense attention call.
+
+| Commit | Grid, heads | Returned and logged a figure before the loss | Call in progress when the loss surfaced |
+|---|---|---|---|
+| `1feb4e55c` | 12×44×80, 8 | block-sparse F32 | dense, F32 operands |
+| `5d27c0979` | 4×44×80, 1 | block-sparse F32 and BF16, dense F32 | dense, BF16 operands |
+
+The cause is not established. Block-sparse attention had run in the same process just before both losses, at `1feb4e55c` as
+one unsplit dispatch (754 ms). No other grid or head count is reported to have lost the device. The timing test no longer calls
+dense attention on Vulkan.

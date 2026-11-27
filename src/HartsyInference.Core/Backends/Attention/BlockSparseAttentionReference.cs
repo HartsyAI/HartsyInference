@@ -40,7 +40,7 @@ public static class BlockSparseAttentionReference
         if (wideOutput is null) return;
         ReadOnlySpan<float> wide = wideOutput.AsReadOnlySpan<float>();
         Span<ushort> narrow = output.AsSpan<ushort>();
-        for (int i = 0; i < wide.Length; i++) narrow[i] = TensorCasts.F32ToBf16BitsRounded(wide[i]);
+        for (int i = 0; i < wide.Length; i++) narrow[i] = BFloat16Bits.FromFloat(wide[i]);
     }
 
     /// <summary>The definition on F32 operands the contract has accepted.</summary>

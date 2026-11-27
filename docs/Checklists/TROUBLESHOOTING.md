@@ -872,6 +872,13 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   with `MESA_VK_DEVICE_SELECT=list vulkaninfo --summary`) to pin ordinal 0 to a specific physical device —
   works even for pure-NVIDIA multi-GPU boxes, not just mixed-vendor ones. Useful for CI/benchmark scripts
   that need a deterministic, known-idle target.
+- **`ErrorDeviceLost` from `vkQueueSubmit2` around large attention calls on a Windows display card** (driver event
+  `nvlddmkm` 153; RTX 3060, driver 610.88, default watchdog settings). Seen twice, surfacing during a dense attention call: F32
+  operands at 42,240 tokens and 8 heads, and BF16 operands at 14,080 tokens and 1 head (head dim 128). Block-sparse attention
+  had run in the same process just before both, the first time as one unsplit 754 ms dispatch. **Cause not established, not
+  fixed.** Long work in one submission is one candidate; `BlockSparseAttention` now splits large passes
+  (`DispatchBlockSparse`), dense attention is unchanged. After a device loss, read the Windows System event log before running
+  again, and size up from the smallest case. [Both runs](../../benchmarks/attention/reports/block-sparse-3060.md#device-losses-in-earlier-runs).
 - **Push descriptors regressed 7% on NVIDIA** (pool-ring is highly tuned there) — not every "best
   practice" generalizes; kept default-off, opt-in `HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1` for AMD/Intel.
 - **INT8 `dotPacked4x8` overload is selected by operand type:** `uint[]` → unsigned, `int[]` → signed.

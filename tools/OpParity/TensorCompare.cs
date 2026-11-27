@@ -26,7 +26,7 @@ public static class TensorCompare
         using Tensor a32 = actual.DType == DType.F32 ? actual : actual.CastTo(DType.F32);
         ReadOnlySpan<float> e = e32.AsReadOnlySpan<float>();
         ReadOnlySpan<float> a = a32.AsReadOnlySpan<float>();
-        double maxAbs = 0, maxRel = 0;
+        double maxAbs = 0, maxRel = 0, squaredError = 0, squaredNorm = 0;
         for (int i = 0; i < e.Length; i++)
         {
             float ev = e[i], av = a[i];
@@ -40,6 +40,13 @@ public static class TensorCompare
             double diff = Math.Abs((double)av - ev);
             maxAbs = Math.Max(maxAbs, diff);
             maxRel = Math.Max(maxRel, diff / Math.Max(Math.Abs((double)ev), 1e-6));
+            squaredError += diff * diff;
+            squaredNorm += (double)ev * ev;
+        }
+        if (acceptance.MaxRelativeRms > 0)
+        {
+            double rms = squaredNorm > 0 ? Math.Sqrt(squaredError / squaredNorm) : Math.Sqrt(squaredError / e.Length);
+            return new(name, rms <= acceptance.MaxRelativeRms, $"relative RMS {rms:E2} (limit {acceptance.MaxRelativeRms:E1})", maxAbs, maxRel);
         }
         bool pass = maxAbs <= acceptance.MaxAbs || maxRel <= acceptance.MaxRel;
         return new(name, pass, $"maxAbs {maxAbs:E2} maxRel {maxRel:E2} (limits {acceptance.MaxAbs:E1} / {acceptance.MaxRel:E1})", maxAbs, maxRel);
