@@ -60,7 +60,9 @@ python -I tools/maxwell-reference/compare_real.py --ref /runs/maxwell-ref/refere
     --engine-greedy /runs/engine/greedy.tsv --engine-forced /runs/engine/forced.tsv --tol-logprob 0.10
 ```
 
-Reference decode (dump_real.py): an explicit greedy loop over the release's forward, not `model.generate()`. `generation_config.json` (eos ids 2 and 200001, no sampling) therefore never affects the tokens. The release computes lm_head in F32 (`modeling_maxwell_moe.py`: `F.linear(lm_input.float(), lm_head.weight.float())`), so the reference logits are F32; the script refuses to run otherwise. A stop id in the continuation is an error: choose a prompt that runs the full 40 tokens, because the engine stops there.
+Reference decode (dump_real.py): an explicit greedy loop over the release's forward, not `model.generate()`. `generation_config.json` (eos ids 2 and 200001, no sampling) therefore never affects the tokens. The release computes lm_head in F32 (`modeling_maxwell_moe.py`: `F.linear(lm_input.float(), lm_head.weight.float())`), so the reference logits are F32; the script refuses to run otherwise. A stop id in the continuation is an error: choose a prompt that runs the full 40 tokens, because the engine stops there. The stop ids are read from the checkpoint files (`eos_token_id` in `generation_config.json` and `config.json`), not hard-coded. Every forward passes `cache_position` and `position_ids` explicitly (prefill 0..L-1, then one position per step), so positions do not depend on the cache object.
+
+Comparison order: greedy tokens are compared over the common prefix before any length check, so a divergence is reported as a divergence, and a length difference after a matching prefix is reported as a length failure.
 
 Checks before trusting the result:
 - `prompt_ids.json` length (reference) equals the engine's prompt token count in its log. This is a length check only: the engine does not dump its prompt ids, so equal lengths do not prove equal ids. A rendering difference with the same length would pass this check.

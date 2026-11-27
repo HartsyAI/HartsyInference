@@ -57,14 +57,16 @@ def main():
         if r["second_id"] == r["top_id"] or margin(r) < 0:
             raise SystemExit(f"reference row {r['index']} is malformed: top {r['top_id']} second {r['second_id']} margin {margin(r):.6f}")
 
-    if len(greedy) != len(ref):
-        print(f"FAIL length: reference {len(ref)} tokens, engine greedy {len(greedy)} tokens; the reference never stops early, so check the engine's stop handling")
-        return 1
+    # Tokens first, over the common prefix: a divergence is the finding; a length difference is reported after it.
     for r, g in zip(ref, greedy):
         if r["token_id"] != g["token_id"]:
             print(f"FAIL greedy token at position {r['index']}: reference {r['token_id']}, engine {g['token_id']}; "
                   f"reference margin top-1 minus top-2 there {margin(r):.6f} nats (top {r['top_id']}, second {r['second_id']})")
             return 1
+    if len(greedy) != len(ref):
+        print(f"FAIL length: the first {min(len(greedy), len(ref))} greedy tokens match, but reference has {len(ref)} tokens and engine greedy "
+              f"has {len(greedy)}; the reference stops are read from the checkpoint, so check the engine's stop handling")
+        return 1
 
     if len(forced) != len(ref):
         print(f"FAIL length: reference {len(ref)} rows, engine forced {len(forced)} rows")
