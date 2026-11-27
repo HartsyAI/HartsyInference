@@ -154,8 +154,8 @@ public sealed class LongCatRecipeGpuParityTests
 
     private static void AvatarParity(Func<IBackend> device, bool onePointSix, bool? int8 = null, Dictionary<string, Tensor>? cpuDense = null)
     {
-        // INT8 weights on the device are the INT8 lane; a dense checkpoint (or cpuDense, which is dense) is the dense lane.
-        double tolerance = (int8 ?? onePointSix) && cpuDense is null ? Int8RelativeTolerance : RelativeTolerance;
+        // The lane is set by the device side: INT8 weights on the device are the INT8 lane, whatever the CPU side holds.
+        double tolerance = (int8 ?? onePointSix) ? Int8RelativeTolerance : RelativeTolerance;
         List<(int Frames, float[] Values)> cpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, int8: int8, dense: cpuDense).Vae.Decoded;
         List<(int Frames, float[] Values)> gpu = LongCatAvatarRecipeEndToEndTests.Run(onePointSix, audioSeed: 1, device, int8).Vae.Decoded;
 
