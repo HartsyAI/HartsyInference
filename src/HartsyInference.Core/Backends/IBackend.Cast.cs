@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -15,9 +16,18 @@ public partial interface IBackend
             dst[i] = (Half)src[i];
     }
 
-    /// <summary>Cast tensor from FP16 to FP32. Default: CPU scalar loop.</summary>
+    /// <summary>Cast tensor from FP16 or BF16 to FP32. Default: CPU scalar loop.</summary>
     unsafe void CastToF32(Tensor output, Tensor input)
     {
+        if (input.DType == DType.BF16)
+        {
+            ushort* bits = (ushort*)input.DataPointer;
+            float* values = (float*)output.DataPointer;
+            int n = (int)input.Shape.ElementCount;
+            for (int i = 0; i < n; i++)
+                values[i] = BFloat16Bits.ToFloat(bits[i]);
+            return;
+        }
         Half* src = (Half*)input.DataPointer;
         float* dst = (float*)output.DataPointer;
         int count = (int)input.Shape.ElementCount;
@@ -32,8 +42,18 @@ public partial interface IBackend
     /// bail on a dtype its kernel does not cover.</summary>
     /// <remarks>Static because an override cannot reach its own interface default — the call binds back to the
     /// class and recurses until the stack ends.</remarks>
-    static void CastToBf16Reference(Tensor output, Tensor input)
+    static unsafe void CastToBf16Reference(Tensor output, Tensor input)
     {
+        // F32 input rounds to nearest even, as the device cast does; Tensor.CastTo truncates.
+        if (input.DType == DType.F32 && output.DType == DType.BF16)
+        {
+            float* src = (float*)input.DataPointer;
+            ushort* dst = (ushort*)output.DataPointer;
+            int n = (int)input.Shape.ElementCount;
+            for (int i = 0; i < n; i++)
+                dst[i] = BFloat16Bits.FromFloat(src[i]);
+            return;
+        }
         Tensor casted = input.CastTo(DType.BF16);
         try
         {

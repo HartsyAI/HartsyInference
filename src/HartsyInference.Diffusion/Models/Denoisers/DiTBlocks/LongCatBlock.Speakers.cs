@@ -22,7 +22,8 @@ public sealed partial class LongCatBlock
         LongCatSpeakerRotation rotation = speakers.Rotation(positions);
         using (rotation.QueryCos)
         using (rotation.QuerySin)
-            return _audio!.Apply(backend, stream, audio, timeEmbed, condFrames, tokensPerFrame, rotation, probe, $"{stage}.audio_cross_attn");
+            return _audio!.Apply(backend, stream, audio, timeEmbed, condFrames, tokensPerFrame, rotation, probe, $"{stage}.audio_cross_attn",
+                roundSubLayer: _bf16Residual);
     }
 
     private static void ProbeHost(Action<string, Tensor> probe, string name, float[] values, params long[] shape)

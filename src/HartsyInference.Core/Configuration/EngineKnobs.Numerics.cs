@@ -86,6 +86,20 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
 
+    /// <summary>Lets the MovieRoll DiT narrow its block attention to F16 on load. Off by default. On the exact GEMM lane (the default of
+    /// <see cref="MovieRollExactGemm"/>) F16 attention fails the upstream parity bound on CUDA (relative RMS 5.8e-3 against 1e-3); F32 attention passes
+    /// (1.124e-4) on that lane.</summary>
+    public static readonly Knob<bool> MovieRollAttentionF16 =
+        Bool("numerics.movieRollAttentionF16", false, KnobScope.Construction, KnobDomain.Numerics,
+            "Narrows the MovieRoll DiT block attention to F16 (the parity-failing path); off keeps F32.");
+
+    /// <summary>Runs every MovieRoll DiT forward (full, per-frame, streamed window and recompute) on exact GEMMs, with CUDA's TF32 off. On by default:
+    /// on the default TF32 lane the F32-attention forward fails the upstream parity bound (relative RMS 6.1e-3 against 1e-3, CUDA, RTX 3060, 334.8 s
+    /// forward); on the exact lane it passes (1.124e-4, 316.0 s). Off runs the backend's default GEMM, which is faster and fails the bound.</summary>
+    public static readonly Knob<bool> MovieRollExactGemm =
+        Bool("numerics.movieRollExactGemm", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Runs MovieRoll DiT forwards on exact GEMMs (TF32 off on CUDA). On by default; off uses the backend's default GEMM, faster and outside the parity bound.");
+
     /// <summary>Krea 2 honours each layer's <c>full_precision_matrix_mult</c> mark (dense GEMM for marked nvfp4 layers). Off
     /// by default: marked layers run the native block-scaled GEMM, which is about 60% faster per step on Blackwell.</summary>
     public static readonly Knob<bool> Krea2FullPrecision =
@@ -155,6 +169,17 @@ public static partial class EngineKnobs
     /// <summary>Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.</summary>
     public static readonly Knob<bool> NeighborhoodAttentionTiled =
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
+
+    /// <summary>Rounds LongCat's activations to the BF16 grid on a BF16 or INT8 release, as the reference does: the latent input, timestep and text
+    /// states (avatar DiT lines 492-495); the patch embedding; the audio embeddings and the audio projection's linears and norm (line 505,
+    /// blocks.py AudioProjModel); the caption projection (y_embedder, outside autocast, line 497); each modulate_fp32 and LayerNorm_FP32 output
+    /// (they cast back to the input dtype, blocks.py 56-69 and 126-134); each sub-layer output (self-attention, text cross-attention, audio
+    /// cross-attention before its gate, FFN); each residual sum (lines 152-153, 178-179, 185-186 at 58eb336); the final linear's input and output;
+    /// and the velocity. Gate and modulation math stays F32. Read at construction and logged at load. The F32 route is unchanged. Off by default:
+    /// the CUDA avatar parity lanes exceeded the 0.2% bound with the earlier residual-only rounding, and the 4090 comparison at 9998155f6 (LC-CMP8)
+    /// was worse than with the knob off (6 of 8 steps over the 2e-2 bound against 1 with it off). No A/B of this rounding is recorded yet.</summary>
+    public static readonly Knob<bool> LongcatBf16Residual =
+        Bool("numerics.longcatBf16Residual", false, KnobScope.Construction, KnobDomain.Numerics, "Rounds LongCat activations to BF16 on a BF16 or INT8 release, as the reference does (off by default).");
 
     /// <summary>LongCat's <c>int8_tensorwise</c> linears dequantize the weight and leave the activations as they are, as the release's reference computes
     /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. On by default for LongCat's INT8 releases (a run

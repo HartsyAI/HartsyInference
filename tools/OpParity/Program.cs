@@ -251,5 +251,6 @@ static Dictionary<string, string> ParseArgs(string[] argv)
 /// <summary>Every case set the tool knows; a new op family adds its class here.</summary>
 file static class Registry
 {
-    public static IEnumerable<OpCase> Cases() => SmokeCases.Cases().Concat(AttentionCases.Cases()).Concat(ReductionCases.Cases());
+    public static IEnumerable<OpCase> Cases() => SmokeCases.Cases().Concat(AttentionCases.Cases()).Concat(ReductionCases.Cases())
+        .Concat(BlockSparseCases.Cases());
 }

@@ -72,6 +72,9 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         _txtFfn = new SwiGluFfn(hiddenSize, mlpDim);
     }
 
+    /// <summary>Whether the joint and window attention may narrow to F16. True by default for the DiTs that share this block; the MovieRoll DiT sets it false. Read when the attention is built, in LoadWeights.</summary>
+    internal bool AllowF16Attention { get; set; } = true;
+
     /// <summary>Loads weights using diffusers naming under <c>transformer_blocks.{i}.*</c>. Modulation linears project temb to <c>6 * hidden</c>; attention is bias=True; QK-norm is RMSNorm; FFNs are GELU(approximate) with <c>ff.net.0.proj</c> + <c>ff.net.2</c> naming.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
@@ -124,14 +127,14 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         _attention = new JointAttention(
             new JointAttentionConfig
             {
-                Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = true,
+                Heads = _numHeads, HeadDim = _headDim, ConcatOrder = [0, 1], AllowF16 = AllowF16Attention,
                 TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
             },
             [_imgAttn, _txtAttn]);
         // AllowF16 as the joint layer: the QK RMS norm bounds the scores, so the window attention may narrow to F16 too.
         _windowAttend = new AttentionLayer(new AttentionLayerConfig
         {
-            Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, AllowF16 = true,
+            Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, AllowF16 = AllowF16Attention,
             TokenMajorRoute = AttentionRoute.TokenMajor, HeadMajorForSage = true,
         });
     }

@@ -5,9 +5,11 @@ namespace HartsyInference.Core.Backends.Attention;
 /// <summary>The operand and option checks every <see cref="IBackend.BlockSparseAttention"/> implementation shares.</summary>
 public static class BlockSparseAttentionContract
 {
-    /// <summary>Checks the options, the operands' shapes against their grids, aliasing and the selection report. Dtypes of the four
-    /// operands are the implementation's own check.</summary>
+    /// <summary>Checks the options, the operands' shapes against their grids and their dtypes (Q, K and V one of F32 or BF16, the
+    /// output F32 or BF16), aliasing, the call's size and the selection report. It reads no tensor's data.</summary>
     /// <exception cref="ArgumentException">An operand or option does not fit the call.</exception>
+    /// <exception cref="AttentionUnsupportedException">An operand or the call's selection holds more elements than an int
+    /// indexes.</exception>
     public static void Validate(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
         Tensor? selected = null)
     {
@@ -23,6 +25,10 @@ public static class BlockSparseAttentionContract
                 + $"got Q={query.Shape}, K={key.Shape}, V={value.Shape}, O={output.Shape}.");
         if (key.Shape[0] != query.Shape[0] || key.Shape[1] != query.Shape[1] || key.Shape[3] != query.Shape[3])
             throw new ArgumentException($"Q and K share batch, heads and head dim; got Q={query.Shape}, K={key.Shape}.", nameof(key));
+        if (!IsOperandType(query.DType) || key.DType != query.DType || value.DType != query.DType || !IsOperandType(output.DType))
+            throw new ArgumentException(
+                "Block-sparse attention reads Q, K and V in one of F32 or BF16 and writes F32 or BF16; "
+                + $"got Q={query.DType}, K={key.DType}, V={value.DType}, O={output.DType}.");
         CheckGrid(options.QueryGrid, options.QueryBlock, query.Shape[2], "query");
         CheckGrid(options.KeyGrid, options.KeyBlock, key.Shape[2], "key");
         if (!(options.Sparsity is >= 0.0 and <= 1.0))
@@ -32,6 +38,7 @@ public static class BlockSparseAttentionContract
         // By reference only: reading a pointer would sync a device-resident operand to the host.
         if (ReferenceEquals(output, query) || ReferenceEquals(output, key) || ReferenceEquals(output, value))
             throw new ArgumentException("The output must not alias an input.", nameof(output));
+        RefuseOversize(query, key, options);
         if (selected is null) return;
         TensorShape report = new(query.Shape[0], query.Shape[1], options.QueryBlocks, options.SelectedBlocks);
         if (selected.DType != DType.I32 || selected.Shape != report)
@@ -39,6 +46,19 @@ public static class BlockSparseAttentionContract
         if (ReferenceEquals(selected, output) || ReferenceEquals(selected, query) || ReferenceEquals(selected, key)
             || ReferenceEquals(selected, value))
             throw new ArgumentException("The selection report must be its own tensor.", nameof(selected));
+    }
+
+    private static bool IsOperandType(DType type) => type == DType.F32 || type == DType.BF16;
+
+    // Operands and the selection report are sliced as spans, which an int indexes.
+    private static void RefuseOversize(Tensor query, Tensor key, BlockSparseAttentionOptions options)
+    {
+        if (query.ElementCount <= int.MaxValue && key.ElementCount <= int.MaxValue
+            && query.Shape[0] * query.Shape[1] * options.QueryBlocks * options.SelectedBlocks <= int.MaxValue)
+            return;
+        throw new AttentionUnsupportedException(
+            $"{nameof(IBackend.BlockSparseAttention)} takes operands and a selection of at most {int.MaxValue} elements each; "
+            + $"got Q={query.Shape}, K={key.Shape} with {options.QueryBlocks} query blocks.");
     }
 
     private static void CheckGrid(TokenGrid3D grid, TokenGrid3D block, long tokens, string side)

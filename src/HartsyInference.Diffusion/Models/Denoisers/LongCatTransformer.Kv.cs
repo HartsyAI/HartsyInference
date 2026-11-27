@@ -141,7 +141,7 @@ public sealed partial class LongCatTransformer
         KvSegmentStore store = new(backend, _blocks.Length, tokenAxis: 2);
         try
         {
-            cur = WanDitOps.Patchify(backend, condLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+            cur = PatchEmbed(backend, condLatent);
             (Tensor cos, Tensor sin) = RopeFor(frames, gridH, gridW, conditioning);
             AttentionSegment[] segments = conditioning.AttentionPlan(hw, frames);
             LongCatBlockInputs inputs = new(frames, hw, conditioning.NumCondLatents, cos, sin, segments, FrameRowIndex(frames, hw));
@@ -221,13 +221,14 @@ public sealed partial class LongCatTransformer
         backend.SliceRows(cos, fullCos, cache.Tokens);
         backend.SliceRows(sin, fullSin, cache.Tokens);
 
-        using Tensor timeEmbed = TimestepEmbedding(backend, frameTimesteps, frames);
+        float[]? roundedTimesteps = _bf16Route ? RoundToBf16(frameTimesteps) : null;
+        using Tensor timeEmbed = TimestepEmbedding(backend, roundedTimesteps ?? frameTimesteps, frames);
         using Tensor text = CaptionEmbedding(backend, encoder, validTextTokens);
         using LongCatSpeakerPass? speakerPass = speakers is null ? null : SpeakerPass(speakers, frames);
         Tensor? cur = null;
         try
         {
-            cur = WanDitOps.Patchify(backend, noisyLatent, _config.InChannels, dim, _config.PatchSize, _patchW2d!, _patchBias);
+            cur = PatchEmbed(backend, noisyLatent);
             AttentionSegment[] segments = [AttentionSegment.Dense(rows)];
             LongCatBlockInputs inputs = new(frames, hw, 0, cos, sin, segments, FrameRowIndex(frames, hw));
             for (int i = 0; i < _blocks.Length; i++)
@@ -243,11 +244,12 @@ public sealed partial class LongCatTransformer
             }
 
             using Tensor finalModulation = LongCatOps.AdaLnProjection(backend, timeEmbed, _finalAdaW!, _finalAdaB);
-            using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw);
+            using Tensor modulated = LongCatOps.NormModulate(backend, cur, finalModulation, dim, 0, hw, _bf16Route);
             cur.Dispose();
             cur = null;
-            using Tensor projected = new(new TensorShape((long)rows, _finalW!.Shape[0]), DType.F32);
-            backend.Linear(projected, modulated, _finalW!, _finalB);
+            Tensor projectedRaw = new(new TensorShape((long)rows, _finalW!.Shape[0]), DType.F32);
+            backend.Linear(projectedRaw, modulated, _finalW!, _finalB);
+            using Tensor projected = LongCatOps.RoundOwned(backend, projectedRaw, _bf16Route);
             Probe?.Invoke("final_layer", projected);
             return WanDitOps.Unpatchify(projected, _config.OutChannels, frames / _config.PatchSize.T, gridH, gridW, _config.PatchSize);
         }
