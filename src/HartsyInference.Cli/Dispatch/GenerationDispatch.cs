@@ -82,6 +82,7 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             InstructPix2PixCfg = parameters.GetDoubleOrNull("ip2p-cfg"),
             RemoveBackground = parameters.GetBool("remove-background", false) ? true : null,
+            RemoveBackgroundModel = parameters.GetStringOrNull("remove-background-model"),
             // SwarmUI's own default is on (UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)), so the
             // flag turns the extras OFF rather than on.
             ModelSpecificEnhancements = !parameters.GetBool("no-model-enhancements", false),
@@ -514,6 +515,8 @@ public static class GenerationDispatch
         {
             return await VisionBatchAsync(engine, spec, inputPath, visionMode, parameters, outputDir, cancel).ConfigureAwait(false);
         }
+        if (parameters.Get("window") is not null || parameters.Get("overlap") is not null || parameters.Get("unbuffered") is not null)
+            throw new ArgumentException("--window, --overlap and --unbuffered apply to a folder of video frames (with --fps), not a single image.");
         ImageData image = LoadImage(prompt);
         VisionRequest request = new VisionRequest
         {
@@ -523,6 +526,7 @@ public static class GenerationDispatch
             Threshold = parameters.GetFloat("confidence", 0.25f),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
+            FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
         };
         VisionRequestValidator.Validate(request);
         VisionResult result = await engine.Vision.RunAsync(spec, request, cancel).ConfigureAwait(false);
@@ -614,14 +618,14 @@ public static class GenerationDispatch
             + "metric-depth, geometry, pose, matting, face, intrinsic, track, or interpolate."),
     };
 
-    /// <summary>A folder input: its images (sorted by name) become the frames of a track or interpolate run, or the views
-    /// of a multi-view depth/geometry run. Frame runs need <c>--fps</c>; interpolation needs <c>--factor</c> or
-    /// <c>--target-fps</c>; tracking takes its text prompt from <c>--prompt</c> on the first frame.</summary>
+    /// <summary>A folder input: its images (sorted by name) become the frames of a track, interpolate or video metric-depth run, or the
+    /// views of a multi-view depth/geometry run. Frame runs need <c>--fps</c> (which is also what makes a metric-depth folder a video);
+    /// interpolation needs <c>--factor</c> or <c>--target-fps</c>; tracking takes its text prompt from <c>--prompt</c> on the first frame.</summary>
     private static async Task<GeneratedArtifact> VisionBatchAsync(IInferenceEngine engine, ModelSpec spec, string folder,
         VisionMode mode, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
         List<ImageData> images = VisionBatchInputs(folder).Select(LoadImage).ToList();
-        bool frames = VisionRequestValidator.IsSequenceOnly(mode);
+        bool frames = VisionRequestValidator.IsSequenceOnly(mode) || mode == VisionMode.MetricDepth && parameters.GetDoubleOrNull("fps") is not null;
         string? query = parameters.Get("query");
         VisionBatchRequest request = new VisionBatchRequest
         {
@@ -635,6 +639,10 @@ public static class GenerationDispatch
                 ? [new VisionFramePrompt { FrameIndex = 0, ObjectId = 1, Text = query }]
                 : null,
             Threshold = parameters.GetFloat("confidence", 0.25f),
+            FocalLengthPx = parameters.GetDoubleOrNull("focal-px"),
+            FrameWindow = parameters.GetIntOrNull("window"),
+            FrameOverlap = parameters.GetIntOrNull("overlap"),
+            FrameBuffering = parameters.Get("unbuffered") == "true" ? VisionFrameBuffering.Unbuffered : null,
         };
         VisionRequestValidator.Validate(request);
         string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), folder);
@@ -684,12 +692,13 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> VideoAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
+        IReadOnlyDictionary<string, object> extra = BuildVideoExtra(parameters);
         VideoRequest request = new VideoRequest
         {
             Vram = ParseVramOverrides(parameters),
             Prompt = prompt,
-            NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative ? negative
-                : "blurry, low quality, distorted, watermark",
+            NegativePrompt = VideoNegativePrompt(parameters),
+            Extra = extra,
             Width = parameters.GetIntOrNull("width"),
             Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
@@ -699,7 +708,7 @@ public static class GenerationDispatch
             Sampler = parameters.GetStringOrNull("sampler"),
             Scheduler = parameters.GetStringOrNull("scheduler"),
             Frames = parameters.GetIntOrNull("frames"),
-            ChainTotalFrames = ResolveChainTotalFrames(parameters),
+            ChainTotalFrames = ResolveChainTotalFrames(parameters, spec),
             ChainContextFrames = parameters.GetIntOrNull("chain-context-frames")
                 ?? MiniMaxH3ChainPlanner.DefaultContextFrames,
             Fps = parameters.GetIntOrNull("fps"),
@@ -707,6 +716,7 @@ public static class GenerationDispatch
             InitImage = parameters.GetStringOrNull("init-image") is { } initPath ? LoadImage(initPath) : null,
             VideoEndFrame = parameters.GetStringOrNull("end-frame") is { } endPath ? LoadImage(endPath) : null,
             DrivingVideo = parameters.GetStringOrNull("driving-video") is { } drivingPath ? LoadVideoClip(drivingPath) : null,
+            VideoContinuation = parameters.GetStringOrNull("continue-video") is { } continuePath ? LoadVideoClip(continuePath) : null,
             DrivingPoseVideo = parameters.GetStringOrNull("pose-video") is { } posePath ? LoadVideoClip(posePath) : null,
             DrivingFaceVideo = parameters.GetStringOrNull("face-video") is { } facePath ? LoadVideoClip(facePath) : null,
             DrivingAutoPreprocess = !parameters.GetBool("no-auto-preprocess", false),
@@ -722,6 +732,8 @@ public static class GenerationDispatch
                 ? LoadAudioClip(drivingAudio)
                     ?? throw new FileNotFoundException($"Driving audio not found: {drivingAudio}")
                 : null,
+            SeparateDrivingVocals = parameters.GetBool("separate-vocals", false),
+            Speakers = BuildSpeakers(parameters),
             Guides = VideoInputManifest.Guides(parameters),
             VideoDenoiseMask = VideoInputManifest.VideoMask(parameters),
             AudioDenoiseMask = VideoInputManifest.AudioMask(parameters),
@@ -791,6 +803,33 @@ public static class GenerationDispatch
             artifact.Meta["execution_path"] = execution.ExecutionPath;
         }
         return artifact;
+    }
+
+    /// <summary>The family keys <c>hartsy video</c> adds to the request: the Duo run folder, made absolute, and its history window.</summary>
+    internal static IReadOnlyDictionary<string, object> BuildVideoExtra(ParamState parameters)
+    {
+        Dictionary<string, object> extra = new(StringComparer.Ordinal);
+        if (parameters.GetStringOrNull("duo-run-folder") is { } folder)
+        {
+            extra[DuoRecipePipeline.RunFolderKey] = Path.GetFullPath(folder);
+        }
+        if (parameters.GetIntOrNull("duo-window-frames") is { } window)
+        {
+            extra[DuoRecipePipeline.WindowFramesKey] = window;
+        }
+        return extra;
+    }
+
+    /// <summary>The negative prompt of a video run: the caller's, else a general one. A Duo run reads no prompt, so it gets none unless the
+    /// caller typed one, which the recipe then refuses by name.</summary>
+    internal static string? VideoNegativePrompt(ParamState parameters)
+    {
+        if (parameters.Get("negative") is { Length: > 0 } negative)
+        {
+            return negative;
+        }
+        bool duo = parameters.GetStringOrNull("duo-run-folder") is not null || parameters.GetIntOrNull("duo-window-frames") is not null;
+        return duo ? null : "blurry, low quality, distorted, watermark";
     }
 
     /// <summary>The image component overrides from <c>--vae</c>, <c>--text-encoder</c> and <c>--vision-encoder</c>, or null.</summary>
@@ -1566,15 +1605,60 @@ public static class GenerationDispatch
 
     /// <summary>Builds the reference clips, pairing each soundtrack to the same-position clip; a missing entry leaves that clip silent rather than shifting the pairing.</summary>
     /// <summary>Total chain frames from either the frame or the seconds flag; seconds convert at H3's native rate.</summary>
-    private static int? ResolveChainTotalFrames(ParamState parameters)
+    private static int? ResolveChainTotalFrames(ParamState parameters, ModelSpec spec)
     {
         if (parameters.GetIntOrNull("chain-frames") is int frames)
         {
             return frames;
         }
+        // Seconds convert at the family's native rate: LongCat-Video-Avatar generates at 25 fps, MiniMax-H3 at its own rate.
+        bool longCatAvatar = spec.Catalog?.Id == "longcat-avatar" || spec.Requested.StartsWith("longcat-avatar", StringComparison.OrdinalIgnoreCase);
+        int nativeFps = longCatAvatar ? LongCatAvatarRecipe.OutputFps : MiniMaxH3Geometry.Fps;
         return parameters.GetDoubleOrNull("chain-seconds") is double seconds
-            ? (int)Math.Round(seconds * MiniMaxH3Geometry.Fps)
+            ? (int)Math.Round(seconds * nativeFps)
             : null;
+    }
+
+    /// <summary>The two speakers of a multi-speaker video, or null when no speaker option was passed. What a family cannot run is refused by the
+    /// engine's planning; only the option text is checked here.</summary>
+    internal static VideoSpeakers? BuildSpeakers(ParamState parameters)
+    {
+        string? firstAudio = parameters.GetStringOrNull("speaker1-audio"), secondAudio = parameters.GetStringOrNull("speaker2-audio");
+        string? firstBox = parameters.GetStringOrNull("speaker1-box"), secondBox = parameters.GetStringOrNull("speaker2-box");
+        string? timing = parameters.GetStringOrNull("speaker-timing");
+        string[]? silent = SplitPaths(parameters.GetStringOrNull("silent-boxes"));
+        if (firstAudio is null && secondAudio is null && firstBox is null && secondBox is null && timing is null && silent is null)
+        {
+            return null;
+        }
+        return new VideoSpeakers
+        {
+            First = new VideoSpeaker { Audio = LoadAudioClip(firstAudio), Box = ParseSpeakerBox(firstBox, "--speaker1-box") },
+            Second = new VideoSpeaker { Audio = LoadAudioClip(secondAudio), Box = ParseSpeakerBox(secondBox, "--speaker2-box") },
+            Timing = timing?.Trim().ToLowerInvariant() switch
+            {
+                null or "parallel" or "para" => VideoSpeakerTiming.Parallel,
+                "sequential" or "add" => VideoSpeakerTiming.Sequential,
+                _ => throw new ArgumentException($"--speaker-timing is parallel or sequential, not '{timing}'."),
+            },
+            SilentBoxes = silent?.Select(box => ParseSpeakerBox(box, "--silent-box")!).ToList(),
+        };
+    }
+
+    private static VideoSpeakerBox? ParseSpeakerBox(string? text, string option)
+    {
+        if (text is null)
+        {
+            return null;
+        }
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        int[] values = new int[4];
+        if (parts.Length != 4 || !parts.Select((part, i) => int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out values[i]))
+            .ToArray().All(static parsed => parsed))
+        {
+            throw new ArgumentException($"{option} takes four whole numbers y_min,x_min,y_max,x_max, not '{text}'.");
+        }
+        return new VideoSpeakerBox { YMin = values[0], XMin = values[1], YMax = values[2], XMax = values[3] };
     }
 
     private static List<ReferenceVideo>? BuildReferenceVideos(ParamState parameters)

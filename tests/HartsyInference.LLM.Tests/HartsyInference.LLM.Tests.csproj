@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\python-reference\hy4_flash\tiny_config.json" Link="Fixtures\Hy4Flash\tiny_config.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,4 +32,7 @@
     <ProjectReference Include="..\..\src\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\GpuRunKnobs.cs" Link="Shared\GpuRunKnobs.cs" />
+  </ItemGroup>
 </Project>

@@ -16,8 +16,10 @@ using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
+using HartsyInference.LLM.Maxwell;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Kimi;
@@ -525,6 +527,7 @@ public sealed partial class TextService : ITextService, IDisposable
                 if (slot.MossVl is null) RequireNoVideo(request);
                 outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
                     : image is not null && slot.HostReference is KimiK31TextModel kimi ? RunKimiVision(kimi, request, sink, cancel)
+                    : image is not null && slot.HostReference is Hy4FlashTextModel hy4 ? RunHy4Vision(hy4, request, sink, cancel)
                     : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
@@ -856,9 +859,24 @@ public sealed partial class TextService : ITextService, IDisposable
     internal static int? OpenReasoningCloseId(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest, TextRequest request,
         bool rawCompletion)
     {
-        if (rawCompletion || template is not JinjaChatTemplate jinja || genRequest.EffectiveMessages() is not { } messages) return null;
-        if (tokenizer.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]) is not int close) return null;
-        return jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools).ReasoningOpen ? close : null;
+        if (rawCompletion || genRequest.EffectiveMessages() is not { } messages) return null;
+        IReadOnlyList<string> markers;
+        ParserInitialState state;
+        switch (template)
+        {
+            case JinjaChatTemplate jinja:
+                markers = SpecialLiteralEscaper.ReasoningMarkers;
+                state = jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools);
+                break;
+            case Hy4FlashChatTemplate hy4:
+                markers = Hy4FlashChatTemplate.ReasoningMarkers;
+                state = hy4.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools, request.ReasoningEffort);
+                break;
+            default:
+                return null;
+        }
+        if (tokenizer.SpecialId(markers[1]) is not int close) return null;
+        return state.ReasoningOpen ? close : null;
     }
 
     /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
@@ -885,12 +903,28 @@ public sealed partial class TextService : ITextService, IDisposable
         string question = VisionQuestion(request);
         SamplingOptions sampling = BuildVisionSampling(request);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
-        string answer;
+        VisionGeneration gen;
+        bool reasoningOpen = false;   // only the SSM template path can open a reasoning block the answer is split on
         if (slot.MllamaVision is not null)
         {
             using Tensor px = VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height,
                 slot.MllamaVision.ImageSize, MllamaMean, MllamaStd);
-            answer = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            gen = new MllamaGenerator(slot.Model!, slot.MllamaVision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+        }
+        else if (slot.SsmModel is not null)
+        {
+            // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
+            // GenericTransformer) can't drive — use the dedicated SSM VLM generator. Its tower is Qwen3-VL, and it takes the
+            // aspect-preserving resize (the grid is read from the resized pixels), not the square squash below.
+            Qwen3VlEncoder vision = slot.SpliceVision as Qwen3VlEncoder ?? throw new InvalidOperationException("The SSM backbone's vision tower must be Qwen3-VL; LoadVisionInto refuses any other projector.");
+            using Tensor px = vision.PreprocessImage(image.Rgb, image.Width, image.Height);
+            // The turn tail comes from the loaded model's own template, so its switch decides the think prefix (no constant here).
+            string turnTail = slot.SsmModel.Template is JinjaChatTemplate jinja
+                ? jinja.TurnTailAfterUser(slot.SsmModel.Tokenizer, request.EnableThinking)
+                : "<|im_end|>\n<|im_start|>assistant\n";
+            reasoningOpen = Qwen35VlGenerator.ReasoningOpen(turnTail);
+            gen = new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!)
+                .Generate(px, question, maxTokens, sampling, turnTail);
         }
         else
         {
@@ -901,15 +935,33 @@ public sealed partial class TextService : ITextService, IDisposable
             using Tensor px = vision is LlavaNextEncoder
                 ? LlavaNextImagePreprocessor.RawToNativeTensor(image.Rgb, image.Width, image.Height)
                 : VlmImagePreprocessor.Preprocess(image.Rgb, image.Width, image.Height, vision.ImageSize, vision.ImageMean, vision.ImageStd);
-            // Qwen3.5-VL rides the SSM Qwen35Model backbone (slot.SsmModel), which MultimodalGenerator (typed to
-            // GenericTransformer) can't drive — use the dedicated SSM VLM generator.
-            answer = slot.SsmModel is not null
-                ? new Qwen35VlGenerator((Qwen35Model)slot.SsmModel.Model, slot.SsmModel.Tokenizer, vision, slot.Backend!).Generate(px, question, maxTokens, sampling)
-                : new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
+            gen = new MultimodalGenerator(slot.Model!, vision, slot.Backend!, slot.Placement).Generate(px, question, maxTokens, sampling);
         }
+        (string reasoning, string answer) = SplitVisionReasoning(gen.Text, reasoningOpen, gen.StoppedOnToken);
+        if (reasoning.Length > 0) sink?.Invoke(new TextChunk { Kind = TextChunkKind.Reasoning, Text = reasoning });
         sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
-        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(answer).Length;
-        return new GenOutcome(answer, StopReason.Stop, 0, completion);
+        // Completion tokens are everything generated, reasoning included (counted from the text the model produced, not the answer).
+        int completion = (slot.SsmModel is not null ? slot.SsmModel.Tokenizer : slot.Looped is not null ? slot.Looped.Tokenizer : slot.Model!.Tokenizer).EncodeOrdinary(gen.Text).Length;
+        return new GenOutcome(answer, VisionStopReason(gen.StoppedOnToken), 0, completion);
+    }
+
+    /// <summary>Maps a vision generator's stop flag to the turn's stop reason: a stop token is a natural stop, a spent token budget is a length stop.</summary>
+    internal static StopReason VisionStopReason(bool stoppedOnToken) => stoppedOnToken ? StopReason.Stop : StopReason.Length;
+
+    /// <summary>Splits a vision answer into reasoning and content, as the text path does, for a prompt that opened a reasoning block
+    /// (<paramref name="reasoningOpen"/>). Without one, the whole text is content: a non-reasoning model that spends its budget keeps its answer.
+    /// With one, the text before the first closing think marker is reasoning and the rest is content; with no marker, it is content when
+    /// decoding stopped on a token, and reasoning when the budget ran out inside the reasoning block.</summary>
+    /// <param name="open">The open think literal the reasoning block is written with; <c>&lt;think&gt;</c> unless the template writes its own.</param>
+    /// <param name="close">The close think literal.</param>
+    internal static (string Reasoning, string Content) SplitVisionReasoning(string raw, bool reasoningOpen, bool stoppedOnToken,
+        string open = "<think>", string close = "</think>")
+    {
+        if (!reasoningOpen) return ("", raw);
+        int at = raw.IndexOf(close, StringComparison.Ordinal);
+        if (at < 0) return stoppedOnToken ? ("", raw) : (raw.Replace(open, "", StringComparison.Ordinal).Trim(), "");
+        string reasoning = raw[..at].Replace(open, "", StringComparison.Ordinal).Trim();
+        return (reasoning, raw[(at + close.Length)..].TrimStart());
     }
 
     /// <summary>Loads a Hugging Face text directory: a host reference model (DeepSeek-V4.1, ERNIE-5.5, Kimi K3.1), a stateful family, or
@@ -928,6 +980,14 @@ public sealed partial class TextService : ITextService, IDisposable
         bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
         if (ernie)
             RequireRunnableErnie5Placement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
+        bool maxwell = string.Equals(checkpoint.ModelType, MaxwellConfig.ModelType, StringComparison.Ordinal);
+        if (maxwell && ResolveShardDevices(deviceKey).Length >= 2)
+            throw new NotSupportedException("Maxwell has no split placement yet: load it on one device.");
+        // Refused here, before UnloadSlot: a refused request leaves the model the slot holds in place.
+        if (maxwell)
+            RequireMaxwellPlacement(deviceKey);
+        if (HfTextDirectoryLoader.IsGlm5Next(checkpoint))
+            RequireRunnableGlm5NextPlacement(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -947,6 +1007,24 @@ public sealed partial class TextService : ITextService, IDisposable
         if (ernie)
         {
             LoadErnie5Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
+        if (HfTextDirectoryLoader.IsHy4Flash(checkpoint))
+        {
+            // A host reference on the CPU, as DeepSeek-V4.1 runs. An oversize or tokenizer-less checkpoint is refused before the unload (RequireSupported);
+            // the BOS/EOS check, tokenizer parse and template compile still run after it, in Hy4FlashTextModel.Load.
+            LoadHostReferenceInto(slot, checkpoint, path, ReplaceWithHostBackend(slot, deviceKey, "Hy4 Flash"), gateOrdinals: [], plan: null);
+            Logs.Info($"[TextService] Loaded Hy4 Flash '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the CPU host reference.");
+            return;
+        }
+        if (maxwell)
+        {
+            LoadMaxwellDirectory(slot, deviceKey, checkpoint, path);
+            return;
+        }
+        if (HfTextDirectoryLoader.IsGlm5Next(checkpoint))
+        {
+            LoadGlm5NextDirectory(slot, deviceKey, checkpoint, path);
             return;
         }
         // after the unload, so the memory of a model this load replaces counts as free
@@ -1049,6 +1127,27 @@ public sealed partial class TextService : ITextService, IDisposable
         return PlacementPlanner.LlmSplitPlan(shardDevices, ratios, config.NumHiddenLayers, perLayer, headBytes);
     }
 
+    /// <summary>Loads a glm5_next directory (Sage S2.1 Flash) on the one device the request names. Weights are mapped and read per layer, so host memory
+    /// and VRAM are not checked before the load.</summary>
+    private void LoadGlm5NextDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        IBackend backend = CreateBackendFor(deviceKey);
+        LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning("[TextService] Sage S2.1 Flash has no memory guard yet: the host reference model reads each layer from the mapped checkpoint on every forward and keeps the dense weights as F32 host copies, so neither host RAM nor VRAM is checked before the load.");
+        Logs.Info($"[TextService] Loaded Sage S2.1 Flash '{name}' on {deviceKey}.");
+    }
+
+    /// <summary>The Sage S2.1 Flash Text path runs on one device, without tensor parallelism.</summary>
+    internal static void RequireRunnableGlm5NextPlacement(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
+    {
+        if (tensorParallelDegree > 1)
+            throw new NotSupportedException($"Sage S2.1 Flash has no tensor-parallel path; the engine's tensor-parallel degree is {tensorParallelDegree}.");
+        if (shardDevices.Count >= 2)
+            throw new NotSupportedException($"Sage S2.1 Flash runs on one device; {shardDevices.Count} were named ({string.Join(" + ", shardDevices)}).");
+    }
+
     /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
     /// weights are preloaded while the device has room; the routed experts stay mapped and are uploaded as tokens pick them. On the CPU each
     /// layer is read and dequantized on every forward. Scheduler rounds take the device gate, so a GPU run does not share the card with
@@ -1069,6 +1168,55 @@ public sealed partial class TextService : ITextService, IDisposable
             ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
             : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
         Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
+    }
+
+    /// <summary>Device memory kept free after the expert cache is sized: the activations of a prefill and the cuBLAS and kernel workspace.</summary>
+    private const long MaxwellDeviceHeadroomBytes = 2L << 30;
+
+    /// <summary>Refuses a Maxwell placement the engine cannot run, before the slot unloads its current model. A GPU other than CUDA is refused: the
+    /// device expert cache is CUDA-only, and without it the whole checkpoint would have to fit in device memory. The kind is read from the key
+    /// (<see cref="NormalizeDeviceKey"/> resolves <c>auto</c>; it is resolved again here so a raw key cannot slip past).</summary>
+    /// <exception cref="NotSupportedException">The device is a GPU other than CUDA.</exception>
+    internal static void RequireMaxwellPlacement(string deviceKey)
+    {
+        string kind = BackendFactory.Kind(deviceKey);
+        if (kind == "auto")
+            kind = BackendFactory.Resolve(deviceKey);
+        if (BackendFactory.IsDeviceKind(kind) && kind != "cuda")
+            throw new NotSupportedException($"Maxwell on a GPU needs CUDA for its device expert cache; '{deviceKey}' is not CUDA. Load it on cuda:0 or cpu.");
+    }
+
+    /// <summary>Loads a Maxwell directory on one device, as a host reference model. On CUDA the dense weights are preloaded to the device and the
+    /// routed experts sit behind a device expert cache sized from the free memory that remains; the cache is device-only, so a miss uploads the
+    /// expert for that call. On the CPU every weight is read on the host. A GPU other than CUDA is refused: the expert cache is CUDA-only, and
+    /// without it the whole checkpoint would have to fit in device memory.</summary>
+    private void LoadMaxwellDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        IBackend backend = CreateBackendFor(deviceKey);
+        // Logged before the load, so it still shows when the load runs out of memory.
+        Logs.Warning("[TextService] Maxwell has no memory guard yet; host RAM and VRAM are not checked before the load.");
+        LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        if (backend.Device.IsGpu)
+        {
+            try
+            {
+                MaxwellModel model = ((MaxwellTextModel)slot.HostReference!).Model;
+                backend.PreloadWeightGroups(model.EnumerateDenseWeightGroups());
+                long budget = Math.Max(0, backend.GetDeviceMemoryUsage().FreeBytes - MaxwellDeviceHeadroomBytes);
+                slot.ExpertOffload = ExpertOffloadSetup.AttachDeviceOnly(backend, model, budget, "[TextService]");
+            }
+            catch
+            {
+                // Without the cache the experts would be uploaded on every forward, so a half-attached model is unloaded rather than kept.
+                UnloadSlot(slot);
+                throw;
+            }
+            Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey} with dense weights resident and a device expert cache.");
+            return;
+        }
+        Logs.Info($"[TextService] Loaded Maxwell-V1.0-Flash '{name}' on {deviceKey}.");
     }
 
     /// <summary>Loads an ERNIE-5.5 directory with its layers split over <paramref name="shardDevices"/>, one backend per stage, every weight (routed
@@ -1338,7 +1486,9 @@ public sealed partial class TextService : ITextService, IDisposable
         if (keepQuantized is not null) backend.CacheQuantizedWeightCasts = false;
         string architecture = architecture0;
         bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
-        EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || ssm, keepQuantized);
+        // The SSM CPU route expands every quantized weight to F32, so its headroom is that expansion read from the header, not 2.5x the file.
+        bool ssmCpuExpansion = ssm && !backend.Capabilities.SupportsQuantized;
+        EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || (ssm && !ssmCpuExpansion), keepQuantized, expandQuantizedToF32: ssmCpuExpansion);
         if (LoopedLanguageModel.IsLoopedArchitecture(architecture))
         {
             LoadLooped(slot, deviceKey, path, request, backend, dequantize, keepQuantized);
@@ -1346,12 +1496,13 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         if (ssm)
         {
-            slot.SsmModel = SsmLanguageModel.Load(path, architecture);
+            // A backend with no quantized multiply (the CPU) takes the F32 expansion; quantized backends keep the packed weights.
+            slot.SsmModel = SsmLanguageModel.Load(path, architecture, dequantizeToF32: !backend.Capabilities.SupportsQuantized);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
             // SSM has its own loader with no EnumerateWeights/redundant-split concept at all.
             slot.PreloadRedundantWeightSplitsApplied = null;
             slot.LoadedPath = path;
-            LoadVisionInto(slot, path);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
+            LoadVisionInto(slot, path, ssmBackbone: true);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
             Logs.Info($"[TextService] Loaded GGUF SSM model '{Path.GetFileName(path)}' ({architecture}) on {deviceKey}."
                 + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
             return;
@@ -1406,6 +1557,9 @@ public sealed partial class TextService : ITextService, IDisposable
 
     /// <summary>The slot serving <paramref name="device"/>, or null before anything ran there. For tests that hold a slot's lease as a running scheduled request does.</summary>
     internal TextDeviceSlot? SlotFor(string? device) => _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? slot) ? slot : null;
+
+    /// <summary>The slot for <paramref name="device"/>, created when absent: a test seam for the state an earlier load left on a slot.</summary>
+    internal TextDeviceSlot EnsureSlot(string? device) => _slots.GetOrAdd(NormalizeDeviceKey(device), static _ => new TextDeviceSlot());
 
     /// <summary>The ordinals a generation on <paramref name="slot"/> gates: the devices its planned placement runs on when the
     /// planner split it, otherwise those its key names.</summary>
@@ -1656,7 +1810,8 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Pairs the loaded text model with a sidecar mmproj GGUF (if present) and loads the matching vision encoder: cross-attention <see cref="MllamaVisionEncoder"/> for Llama-3.2-Vision, else a splice encoder (Qwen2.5-VL vs SigLIP). A bad mmproj degrades to text-only rather than failing the load.</summary>
-    private static void LoadVisionInto(TextDeviceSlot slot, string textPath)
+    /// <param name="ssmBackbone">The SSM backbone (Qwen3.5-VL) accepts only a Qwen3-VL tower; any other projector is refused here with a warning and the model stays text-only.</param>
+    internal static void LoadVisionInto(TextDeviceSlot slot, string textPath, bool ssmBackbone = false)
     {
         string? mmproj = FindMmproj(textPath);
         if (mmproj is null)
@@ -1669,6 +1824,11 @@ public sealed partial class TextService : ITextService, IDisposable
                 slot.MllamaVision = MllamaVisionEncoder.Load(mmproj);
             else if (IsQwen3Vl(mmproj))   // must precede IsQwen25Vl (which greedily matches any "qwen" projector).
                 slot.SpliceVision = Qwen3VlEncoder.Load(mmproj);
+            else if (ssmBackbone)
+            {
+                Logs.Warning($"[TextService] '{Path.GetFileName(mmproj)}' is not a Qwen3-VL projector, which the SSM backbone needs for the image grid. Model stays text-only.");
+                return;
+            }
             else if (IsLlavaNext(mmproj))
                 slot.SpliceVision = LlavaNextEncoder.Load(mmproj);
             else
@@ -1999,7 +2159,7 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Refuses to load when there isn't enough free host RAM to survive the load, so a big model fails with a clear error instead of OOM-killing the process. A load that dequantizes everything needs <see cref="RamHeadroomMultiplier"/> times the file; one that keeps supported quants compressed needs <see cref="QuantizedResidentHeadroomMultiplier"/> times the file plus the F32 size of any quantized tensor it still has to expand. No-op when <c>/proc/meminfo</c> is absent.</summary>
-    private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null)
+    private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null, bool expandQuantizedToF32 = false)
     {
         long availableKb = ReadAvailableMemoryKb();
         if (availableKb < 0)
@@ -2008,15 +2168,46 @@ public sealed partial class TextService : ITextService, IDisposable
         try { fileBytes = new FileInfo(path).Length; }
         catch (Exception ex) { Logs.Debug($"[TextService] Could not stat '{path}': {ex.Message}"); return; }
         double availableBytes = availableKb * 1024.0;
-        double requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out double expandedBytes, keepQuantized);
+        double requiredBytes;
+        double expandedBytes;
+        if (expandQuantizedToF32)
+        {
+            using GgufLoader probe = new GgufLoader();
+            probe.Load(path);
+            requiredBytes = ExpandedF32RequiredBytes(probe.Descriptors.Values, fileBytes);
+            expandedBytes = requiredBytes - fileBytes;
+        }
+        else
+        {
+            requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out expandedBytes, keepQuantized);
+        }
+        RequireHostRam(availableBytes, requiredBytes, fileBytes, expandedBytes, path, dequantizesEverything, expandQuantizedToF32);
+    }
+
+    /// <summary>The host bytes of an SSM load that expands every quantized weight to F32 on the CPU: the packed file, which stays mapped, plus each
+    /// quantized tensor at four bytes per element (the F32 copy). Read from the header, so the refusal uses the real size, not a multiple of the file.</summary>
+    internal static double ExpandedF32RequiredBytes(IEnumerable<GgufTensorDescriptor> tensors, long fileBytes)
+    {
+        double expanded = 0;
+        foreach (GgufTensorDescriptor tensor in tensors)
+            if (tensor.DType.IsQuantized) expanded += tensor.Shape.ElementCount * 4.0;
+        return fileBytes + expanded;
+    }
+
+    /// <summary>Refuses a load whose required host RAM exceeds the free RAM; the message names the route that set the requirement.</summary>
+    internal static void RequireHostRam(double availableBytes, double requiredBytes, long fileBytes, double expandedBytes, string path,
+        bool dequantizesEverything, bool expandQuantizedToF32)
+    {
         if (availableBytes < requiredBytes)
         {
             throw new HartsyInferenceException(
                 $"Not enough free host RAM to safely load '{Path.GetFileName(path)}' ({fileBytes / 1024.0 / 1024 / 1024:0.0} GB file): "
                 + $"{availableBytes / 1024 / 1024 / 1024:0.0} GB free, need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB headroom"
-                + (dequantizesEverything
-                    ? $" ({RamHeadroomMultiplier}x the file for dequantization). "
-                    : $" ({QuantizedResidentHeadroomMultiplier}x the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of tensors expanded to F32). ")
+                + (expandQuantizedToF32
+                    ? $" (the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of quantized tensors expanded to F32 for the CPU). "
+                    : dequantizesEverything
+                        ? $" ({RamHeadroomMultiplier}x the file for dequantization). "
+                        : $" ({QuantizedResidentHeadroomMultiplier}x the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of tensors expanded to F32). ")
                 + "Free RAM or use a smaller quant, then retry — loading anyway risks crashing the whole process.");
         }
     }

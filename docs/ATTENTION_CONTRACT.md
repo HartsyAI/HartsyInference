@@ -285,6 +285,31 @@ The planner reproduces these until the row that owns each is rewritten.
   quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
   does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back after a run of calls that fit at it), because `cuMemGetInfo` reads far too low on a card a process has filled past about
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
+- With `numerics.tileFromDevice` on (default off), the tile height is the device's fixed rung over the row bytes: 1 GiB when the card's total VRAM
+  is 20 GiB or more (binary; a 20 GB card reports about 18.6 GiB and gets 512 MiB), else 512 MiB. The rung sets the height only. The tiling,
+  BF16-cast and causal-mask gates share one budget. While a streaming scope is open it is `min(total/2, headroom/2)`, where the headroom is
+  the scope's `HeadroomBytes` (model- and token-derived, what the planner leaves free; noted when the scope is constructed, cleared when it
+  is disposed). With no scope open it is the device's tile rung (1 GiB at 20 GiB total or more, else 512 MiB). The budget reads no free
+  memory, so the gate path does not move with the free reading. A failed allocation is not retried at a smaller height under this knob: it
+  raises OutOfVram, so a run never changes path mid-run. The remembered cap is recorded but not read under this knob, so later calls do not
+  start from a shrunken height. The gate is pinned by `SdpaTileFromDeviceTests` (budget as a function of total and headroom) and the
+  on-card A/B `SdpaTileFromDeviceGpuTests` (bit-identical output across two free readings with the knob on; knob off differs at rounding). A/B on RTX 4090 at 93 frames, seed 1234, knob
+  `c3a55333c` vs main `712ea2ca7`: 832x480 knob steps 92.7 / 92.0 s, peaks 19585 / 19718 MiB; main steps 90.7 / 91.7 s, peaks
+  20175 / 20051 MiB; the knob reproduces its output (two runs, same sha `6182eb4a`); main does not. These rows were measured on the
+  previous gate (the rung), so the 832x480 and 640x368 A/B must be re-run on this gate before default-on.
+- Reading the free-memory log (`numerics.tileFromDevice` A/B). Two switches, set together for a run:
+  `HARTSY_GPU_TEST_KNOBS=numerics.tileFromDevice=true` turns the knob on for a GpuIntegration test run (test projects only), and
+  `HARTSY_TILE_FREE_LOG=<file>` names the file each process appends its summary to (any run: the CLI generation or a test host). The
+  variable is read only when the knob is on, so an ordinary run writes nothing. The file gets one block per process: a `# pid=… utc=…` line,
+  then one `tileFromDevice row=<id> executed=…` line per executed attention row, which is the count to read as calls; then the
+  `tileFromDevice: calls=… halved=… totalMiB=… freeMiB min/max=… tileRows=[…]` line (every tiled score-tile call); then one
+  `tileFromDevice gate=<tiles|bf16cast|cast.score|causal> decisions=… over=…` line per budget gate. A gate's `decisions` includes
+  planner probes (PlansBatch to PlanAttention, Cheaper, Explain) and rows that never ran, so it is not a call count. `over` counts decisions
+  whose bytes exceeded the gate's budget (the tiled or fallback side). The gate line no longer reports free VRAM: under the knob the budget
+  is the scope headroom or the tile rung, so free is not part of any gate's decision. Forced-tile and past-materialized returns in `TilesScores` are not gate decisions and are not counted; `cast.score` skips
+  forced calls for the same reason. A tile line at
+  `halved>0` means an OOM halved that call's tile. Stderr also shows the summary, but `dotnet test` at default verbosity hides a test
+  host's stderr, so read the file.
 - CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
   attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
   Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
@@ -317,3 +342,10 @@ The planner reproduces these until the row that owns each is rewritten.
   The Kitchen's `token_aug` option is an open gap: its CUDA kernel implements it and its eager definition ignores it,
   so the only thing a port could be checked against is that kernel's output. Neither the reference nor a backend here
   has it. No model calls the primitive yet, and it has no timing.
+- **Block-sparse attention** over a 3D token grid is not an `AttentionCall` either: which keys a query reads depends on
+  the operands, so no mask, planner row or `Execution` evidence describes it. It is the backend primitive
+  `IBackend.BlockSparseAttention`, defined by `BlockSparseAttentionReference` and specified in
+  [backend op contracts](BACKEND_OPS.md#blocksparseattention). It keeps this contract's head-major `[B, H, S, D]`
+  operands, its plain scale multiplier and its zero row for a token with no key; it takes no mask, no grouped K/V and no
+  numerical permissions. The CPU backend runs the reference in F32; CUDA and Vulkan have no kernel and refuse the call by
+  name. No model calls it yet, and it has no timing.

@@ -150,8 +150,11 @@ internal sealed class VideoRequestExecutionBinding
         CaptureMedia(request.VideoEndFrame, mediaBuffers);
         CaptureMedia(request.VideoAudioInput, mediaBuffers);
         CaptureMedia(request.VideoAudioReference, mediaBuffers);
+        CaptureMedia(request.Speakers?.First?.Audio, mediaBuffers);
+        CaptureMedia(request.Speakers?.Second?.Audio, mediaBuffers);
         CaptureMedia(request.VideoDenoiseMask, mediaBuffers);
         CaptureMedia(request.DrivingVideo, mediaBuffers);
+        CaptureMedia(request.VideoContinuation, mediaBuffers);
         CaptureMedia(request.DrivingPoseVideo, mediaBuffers);
         CaptureMedia(request.DrivingFaceVideo, mediaBuffers);
         CaptureMedia(request.DrivingBackgroundVideo, mediaBuffers);
@@ -169,11 +172,18 @@ internal sealed class VideoRequestExecutionBinding
             AudioDenoiseMask = SnapshotAudioMask(request.AudioDenoiseMask, mediaBuffers),
             Controls = SnapshotList(request.Controls, control => CaptureMedia(control, mediaBuffers),
                 nameof(VideoRequest.Controls)),
+            Speakers = SnapshotSpeakers(request.Speakers, mediaBuffers),
             Loras = SnapshotLoras(request.Loras),
             Extra = SnapshotExtra(request.Extra, mediaBuffers),
             Settings = SnapshotSettings(request.Settings),
         };
     }
+
+    private static VideoSpeakers? SnapshotSpeakers(VideoSpeakers? speakers, List<MediaBufferStamp> mediaBuffers) =>
+        speakers is null ? null : speakers with
+        {
+            SilentBoxes = SnapshotList(speakers.SilentBoxes, _ => { }, nameof(VideoSpeakers.SilentBoxes)),
+        };
 
     private static AudioDenoiseMask? SnapshotAudioMask(AudioDenoiseMask? mask,
         List<MediaBufferStamp> mediaBuffers)

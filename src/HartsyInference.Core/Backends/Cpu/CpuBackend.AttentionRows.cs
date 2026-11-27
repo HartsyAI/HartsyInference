@@ -55,6 +55,18 @@ public sealed partial class CpuBackend
         SolAttentionReference.Run(output, query, key, value, options, routed);
 
     /// <inheritdoc/>
+    public bool HasBlockSparseAttention => true;
+
+    /// <inheritdoc/>
+    /// <remarks>The reference is the CPU's block-sparse attention.</remarks>
+    public void BlockSparseAttention(Tensor output, Tensor query, Tensor key, Tensor value, BlockSparseAttentionOptions options,
+        Tensor? selected = null)
+    {
+        ThrowIfDisposed();
+        BlockSparseAttentionReference.Apply(output, query, key, value, options, selected);
+    }
+
+    /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
         AttentionCall prepared = AttentionExecution.Prepare(in call);

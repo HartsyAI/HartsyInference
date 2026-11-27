@@ -76,6 +76,12 @@ public static partial class EngineKnobs
         Bool("numerics.cudnnDeterministic", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Skips cuDNN backend-graph engines marked CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC during heuristic search, falling through to the next candidate or the direct-kernel fallback.");
 
+    /// <summary>Keeps the dense LongCat DiT's weights as BF16 (the reference's <c>torch_dtype=torch.bfloat16</c> load) when the checkpoint is F32:
+    /// the released base DiT is 54.3 GB of F32, which exceeds a 48 GB host cap and halves the bytes a streamed block moves. Off: the F32 weights as stored.</summary>
+    public static readonly Knob<bool> LongCatDitBf16 =
+        Bool("numerics.longcatDitBf16", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Converts a dense F32 LongCat DiT to BF16 at load, as the reference loads it (54.3 GB F32 is more than the host cap); off keeps F32.");
+
     /// <summary>Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.</summary>
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
@@ -149,6 +155,14 @@ public static partial class EngineKnobs
     /// <summary>Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.</summary>
     public static readonly Knob<bool> NeighborhoodAttentionTiled =
         Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
+
+    /// <summary>LongCat's <c>int8_tensorwise</c> linears dequantize the weight and leave the activations as they are, as the release's reference computes
+    /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. CUDA only: the resident weight is unpacked to
+    /// BF16 on the device into a dense GEMM on every call, a tiled projection once per tile. Where the backend cannot do that (no unpack kernel,
+    /// a rotated weight) it dequantizes on the host instead, and that dense linear is eligible for <c>numerics.w8a8</c>, which would quantize the
+    /// activations again.</summary>
+    public static readonly Knob<bool> LongcatInt8WeightOnly =
+        Bool("numerics.longcatInt8WeightOnly", false, KnobScope.Construction, KnobDomain.Numerics, "LongCat INT8 linears dequantize the weight and keep the activations unquantized, as the reference does. CUDA unpacks each weight on the device on every call. Leave numerics.w8a8 off.");
 
     /// <summary>Builds LTX-2.5's diffusion video decoder instead of the ~40x faster conv decoder when the checkpoint has both.</summary>
     public static readonly Knob<bool> Ltx2DiffusionVae =

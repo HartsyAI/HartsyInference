@@ -275,7 +275,7 @@ same branch applies.
 | 6. Swarm classification | See [SwarmUI core](#swarmui-core) | Could not confirm |
 | Picture label | `MiniMaxH3TextEncoding.cs:188` | Confirmed mismatch with image node |
 | Layer 50 tap | `MiniMaxH3TextEncoder.cs:86` | Confirmed |
-| comfy_attention blob | No engine handling found | Confirmed gap |
+| comfy_attention blob | Dropped by `RouteKey` through the shared `ComfyAttentionHint` (`ModelAssets/Quant`); the blob's value is not read here | Dropped, not honoured: the engine runs float attention by default where ComfyUI may run the named backend; INT8 attention is opt-in (`numerics.int8AttnV2`, CUDA), unverified against Comfy |
 | Qwen3.8 runtime | Grep for `qwen3\.8`, `qwen38`, `qwen3_8`: only Qwen3-8B matches | **No** |
 
 ## Feature matrix (from the plan, unchanged)
@@ -297,7 +297,7 @@ same branch applies.
 | Tiled VAE decode | Yes | Yes | 3D only | 3 | Extend to 2D |
 | Latent preview | n/a | Yes | Video only | 4 | Wire |
 | Prompt weighting | No | Via tokenizer | Video: CondScale | 4 | Reuse; pin in ledger test |
-| LoRA | Not stated | Key map in `comfy/lora.py` | Video merges exist | 5c | Implement; bf16 base first |
+| LoRA | Not stated | Key map in `comfy/lora.py` | Video merges exist | 5c | Wired: merged into the DiT before its weights bind. ai-toolkit files (`diffusion_model.blocks.N.attn.qkv_proj`, `mlp.fc1`, …) are detected as `AiToolkitMiniMaxH3`. A delta that does not fit the build is skipped and counted (`SkippedShape`), and `lora.partialApplication` decides whether that is allowed. Synthetic-geometry tests plus a header check of the real Skeletor file; no real-weight merge or generation |
 | Prompt enhancer, Qwen3.5-9B | No | Recommended | Qwen3.5 runtime exists | 5d | Implement, off by default |
 | Prompt enhancer, official (Qwen3.8-27B) | Yes | No | No Qwen3.8 runtime | 5d | Refuse and record unless the runtime loads it |
 | Block streaming, component placement, phase unload | n/a | n/a | Video has them | 4 | Declare only what the pipeline wires |

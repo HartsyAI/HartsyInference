@@ -377,13 +377,16 @@ public static class SideModels
     };
 
     /// <summary>Qwen3-VL-4B text encoder as the Comfy-Org <c>int8_tensorwise</c> + ConvRot 256 build (4.86 GB), the encoder
-    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).</summary>
+    /// the int8 Fibo 2.0 transformers pair with. Sha256 is the Hugging Face LFS object id. Fibo 2.0 weights are CC-BY-NC-4.0 (non-commercial).
+    /// <para>The target name is its own folder, not <c>fibo2/qwen3vl_4b_int8_convrot.safetensors</c>: a same-named file from another
+    /// build (4,450,477,142 B, an int8 vision tower) sat there and satisfied the existence check, so the RMBG 3.0 run loaded it.
+    /// The pinned build lands beside it and nothing overwrites the other file.</para></summary>
     public static readonly ModelAsset Fibo2Qwen3VL4BInt8 = new ModelAsset
     {
         Repo = "Comfy-Org/Fibo-2.0",
         RepoPath = "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
         TargetSubdir = "text_encoders",
-        TargetName = "fibo2/qwen3vl_4b_int8_convrot.safetensors",
+        TargetName = "fibo2/comfy-org/qwen3vl_4b_int8_convrot.safetensors",
         Role = "text encoder",
         Sha256 = "32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c"
     };
@@ -624,6 +627,18 @@ public static class SideModels
         TargetName = "AceStep/ace_1.5_vae.safetensors",
         Role = "vae",
         Sha256 = "6de92e3a862acd287e08b024ac90f0783a8635451b728721a33ff03565bcb2bb"
+    };
+
+    /// <summary>HunyuanVideo-1.5 VAE (fp32 diffusers file, 5.04 GB) as the MovieRoll reference loads it (<c>vae/</c> of <c>tencent/HunyuanVideo-1.5</c>).
+    /// The hash is the LFS object id from the repo's public metadata; the repo is not gated.</summary>
+    public static readonly ModelAsset MovieRollVae = new ModelAsset
+    {
+        Repo = "tencent/HunyuanVideo-1.5",
+        RepoPath = "vae/diffusion_pytorch_model.safetensors",
+        TargetSubdir = "HunyuanVideo-1.5/vae",
+        TargetName = "diffusion_pytorch_model.safetensors",
+        Role = "vae",
+        Sha256 = "2609ed7033c052fdf164afcac71e8a7c82afccdbb001d673444a72f194fbb918"
     };
 
     /// <summary>HunyuanVideo 3D causal VAE (bf16) — Comfy-Org's standard HunyuanVideo repack; shared architecture with Kandinsky-5 Video's bundled diffusers VAE.</summary>

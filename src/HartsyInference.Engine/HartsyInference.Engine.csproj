@@ -10,6 +10,7 @@
     <InternalsVisibleTo Include="HartsyInference.Diffusion.Tests" />
     <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
     <InternalsVisibleTo Include="HartsyInference.Engine.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.API.Tests" />
   </ItemGroup>
 
   <ItemGroup>

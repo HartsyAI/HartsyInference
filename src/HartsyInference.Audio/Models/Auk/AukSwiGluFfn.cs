@@ -13,10 +13,10 @@ public sealed class AukSwiGluFfn
     private int _dim;
     private int _inner;
 
-    public void Load(IReadOnlyDictionary<string, Tensor> weights, string prefix, int dim, int inner)
+    public void Load(IReadOnlyDictionary<string, Tensor> weights, string prefix, int dim, int inner, ICollection<Tensor> owned)
     {
-        _inW = AukOps.Take(weights, $"{prefix}.linear_in.weight", 2 * inner, dim);
-        _outW = AukOps.Take(weights, $"{prefix}.linear_out.weight", dim, inner);
+        _inW = AukOps.Take(weights, $"{prefix}.linear_in.weight", owned, 2 * inner, dim);
+        _outW = AukOps.Take(weights, $"{prefix}.linear_out.weight", owned, dim, inner);
         _dim = dim;
         _inner = inner;
     }

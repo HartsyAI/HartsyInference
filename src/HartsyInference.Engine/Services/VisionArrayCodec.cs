@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
@@ -13,8 +14,6 @@ public static class VisionArrayCodec
 {
     /// <summary>The dtype name both forms declare.</summary>
     public const string Dtype = "float32";
-
-    private static readonly byte[] NpyMagic = [0x93, (byte)'N', (byte)'U', (byte)'M', (byte)'P', (byte)'Y'];
 
     /// <summary>The values as little-endian float32 bytes, row-major.</summary>
     public static byte[] ToLittleEndianBytes(VisionArray array)
@@ -48,29 +47,13 @@ public static class VisionArrayCodec
     public static byte[] ToNpy(VisionArray array)
     {
         ArgumentNullException.ThrowIfNull(array);
-        string shape = array.Shape.Length == 1
-            ? $"({array.Shape[0]},)"
-            : $"({string.Join(", ", array.Shape.Select(d => d.ToString(CultureInfo.InvariantCulture)))})";
-        string dict = $"{{'descr': '<f4', 'fortran_order': False, 'shape': {shape}, }}";
-        // magic (6) + version (2) + header length (2) + header, padded with spaces and a newline to a multiple of 64.
-        int unpadded = NpyMagic.Length + 2 + 2 + dict.Length + 1;
-        int padding = (64 - unpadded % 64) % 64;
-        string header = dict + new string(' ', padding) + "\n";
-        byte[] payload = ToLittleEndianBytes(array);
-        byte[] file = new byte[NpyMagic.Length + 4 + header.Length + payload.Length];
-        NpyMagic.CopyTo(file, 0);
-        file[6] = 1;
-        file[7] = 0;
-        BinaryPrimitives.WriteUInt16LittleEndian(file.AsSpan(8), checked((ushort)header.Length));
-        Encoding.ASCII.GetBytes(header, file.AsSpan(10));
-        payload.CopyTo(file, 10 + header.Length);
-        return file;
+        return NpyFile.Float32(array.Data, array.Shape);
     }
 
     /// <summary>Reads a <c>.npy</c> v1.0 file written by <see cref="ToNpy"/> (little-endian float32, C order).</summary>
     public static VisionArray FromNpy(ReadOnlySpan<byte> file)
     {
-        if (file.Length < 10 || !file[..6].SequenceEqual(NpyMagic) || file[6] != 1)
+        if (file.Length < 10 || !file[..6].SequenceEqual(NpyFile.Magic) || file[6] != 1)
             throw new ArgumentException("Not a .npy v1.0 file.", nameof(file));
         int headerLength = BinaryPrimitives.ReadUInt16LittleEndian(file[8..]);
         string header = Encoding.ASCII.GetString(file.Slice(10, headerLength));

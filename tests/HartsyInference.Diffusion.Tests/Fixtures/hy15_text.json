@@ -1,0 +1,84 @@
+{
+ "source": "Tencent-Hunyuan/MovieRoll@0b5f73e2d7cad86826dcf8fc420991d789d88646",
+ "system_prompt": "You are a helpful assistant. Describe the video by detailing the following aspects:         1. The main content and theme of the video.         2. The color, shape, size, texture, quantity, text, and spatial relationships of the objects.         3. Actions, events, behaviors temporal relationships, physical movement changes of the objects.         4. background environment, light, style and atmosphere.         5. camera angles, movements, and transitions used in the video.",
+ "glyph_cases": [
+  {
+   "prompt": "a cat holds a sign that says \"HELLO WORLD\" at noon",
+   "texts": [
+    "HELLO WORLD"
+   ],
+   "formatted": "Text \"HELLO WORLD\". "
+  },
+  {
+   "prompt": "two signs: \"OPEN\" and “CLOSED” on a door",
+   "texts": [
+    "OPEN",
+    "CLOSED"
+   ],
+   "formatted": "Text \"OPEN\". Text \"CLOSED\". "
+  },
+  {
+   "prompt": "curly first “B” then straight \"A\"",
+   "texts": [
+    "B",
+    "A"
+   ],
+   "formatted": "Text \"B\". Text \"A\". "
+  },
+  {
+   "prompt": "repeats \"X\" and \"X\" and \"Y\"",
+   "texts": [
+    "X",
+    "Y"
+   ],
+   "formatted": "Text \"X\". Text \"Y\". "
+  },
+  {
+   "prompt": "a single repeat \"Z\"",
+   "texts": [
+    "Z"
+   ],
+   "formatted": "Text \"Z\". "
+  },
+  {
+   "prompt": "single quotes ‘not read’ and \"read\"",
+   "texts": [
+    "read"
+   ],
+   "formatted": "Text \"read\". "
+  },
+  {
+   "prompt": "no quotes at all",
+   "texts": [],
+   "formatted": null
+  },
+  {
+   "prompt": "",
+   "texts": [],
+   "formatted": null
+  },
+  {
+   "prompt": "empty quotes \"\" here",
+   "texts": [
+    ""
+   ],
+   "formatted": "Text \"\". "
+  },
+  {
+   "prompt": "multi\nline \"one\" and\n\"two\"",
+   "texts": [
+    "one",
+    "two"
+   ],
+   "formatted": "Text \"one\". Text \"two\". "
+  },
+  {
+   "prompt": "中文 \"你好\" and “世界”",
+   "texts": [
+    "你好",
+    "世界"
+   ],
+   "formatted": "Text \"你好\". Text \"世界\". "
+  }
+ ]
+}

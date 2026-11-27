@@ -112,6 +112,7 @@ public static class ModelIdentityCatalog
             Video("ltx-2.5-distilled", "lightricks-ltx-video-2-5", "LTX-2.5 Distilled", "Lightricks", "other", "960x960"),
             Video("wan", "wan-2_2-ti2v-5b", "Wan 2.2 TI2V 5B", "Alibaba Wan", "apache-2.0", "960x960"),
             Video("hunyuan-video", "hunyuan-video", "HunyuanVideo", "Tencent", "other", "720x720"),
+            Video("movieroll", "movieroll", "MovieRoll", "Tencent", "other", "864x480"),
             Video("minimax-h3", "minimax-h3", "MiniMax-H3", "MiniMax", "other", "960x960"),
             Video("kandinsky5-video", "kandinsky5-video-lite", "Kandinsky 5 Video Lite", "Sber AI", "apache-2.0", "640x640"),
             Video("lance-video", "lance-t2v", "Lance (Video)", "Lance", "other", "640x640"),
@@ -194,6 +195,11 @@ public static class ModelIdentityCatalog
             Audio("rvc", "rvc_clone", "RVC v2", "RVC-Project", "mit", "clone"),
             Audio("openvoice", "openvoice_clone", "OpenVoice V2", "MyShell", "mit", "clone"),
             Audio("demucs", "demucs_fx", "Demucs", "Meta", "mit", "fx"),
+            // Kim_Vocal_2 states no licence anywhere it is distributed (the UVR GUI code is MIT; nothing says the weights are), so it is
+            // "other" until the terms are confirmed with the UVR project.
+            Audio("kim-vocal-2", "kim_vocal_2_fx", "Kim_Vocal_2", "Ultimate Vocal Remover", "other", "fx", "meituan-longcat/LongCat-Video-Avatar-1.6"),
+            Audio("voice-isolator", "voice_isolator_fx", "Inworld Voice Isolator", "Inworld", "apache-2.0", "fx", "inworld/voice-isolator"),
+            Audio("voice-isolator-realtime", "voice_isolator_realtime_fx", "Inworld Voice Isolator (realtime)", "Inworld", "apache-2.0", "fx", "inworld/voice-isolator"),
             Audio("resemble-enhance", "resemble_enhance_fx", "Resemble-Enhance", "Resemble AI", "mit", "fx"),
         ];
         Dictionary<string, ArtifactIdentity> byId = new(rows.Length, StringComparer.OrdinalIgnoreCase);

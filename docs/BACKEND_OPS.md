@@ -254,6 +254,28 @@ blend forms are one value in exact arithmetic and differ in the last bit in F32,
 The norms sum in F64. A zero delta leaves the latent untouched. F32; the predictions may be one tensor but neither may share
 storage with the latent.
 
+Over a zero `z`, with guidance 0 and delta 1, the per-row form is a row-norm match: `z = uncond · ‖cond‖₂ / (‖uncond‖₂ + eps)` per
+row (FastFrames' per-head renorm). A zero keeps no sign there.
+
+## SumProducts
+
+```
+output[g, t] = Σ_r term_t(a[viewA(g, r)], b[viewB(g, r)])     g over the kept leading axes, r over the rest
+term         = a·b (Dot), a·a (SquaredA), b·b (SquaredB); the chosen ones in that order
+```
+
+Reference: `SumProductsReference.Apply`. Contract: `SumProductsContract.Validate`. A `SumProductsSpec` carries one `StridedView` per
+operand with equal extents, the number of kept axes and the `ProductTerms`. A range is a `Slice` of the view; `PerRow(elements, width)`
+gives every row inside a longer dimension its own sums; `Over(view)` gives one group.
+
+- Each product of two F32 elements is formed in F64, where it is exact, and the sums accumulate in F64. An F64 output holds the sum, an
+  F32 output the sum rounded once. A backend without F64 arithmetic takes the reference.
+- The order of the additions is free, so two implementations agree within `n · 2⁻⁵² · Σ|term|` over the `n` elements of a group, not bit for
+  bit, plus one rounding each when the output is F32. The reference adds in the order of the view.
+- An element the view addresses more than once (a broadcast axis) counts each time. NaN and infinity propagate.
+- F32 operands, which may be one tensor. The output holds exactly groups times terms elements and shares no storage with either.
+- The result is a tensor. `ProductSums.DotAndSquaredB` is the one helper that reads it on the host, which is a sync.
+
 ## TopKGuidedLogits
 
 ```
@@ -306,6 +328,43 @@ the axis; the output is the q grid or its flat `[tokens, heads · headDim]` form
 it flat and skips a reshape. CUDA runs the per-query kernel, or the query-tiled kernels at head width 64 unless
 `numerics.neighborhoodAttentionTiled` is off (the tiled path is an online softmax over the tile's union window, a different
 summation order).
+
+## BlockSparseAttention
+
+```
+block      = a QueryBlock or KeyBlock box of its (T, H, W) token grid; blocks and the tokens inside one in raster order
+q̄[m], k̄[n] = the mean row of query block m, of key block n                  per (batch, head)
+score[m,n] = q̄[m] · k̄[n]                                                    unscaled
+read[m]    = the K highest-scoring n, K = (int)((1 − sparsity) · keyBlocks)  truncated in double precision
+out[i]     = Σ_j softmax_j(scale · q[i] · k[j]) · v[j]                       i in block m, j over the keys of read[m]
+```
+
+Reference: `BlockSparseAttentionReference.Apply`. Contract: `BlockSparseAttentionContract.Validate`. Called as
+`IBackend.BlockSparseAttention`; `HasBlockSparseAttention` says whether a backend runs it, and one that does not refuses
+the call by name.
+
+- Operands are F32 head-major `[B, H, Sq|Sk, D]` in raster order of their grids, already normed and rotated, with one head
+  count for Q, K and V. The output is `[B, H, Sq, D]` in query raster order and is not an input.
+- `BlockSparseAttentionOptions` carries a query grid and a key grid (`TokenGrid3D`, `Frames × Height × Width`; they may
+  differ on every axis), a block per side (default 4×4×4, and the two may differ), the sparsity in `[0, 1]` and the score
+  multiplier (null is `D^-1/2`). A grid that is not a multiple of its block on every axis is refused: the caller pads.
+  There is no attention mask. A caller that lets one group of queries see only part of the keys makes one call per
+  group, each with its own grids.
+- Scale multiplies the token scores only. Selection ignores it, and no neighbour or sink block is added.
+- `K = 0` (fewer than 16 key blocks at sparsity 0.9375) writes zeros.
+- Of equal block scores the lower index wins, and a NaN score ranks above every number, so a NaN key reaches the output
+  while `K > 0`. Both rules are this engine's: `torch.topk`, which the definition below uses, states no tie order.
+- A token whose every score is negative infinity gets a zero row; a NaN score propagates
+  ([attention contract §3](ATTENTION_CONTRACT.md#3-scores)).
+- The optional `selected` tensor, I32 `[B, H, queryBlocks, K]`, receives each query block's key blocks, ascending.
+- A kernel is held to the reference on F32 operands: the same `selected` report and an output within a relative RMS of
+  1e-5. The reference sums a block mean in the block's raster order and a score in channel order, both in F32; a kernel
+  that sums in another order can rank two blocks differently only where their scores differ by rounding alone.
+
+The definition is `flash_attn_bsa_3d` of meituan-longcat/LongCat-Video at `58eb336edc5c8c63389838727e40b8c18434e54e` in
+top-k mode, whose `bsa_params` ship as sparsity 0.9375 and 4×4×4 blocks. Its CDF-threshold selection has no option here.
+It is a different operation from [Sol-Attn](ATTENTION_CONTRACT.md#9-where-kernels-differ-today) (64-token runs of one
+sequence, with a pooled tail) and from the video sparse attention sessions.
 
 ## FakeQuantizeUniform
 
@@ -435,6 +494,15 @@ out = max(x · rsqrt(mean(x²) + eps) · w, 0) · scale      per row of weight.E
 The default composes `RmsNorm`, `LeakyRelu(0)` and `Scale`; CUDA fuses them into one warp-per-row kernel for F32. The output
 may be shaped differently from the input (same element count), as the SANA-WM camera keys are.
 
+## SelectiveScan
+
+`SelectiveScan` is the Mamba-1 selective state-space recurrence. Per row and channel, with step `delta`, input `u`, decay `a`
+(negative), input and output projections `b` and `c`, and skip `d`: `h = exp(delta * a) h + delta * b * u` and `y = c . h + d * u`,
+multiplied by `silu(z)` when a gate is given. The state carries from one call to the next, which is how a stream runs it.
+The host reference (`SelectiveScanReference`) is the only implementation. It refuses more than `MaxStates` (256) states per
+channel, the size of the on-stack state it keeps per channel. A CUDA kernel is the next step: one thread per row and channel with
+the state in registers, as the Metal kernel in the upstream `scan.py` does.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -444,7 +512,8 @@ Every implementation of these ops:
 - is graph-capture safe: the geometry is passed by value as kernel parameters or push constants, never through
   constant memory or a device-side spec buffer;
 - is one launch per call, except the globally normalized `GuidedEulerStep`, which is three (the partial sums, the
-  ratio, the update), as the op it replaced was.
+  ratio, the update), as the op it replaced was, and `SumProducts` over one large group, which may be two (the partial sums, their sum)
+  through a scratch buffer.
 
 ## Backend coverage
 
@@ -461,10 +530,12 @@ Every implementation of these ops:
 | `GroupScale` | reference | `group_scale_f32`, `_f16_f32`, `_f16_f16`, `_bf16_f32`, `_bf16_bf16` | `group_scale_f32/f16/f16_f16`; BF16 takes the reference |
 | `LinearFused` | composed | int8 fused epilogues where eligible, else composed | composed |
 | `GuidedEulerStep` | reference | `guided_euler.ptx` (`guided_euler_f32`; `_reduce/_finalize/_scaled` for the global norm; `_rows` per row) | `guided_euler`; the normalized forms take the reference |
+| `SumProducts` | reference | `sum_products.ptx` (`sum_products_groups_f32`; `_partials/_finalize` for a group past 16384 elements) | reference |
 | `TopKGuidedLogits` | reference | `topk_guided_logits.ptx` (`topk_guided_logits_f32`, rows up to 16448 wide) | reference |
 | `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
 | `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
+| `BlockSparseAttention` | reference | refused | refused |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
 | `SparseTopK` | reference | `sparse_index.ptx` (`sparse_topk_f32`) | `sparse_topk` |
@@ -473,6 +544,7 @@ Every implementation of these ops:
 | `Exp`, `Reciprocal` | reference | `point_ops.ptx` (`elementwise_math_<in>_<out>`, F32 and BF16 each side) | reference |
 | `FrameDeltaScan` | reference | `frame_scan.ptx` (`frame_scan_scale_keys_f32`, `frame_scan_recurrence_f32`, `_col_f32`, `frame_scan_sum_f32`) around cuBLAS batched GEMMs | reference |
 | `DepthwiseConvGlu` | reference | `depthwise_glu.ptx` (`depthwise_glu_f32/bf16`, `depthwise_glu_bf16_vec`) | reference |
+| `SelectiveScan` | reference | none | none |
 | `UcpeTransform` | reference | `ucpe.ptx` (`ucpe_transform_f32`) | reference |
 | `DepthwiseConvFrames` | reference | `frame_conv.ptx` (`depthwise_conv_frames_f32`) | reference |
 | `RmsNormRelu` | composed | `rms_relu.ptx` (`rms_norm_relu_f32`); other dtypes composed | composed |

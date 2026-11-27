@@ -51,6 +51,23 @@ public sealed class Fibo2PerceiverLayer : IDisposable
         Fibo2Weights.LoadSwiGlu(_ffn, weights, $"{prefix}.ffn.", _ffnDim, _ownedSplits);
     }
 
+    /// <summary>Every weight the layer holds, for a residency owner to preload or free. The tensors are borrowed or split at load, and
+    /// this only lists them.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor? t in new[] { _crossNorm, _selfNorm, _ffnNorm })
+            if (t is not null)
+                yield return t;
+        if (_crossAttention is not null)
+            foreach (Tensor t in _crossAttention.EnumerateWeights())
+                yield return t;
+        if (_selfAttention is not null)
+            foreach (Tensor t in _selfAttention.EnumerateWeights())
+                yield return t;
+        foreach (Tensor t in _ffn.EnumerateWeights())
+            yield return t;
+    }
+
     /// <summary>Runs the block on the queries <c>[1, G, dim]</c> against the text bundle <c>[1, L, capFeatDim]</c>. The caller
     /// keeps both inputs; the result is new.</summary>
     public Tensor Forward(IBackend backend, Tensor queries, Tensor bundle)

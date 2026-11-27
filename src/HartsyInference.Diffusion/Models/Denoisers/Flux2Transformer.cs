@@ -1,13 +1,15 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Flux.2 Diffusion Transformer (Klein 4B / Klein 9B / Dev). Distinct from <see cref="FluxTransformer"/>: LayerNorm for stream norms, top-level shared modulation projections (one Linear per stream type, output reused across all blocks), 4-axis RoPE with theta=2000, parallel single-stream block (fused QKV+MLP), SwiGLU MLP in both block types. Reference: <c>diffusers.transformer_flux2.Flux2Transformer2DModel</c>.</summary>
-public sealed unsafe class Flux2Transformer : IDisposable
+public sealed unsafe class Flux2Transformer : IDisposable, IStreamableDenoiser
 {
     private readonly Flux2Config _config;
     private readonly Flux2DoubleBlock[] _doubleBlocks;
@@ -61,6 +63,13 @@ public sealed unsafe class Flux2Transformer : IDisposable
     // Rope-table signature: Precompute rebuilds host trig tables AND re-uploads the GPU cos/sin tables —
     // positions only change with resolution / text length.
     private long _ropeSig = long.MinValue;
+
+    // The exact key of the reference-edit rope tables (see EnsureReferenceRope), valid only while _ropeSig is ReferenceRopeSignature.
+    private const long ReferenceRopeSignature = long.MinValue + 2;
+    private int _refTextLength;
+    private int _refHeight;
+    private int _refWidth;
+    private float[] _refTimes = [];
 
     private int _disposed;
 
@@ -149,6 +158,17 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
+        foreach (Tensor w in EnumerateSharedWeights()) yield return w;
+        for (int i = 0; i < _doubleBlocks.Length; i++)
+            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
+        for (int i = 0; i < _singleBlocks.Length; i++)
+            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>Every weight outside the transformer blocks: the embedders, the output projections and the three shared
+    /// modulation projections. They stay resident for the whole denoise loop, so a block stream never evicts them.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
+    {
         if (_xEmbedWeight is not null) yield return _xEmbedWeight;
         if (_contextEmbedWeight is not null) yield return _contextEmbedWeight;
         if (_timestepLinear1Weight is not null) yield return _timestepLinear1Weight;
@@ -161,10 +181,39 @@ public sealed unsafe class Flux2Transformer : IDisposable
         foreach (Tensor w in _doubleModImg.EnumerateWeights()) yield return w;
         foreach (Tensor w in _doubleModTxt.EnumerateWeights()) yield return w;
         foreach (Tensor w in _singleMod.EnumerateWeights()) yield return w;
-        for (int i = 0; i < _doubleBlocks.Length; i++)
-            foreach (Tensor w in _doubleBlocks[i].EnumerateWeights()) yield return w;
-        for (int i = 0; i < _singleBlocks.Length; i++)
-            foreach (Tensor w in _singleBlocks[i].EnumerateWeights()) yield return w;
+    }
+
+    /// <summary>Hook invoked immediately before each block's forward pass, with the global index <see cref="GetBlock"/> uses
+    /// (double blocks first, then single). A <see cref="BlockStreamingController"/> sets it to bring each block in; null = all resident.</summary>
+    public Action<int>? BeforeBlockForward { get; set; }
+
+    /// <summary>Streamable blocks: <see cref="GetBlock"/> indexes <c>[0, BlockCount)</c>, double blocks then single.</summary>
+    public int BlockCount => _doubleBlocks.Length + _singleBlocks.Length;
+
+    /// <summary>The streamable block at <paramref name="idx"/>, double blocks first. Its tensors are the block's own references, so a
+    /// controller tracks residency by reference.</summary>
+    public IStreamingBlock GetBlock(int idx)
+    {
+        if (idx < 0 || idx >= BlockCount) throw new ArgumentOutOfRangeException(nameof(idx));
+        return idx < _doubleBlocks.Length
+            ? new BlockHandle(_doubleBlocks[idx].EnumerateWeights())
+            : new BlockHandle(_singleBlocks[idx - _doubleBlocks.Length].EnumerateWeights());
+    }
+
+    /// <summary>A transformer block seen as a streamable unit: its weights, and their on-device footprint measured once.</summary>
+    private sealed class BlockHandle : IStreamingBlock
+    {
+        private readonly Tensor[] _weights;
+
+        public BlockHandle(IEnumerable<Tensor> weights)
+        {
+            _weights = weights.ToArray();
+            EstimatedWeightBytes = WeightBytes.Sum(_weights);
+        }
+
+        public long EstimatedWeightBytes { get; }
+
+        public IEnumerable<Tensor> EnumerateWeights() => _weights;
     }
 
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
@@ -186,6 +235,63 @@ public sealed unsafe class Flux2Transformer : IDisposable
         return velocity;
     }
 
+    /// <summary>Velocity of <c>[target grid, reference grid 0, ...]</c> under one shared noise level: the FLUX.2 Klein
+    /// reference-edit layout, where the reference latents are appended to the image tokens, share the timestep embedding,
+    /// and sit at their own RoPE T coordinate (<paramref name="gridTimes"/>, the target first at 0, then 10, 20, ... in
+    /// diffusers). Every grid covers the same <paramref name="hPacked"/> × <paramref name="wPacked"/> patches. Returns
+    /// the velocity of every token; the caller keeps the first grid. Batch 1; no modality embedding is involved.</summary>
+    /// <param name="packedTokens"><c>[1, grids·H·W, in_channels]</c>, the target grid first.</param>
+    public Tensor ForwardWithReferences(IBackend backend, Tensor packedTokens, Tensor textEmbeddings, float sigma,
+        int hPacked, int wPacked, ReadOnlySpan<float> gridTimes)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(packedTokens);
+        ArgumentNullException.ThrowIfNull(textEmbeddings);
+        if (gridTimes.Length < 1)
+            throw new ArgumentException("At least the target grid is required.", nameof(gridTimes));
+        if (textEmbeddings.Shape.Rank != 3 || textEmbeddings.Shape[0] != 1)
+            throw new ArgumentException($"Text embeddings must be [1, L, D], got {textEmbeddings.Shape}.", nameof(textEmbeddings));
+        long expected = (long)gridTimes.Length * hPacked * wPacked;
+        if (packedTokens.Shape.Rank != 3 || packedTokens.Shape[0] != 1 || packedTokens.Shape[1] != expected
+            || packedTokens.Shape[2] != _config.InChannels)
+        {
+            throw new ArgumentException(
+                $"{gridTimes.Length} grids of {hPacked}x{wPacked} need packed tokens [1, {expected}, {_config.InChannels}], got {packedTokens.Shape}.",
+                nameof(packedTokens));
+        }
+        Tensor temb = ComputeTimestepEmbedding(backend, sigma, 0f, 1);
+        try
+        {
+            return ForwardWithTemb(backend, packedTokens, textEmbeddings, temb, hPacked, wPacked, null, null, gridTimes.ToArray());
+        }
+        finally
+        {
+            temb.Dispose();
+        }
+    }
+
+    /// <summary>Rope tables for <c>[text, grids...]</c> at the given T coordinates, rebuilt only when the key changes. The key is
+    /// compared exactly, never hashed (a collision would reuse another layout's positions and still produce an image), and the
+    /// tables carry the reserved <see cref="ReferenceRopeSignature"/>, so a plain or multi-grid forward in between leaves its own
+    /// signature and the tables are never mistaken for these.</summary>
+    private void EnsureReferenceRope(int txtSeqLen, int hPacked, int wPacked, float[] gridTimes)
+    {
+        if (_ropeSig == ReferenceRopeSignature && _refTextLength == txtSeqLen && _refHeight == hPacked && _refWidth == wPacked
+            && gridTimes.AsSpan().SequenceEqual(_refTimes))
+        {
+            return;
+        }
+        // Disowned while the tables are rewritten, so a Precompute that throws part-way is redone on the next call.
+        _ropeSig = long.MinValue;
+        using Tensor posIds = Flux2PosEmbed.BuildGridPositionIds(txtSeqLen, hPacked, wPacked, gridTimes);
+        _rope.Precompute(posIds);
+        _refTextLength = txtSeqLen;
+        _refHeight = hPacked;
+        _refWidth = wPacked;
+        _refTimes = gridTimes.ToArray();
+        _ropeSig = ReferenceRopeSignature;
+    }
+
     /// <summary>Forward body with a caller-owned temb (shared by the eager and step-graph paths — the graph
     /// path computes temb inside the capture from a fixed device sin buffer). Does NOT dispose temb.
     /// <para><paramref name="stepCache"/> = the original FBCache target shape: double block 0 always runs and
@@ -193,7 +299,8 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// block0Img + the previous step's img-portion residual (stored against the pre-final-layer img hidden,
     /// which has block0Img's exact shape/dtype). Null = byte-identical uncached forward.</para></summary>
     private Tensor ForwardWithTemb(IBackend backend, Tensor packedLatent, Tensor textEmbeddings, Tensor temb,
-        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null,
+        float[]? gridTimes = null)
     {
         int batch = (int)packedLatent.Shape[0];
         int imgSeqLen = (int)packedLatent.Shape[1];
@@ -234,7 +341,11 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
         // ── 4. Precompute 4-axis RoPE — sig-cached (Precompute rebuilds host tables + re-uploads the GPU
         //       cos/sin tables; it ran EVERY forward before) ──
-        EnsureRope(txtSeqLen, hPacked, wPacked);
+        // A lone target at T = 0 is the plain layout: share its tables rather than rewrite them for the same positions.
+        if (gridTimes is null || (gridTimes.Length == 1 && gridTimes[0] == 0f))
+            EnsureRope(txtSeqLen, hPacked, wPacked);
+        else
+            EnsureReferenceRope(txtSeqLen, hPacked, wPacked, gridTimes);
 
         // ── 5. Double-stream blocks (text + image as two parallel streams sharing joint attn) ──
         // Across-step First-Block cache: double block 0 always runs; its img stream is the gate indicator.
@@ -251,6 +362,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         // own cacheActive gate, so a cache hit never reconstructs a residual computed under a different bias.
         if (stepCache is not null && attnBias is null && _config.Depth > 0)
         {
+            BeforeBlockForward?.Invoke(0);
             (Tensor img0, Tensor txt0) = _doubleBlocks[0].Forward(
                 backend, currentImg, currentTxt, imgMod, txtMod, _rope, attnBias);
             if (!ReferenceEquals(currentImg, imgTokens)) currentImg.Dispose();
@@ -274,6 +386,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         {
             for (int i = startDouble; i < _config.Depth; i++)
             {
+                BeforeBlockForward?.Invoke(i);
                 (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(
                     backend, currentImg, currentTxt, imgMod, txtMod, _rope, attnBias);
                 if (!ReferenceEquals(currentImg, imgTokens) && !ReferenceEquals(currentImg, cacheAnchor)) currentImg.Dispose();
@@ -295,6 +408,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             // ── 7. Single-stream blocks (parallel attn+MLP on full concat sequence) ──
             for (int i = 0; i < _config.DepthSingleBlocks; i++)
             {
+                BeforeBlockForward?.Invoke(_config.Depth + i);
                 Tensor newX = _singleBlocks[i].Forward(backend, x, sgMod, _rope, attnBias);
                 x.Dispose();
                 x = newX;
@@ -422,6 +536,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
             for (int i = 0; i < _config.Depth; i++)
             {
+                BeforeBlockForward?.Invoke(i);
                 (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, [], txtMod, _rope, null, imgAttn, imgMlp);
                 img.Dispose();
                 txt.Dispose();
@@ -437,6 +552,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             txt = null;
             for (int i = 0; i < _config.DepthSingleBlocks; i++)
             {
+                BeforeBlockForward?.Invoke(_config.Depth + i);
                 Tensor next = _singleBlocks[i].Forward(backend, joint, [], _rope, null, single);
                 joint.Dispose();
                 joint = next;
@@ -626,7 +742,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
     {
         int batch = (int)packedLatent.Shape[0];
         bool graphMode = StepGraphEnabled && backend.StepGraphSupported && !_graphDead
-            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed);
+            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed) && BeforeBlockForward is null;
         if (!graphMode)
             return (Forward(backend, packedLatent, textEmbeddings, sigma, guidanceScale, hPacked, wPacked), true);
 

@@ -787,6 +787,35 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Whether a resident <c>int8_tensorwise</c> weight whose layer asks for a full-precision GEMM
+    /// (<see cref="QuantWeightInfo.FullPrecisionMatMul"/>) is unpacked on the device, row tile by row tile, into that GEMM; false routes it
+    /// through the host dequant fallback. The unpacked values are the host fallback's BF16 ones, so the GEMM dtype and the small-m route follow
+    /// as for that dense weight. A rotated (ConvRot) weight, and a fused epilogue or prologue, stay on the fallback.</summary>
+    private bool CanDequantInt8OnDevice(Tensor weight, QuantWeightInfo info, bool fuseGelu, Tensor? preGate)
+        => info is { Format: "int8_tensorwise", FullPrecisionMatMul: true, ConvRotGroupSize: 0, RowScale: not null }
+            && _kernels is { HasInt8DequantKernels: true } && weight.Shape.Rank == 2 && !fuseGelu && preGate is null
+            && weight.Fp8ScaleFactor == 1f && !weight.ForceF32Gemm;
+
+    /// <summary>The bytes one row tile of an unpacked int8 weight may take in the GEMM dtype.</summary>
+    private const long Int8DequantTileBytes = 64L << 20;
+
+    /// <summary>Weight rows per tile of the device-unpacked int8 GEMM: <see cref="Int8DequantTileBytes"/> over the row bytes, in steps of 64
+    /// rows.</summary>
+    internal static int Int8DequantTileRows(int rows, int columns, DType gemmDtype)
+        => (int)Math.Min(rows, Math.Max(64L, Int8DequantTileBytes / ((long)columns * gemmDtype.SizeInBytes) & ~63L));
+
+    /// <summary>Unpacks <paramref name="rows"/> rows of a resident int8 weight, from <paramref name="firstRow"/>, into
+    /// <paramref name="bf16"/>, and returns them in <paramref name="gemmDtype"/>: that buffer itself, or <paramref name="cast"/> filled from
+    /// it.</summary>
+    private ulong UnpackInt8Rows(ulong pWeight, ulong rowScaleDev, int firstRow, int rows, int columns, DType gemmDtype, ulong bf16, ulong cast)
+    {
+        _kernels!.LaunchInt8Dequant(bf16, pWeight + (ulong)((long)firstRow * columns), rowScaleDev + (ulong)((long)firstRow * sizeof(float)),
+            rows, columns, _stream.Handle);
+        if (gemmDtype == DType.BF16) return bf16;
+        CastOnGpu(cast, bf16, DType.BF16, gemmDtype, checked(rows * columns));
+        return cast;
+    }
+
     /// <summary>Whether the transient-dequant path can serve this resident nvfp4 weight; false routes it through the host dequant fallback.</summary>
     /// <remarks>Deliberately does NOT consult <see cref="QuantWeightInfo.FullPrecisionMatMul"/>. That flag means "this
     /// layer must run a real GEMM rather than a quantized one", which is exactly what this path does — the weight is
@@ -1275,8 +1304,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             ? CublasApi.CUBLAS_COMPUTE_32F
             : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 
-    /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
-    private int SdpaF32Compute => _sdpaNoTf32 ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
+    /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c> or the call runs under <see cref="HighPrecisionGemm"/>
+    /// (a model's scoped full-precision request, e.g. <c>ExactGemmScope</c>). The attention row table is built once and still lists TF32 as the
+    /// rows' multiply format; only the GEMM's compute type follows the scope.</summary>
+    private int SdpaF32Compute => _sdpaNoTf32 || HighPrecisionGemm ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
@@ -2037,10 +2068,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         using OpScope _op = EnterOp();
         EnsureKernels();
 
-        // A resident int8 weight has no dtype cast the generic path below could take — CastOnGpu has no I8 source —
-        // so a layer the IMMA chain cannot serve (an explicit full_precision_matrix_mult, a shape the cuBLASLt int8
-        // TN config rejects, a row range) has to be un-rotated and dequantized here or it cannot run at all.
-        if (weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
+        // A resident int8 weight has no dtype cast the generic path below could take — CastOnGpu has no I8 source. A
+        // full_precision_matrix_mult layer is unpacked on the device into the float GEMM below; any other layer the IMMA
+        // chain cannot serve (a shape the cuBLASLt int8 TN config rejects, a row range), and a full-precision one the
+        // device unpack does not take, has to be un-rotated and dequantized here or it cannot run at all.
+        bool int8Unpack = weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } unpackInfo
+            && CanDequantInt8OnDevice(weight, unpackInfo, fuseGelu, preGate);
+        if (!int8Unpack && weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
             && !CanRunResidentInt8(output, input, weight, int8Info, weightRowOffset, weightRowCount))
         {
             using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize);
@@ -2132,8 +2166,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // quantize here — only the eligibility answer, already settled by the fallback gate above. The scale upload
         // reads the companion on the HOST, so it happens before this call touches the transfer caches, for the same
         // reason the W8A8 host quant above does.
-        bool int8Resident = weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null };
-        ulong int8RowScaleDev = int8Resident ? EnsureInt8RowScaleDev(weight, n) : 0;
+        bool int8Resident = !int8Unpack && weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null };
+        // One scale per weight row, whatever row range this call computes.
+        ulong int8RowScaleDev = int8Resident || int8Unpack ? EnsureInt8RowScaleDev(weight, (int)weight.Shape[0]) : 0;
 
         // Same ordering rule for block-scaled weights: the scale upload and the scalar reads are HOST reads of the
         // companions, so they happen before the transfer caches are touched. Eligibility was already settled by the
@@ -2168,7 +2203,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             NoteBlockScaledDispatch(native: false, weight, input, output, n, k, rowRange, blockScales);
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
-        ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0;
+        ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0, pInt8Bf16 = 0;
         bool cachedOutput = false;
         try
         {
@@ -2346,7 +2381,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // GemmEx is inefficient at m=1; the fused GEMV reads each weight row once with an F32 accumulate
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
                 // numerics.bf16Gemv=false to fall back to cuBLAS.
-                DType gemvDtype = blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
+                DType gemvDtype = int8Unpack ? DType.BF16 : blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
                 if (EnableBf16Gemv && _kernels!.HasFloatGemv && (gemvDtype == DType.BF16 || gemvDtype == DType.F16))
                 {
                     // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
@@ -2356,8 +2391,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     // F32 cast; F32 biases (the common LLM case) pass straight through.
                     ulong gemvBias = bias is null ? 0
                         : CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
-                    ulong gemvWeight = gemvDtype == weight.DType ? pWeight
-                        : MaterializeWeightIfNeeded(pWeight, weight, gemvDtype, out pWeightCast, blockScales);
+                    ulong gemvWeight;
+                    if (int8Unpack)
+                    {
+                        // The whole weight: these kernels read it once.
+                        pInt8Bf16 = CudaMemory.Allocate((nuint)(weight.ElementCount * DType.BF16.SizeInBytes));
+                        gemvWeight = UnpackInt8Rows(pWeight, int8RowScaleDev, 0, n, k, DType.BF16, pInt8Bf16, 0);
+                    }
+                    else
+                    {
+                        gemvWeight = gemvDtype == weight.DType ? pWeight
+                            : MaterializeWeightIfNeeded(pWeight, weight, gemvDtype, out pWeightCast, blockScales);
+                    }
                     if (gemvDtype == DType.BF16)
                         _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, gemvWeight, gemvBias, n, k, m, _stream.Handle);
                     else
@@ -2565,7 +2610,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // inside CastOnGpu's F8→F32 path.
             // The 16-bit path rounds both operands to F16; ForceF32Gemm weights skip it.
             bool forceF32 = weight.ForceF32Gemm;
-            DType gemmDtype = forceF32 ? DType.F32 : ResolveGemmDtype(input.DType, UnpackedWeightDType(weight));
+            DType gemmDtype = forceF32 ? DType.F32 : ResolveGemmDtype(input.DType, int8Unpack ? DType.BF16 : UnpackedWeightDType(weight));
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
 
             // Weight cast (fp8/quant → BF16/F16): identical every forward, so for a preloaded weight we
@@ -2579,7 +2624,19 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // adds roughly 40% peak VRAM on Flux (the T5 encoder alone is 4.7B parameters).
             bool hipUpcast = forceF32 || (HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32);
             ulong weightPtr;
-            if (weight.DType == gemmDtype)
+            // A device-unpacked int8 weight is never cast whole or cached: only the rows this call computes are unpacked, here
+            // when they fit one tile (every GEMM path below then takes them as a dense weight), else tile by tile at the GEMM.
+            int tileRows = int8Unpack ? Int8DequantTileRows(n, k, gemmDtype) : n;
+            bool int8Tiled = tileRows < n;
+            if (int8Unpack)
+            {
+                pInt8Bf16 = CudaMemory.Allocate((nuint)((long)tileRows * k * DType.BF16.SizeInBytes));
+                if (gemmDtype != DType.BF16)
+                    pWeightCast = CudaMemory.Allocate((nuint)((long)tileRows * k * gemmDtype.SizeInBytes));
+                weightPtr = int8Tiled ? 0
+                    : UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset, n, k, gemmDtype, pInt8Bf16, pWeightCast);
+            }
+            else if (weight.DType == gemmDtype)
             {
                 weightPtr = pWeight;
             }
@@ -2637,7 +2694,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Every branch above leaves weightPtr addressing gemmDtype elements over the WHOLE weight — casts are
             // deliberately computed and cached full-size so sibling row ranges share one cast — so the range is a
             // single offset applied here, after cast resolution rather than inside each branch.
-            if (rowRange)
+            if (rowRange && !int8Unpack)
             {
                 weightPtr += (ulong)((long)weightRowOffset * k * gemmDtype.SizeInBytes);
             }
@@ -2670,7 +2727,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Tensor-core HGEMM path (opt-in, validation-pending): F16 operands+output,
             // aligned dims. Produces the GEMM only; bias is added by the block below.
             bool ltBiasFused = false;
-            if (EnableTensorCoreGemm && gemmDtype == DType.F16 && output.DType == DType.F16
+            if (!int8Tiled && EnableTensorCoreGemm && gemmDtype == DType.F16 && output.DType == DType.F16
                 && TensorCoreGemm.IsSupported && Cuda.TensorCoreGemm.IsAligned(m, n, k))
             {
                 TensorCoreGemm.Run(a: inputPtr, b: weightPtr, c: pOutput, m: m, n: n, k: k, alpha: alpha, stream: _stream.Handle);
@@ -2682,7 +2739,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // fused and GemmEx paths: HighPrecisionGemm/numerics.noTf32/numerics.gemmF16 must not change
                 // semantics merely because this Linear has a bias. A missing Lt algorithm is an ordinary
                 // per-shape capability result, so TryRun returns false and the existing GemmEx+BiasAdd path runs.
-                if (EnableEpilogueFusion && bias is not null && !outNeedsCast)
+                if (!int8Tiled && EnableEpilogueFusion && bias is not null && !outNeedsCast)
                 {
                     LtGemmExecutor lt = LtGemm;
                     if (lt.IsSupported)
@@ -2718,16 +2775,26 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                             gemmOut = pGemmTemp;
                             gemmOutType = gemmType;
                         }
-                        CublasApi.cublasGemmEx(
-                            _cublasHandle,
-                            CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                            n, m, k,
-                            &alpha,
-                            weightPtr, gemmType, k,
-                            inputPtr, gemmType, k,
-                            &beta,
-                            gemmOut, gemmOutType, n,
-                            gemmCompute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        // One pass over the whole weight, or one per row tile of a tiled int8 weight: a tile of weight rows is a run of
+                        // output channels, written at its column offset under the full output's leading dimension.
+                        int gemmOutBytes = (outNeedsCast ? gemmDtype : output.DType).SizeInBytes;
+                        for (int first = 0; first < n; first += tileRows)
+                        {
+                            int rows = Math.Min(tileRows, n - first);
+                            ulong tileWeight = int8Tiled
+                                ? UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset + first, rows, k, gemmDtype, pInt8Bf16, pWeightCast)
+                                : weightPtr;
+                            CublasApi.cublasGemmEx(
+                                _cublasHandle,
+                                CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                                rows, m, k,
+                                &alpha,
+                                tileWeight, gemmType, k,
+                                inputPtr, gemmType, k,
+                                &beta,
+                                gemmOut + (ulong)((long)first * gemmOutBytes), gemmOutType, n,
+                                gemmCompute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        }
                         if (outNeedsCast)
                             CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
                     }
@@ -2766,6 +2833,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (pInputPacked != 0) CudaMemory.FreeAsync(pInputPacked, _stream.Handle);
             if (pInputScale != 0) CudaMemory.FreeAsync(pInputScale, _stream.Handle);
             if (pBlockScratch != 0) CudaMemory.FreeAsync(pBlockScratch, _stream.Handle);
+            if (pInt8Bf16 != 0) CudaMemory.FreeAsync(pInt8Bf16, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
@@ -5511,8 +5579,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (query.DType == DType.BF16 && mask is null)
             {
                 ulong castScoreBytes = (ulong)totalHeads * (ulong)sq * (ulong)skv * sizeof(float);
-                (nuint castFree, _) = _context.GetMemoryInfo();
-                if (EngineKnobs.SdpaForceTiled.Value || castScoreBytes > (ulong)castFree / 2)
+                GateReading castGate = ReadGate();
+                bool castOver = castScoreBytes > castGate.Budget;
+                // A forced tile is not a budget decision, so only the unforced path logs it.
+                if (!EngineKnobs.SdpaForceTiled.Value) LogGate("cast.score", castOver, castGate);
+                if (EngineKnobs.SdpaForceTiled.Value || castOver)
                 {
                     SdpaTiledF32Core(opQ, opK, opV, opOut, totalHeads, sq, skv, d, scale, pBias: 0, heads: 1, default);
                     _kernels!.LaunchCastF32ToBf16(pOut, pOutCast, (int)output.ElementCount, _stream.Handle);
@@ -5869,13 +5940,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             CudnnSdpa.View.Of(c.Query), CudnnSdpa.View.Of(c.Key), CudnnSdpa.View.Of(c.Value), CudnnSdpa.View.Of(c.Output), CudnnSdpa.Offsets.Of(in c),
             castTarget);
 
-    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit in half of free VRAM (cuMemGetInfo counts pool reservations as used).</summary>
+    /// <summary>Whether the <c>tq*kvLen</c> F32 causal bias plus the F16 copies of Q, O, K and V fit the gate budget (logged as gate "causal"): half of free VRAM, or under
+    /// <c>numerics.tileFromDevice</c> the shared gate budget (<see cref="PlannedGateBudget"/>), which reads no free memory.</summary>
     private bool CausalMaskFits(int tq, int kvLen, int hq, int hkv, int d)
     {
         ulong maskBytes = (ulong)tq * (ulong)kvLen * sizeof(float);
         ulong castBytes = 2UL * sizeof(ushort) * (ulong)d * ((ulong)hq * (ulong)tq + (ulong)hkv * (ulong)kvLen);
-        (nuint freeBytes, _) = _context.GetMemoryInfo();
-        return maskBytes + castBytes < (ulong)freeBytes / 2;
+        GateReading gate = ReadGate();
+        bool fits = maskBytes + castBytes < gate.Budget;
+        LogGate("causal", !fits, gate);
+        return fits;
     }
 
     /// <summary>Causal prefill through cuDNN's fused engine, with the causal rule carried as an additive bias.
@@ -6305,6 +6379,29 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return raised >= MinTileScoreBytes ? new TileCap(0, 0, cap.ProbeAfter) : new TileCap(raised, 0, cap.ProbeAfter);
     }
 
+    /// <summary>The fixed score-tile rung of a device, for <c>numerics.tileFromDevice</c>: 1 GiB at 20 GiB total or more, else 512 MiB. The 20 GiB
+    /// boundary is binary (<c>20 &lt;&lt; 30</c> bytes): a card marketed as 20 GB reports about 18.6 GiB and gets 512 MiB; a 24 GB card gets 1 GiB.
+    /// The rung sets the tile height, and is the gate budget when no streaming scope is open (see <c>PlannedGateBudget</c>).</summary>
+    internal static long TileRungBytes(ulong deviceTotalBytes) => deviceTotalBytes >= 20UL << 30 ? 1L << 30 : 512L << 20;
+
+    /// <summary>The query tile's height from the device total (<c>numerics.tileFromDevice</c>): the rung over the row bytes, never past the rows of
+    /// the call or the score elements the softmax addresses, or the height <c>numerics.sdpaTile</c> forces. The height is a function of the device
+    /// only. A failed allocation in <c>SdpaTiledF32Core</c> still halves that call's tile (the OOM loop), so a run that hits one is not
+    /// bit-comparable with a run that did not. The remembered cap is recorded but not read under this knob, so later calls do not start from
+    /// a shrunken height.</summary>
+    internal static long TileRowsFromDevice(ulong deviceTotalBytes, long totalHeads, long sq, long skv, int? forced)
+    {
+        long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
+        if (cap < 1)
+            throw new AttentionUnsupportedException(
+                $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
+        long perRow = totalHeads * skv * sizeof(float);
+        long rows = Math.Max(1, TileRungBytes(deviceTotalBytes) / Math.Max(1, perRow));
+        if (rows > sq) rows = sq;
+        if (forced is int f && f > 0) rows = Math.Min(f, sq);
+        return Math.Min(rows, cap);
+    }
+
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
     /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
     /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
@@ -6334,17 +6431,21 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ulong scoresBuf = 0, pOnes = 0;
         try
         {
-            (nuint freeBytes, _) = _context.GetMemoryInfo();
+            (nuint freeBytes, nuint deviceTotal) = _context.GetMemoryInfo();
+            bool fromDevice = EngineKnobs.TileFromDevice.Value == true;
             long perRow = totalHeads * skv * sizeof(float);
             TileCap remembered;
             lock (_sdpaTileCapGate)
                 remembered = _sdpaTileCap;
-            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
+            long Br = fromDevice
+                ? TileRowsFromDevice((ulong)deviceTotal, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value)
+                : TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
 
             // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
-            // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
-            // allocator recovery) are not paid on every call. The memory grows back, with backoff (see NextTileCap): a transient failure must not
+            // so the floor never turns a slow call into a failed one. Knob off, the height that fit is remembered so the failures (each one a full
+            // allocator recovery) are not paid on every call; under numerics.tileFromDevice the cap is recorded but not read. The memory grows back, with backoff (see NextTileCap): a transient failure must not
             // pin the tile small for the backend's lifetime, and a card that really is full must not be probed every other call.
+            long plannedBr = Br;
             bool halved = false;
             while (true)
             {
@@ -6353,13 +6454,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     scoresBuf = CudaMemory.Allocate((nuint)(perRow * Br));
                     break;
                 }
-                catch (OutOfVramException) when (Br > 1)
+                // Under numerics.tileFromDevice a failed allocation is not retried at a smaller height: the height is a function of the device
+                // only, so the failure surfaces instead of changing the path mid-run.
+                catch (OutOfVramException) when (Br > 1 && !fromDevice)
                 {
                     Br = Math.Max(1, Br / 2);
                     halved = true;
                 }
             }
 
+            if (fromDevice) TileFreeLog.Record((ulong)freeBytes, (ulong)deviceTotal, plannedBr, Br);
             AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cuda.tiled.scores", perRow * Br);
             lock (_sdpaTileCapGate)
                 _sdpaTileCap = NextTileCap(_sdpaTileCap, halved, perRow * Br, perRow, EngineKnobs.SdpaTile.Value is > 0);

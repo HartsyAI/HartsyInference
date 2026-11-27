@@ -178,6 +178,8 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 
 ## 12. Cleanup follow-ups
 
+- [ ] Plain `qwen35` / `qwen35moe` GGUFs whose value heads may be stored tiled (converter-version dependent, 9B-class and Clef): decide the detection signal, then un-tile at load or refuse. Until then the output is suspected wrong for those files (TROUBLESHOOTING).
+- [ ] Qwen3.5-VL image input squashes every image to the tower's fixed 768x768 (`VlmImagePreprocessor`) where transformers uses `smart_resize`; the M-RoPE grid is already read from the encoded pixels, so only the preprocessor needs an aspect-ratio path. A non-Qwen3-VL mmproj on the SSM backbone is refused at load (text-only).
 - [ ] Re-run analyzer diagnostics before acting on the historical snapshot; judge config/API mirrors individually.
 - [ ] LtGemmExecutor consolidation only after Fp4 block-scale attributes are supported.
 - [ ] Vulkan spec/push-constant builders only if parameterization improves the actual differing contracts.
@@ -234,3 +236,10 @@ with its first consumer and is removed here once it ships.
   Ming-Image text encoder, MiniMax-H3.
 - [ ] A BailingMoeV2 safetensors config factory for `GenericTransformer` + `MoeFeedForward` (the Ming-Image text
   encoder).
+
+## 14. Audio front ends
+
+- [ ] Re-run Chatterbox and IndexTTS-2 reference-conditioning parity on real weights. Their recorded `soxr_hq` stand-in figures ([PARITY_VERIFICATION](PARITY_VERIFICATION.md))
+  predate the 2026-11-26 filter, which was measured at the resampler only ([KIM_VOCAL2_SEPARATOR](../Research/KIM_VOCAL2_SEPARATOR.md)). The parity tests and dump
+  scripts they cite are no longer in the tree. `AudioClipCodec.DecodeStereoSoxrHq`, the separator's input resampling from any source rate, uses the same filter and
+  was likewise measured at the resampler only.

@@ -182,8 +182,8 @@ public sealed class Resampler
     }
 
     // Modified Bessel function of the first kind, order 0. Series expansion converges
-    // quickly for the argument range we hit (beta * x in [0, ~9]).
-    private static double BesselI0(double x)
+    // quickly for the argument range we hit (beta * x in [0, ~13]).
+    internal static double BesselI0(double x)
     {
         double sum = 1.0;
         double term = 1.0;

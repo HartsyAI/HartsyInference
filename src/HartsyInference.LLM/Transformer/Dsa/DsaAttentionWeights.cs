@@ -37,6 +37,6 @@ public sealed record DsaAttentionWeights
     /// <summary>Dense head mix <c>[Heads, Heads]</c> applied before the gate (ERNIE VHA, folded by <see cref="Sparse.HeadMix.FoldLowRank"/>); null means none.</summary>
     public Tensor? HeadMix { get; init; }
 
-    /// <summary>The indexer's weights.</summary>
-    public required DsaIndexerWeights Indexer { get; init; }
+    /// <summary>The token top-k indexer's weights; null when the layer is built with its own <see cref="IDsaKeySelector"/>.</summary>
+    public DsaIndexerWeights? Indexer { get; init; }
 }
