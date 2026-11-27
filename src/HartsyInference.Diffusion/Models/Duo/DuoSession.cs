@@ -25,6 +25,7 @@ public sealed class DuoSession
     private readonly DuoAudioStreamDecoder _audio;
     private readonly MiniMaxH3Config _config;
     private readonly DuoSampleInput _sample;
+    private bool _ran;
 
     public DuoSession(MiniMaxH3Transformer transformer, IBackend backend, MiniMaxH3Config config, DuoSampleInput sample, DuoRopePolicy rope,
         DuoStreamCache cache, DuoVideoStreamDecoder video, DuoAudioStreamDecoder audio)
@@ -42,11 +43,29 @@ public sealed class DuoSession
     public DuoOutput Run(DuoRun run)
     {
         ArgumentNullException.ThrowIfNull(run);
+        if (_ran)
+        {
+            throw new InvalidOperationException("A DuoSession runs once; make a new session for another conversation.");
+        }
         int blocks = _sample.Blocks.Count;
         if (run.BodyText.Count != blocks || run.NoiseVideo.Count != blocks || run.NoiseAudio.Count != blocks)
         {
             throw new ArgumentException($"The run needs body text, video noise and audio noise for each of the {blocks} blocks.", nameof(run));
         }
+        // Every block is checked before anything is committed: a grid or audio length that the decoders cannot take fails here, not mid-run.
+        for (int block = 0; block < blocks; block++)
+        {
+            DuoBlockInput input = _sample.Blocks[block];
+            if (input.Video.Frames != ChunkLatents)
+            {
+                throw new ArgumentException($"Block {block} has {input.Video.Frames} latent frames; a duo_5_17 chunk has {ChunkLatents}.", nameof(run));
+            }
+            if (input.AudioSteps != _audio.BlockSteps)
+            {
+                throw new ArgumentException($"Block {block} has {input.AudioSteps} audio steps; the audio stream takes {_audio.BlockSteps}.", nameof(run));
+            }
+        }
+        _ran = true;
         _chunks.Prefill(run.SharedText, run.ReferenceVideo);
 
         List<DuoDecodedBlock> video = [];

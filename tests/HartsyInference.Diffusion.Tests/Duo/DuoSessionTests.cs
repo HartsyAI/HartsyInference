@@ -8,37 +8,109 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests.Duo;
 
-/// <summary>The Duo session driver on the tiny synthetic model, with fake window decoders. The run publishes one video block of 17 frames and one
-/// audio block per Duo block, in order, and refuses a run whose inputs do not match the sample. These are self-consistency checks on the
-/// driver: nothing here runs upstream code or released weights.</summary>
+/// <summary>The Duo session driver on the tiny synthetic model, with fake window decoders that depend on their input. The windows the video
+/// decoder is handed must hold the chunks in order, so consecutive windows agree on the chunks they share; the published blocks must depend on
+/// the noise; and the driver refuses a bad grid or audio length before anything is committed, and runs only once. These are self-consistency
+/// checks on the driver: nothing here runs upstream code or released weights.</summary>
 public sealed class DuoSessionTests
 {
     private const int Hidden = 8, Heads = 2, HeadDim = 96, Inner = Heads * HeadDim, Ffn = 16, TextDim = 5, Layers = 2;
     private const int VideoIn = 96, AudioIn = 32, TimeEmbedDim = 6, TimeEmbedHidden = 8;
     private const int Shared = 3, BodyRows = 2, RefRows = 4, VideoRows = 20, AudioSteps = 3, AudioRows = 2 * AudioSteps;
-    private const int Blocks = 3, SamplesPerStep = 4;
+    private const int Blocks = 3, SamplesPerStep = 4, Height = 4, Width = 4;
+
+    [Fact]
+    public void TheVideoWindowsHoldTheChunksInOrder()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        List<Window> windows = [];
+        RunOnce(transformer, windows, seed: 0);
+
+        // OnChunk(1), OnChunk(2) and the End window: 7, 12 and 12 latent steps.
+        Assert.Equal(new[] { 7, 12, 12 }, windows.Select(w => w.Steps).ToArray());
+        // Chunk 0 is steps 0-4 of the first window and of the second; chunk 1 is steps 5-6 of the first window (its first two) and steps 5-9 of
+        // the second, and the End window opens on chunk 1 too.
+        AssertSameSteps(windows[0], 0, windows[1], 0, 5);
+        AssertSameSteps(windows[0], 5, windows[1], 5, 2);
+        AssertSameSteps(windows[1], 5, windows[2], 0, 5);
+    }
+
+    [Fact]
+    public void ThePublishedBlocksDependOnTheNoise()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        DuoOutput first = RunOnce(transformer, [], seed: 0);
+        DuoOutput second = RunOnce(transformer, [], seed: 1);
+
+        Assert.NotEqual(first.Video[0].Rgb, second.Video[0].Rgb);
+        Assert.NotEqual(first.Audio[0], second.Audio[0]);
+    }
 
     [Fact]
     public void ARunPublishesEveryVideoAndAudioBlockInOrder()
     {
         using MiniMaxH3Transformer transformer = Transformer();
-        IBackend backend = TestBackends.Cpu;
-        using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, FakeVideo);
-        using DuoAudioStreamDecoder audio = new(backend, FakeAudio, AudioIn, SamplesPerStep, AudioSteps, lookaheadSteps: 2, contextSteps: 4);
-        DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
-
-        DuoOutput output = session.Run(Run());
+        DuoOutput output = RunOnce(transformer, [], seed: 0);
 
         Assert.Equal(Blocks, output.Video.Count);
         Assert.All(output.Video, block =>
         {
             Assert.Equal(17, block.Frames);
-            Assert.Equal(4, block.Height);
-            Assert.Equal(4, block.Width);
+            Assert.Equal(Height, block.Height);
+            Assert.Equal(Width, block.Width);
         });
         Assert.Equal(Blocks, output.Audio.Count);
         Assert.All(output.Audio, samples => Assert.Equal(2 * AudioSteps * SamplesPerStep, samples.Length));
+    }
+
+    [Fact]
+    public void ABlockWithTheWrongGridIsRefusedBeforeAnythingIsCommitted()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoAudioStreamDecoder audio = Audio(backend);
+        DuoSampleInput sample = Sample() with
+        {
+            Blocks = Sample().Blocks.Select((b, i) => i == 1 ? b with { Video = new DuoGrid(4, Height, Width) } : b).ToArray(),
+        };
+        DuoSession session = new(transformer, backend, Config(), sample, DuoRopePolicy.Old, cache, video, audio);
+
+        Assert.Throws<ArgumentException>(() => session.Run(Run(seed: 0)));
+        Assert.Equal(0, cache.Length);
+    }
+
+    [Fact]
+    public void ABlockWithTheWrongAudioStepsIsRefusedBeforeAnythingIsCommitted()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoAudioStreamDecoder audio = Audio(backend);
+        DuoSampleInput sample = Sample() with
+        {
+            Blocks = Sample().Blocks.Select((b, i) => i == 2 ? b with { AudioSteps = AudioSteps + 1 } : b).ToArray(),
+        };
+        DuoSession session = new(transformer, backend, Config(), sample, DuoRopePolicy.Old, cache, video, audio);
+
+        Assert.Throws<ArgumentException>(() => session.Run(Run(seed: 0)));
+        Assert.Equal(0, cache.Length);
+    }
+
+    [Fact]
+    public void ASessionRunsOnce()
+    {
+        using MiniMaxH3Transformer transformer = Transformer();
+        IBackend backend = TestBackends.Cpu;
+        using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoAudioStreamDecoder audio = Audio(backend);
+        DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
+        session.Run(Run(seed: 0));
+
+        Assert.Throws<InvalidOperationException>(() => session.Run(Run(seed: 0)));
     }
 
     [Fact]
@@ -47,20 +119,93 @@ public sealed class DuoSessionTests
         using MiniMaxH3Transformer transformer = Transformer();
         IBackend backend = TestBackends.Cpu;
         using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
-        using DuoVideoStreamDecoder video = new(backend, FakeVideo);
-        using DuoAudioStreamDecoder audio = new(backend, FakeAudio, AudioIn, SamplesPerStep, AudioSteps, lookaheadSteps: 2, contextSteps: 4);
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, [], 0));
+        using DuoAudioStreamDecoder audio = Audio(backend);
         DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
-        DuoRun run = Run() with { BodyText = Run().BodyText.Take(Blocks - 1).ToArray() };
+        DuoRun run = Run(seed: 0) with { BodyText = Run(seed: 0).BodyText.Take(Blocks - 1).ToArray() };
 
         Assert.Throws<ArgumentException>(() => session.Run(run));
     }
 
-    private static DuoRun Run() => new(
+    /// <summary>One run on a fresh cache and fresh decoders. The windows the video decoder saw are appended to <paramref name="windows"/>.</summary>
+    private static DuoOutput RunOnce(MiniMaxH3Transformer transformer, List<Window> windows, int seed)
+    {
+        IBackend backend = TestBackends.Cpu;
+        using DuoStreamCache cache = new(backend, blocks: Layers, width: Inner, capacityRows: 256);
+        using DuoVideoStreamDecoder video = new(backend, window => Fake(window, windows, seed));
+        using DuoAudioStreamDecoder audio = Audio(backend);
+        DuoSession session = new(transformer, backend, Config(), Sample(), DuoRopePolicy.Old, cache, video, audio);
+        return session.Run(Run(seed));
+    }
+
+    private static DuoAudioStreamDecoder Audio(IBackend backend) =>
+        new(backend, FakeAudio, AudioIn, SamplesPerStep, AudioSteps, lookaheadSteps: 2, contextSteps: 4);
+
+    /// <summary>A recorded window: its latent steps, and the values in [channel][step][height][width] order.</summary>
+    private sealed record Window(int Steps, float[] Values);
+
+    /// <summary>A fake video decoder. It records the window it was given and returns pixels that depend on the window's values and the seed.</summary>
+    private static Tensor Fake(Tensor window, List<Window> windows, int seed)
+    {
+        int steps = (int)window.Shape[2];
+        float[] values = window.AsSpan<float>().ToArray();
+        windows.Add(new Window(steps, values));
+        int frames = DuoVideoDecodePlan.RawFramesFor(steps);
+        float mean = values.Average();
+        Tensor output = new(new TensorShape(new long[] { 1, 3, frames, Height, Width }), DType.F32);
+        Span<float> o = output.AsSpan<float>();
+        for (int c = 0; c < 3; c++)
+        {
+            for (int f = 0; f < frames; f++)
+            {
+                for (int p = 0; p < Height * Width; p++)
+                {
+                    o[((c * frames) + f) * Height * Width + p] = MathF.Tanh(mean * 8f + 0.1f * c + 0.01f * f + 0.001f * p + 0.5f * seed);
+                }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>A fake audio decoder: <c>[1, 2, steps · samplesPerStep]</c>, pure in its window's values.</summary>
+    private static Tensor FakeAudio(Tensor window)
+    {
+        int steps = (int)window.Shape[3];
+        float[] values = window.AsSpan<float>().ToArray();
+        float mean = values.Average();
+        Tensor output = new(new TensorShape(new long[] { 1, 2, steps * SamplesPerStep }), DType.F32);
+        Span<float> o = output.AsSpan<float>();
+        for (int s = 0; s < steps * SamplesPerStep; s++)
+        {
+            o[s] = MathF.Tanh(mean * 8f + 0.01f * s);
+            o[(steps * SamplesPerStep) + s] = MathF.Tanh(mean * 4f - 0.01f * s);
+        }
+        return output;
+    }
+
+    /// <summary>Asserts that <paramref name="count"/> latent steps of two windows agree, for every channel and every height and width position.</summary>
+    private static void AssertSameSteps(Window a, int aStart, Window b, int bStart, int count)
+    {
+        for (int c = 0; c < 24; c++)
+        {
+            for (int t = 0; t < count; t++)
+            {
+                for (int p = 0; p < Height * Width; p++)
+                {
+                    float left = a.Values[((c * a.Steps) + aStart + t) * Height * Width + p];
+                    float right = b.Values[((c * b.Steps) + bStart + t) * Height * Width + p];
+                    Assert.Equal(left, right);
+                }
+            }
+        }
+    }
+
+    private static DuoRun Run(int seed) => new(
         SharedText: Values(2, Shared * TextDim),
         ReferenceVideo: Values(30, RefRows * VideoIn),
         BodyText: Enumerable.Range(0, Blocks).Select(b => Values(10 + b, BodyRows * TextDim)).ToArray(),
-        NoiseVideo: Enumerable.Range(0, Blocks).Select(b => Values(40 + b, VideoRows * VideoIn)).ToArray(),
-        NoiseAudio: Enumerable.Range(0, Blocks).Select(b => Values(50 + b, AudioRows * AudioIn)).ToArray(),
+        NoiseVideo: Enumerable.Range(0, Blocks).Select(b => Values(40 + b + (100 * seed), VideoRows * VideoIn)).ToArray(),
+        NoiseAudio: Enumerable.Range(0, Blocks).Select(b => Values(50 + b + (100 * seed), AudioRows * AudioIn)).ToArray(),
         Steps: 2,
         Shift: 1.0);
 
@@ -74,34 +219,15 @@ public sealed class DuoSessionTests
         {
             StartMs = 708.0 * b,
             BodyTextRows = BodyRows,
-            Video = new DuoGrid(5, 4, 4),
+            Video = new DuoGrid(5, Height, Width),
             AudioSteps = AudioSteps,
-            FrameStartsMs = Enumerable.Range(0, 5).Select(f => 708.0 * b + 100.0 * f).ToArray(),
+            FrameStartsMs = Enumerable.Range(0, 5).Select(f => (708.0 * b) + (100.0 * f)).ToArray(),
         }).ToArray(),
         CleanBlocks = 0,
         NoisyBlocks = [0],
     };
 
     private static MiniMaxH3Config Config() => new() { LatentsDim = 24, HasAudio = true, AudioLatentsDim = AudioIn };
-
-    /// <summary>A fake video decoder: a pure function of the window's shape, with the frame count the schedule needs.</summary>
-    private static Tensor FakeVideo(Tensor window)
-    {
-        int frames = DuoVideoDecodePlan.RawFramesFor((int)window.Shape[2]);
-        int h = (int)window.Shape[3], w = (int)window.Shape[4];
-        Tensor output = new(new TensorShape(new long[] { 1, 3, frames, h, w }), DType.F32);
-        output.AsSpan<float>().Fill(0.25f);
-        return output;
-    }
-
-    /// <summary>A fake audio decoder: <c>[1, 2, steps · samplesPerStep]</c>, pure in its shape.</summary>
-    private static Tensor FakeAudio(Tensor window)
-    {
-        int steps = (int)window.Shape[3];
-        Tensor output = new(new TensorShape(new long[] { 1, 2, steps * SamplesPerStep }), DType.F32);
-        output.AsSpan<float>().Fill(0.5f);
-        return output;
-    }
 
     private static MiniMaxH3Transformer Transformer()
     {
@@ -182,9 +308,9 @@ public sealed class DuoSessionTests
         float[] data = new float[count];
         for (int i = 0; i < count; i++)
         {
-            double h = Math.Sin(seed * 12.9898 + i * 78.233) * 43758.5453;
+            double h = Math.Sin((seed * 12.9898) + (i * 78.233)) * 43758.5453;
             double frac = h - Math.Floor(h);
-            data[i] = scale * (float)(2.0 * frac - 1.0);
+            data[i] = scale * (float)((2.0 * frac) - 1.0);
         }
         return data;
     }
