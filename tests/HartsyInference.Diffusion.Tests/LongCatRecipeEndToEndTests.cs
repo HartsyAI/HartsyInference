@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Numerics;
@@ -106,6 +107,16 @@ public sealed class LongCatRecipeEndToEndTests
     [InlineData(true)]
     public void TheBaseRecipeGeneratesTheRequestedClipFromATinyCheckpoint(bool int8)
     {
+        VideoGenerationResult result = RunBaseClip(int8, () => new CpuBackend());
+
+        Assert.Equal(5, result.Frames.Count);
+        Assert.All(result.Frames, frame => Assert.NotNull(frame));
+    }
+
+    /// <summary>Runs the base recipe on a tiny checkpoint written to disk, on the backend <paramref name="makeBackend"/> makes (CPU, CUDA or
+    /// Vulkan). Shared by the CPU smoke test above and the device parity tests (<c>LongCatRecipeGpuParityTests</c>), so the two run the same body.</summary>
+    internal static VideoGenerationResult RunBaseClip(bool int8, Func<IBackend> makeBackend)
+    {
         using LongCatRecipeStandIns standIns = new(LongCatTestData.Tiny.CaptionChannels, LongCatTestData.Tiny.InChannels);
         string directory = Path.Combine(Path.GetTempPath(), "longcat-e2e-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -129,7 +140,7 @@ public sealed class LongCatRecipeEndToEndTests
             }
             LongCatTestData.DisposeAll(weights);
 
-            using CpuBackend backend = new();
+            using IBackend backend = makeBackend();
             IVideoRecipePipeline pipeline = new LongCatVideoRecipe(standIns.Sides).Construct(new RecipeContext
             {
                 CheckpointPath = directory, Backend = backend,
@@ -138,7 +149,7 @@ public sealed class LongCatRecipeEndToEndTests
             {
                 VideoRequest request = new()
                 {
-                    Prompt = "a lighthouse at dusk", NegativePrompt = "", Seed = 3,  
+                    Prompt = "a lighthouse at dusk", NegativePrompt = "", Seed = 3,
                 };
                 VideoEffectiveSettings settings = new()
                 {
@@ -146,10 +157,7 @@ public sealed class LongCatRecipeEndToEndTests
                     ReferenceSizing = VideoReferenceSizing.Native, LockedFields = default,
                 };
 
-                VideoGenerationResult result = pipeline.Generate(request, settings, progress: null, CancellationToken.None);
-
-                Assert.Equal(5, result.Frames.Count);
-                Assert.All(result.Frames, frame => Assert.NotNull(frame));
+                return pipeline.Generate(request, settings, progress: null, CancellationToken.None);
             }
             finally
             {
