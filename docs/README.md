@@ -42,6 +42,7 @@ git preserves removed history.
 | SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
 | Hy4 Flash (Tencent, 220B MoE with Engram, iHC and indexed attention): pins, licence terms, architecture constants, weight sizes, key map, open questions | [Research/HY4_FLASH_ARCHITECTURE.md](Research/HY4_FLASH_ARCHITECTURE.md) |
 | Sage S2.1 Flash (`glm5_next`: KDA + NoPE compressed-pool DSA layers under mHC, 288-expert clamped-SwiGLU MoE, MTP, vision, SciPerception projectors): pins, licence, key layout traps, FP8 quantized set | [Research/SAGE_S21_FLASH_ARCHITECTURE.md](Research/SAGE_S21_FLASH_ARCHITECTURE.md) |
+| Krea 3 (recipe scaffold, no released checkpoint): what the technical report discloses, what is inferred or undisclosed, reuse map | [Research/KREA3_ARCHITECTURE.md](Research/KREA3_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
 | Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |
