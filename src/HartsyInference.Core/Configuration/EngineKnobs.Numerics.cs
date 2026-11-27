@@ -158,7 +158,8 @@ public static partial class EngineKnobs
 
     /// <summary>LongCat's <c>int8_tensorwise</c> linears dequantize the weight and leave the activations as they are, as the release's reference computes
     /// them, instead of CUDA's resident path, which also quantizes each activation row to int8. On by default for LongCat's INT8 releases (a run
-    /// with it on: step 1 noise relRMS 0.0242 against 0.0266 off; the default route is 0.0985 at step 1 with reference inputs, LC-CMP5). Every
+    /// with it on: step 1 noise relRMS 0.024218, against 0.026643 for weight-only before the rounding change and 0.098540 with it off, on the
+    /// resident route; 4090, reference inputs, engine 1a1946df4, LC-CMP5). Every
     /// weight is dequantized with the reference's rounding for its input dtype (BF16 nearest-even, or the exact float32 product for float32-input
     /// layers). CUDA only: the device unpacks the weight on every call, a tiled projection once per tile. Where the backend cannot do that it
     /// dequantizes on the host instead, and that dense linear is eligible for <c>numerics.w8a8</c>, which would quantize the activations again.

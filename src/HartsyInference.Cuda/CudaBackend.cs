@@ -790,13 +790,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Whether a resident <c>int8_tensorwise</c> weight whose layer asks for a full-precision GEMM
     /// (<see cref="QuantWeightInfo.FullPrecisionMatMul"/>) is unpacked on the device, row tile by row tile, into that GEMM; false routes it
     /// through the host dequant fallback. The unpacked values are the host fallback's BF16 ones, so the GEMM dtype and the small-m route follow
-    /// as for that dense weight. A rotated (ConvRot) weight, and a fused epilogue or prologue, stay on the fallback.</summary>
+    /// as for that dense weight. A rotated (ConvRot) weight, and a fused epilogue or prologue, stay on the fallback. A float32-forced weight
+    /// takes the device unpack only with the reference rounding (its mode 2); another family's forced-float32 weight keeps the host fallback.</summary>
     private bool CanDequantInt8OnDevice(Tensor weight, QuantWeightInfo info, bool fuseGelu, Tensor? preGate)
         => info is { Format: "int8_tensorwise", FullPrecisionMatMul: true, ConvRotGroupSize: 0, RowScale: not null }
+            && (info.ReferenceRounding || !weight.ForceF32Gemm)
             && _kernels is { HasInt8DequantKernels: true } && weight.Shape.Rank == 2 && !fuseGelu && preGate is null
             && weight.Fp8ScaleFactor == 1f;
 
-    /// <summary>The bytes one row tile of an unpacked int8 weight may take in the GEMM dtype.</summary>
     /// <summary>The unpack mode of an int8 weight's linear: 0 for the default truncation; for a reference-rounded weight, 2 (the exact float32
     /// product) when the layer is a float32-input one (ForceF32Gemm, set at load from the reference's dtype rule), 1 (BF16 nearest-even) otherwise.</summary>
     private static int Int8RoundingMode(Tensor weight) =>
@@ -810,6 +811,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return dequantized;
     }
 
+    /// <summary>The bytes one row tile of an unpacked int8 weight may take in the GEMM dtype.</summary>
     private const long Int8DequantTileBytes = 64L << 20;
 
     /// <summary>Weight rows per tile of the device-unpacked int8 GEMM: <see cref="Int8DequantTileBytes"/> over the row bytes, in steps of 64
