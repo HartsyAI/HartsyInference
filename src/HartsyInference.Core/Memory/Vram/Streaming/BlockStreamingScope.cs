@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -218,6 +219,8 @@ public sealed class BlockStreamingScope : IDisposable
                 }
             }
         }
+        // Diagnostics only (diagnostics.streamResidentPrefix, default off): pin the count instead of the free-memory sizing.
+        if (EngineKnobs.StreamResidentPrefix.Value is int pinnedPrefix) prefix = Math.Clamp(pinnedPrefix, 0, blockBytes.Length);
         Logs.Info($"[VRAM] {options.ModelName}/denoise plan: free after shared {ByteFormat.Mb(freeAfterShared)}, shared {ByteFormat.Mb(sharedBytes)}, " +
             $"headroom {ByteFormat.Mb(headroom)}, spendable {ByteFormat.Mb(freeAfterShared - headroom)}, " +
             $"block 0 {ByteFormat.Mb(blockBytes.Length > 0 ? blockBytes[0] : 0)}, prefix {prefix} of {blockBytes.Length}.");

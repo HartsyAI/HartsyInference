@@ -100,6 +100,7 @@ public sealed class LongCatAvatarPipeline
     private readonly LongCatTransformer _dit;
     // Counts the denoise calls that dumped their steps, so a chain's segments do not overwrite each other's files.
     private int _dumpedCalls;
+    private int _denoiseCalls;
 
     /// <summary>Creates the pipeline over a loaded avatar transformer.</summary>
     public LongCatAvatarPipeline(IBackend backend, LongCatTransformer dit)
@@ -165,6 +166,12 @@ public sealed class LongCatAvatarPipeline
 
             string? dumpDirectory = EngineKnobs.LongCatStepDump.Value;
             LongCatStepDump? dump = string.IsNullOrEmpty(dumpDirectory) ? null : new LongCatStepDump(dumpDirectory, _dumpedCalls++);
+            // Diagnostics only: the DiT's probe tensors of the first denoise step of the first call (diagnostics.longcatProbeDump).
+            int callIndex = _denoiseCalls++;
+            string? probeDirectory = EngineKnobs.LongCatProbeDump.Value;
+            LongCatProbeDump? probes = callIndex == 0 && !string.IsNullOrEmpty(probeDirectory)
+                ? new LongCatProbeDump(probeDirectory, callIndex, LongCatProbeDump.ParseBlocks(EngineKnobs.LongCatProbeBlocks.Value))
+                : null;
             long started = System.Diagnostics.Stopwatch.GetTimestamp();
             for (int i = 0; i < run.Steps; i++)
             {
@@ -173,8 +180,9 @@ public sealed class LongCatAvatarPipeline
                 // The mixed schedule: the step's DMD and OPSD multipliers; a zero multiplier leaves its gate off (no scope), as upstream does.
                 using IDisposable? dmdScope = run.LoraMix?.EnterDmd(i);
                 using IDisposable? opsdScope = run.LoraMix?.EnterOpsd(i);
-                using Tensor velocity = Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond,
-                    tensors);
+                using Tensor velocity = i == 0 && probes is not null
+                    ? ProbedVelocity(probes, run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond, tensors)
+                    : Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond, tensors);
 
                 // The reference negates the model output for its scheduler and steps the noisy frames only: state += dt · (−velocity).
                 using Tensor step = new(state.Shape, DType.F32);
@@ -208,6 +216,21 @@ public sealed class LongCatAvatarPipeline
 
     /// <summary>The velocity of the noisy frames, <c>[channels·noisy, hw]</c>, on the device: with the cache the noisy frames only, without it the
     /// whole clip and the noisy rows taken from the result.</summary>
+    /// <summary>One denoise velocity with the DiT's probe installed for its duration (diagnostics only).</summary>
+    private Tensor ProbedVelocity(LongCatProbeDump probes, LongCatAvatarRun run, LongCatKvCache? cache, Tensor state, Tensor? condState, int channels,
+        int frames, int hw, int cond, LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond, LongCatRunTensors tensors)
+    {
+        _dit.Probe = probes.Record;
+        try
+        {
+            return Velocity(run, cache, state, condState, channels, frames, hw, cond, conditioning, t, guided, audioCond, audioUncond, tensors);
+        }
+        finally
+        {
+            _dit.Probe = null;
+        }
+    }
+
     private Tensor Velocity(LongCatAvatarRun run, LongCatKvCache? cache, Tensor state, Tensor? condState, int channels, int frames, int hw, int cond,
         LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond, LongCatRunTensors tensors)
     {

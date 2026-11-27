@@ -214,6 +214,23 @@ public static partial class EngineKnobs
             "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain). Unset draws the seeded noise.");
 
     /// <summary>Directory for the per-step dump of the LongCat avatar denoise loop; unset writes nothing and reads nothing back.</summary>
+    public static readonly Knob<string?> LongCatProbeDump =
+        Str("diagnostics.longcatProbeDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar DiT's probe tensors at the first denoise step of the first call: call00_probe_<name>.npy for the embedders, "
+            + "the RoPE tables, every block's output (block{i}.out) and, for the blocks named by diagnostics.longcatProbeBlocks, each stage. Unset writes nothing.");
+
+    /// <summary>Block indices (comma-separated, e.g. <c>0,1,47</c>) whose every stage is dumped by <c>diagnostics.longcatProbeDump</c>; the block
+    /// outputs are always dumped. Unset dumps no stage inside a block.</summary>
+    public static readonly Knob<string?> LongCatProbeBlocks =
+        Str("diagnostics.longcatProbeBlocks", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Comma-separated block indices whose every probe stage is dumped by diagnostics.longcatProbeDump; unset dumps only the block outputs.");
+
+    /// <summary>Pins the resident prefix (blocks kept on the device) of a streaming scope to this count instead of the free-memory sizing; a
+    /// diagnostic for comparing a resident run with a streamed one. Unset keeps the planner's sizing.</summary>
+    public static readonly Knob<int?> StreamResidentPrefix =
+        IntOverride("diagnostics.streamResidentPrefix", KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Pins the streaming scope's resident prefix to this block count (clamped to the block count) instead of the free-memory sizing; unset keeps the sizing.");
+
     public static readonly Knob<string?> LongCatStepDump =
         Str("diagnostics.longcatStepDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Directory for the LongCat avatar denoise loop's per-step .npy dump (call{n}_step{i}_t, _noise, _latent); unset writes nothing.");
