@@ -25,6 +25,9 @@ public sealed class LongCatInt8WeightOnlyTests
         using Tensor rowScale = scale;
 
         Assert.False(EngineKnobs.LongcatInt8WeightOnly.Default);
+        // A whole-run lane that names the knob (HARTSY_GPU_TEST_KNOBS) turns it on for every test in the run, so then it marks by design.
+        if (Environment.GetEnvironmentVariable(GpuRunKnobs.EnvVar) is { } run && run.Contains("numerics.longcatInt8WeightOnly", StringComparison.Ordinal))
+            return;
         Assert.Equal(0, LongCatRecipeSupport.ApplyInt8WeightOnly(new Dictionary<string, Tensor> { ["linear.weight"] = weight }));
         Assert.False(weight.QuantInfo!.FullPrecisionMatMul);
     }
