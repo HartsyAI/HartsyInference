@@ -86,11 +86,19 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");
 
-    /// <summary>Lets the MovieRoll DiT narrow its block attention to F16 on load. Off by default: F16 attention fails the upstream parity bound on CUDA
-    /// (relative RMS 5.8e-3 against 1e-3); F32 passes (1.1e-4) at about 22% more forward time.</summary>
+    /// <summary>Lets the MovieRoll DiT narrow its block attention to F16 on load. Off by default. On the exact GEMM lane (the default of
+    /// <see cref="MovieRollExactGemm"/>) F16 attention fails the upstream parity bound on CUDA (relative RMS 5.8e-3 against 1e-3); F32 attention passes
+    /// (1.124e-4) on that lane.</summary>
     public static readonly Knob<bool> MovieRollAttentionF16 =
         Bool("numerics.movieRollAttentionF16", false, KnobScope.Construction, KnobDomain.Numerics,
             "Narrows the MovieRoll DiT block attention to F16 (the parity-failing path); off keeps F32.");
+
+    /// <summary>Runs every MovieRoll DiT forward (full, per-frame, streamed window and recompute) on exact GEMMs, with CUDA's TF32 off. On by default:
+    /// on the default TF32 lane the F32-attention forward fails the upstream parity bound (relative RMS 6.1e-3 against 1e-3, CUDA, RTX 3060, 334.8 s
+    /// forward); on the exact lane it passes (1.124e-4, 316.0 s). Off runs the backend's default GEMM, which is faster and fails the bound.</summary>
+    public static readonly Knob<bool> MovieRollExactGemm =
+        Bool("numerics.movieRollExactGemm", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Runs MovieRoll DiT forwards on exact GEMMs (TF32 off on CUDA). On by default; off uses the backend's default GEMM, faster and outside the parity bound.");
 
     /// <summary>Krea 2 honours each layer's <c>full_precision_matrix_mult</c> mark (dense GEMM for marked nvfp4 layers). Off
     /// by default: marked layers run the native block-scaled GEMM, which is about 60% faster per step on Blackwell.</summary>

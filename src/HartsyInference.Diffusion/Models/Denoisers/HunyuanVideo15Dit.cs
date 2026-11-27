@@ -1,6 +1,7 @@
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -107,6 +108,17 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         foreach (Tensor t in _refiner.EnumerateWeights()) yield return t;
     }
 
+    /// <summary>The GEMM scope of a DiT forward: exact GEMMs while <see cref="EngineKnobs.MovieRollExactGemm"/> is on (the default), otherwise the
+    /// backend's own setting is kept.</summary>
+    private static IDisposable ExactGemm(IBackend backend) =>
+        EngineKnobs.MovieRollExactGemm.Value ? new ExactGemmScope(backend) : NoGemmScope.Instance;
+
+    private sealed class NoGemmScope : IDisposable
+    {
+        public static readonly NoGemmScope Instance = new();
+        public void Dispose() { }
+    }
+
     /// <summary>Every weight: shared tensors, then each block.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -121,6 +133,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <param name="conditioning">Optional <c>[1, 33, T, H, W]</c> (conditioning latent then mask); null feeds zeros (text-to-video).</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
     {
+        using IDisposable exactGemm = ExactGemm(backend);
         (int frames, int height, int width) = ValidateInputs(latent, qwen, byt5, conditioning);
         int tokens = frames * height * width;
         int hidden = _config.HiddenSize;
@@ -148,6 +161,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// With every frame at the same timestep this equals Forward.</summary>
     public Tensor ForwardPerFrame(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
     {
+        using IDisposable exactGemm = ExactGemm(backend);
         ArgumentNullException.ThrowIfNull(frameTimesteps);
         (int frames, int height, int width) = ValidateInputs(latent, qwen, byt5, conditioning);
         if (frameTimesteps.Length != frames)
@@ -222,6 +236,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private Tensor? StreamWindow(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor? qwen, Tensor? byt5,
         MovieRollKvCache cache, int fullHistoryBlocks, bool encode, int startFrame)
     {
+        using IDisposable exactGemm = ExactGemm(backend);
         ArgumentNullException.ThrowIfNull(frameTimesteps);
         ArgumentNullException.ThrowIfNull(cache);
         if (!cache.IsInit) throw new InvalidOperationException("Init the cache with StreamLayerNames before streaming.");
@@ -322,6 +337,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// The reference for this path is a transcription of MovieRoll's function, not the upstream code. Returns <c>T</c>.</summary>
     public int StreamRecompute(IBackend backend, Tensor latent, int[] chunkFrames, MovieRollKvCache cache, int fullHistoryBlocks)
     {
+        using IDisposable exactGemm = ExactGemm(backend);
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(latent);
         ArgumentNullException.ThrowIfNull(chunkFrames);
