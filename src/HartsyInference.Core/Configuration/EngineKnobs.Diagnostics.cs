@@ -213,7 +213,7 @@ public static partial class EngineKnobs
         Str("diagnostics.longcatNoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain). Unset draws the seeded noise.");
 
-    /// <summary>Directory for the per-step dump of the LongCat avatar denoise loop; unset writes nothing and reads nothing back.</summary>
+    /// <summary>Directory for the LongCat avatar DiT's probe tensors of the first denoise step of the first call; unset writes nothing.</summary>
     public static readonly Knob<string?> LongCatProbeDump =
         Str("diagnostics.longcatProbeDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Directory for the LongCat avatar DiT's probe tensors at the first denoise step of the first call: call00_probe_<name>.npy for the embedders, "
@@ -231,6 +231,7 @@ public static partial class EngineKnobs
         IntOverride("diagnostics.streamResidentPrefix", KnobScope.Runtime, KnobDomain.Diagnostics,
             "Pins the streaming scope's resident prefix to this block count (clamped to the block count) instead of the free-memory sizing; unset keeps the sizing.");
 
+    /// <summary>Directory for the per-step dump of the LongCat avatar denoise loop; unset writes nothing and reads nothing back.</summary>
     public static readonly Knob<string?> LongCatStepDump =
         Str("diagnostics.longcatStepDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Directory for the LongCat avatar denoise loop's per-step .npy dump (call{n}_step{i}_t, _noise, _latent); unset writes nothing.");

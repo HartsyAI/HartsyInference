@@ -214,8 +214,6 @@ public sealed class LongCatAvatarPipeline
         }
     }
 
-    /// <summary>The velocity of the noisy frames, <c>[channels·noisy, hw]</c>, on the device: with the cache the noisy frames only, without it the
-    /// whole clip and the noisy rows taken from the result.</summary>
     /// <summary>One denoise velocity with the DiT's probe installed for its duration (diagnostics only).</summary>
     private Tensor ProbedVelocity(LongCatProbeDump probes, LongCatAvatarRun run, LongCatKvCache? cache, Tensor state, Tensor? condState, int channels,
         int frames, int hw, int cond, LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond, LongCatRunTensors tensors)
@@ -231,6 +229,8 @@ public sealed class LongCatAvatarPipeline
         }
     }
 
+    /// <summary>The velocity of the noisy frames, <c>[channels·noisy, hw]</c>, on the device: with the cache the noisy frames only, without it the
+    /// whole clip and the noisy rows taken from the result.</summary>
     private Tensor Velocity(LongCatAvatarRun run, LongCatKvCache? cache, Tensor state, Tensor? condState, int channels, int frames, int hw, int cond,
         LongCatConditioning conditioning, float t, bool guided, float[] audioCond, float[]? audioUncond, LongCatRunTensors tensors)
     {
