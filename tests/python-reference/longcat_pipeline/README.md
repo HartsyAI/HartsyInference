@@ -36,3 +36,19 @@ C# side: set `HARTSY_LONGCAT_PIPELINE_DIR` to the output directory and run
 `dotnet test tests/HartsyInference.Diffusion.Tests --filter FullyQualifiedName~LongCatPipelineParityTests`. The test is skipped, and so is not
 evidence, until the variable is set. Tolerance relRMS 1e-5 per schedule, velocity, stepped latent and final latent; the report is written next to
 the dump as `pipeline-parity-report.txt`.
+
+## Real-weight runner
+
+`run_base_reference.py` runs the pinned base pipeline on the released weights for a comparison with the engine, on a card that cannot hold the BF16 DiT
+and umT5 together. It encodes the text once and frees umT5, spreads the DiT over GPU and host with accelerate (block by block), starts from a saved
+latent and writes that latent, the final latent, every frame as PNG and `report.json` (optionally the latent after each step). Attention is torch SDPA
+instead of flash-attn; the report lists every way it differs from `run_demo_text_to_video.py`. Its own header gives the command and the defaults.
+
+It needs the pinned reference's requirements (torch 2.6.0, transformers 4.41.0, diffusers 0.35.1, einops, ftfy, loguru) plus accelerate 1.6.0.
+Not in the Windows venv.
+
+The engine side of the comparison starts from the runner's `noise.npy`:
+`hartsy video "<prompt>" -m longcat-video -n "<negative prompt>" --seed 1234 --set diagnostics.longcatNoiseNpy=<out>/noise.npy`.
+
+To try it without the released files, `make_tiny_base_checkpoint.py` writes a tiny model folder from the reference's own classes (random weights; its
+LoRA has rank 4, so the distilled call takes `--lora-dim 4`). That trial checks that the runner runs, not what it computes at full size.
