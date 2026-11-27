@@ -297,13 +297,20 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         // RelabelRank2ToPyTorchOrder is a pure metadata swap (GGUF rank-2 bytes are already
         // [out, in]), so it is quant-safe — unlike the old memcpy Relabel, which was F32-only.
         GgufModelLoader.LoadedGgufModel handle = GgufModelLoader.Load(ggufPath);
+        // The F32 copies made by the expansion are owned by the model (disposed with it), and freed here if the load fails.
+        List<Tensor> expanded = [];
         try
         {
             Dictionary<string, Tensor> w = GgufModelLoader.RelabelRank2ToPyTorchOrder(handle.Weights);
             if (dequantizeToF32)
             {
                 foreach (string key in w.Keys.ToList())
-                    if (w[key].DType.IsQuantized) w[key] = GgufDequantizer.Dequantize(w[key], DType.F32);
+                {
+                    if (!w[key].DType.IsQuantized) continue;
+                    Tensor f32 = GgufDequantizer.Dequantize(w[key], DType.F32);
+                    expanded.Add(f32);
+                    w[key] = f32;
+                }
             }
             // Host-consumed / non-Linear tensors must be F32:
             //  - every rank-1 tensor (norm weights, ssm_a, ssm_dt.bias — RmsNorm and the host SSM
@@ -425,6 +432,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 numHeads, numKvHeads, attnHeadDim, rotaryDim, ropeTheta,
                 convK, headKvDim, headVDim, numKHeads, numVHeads, moe, maxSequenceLength);
             model._ownedTensors.AddRange(converted);
+            model._ownedTensors.AddRange(expanded);
             if (loop is not null) model.ConfigureLoop(loop, routers!, ropeScaling);
             else model.ConfigureRope(ropeScaling);
             int[]? sections = m.GetIntArray($"{arch}.rope.dimension_sections");
@@ -432,7 +440,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
                 model.MropeSection = Array.FindAll(sections, static s => s > 0);
             return model;
         }
-        catch { handle.Dispose(); throw; }
+        catch { foreach (Tensor t in expanded) t.Dispose(); handle.Dispose(); throw; }
     }
 
     private Tensor W(string key) => _w[key];
