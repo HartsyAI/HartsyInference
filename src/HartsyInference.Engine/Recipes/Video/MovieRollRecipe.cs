@@ -127,26 +127,49 @@ public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
             // Refused before anything is converted or copied: a backend without streaming cannot hold this DiT, whatever it is cast to.
             string? fit = VideoWeightFit.Refusal(context.Backend, "MovieRoll", () => (new FileInfo(context.CheckpointPath).Length, DitHoldDetail));
             if (fit is not null) throw new NotSupportedException(fit);
-            Dictionary<string, Tensor> ditWeights = HunyuanVideo15CheckpointConverter.Convert(
-                new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal), config.NumBlocks, config.HiddenSize);
-            string? quant = QuantRefusal(ditWeights.Values.Select(weight => weight.DType));
-            if (quant is not null) throw new NotSupportedException(quant);
-            if (ditWeights.Count == 0)
-                throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
-            // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
-            // block the DiT streams. The BF16 to F16 copies below are made once on the host, and they are what the DiT keeps.
-            RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
-            // F16 for the native F16 GEMM: BF16 on every backend, FP32 (the released file) on CUDA only. Only the cast copies are owned here; the rest
-            // are the container's.
-            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, DitHalfCastSources(context.Backend), DType.F16);
-            HashSet<Tensor> converted = new(ditWeights.Values, ReferenceEqualityComparer.Instance);
-            foreach (Tensor copy in ditF16.Values)
-            {
-                if (!converted.Contains(copy)) loaders.Add(copy);
-            }
-
             dit = new HunyuanVideo15Dit(config) { AllowF16Attention = EngineKnobs.MovieRollAttentionF16.Value };
-            dit.LoadWeights(ditF16);
+            if (EngineKnobs.MovieRollStreamBlocks.Value && context.Backend.StreamingCache is not null)
+            {
+                // Streamed load: the DiT's blocks are converted and cast from the mapped checkpoint as the forward reaches them, so the host holds one
+                // block's F16 weights rather than the whole DiT. Same converter and cast as below, so the outputs are the same bits.
+                string? streamQuant = QuantRefusal(ditSource.Weights.Values.Select(weight => weight.DType));
+                if (streamQuant is not null) throw new NotSupportedException(streamQuant);
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
+                HunyuanVideo15BlockLoader blockLoader = new(dit, config, ditSource.Weights, DitHalfCastSources(context.Backend));
+                loaders.Add(blockLoader);
+                blockLoader.LoadShared();
+                dit.LoadBlock = blockLoader.LoadBlock;
+            }
+            else
+            {
+                Dictionary<string, Tensor> ditWeights = HunyuanVideo15CheckpointConverter.Convert(
+                    new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal), config.NumBlocks, config.HiddenSize);
+                string? quant = QuantRefusal(ditWeights.Values.Select(weight => weight.DType));
+                if (quant is not null) throw new NotSupportedException(quant);
+                if (ditWeights.Count == 0)
+                    throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
+                // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
+                // block the DiT streams. The BF16 to F16 copies below are made once on the host, and they are what the DiT keeps.
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
+                // F16 for the native F16 GEMM: BF16 on every backend, FP32 (the released file) on CUDA only.
+                Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, DitHalfCastSources(context.Backend), DType.F16);
+                // The converter's copies are released here, except those the DiT keeps as they are (a backend that casts nothing): the split
+                // attention weights were F32 copies the cast replaced, and they were held until the process ended before this change.
+                HashSet<Tensor> mapped = new(ditSource.Weights.Values, ReferenceEqualityComparer.Instance);
+                HashSet<Tensor> converted = new(ditWeights.Values, ReferenceEqualityComparer.Instance);
+                HashSet<Tensor> kept = new(ditF16.Values, ReferenceEqualityComparer.Instance);
+                foreach (Tensor tensor in converted)
+                {
+                    if (mapped.Contains(tensor)) continue;
+                    if (kept.Contains(tensor)) loaders.Add(tensor);
+                    else tensor.Dispose();
+                }
+                foreach (Tensor copy in ditF16.Values)
+                {
+                    if (!mapped.Contains(copy) && !converted.Contains(copy)) loaders.Add(copy);
+                }
+                dit.LoadWeights(ditF16);
+            }
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MovieRollVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             // The VAE stays fp32. Its layers make their own F32 copies of the weights, so an F16 cast would save nothing and only lose precision.
