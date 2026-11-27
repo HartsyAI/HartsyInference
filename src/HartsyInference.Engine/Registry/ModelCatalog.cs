@@ -3126,10 +3126,9 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "fastframes-l", Modality = vid, DisplayName = "FastFrames L (14B, text-to-video)", Architecture = "frame-wise causal Wan DiT + KV refiner + pixel decoder", Status = vp,
-                // Block streaming is in (#1178), but the frame KV cache is not streamed, so 81 frames need an 80 GB card. The flag
-                // stays false until a pod run confirms the L clip (docs/Checklists/FASTFRAMES_GPU_RUNBOOK.md). The recipe constructs
-                // for engine-level runs.
-                CliDrivable = false,
+                // The frame KV cache is not streamed, so 81 frames need an 80 GB card (block streaming alone does not fit them). An 81-frame
+                // clip ran through this CLI on an H100 80GB (docs/Checklists/PARITY_VERIFICATION.md).
+                CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     // Apple's FastFrames-L, all three files.
