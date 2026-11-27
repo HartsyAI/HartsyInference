@@ -20,7 +20,7 @@ NVCC_BUILT=("int8_attn_v2")
 ARCH_VARIANTS=("int8_attn_v2")
 PTXAS_SPILL_CHECK=("int8_attn_v2")
 # cp.async and m16n8k16/k32 MMA: no Turing build. The Turing card takes the dense and tiled attention rows instead.
-# block_sparse_attention: head dim 128 takes 83 KB of shared memory, past a Turing block; held until a Turing run.
+# block_sparse_attention: head dim 128 takes 82,944 bytes of shared memory, past a Turing block; held until a Turing run.
 SM80_ONLY=("flash_attn_f16" "sage_attn_int8" "int8_attn_v2" "h3_vsa" "block_sparse_attention")
 
 # shellcheck source=../build_common.sh

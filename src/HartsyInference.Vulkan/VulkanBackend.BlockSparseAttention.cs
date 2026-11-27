@@ -32,18 +32,21 @@ public sealed partial class VulkanBackend
         BlockSparseAttentionContract.Validate(output, query, key, value, options, selected);
         if (!HasBlockSparseAttention)
             throw new AttentionUnsupportedException(
-                $"Vulkan BlockSparseAttention needs {BlockSparseSharedBytes} bytes of workgroup memory; the device has {Vk.MaxComputeSharedMemoryBytes}.");
+                $"Vulkan BlockSparseAttention needs {BlockSparseSharedBytes} bytes of workgroup memory; "
+                + $"the device has {Vk.MaxComputeSharedMemoryBytes}.");
         int batch = (int)query.Shape[0], heads = (int)query.Shape[1], dim = (int)query.Shape[3];
         int queryTokens = (int)query.Shape[2], keyTokens = (int)key.Shape[2];
         int queryBlocks = options.QueryBlocks, keyBlocks = options.KeyBlocks, chosen = options.SelectedBlocks;
         bool narrowIn = query.DType == DType.BF16, narrowOut = output.DType == DType.BF16;
         if ((narrowIn || narrowOut) && !(Vk.Storage16Bit && Vk.ShaderInt16))
-            throw new AttentionUnsupportedException("Vulkan BlockSparseAttention reads and writes BF16 only on a device with 16-bit storage and shaderInt16.");
+            throw new AttentionUnsupportedException(
+                "Vulkan BlockSparseAttention reads and writes BF16 only on a device with 16-bit storage and shaderInt16.");
         TokenGrid3D queryGrid = options.QueryGrid, queryBlock = options.QueryBlock, keyGrid = options.KeyGrid, keyBlock = options.KeyBlock;
         long tileGroups = queryBlocks * ((queryBlock.Tokens + BlockSparseQueryTile - 1) / BlockSparseQueryTile);
         if (dim > BlockSparseMaxHeadDim || keyBlocks > BlockSparseMaxKeyBlocks)
             throw new AttentionUnsupportedException(
-                $"Vulkan BlockSparseAttention takes a head dim up to {BlockSparseMaxHeadDim} and up to {BlockSparseMaxKeyBlocks} key blocks; got {dim} and {keyBlocks}.");
+                $"Vulkan BlockSparseAttention takes a head dim up to {BlockSparseMaxHeadDim} and up to "
+                + $"{BlockSparseMaxKeyBlocks} key blocks; got {dim} and {keyBlocks}.");
         if (Math.Max(tileGroups, keyBlocks) > Vk.MaxComputeWorkGroupCountX || heads > Vk.MaxComputeWorkGroupCountY
             || batch > Vk.MaxComputeWorkGroupCountZ)
             throw new AttentionUnsupportedException($"Vulkan BlockSparseAttention cannot dispatch {query.Shape} in these blocks on this device.");
@@ -75,7 +78,8 @@ public sealed partial class VulkanBackend
                 BinaryWriteUInt(pc, 12, (uint)keyBlocks);
                 BinaryWriteUInt(pc, 16, (uint)chosen);
                 Span<ulong> selectBufs = stackalloc ulong[] { selection.Handle, queryMeans.Handle, keyMeans.Handle };
-                Dispatch(GetKernel("block_sparse_select", storageBufferCount: 3, default), selectBufs, pc[..20], (uint)queryBlocks, (uint)heads, (uint)batch);
+                Dispatch(GetKernel("block_sparse_select", storageBufferCount: 3, default), selectBufs, pc[..20],
+                    (uint)queryBlocks, (uint)heads, (uint)batch);
             }
 
             ReadOnlySpan<int> fields =

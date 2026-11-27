@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -102,7 +103,7 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
             Assert.Equal(wideSelected.AsReadOnlySpan<int>().ToArray(), mixedSelected.AsReadOnlySpan<int>().ToArray());
             Assert.Equal(wide.AsReadOnlySpan<int>().ToArray(), mixed.AsReadOnlySpan<int>().ToArray());
             float[] expected = wide.AsReadOnlySpan<float>().ToArray();
-            Assert.Equal(Array.ConvertAll(expected, TensorCasts.F32ToBf16BitsRounded), narrow.AsReadOnlySpan<ushort>().ToArray());
+            Assert.Equal(Array.ConvertAll(expected, BlockSparseAttentionCase.NearestBf16), narrow.AsReadOnlySpan<ushort>().ToArray());
         }
     }
 
@@ -173,6 +174,50 @@ public sealed class BlockSparseAttentionReferenceTests(ITestOutputHelper log)
         using Tensor wrongReport = new(new TensorShape(1, 1, 2, 1), DType.I32);
         Assert.Throws<ArgumentException>(() => f.Backend.BlockSparseAttention(f.Output, f.Query, f.Key, f.Value, good, wrongReport));
         Assert.All(f.Output.AsReadOnlySpan<float>().ToArray(), static v => Assert.Equal(-7f, v));
+    }
+
+    /// <summary>The nearest-even rule the tests round with, on the cases that decide it.</summary>
+    [Theory]
+    [InlineData(0x3F800000u, 0x3F80)]
+    [InlineData(0x3F808000u, 0x3F80)]
+    [InlineData(0x3F818000u, 0x3F82)]
+    [InlineData(0x3F808001u, 0x3F81)]
+    [InlineData(0xBF818000u, 0xBF82)]
+    [InlineData(0x7F7FFFFFu, 0x7F80)]
+    public void TheBf16RuleRoundsTiesToEven(uint single, int expected)
+    {
+        float value = BitConverter.UInt32BitsToSingle(single);
+        Assert.Equal((ushort)expected, BlockSparseAttentionCase.NearestBf16(value));
+        Assert.Equal((ushort)expected, BFloat16Bits.FromFloat(value));
+    }
+
+    /// <summary>A NaN whose payload is all ones must not carry out of the exponent when it is rounded.</summary>
+    [Theory]
+    [InlineData(0x7FFFFFFFu)]
+    [InlineData(0xFFFFFFFFu)]
+    [InlineData(0x7F800001u)]
+    public void ANaNOfAnyPayloadStaysNaNInABf16Output(uint payload)
+    {
+        using CpuBackend backend = new();
+        BlockSparseAttentionOptions options = new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 };
+        TensorShape shape = new(1, 1, 64, 4);
+        using Tensor query = new(shape, DType.F32), key = new(shape, DType.F32), value = new(shape, DType.F32);
+        using Tensor output = new(shape, DType.BF16);
+        query.AsSpan<float>().Clear();
+        key.AsSpan<float>().Clear();
+        value.AsSpan<float>().Fill(BitConverter.UInt32BitsToSingle(payload));
+
+        backend.BlockSparseAttention(output, query, key, value, options);
+
+        Assert.True(float.IsNaN(BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(BitConverter.UInt32BitsToSingle(payload)))));
+        Assert.All(output.AsReadOnlySpan<ushort>().ToArray(), static bits => Assert.True(float.IsNaN(BFloat16Bits.ToFloat(bits))));
+    }
+
+    [Fact]
+    public void NearTiedBlocksDependOnTheOrderOfTheSums()
+    {
+        using CpuBackend backend = new();
+        BlockSparseAttentionDeviceChecks.NearTiedBlocksAreSelectedAsTheReferenceDoes(backend);
     }
 
     /// <summary>A tensor allocates on first read, so these shapes cost nothing as long as the call is refused unread.</summary>

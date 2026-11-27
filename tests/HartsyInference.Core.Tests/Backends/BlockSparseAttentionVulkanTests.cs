@@ -66,26 +66,27 @@ public sealed class BlockSparseAttentionVulkanTests(ITestOutputHelper log)
     }
 
     [VulkanFact]
+    public void NearTiedBlocksAreSelectedAsTheReferenceDoes()
+    {
+        using VulkanBackend vulkan = new();
+        Checks.NearTiedBlocksAreSelectedAsTheReferenceDoes(vulkan);
+    }
+
+    [VulkanFact]
     public void TooWideAHeadAndTooManyKeyBlocksAreRefusedBeforeAnyWrite()
     {
         using VulkanBackend vulkan = new();
-        Checks.Refused(vulkan, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 }, 129);
-        Checks.Refused(vulkan, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 7681), Sparsity = 0.9 }, 16);
+        Checks.Refused(vulkan, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 }, 129, "got 129 and 1.");
+        Checks.Refused(vulkan, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 7681), Sparsity = 0.9 }, 16, "got 16 and 7681.");
     }
 
     private sealed class VulkanFactAttribute : FactAttribute
     {
-        public VulkanFactAttribute()
-        {
-            if (!VulkanContext.IsAvailable()) Skip = "SKIPPED: Vulkan unavailable.";
-        }
+        public VulkanFactAttribute() => Skip = Checks.VulkanSkip;
     }
 
     private sealed class VulkanTheoryAttribute : TheoryAttribute
     {
-        public VulkanTheoryAttribute()
-        {
-            if (!VulkanContext.IsAvailable()) Skip = "SKIPPED: Vulkan unavailable.";
-        }
+        public VulkanTheoryAttribute() => Skip = Checks.VulkanSkip;
     }
 }

@@ -2,6 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
+using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -13,6 +15,27 @@ namespace HartsyInference.Core.Tests.Backends;
 internal static class BlockSparseAttentionDeviceChecks
 {
     public const double WideTolerance = 1e-5, NarrowTolerance = 1e-4;
+
+    private static readonly Lazy<string?> CudaReason = new(static () =>
+    {
+        if (!CudaContext.IsAvailable()) return "SKIPPED: CUDA unavailable.";
+        using CudaContext context = new(0);
+        // Only a card the kernel is not built for skips; on any other, a kernel that does not load fails the test.
+        return context.Sm < 80 ? "SKIPPED: block-sparse attention has no CUDA kernel below sm_80." : null;
+    });
+
+    private static readonly Lazy<string?> VulkanReason = new(static () =>
+    {
+        if (!VulkanContext.IsAvailable()) return "SKIPPED: Vulkan unavailable.";
+        using VulkanBackend backend = new();
+        return backend.HasBlockSparseAttention ? null : "SKIPPED: the Vulkan device has less than 32 KiB of workgroup memory.";
+    });
+
+    /// <summary>Why the CUDA tests cannot run here, or null.</summary>
+    public static string? CudaSkip => CudaReason.Value;
+
+    /// <summary>Why the Vulkan tests cannot run here, or null.</summary>
+    public static string? VulkanSkip => VulkanReason.Value;
 
     public static TheoryData<string> ReferenceCases => new(BlockSparseAttentionCase.All.Select(static c => c.Name));
 
@@ -156,14 +179,83 @@ internal static class BlockSparseAttentionDeviceChecks
         Compare(backend, log, query, key, value, options, DType.F32, DType.F32, $"{keyBlocks} key blocks");
     }
 
-    public static void Refused(IBackend backend, BlockSparseAttentionOptions options, int dim)
+    /// <summary>Key blocks that hold the same rows in different orders, so their means, and their scores, differ by rounding
+    /// alone: the blocks taken follow the order the reference sums in. First shows that another order takes others.</summary>
+    public static void NearTiedBlocksAreSelectedAsTheReferenceDoes(IBackend backend)
     {
+        const int Dim = 16, Length = 64;
+        BlockSparseAttentionOptions options = new() { QueryGrid = new(4, 4, 32), KeyGrid = new(4, 16, 16), Sparsity = 0.75 };
+        Random random = new(31);
+        float[] pool = new float[Length * Dim];
+        // Every eighth row is a million times the others, so a sum's last bits depend on when it meets them.
+        for (int i = 0; i < pool.Length; i++) pool[i] = (random.NextSingle() * 2f - 1f) * (i / Dim % 8 == 0 ? 1e6f : 1f);
+        using Tensor query = Noise(random, 1, 1, (int)options.QueryGrid.Tokens, Dim);
+        using Tensor key = new(new TensorShape(1, 1, options.KeyGrid.Tokens, Dim), DType.F32);
+        using Tensor value = Noise(random, 1, 1, (int)options.KeyGrid.Tokens, Dim);
+        Span<float> keys = key.AsSpan<float>();
+        for (int block = 0; block < options.KeyBlocks; block++)
+        {
+            int[] order = [.. Enumerable.Range(0, Length)];
+            random.Shuffle(order);
+            for (int offset = 0; offset < Length; offset++)
+                pool.AsSpan(order[offset] * Dim, Dim).CopyTo(keys.Slice(options.KeyRow(block, offset) * Dim, Dim));
+        }
+        TensorShape report = new(1, 1, options.QueryBlocks, options.SelectedBlocks);
+        using CpuBackend cpu = new();
+        using Tensor output = new(query.Shape, DType.F32);
+        using Tensor expected = new(report, DType.I32), actual = new(report, DType.I32);
+        cpu.BlockSparseAttention(output, query, key, value, options, expected);
+        int[] reference = expected.AsReadOnlySpan<int>().ToArray();
+        Assert.NotEqual(reference, SelectedInReverseOrder(query, key, options));
+
+        backend.BlockSparseAttention(output, query, key, value, options, actual);
+
+        Assert.Equal(reference, actual.AsReadOnlySpan<int>().ToArray());
+    }
+
+    /// <summary>The selection with every sum taken backwards: rows within a block and channels within a score.</summary>
+    private static int[] SelectedInReverseOrder(Tensor query, Tensor key, BlockSparseAttentionOptions options)
+    {
+        int dim = (int)query.Shape[3];
+        float[] Mean(ReadOnlySpan<float> rows, Func<int, int, int> row, int block, int length)
+        {
+            float[] mean = new float[dim];
+            for (int offset = length - 1; offset >= 0; offset--)
+                for (int d = 0; d < dim; d++) mean[d] += rows[row(block, offset) * dim + d];
+            for (int d = 0; d < dim; d++) mean[d] /= length;
+            return mean;
+        }
+        float[][] keyMeans = new float[options.KeyBlocks][];
+        for (int n = 0; n < keyMeans.Length; n++)
+            keyMeans[n] = Mean(key.AsReadOnlySpan<float>(), options.KeyRow, n, (int)options.KeyBlock.Tokens);
+        List<int> chosen = [];
+        for (int m = 0; m < options.QueryBlocks; m++)
+        {
+            float[] mean = Mean(query.AsReadOnlySpan<float>(), options.QueryRow, m, (int)options.QueryBlock.Tokens);
+            float Score(int n)
+            {
+                float sum = 0f;
+                for (int d = dim - 1; d >= 0; d--) sum += mean[d] * keyMeans[n][d];
+                return sum;
+            }
+            chosen.AddRange(Enumerable.Range(0, options.KeyBlocks).OrderByDescending(Score).Take(options.SelectedBlocks).Order());
+        }
+        return [.. chosen];
+    }
+
+    /// <summary>The backend has the operation, refuses the call with a message that holds <paramref name="named"/>, and writes
+    /// nothing.</summary>
+    public static void Refused(IBackend backend, BlockSparseAttentionOptions options, int dim, string named)
+    {
+        Assert.True(backend.HasBlockSparseAttention);
         using Tensor query = new(new TensorShape(1, 1, options.QueryGrid.Tokens, dim), DType.F32);
         using Tensor key = new(new TensorShape(1, 1, options.KeyGrid.Tokens, dim), DType.F32);
         using Tensor value = new(key.Shape, DType.F32);
         using Tensor output = new(query.Shape, DType.F32);
         output.AsSpan<float>().Fill(-7f);
-        Assert.Throws<AttentionUnsupportedException>(() => backend.BlockSparseAttention(output, query, key, value, options));
+        AttentionUnsupportedException refusal = Assert.Throws<AttentionUnsupportedException>(
+            () => backend.BlockSparseAttention(output, query, key, value, options));
+        Assert.Contains(named, refusal.Message);
         backend.Sync();
         Assert.All(output.AsReadOnlySpan<float>().ToArray(), static v => Assert.Equal(-7f, v));
     }
@@ -210,7 +302,7 @@ internal static class BlockSparseAttentionDeviceChecks
             ReadOnlySpan<ushort> rounded = actual.AsReadOnlySpan<ushort>();
             for (int i = 0; i < unrounded.Length; i++)
                 if (!float.IsNaN(unrounded[i]))
-                    Assert.True(rounded[i] == TensorCasts.F32ToBf16BitsRounded(unrounded[i]),
+                    Assert.True(rounded[i] == BlockSparseAttentionCase.NearestBf16(unrounded[i]),
                         $"{name} {operands}->BF16: element {i} is {got[i]}, not {unrounded[i]} rounded to nearest even");
         }
         double relative = norm > 0 ? Math.Sqrt(error / norm) : Math.Sqrt(error / want.Length);

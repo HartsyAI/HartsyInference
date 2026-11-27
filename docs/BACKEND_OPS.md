@@ -370,10 +370,12 @@ the call by name.
   both in F32; a kernel that sums in another order can rank two blocks differently only where their scores differ by
   rounding alone.
 - CUDA (`block_sparse_attention.ptx`) takes head dim 16, 32, 64 or 128 and at most one key block per 4 bytes of what the
-  selection's 544 static bytes leave of a block's default shared memory (12152 at 48 KB). Head dim 128 takes 83 KB of shared memory per kernel block, so there is no
-  Turing build. Any other call is refused by name, with no host fallback. Its means and scores are the reference's bit for
-  bit (round-to-nearest intrinsics in the reference's order), so its selection is the reference's; the attention is an
-  online softmax over chunks of 64 key rows. [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).
+  selection's 544 static bytes leave of a block's default shared memory (12152 at 48 KiB). Head dims 64 and 128 take more
+  than that default per kernel block (50,176 and 82,944 bytes), which the card has to grant; 128 takes more than a Turing
+  block holds, so there is no Turing build. Any other call is refused by name, with no host fallback. Its means and scores
+  are the reference's bit for bit (round-to-nearest intrinsics in the reference's order), so its selection is the
+  reference's; the attention is an online softmax over chunks of 64 key rows.
+  [Times against dense attention](../benchmarks/attention/reports/block-sparse-3060.md).
 - Vulkan (`block_sparse_*.spv`) takes head dim up to 128 and up to 7680 key blocks on a device with 32 KiB of workgroup
   memory, and BF16 on one with 16-bit storage; anything else is refused by name. Its means and scores are `precise` in the
   reference's order, with the divide through `divRn`, so the selection is the reference's where the driver keeps

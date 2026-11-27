@@ -88,6 +88,16 @@ internal sealed record BlockSparseAttentionCase(string Name, int Batch, int Head
         return norm > 0 ? Math.Sqrt(error / norm) : Math.Sqrt(error / expected.Length);
     }
 
+    /// <summary>The BF16 value nearest to a number, ties to even, decided by the 16 bits that are dropped: written here so no
+    /// test checks the engine's rounding with the engine's rounding.</summary>
+    public static ushort NearestBf16(float value)
+    {
+        uint bits = BitConverter.SingleToUInt32Bits(value);
+        uint kept = bits >> 16, dropped = bits & 0xFFFF;
+        bool up = dropped > 0x8000 || (dropped == 0x8000 && (kept & 1) == 1);
+        return (ushort)(kept + (up ? 1u : 0u));
+    }
+
     /// <summary>The script's values in [-1, 1), a 32-bit LCG exact in F32, times <paramref name="factor"/>.</summary>
     private Tensor Operand(int tokens, uint seed, float factor)
     {

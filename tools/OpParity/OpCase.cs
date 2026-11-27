@@ -18,13 +18,17 @@ public enum AcceptanceKind
 }
 
 /// <summary>The acceptance rule of one case: kind, tolerances and the reason a tolerance is justified.</summary>
-public sealed record Acceptance(AcceptanceKind Kind, double MaxAbs = 0, double MaxRel = 0, string Reason = "")
+public sealed record Acceptance(AcceptanceKind Kind, double MaxAbs = 0, double MaxRel = 0, string Reason = "", double MaxRelativeRms = 0)
 {
     /// <summary>Byte equality.</summary>
     public static Acceptance Exact => new(AcceptanceKind.BitIdentical);
 
     /// <summary>A justified tolerance.</summary>
     public static Acceptance Within(double maxAbs, double maxRel, string reason) => new(AcceptanceKind.Tolerance, maxAbs, maxRel, reason);
+
+    /// <summary>Judged against the CPU backend by the RMS of the difference over the RMS of the CPU's output.</summary>
+    public static Acceptance AgainstHostRms(double maxRelativeRms, string reason) =>
+        new(AcceptanceKind.HostReference, Reason: reason, MaxRelativeRms: maxRelativeRms);
 
     /// <summary>Judged against the CPU backend instead of a fixture.</summary>
     public static Acceptance AgainstHost(double maxAbs, double maxRel, string reason) => new(AcceptanceKind.HostReference, maxAbs, maxRel, reason);

@@ -67,11 +67,18 @@ public sealed class BlockSparseAttentionGpuTests(ITestOutputHelper log)
     }
 
     [CudaFact]
+    public void NearTiedBlocksAreSelectedAsTheReferenceDoes()
+    {
+        using CudaBackend cuda = Open();
+        Checks.NearTiedBlocksAreSelectedAsTheReferenceDoes(cuda);
+    }
+
+    [CudaFact]
     public void AnUncompiledHeadDimAndTooManyKeyBlocksAreRefusedBeforeAnyWrite()
     {
         using CudaBackend cuda = Open();
-        Checks.Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 }, 24);
-        Checks.Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 12153), Sparsity = 0.9 }, 16);
+        Checks.Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4), Sparsity = 0.0 }, 24, "got 24.");
+        Checks.Refused(cuda, new() { QueryGrid = new(4, 4, 4), KeyGrid = new(4, 4, 4 * 12153), Sparsity = 0.9 }, 16, "got 12153.");
     }
 
     private static CudaBackend Open()
@@ -88,17 +95,11 @@ public sealed class BlockSparseAttentionGpuTests(ITestOutputHelper log)
 
     private sealed class CudaFactAttribute : FactAttribute
     {
-        public CudaFactAttribute()
-        {
-            if (!CudaContext.IsAvailable()) Skip = "SKIPPED: CUDA unavailable.";
-        }
+        public CudaFactAttribute() => Skip = Checks.CudaSkip;
     }
 
     private sealed class CudaTheoryAttribute : TheoryAttribute
     {
-        public CudaTheoryAttribute()
-        {
-            if (!CudaContext.IsAvailable()) Skip = "SKIPPED: CUDA unavailable.";
-        }
+        public CudaTheoryAttribute() => Skip = Checks.CudaSkip;
     }
 }

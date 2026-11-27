@@ -1,20 +1,22 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.OpParity.Cases;
 
-/// <summary>3D block-sparse attention (<see cref="IBackend.BlockSparseAttention"/>), judged against the CPU backend: the selected
-/// key blocks exactly, an F32 output within an absolute 1e-5, a BF16 output within one BF16 step below 1.</summary>
+/// <summary>3D block-sparse attention (<see cref="IBackend.BlockSparseAttention"/>), judged against the CPU backend by the bars of
+/// docs/BACKEND_OPS.md: the selected key blocks exactly, an F32 output within a relative RMS of 1e-5, a BF16 output within 1e-4 and
+/// equal to the backend's own F32 result rounded to nearest even.</summary>
 public static class BlockSparseCases
 {
     public const string Family = "blocksparse";
 
     private static readonly string[] Required = ["cpu", "cuda", "vulkan"];
 
-    private static readonly Acceptance Selection = Acceptance.AgainstHost(0, 0, "the selection is the reference's");
-    private static readonly Acceptance Wide = Acceptance.AgainstHost(1e-5, 0, "the softmax's exp and the key accumulation order follow each backend");
-    private static readonly Acceptance Narrow = Acceptance.AgainstHost(4e-3, 0, "a BF16 output can round to the neighbouring value");
+    private static readonly Acceptance Equal = Acceptance.AgainstHost(0, 0, "the selection is the reference's, and the rounding exact");
+    private static readonly Acceptance Wide = Acceptance.AgainstHostRms(1e-5, "the softmax's exp and accumulation order follow each backend");
+    private static readonly Acceptance Narrow = Acceptance.AgainstHostRms(1e-4, "a BF16 output can round to the neighbouring value");
 
     public static IReadOnlyList<OpCase> Cases()
     {
@@ -57,7 +59,20 @@ public static class BlockSparseCases
             ReadOnlySpan<int> blocks = selected.AsReadOnlySpan<int>();
             Span<float> copy = t.Outputs["selected"].AsSpan<float>();
             for (int i = 0; i < blocks.Length; i++) copy[i] = blocks[i];
-        }, static be => be.HasBlockSparseAttention, Required, Selection));
+        }, static be => be.HasBlockSparseAttention, Required, Equal));
+        // How many BF16 values are not the backend's own F32 values rounded to nearest even: none.
+        cases.Add(new(Family, name + "_bf16_rounded", seed => Build(seed, "mismatches", new TensorShape(1), DType.F32), (be, t) =>
+        {
+            using Tensor wide = new(queries, DType.F32), narrow = new(queries, DType.BF16);
+            Attend(be, t, wide, null);
+            Attend(be, t, narrow, null);
+            ReadOnlySpan<float> unrounded = wide.AsReadOnlySpan<float>();
+            ReadOnlySpan<ushort> rounded = narrow.AsReadOnlySpan<ushort>();
+            int mismatches = 0;
+            for (int i = 0; i < unrounded.Length; i++)
+                if (!float.IsNaN(unrounded[i]) && rounded[i] != BFloat16Bits.FromFloat(unrounded[i])) mismatches++;
+            t.Outputs["mismatches"].AsSpan<float>()[0] = mismatches;
+        }, static be => be.HasBlockSparseAttention, Required, Equal));
         cases.Add(new(Family, name + "_f32", seed => Build(seed, "out", queries, DType.F32),
             (be, t) => Attend(be, t, t.Outputs["out"], null), static be => be.HasBlockSparseAttention, Required, Wide));
         cases.Add(new(Family, name + "_to_bf16", seed => Build(seed, "out", queries, DType.BF16),

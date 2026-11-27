@@ -95,17 +95,11 @@ public sealed class BlockSparseAttentionSpeedTests(ITestOutputHelper log)
 
     private sealed class CudaTheoryAttribute : TheoryAttribute
     {
-        public CudaTheoryAttribute()
-        {
-            if (!CudaContext.IsAvailable()) Skip = "SKIPPED: CUDA unavailable.";
-        }
+        public CudaTheoryAttribute() => Skip = BlockSparseAttentionDeviceChecks.CudaSkip;
     }
 
     private sealed class VulkanTheoryAttribute : TheoryAttribute
     {
-        public VulkanTheoryAttribute()
-        {
-            if (!VulkanContext.IsAvailable()) Skip = "SKIPPED: Vulkan unavailable.";
-        }
+        public VulkanTheoryAttribute() => Skip = BlockSparseAttentionDeviceChecks.VulkanSkip;
     }
 }

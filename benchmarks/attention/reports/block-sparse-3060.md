@@ -18,8 +18,8 @@ LongCat-Video's 720p refinement, head dim 128, sparsity 0.9375 and 4×4×4 block
 The 48-frame grid runs 8 heads rather than the model's 32: four operands of 32 heads do not fit in 12 GB. Which dense kernel
 row served each call was not recorded.
 
-The block-sparse kernel computes in F32 whatever it reads, so BF16 operands save memory and load traffic and little time. A
-query block reads 1/16 of the keys, and the time falls by less than that: the kernel is F32 arithmetic in the CUDA cores.
+The block-sparse kernel computes in F32 whatever it reads. BF16 operands save memory; their times differ from F32 by 5
+percent or less. A query block reads 1/16 of the keys and the time falls 9 to 11 times; why not 16 was not measured.
 Its workspace beside the operands is the block means and the selection, 34 MiB at the 48-frame, 8-head size (computed from the
 shapes).
 

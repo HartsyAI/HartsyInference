@@ -1,4 +1,5 @@
 using System.Buffers;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends.Attention;
@@ -172,7 +173,7 @@ public static class AttentionHostReference
         DType dt = x.Storage.DType;
         if (dt == DType.F32) ((float*)p)[i] = value;
         else if (dt == DType.F16) ((ushort*)p)[i] = BitConverter.HalfToUInt16Bits((Half)value);
-        else if (dt == DType.BF16) ((ushort*)p)[i] = TensorCasts.F32ToBf16BitsRounded(value);
+        else if (dt == DType.BF16) ((ushort*)p)[i] = BFloat16Bits.FromFloat(value);
         else throw new AttentionUnsupportedException($"The host reference writes F32, F16 and BF16 outputs, not {dt}.");
     }
 
