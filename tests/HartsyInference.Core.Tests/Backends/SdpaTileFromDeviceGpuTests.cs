@@ -20,12 +20,12 @@ public sealed class SdpaTileFromDeviceGpuTests
     public SdpaTileFromDeviceGpuTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
-    public void KnobOn_TheSameResidentPlan_GivesTheSamePathAtTwoFreeReadings()
+    public void KnobOn_TheSameHeadroom_GivesTheSamePathAtTwoFreeReadings()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        // 10 GiB planned resident on a 12 GiB card leaves a 1 GiB budget: the 2.7 GiB score matrix is tiled at both readings.
-        float[] tight = Run(knobOn: true, freeBytes: 2 * Gib, plannedResident: 10 * Gib);
-        float[] loose = Run(knobOn: true, freeBytes: 20 * Gib, plannedResident: 10 * Gib);
+        // A 1 GiB noted headroom caps the budget at 1 GiB: the 2.7 GiB score matrix is tiled at both readings.
+        float[] tight = Run(knobOn: true, freeBytes: 2 * Gib, headroom: 1 * Gib);
+        float[] loose = Run(knobOn: true, freeBytes: 20 * Gib, headroom: 1 * Gib);
         double gap = RelativeL2(tight, loose);
         _output.WriteLine($"knob on: relative L2 between free readings 2 GiB and 20 GiB: {gap:E3}");
         Assert.True(tight.AsSpan().SequenceEqual(loose), $"knob on: outputs differ across free readings (relative L2 {gap:E3})");
@@ -35,21 +35,21 @@ public sealed class SdpaTileFromDeviceGpuTests
     public void KnobOff_TheFreeReadingCanMoveThePath_ByRoundingOnly()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        float[] tight = Run(knobOn: false, freeBytes: 2 * Gib, plannedResident: 0);
-        float[] loose = Run(knobOn: false, freeBytes: 20 * Gib, plannedResident: 0);
+        float[] tight = Run(knobOn: false, freeBytes: 2 * Gib, headroom: 0);
+        float[] loose = Run(knobOn: false, freeBytes: 20 * Gib, headroom: 0);
         double gap = RelativeL2(tight, loose);
         _output.WriteLine($"knob off: relative L2 between free readings 2 GiB and 20 GiB: {gap:E3}");
         Assert.True(gap < 1e-4, $"knob off: the path change is larger than rounding: relative L2 {gap:E3}");
     }
 
-    private static float[] Run(bool knobOn, ulong freeBytes, ulong plannedResident)
+    private static float[] Run(bool knobOn, ulong freeBytes, ulong headroom)
     {
         if (knobOn) KnobStore.Set(EngineKnobs.TileFromDevice, true);
         try
         {
             using CudaBackend backend = new(0, PtxDir());
             backend.TestFreeVramOverride = () => (nuint)freeBytes;
-            backend.NoteAttentionPlannedResident((long)plannedResident);
+            backend.NoteAttentionHeadroom((long)headroom);
             Random rng = new(5);
             using Tensor q = Random(rng), k = Random(rng), v = Random(rng);
             using Tensor output = new(new TensorShape(1, Heads, Tokens, HeadDim), DType.F32);

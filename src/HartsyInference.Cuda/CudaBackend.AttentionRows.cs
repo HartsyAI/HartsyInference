@@ -337,7 +337,7 @@ public sealed partial class CudaBackend
         (nuint memFree, nuint memTotal) = _context.GetMemoryInfo();
         ulong free = (ulong)(TestFreeVramOverride?.Invoke() ?? memFree);
         ulong total = memTotal;
-        ulong budget = EngineKnobs.TileFromDevice.Value == true ? PlannedGateBudget(total, PlannedResidentBytes) : free / 2;
+        ulong budget = EngineKnobs.TileFromDevice.Value == true ? PlannedGateBudget(total, AttentionHeadroomBytes) : free / 2;
         return new GateReading(budget, free, total);
     }
 
@@ -353,26 +353,25 @@ public sealed partial class CudaBackend
     /// total half makes a gate's path the same on every run of one device while free VRAM is ample; the free clamp stops a gate choosing a buffer
     /// the card does not have free now. So the path can still move when free falls below half the total: the A/B rows name the free reading of
     /// each run. The tile rung no longer sets a gate; it sets only the tile height (<see cref="TileRowsFromDevice"/>).</summary>
-    /// <remarks>Under the knob the budget reads no free memory: the streaming planner's known resident bytes (see <see cref="PlannedResidentBytes"/>)
-    /// and the device total set it, so two runs of one card and model take the same gate path whatever else holds the card's memory.</remarks>
-    internal static ulong PlannedGateBudget(ulong deviceTotalBytes, ulong plannedResidentBytes)
+    /// <remarks>Under the knob the budget reads no free memory: it is the device total's half, capped at the headroom a streaming scope
+    /// noted (see <see cref="NoteAttentionHeadroom"/>). The planner keeps that headroom free after its resident prefix, so a materialized
+    /// allocation at this size fits. With no scope noted, the default is <see cref="AttentionDefaultBudgetBytes"/>.</remarks>
+    internal static ulong PlannedGateBudget(ulong deviceTotalBytes, ulong headroomBytes)
     {
-        ulong reserved = plannedResidentBytes + AttentionReserveBytes;
-        ulong spendable = deviceTotalBytes > reserved ? deviceTotalBytes - reserved : 0;
-        return Math.Min(deviceTotalBytes / 2, spendable);
+        ulong cap = headroomBytes > 0 ? headroomBytes : AttentionDefaultBudgetBytes;
+        return Math.Min(deviceTotalBytes / 2, cap);
     }
 
-    /// <summary>Activation and context headroom kept free of the planned budget, under <c>numerics.tileFromDevice</c> (1 GiB).</summary>
-    internal const ulong AttentionReserveBytes = 1UL << 30;
+    /// <summary>The budget cap when no streaming scope has noted a headroom (<c>numerics.tileFromDevice</c>): 1 GiB.</summary>
+    internal const ulong AttentionDefaultBudgetBytes = 1UL << 30;
 
-    /// <summary>Bytes the streaming planner keeps resident, as the planner computed them from the model, not from free memory. Set through
-    /// <see cref="NoteAttentionPlannedResident"/> at each denoise plan; 0 until a plan is noted.</summary>
-    internal ulong PlannedResidentBytes => (ulong)Math.Max(0L, _attentionPlannedResident);
+    /// <summary>The headroom a streaming scope noted, 0 when none is active.</summary>
+    internal ulong AttentionHeadroomBytes => (ulong)Math.Max(0L, _attentionHeadroom);
 
-    private long _attentionPlannedResident;
+    private long _attentionHeadroom;
 
     /// <inheritdoc/>
-    public void NoteAttentionPlannedResident(long bytes) => _attentionPlannedResident = bytes;
+    public void NoteAttentionHeadroom(long bytes) => _attentionHeadroom = bytes;
 
 
     /// <summary>Whether the equal-head form of a grouped call runs on INT8 v2, Sage or the F16 flash kernel: the kernels the

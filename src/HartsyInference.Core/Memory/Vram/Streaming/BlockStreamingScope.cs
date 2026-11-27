@@ -16,6 +16,7 @@ namespace HartsyInference.Core.Memory.Vram.Streaming;
 public sealed class BlockStreamingScope : IDisposable
 {
     private readonly IStreamableDenoiser _denoiser;
+    private readonly IBackend _backend;
     private readonly string _modelName;
     private readonly bool _perStepTrim;
     private readonly BlockStreamingController? _streamer;
@@ -25,6 +26,10 @@ public sealed class BlockStreamingScope : IDisposable
         BlockStreamingController? streamer)
     {
         _denoiser = options.Denoiser;
+        // The planner keeps this much free after the resident prefix, so an attention gate budget of at most this much always fits (see
+        // NoteAttentionHeadroom). Cleared in Dispose.
+        _backend = options.Backend;
+        _backend.NoteAttentionHeadroom(options.HeadroomBytes);
         _modelName = options.ModelName;
         _perStepTrim = options.PerStepTrim;
         _streamer = streamer;
@@ -127,6 +132,7 @@ public sealed class BlockStreamingScope : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _backend.NoteAttentionHeadroom(0);
         _denoiser.BeforeBlockForward = null;
         if (_streamer is null) return;
         if (_perStepTrim && StepsEnded == 0)
@@ -186,11 +192,6 @@ public sealed class BlockStreamingScope : IDisposable
         // The planner's inputs, read once after the shared preload and the trim: the sizing spends free memory minus the headroom on whole blocks.
         long freeAfterShared = backend.FreeMemoryBytes();
         long sharedBytes = SumBytes(denoiser.EnumerateSharedWeights());
-        // Model-derived planned residency for the attention gate budget: the shared weights plus two of the largest blocks (one resident, one
-        // staging). It reads no free memory, so the budget does not move with the planner's free-memory prefix above.
-        long largestBlock = 0;
-        foreach (long bytes in blockBytes) largestBlock = Math.Max(largestBlock, bytes);
-        backend.NoteAttentionPlannedResident(sharedBytes + 2 * largestBlock);
         int prefix;
         if (pin is null)
         {

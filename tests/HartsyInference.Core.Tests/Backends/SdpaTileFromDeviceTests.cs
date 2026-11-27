@@ -41,20 +41,19 @@ public sealed class SdpaTileFromDeviceTests
     }
 
     [Fact]
-    public void TheGateBudgetIsHalfTheTotalWhenTheResidentPlanLeavesRoom()
+    public void TheGateBudgetIsTheNotedHeadroomCappedAtHalfTheTotal()
     {
-        // No free-memory argument exists: the budget is a function of the device total and the planned resident bytes only.
-        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 0));
-        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 8UL << 30));
+        // No free-memory argument exists: the budget is a function of the device total and the noted headroom only.
+        Assert.Equal(2UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
+        Assert.Equal(Card24Gb / 2, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 20UL << 30));
     }
 
     [Fact]
-    public void TheGateBudgetShrinksToWhatThePlanLeavesAndNeverGoesNegative()
+    public void WithNoHeadroomNotedTheBudgetIsTheOneGiBDefault()
     {
-        // 24 GiB card, 20 GiB planned resident: 24 - 20 - 1 reserve leaves 3 GiB, under half the total.
-        Assert.Equal(3UL << 30, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 20UL << 30));
-        // A plan that leaves no room gives no budget (the materialized gates then refuse), not an underflow.
-        Assert.Equal(0UL, CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 23UL << 30));
+        // A scope that clears its note (headroom 0) leaves the default, never an unbounded or zero budget.
+        Assert.Equal(CudaBackend.AttentionDefaultBudgetBytes, CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 0));
+        Assert.Equal(1UL << 30, CudaBackend.AttentionDefaultBudgetBytes);
     }
 
     [Fact]
@@ -62,7 +61,7 @@ public sealed class SdpaTileFromDeviceTests
     {
         // A 1 GiB rung on a 24 GB card: a 2 GiB score matrix is under the gate, so it stays materialized.
         Assert.Equal(1L << 30, CudaBackend.TileRungBytes(Card24Gb));
-        Assert.True(2UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, plannedResidentBytes: 0));
+        Assert.True(2UL << 30 <= CudaBackend.PlannedGateBudget(Card24Gb, headroomBytes: 2UL << 30));
     }
 
     [Fact]

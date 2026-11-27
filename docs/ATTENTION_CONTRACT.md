@@ -287,10 +287,13 @@ The planner reproduces these until the row that owns each is rewritten.
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
 - With `numerics.tileFromDevice` on (default off), the tile height is the device's fixed rung over the row bytes: 1 GiB when the card's total VRAM
   is 20 GiB or more (binary; a 20 GB card reports about 18.6 GiB and gets 512 MiB), else 512 MiB. The rung sets the height only. The tiling,
-  BF16-cast and causal-mask gates share one budget, `min(total/2, free)`. Because free is in that `min`, a gate can still choose a different
-  path on a run with less free VRAM than half the total. A failed allocation still halves that call's tile (the OOM loop), so a run
-  that hits one is not bit-comparable with one that did not. The remembered cap is recorded but not read under this knob, so later calls
-  do not start from a shrunken height. A/B on RTX 4090 at 93 frames, seed 1234, knob
+  BF16-cast and causal-mask gates share one budget, `min(total/2, headroom)`. The headroom is the policy headroom that a streaming scope
+  keeps free after its resident prefix, noted when the scope starts and cleared when it is disposed; with no scope active the cap is
+  1 GiB. The budget reads no free memory, so the gate path does not move with the free reading, and a materialized allocation at this
+  size fits in what the planner held back. A failed allocation is not retried at a smaller height under this knob: it raises
+  OutOfVram, so a run never changes path mid-run. The remembered cap is recorded but not read under this knob, so later calls do not
+  start from a shrunken height. The gate is pinned by `SdpaTileFromDeviceTests` (budget as a function of total and headroom) and the
+  on-card A/B `SdpaTileFromDeviceGpuTests` (bit-identical output across two free readings with the knob on; knob off differs at rounding). A/B on RTX 4090 at 93 frames, seed 1234, knob
   `c3a55333c` vs main `712ea2ca7`: 832x480 knob steps 92.7 / 92.0 s, peaks 19585 / 19718 MiB; main steps 90.7 / 91.7 s, peaks
   20175 / 20051 MiB; the knob reproduces its output (two runs, same sha `6182eb4a`); main does not. These rows were measured on the
   previous gate (the rung), so the 832x480 and 640x368 A/B must be re-run on this gate before default-on.
