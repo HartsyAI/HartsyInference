@@ -63,7 +63,7 @@ public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
     /// <summary>Planning refusals: the base family has no driving speech, and its long-video chain is not wired yet (a request for one would run as a
     /// single clip, silently).</summary>
     /// <inheritdoc/>
-    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request);
+    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request, distilled: false);
 
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;

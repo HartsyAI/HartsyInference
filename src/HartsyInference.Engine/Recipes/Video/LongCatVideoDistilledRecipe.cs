@@ -65,7 +65,7 @@ public sealed class LongCatVideoDistilledRecipe : IVideoRecipe, IVideoDeviceChec
 
     /// <summary>Planning refusals, as the base family's: no driving speech (the base has none), and a chain length the base recipe does not read.</summary>
     /// <inheritdoc/>
-    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request);
+    public string? RequestRefusal(VideoRequest request, VideoEffectiveSettings settings) => LongCatRecipeSupport.BaseRequestRefusal(request, distilled: true);
 
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;

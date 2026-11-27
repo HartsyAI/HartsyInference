@@ -262,12 +262,20 @@ internal static class LongCatRecipeSupport
 
     /// <summary>The planning refusals of the base family (the base and the distilled build): no driving speech, and a chain length the base recipe
     /// does not read. Null when the request is one the base family can run.</summary>
-    internal static string? BaseRequestRefusal(HartsyInference.Engine.Requests.VideoRequest request)
+    internal static string? BaseRequestRefusal(HartsyInference.Engine.Requests.VideoRequest request, bool distilled)
     {
         if (request.VideoAudioReference is not null)
             return "LongCat-Video has no driving audio; speech-driven video is longcat-avatar.";
         if (request.ChainTotalFrames is not null)
             return "Long video on LongCat-Video is not wired yet; the request's chain length would be ignored.";
+        if (request.VideoContinuation is not null)
+        {
+            if (request.InitImage is not null)
+                return "A LongCat-Video continuation takes its conditioning from the clip; it cannot also take an init image.";
+            // The reference's generate_vc asserts `not (use_distill and enhance_hf)`, and a continuation runs with enhance_hf.
+            if (distilled)
+                return "The distilled LongCat-Video build cannot continue a clip: its 16-step schedule excludes the continuation's enhance_hf tail. Use longcat-video.";
+        }
         return null;
     }
 

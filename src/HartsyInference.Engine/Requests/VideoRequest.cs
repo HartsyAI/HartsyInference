@@ -115,6 +115,10 @@ public sealed record VideoRequest
     /// <summary>Driving motion video for character-animation families (Wan-Animate); null falls back to tiling <see cref="InitImage"/> across frames.</summary>
     public VideoClip? DrivingVideo { get; init; }
 
+    /// <summary>The clip a continuation extends (LongCat-Video's video continuation): its last 13 frames condition the generation, and the
+    /// output begins with them, as the reference returns them. Null for an ordinary generation.</summary>
+    public VideoClip? VideoContinuation { get; init; }
+
     /// <summary>Pre-rendered pose/skeleton driving video; overrides auto-preprocessing for the pose branch.</summary>
     public VideoClip? DrivingPoseVideo { get; init; }
 
