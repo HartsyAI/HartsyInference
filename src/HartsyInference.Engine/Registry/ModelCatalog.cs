@@ -3287,14 +3287,14 @@ public static class ModelCatalog
 
             // Duo v1 (inclusionAI): a LoRA on MiniMax-H3's Ref2VA DiT, driven chunk by chunk by a LoRA-tuned Qwen3-VL-32B. The DuoRecipe runs the two causal releases from supplied Intent rows (no Intent model, no ASR, no CLI route, nothing
             // verified on released weights). The assets are the Duo-specific LoRA files only: the user places the release's realization/backbone shards and codec/ VAEs (MiniMax-H3's own files) beside them in the release folder.
-            // The distilled release needs a re-noise solver the engine does not have, so no recipe matches it.
+            // The distilled release ships the LoRA only: the causal release's backbone and codec files go beside it, and its run folder also holds the re-noise draws.
             // Licence: the MiniMax H3 Community License (repo LICENSE, Exhibit A). Its default terms grant rights only outside the EU, UK, Republic of Korea and United States (use and distribution), require the licence and NOTICE
             // beside any distributed file and a notice on modified files, bind recipients to the same restrictions (including no use of outputs to improve another model), and ask for "MiniMax H3" on a commercial UI and a
             // machine-generated disclosure on public outputs. The owner holds a separate MiniMax licence that allows hosting a repack; its terms are not recorded yet, so hosting stays off until they are written here.
             new CatalogEntry
             {
                 Id = "duo-v1-distill", Modality = vid, DisplayName = "Duo 1.0 distill (full-duplex audio-video, 4 steps)",
-                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (DMD generator, shift 5.0); no recipe yet",
+                Architecture = "H3 Ref2VA DiT + rank-128 LoRA (DMD generator, shift 5.0); needs the causal release's backbone and codec files",
                 Status = vp, HuggingFaceRepo = "inclusionAI/Duo-1.0-distill",
                 Assets = DuoLoraAssets("inclusionAI/Duo-1.0-distill", "duo-1.0-distill",
                     "4ca08a328ea6ecc19490bd16605164d07dd9d8dcd7d3b0774c4d9358349be10a",

@@ -29,11 +29,60 @@ public sealed class DuoRecipeTests : IDisposable
     }
 
     [Fact]
-    public void BothCausalReleasesResolveToTheRecipeAndTheDistilledOneDoesNot()
+    public void EachReleaseResolvesToItsStageWithItsOwnSamplerDefaults()
     {
-        Assert.IsType<DuoRecipe>(VideoRecipeRegistry.Resolve("duo-v1-causal"));
-        Assert.IsType<DuoRecipe>(VideoRecipeRegistry.Resolve("duo-v1-2-causal"));
-        Assert.Null(VideoRecipeRegistry.Resolve("duo-v1-distill"));
+        foreach (string causal in new[] { "duo-v1-causal", "duo-v1-2-causal" })
+        {
+            VideoDefaults defaults = Assert.IsType<DuoRecipe>(VideoRecipeRegistry.Resolve(causal)).Defaults;
+            Assert.Equal((50, 1f), (defaults.Steps, defaults.FlowShift!.Value));
+        }
+        VideoDefaults distilled = Assert.IsType<DuoRecipe>(VideoRecipeRegistry.Resolve("duo-v1-distill")).Defaults;
+        Assert.Equal((4, 5f), (distilled.Steps, distilled.FlowShift!.Value));
+    }
+
+    [Fact]
+    public async Task ADistilledReleaseGeneratesFromARunFolderWithReNoise()
+    {
+        using DuoReleaseFixture release = new(distilled: true);
+        DuoRecipe recipe = new(distilled: true);
+        using DuoRecipePipeline pipeline = recipe.Build(
+            new RecipeContext { CheckpointPath = release.Release, Backend = _backend }, (_, _) => DuoReleaseFixture.Codecs());
+        VideoRequest request = Request((DuoRecipePipeline.RunFolderKey, release.RunFolder)) with { Steps = null };
+        VideoEffectiveSettings settings = (await Plan(request, recipe, "duo-v1-distill")).EffectiveSettings;
+        List<int> steps = [];
+
+        VideoGenerationResult result = pipeline.Generate(request, settings, new Immediate(p => steps.Add(p.Step)), default);
+
+        Assert.Equal((4, 5f), (settings.Steps, settings.FlowShift!.Value));
+        Assert.Equal(DuoReleaseFixture.Frames, result.Frames.Count);
+        Assert.Equal(Enumerable.Range(1, 8), steps);
+        // Other draws give another clip, so the folder's re-noise reaches the output.
+        File.Copy(Path.Combine(release.RunFolder, "rvideo1.bin"), Path.Combine(release.RunFolder, "rvideo0.bin"), overwrite: true);
+        VideoGenerationResult other = pipeline.Generate(request, settings, null, default);
+        Assert.NotEqual(result.Frames.SelectMany(f => f.Rgb), other.Frames.SelectMany(f => f.Rgb));
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(request, settings with { Sampler = "euler" }, null, default));
+    }
+
+    [Fact]
+    public async Task EachStageRefusesTheOtherStagesRunFolderAndRelease()
+    {
+        using DuoReleaseFixture release = new(distilled: true);
+        DuoRecipe distilled = new(distilled: true);
+        using DuoRecipePipeline causalPipeline = Build();
+        VideoRequest renoised = Request((DuoRecipePipeline.RunFolderKey, release.RunFolder)) with { Steps = 4, FlowShift = 5f };
+        VideoEffectiveSettings settings = (await Plan(renoised)).EffectiveSettings;
+        ArgumentException refused = Assert.Throws<ArgumentException>(() => causalPipeline.Generate(renoised, settings, null, default));
+        Assert.Contains("renoiseVideo", refused.Message, StringComparison.Ordinal);
+
+        using DuoRecipePipeline distilledPipeline = distilled.Build(
+            new RecipeContext { CheckpointPath = release.Release, Backend = _backend }, (_, _) => DuoReleaseFixture.Codecs());
+        VideoRequest plain = Request() with { Steps = DuoReleaseFixture.Steps, FlowShift = 1f };
+        VideoEffectiveSettings plainSettings = (await Plan(plain, distilled, "duo-v1-distill")).EffectiveSettings;
+        refused = Assert.Throws<ArgumentException>(() => distilledPipeline.Generate(plain, plainSettings, null, default));
+        Assert.Contains("renoiseVideo", refused.Message, StringComparison.Ordinal);
+
+        Assert.Throws<NotSupportedException>(() => DuoAssets.Resolve(_release.Release, null, distilled: true));
+        Assert.Throws<NotSupportedException>(() => DuoAssets.Resolve(release.Release, null));
     }
 
     [Fact]
@@ -235,7 +284,7 @@ public sealed class DuoRecipeTests : IDisposable
         DuoReleaseFixture.WriteLora(_release.Dcp, "models.generator.");
 
         InvalidDataException error = Assert.Throws<InvalidDataException>(() => Build());
-        Assert.Contains("distilled", error.Message, StringComparison.Ordinal);
+        Assert.Contains("models.student.", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -266,12 +315,12 @@ public sealed class DuoRecipeTests : IDisposable
         TextDim = DuoReleaseFixture.TextDim, LatentsDim = 24, HasAudio = true, AudioLatentsDim = 32,
     };
 
-    private static Task<VideoPlan> Plan(VideoRequest request)
+    private static Task<VideoPlan> Plan(VideoRequest request) => Plan(request, new DuoRecipe(), "duo-v1-causal");
+
+    private static Task<VideoPlan> Plan(VideoRequest request, DuoRecipe recipe, string id)
     {
-        DuoRecipe recipe = new();
-        ModelSpec spec = new() { Requested = "duo-v1-causal", Modality = Modality.Video };
-        return VideoProfileResolver.ResolveAsync(spec, request,
-            VideoRecipeDeclaration.For(recipe, "duo-v1-causal", null, recipe.Supports), default);
+        ModelSpec spec = new() { Requested = id, Modality = Modality.Video };
+        return VideoProfileResolver.ResolveAsync(spec, request, VideoRecipeDeclaration.For(recipe, id, null, recipe.Supports), default);
     }
 
     private sealed class Immediate(Action<StepPreview> report) : IProgress<StepPreview>

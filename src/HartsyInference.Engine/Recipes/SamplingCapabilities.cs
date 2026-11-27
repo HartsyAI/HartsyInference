@@ -109,7 +109,7 @@ public static class SamplingCapabilities
         ["ltx-2.5-distilled"] = SolverOwned,
         ["minimax-h3"] = SolverOwned,
         ["minimax-h3-image"] = SolverOwned,
-        // Duo's causal student runs the released Euler grid; no sampler or schedule is selectable.
+        // Duo runs each release's own solver (causal Euler, distilled re-noise); no sampler or schedule is selectable.
         ["duo-v1"] = SolverOwned,
     };
 
