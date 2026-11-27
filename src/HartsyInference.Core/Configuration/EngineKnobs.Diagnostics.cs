@@ -213,6 +213,29 @@ public static partial class EngineKnobs
         Str("diagnostics.longcatNoiseNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
             "Path to a float32 C-order .npy [1, C, T, H, W] that replaces the initial noise of LongCat generations (the first segment of a chain). Unset draws the seeded noise.");
 
+    /// <summary>Directory where the LongCat avatar generation writes its conditioning tensors (float32 .npy, prefix call{n}_): text_embeds
+    /// [1, S, C] (the positive prompt, padded rows as encoded), text_valid_tokens [1], audio_windows [frames, W] (the raw Whisper windows of the
+    /// clip), audio_tokens [N, D] (the first segment's projected audio tokens, the DiT's input), first_frame_latent [1, C, 1, h, w] (image-to-video
+    /// only), speech16k [samples] (the driving speech at 16 kHz, before the cut). Unset writes nothing.</summary>
+    public static readonly Knob<string?> LongCatConditioningDump =
+        Str("diagnostics.longcatConditioningDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Directory for the LongCat avatar's conditioning tensors (text_embeds, text_valid_tokens, audio_windows, audio_tokens, first_frame_latent, speech16k) as float32 .npy; unset writes nothing.");
+
+    /// <summary>Replaces the positive prompt's embeddings (float32 .npy [1, S, C]); the token count is kept.</summary>
+    public static readonly Knob<string?> LongCatTextEmbedNpy =
+        Str("diagnostics.longcatTextEmbedNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Float32 .npy [1, S, C] that replaces the positive prompt's embeddings in LongCat avatar generations; unset keeps the encoder's output.");
+
+    /// <summary>Replaces the first segment's projected audio tokens (float32 .npy [N, D]).</summary>
+    public static readonly Knob<string?> LongCatAudioTokensNpy =
+        Str("diagnostics.longcatAudioTokensNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Float32 .npy [N, D] that replaces the first segment's projected audio tokens (the DiT's audio input) in LongCat avatar generations; unset keeps them.");
+
+    /// <summary>Replaces the first-frame conditioning latent (float32 .npy [1, C, 1, h, w]) of an avatar image-to-video generation.</summary>
+    public static readonly Knob<string?> LongCatFirstFrameLatentNpy =
+        Str("diagnostics.longcatFirstFrameLatentNpy", null, KnobScope.Runtime, KnobDomain.Diagnostics,
+            "Float32 .npy [1, C, 1, h, w] that replaces the first-frame conditioning latent of LongCat avatar image-to-video generations; unset keeps the encoder's output.");
+
     /// <summary>Directory for the LongCat avatar DiT's probe tensors of the first denoise step of the first call; unset writes nothing.</summary>
     public static readonly Knob<string?> LongCatProbeDump =
         Str("diagnostics.longcatProbeDump", null, KnobScope.Runtime, KnobDomain.Diagnostics,
