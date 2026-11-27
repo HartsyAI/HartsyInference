@@ -1,5 +1,6 @@
 using System.Reflection;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -7,6 +8,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.ModelAssets.Lora;
+using HartsyInference.Tests.Shared;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -14,6 +16,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>A pinned prefix released for a re-size restores the shared weights before the planner reads free memory: the release frees each block,
 /// and a freed block also frees the LoRA adapter operands it expands to, which live with the shared weights.</summary>
 [Trait("Category", "SyntheticSmoke")]
+[Collection(GlobalKnobStore.Name)]
 public sealed class BlockStreamingReleaseTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "longcat-release-" + Guid.NewGuid().ToString("N"));
@@ -84,6 +87,31 @@ public sealed class BlockStreamingReleaseTests : IDisposable
 
         bool freedBlockZero = recorder.Calls.Any(c => c.Kind == "FreeWeights" && c.Tensors.Contains(firstBlockWeight));
         Assert.True(freedBlockZero, "an unsized resident pin must free every block, block 0 included");
+    }
+
+    /// <summary>The <c>diagnostics.streamResidentPrefix</c> knob pins the resident prefix count of an Auto scope; unset, the free-memory sizing
+    /// (ample here, so every block) decides. The pin is clamped to the block count.</summary>
+    [Fact]
+    public void TheStreamResidentPrefixKnobPinsTheCountAndUnsetKeepsTheSizing()
+    {
+        using CpuBackend cpu = new();
+        using LongCatTransformer dit = GatedTransformer(cpu);
+        IBackend backend = RecordingBackend.Create(cpu, new NoStreamingCache(), out _);
+        int blocks = dit.BlockCount;
+
+        using (BlockStreamingScope unset = BlockStreamingScope.Open(Options(backend, dit, new ResidentPrefixPin(), tokenLoad: 100)))
+            Assert.Equal(blocks, unset.ResidentPrefixBlocks);
+
+        KnobStore.Set(EngineKnobs.StreamResidentPrefix, 1);
+        try
+        {
+            using BlockStreamingScope pinned = BlockStreamingScope.Open(Options(backend, dit, new ResidentPrefixPin(), tokenLoad: 100));
+            Assert.Equal(Math.Min(1, blocks), pinned.ResidentPrefixBlocks);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.StreamResidentPrefix);
+        }
     }
 
     private BlockStreamingOptions Options(IBackend backend, LongCatTransformer dit, ResidentPrefixPin pin, long tokenLoad,
