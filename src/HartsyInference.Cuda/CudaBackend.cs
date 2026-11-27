@@ -794,13 +794,21 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private bool CanDequantInt8OnDevice(Tensor weight, QuantWeightInfo info, bool fuseGelu, Tensor? preGate)
         => info is { Format: "int8_tensorwise", FullPrecisionMatMul: true, ConvRotGroupSize: 0, RowScale: not null }
             && _kernels is { HasInt8DequantKernels: true } && weight.Shape.Rank == 2 && !fuseGelu && preGate is null
-            && weight.Fp8ScaleFactor == 1f && !weight.ForceF32Gemm;
+            && weight.Fp8ScaleFactor == 1f;
 
     /// <summary>The bytes one row tile of an unpacked int8 weight may take in the GEMM dtype.</summary>
     /// <summary>The unpack mode of an int8 weight's linear: 0 for the default truncation; for a reference-rounded weight, 2 (the exact float32
     /// product) when the layer is a float32-input one (ForceF32Gemm, set at load from the reference's dtype rule), 1 (BF16 nearest-even) otherwise.</summary>
     private static int Int8RoundingMode(Tensor weight) =>
         weight.QuantInfo is { ReferenceRounding: true } ? (weight.ForceF32Gemm ? 2 : 1) : 0;
+
+    /// <summary>The exact float32 dequant of a float32-input layer, marked so the GEMM stays float32 (the flag is per tensor and a fresh tensor
+    /// does not carry it). Without it the dense weight multiplies at the default float32 compute, which is TF32 on the device.</summary>
+    private static Tensor FloatDequantKeepingGemm(Tensor dequantized)
+    {
+        dequantized.ForceF32Gemm = true;
+        return dequantized;
+    }
 
     private const long Int8DequantTileBytes = 64L << 20;
 
@@ -2093,7 +2101,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             // A reference-rounded weight on a float32-input layer keeps its exact float32 product; the other layers take BF16.
             using Tensor dequantized = Int8RoundingMode(weight) == 2
-                ? Int8ConvRotCodec.DequantToF32Exact(weight, int8Info.RowScale)
+                ? FloatDequantKeepingGemm(Int8ConvRotCodec.DequantToF32Exact(weight, int8Info.RowScale))
                 : Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize, int8Info.ReferenceRounding);
             try
             {
