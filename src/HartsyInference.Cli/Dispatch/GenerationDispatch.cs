@@ -692,12 +692,13 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> VideoAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
+        IReadOnlyDictionary<string, object> extra = BuildVideoExtra(parameters);
         VideoRequest request = new VideoRequest
         {
             Vram = ParseVramOverrides(parameters),
             Prompt = prompt,
-            NegativePrompt = parameters.Get("negative") is { Length: > 0 } negative ? negative
-                : "blurry, low quality, distorted, watermark",
+            NegativePrompt = VideoNegativePrompt(parameters),
+            Extra = extra,
             Width = parameters.GetIntOrNull("width"),
             Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
@@ -800,6 +801,33 @@ public static class GenerationDispatch
             artifact.Meta["execution_path"] = execution.ExecutionPath;
         }
         return artifact;
+    }
+
+    /// <summary>The family keys <c>hartsy video</c> adds to the request: the Duo run folder, made absolute, and its history window.</summary>
+    internal static IReadOnlyDictionary<string, object> BuildVideoExtra(ParamState parameters)
+    {
+        Dictionary<string, object> extra = new(StringComparer.Ordinal);
+        if (parameters.GetStringOrNull("duo-run-folder") is { } folder)
+        {
+            extra[DuoRecipePipeline.RunFolderKey] = Path.GetFullPath(folder);
+        }
+        if (parameters.GetIntOrNull("duo-window-frames") is { } window)
+        {
+            extra[DuoRecipePipeline.WindowFramesKey] = window;
+        }
+        return extra;
+    }
+
+    /// <summary>The negative prompt of a video run: the caller's, else a general one. A Duo run reads no prompt, so it gets none unless the
+    /// caller typed one, which the recipe then refuses by name.</summary>
+    internal static string? VideoNegativePrompt(ParamState parameters)
+    {
+        if (parameters.Get("negative") is { Length: > 0 } negative)
+        {
+            return negative;
+        }
+        bool duo = parameters.GetStringOrNull("duo-run-folder") is not null || parameters.GetIntOrNull("duo-window-frames") is not null;
+        return duo ? null : "blurry, low quality, distorted, watermark";
     }
 
     /// <summary>The image component overrides from <c>--vae</c>, <c>--text-encoder</c> and <c>--vision-encoder</c>, or null.</summary>

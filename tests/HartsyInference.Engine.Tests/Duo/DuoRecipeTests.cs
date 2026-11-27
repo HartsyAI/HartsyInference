@@ -7,6 +7,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -63,6 +64,23 @@ public sealed class DuoRecipeTests : IDisposable
         Assert.Throws<ArgumentException>(() => pipeline.Generate(request, settings with { Sampler = "euler" }, null, default));
     }
 
+    /// <summary>The construction-time checks must read the distilled run folder as distilled.</summary>
+    [Fact]
+    public async Task AServiceBoundDistilledRequestPassesTheConstructionChecks()
+    {
+        using DuoReleaseFixture release = new(distilled: true);
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = new() { Requested = "duo-v1-distill", Modality = Modality.Video, LocalPath = release.Release };
+        VideoRequest request = Request((DuoRecipePipeline.RunFolderKey, release.RunFolder)) with { Steps = null };
+        VideoPlan plan = await engine.VideoPlanning.PlanAsync(spec, request);
+
+        using DuoRecipePipeline pipeline = new DuoRecipe(distilled: true).Build(
+            new RecipeContext { CheckpointPath = release.Release, Backend = _backend, VideoPlan = plan },
+            (_, _) => DuoReleaseFixture.Codecs());
+
+        Assert.NotNull(pipeline);
+    }
+
     [Fact]
     public async Task EachStageRefusesTheOtherStagesRunFolderAndRelease()
     {
@@ -83,6 +101,18 @@ public sealed class DuoRecipeTests : IDisposable
 
         Assert.Throws<NotSupportedException>(() => DuoAssets.Resolve(_release.Release, null, distilled: true));
         Assert.Throws<NotSupportedException>(() => DuoAssets.Resolve(release.Release, null));
+    }
+
+    /// <summary>A release folder named with <c>--model-path</c> holds the LoRA, so nothing is left to download.</summary>
+    [Theory]
+    [InlineData("duo-v1-causal")]
+    [InlineData("duo-v1-2-causal")]
+    [InlineData("duo-v1-distill")]
+    public void AReleaseFolderSatisfiesTheCatalogFiles(string id)
+    {
+        CatalogEntry entry = ModelCatalog.All.Single(e => e.Id == id);
+
+        Assert.Empty(ModelDownloader.MissingAssets(entry, _release.Release));
     }
 
     [Fact]
@@ -285,6 +315,44 @@ public sealed class DuoRecipeTests : IDisposable
 
         InvalidDataException error = Assert.Throws<InvalidDataException>(() => Build());
         Assert.Contains("models.student.", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The LoRA here is a distilled one, which only the merge reads: a request refusal that arrives instead of that error was made
+    /// before the merge.</summary>
+    [Fact]
+    public async Task AServiceBoundRequestThatCannotRunIsRefusedAtConstructionBeforeTheMerge()
+    {
+        File.Delete(Path.Combine(_release.Release, "realization", "complete.json"));
+        DuoReleaseFixture.WriteLora(_release.Dcp, "models.generator.");
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = new() { Requested = "duo-v1-causal", Modality = Modality.Video, LocalPath = _release.Release };
+        VideoPlan plan = await engine.VideoPlanning.PlanAsync(spec, Request() with { Prompt = "a face" });
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => new DuoRecipe().Build(
+            new RecipeContext { CheckpointPath = _release.Release, Backend = _backend, VideoPlan = plan },
+            (_, _) => DuoReleaseFixture.Codecs()));
+
+        Assert.Contains("no prompt", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AHistoryPastTheAvailableMemoryIsRefusedByTheWindowName()
+    {
+        DuoRunInput input = DuoRunInput.Read(Request(), (await Plan(Request())).EffectiveSettings, Config());
+        MiniMaxH3Config config = Config() with
+        {
+            NumLayers = DuoReleaseFixture.Layers, NumAttentionHeads = DuoReleaseFixture.Heads,
+            AttentionHeadDim = DuoReleaseFixture.HeadDim,
+        };
+        long history = input.HistoryBytes(config);
+        Assert.Equal(input.CacheRows * 2L * 2 * 192 * 4, history);
+
+        // Free memory short of the history is refused; the pool's unused reserve counts as available; no figure means no check.
+        ArgumentException error = Assert.Throws<ArgumentException>(
+            () => input.RequireHistoryFits(config, new DeviceMemoryUsage(history - 1, 2 * history, -1, -1, -1, -1)));
+        Assert.Contains(DuoRecipePipeline.WindowFramesKey, error.Message, StringComparison.Ordinal);
+        input.RequireHistoryFits(config, new DeviceMemoryUsage(history - 1, 2 * history, 10, 9, 0, 0));
+        input.RequireHistoryFits(config, new DeviceMemoryUsage(0, 0, -1, -1, -1, -1));
     }
 
     [Fact]
