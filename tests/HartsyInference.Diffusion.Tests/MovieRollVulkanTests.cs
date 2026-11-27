@@ -16,7 +16,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>The MovieRoll decode on Vulkan, through <see cref="MovieRollPipeline.Generate"/>: the tiny 4-channel VAE is placed for the decode and
 /// released after it, and the frames must match the CPU run within <see cref="FrameErrorBound"/>. The sampling and the decode must read nothing back
 /// from the device before the frames are compared. Every CausalConv3d reaches Vulkan through the composed padding (PaddedFrames), so this fact covers
-/// that path. Runs only through the GPU session (Category=GpuIntegration); it is skipped where no Vulkan device opens.</summary>
+/// that path. Runs as a GPU integration test (Category=GpuIntegration); it is skipped where no Vulkan device opens.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class MovieRollVulkanTests(ITestOutputHelper output)
 {
