@@ -138,7 +138,7 @@ public sealed class FxService : IFxService
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
-        }, cancel);
+        }, cancel, callerFallsBackFromOutOfVram: HasCpuFallback(backend));
     }
 
     private static bool IsMdxSeparator(AudioModelSelector selector, FxSeparateRequest request)
@@ -159,7 +159,7 @@ public sealed class FxService : IFxService
     /// out of video memory after the audio runtime's own retry, wrapped or not, runs again on the CPU. Shared by the Kim_Vocal_2 and voice-isolator routes.</summary>
     internal static async Task<T> WithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
     {
-        if (engine.Device.Type is not (DeviceType.Cuda or DeviceType.Vulkan))
+        if (!HasCpuFallback(engine))
         {
             return await run(cpu).ConfigureAwait(false);
         }
@@ -167,12 +167,15 @@ public sealed class FxService : IFxService
         {
             return await run(engine).ConfigureAwait(false);
         }
-        catch (Exception ex) when (AudioRuntime.FindOutOfVram(ex) is not null && !cancel.IsCancellationRequested)
+        catch (Exception ex) when (AudioRuntime.IsUncancelledOutOfVram(ex, cancel))
         {
             Logs.Warning($"[Audio] Not enough video memory on {engine.Device}; running on the CPU instead, which takes far longer.");
             return await run(cpu).ConfigureAwait(false);
         }
     }
+
+    /// <summary>Whether a run on <paramref name="backend"/> under <see cref="WithCpuFallbackAsync{T}"/> has a CPU run to fall back to.</summary>
+    private static bool HasCpuFallback(IBackend backend) => backend.Device.Type is DeviceType.Cuda or DeviceType.Vulkan;
 
     private Task<StemsResult> SeparateVocalsOnAsync(IBackend backend, AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
     {
@@ -198,7 +201,7 @@ public sealed class FxService : IFxService
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
-        }, cancel);
+        }, cancel, callerFallsBackFromOutOfVram: HasCpuFallback(backend));
     }
 
     /// <summary>The vocals of <paramref name="audio"/> for the video driving-audio pre-step, in both forms: a 44.1 kHz stereo WAV clip (16-bit PCM) for a soundtrack or a recipe that decodes it, and 16 kHz mono taken from the float stem the way the reference does, for a speech encoder.</summary>
