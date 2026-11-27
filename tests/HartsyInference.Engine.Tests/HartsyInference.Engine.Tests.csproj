@@ -38,6 +38,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The distributed-checkpoint writer the ModelAssets tests use, so the recipe loads the same layout the reader is tested on. -->
+    <Compile Include="..\HartsyInference.ModelAssets.Tests\Duo\DcpFixture.cs" Link="Shared\DcpFixture.cs" />
+    <Compile Include="..\HartsyInference.ModelAssets.Tests\Duo\PickleBuilder.cs" Link="Shared\PickleBuilder.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="..\Shared\GpuDeviceFacts.cs" Link="Shared\GpuDeviceFacts.cs" />
   </ItemGroup>
 

@@ -40,7 +40,9 @@ public sealed class DuoSession
 
     /// <summary>Denoises every block of the sample in order and returns what the decoders publish. Every block must be a duo_5_17 chunk of
     /// five latent steps, and the decoders must be built for the same blocks.</summary>
-    public DuoOutput Run(DuoRun run)
+    /// <param name="onStep">Called after each denoise step with the number of steps finished over the whole run.</param>
+    /// <param name="cancel">Checked before the prefill and before every denoise step.</param>
+    public DuoOutput Run(DuoRun run, Action<int>? onStep = null, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(run);
         if (_ran)
@@ -65,6 +67,7 @@ public sealed class DuoSession
                 throw new ArgumentException($"Block {block} has {input.AudioSteps} audio steps; the audio stream takes {_audio.BlockSteps}.", nameof(run));
             }
         }
+        cancel.ThrowIfCancellationRequested();
         _ran = true;
         _chunks.Prefill(run.SharedText, run.ReferenceVideo);
 
@@ -72,8 +75,9 @@ public sealed class DuoSession
         List<float[]> audio = [];
         for (int block = 0; block < blocks; block++)
         {
+            int done = block * run.Steps;
             (float[] rows, float[] audioRows) = _chunks.GenerateBlock(block, run.BodyText[block], run.NoiseVideo[block], run.NoiseAudio[block],
-                run.Steps, run.Shift);
+                run.Steps, run.Shift, onStep is null ? null : step => onStep(done + step), cancel);
             using (Tensor chunk = Chunk(rows, block))
             {
                 video.AddRange(_video.OnChunk(chunk));

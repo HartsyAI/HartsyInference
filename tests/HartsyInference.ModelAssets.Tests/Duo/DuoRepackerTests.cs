@@ -139,6 +139,63 @@ public sealed class DuoRepackerTests : IDisposable
     }
 
     [Fact]
+    public unsafe void MergeInto_GivesTheSameBytesAsTheOfflineRepack()
+    {
+        Fixture fx = Build();
+        string output = Path.Combine(_root, "merged");
+        DuoMergeOptions options = new() { Heads = Heads, HeadDim = HeadDim };
+        using DuoLoraSource lora = DuoLoraSource.FromDcp(fx.Dcp);
+        DuoRepacker.MergeBackbone(fx.Backbone, lora, output, options);
+
+        using SafeTensorsLoader first = new(), second = new(), mergedFirst = new(), mergedSecond = new();
+        first.Load(Path.Combine(fx.Backbone, "model-00001-of-00002.safetensors"));
+        second.Load(Path.Combine(fx.Backbone, "model-00002-of-00002.safetensors"));
+        mergedFirst.Load(Path.Combine(output, "model-00001-of-00002.safetensors"));
+        mergedSecond.Load(Path.Combine(output, "model-00002-of-00002.safetensors"));
+        Dictionary<string, Tensor> weights = first.GetAllTensors().Concat(second.GetAllTensors())
+            .ToDictionary(t => t.Key, t => t.Value, StringComparer.Ordinal);
+        IReadOnlyList<Tensor> owned = DuoRepacker.MergeInto(weights, lora, options);
+
+        try
+        {
+            Dictionary<string, Tensor> expected = mergedFirst.GetAllTensors().Concat(mergedSecond.GetAllTensors())
+                .ToDictionary(t => t.Key, t => t.Value, StringComparer.Ordinal);
+            Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), weights.Keys.Order(StringComparer.Ordinal));
+            foreach ((string key, Tensor tensor) in expected)
+            {
+                int bytes = (int)tensor.DType.ComputeByteCount(tensor.ElementCount);
+                Assert.True(new ReadOnlySpan<byte>(tensor.DataPointer, bytes)
+                    .SequenceEqual(new ReadOnlySpan<byte>(weights[key].DataPointer, bytes)), key);
+            }
+            // Both qkv weights are rewritten, plus the out projection, fc1 and the patch projection.
+            Assert.Equal(5, owned.Count);
+        }
+        finally
+        {
+            foreach (Tensor tensor in owned) tensor.Dispose();
+        }
+    }
+
+    [Fact]
+    public void MergeInto_RefusesAQuantizedTargetAndChangesNothing()
+    {
+        Fixture fx = Build();
+        using DuoLoraSource lora = DuoLoraSource.FromDcp(fx.Dcp);
+        using SafeTensorsLoader first = new(), second = new();
+        first.Load(Path.Combine(fx.Backbone, "model-00001-of-00002.safetensors"));
+        second.Load(Path.Combine(fx.Backbone, "model-00002-of-00002.safetensors"));
+        Dictionary<string, Tensor> weights = first.GetAllTensors().Concat(second.GetAllTensors())
+            .ToDictionary(t => t.Key, t => t.Value, StringComparer.Ordinal);
+        using Tensor half = new(weights["video_patch_proj.weight"].Shape, DType.F16);
+        weights["video_patch_proj.weight"] = half;
+        Dictionary<string, Tensor> before = new(weights, StringComparer.Ordinal);
+
+        Assert.Throws<NotSupportedException>(
+            () => DuoRepacker.MergeInto(weights, lora, new DuoMergeOptions { Heads = Heads, HeadDim = HeadDim }));
+        Assert.All(before, entry => Assert.Same(entry.Value, weights[entry.Key]));
+    }
+
+    [Fact]
     public void MergeBackbone_ReordersQkvMergesEachSliceAndSwapsFc1HalvesLikeUpstream()
     {
         Fixture fx = Build();
