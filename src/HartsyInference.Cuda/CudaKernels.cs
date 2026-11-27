@@ -65,6 +65,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _mxfp8DequantBf16;
     private readonly CudaModule? _int8DequantModule;
     private readonly nint _int8DequantBf16;
+    private readonly nint _int8DequantF32;
     private readonly nint _nvfp4DequantF16;
     private readonly nint _nvfp4DequantBf16;
 
@@ -764,6 +765,7 @@ public sealed partial class CudaKernels : IDisposable
         {
             _int8DequantModule = LoadOwnedModule(int8DequantPath);
             _int8DequantBf16 = _int8DequantModule.GetFunction("dequant_int8_to_bf16");
+            _int8DequantF32 = _int8DequantModule.GetFunction("dequant_int8_to_f32");
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
@@ -2162,21 +2164,30 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Whether the optional dequant_int8_to_bf16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
     public bool HasInt8DequantKernels => _int8DequantModule is not null;
 
-    /// <summary>int8_tensorwise unpack: I8 <c>[rows, cols]</c> x one F32 scale per row to dense BF16 <c>[rows, cols]</c>. The default truncates as
-    /// <c>Int8ConvRotCodec.DequantToBf16</c> stores it; <paramref name="referenceRounding"/> rounds as the reference's bf16 QuantizedLinear does
-    /// (see dequant_int8_to_bf16.cu). A run of rows is a pointer into the weight and the same offset into the scales.</summary>
-    public unsafe void LaunchInt8Dequant(ulong output, ulong weight, ulong rowScale, int rows, int cols, nint stream, bool referenceRounding = false)
+    /// <summary>int8_tensorwise unpack of <c>[rows, cols]</c> I8 weights with one F32 scale per row. <paramref name="roundingMode"/>: 0 truncates to
+    /// BF16 as <c>Int8ConvRotCodec.DequantToBf16</c> does; 1 rounds to BF16 nearest-even as the reference's bf16 QuantizedLinear does; 2 writes the
+    /// exact F32 product into <paramref name="output"/> as F32 (a float32-input layer). See dequant_int8_to_bf16.cu. A run of rows is a pointer into
+    /// the weight and the same offset into the scales.</summary>
+    public unsafe void LaunchInt8Dequant(ulong output, ulong weight, ulong rowScale, int rows, int cols, nint stream, int roundingMode = 0)
     {
         if (_int8DequantModule is null) throw new InvalidOperationException("dequant_int8_to_bf16.ptx not present in the Ptx folder.");
         ulong wArg = weight, sArg = rowScale, oArg = output;
         uint rowsArg = (uint)rows, colsArg = (uint)cols;
-        int refArg = referenceRounding ? 1 : 0;
-        void** args = stackalloc void*[6];
-        args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
-        args[3] = &rowsArg; args[4] = &colsArg; args[5] = &refArg;
         const uint BlockSize = 256;
         uint gridX = (uint)(((long)cols + BlockSize - 1) / BlockSize);
         uint gridY = (uint)Math.Min(rows, 65535);
+        if (roundingMode == 2)
+        {
+            void** f32Args = stackalloc void*[5];
+            f32Args[0] = &wArg; f32Args[1] = &sArg; f32Args[2] = &oArg;
+            f32Args[3] = &rowsArg; f32Args[4] = &colsArg;
+            CudaDriverApi.cuLaunchKernel(_int8DequantF32, gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)f32Args, 0).ThrowOnError();
+            return;
+        }
+        int refArg = roundingMode == 1 ? 1 : 0;
+        void** args = stackalloc void*[6];
+        args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
+        args[3] = &rowsArg; args[4] = &colsArg; args[5] = &refArg;
         CudaDriverApi.cuLaunchKernel(_int8DequantBf16, gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 

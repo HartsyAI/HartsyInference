@@ -797,6 +797,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             && weight.Fp8ScaleFactor == 1f && !weight.ForceF32Gemm;
 
     /// <summary>The bytes one row tile of an unpacked int8 weight may take in the GEMM dtype.</summary>
+    /// <summary>The unpack mode of an int8 weight's linear: 0 for the default truncation; for a reference-rounded weight, 2 (exact F32) when the
+    /// layer's input is float32 (the reference runs those layers on float32), 1 (BF16 nearest-even) otherwise.</summary>
+    private static int Int8RoundingMode(Tensor weight, Tensor input) =>
+        weight.QuantInfo is { ReferenceRounding: true } ? (input.DType == DType.F32 ? 2 : 1) : 0;
+
     private const long Int8DequantTileBytes = 64L << 20;
 
     /// <summary>Weight rows per tile of the device-unpacked int8 GEMM: <see cref="Int8DequantTileBytes"/> over the row bytes, in steps of 64
@@ -808,10 +813,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <paramref name="bf16"/>, and returns them in <paramref name="gemmDtype"/>: that buffer itself, or <paramref name="cast"/> filled from
     /// it.</summary>
     private ulong UnpackInt8Rows(ulong pWeight, ulong rowScaleDev, int firstRow, int rows, int columns, DType gemmDtype, ulong bf16, ulong cast,
-        bool referenceRounding = false)
+        int roundingMode = 0)
     {
-        _kernels!.LaunchInt8Dequant(bf16, pWeight + (ulong)((long)firstRow * columns), rowScaleDev + (ulong)((long)firstRow * sizeof(float)),
-            rows, columns, _stream.Handle, referenceRounding);
+        ulong weightRows = pWeight + (ulong)((long)firstRow * columns);
+        ulong scaleRows = rowScaleDev + (ulong)((long)firstRow * sizeof(float));
+        if (roundingMode == 2 && gemmDtype == DType.F32)
+        {
+            // A float32-input layer: its weight is the exact float32 product, written straight into the F32 buffer.
+            _kernels!.LaunchInt8Dequant(cast, weightRows, scaleRows, rows, columns, _stream.Handle, roundingMode: 2);
+            return cast;
+        }
+        // A BF16 GEMM (or a float32 layer whose GEMM is not F32) rounds to BF16 as the reference's bf16 layers do.
+        _kernels!.LaunchInt8Dequant(bf16, weightRows, scaleRows, rows, columns, _stream.Handle, roundingMode: roundingMode == 2 ? 1 : roundingMode);
         if (gemmDtype == DType.BF16) return bf16;
         CastOnGpu(cast, bf16, DType.BF16, gemmDtype, checked(rows * columns));
         return cast;
@@ -2078,7 +2091,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (!int8Unpack && weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
             && !CanRunResidentInt8(output, input, weight, int8Info, weightRowOffset, weightRowCount))
         {
-            using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize, int8Info.ReferenceRounding);
+            // A reference-rounded weight on a float32-input layer keeps its exact float32 product; the other layers take BF16.
+            using Tensor dequantized = Int8RoundingMode(weight, input) == 2
+                ? Int8ConvRotCodec.DequantToF32Exact(weight, int8Info.RowScale)
+                : Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize, int8Info.ReferenceRounding);
             try
             {
                 LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
@@ -2397,7 +2413,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     {
                         // The whole weight: these kernels read it once.
                         pInt8Bf16 = CudaMemory.Allocate((nuint)(weight.ElementCount * DType.BF16.SizeInBytes));
-                        gemvWeight = UnpackInt8Rows(pWeight, int8RowScaleDev, 0, n, k, DType.BF16, pInt8Bf16, 0, weight.QuantInfo is { ReferenceRounding: true });
+                        gemvWeight = UnpackInt8Rows(pWeight, int8RowScaleDev, 0, n, k, DType.BF16, pInt8Bf16, 0, Int8RoundingMode(weight, input));
                     }
                     else
                     {
@@ -2635,7 +2651,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (gemmDtype != DType.BF16)
                     pWeightCast = CudaMemory.Allocate((nuint)((long)tileRows * k * gemmDtype.SizeInBytes));
                 weightPtr = int8Tiled ? 0
-                    : UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset, n, k, gemmDtype, pInt8Bf16, pWeightCast, weight.QuantInfo is { ReferenceRounding: true });
+                    : UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset, n, k, gemmDtype, pInt8Bf16, pWeightCast, Int8RoundingMode(weight, input));
             }
             else if (weight.DType == gemmDtype)
             {
@@ -2783,7 +2799,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         {
                             int rows = Math.Min(tileRows, n - first);
                             ulong tileWeight = int8Tiled
-                                ? UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset + first, rows, k, gemmDtype, pInt8Bf16, pWeightCast, weight.QuantInfo is { ReferenceRounding: true })
+                                ? UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset + first, rows, k, gemmDtype, pInt8Bf16, pWeightCast, Int8RoundingMode(weight, input))
                                 : weightPtr;
                             CublasApi.cublasGemmEx(
                                 _cublasHandle,

@@ -29,6 +29,32 @@ public static unsafe class Int8ConvRotCodec
         }
     }
 
+    /// <summary>The exact float32 product of an unrotated int8 weight and its per-row scale, for a layer whose input is float32: the reference
+    /// runs those layers in float32, so its weight is <c>level * scale</c> in float32 with no BF16 step (quantization.py lines 28-29 cast to the
+    /// input's dtype).</summary>
+    public static Tensor DequantToF32Exact(Tensor weight, Tensor rowScale)
+    {
+        ArgumentNullException.ThrowIfNull(weight);
+        ArgumentNullException.ThrowIfNull(rowScale);
+        if (weight.DType != DType.I8 || weight.Shape.Rank != 2) throw new ArgumentException($"The weight must be I8 rank-2; got {weight.DType} {weight.Shape}.", nameof(weight));
+        if (rowScale.DType != DType.F32) throw new ArgumentException($"The weight scale must be F32; got {rowScale.DType}.", nameof(rowScale));
+        long outFeatures = weight.Shape[0], inFeatures = weight.Shape[1];
+        if (rowScale.ElementCount != outFeatures && rowScale.ElementCount != 1)
+            throw new ArgumentException($"The weight scale must hold {outFeatures} row scales or one per-tensor scale; got {rowScale.ElementCount}.", nameof(rowScale));
+        Tensor result = new(new TensorShape(outFeatures, inFeatures), DType.F32);
+        ReadOnlySpan<sbyte> source = weight.AsReadOnlySpan<sbyte>();
+        ReadOnlySpan<float> scales = rowScale.AsReadOnlySpan<float>();
+        Span<float> destination = result.AsSpan<float>();
+        bool perTensor = rowScale.ElementCount == 1;
+        for (long row = 0; row < outFeatures; row++)
+        {
+            float scale = perTensor ? scales[0] : scales[(int)row];
+            for (long column = 0; column < inFeatures; column++)
+                destination[(int)(row * inFeatures + column)] = source[(int)(row * inFeatures + column)] * scale;
+        }
+        return result;
+    }
+
     /// <summary>Dequantizes an int8 weight <c>[out, in]</c> and un-rotates it, producing the BF16 <c>[out, in]</c> <c>IBackend.Linear</c> consumes.</summary>
     /// <param name="rowScale">F32, one scale per output row; a single element is broadcast as a per-tensor scale.</param>
     /// <param name="convRotGroupSize">0 for a weight quantized without rotation.</param>

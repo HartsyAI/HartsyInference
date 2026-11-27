@@ -64,7 +64,8 @@ public sealed class LongCatInt8WeightOnlyTests
         using Tensor rowScale = scale;
         using Tensor input = LongCatTestData.Random(new TensorShape(Tokens, Columns), 4);
         using Tensor bias = LongCatTestData.Random(new TensorShape(Rows), 5);
-        using Tensor dense = Int8ConvRotCodec.DequantToBf16(weight, scale, 0);
+        // The engine's GEMM for this float32 input runs in BF16 (ResolveGemmDtype), so the marked weight is the BF16 nearest-even product.
+        using Tensor dense = Int8ConvRotCodec.DequantToBf16(weight, scale, 0, referenceRounding: true);
         using CudaBackend backend = GpuDevices.OpenCuda();
 
         float[] resident = Linear(backend, input, weight, bias);

@@ -35,3 +35,18 @@ extern "C" __global__ void dequant_int8_to_bf16(
         }
     }
 }
+
+// The same weight for a layer whose input is float32 (the reference runs its time embedder and adaLN linears on float32 under
+// autocast, so the weight is the exact float32 product): level * scale, one IEEE multiply, into F32 rows.
+extern "C" __global__ void dequant_int8_to_f32(
+    const signed char* __restrict__ w, const float* __restrict__ rowScale, float* __restrict__ out,
+    unsigned int rows, unsigned int cols)
+{
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= cols) return;
+    for (unsigned int row = blockIdx.y; row < rows; row += gridDim.y)
+    {
+        unsigned long long i = (unsigned long long)row * cols + col;
+        out[i] = (float)w[i] * rowScale[row];
+    }
+}

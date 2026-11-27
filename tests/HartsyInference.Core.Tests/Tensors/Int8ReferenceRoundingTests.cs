@@ -62,6 +62,26 @@ public sealed class Int8ReferenceRoundingTests
     }
 
     [Fact]
+    public void AFloat32InputLayerKeepsTheExactFloat32Product()
+    {
+        // The reference runs time-embedder and adaLN linears on float32 input (quantization.py lines 28-29 cast to x.dtype): the weight is
+        // level * scale in float32, not rounded to BF16.
+        sbyte[,] levels = { { -128, 3, 127 } };
+        float[] scales = { 0.1f };
+        (Tensor weight, Tensor scale) = Layer(levels, scales);
+        using (weight)
+        using (scale)
+        {
+            using Tensor exact = Int8ConvRotCodec.DequantToF32Exact(weight, scale);
+            ReadOnlySpan<float> values = exact.AsReadOnlySpan<float>();
+            for (int c = 0; c < 3; c++)
+                Assert.Equal((float)levels[0, c] * scales[0], values[c]);
+            // The BF16 product of the same level is not the float32 product (0.1f * 3 is not representable in BF16 exactly).
+            Assert.NotEqual(BFloat16Bits.ToFloat(Reference(3, scales[0])), values[1]);
+        }
+    }
+
+    [Fact]
     public void TheReferenceRoundingRefusesARotatedWeight()
     {
         (Tensor weight, Tensor scale) = Layer(new sbyte[,] { { 1, 2, 3, 4 } }, new[] { 1f });

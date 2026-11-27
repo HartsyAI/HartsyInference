@@ -119,7 +119,8 @@ public static class QuantizedWeightPolicy
             return GgufDequantizer.Dequantize(weight, wideDType);
         if (weight.DType == DType.I8 && info.RowScale is not null)
         {
-            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(weight, info.RowScale, info.ConvRotGroupSize);
+            // A reference-rounded weight (LongCat's INT8 release) widens with the BF16 nearest-even product the CUDA path computes; others truncate.
+            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(weight, info.RowScale, info.ConvRotGroupSize, info.ReferenceRounding);
             return wideDType == DType.BF16 ? bf16.To(bf16.Device) : bf16.CastTo(wideDType);
         }
         if (weight.DType == DType.F4E2M1 && info is { BlockScale: not null, GlobalScale: not null })
