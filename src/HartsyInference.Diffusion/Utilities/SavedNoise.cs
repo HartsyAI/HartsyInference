@@ -14,9 +14,12 @@ namespace HartsyInference.Diffusion.Utilities;
 internal static class SavedNoise
 {
     /// <summary>Noise of <paramref name="shape"/>: the file <paramref name="knob"/> names when it is set, else the seeded draw.</summary>
-    internal static Tensor Create(Knob<string?> knob, TensorShape shape, int seed, string logTag)
+    internal static Tensor Create(Knob<string?> knob, TensorShape shape, int seed, string logTag) =>
+        Create(knob, knob.Value, shape, seed, logTag);
+
+    /// <summary>The same with the file the caller took from the setting's value, for a setting that names one file per part of a generation.</summary>
+    internal static Tensor Create(Knob<string?> knob, string? path, TensorShape shape, int seed, string logTag)
     {
-        string? path = knob.Value;
         if (string.IsNullOrWhiteSpace(path))
             return SeedGenerator.CreateNoise(shape, seed);
         Logs.Warning($"[{logTag}] {knob.Id} replaces the seeded noise with {path} (shape {shape}).");

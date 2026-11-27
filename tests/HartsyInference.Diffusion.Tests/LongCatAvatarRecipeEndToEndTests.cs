@@ -1,7 +1,10 @@
+using System.Globalization;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Audio.Dsp.Loudness;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
@@ -70,9 +73,79 @@ public sealed class LongCatAvatarRecipeEndToEndTests
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SavedNoiseNamedPerSegmentReplacesEverySegmentsDraw(bool onePointSix)
+    {
+        // Each run is five or six latent frames of 2 x 2: segment 0 as it is generated, a later one with its reference slot in front.
+        const int FirstFrames = 5, LaterFrames = 6, Conditioning = 5;
+        string directory = Path.Combine(Path.GetTempPath(), "longcat-segment-noise-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            int channels = LongCatTinyAvatarRelease.Config.InChannels;
+            string pattern = Path.Combine(directory, "noise_{segment}.npy");
+            void Write(int segment, int seed, bool conditioningOnly = false)
+            {
+                int frames = segment == 0 ? FirstFrames : LaterFrames, perFrame = 4;
+                float[] values = LongCatTestData.RandomValues(new Random(100 * segment + 7), channels * frames * perFrame);
+                float[] other = LongCatTestData.RandomValues(new Random(seed), values.Length);
+                // A change of every value, or of the frames the conditioning overwrites alone.
+                for (int i = 0; i < values.Length; i++)
+                    if (seed != 0 && (!conditioningOnly || i / perFrame % frames < Conditioning))
+                        values[i] = other[i];
+                File.WriteAllBytes(pattern.Replace("{segment}", segment.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal),
+                    NpyFile.Float32(values, [1, channels, frames, 2, 2]));
+            }
+
+            List<(int Frames, float[] Values)> Segments(string? noise, int seed)
+            {
+                using IDisposable? scope = noise is null ? null
+                    : KnobProfile.Create("longcat-segment-noise").With(EngineKnobs.LongCatNoiseNpy, noise).Push();
+                return Run(onePointSix, audioSeed: 1, seed: seed).Vae.Decoded;
+            }
+
+            for (int segment = 0; segment < 3; segment++)
+                Write(segment, seed: 0);
+            List<(int Frames, float[] Values)> saved = Segments(pattern, seed: 3), otherSeed = Segments(pattern, seed: 4);
+            // With a file for every segment the seed draws nothing.
+            for (int segment = 0; segment < 3; segment++)
+                Assert.Equal(saved[segment].Values, otherSeed[segment].Values);
+
+            // The reference and context frames of a later segment's file are never read.
+            Write(1, seed: 55, conditioningOnly: true);
+            List<(int Frames, float[] Values)> conditioningChanged = Segments(pattern, seed: 3);
+            for (int segment = 0; segment < 3; segment++)
+                Assert.Equal(saved[segment].Values, conditioningChanged[segment].Values);
+
+            // The last segment's file reaches the last segment, and no earlier one.
+            Write(1, seed: 0);
+            Write(2, seed: 56);
+            List<(int Frames, float[] Values)> lastChanged = Segments(pattern, seed: 3);
+            Assert.Equal(saved[0].Values, lastChanged[0].Values);
+            Assert.Equal(saved[1].Values, lastChanged[1].Values);
+            Assert.NotEqual(saved[2].Values, lastChanged[2].Values);
+
+            // A path without the mark replaces the first segment's draw alone: the later ones still follow the seed.
+            string first = Path.Combine(directory, "noise_0.npy");
+            List<(int Frames, float[] Values)> firstOnly = Segments(first, seed: 3), firstOnlyOtherSeed = Segments(first, seed: 4);
+            Assert.Equal(firstOnly[0].Values, firstOnlyOtherSeed[0].Values);
+            Assert.NotEqual(firstOnly[1].Values, firstOnlyOtherSeed[1].Values);
+
+            // Every segment the mark names is required.
+            File.Delete(Path.Combine(directory, "noise_2.npy"));
+            Assert.Throws<FileNotFoundException>(() => Segments(pattern, seed: 3));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     /// <summary>Runs the chain on the backend <paramref name="makeBackend"/> makes (CPU by default). Shared by the CPU tests above and the device parity tests.</summary>
     internal static (VideoGenerationResult Result, LongCatStandInVae Vae, List<(float[] Speech, int Fps)> FeatureCalls) Run(bool onePointSix,
-        int audioSeed, Func<IBackend>? makeBackend = null, bool? int8 = null, Dictionary<string, Tensor>? dense = null)
+        int audioSeed, Func<IBackend>? makeBackend = null, bool? int8 = null, Dictionary<string, Tensor>? dense = null, int seed = 3)
     {
         LongCatConfig config = LongCatTinyAvatarRelease.Config;
         using LongCatTinyAvatarRelease release = new(onePointSix, int8, dense);
@@ -88,12 +161,12 @@ public sealed class LongCatAvatarRecipeEndToEndTests
             });
         VideoRequest request = new()
         {
-            Prompt = "a person speaking", NegativePrompt = "", Seed = 3, ChainTotalFrames = ChainFrames,
+            Prompt = "a person speaking", NegativePrompt = "", Seed = seed, ChainTotalFrames = ChainFrames,
             InitImage = LongCatTinyAvatarRelease.Portrait(Size), VideoAudioReference = LongCatTinyAvatarRelease.Speech(1.2),
         };
         VideoEffectiveSettings settings = new()
         {
-            Width = Size, Height = Size, Frames = SegmentFrames, Fps = LongCatAvatarRecipe.OutputFps, Steps = 8, CfgScale = 1f, Seed = 3,
+            Width = Size, Height = Size, Frames = SegmentFrames, Fps = LongCatAvatarRecipe.OutputFps, Steps = 8, CfgScale = 1f, Seed = seed,
             ReferenceSizing = VideoReferenceSizing.Native, LockedFields = default,
         };
 
