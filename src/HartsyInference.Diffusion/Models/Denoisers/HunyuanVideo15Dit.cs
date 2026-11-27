@@ -53,6 +53,10 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <inheritdoc/>
     public Action<int>? BeforeBlockForward { get; set; }
 
+    /// <summary>Diagnostic tap: called with each block's output image tokens during the per-frame forward. The tensor is valid only inside the call.
+    /// Null by default, so the forward is unchanged.</summary>
+    internal Action<int, Tensor>? BlockOutputTap { get; set; }
+
     /// <inheritdoc/>
     public IStreamingBlock GetBlock(int idx) => _blocks[idx];
 
@@ -84,7 +88,15 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     }
 
     /// <summary>One block's weights under <c>transformer_blocks.{index}</c>. The block keeps references to these tensors until its next load.</summary>
-    internal void LoadBlockWeights(int index, IReadOnlyDictionary<string, Tensor> w) => _blocks[index].LoadWeights(w, $"transformer_blocks.{index}");
+    internal void LoadBlockWeights(int index, IReadOnlyDictionary<string, Tensor> w)
+    {
+        _blocks[index].AllowF16Attention = AllowF16Attention;
+        _blocks[index].LoadWeights(w, $"transformer_blocks.{index}");
+    }
+
+    /// <summary>Whether the blocks' attention may narrow to F16 (see <see cref="HunyuanImageBlock.AllowF16Attention"/>). False by default: the F16
+    /// attention fails the upstream parity bound on CUDA (5.8e-3 against 1e-3), F32 passes (1.1e-4). Set before the blocks load.</summary>
+    internal bool AllowF16Attention { get; set; } = false;
 
     /// <inheritdoc/>
     public IEnumerable<Tensor> EnumerateSharedWeights()
@@ -157,6 +169,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
                 (Tensor nextImg, Tensor nextTxt) = _blocks[i].ForwardPerFrame(backend, img, txt, txtTemb, frameTemb, layout, _rope, height, width, frames);
                 img.Dispose(); txt.Dispose();
                 img = nextImg; txt = nextTxt;
+                BlockOutputTap?.Invoke(i, img);
             }
             txt.Dispose();
             txt = null;

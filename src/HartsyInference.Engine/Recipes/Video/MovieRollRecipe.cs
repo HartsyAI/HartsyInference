@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
@@ -144,7 +145,7 @@ public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
                 if (!converted.Contains(copy)) loaders.Add(copy);
             }
 
-            dit = new HunyuanVideo15Dit(config);
+            dit = new HunyuanVideo15Dit(config) { AllowF16Attention = EngineKnobs.MovieRollAttentionF16.Value };
             dit.LoadWeights(ditF16);
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MovieRollVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
