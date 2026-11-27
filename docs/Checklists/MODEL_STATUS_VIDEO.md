@@ -76,7 +76,7 @@ Families both upstreams already recognise and this engine has no recipe for. Ver
   8.3B DiT (`HunyuanVideo15Dit`, Tencent-name converter) matches a tiny-config reference on CPU. The text encoders, the
   pipeline, the recipe and the catalog row are built and merged (#1297, #1320, #1327; the catalog entry is `ValidationPending`
   with the DiT's sha256 pinned, #1381). A real-weight run completed on an RTX 3060 on 2026-11-27 (engine b592bb4a5, CUDA, 17 frames at 480x272,
-  logged in the test PC's run folder): 17 frames written, output viewed as a coherent bounce. That run is evidence the path runs end to end,
+  logged in the test PC's run folder): 17 frames written, output viewed as a coherent bounce. The DiT is cast to F16 at load on CUDA only (PR #1438; F32 on CPU and elsewhere). An A/B on the same prompt and seed halved the wall time (741 s against 1,299 to 1,410 s), with the same peak VRAM and host RAM down to 44 MiB free in the F16 arm. That run is evidence the path runs end to end,
   not parity. Its device peak was 11,732 MiB with a memory-spill warning late in the run; the cause is not yet confirmed. The CUDA facts for the
   streaming, sampler and VAE decode ran on tiny configs only.
   - MovieRoll H3 (causal VAE, 16× spatial / 4× temporal, 32 latent channels): tiny-config parity with MovieRoll's own Encoder/Decoder in `hartsy-ref:cpu` (end-to-end ≤3.4e-6, per stage ≤1.2e-7). Streaming T-cache decode, real weights and GPU shuffle ops are still open.

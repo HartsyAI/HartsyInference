@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -74,6 +75,11 @@ public sealed class MovieRollRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool RefusesUnhonouredPlacements => true;
 
+    /// <summary>The source dtypes the DiT casts to F16 at load on this backend: the released FP32 and BF16 on CUDA, and none elsewhere, so an F32
+    /// DiT keeps its F32 weights on the CPU backend. An empty list casts nothing.</summary>
+    public static IReadOnlyList<DType> DitHalfCastSources(IBackend backend) =>
+        backend is HartsyInference.Cuda.CudaBackend ? [DType.BF16, DType.F32] : [];
+
     /// <inheritdoc/>
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
@@ -98,9 +104,9 @@ public sealed class MovieRollRecipe : IVideoRecipe
             // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a
             // block the DiT streams. The BF16 to F16 copies below are made once on the host, and they are what the DiT keeps.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "MovieRollRecipe");
-            // F32 (the released file) or BF16 -> F16 for the native F16 GEMM. Only the cast copies are owned here; the rest are the container's.
-            // The released distilled t2v file is FP32; without the F32 source the DiT stays FP32 on the card and streams 2x the bytes.
-            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, [DType.BF16, DType.F32], DType.F16);
+            // F16 for the native F16 GEMM on CUDA only: the released file is FP32, and off CUDA the DiT keeps its F32 weights. Only the cast copies
+            // are owned here; the rest are the container's.
+            Dictionary<string, Tensor> ditF16 = VaePrecisionHelper.CastWeights(ditWeights, DitHalfCastSources(context.Backend), DType.F16);
             HashSet<Tensor> converted = new(ditWeights.Values, ReferenceEqualityComparer.Instance);
             foreach (Tensor copy in ditF16.Values)
             {
