@@ -228,7 +228,7 @@ index 0000000..f870345
 +
 +    pipe._decode_video_latents = logged_decode
 diff --git a/run_demo_avatar_single_audio_to_video.py b/run_demo_avatar_single_audio_to_video.py
-index 6a73c74..976fb0b 100644
+index 6a73c74..d330868 100644
 --- a/run_demo_avatar_single_audio_to_video.py
 +++ b/run_demo_avatar_single_audio_to_video.py
 @@ -25,6 +25,7 @@ from longcat_video.audio_process import get_audio_encoder, get_audio_feature_ext
@@ -332,7 +332,13 @@ index 6a73c74..976fb0b 100644
      audio_feature_extractor = get_audio_feature_extractor(audio_model_checkpoint_path, model_type)
  
      vocal_separator_path = os.path.join(checkpoint_dir, 'vocal_separator/Kim_Vocal_2.onnx')
-@@ -218,7 +279,7 @@ def generate(args):
+@@ -214,11 +275,12 @@ def generate(args):
+                 {"device_id": local_rank, "cudnn_conv_algo_search": "HEURISTIC"},
+             )
+         ]
+-    vocal_separator.load_model(audio_separator_model_name)
++    if vocal_separator is not None:
++        vocal_separator.load_model(audio_separator_model_name)
  
      
      # initialize pipeline
@@ -341,7 +347,7 @@ index 6a73c74..976fb0b 100644
          tokenizer = tokenizer,
          text_encoder = text_encoder,
          vae = vae,
-@@ -228,6 +289,9 @@ def generate(args):
+@@ -228,6 +290,9 @@ def generate(args):
          audio_feature_extractor=audio_feature_extractor,
          model_type=model_type
      )
@@ -351,7 +357,7 @@ index 6a73c74..976fb0b 100644
      pipe.to(local_rank)
  
      if args.compile_vae:
-@@ -258,7 +322,7 @@ def generate(args):
+@@ -258,7 +323,7 @@ def generate(args):
      generator = torch.Generator(device=local_rank)
      generator.manual_seed(seed)
  
