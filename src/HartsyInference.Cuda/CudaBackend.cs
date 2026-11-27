@@ -787,6 +787,35 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Whether a resident <c>int8_tensorwise</c> weight whose layer asks for a full-precision GEMM
+    /// (<see cref="QuantWeightInfo.FullPrecisionMatMul"/>) is unpacked on the device, row tile by row tile, into that GEMM; false routes it
+    /// through the host dequant fallback. The unpacked values are the host fallback's BF16 ones, so the GEMM dtype and the small-m route follow
+    /// as for that dense weight. A rotated (ConvRot) weight, and a fused epilogue or prologue, stay on the fallback.</summary>
+    private bool CanDequantInt8OnDevice(Tensor weight, QuantWeightInfo info, bool fuseGelu, Tensor? preGate)
+        => info is { Format: "int8_tensorwise", FullPrecisionMatMul: true, ConvRotGroupSize: 0, RowScale: not null }
+            && _kernels is { HasInt8DequantKernels: true } && weight.Shape.Rank == 2 && !fuseGelu && preGate is null
+            && weight.Fp8ScaleFactor == 1f && !weight.ForceF32Gemm;
+
+    /// <summary>The bytes one row tile of an unpacked int8 weight may take in the GEMM dtype.</summary>
+    private const long Int8DequantTileBytes = 64L << 20;
+
+    /// <summary>Weight rows per tile of the device-unpacked int8 GEMM: <see cref="Int8DequantTileBytes"/> over the row bytes, in steps of 64
+    /// rows.</summary>
+    internal static int Int8DequantTileRows(int rows, int columns, DType gemmDtype)
+        => (int)Math.Min(rows, Math.Max(64L, Int8DequantTileBytes / ((long)columns * gemmDtype.SizeInBytes) & ~63L));
+
+    /// <summary>Unpacks <paramref name="rows"/> rows of a resident int8 weight, from <paramref name="firstRow"/>, into
+    /// <paramref name="bf16"/>, and returns them in <paramref name="gemmDtype"/>: that buffer itself, or <paramref name="cast"/> filled from
+    /// it.</summary>
+    private ulong UnpackInt8Rows(ulong pWeight, ulong rowScaleDev, int firstRow, int rows, int columns, DType gemmDtype, ulong bf16, ulong cast)
+    {
+        _kernels!.LaunchInt8Dequant(bf16, pWeight + (ulong)((long)firstRow * columns), rowScaleDev + (ulong)((long)firstRow * sizeof(float)),
+            rows, columns, _stream.Handle);
+        if (gemmDtype == DType.BF16) return bf16;
+        CastOnGpu(cast, bf16, DType.BF16, gemmDtype, checked(rows * columns));
+        return cast;
+    }
+
     /// <summary>Whether the transient-dequant path can serve this resident nvfp4 weight; false routes it through the host dequant fallback.</summary>
     /// <remarks>Deliberately does NOT consult <see cref="QuantWeightInfo.FullPrecisionMatMul"/>. That flag means "this
     /// layer must run a real GEMM rather than a quantized one", which is exactly what this path does — the weight is
@@ -2039,10 +2068,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         using OpScope _op = EnterOp();
         EnsureKernels();
 
-        // A resident int8 weight has no dtype cast the generic path below could take — CastOnGpu has no I8 source —
-        // so a layer the IMMA chain cannot serve (an explicit full_precision_matrix_mult, a shape the cuBLASLt int8
-        // TN config rejects, a row range) has to be un-rotated and dequantized here or it cannot run at all.
-        if (weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
+        // A resident int8 weight has no dtype cast the generic path below could take — CastOnGpu has no I8 source. A
+        // full_precision_matrix_mult layer is unpacked on the device into the float GEMM below; any other layer the IMMA
+        // chain cannot serve (a shape the cuBLASLt int8 TN config rejects, a row range), and a full-precision one the
+        // device unpack does not take, has to be un-rotated and dequantized here or it cannot run at all.
+        bool int8Unpack = weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } unpackInfo
+            && CanDequantInt8OnDevice(weight, unpackInfo, fuseGelu, preGate);
+        if (!int8Unpack && weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null } int8Info
             && !CanRunResidentInt8(output, input, weight, int8Info, weightRowOffset, weightRowCount))
         {
             using Tensor dequantized = Int8ConvRotCodec.DequantToBf16(weight, int8Info.RowScale, int8Info.ConvRotGroupSize);
@@ -2134,8 +2166,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // quantize here — only the eligibility answer, already settled by the fallback gate above. The scale upload
         // reads the companion on the HOST, so it happens before this call touches the transfer caches, for the same
         // reason the W8A8 host quant above does.
-        bool int8Resident = weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null };
-        ulong int8RowScaleDev = int8Resident ? EnsureInt8RowScaleDev(weight, n) : 0;
+        bool int8Resident = !int8Unpack && weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null };
+        // One scale per weight row, whatever row range this call computes.
+        ulong int8RowScaleDev = int8Resident || int8Unpack ? EnsureInt8RowScaleDev(weight, (int)weight.Shape[0]) : 0;
 
         // Same ordering rule for block-scaled weights: the scale upload and the scalar reads are HOST reads of the
         // companions, so they happen before the transfer caches are touched. Eligibility was already settled by the
@@ -2170,7 +2203,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             NoteBlockScaledDispatch(native: false, weight, input, output, n, k, rowRange, blockScales);
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
-        ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0;
+        ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0, pInt8Bf16 = 0;
         bool cachedOutput = false;
         try
         {
@@ -2348,7 +2381,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // GemmEx is inefficient at m=1; the fused GEMV reads each weight row once with an F32 accumulate
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
                 // numerics.bf16Gemv=false to fall back to cuBLAS.
-                DType gemvDtype = blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
+                DType gemvDtype = int8Unpack ? DType.BF16 : blockScaled is null ? UnpackedWeightDType(weight) : weight.DType;
                 if (EnableBf16Gemv && _kernels!.HasFloatGemv && (gemvDtype == DType.BF16 || gemvDtype == DType.F16))
                 {
                     // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
@@ -2358,8 +2391,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     // F32 cast; F32 biases (the common LLM case) pass straight through.
                     ulong gemvBias = bias is null ? 0
                         : CastIfNeeded(pBias, bias.DType, DType.F32, (int)bias.ElementCount, out pBiasCast);
-                    ulong gemvWeight = gemvDtype == weight.DType ? pWeight
-                        : MaterializeWeightIfNeeded(pWeight, weight, gemvDtype, out pWeightCast, blockScales);
+                    ulong gemvWeight;
+                    if (int8Unpack)
+                    {
+                        // The whole weight: these kernels read it once.
+                        pInt8Bf16 = CudaMemory.Allocate((nuint)(weight.ElementCount * DType.BF16.SizeInBytes));
+                        gemvWeight = UnpackInt8Rows(pWeight, int8RowScaleDev, 0, n, k, DType.BF16, pInt8Bf16, 0);
+                    }
+                    else
+                    {
+                        gemvWeight = gemvDtype == weight.DType ? pWeight
+                            : MaterializeWeightIfNeeded(pWeight, weight, gemvDtype, out pWeightCast, blockScales);
+                    }
                     if (gemvDtype == DType.BF16)
                         _kernels!.LaunchMulMatVecBf16F32(pOutput, pInput, gemvWeight, gemvBias, n, k, m, _stream.Handle);
                     else
@@ -2567,7 +2610,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // inside CastOnGpu's F8→F32 path.
             // The 16-bit path rounds both operands to F16; ForceF32Gemm weights skip it.
             bool forceF32 = weight.ForceF32Gemm;
-            DType gemmDtype = forceF32 ? DType.F32 : ResolveGemmDtype(input.DType, UnpackedWeightDType(weight));
+            DType gemmDtype = forceF32 ? DType.F32 : ResolveGemmDtype(input.DType, int8Unpack ? DType.BF16 : UnpackedWeightDType(weight));
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
 
             // Weight cast (fp8/quant → BF16/F16): identical every forward, so for a preloaded weight we
@@ -2581,7 +2624,19 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // adds roughly 40% peak VRAM on Flux (the T5 encoder alone is 4.7B parameters).
             bool hipUpcast = forceF32 || (HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32);
             ulong weightPtr;
-            if (weight.DType == gemmDtype)
+            // A device-unpacked int8 weight is never cast whole or cached: only the rows this call computes are unpacked, here
+            // when they fit one tile (every GEMM path below then takes them as a dense weight), else tile by tile at the GEMM.
+            int tileRows = int8Unpack ? Int8DequantTileRows(n, k, gemmDtype) : n;
+            bool int8Tiled = tileRows < n;
+            if (int8Unpack)
+            {
+                pInt8Bf16 = CudaMemory.Allocate((nuint)((long)tileRows * k * DType.BF16.SizeInBytes));
+                if (gemmDtype != DType.BF16)
+                    pWeightCast = CudaMemory.Allocate((nuint)((long)tileRows * k * gemmDtype.SizeInBytes));
+                weightPtr = int8Tiled ? 0
+                    : UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset, n, k, gemmDtype, pInt8Bf16, pWeightCast);
+            }
+            else if (weight.DType == gemmDtype)
             {
                 weightPtr = pWeight;
             }
@@ -2639,7 +2694,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Every branch above leaves weightPtr addressing gemmDtype elements over the WHOLE weight — casts are
             // deliberately computed and cached full-size so sibling row ranges share one cast — so the range is a
             // single offset applied here, after cast resolution rather than inside each branch.
-            if (rowRange)
+            if (rowRange && !int8Unpack)
             {
                 weightPtr += (ulong)((long)weightRowOffset * k * gemmDtype.SizeInBytes);
             }
@@ -2672,7 +2727,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // Tensor-core HGEMM path (opt-in, validation-pending): F16 operands+output,
             // aligned dims. Produces the GEMM only; bias is added by the block below.
             bool ltBiasFused = false;
-            if (EnableTensorCoreGemm && gemmDtype == DType.F16 && output.DType == DType.F16
+            if (!int8Tiled && EnableTensorCoreGemm && gemmDtype == DType.F16 && output.DType == DType.F16
                 && TensorCoreGemm.IsSupported && Cuda.TensorCoreGemm.IsAligned(m, n, k))
             {
                 TensorCoreGemm.Run(a: inputPtr, b: weightPtr, c: pOutput, m: m, n: n, k: k, alpha: alpha, stream: _stream.Handle);
@@ -2684,7 +2739,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // fused and GemmEx paths: HighPrecisionGemm/numerics.noTf32/numerics.gemmF16 must not change
                 // semantics merely because this Linear has a bias. A missing Lt algorithm is an ordinary
                 // per-shape capability result, so TryRun returns false and the existing GemmEx+BiasAdd path runs.
-                if (EnableEpilogueFusion && bias is not null && !outNeedsCast)
+                if (!int8Tiled && EnableEpilogueFusion && bias is not null && !outNeedsCast)
                 {
                     LtGemmExecutor lt = LtGemm;
                     if (lt.IsSupported)
@@ -2720,16 +2775,26 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                             gemmOut = pGemmTemp;
                             gemmOutType = gemmType;
                         }
-                        CublasApi.cublasGemmEx(
-                            _cublasHandle,
-                            CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
-                            n, m, k,
-                            &alpha,
-                            weightPtr, gemmType, k,
-                            inputPtr, gemmType, k,
-                            &beta,
-                            gemmOut, gemmOutType, n,
-                            gemmCompute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        // One pass over the whole weight, or one per row tile of a tiled int8 weight: a tile of weight rows is a run of
+                        // output channels, written at its column offset under the full output's leading dimension.
+                        int gemmOutBytes = (outNeedsCast ? gemmDtype : output.DType).SizeInBytes;
+                        for (int first = 0; first < n; first += tileRows)
+                        {
+                            int rows = Math.Min(tileRows, n - first);
+                            ulong tileWeight = int8Tiled
+                                ? UnpackInt8Rows(pWeight, int8RowScaleDev, weightRowOffset + first, rows, k, gemmDtype, pInt8Bf16, pWeightCast)
+                                : weightPtr;
+                            CublasApi.cublasGemmEx(
+                                _cublasHandle,
+                                CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                                rows, m, k,
+                                &alpha,
+                                tileWeight, gemmType, k,
+                                inputPtr, gemmType, k,
+                                &beta,
+                                gemmOut + (ulong)((long)first * gemmOutBytes), gemmOutType, n,
+                                gemmCompute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        }
                         if (outNeedsCast)
                             CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
                     }
@@ -2768,6 +2833,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (pInputPacked != 0) CudaMemory.FreeAsync(pInputPacked, _stream.Handle);
             if (pInputScale != 0) CudaMemory.FreeAsync(pInputScale, _stream.Handle);
             if (pBlockScratch != 0) CudaMemory.FreeAsync(pBlockScratch, _stream.Handle);
+            if (pInt8Bf16 != 0) CudaMemory.FreeAsync(pInt8Bf16, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
