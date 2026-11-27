@@ -4,9 +4,9 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>MovieRoll's sigma ladders and rolling step-index table, against <c>Fixtures/movieroll_schedule_reference.json</c>, a transcription of the
-/// reference's <c>FlowMatchDiscreteScheduler.set_timesteps</c>, <c>set_custom_timesteps</c> and <c>StreamingSchedulerWrapper.get_step_index</c>
-/// (run in the CPU reference image). The reference is a transcription of the scheduler math, not the diffusers module itself.</summary>
+/// <summary>MovieRoll's sigma ladders and rolling step-index table, against <c>Fixtures/movieroll_schedule_reference.json</c>, recorded from
+/// MovieRoll's own <c>FlowMatchDiscreteScheduler.set_timesteps</c>, <c>set_custom_timesteps</c> and <c>StreamingSchedulerWrapper.get_step_index</c>
+/// at upstream commit 0b5f73e (Tencent-Hunyuan/MovieRoll) by <c>generate_movieroll_schedule_fixtures_upstream.py</c>.</summary>
 public sealed class MovieRollScheduleTests
 {
     private const float Tolerance = 1e-5f;
