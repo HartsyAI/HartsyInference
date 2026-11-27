@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -44,7 +45,7 @@ public sealed class Qwen35VlGenerator
         // The turn tail is the loaded template's own rendering after the user content (see JinjaChatTemplate.TurnTailAfterUser).
         int[] post = _tok.Encode($"<|vision_end|>{question}{turnTail}", addSpecial: true);
         int seqLen = pre.Length + imgTokens + post.Length;
-        Logs.Info($"[Qwen35VlGenerator] image grid {grid} ({grid.Tokens} merged tokens); prompt {seqLen} tokens; max new tokens {maxTokens}; reasoning open {ReasoningOpen(turnTail)}.");
+        Logs.Info($"[Qwen35VlGenerator] image grid MRopeImageGrid {{ T = {grid.T}, H = {grid.H}, W = {grid.W}, Tokens = {grid.Tokens} }}; prompt {seqLen} tokens; max new tokens {maxTokens}; reasoning open {ReasoningOpen(turnTail)}.");
 
         // 3. Assemble the spliced input-embedding sequence [pre][image][post] (host F32).
         using Tensor embeds = new(new TensorShape(1, seqLen, hidden), DType.F32);
@@ -81,14 +82,24 @@ public sealed class Qwen35VlGenerator
         }
         int token = sampler.Next(new Span<float>(logits), history);
 
+        int? openId = _tok.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[0]), closeId = _tok.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]);
         for (int step = 0; step < maxTokens && !stops.Contains(token); step++)
         {
-            sb.Append(_tok.Decode(new[] { token }));
+            sb.Append(PieceText(_tok, token, openId, closeId));
             history.Add(token);
             logits = _model.ForwardLastLogits(_backend, new[] { token });
             token = sampler.Next(new Span<float>(logits), history);
         }
         return new VisionGeneration(sb.ToString(), StoppedOnToken: stops.Contains(token));
+    }
+
+    /// <summary>The text of one generated token. The reasoning markers are control tokens in these templates, and <see cref="ILlmTokenizer.Decode"/> drops
+    /// control ids, so the closing marker would vanish before the reasoning split sees it. They are written as their literal text, as the text path keeps them.</summary>
+    internal static string PieceText(ILlmTokenizer tok, int token, int? openId, int? closeId)
+    {
+        if (closeId is int c && token == c) return SpecialLiteralEscaper.ReasoningMarkers[1];
+        if (openId is int o && token == o) return SpecialLiteralEscaper.ReasoningMarkers[0];
+        return tok.Decode(new[] { token });
     }
 
     /// <summary>The turn tail when no template is loaded: a plain assistant header, no reasoning block.</summary>
