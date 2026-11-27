@@ -23,8 +23,8 @@ public sealed class Hy4FlashChatTemplate : IChatTemplate
     public Hy4FlashChatTemplate(string source)
     {
         ArgumentException.ThrowIfNullOrEmpty(source);
-        _default = new JinjaChatTemplate(source);
-        _noThink = new JinjaChatTemplate("{% set reasoning_effort = 'no_think' %}\n" + source);
+        _default = new JinjaChatTemplate(source, renderImageBlocks: true);
+        _noThink = new JinjaChatTemplate("{% set reasoning_effort = 'no_think' %}\n" + source, renderImageBlocks: true);
     }
 
     /// <inheritdoc />

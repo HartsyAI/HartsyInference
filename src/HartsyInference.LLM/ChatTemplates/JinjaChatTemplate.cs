@@ -13,6 +13,7 @@ public sealed class JinjaChatTemplate : IChatTemplate
     private readonly JinjaEngine _engine;
     private readonly string _toolRole;
     private readonly bool _prependBos;
+    private readonly bool _renderImageBlocks;
 
     public string Name => "jinja";
 
@@ -24,12 +25,15 @@ public sealed class JinjaChatTemplate : IChatTemplate
     /// <param name="prependBos">Starts every encoded prompt with exactly one tokenizer BOS, adding it when the render does not begin with
     /// it: the GGUF <c>add_bos_token</c> contract as llama.cpp applies it, whether or not the template writes <c>bos_token</c>.</param>
     /// <param name="hfWhitespace">Renders with transformers' <c>trim_blocks</c> and <c>lstrip_blocks</c>, which a template written for the Hugging Face environment relies on.</param>
-    public JinjaChatTemplate(string chatTemplate, bool prependBos = false, bool hfWhitespace = false)
+    /// <param name="renderImageBlocks">Renders a turn with an <see cref="ImageBlock"/> as the content list its template reads (text items and image items).
+    /// Off by default: every other template keeps the plain content string, so a turn's image blocks do not change its prompt.</param>
+    public JinjaChatTemplate(string chatTemplate, bool prependBos = false, bool hfWhitespace = false, bool renderImageBlocks = false)
     {
         ArgumentNullException.ThrowIfNull(chatTemplate);
         _engine = new JinjaEngine(chatTemplate, hfWhitespace);
         Source = chatTemplate;
         _prependBos = prependBos;
+        _renderImageBlocks = renderImageBlocks;
         // GLM-4-0414 answers tool results under an "observation" role; a "tool" turn would be silently dropped by its template.
         // Only a template whose parsed expressions compare the role to "observation" is remapped (a comment, text or string literal
         // naming it is not an expression), and a template that also compares the role to "tool" keeps the tool role.
@@ -152,11 +156,12 @@ public sealed class JinjaChatTemplate : IChatTemplate
     }
 
     /// <summary>The OpenAI-shaped message dictionary Hugging Face templates expect: <c>tool_calls[i].function.{name,arguments}</c> with arguments as a parsed object when they are JSON, plus <c>tool_call_id</c>, <c>name</c> and <c>reasoning_content</c> when set.</summary>
-    // A turn with images renders its body as the content list the template reads: a text item per text block and an image item per image block.
-    // Without an image block the body is the plain string, as it always was.
-    private static object? ContentValue(ChatMessage m, IReadOnlyList<string> literals)
+    // With render-image-blocks on, a turn with images renders its body as the content list the template reads: a text item per text block and an
+    // image item per image block. Otherwise, or without an image block, the body is the plain string, as it always was.
+    private object? ContentValue(ChatMessage m, IReadOnlyList<string> literals)
     {
-        if (m.Blocks is not { Count: > 0 } blocks || !blocks.Any(static b => b is ImageBlock)) return SpecialLiteralEscaper.Escape(m.Content, literals);
+        if (!_renderImageBlocks || m.Blocks is not { Count: > 0 } blocks || !blocks.Any(static b => b is ImageBlock))
+            return SpecialLiteralEscaper.Escape(m.Content, literals);
         List<object?> items = new(blocks.Count);
         foreach (ContentBlock block in blocks)
         {
