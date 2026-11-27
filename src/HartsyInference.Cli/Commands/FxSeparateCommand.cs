@@ -54,9 +54,8 @@ public sealed class FxSeparateCommand : Command<FxSeparateCommand.Settings>
         // Demucs' STFT/ISTFT (DemucsSpec.Spec) only has a CPU implementation (CudaBackend.Stft throws
         // NotSupportedException), so Demucs forces CPU whatever -b says. The MDX-Net separator and the voice isolator take -b:
         // the isolator's STFT stays on the host, but its network runs on the requested backend.
-        bool voiceIsolator = string.Equals(settings.Model, "voice-isolator", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(settings.Model, "voice-isolator-realtime", StringComparison.OrdinalIgnoreCase);
-        bool usesBackend = voiceIsolator || ModelCatalog.Find(settings.Model)?.Features.HasFlag(CatalogFeatures.MdxNetSeparator) == true;
+        CatalogFeatures features = ModelCatalog.Find(settings.Model)?.Features ?? CatalogFeatures.None;
+        bool usesBackend = features.HasFlag(CatalogFeatures.MdxNetSeparator) || features.HasFlag(CatalogFeatures.VoiceIsolator);
         string backend = usesBackend ? settings.Backend : "cpu";
         ParamState parameters = new ParamState(Modality.Fx) { Backend = backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("mode", "separate");

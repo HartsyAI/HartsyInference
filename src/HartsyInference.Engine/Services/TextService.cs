@@ -16,6 +16,7 @@ using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Hy4Flash;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Maxwell;
@@ -857,9 +858,24 @@ public sealed partial class TextService : ITextService, IDisposable
     internal static int? OpenReasoningCloseId(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest, TextRequest request,
         bool rawCompletion)
     {
-        if (rawCompletion || template is not JinjaChatTemplate jinja || genRequest.EffectiveMessages() is not { } messages) return null;
-        if (tokenizer.SpecialId(SpecialLiteralEscaper.ReasoningMarkers[1]) is not int close) return null;
-        return jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools).ReasoningOpen ? close : null;
+        if (rawCompletion || genRequest.EffectiveMessages() is not { } messages) return null;
+        IReadOnlyList<string> markers;
+        ParserInitialState state;
+        switch (template)
+        {
+            case JinjaChatTemplate jinja:
+                markers = SpecialLiteralEscaper.ReasoningMarkers;
+                state = jinja.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools);
+                break;
+            case Hy4FlashChatTemplate hy4:
+                markers = Hy4FlashChatTemplate.ReasoningMarkers;
+                state = hy4.ResolveParserState(tokenizer, messages, request.EnableThinking, genRequest.Tools, request.ReasoningEffort);
+                break;
+            default:
+                return null;
+        }
+        if (tokenizer.SpecialId(markers[1]) is not int close) return null;
+        return state.ReasoningOpen ? close : null;
     }
 
     /// <summary>The special-token ids the passthrough parser decodes as text: the control-token literals a filter asked to see, plus the reasoning markers so a thinking model's <c>&lt;think&gt;</c> tags stay in the stream. A literal the tokenizer does not know as a special token is already plain text, so it needs no mapping.</summary>
@@ -1467,7 +1483,9 @@ public sealed partial class TextService : ITextService, IDisposable
         if (keepQuantized is not null) backend.CacheQuantizedWeightCasts = false;
         string architecture = architecture0;
         bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
-        EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || ssm, keepQuantized);
+        // The SSM CPU route expands every quantized weight to F32, so its headroom is that expansion read from the header, not 2.5x the file.
+        bool ssmCpuExpansion = ssm && !backend.Capabilities.SupportsQuantized;
+        EnsureRamHeadroomFor(path, dequantizesEverything: (dequantize && keepQuantized is null) || (ssm && !ssmCpuExpansion), keepQuantized, expandQuantizedToF32: ssmCpuExpansion);
         if (LoopedLanguageModel.IsLoopedArchitecture(architecture))
         {
             LoadLooped(slot, deviceKey, path, request, backend, dequantize, keepQuantized);
@@ -1475,7 +1493,8 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         if (ssm)
         {
-            slot.SsmModel = SsmLanguageModel.Load(path, architecture);
+            // A backend with no quantized multiply (the CPU) takes the F32 expansion; quantized backends keep the packed weights.
+            slot.SsmModel = SsmLanguageModel.Load(path, architecture, dequantizeToF32: !backend.Capabilities.SupportsQuantized);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
             // SSM has its own loader with no EnumerateWeights/redundant-split concept at all.
             slot.PreloadRedundantWeightSplitsApplied = null;
@@ -2137,7 +2156,7 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Refuses to load when there isn't enough free host RAM to survive the load, so a big model fails with a clear error instead of OOM-killing the process. A load that dequantizes everything needs <see cref="RamHeadroomMultiplier"/> times the file; one that keeps supported quants compressed needs <see cref="QuantizedResidentHeadroomMultiplier"/> times the file plus the F32 size of any quantized tensor it still has to expand. No-op when <c>/proc/meminfo</c> is absent.</summary>
-    private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null)
+    private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null, bool expandQuantizedToF32 = false)
     {
         long availableKb = ReadAvailableMemoryKb();
         if (availableKb < 0)
@@ -2146,15 +2165,46 @@ public sealed partial class TextService : ITextService, IDisposable
         try { fileBytes = new FileInfo(path).Length; }
         catch (Exception ex) { Logs.Debug($"[TextService] Could not stat '{path}': {ex.Message}"); return; }
         double availableBytes = availableKb * 1024.0;
-        double requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out double expandedBytes, keepQuantized);
+        double requiredBytes;
+        double expandedBytes;
+        if (expandQuantizedToF32)
+        {
+            using GgufLoader probe = new GgufLoader();
+            probe.Load(path);
+            requiredBytes = ExpandedF32RequiredBytes(probe.Descriptors.Values, fileBytes);
+            expandedBytes = requiredBytes - fileBytes;
+        }
+        else
+        {
+            requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out expandedBytes, keepQuantized);
+        }
+        RequireHostRam(availableBytes, requiredBytes, fileBytes, expandedBytes, path, dequantizesEverything, expandQuantizedToF32);
+    }
+
+    /// <summary>The host bytes of an SSM load that expands every quantized weight to F32 on the CPU: the packed file, which stays mapped, plus each
+    /// quantized tensor at four bytes per element (the F32 copy). Read from the header, so the refusal uses the real size, not a multiple of the file.</summary>
+    internal static double ExpandedF32RequiredBytes(IEnumerable<GgufTensorDescriptor> tensors, long fileBytes)
+    {
+        double expanded = 0;
+        foreach (GgufTensorDescriptor tensor in tensors)
+            if (tensor.DType.IsQuantized) expanded += tensor.Shape.ElementCount * 4.0;
+        return fileBytes + expanded;
+    }
+
+    /// <summary>Refuses a load whose required host RAM exceeds the free RAM; the message names the route that set the requirement.</summary>
+    internal static void RequireHostRam(double availableBytes, double requiredBytes, long fileBytes, double expandedBytes, string path,
+        bool dequantizesEverything, bool expandQuantizedToF32)
+    {
         if (availableBytes < requiredBytes)
         {
             throw new HartsyInferenceException(
                 $"Not enough free host RAM to safely load '{Path.GetFileName(path)}' ({fileBytes / 1024.0 / 1024 / 1024:0.0} GB file): "
                 + $"{availableBytes / 1024 / 1024 / 1024:0.0} GB free, need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB headroom"
-                + (dequantizesEverything
-                    ? $" ({RamHeadroomMultiplier}x the file for dequantization). "
-                    : $" ({QuantizedResidentHeadroomMultiplier}x the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of tensors expanded to F32). ")
+                + (expandQuantizedToF32
+                    ? $" (the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of quantized tensors expanded to F32 for the CPU). "
+                    : dequantizesEverything
+                        ? $" ({RamHeadroomMultiplier}x the file for dequantization). "
+                        : $" ({QuantizedResidentHeadroomMultiplier}x the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of tensors expanded to F32). ")
                 + "Free RAM or use a smaller quant, then retry — loading anyway risks crashing the whole process.");
         }
     }

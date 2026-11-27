@@ -85,7 +85,7 @@ public sealed class FxService : IFxService
 
     /// <summary>Voice-isolator route of <see cref="SeparateAsync"/>: a <c>voice</c> and a <c>background</c> stem (mono, 48 kHz; the
     /// background is the input minus the voice). Both models run on the engine's backend (CPU rerun when the card is full). The STFT stays on the host (IBackend.Stft has no
-    /// GPU path); the offline network's scan, convolution and attention ops take the device, and the Mamba causal-conv history does not.</summary>
+    /// GPU path). On CUDA and Vulkan the network's scan, the Mamba causal convolution and the attention run on backend ops; on the CPU the causal convolution keeps its host loop, which is faster there.</summary>
     private Task<StemsResult> IsolateVoiceAsync(AudioModelSelector selector, FxSeparateRequest request, bool realtime, CancellationToken cancel)
     {
         if (request.Shifts != 0 || request.Segment is not null || request.Overlap is not null)

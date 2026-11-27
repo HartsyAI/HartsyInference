@@ -62,29 +62,27 @@ public sealed class VoiceIsolatorGoldenParityTests(ITestOutputHelper output)
     [Trait("Category", "GpuIntegration")]
     public void Vulkan_RealtimeStream11sMatchesTheReference() => Check("realtime_stream_11s", "vulkan");
 
-    /// <summary>Runs one case on the named backend ("cpu", "cuda" or "vulkan"). A device that is not present reports itself as skipped.</summary>
+    /// <summary>Runs one case on the named backend ("cpu", "cuda" or "vulkan"). The device fact skips a missing device before this runs; a
+    /// device that fails to open here is a failure, not a pass.</summary>
     private void Check(string name, string backendName)
     {
-        IBackend? backend = Create(backendName);
-        if (backend is null) return;
-        using (backend as IDisposable)
+        using (IBackend backend = Create(backendName))
         {
             CheckOn(name, backend, backendName);
         }
     }
 
-    private IBackend? Create(string backendName)
+    private static IBackend Create(string backendName)
     {
         switch (backendName)
         {
             case "cpu":
                 return new CpuBackend();
             case "cuda":
-                if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: CUDA unavailable"); return null; }
+                // Throws when no device opens: the device fact already skipped a missing device, so a failure here is real.
                 return new CudaBackend(0, PtxDirectory());
             case "vulkan":
-                try { return new VulkanBackend(); }
-                catch (Exception ex) { output.WriteLine($"SKIPPED: Vulkan unavailable ({ex.Message})"); return null; }
+                return new VulkanBackend();
             default:
                 throw new ArgumentOutOfRangeException(nameof(backendName), backendName, "Unknown backend.");
         }

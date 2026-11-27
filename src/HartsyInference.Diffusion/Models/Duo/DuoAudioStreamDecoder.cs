@@ -88,6 +88,9 @@ public sealed class DuoAudioStreamDecoder : IDisposable
             decoder.SamplesPerLatentFrame, spec.AudioLatents, lookaheadSteps, contextSteps);
     }
 
+    /// <summary>Latent steps per channel in one block; every block the stream receives has this many.</summary>
+    public int BlockSteps => _blockSteps;
+
     /// <summary>Receives the next block, <c>2 · blockSteps · width</c> values in [channel][step][width] order. Returns the samples of the
     /// previous block, [channel][sample] with <c>blockSteps · samplesPerStep</c> per channel, or nothing for the first block.</summary>
     public float[] OnBlock(float[] rows)
@@ -186,17 +189,17 @@ public sealed class DuoAudioStreamDecoder : IDisposable
         float[] samples;
         try
         {
-            Tensor pixels = _decodeWindow(window);
+            Tensor decoded = _decodeWindow(window);
             try
             {
-                samples = Crop(pixels, steps);
+                samples = Crop(decoded, steps);
             }
             finally
             {
                 // A decoder may hand back the window itself; it is disposed once, below.
-                if (!ReferenceEquals(pixels, window))
+                if (!ReferenceEquals(decoded, window))
                 {
-                    pixels.Dispose();
+                    decoded.Dispose();
                 }
             }
         }
