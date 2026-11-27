@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Tensors;
@@ -71,6 +72,8 @@ internal static class LongCatInt8ReleaseCheck
             [name + LongCatInt8Converter.QuantizedSuffix] = quantized,
             [name + LongCatInt8Converter.ScaleSuffix] = scales,
         });
+        // Read before PrepareFor replaces the tensors with their widened copies, which do not carry the flag.
+        bool f32Input = converted[name + ".weight"].ForceF32Gemm;
         using QuantizedWeightPolicy.PreparedWeights prepared =
             QuantizedWeightPolicy.PrepareFor(converted, static _ => false, "longcat-int8-release-check", DType.F32);
 
@@ -100,7 +103,12 @@ internal static class LongCatInt8ReleaseCheck
                 if (!(excess <= 0))
                     releaseViolations++;
                 maxExcess = Math.Max(maxExcess, excess);
-                if (BitConverter.SingleToUInt32Bits(engine[i]) != (uint)TensorCasts.F32ToBf16Bits(level * scale) << 16)
+                // The reference's rounding for this layer's input dtype: the exact float32 product for a float32-input layer (ForceF32Gemm), else
+                // the BF16 product of the level and the BF16 scale, rounded to nearest-even (quantization.py lines 28-29).
+                uint expectedBits = f32Input
+                    ? BitConverter.SingleToUInt32Bits((float)level * scale)
+                    : (uint)BFloat16Bits.FromFloat((float)level * BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(scale))) << 16;
+                if (BitConverter.SingleToUInt32Bits(engine[i]) != expectedBits)
                     engineViolations++;
                 if (scale > 0f)
                     maxStep = Math.Max(maxStep, error / scale);

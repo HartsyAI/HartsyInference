@@ -22,6 +22,12 @@ public static class LongCatInt8Converter
     /// <summary>True when any key ends in <see cref="QuantizedSuffix"/>.</summary>
     public static bool IsInt8Layout(IEnumerable<string> keys) => keys.Any(static key => key.EndsWith(QuantizedSuffix, StringComparison.Ordinal));
 
+    /// <summary>True for the layers the reference runs on float32 input: the time embedder's two linears, and every adaLN modulation linear (block,
+    /// audio, final). Under autocast in longcat_video_dit_avatar.py (lines 130-133, 166-168, 499-500) and FinalLayer_FP32 (blocks.py 159-160).</summary>
+    public static bool IsFloat32InputLayer(string denseKey) =>
+        denseKey.StartsWith("t_embedder.mlp.", StringComparison.Ordinal)
+        || denseKey.Contains("adaLN_modulation.1.", StringComparison.Ordinal);
+
     /// <summary>Returns a dictionary under the dense key names, each quantized weight carrying its scale. Dense tensors pass through
     /// untouched.</summary>
     public static Dictionary<string, Tensor> Convert(IReadOnlyDictionary<string, Tensor> source)
@@ -57,7 +63,11 @@ public static class LongCatInt8Converter
                 throw new InvalidDataException(
                     $"'{baseKey}{ScaleSuffix}' must hold {tensor.Shape[0]} per-row scales (or one per-tensor scale); got {scale.ElementCount}.");
 
-            tensor.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = scale, ConvRotGroupSize = 0 };
+            // The reference's rounding (quantization.py lines 28-29 cast to the input's dtype). A float32-input layer (the time embedder and the adaLN
+            // linears, which the reference runs under autocast) keeps the exact float32 product and a float32 GEMM; every other layer is BF16 input.
+            tensor.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = scale, ConvRotGroupSize = 0, ReferenceRounding = true };
+            if (IsFloat32InputLayer(denseKey))
+                tensor.ForceF32Gemm = true;
             result[denseKey] = tensor;
         }
         return result;
