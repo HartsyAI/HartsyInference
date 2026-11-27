@@ -113,6 +113,8 @@ public sealed class DuoRecipePipeline : IVideoRecipePipeline
         }
         else
         {
+            // A run that threw or was cancelled can leave work queued that still reads them.
+            _backend.Sync();
             _backend.FreeWeights(weights());
         }
     }
