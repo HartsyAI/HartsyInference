@@ -21,7 +21,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// chat template with the crop measured from the tokenised prompt, and Glyph-ByT5-small on the quoted text only. The VAE is the HunyuanVideo-1.5 VAE the
 /// reference loads. The distilled chain runs five steps with no classifier-free guidance, context noise 0.15, and the full-history block count 6.
 /// Construction is not validated against real weights yet: the DiT is gated, so its catalog entry is <c>ValidationPending</c> and carries no pin.</summary>
-public sealed class MovieRollRecipe : IVideoRecipe
+public sealed class MovieRollRecipe : IVideoRecipe, IVideoDeviceCheck
 {
     /// <summary>Latent frames of each emitted chunk after the first, and the first chunk's <c>1 + ChunkFrames</c> (upstream <c>check_and_get_chunk_sizes</c>).</summary>
     internal const int ChunkFrames = 4;
@@ -75,6 +75,32 @@ public sealed class MovieRollRecipe : IVideoRecipe
     /// <inheritdoc/>
     public bool RefusesUnhonouredPlacements => true;
 
+    /// <summary>The note on how the released DiT is held on a backend without streaming: FP32 off CUDA, since the F16 cast is CUDA only.</summary>
+    internal const string DitHoldDetail = " (held at its FP32 load dtype; the F16 cast is CUDA only)";
+
+    /// <inheritdoc/>
+    string? IVideoDeviceCheck.DeviceRefusal(IBackend backend, string checkpointPath)
+    {
+        if (!File.Exists(checkpointPath)) return null;
+        return VideoWeightFit.Refusal(backend, "MovieRoll", () => (new FileInfo(checkpointPath).Length, DitHoldDetail));
+    }
+
+    /// <summary>Why the checkpoint's tensors cannot run: a quantized (FP8 or INT8) DiT has no load path here, so only FP32 and BF16 (and the F16 cast
+    /// of them) are accepted. Null when every dtype is one of those.</summary>
+    public static string? QuantRefusal(IEnumerable<DType> dtypes)
+    {
+        foreach (DType dtype in dtypes)
+        {
+            if (dtype != DType.F32 && dtype != DType.BF16 && dtype != DType.F16)
+                return $"MovieRoll has no load path for {dtype} weights; use the FP32 or BF16 release. Quantized (FP8 or INT8) checkpoints are not in scope.";
+        }
+        return null;
+    }
+
+    /// <summary>Why a request's LoRA adapters cannot run: the MovieRoll recipe has no adapter path, so any entry is refused. Null without adapters.</summary>
+    public static string? LoraRefusal(bool hasAdapters) =>
+        hasAdapters ? "MovieRoll does not support LoRA adapters; remove Loras from the request." : null;
+
     /// <summary>The source dtypes the DiT casts to F16 at load on this backend. BF16 is cast on every backend, as before; FP32 (the released file's
     /// dtype) is cast on CUDA only, because the F16 path for FP32 weights is proven there and not on the CPU backend, which keeps them.</summary>
     public static IReadOnlyList<DType> DitHalfCastSources(IBackend backend) =>
@@ -97,8 +123,13 @@ public sealed class MovieRollRecipe : IVideoRecipe
             CheckpointSource ditSource = CheckpointSource.Open(context.CheckpointPath);
             loaders.Add(ditSource);
             HunyuanVideo15Config config = HunyuanVideo15Config.Full;
+            // Refused before anything is converted or copied: a backend without streaming cannot hold this DiT, whatever it is cast to.
+            string? fit = VideoWeightFit.Refusal(context.Backend, "MovieRoll", () => (new FileInfo(context.CheckpointPath).Length, DitHoldDetail));
+            if (fit is not null) throw new NotSupportedException(fit);
             Dictionary<string, Tensor> ditWeights = HunyuanVideo15CheckpointConverter.Convert(
                 new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal), config.NumBlocks, config.HiddenSize);
+            string? quant = QuantRefusal(ditWeights.Values.Select(weight => weight.DType));
+            if (quant is not null) throw new NotSupportedException(quant);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"MovieRoll checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
             // DisableCacheWeightCasts turns off the device-side cache of per-dtype weight casts: each cached cast would be a second device copy of a

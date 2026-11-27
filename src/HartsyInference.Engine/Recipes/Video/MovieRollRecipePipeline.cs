@@ -35,6 +35,8 @@ public sealed class MovieRollRecipePipeline(IBackend backend, MovieRollPipeline 
         CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
+        string? lora = MovieRollRecipe.LoraRefusal(request.Loras is { Entries.Count: > 0 });
+        if (lora is not null) throw new NotSupportedException(lora);
         (int width, int height) = VideoRecipeUtils.ResolveResolution(settings, multiple: 16);
         int frames = settings.Frames;
         // Frames are 16n+1 (the constraints snap them); the sampler emits n chunks: a first of five latent frames and n-1 of four.
