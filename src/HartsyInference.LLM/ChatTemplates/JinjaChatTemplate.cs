@@ -97,13 +97,15 @@ public sealed class JinjaChatTemplate : IChatTemplate
     /// think block. Only the appended tail is read, because message content keeps its reasoning markers literal.</summary>
     /// <remarks>Content when the tokenizer lacks either marker as a control token, when the template does not render, or when the render
     /// without the generation prompt is not a prefix of the render with it.</remarks>
+    /// <param name="reasoningMarkers">The open and close think literals this template writes; null for the <c>&lt;think&gt;</c> and <c>&lt;/think&gt;</c> pair.</param>
     public ParserInitialState ResolveParserState(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking,
-        IReadOnlyList<ToolSpec>? tools)
+        IReadOnlyList<ToolSpec>? tools, IReadOnlyList<string>? reasoningMarkers = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(messages);
-        string open = SpecialLiteralEscaper.ReasoningMarkers[0];
-        string close = SpecialLiteralEscaper.ReasoningMarkers[1];
+        IReadOnlyList<string> markers = reasoningMarkers ?? SpecialLiteralEscaper.ReasoningMarkers;
+        string open = markers[0];
+        string close = markers[1];
         if (tokenizer.SpecialId(open) is null || tokenizer.SpecialId(close) is null) return new ParserInitialState(false);
         string withPrompt, withoutPrompt;
         try

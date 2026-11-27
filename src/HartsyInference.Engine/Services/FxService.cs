@@ -84,8 +84,8 @@ public sealed class FxService : IFxService
     }
 
     /// <summary>Voice-isolator route of <see cref="SeparateAsync"/>: a <c>voice</c> and a <c>background</c> stem (mono, 48 kHz; the
-    /// background is the input minus the voice). Offline runs on the engine's backend (CPU rerun when the card is full); realtime always runs on the CPU. The STFT stays on the host (IBackend.Stft has no
-    /// GPU path); the offline network's scan, convolution and attention ops take the device, and the Mamba causal-conv history does not.</summary>
+    /// background is the input minus the voice). Both models run on the engine's backend (CPU rerun when the card is full). The STFT stays on the host (IBackend.Stft has no
+    /// GPU path). On CUDA and Vulkan the network's scan, the Mamba causal convolution and the attention run on backend ops; on the CPU the causal convolution keeps its host loop, which is faster there.</summary>
     private Task<StemsResult> IsolateVoiceAsync(AudioModelSelector selector, FxSeparateRequest request, bool realtime, CancellationToken cancel)
     {
         if (request.Shifts != 0 || request.Segment is not null || request.Overlap is not null)
@@ -102,10 +102,10 @@ public sealed class FxService : IFxService
                 $"LookaheadFrames must be one of {string.Join(", ", FxCatalog.VoiceIsolatorRealtimeLookaheads)}.");
         }
         string cacheKey = selector.LocalPath ?? (realtime ? FxCatalog.VoiceIsolatorRealtimeId : FxCatalog.VoiceIsolatorId);
-        // Offline runs on the engine's backend (CUDA measured faster than CPU at 3 s and 11 s; Vulkan only at 11 s), with a CPU rerun
-        // when the card is full. Realtime stays on the CPU: neither GPU was faster than the CPU on the golden clips (see
-        // docs/Research/VOICE_ISOLATOR_ARCHITECTURE.md). The STFT (VoiceIsolatorSpectral) stays on the host whichever backend runs.
-        IBackend gpu = realtime ? _cpuBackend.Value : _engine.Backend;
+        // Both models run on the engine's backend (CUDA or Vulkan), with a CPU rerun when the card is full: on the final head the
+        // device runs beat the CPU on every golden case (see docs/Research/VOICE_ISOLATOR_ARCHITECTURE.md). The STFT (VoiceIsolatorSpectral)
+        // stays on the host whichever backend runs.
+        IBackend gpu = _engine.Backend;
         return WithCpuFallbackAsync(gpu, _cpuBackend.Value,
             backend => IsolateVoiceOnAsync(backend, selector, request, realtime, cacheKey, cancel), cancel);
     }
@@ -138,7 +138,7 @@ public sealed class FxService : IFxService
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
-        }, cancel);
+        }, cancel, callerFallsBackFromOutOfVram: HasCpuFallback(backend));
     }
 
     private static bool IsMdxSeparator(AudioModelSelector selector, FxSeparateRequest request)
@@ -159,7 +159,7 @@ public sealed class FxService : IFxService
     /// out of video memory after the audio runtime's own retry, wrapped or not, runs again on the CPU. Shared by the Kim_Vocal_2 and voice-isolator routes.</summary>
     internal static async Task<T> WithCpuFallbackAsync<T>(IBackend engine, IBackend cpu, Func<IBackend, Task<T>> run, CancellationToken cancel)
     {
-        if (engine.Device.Type is not (DeviceType.Cuda or DeviceType.Vulkan))
+        if (!HasCpuFallback(engine))
         {
             return await run(cpu).ConfigureAwait(false);
         }
@@ -167,12 +167,15 @@ public sealed class FxService : IFxService
         {
             return await run(engine).ConfigureAwait(false);
         }
-        catch (Exception ex) when (AudioRuntime.FindOutOfVram(ex) is not null && !cancel.IsCancellationRequested)
+        catch (Exception ex) when (AudioRuntime.IsUncancelledOutOfVram(ex, cancel))
         {
             Logs.Warning($"[Audio] Not enough video memory on {engine.Device}; running on the CPU instead, which takes far longer.");
             return await run(cpu).ConfigureAwait(false);
         }
     }
+
+    /// <summary>Whether a run on <paramref name="backend"/> under <see cref="WithCpuFallbackAsync{T}"/> has a CPU run to fall back to.</summary>
+    private static bool HasCpuFallback(IBackend backend) => backend.Device.Type is DeviceType.Cuda or DeviceType.Vulkan;
 
     private Task<StemsResult> SeparateVocalsOnAsync(IBackend backend, AudioModelSelector selector, FxSeparateRequest request, CancellationToken cancel)
     {
@@ -198,7 +201,7 @@ public sealed class FxService : IFxService
                 Format = "wav",
                 SampleRate = runner.SampleRate,
             };
-        }, cancel);
+        }, cancel, callerFallsBackFromOutOfVram: HasCpuFallback(backend));
     }
 
     /// <summary>The vocals of <paramref name="audio"/> for the video driving-audio pre-step, in both forms: a 44.1 kHz stereo WAV clip (16-bit PCM) for a soundtrack or a recipe that decodes it, and 16 kHz mono taken from the float stem the way the reference does, for a speech encoder.</summary>
