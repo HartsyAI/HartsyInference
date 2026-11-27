@@ -68,7 +68,7 @@ public sealed unsafe partial class Fibo2Pipeline
 
             FlowMatchEulerDiscreteScheduler scheduler = new(sigmaShift);
             scheduler.SetTimesteps(steps);
-            latent = SeedGenerator.CreateNoise(new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed);
+            latent = Fibo2NoiseSource.Create(new TensorShape(1, _config.InChannels, latentHeight, latentWidth), resolvedSeed);
             float initialSigma = scheduler.InitialNoiseSigma;
             if (MathF.Abs(initialSigma - 1f) > 1e-6f)
                 ScaleInPlace(latent, initialSigma);
