@@ -14,6 +14,8 @@ using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.Tests.Shared;
+using HartsyInference.Vulkan;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -130,6 +132,17 @@ public sealed class LongCatWeightFitTests : IDisposable
         NotSupportedException refused = Assert.Throws<NotSupportedException>(() => recipe.Construct(context));
 
         Assert.Contains("no weight streaming", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "GpuIntegration")]
+    [VulkanDeviceFact]
+    public void ARealVulkanDeviceThatHoldsTheWeightsIsNotRefused()
+    {
+        using VulkanBackend vulkan = GpuDevices.OpenVulkan();
+
+        Assert.Null(((IBackend)vulkan).StreamingCache);
+        Assert.Null(LongCatWeightFit.Refusal(vulkan, _base));
+        Assert.Null(LongCatWeightFit.Refusal(vulkan, _int8.Checkpoint));
     }
 
     /// <summary>Plans through the video service of an engine over <paramref name="backend"/>, which the engine disposes.</summary>

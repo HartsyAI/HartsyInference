@@ -61,7 +61,7 @@ public sealed class LongCatVideoRecipe : IVideoRecipe, IVideoDeviceCheck
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
 
     /// <inheritdoc/>
-    public string? DeviceRefusal(IBackend backend, string checkpointPath) =>
+    string? IVideoDeviceCheck.DeviceRefusal(IBackend backend, string checkpointPath) =>
         LongCatWeightFit.Refusal(backend, LongCatRecipeSupport.CheckpointDirectory(checkpointPath));
 
     /// <inheritdoc/>

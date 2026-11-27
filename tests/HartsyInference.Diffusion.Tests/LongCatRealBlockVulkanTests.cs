@@ -15,18 +15,19 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Block 0 of a released BF16 LongCat-Video-Avatar DiT, self-attention, text cross-attention, audio step and FFN, on Vulkan against the CPU
 /// backend: the released weights, seeded inputs on a 3 x 8 x 8 token grid with one conditioning frame. Two lanes: GEMMs in F32
-/// (<see cref="VulkanBackend.EnableF16Gemm"/> off) and the backend's default F16 GEMMs. Runs only when HARTSY_LONGCAT_BF16_INDEX names the
+/// (<see cref="VulkanBackend.EnableF16Gemm"/> off) and the backend's default F16 GEMMs. Runs only when HARTSY_LONGCAT_BLOCK_INDEX names the
 /// release's dense index, beside at least block 0's shards and <c>config.json</c>, and a Vulkan device opens.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class LongCatRealBlockVulkanTests(ITestOutputHelper output)
 {
-    private const string EnvName = "HARTSY_LONGCAT_BF16_INDEX";
+    private const string EnvName = "HARTSY_LONGCAT_BLOCK_INDEX";
     private const int Frames = 3, GridH = 8, GridW = 8, CondFrames = 1, TextRows = 32;
 
-    /// <summary>Set before the first run on real weights. The relative RMS of the output against the CPU's, GEMMs in F32.</summary>
+    /// <summary>The relative RMS of the output against the CPU's, GEMMs in F32. Set before the first run on real weights; measured 1.846e-6 on an
+    /// RTX 3060 (2026-11-27).</summary>
     private const double ExactBound = 1e-4;
 
-    /// <summary>Set before the first run on real weights. The same with the default F16 GEMMs.</summary>
+    /// <summary>The same with the default F16 GEMMs. Set before the first run on real weights; measured 4.259e-4 on the same card.</summary>
     private const double DefaultBound = 1e-2;
 
     [RealBlockFact]
@@ -65,6 +66,24 @@ public sealed class LongCatRealBlockVulkanTests(ITestOutputHelper output)
         for (int i = 0; i < expected.Length; i++)
             worst = Math.Max(worst, Math.Abs((double)actual[i] - expected[i]));
         double moved = LongCatTestData.RelRms(expected, input);
+        int at = 0;
+        double peak = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            peak = Math.Max(peak, Math.Abs(expected[i]));
+            if (Math.Abs((double)actual[i] - expected[i]) >= worst)
+                at = i;
+        }
+        // The worst row's own relative RMS, which the whole output's would average away.
+        double worstRow = 0;
+        for (int start = 0; start < expected.Length; start += config.HiddenSize)
+        {
+            worstRow = Math.Max(worstRow, LongCatTestData.RelRms(actual.AsSpan(start, config.HiddenSize),
+                expected.AsSpan(start, config.HiddenSize)));
+        }
+        output.WriteLine(FormattableString.Invariant(
+            $"CPU output: largest magnitude {peak:E3}, value at the worst difference {expected[at]:E3} (Vulkan {actual[at]:E3}), ")
+            + FormattableString.Invariant($"worst row relRMS {worstRow:E3}"));
         output.WriteLine(FormattableString.Invariant(
             $"{vulkan.Capabilities.Name}, F16 GEMMs {f16Gemm}: relRMS {relRms:E3} (bound {bound:E0}), worst absolute difference {worst:E3} ")
             + FormattableString.Invariant($"at an output RMS of {rms:E3}, non-finite {bad}, the block moved its input by relRMS {moved:E3}"));
