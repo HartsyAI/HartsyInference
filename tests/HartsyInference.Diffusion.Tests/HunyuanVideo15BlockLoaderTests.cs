@@ -107,6 +107,12 @@ public sealed class HunyuanVideo15BlockLoaderTests
         /// <summary>Every tensor a host release was asked to release, including the releases that failed.</summary>
         public HashSet<Tensor> HostDisposed { get; } = new(ReferenceEqualityComparer.Instance);
 
+        /// <summary>Calls to the device free, including the one that failed.</summary>
+        public int FreeCalls => _frees;
+
+        /// <summary>Calls to the host release, including the one that failed.</summary>
+        public int HostReleaseCalls { get; private set; }
+
         public void Preload(IEnumerable<Tensor> weights)
         {
             _uploadStarted = true;
@@ -130,6 +136,7 @@ public sealed class HunyuanVideo15BlockLoaderTests
         public void DisposeHost(Tensor tensor)
         {
             HostDisposed.Add(tensor);
+            HostReleaseCalls++;
             // FailDisposeHostOn counts the host releases made after the first upload began, so it targets the unload or the rollback, not the
             // loader's own releases of converter outputs before the upload.
             if (_uploadStarted && ++_hostAfterUpload == FailDisposeHostOn)
@@ -219,20 +226,27 @@ public sealed class HunyuanVideo15BlockLoaderTests
         loader.Load(path);
         HunyuanVideo15Config config = TinyConfig();
         using HunyuanVideo15Dit dit = new(config);
-        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailFreeOn = 1 }, Source(loader), [], true);
+        FailingPlacement placement = new() { FailFreeOn = 1 };
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
         blockLoader.LoadShared();
         blockLoader.LoadBlock(0);
         int held = blockLoader.LoadedBlockTensorCount;
         Assert.True(held > 0);
 
         // The device free failed: the block stays loaded with its host copies, so the release can be retried.
+        int freesBefore = placement.FreeCalls;
+        int hostBefore = placement.HostReleaseCalls;
         Assert.Throws<InvalidOperationException>(() => blockLoader.UnloadBlock(0));
+        Assert.Equal(freesBefore + 1, placement.FreeCalls);
+        Assert.Equal(hostBefore, placement.HostReleaseCalls);
         Assert.Equal(0, blockLoader.LoadedBlock);
         Assert.Equal(held, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads - 1, blockLoader.BlockReleases);
 
-        // The retry frees the device copy and releases the host copies.
+        // The retry frees the device copy a second time and releases each host copy exactly once.
         blockLoader.UnloadBlock(0);
+        Assert.Equal(freesBefore + 2, placement.FreeCalls);
+        Assert.Equal(hostBefore + held, placement.HostReleaseCalls);
         Assert.Equal(-1, blockLoader.LoadedBlock);
         Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
@@ -267,5 +281,26 @@ public sealed class HunyuanVideo15BlockLoaderTests
 
         // Disposing again is a no-op.
         blockLoader.Dispose();
+    }
+
+    [Fact]
+    public void DisposeWithAFailingHostReleaseCountsTheReleaseOnce()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        FailingPlacement placement = new() { FailDisposeHostOn = 1 };
+        HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
+        blockLoader.LoadShared();
+        blockLoader.LoadBlock(0);
+
+        // The first host release fails inside Dispose's own release of the block. That release already counted the block as released, so Dispose
+        // must not count it again.
+        Assert.Throws<InvalidOperationException>(() => blockLoader.Dispose());
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
     }
 }

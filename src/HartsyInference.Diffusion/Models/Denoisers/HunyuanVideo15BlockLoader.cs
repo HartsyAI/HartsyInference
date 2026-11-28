@@ -198,13 +198,16 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
         catch (Exception ex)
         {
             failure = ex;
-            // The block's device release failed and the block stays loaded. Dispose cannot leave its host copies behind, so they are dropped here
-            // and the failure is reported; the device copy may remain allocated.
-            List<Tensor> owned = _blockOwned;
-            _blockOwned = [];
-            _loaded = -1;
-            BlockReleases++;
-            DisposeHostCopies(owned, ref failure);
+            // A device-release failure leaves the block loaded: Dispose drops its host copies here and reports the failure; the device copy may remain
+            // allocated. A host-release failure has already cleared the block in UnloadBlock, which counted that release, so nothing is counted again.
+            if (_loaded >= 0)
+            {
+                List<Tensor> owned = _blockOwned;
+                _blockOwned = [];
+                _loaded = -1;
+                BlockReleases++;
+                DisposeHostCopies(owned, ref failure);
+            }
         }
         // The shared copies are released even when the block's release failed.
         _disposed = true;
