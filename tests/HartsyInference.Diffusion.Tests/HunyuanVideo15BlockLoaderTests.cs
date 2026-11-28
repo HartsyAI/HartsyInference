@@ -98,6 +98,10 @@ public sealed class HunyuanVideo15BlockLoaderTests
 
         public int FailFreeOn { get; init; }
 
+        public int FailDisposeHostOn { get; init; }
+
+        private int _hostDisposes;
+
         public void Preload(IEnumerable<Tensor> weights)
         {
             if (++_preloads == FailPreloadOn) throw new InvalidOperationException("forced upload failure");
@@ -111,6 +115,55 @@ public sealed class HunyuanVideo15BlockLoaderTests
         }
 
         public void Sync() => _inner.Sync();
+
+        public void DisposeHost(Tensor tensor)
+        {
+            if (++_hostDisposes == FailDisposeHostOn)
+            {
+                tensor.Dispose();
+                throw new InvalidOperationException("forced host release failure");
+            }
+            ((IBlockPlacement)_inner).DisposeHost(tensor);
+        }
+    }
+
+    [Fact]
+    public void AFailedHostReleaseStillClearsTheBlock()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailDisposeHostOn = 1 }, Source(loader), [], true);
+        blockLoader.LoadShared();
+        blockLoader.LoadBlock(0);
+
+        Assert.Throws<InvalidOperationException>(() => blockLoader.UnloadBlock(0));
+        // The block is released although one host copy failed to release: the state is clear and the other copies were released too.
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+        blockLoader.UnloadBlock(0);
+    }
+
+    [Fact]
+    public void AFailedRollbackReleaseDoesNotMaskTheLoadException()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailPreloadOn = 1, FailDisposeHostOn = 1 },
+            Source(loader), [], true);
+        blockLoader.LoadShared();
+
+        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => blockLoader.LoadBlock(0));
+        Assert.Equal("forced upload failure", thrown.Message);
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
     }
 
     [Fact]

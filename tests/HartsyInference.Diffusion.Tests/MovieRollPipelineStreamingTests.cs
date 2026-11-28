@@ -199,7 +199,8 @@ public sealed class MovieRollPipelineStreamingTests
     public void AForcedThrowMidForwardLeavesNoBlockLoaded(int throwAtBlockForward)
     {
         CountingPoolCache pool = new();
-        using Rig rig = new(pool);
+        // Per-step drains are off, so the drains counted here are the post-run drain alone.
+        using Rig rig = new(pool, trimEachStep: false);
         Random textRng = new(3);
         using Tensor qwen = RandomTensor(textRng, 1, 3, 24);
         using Tensor byt5 = RandomTensor(textRng, 1, 2, 16);
@@ -214,7 +215,8 @@ public sealed class MovieRollPipelineStreamingTests
         Assert.Throws<InvalidOperationException>(() =>
             rig.StreamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11)));
         AssertReleased(rig.BlockLoader, "after the forced throw");
-        Assert.True(pool.Drains > 0, "The pool was not drained after the failed run.");
+        // Exactly one drain: the post-run drain, which runs after the KV cache is freed even on a throw.
+        Assert.Equal(1, pool.Drains);
 
         // The pipeline and the DiT are still usable: the next generation runs and releases everything.
         rig.Streamed.BeforeBlockForward = null;
@@ -235,6 +237,21 @@ public sealed class MovieRollPipelineStreamingTests
         Assert.Throws<InvalidOperationException>(() =>
             rig.StreamedPipeline.SampleLatents(Options(), qwen, byt5, null, null, Height, Width, Noise(11)));
         AssertReleased(rig.BlockLoader, "after a failed upload");
+    }
+
+    [Fact]
+    public void ADefaultRunDrainsOncePerStepAndOnceAfterTheRunExactly()
+    {
+        CountingPoolCache pool = new();
+        using Rig rig = new(pool);
+        Random textRng = new(3);
+        using Tensor qwen = RandomTensor(textRng, 1, 3, 24);
+        using Tensor byt5 = RandomTensor(textRng, 1, 2, 16);
+
+        using Tensor latents = rig.StreamedPipeline.SampleLatents(Options(), qwen, byt5, null, null, Height, Width, Noise(11));
+        // The distilled schedule has a window of 5 slots and one step per round; the run takes NumChunks (5) rounds after the window fills, so the
+        // round loop runs window + NumChunks - 1 = 9 times, one step callback each. Plus the post-run drain.
+        Assert.Equal(9 + 1, pool.Drains);
     }
 
     [Fact]

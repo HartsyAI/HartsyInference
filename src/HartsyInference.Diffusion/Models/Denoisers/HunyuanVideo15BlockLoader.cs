@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
@@ -16,6 +17,9 @@ internal interface IBlockPlacement
     void Free(IEnumerable<Tensor> weights);
 
     void Sync();
+
+    /// <summary>Releases a host copy the loader owns. Defaults to the tensor's own dispose.</summary>
+    void DisposeHost(Tensor tensor) => tensor.Dispose();
 }
 
 /// <summary>The placement on a backend: <see cref="IBackend.PreloadWeights"/>, <see cref="IBackend.FreeWeights"/> and <see cref="IBackend.Sync"/>.</summary>
@@ -167,33 +171,71 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
     {
         ThrowIfDisposed();
         if (index != _loaded) return;
+        Exception? failure = null;
         try
         {
             _placement.Sync();
             _placement.Free(_dit.GetBlock(index).EnumerateWeights());
         }
-        finally
+        catch (Exception ex)
         {
-            ReleaseHostCopies();
-            _loaded = -1;
-            BlockReleases++;
+            failure = ex;
         }
+        // The state is cleared before any host copy is released, so a release that throws cannot leave the block loaded.
+        List<Tensor> owned = _blockOwned;
+        _blockOwned = [];
+        _loaded = -1;
+        BlockReleases++;
+        DisposeHostCopies(owned, ref failure);
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
         if (_disposed) return;
-        if (_loaded >= 0) UnloadBlock(_loaded);
+        Exception? failure = null;
+        try
+        {
+            if (_loaded >= 0) UnloadBlock(_loaded);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        // The shared copies are released even when the block's release failed.
         _disposed = true;
-        foreach (Tensor tensor in _shared) tensor.Dispose();
+        List<Tensor> shared = [.. _shared];
         _shared.Clear();
+        DisposeHostCopies(shared, ref failure);
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    /// <summary>Releases each host copy on its own: a copy that fails to release does not stop the others, and the first failure is reported.</summary>
+    private void DisposeHostCopies(IEnumerable<Tensor> tensors, ref Exception? failure)
+    {
+        foreach (Tensor tensor in tensors)
+        {
+            try
+            {
+                _placement.DisposeHost(tensor);
+            }
+            catch (Exception ex)
+            {
+                failure ??= ex;
+            }
+        }
     }
 
     /// <summary>Undoes a load that threw: the device copies are freed on a best-effort basis, then every tensor the load created and kept is released.
     /// Mapped views are never released, and a second dispose is a no-op.</summary>
     private void RollBackLoad(int index, List<Tensor> created)
     {
+        // The state is reset first, so nothing below can leave the block marked as loaded. Nothing below may throw: the load's own exception is the one
+        // the caller sees.
+        List<Tensor> owned = _blockOwned;
+        _blockOwned = [];
+        _loaded = -1;
         try
         {
             _placement.Free(_dit.GetBlock(index).EnumerateWeights());
@@ -202,18 +244,13 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
         {
             // The upload that failed may have placed nothing; a failing free here must not hide the load's own exception.
         }
-        foreach (Tensor tensor in created.Concat(_blockOwned))
+        Exception? ignored = null;
+        List<Tensor> held = [];
+        foreach (Tensor tensor in created.Concat(owned))
         {
-            if (!_mapped.Contains(tensor)) tensor.Dispose();
+            if (!_mapped.Contains(tensor)) held.Add(tensor);
         }
-        _blockOwned = [];
-        _loaded = -1;
-    }
-
-    private void ReleaseHostCopies()
-    {
-        foreach (Tensor tensor in _blockOwned) tensor.Dispose();
-        _blockOwned = [];
+        DisposeHostCopies(held, ref ignored);
     }
 
     /// <summary>The block tensor for a checkpoint view: an owned F32 copy read with positional reads when this loader reads from the file and the view is
