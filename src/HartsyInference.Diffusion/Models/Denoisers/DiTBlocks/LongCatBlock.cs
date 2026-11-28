@@ -18,6 +18,10 @@ public sealed partial class LongCatBlock : IStreamingBlock
     private Tensor? _adaWeight, _adaBias;
     // The reference's x is BF16 on a BF16 or INT8 release, so each residual sum rounds to BF16 there; the F32 route (tiny F32 weights) does not.
     private bool _bf16Residual;
+
+    /// <summary>The BF16 route on the CPU: the self-attention and cross-attention projections run on the host (see LongCatSplitLinear). On a device
+    /// the route rounds the residuals and the sub-layer outputs only.</summary>
+    private bool Bf16HostRoute => _bf16Residual && _qkv is { Device.IsCpu: true };
     private Tensor? _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias;
     private Tensor? _crossNormWeight, _crossNormBias;
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
@@ -78,7 +82,6 @@ public sealed partial class LongCatBlock : IStreamingBlock
         _w2 = w[$"{prefix}.ffn.w2.weight"];
         _w3 = w[$"{prefix}.ffn.w3.weight"];
         BuildAttention();
-        _selfAttention!.RoundProjection = _bf16Residual ? LongCatOps.RoundFn : null;
         // Avatar blocks carry the audio step. It loads first, so the estimate below counts it. A base checkpoint has none of these keys: any step
         // from an earlier avatar load is released, so the block is a base block again.
         LongCatAvatarAudioStep? audio = w.ContainsKey($"{prefix}.audio_adaLN_modulation.1.weight")
@@ -248,18 +251,18 @@ public sealed partial class LongCatBlock : IStreamingBlock
         _qkvTileRows = rows;
     }
 
-    /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
-    /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
     /// <summary>The self-attention projection on the BF16 route: the qkv with its LoRA branch rounded apart, the q and k norms in two rounded steps,
     /// and the split. Replaces the shared fused projection, which sums the LoRA branch in F32 and rounds only the sum.</summary>
     private (Tensor Q, Tensor K, Tensor V) ProjectSelfBf16(IBackend backend, Tensor input)
     {
         int s = (int)input.Shape[0], dim = _config.HiddenSize, heads = _config.NumHeads, headDim = _config.HeadDim;
         using Tensor qkv = LongCatSplitLinear.Linear(backend, input, _qkv!, _qkvBias, bf16: true);
-        Tensor qRaw = new(new TensorShape(s, dim), DType.F32), kRaw = new(new TensorShape(s, dim), DType.F32);
-        Tensor v = new(new TensorShape(s, heads, headDim), DType.F32);
+        Tensor? qRaw = null, kRaw = null, v = null;
         try
         {
+            qRaw = new(new TensorShape(s, dim), DType.F32);
+            kRaw = new(new TensorShape(s, dim), DType.F32);
+            v = new(new TensorShape(s, heads, headDim), DType.F32);
             ReadOnlySpan<float> source = qkv.AsReadOnlySpan<float>();
             Span<float> qs = qRaw.AsSpan<float>(), ks = kRaw.AsSpan<float>(), vs = v.AsSpan<float>();
             for (int r = 0; r < s; r++)
@@ -269,18 +272,25 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 source.Slice(r * 3 * dim + 2 * dim, dim).CopyTo(vs.Slice(r * dim, dim));
             }
             Tensor q = LongCatSplitLinear.HeadNorm(qRaw, _qNorm!, heads, LongCatConfig.NormEps);
-            Tensor k = LongCatSplitLinear.HeadNorm(kRaw, _kNorm!, heads, LongCatConfig.NormEps);
-            return (q, k, v);
-        }
-        catch
-        {
-            v.Dispose();
-            throw;
+            Tensor k;
+            try
+            {
+                k = LongCatSplitLinear.HeadNorm(kRaw, _kNorm!, heads, LongCatConfig.NormEps);
+            }
+            catch
+            {
+                q.Dispose();
+                throw;
+            }
+            Tensor value = v;
+            v = null;
+            return (q, k, value);
         }
         finally
         {
-            qRaw.Dispose();
-            kRaw.Dispose();
+            qRaw?.Dispose();
+            kRaw?.Dispose();
+            v?.Dispose();
         }
     }
 
@@ -299,9 +309,11 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
+    /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
+    /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
     private (Tensor Q, Tensor K, Tensor V) ProjectSelfTiled(IBackend backend, Tensor input)
     {
-        if (_bf16Residual)
+        if (Bf16HostRoute)
             return ProjectSelfBf16(backend, input);
         int s = (int)input.Shape[0];
         int dim = (int)input.Shape[1];
@@ -411,7 +423,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 speakerMap = speakers.ReferenceMap(backend, _selfAttention, q, inputs.CondFrames * inputs.TokensPerFrame, referenceKeys);
             }
             Tensor flat = LongCatOps.RoundOwned(backend, SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments), _bf16Residual);
-            return _bf16Residual ? OutputBf16(backend, flat) : _selfAttention.ProjectOutput(backend, flat);
+            return Bf16HostRoute ? OutputBf16(backend, flat) : _selfAttention.ProjectOutput(backend, flat);
         }
         finally
         {
@@ -467,7 +479,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
 
     private Tensor CrossAttention(IBackend backend, Tensor queryInput, Tensor text)
     {
-        if (_bf16Residual)
+        if (Bf16HostRoute)
             return CrossAttentionBf16(backend, queryInput, text);
         int heads = _config.NumHeads, headDim = _config.HeadDim, dim = _config.HiddenSize;
         int rows = (int)queryInput.Shape[0], textRows = (int)text.Shape[0];

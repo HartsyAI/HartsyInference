@@ -469,6 +469,35 @@ public sealed unsafe class Tensor : IDisposable
         return view;
     }
 
+    /// <summary>A view of rows <c>[rowOffset, rowOffset + rowCount)</c> of this tensor's bytes without its LoRA adjunct. The quantization metadata
+    /// (scales, the block layout) is kept; a row window keeps it only when it covers every row. The caller owns the view; disposing it does not free
+    /// the borrowed bytes.</summary>
+    public unsafe Tensor WithoutLowRankAdjunct(int rowOffset = 0, int rowCount = -1)
+    {
+        int count = rowCount < 0 ? (int)Shape[0] : rowCount;
+        long rowBytes = Shape.ElementCount / Shape[0] * DType.SizeInBytes;
+        byte* start = (byte*)DataPointer + rowOffset * rowBytes;
+        TensorShape shape = new(count, Shape[1]);
+        Tensor view = new(start, shape, DType, Device);
+        view.SetKeepAlive(this);
+        if (rowOffset == 0 && count == Shape[0])
+        {
+            CopyQuantMetadataTo(view, rowsPreserved: true);
+        }
+        else
+        {
+            // A row window renumbers the rows, so the per-row scales cannot follow it; the per-tensor scalars can.
+            if (QuantInfo is not null)
+                throw new HartsyInferenceException($"A row window of {Shape} cannot keep its per-row quantization metadata ({QuantInfo.Format}).");
+            view.Fp8ScaleFactor = Fp8ScaleFactor;
+            view.Fp8InputScaleFactor = Fp8InputScaleFactor;
+            view.SkipNativeFp8Gemm = SkipNativeFp8Gemm;
+            view.ForceF32Gemm = ForceF32Gemm;
+        }
+        view.LowRankAdjunct = null;
+        return view;
+    }
+
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer
     {

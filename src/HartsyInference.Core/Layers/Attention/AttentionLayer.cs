@@ -242,11 +242,6 @@ public sealed partial class AttentionLayer
 
     /// <summary>The projection stage alone, for self-attention: Q, K and V of <paramref name="input"/>, which is disposed once
     /// they are read when <paramref name="releaseInput"/> is set. The caller owns the three tensors.</summary>
-    /// <summary>Optional rounding of the projected tensors, for a caller whose reference rounds them: the qkv output, and the normed query and key
-    /// of the fused split. The function takes ownership of its argument and returns the tensor to use. Null (the default) leaves every projection
-    /// exactly as it was.</summary>
-    public Func<IBackend, Tensor, Tensor>? RoundProjection { get; set; }
-
     public (Tensor Q, Tensor K, Tensor V) ProjectSelf(IBackend backend, Tensor input, bool releaseInput)
     {
         AttentionLayerWeights w = _weights ?? throw new InvalidOperationException("This attention layer has no projection weights.");
@@ -484,8 +479,6 @@ public sealed partial class AttentionLayer
         {
             backend.Linear(qkv, input, w.Qkv!, w.QkvBias);
             if (release) input.Dispose();
-            if (RoundProjection is { } roundQkv)
-                qkv = roundQkv(backend, qkv);
             q = new(projected, act);
             k = new(projected, act);
             v = new(projected, act);
@@ -499,11 +492,6 @@ public sealed partial class AttentionLayer
                 backend.SliceLastDim(q, qkv, 0);
                 backend.SliceLastDim(k, qkv, _config.InnerDim);
                 backend.SliceLastDim(v, qkv, 2 * _config.InnerDim);
-            }
-            if (RoundProjection is { } roundNormed)
-            {
-                q = roundNormed(backend, q);
-                k = roundNormed(backend, k);
             }
             return (q, k, v, null);
         }

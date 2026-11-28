@@ -1,7 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Core.Layers.Attention;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -32,9 +31,6 @@ internal static class LongCatOps
         backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, LongCatConfig.NormEps).WithModulation(in modulation));
         return RoundOwned(backend, output, roundOutput);
     }
-
-    /// <summary>The rounding as a projection hook (<see cref="AttentionLayer.RoundProjection"/>): always rounds.</summary>
-    public static readonly Func<IBackend, Tensor, Tensor> RoundFn = static (backend, values) => RoundOwned(backend, values, on: true);
 
     /// <summary>The caption projection (PixArtAlpha: Linear, GELU, Linear) with BF16 rounding after every op, as the reference's y_embedder runs in
     /// BF16 (per-stage check, B6). The encoder is rounded on entry. A new tensor, owned by the caller.</summary>

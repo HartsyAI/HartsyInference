@@ -25,18 +25,14 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private readonly AttentionLayerConfig _config;
     private AttentionLayer? _attention;
     private bool _bf16Route;
-
-    /// <summary>Turns the BF16 route on or off: the attention layer's projections round as the reference's do (see <see cref="AttentionLayer.RoundProjection"/>).</summary>
-    internal void SetBf16Route(bool on)
-    {
-        _bf16Route = on;
-        if (_attention is not null)
-            _attention.RoundProjection = on ? LongCatOps.RoundFn : null;
-    }
     private Tensor? _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB;
     private List<Tensor> _owned = [];
     private bool _loaded;
     private int _disposed;
+
+    /// <summary>Turns the BF16 route on or off. On the CPU the projections, the norms and the attention round as the reference's do (see
+    /// <c>LongCatSplitLinear</c>).</summary>
+    internal void SetBf16Route(bool on) => _bf16Route = on;
 
     /// <summary>Creates the layer geometry. <paramref name="dim"/> must divide evenly by <paramref name="heads"/>.</summary>
     public LongCatAudioCrossAttention(int dim, int encoderDim, int heads)
@@ -78,7 +74,6 @@ public sealed class LongCatAudioCrossAttention : IDisposable
             Tensor pB = CheckpointTensors.RequireF32(weights, "LongCat", prefix + "proj.bias", owned, [_dim]);
 
             AttentionLayer attention = new(_config, new AttentionNormWeights(qN, kN, NormEps, NormEps));
-            attention.RoundProjection = _bf16Route ? LongCatOps.RoundFn : null;
             ReleaseOwned();
             _owned = owned;
             _attention = attention;
@@ -171,9 +166,9 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private Tensor AttendBatched(IBackend backend, Tensor noisyX, Tensor noisyAudio, int batch, int tokens, int ctx,
         LongCatSpeakerRotation? rotation)
     {
-        if (_bf16Route)
+        if (_bf16Route && _qW!.Device.IsCpu)
         {
-            // BF16 route: the projections, the norms and the attention and its output round as the reference's do (see LongCatSplitLinear).
+            // BF16 route on the CPU: the projections, the norms and the attention and its output round as the reference's do (see LongCatSplitLinear).
             Tensor qBf = LongCatSplitLinear.Linear(backend, noisyX, _qW!, _qB, bf16: true);
             Tensor kBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: 0, rowCount: _dim);
             Tensor vBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: _dim, rowCount: _dim);

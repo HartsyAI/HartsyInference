@@ -13,8 +13,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 internal static class LongCatSplitLinear
 {
     /// <summary><c>bf(bf(x·Wᵀ + b) + bf(branch))</c> over the rows <c>[rowOffset, rowOffset + rowCount)</c> of <paramref name="weight"/> (all rows
-    /// by default), the branch being <c>bf(bf(bf(x·Downᵀ)·Upᵀ)·scale)</c> summed over the active terms and rounded once. Without <paramref name="bf16"/>,
-    /// the shared linear. A new <c>[rows, count]</c> F32 tensor, owned by the caller.</summary>
+    /// by default). The branch of each active term is <c>bf(bf(bf(x·Downᵀ)·Upᵀ)·scale)</c>; the terms are added one after another, each sum rounded,
+    /// as a PEFT forward adds its adapters. Without <paramref name="bf16"/>, the shared linear. A new <c>[rows, count]</c> F32 tensor, owned by the
+    /// caller.</summary>
     public static unsafe Tensor Linear(IBackend backend, Tensor input, Tensor weight, Tensor? bias, bool bf16, int rowOffset = 0, int rowCount = -1)
     {
         int rows = (int)input.Shape[0], total = (int)weight.Shape[0];
@@ -32,24 +33,22 @@ internal static class LongCatSplitLinear
             return bf16 ? LongCatOps.RoundOwned(backend, plain, on: true) : plain;
         }
 
-        // The base product: the weight's rows without the adjunct, as a borrowed view of the same bytes (the weight owns them).
-        long rowBytes = (long)weight.Shape[1] * weight.DType.SizeInBytes;
-        byte* rowStart = (byte*)weight.DataPointer + rowOffset * rowBytes;
-        using Tensor baseWeight = new(rowStart, new TensorShape(count, weight.Shape[1]), weight.DType, weight.Device);
+        // The base product: the rows without the adjunct, as a borrowed view that keeps the quantization metadata (the weight owns the bytes).
+        using Tensor baseWeight = weight.WithoutLowRankAdjunct(rowOffset, count);
         Tensor? baseBias = null;
         if (bias is not null)
         {
             byte* biasStart = (byte*)bias.DataPointer + rowOffset * bias.DType.SizeInBytes;
             baseBias = new Tensor(biasStart, new TensorShape(count), bias.DType, bias.Device);
         }
+        Tensor? result = null;
         try
         {
             Tensor baseRaw = new(new TensorShape(rows, count), DType.F32);
             backend.Linear(baseRaw, input, baseWeight, baseBias);
-            using Tensor baseBf = LongCatOps.RoundOwned(backend, baseRaw, on: true);
+            result = LongCatOps.RoundOwned(backend, baseRaw, on: true);
 
             LowRankAdjunct window = windowed ? adjunct!.SliceRows(rowOffset, count) : adjunct!;
-            Tensor? branch = null;
             foreach (LowRankAdjunctTerm term in window.Terms)
             {
                 if (!term.IsApplied)
@@ -57,32 +56,31 @@ internal static class LongCatSplitLinear
                 Tensor downRaw = new(new TensorShape(rows, term.Down.Shape[0]), DType.F32);
                 backend.Linear(downRaw, input, term.Down, null);
                 Tensor down = LongCatOps.RoundOwned(backend, downRaw, on: true);
-                Tensor up = down;
-                if (term.Up is not null)
+                Tensor up;
+                if (term.Up is null)
+                {
+                    up = down;
+                }
+                else
                 {
                     Tensor upRaw = new(new TensorShape(rows, term.Up.Shape[0]), DType.F32);
                     backend.Linear(upRaw, down, term.Up, null);
+                    down.Dispose();
                     up = LongCatOps.RoundOwned(backend, upRaw, on: true);
                 }
                 Tensor scaled = Scale(up, term.EffectiveScale);
                 up.Dispose();
-                if (branch is null)
-                {
-                    branch = scaled;
-                }
-                else
-                {
-                    Tensor summed = Add(branch, scaled);
-                    branch.Dispose();
-                    scaled.Dispose();
-                    branch = summed;
-                }
+                Tensor summed = Add(result, scaled);
+                scaled.Dispose();
+                result.Dispose();
+                result = LongCatOps.RoundOwned(backend, summed, on: true);
             }
-            if (branch is null)
-                return baseBf.To(baseBf.Device);
-            using Tensor branchBf = LongCatOps.RoundOwned(backend, branch, on: true);
-            Tensor total2 = Add(baseBf, branchBf);
-            return LongCatOps.RoundOwned(backend, total2, on: true);
+            return result;
+        }
+        catch
+        {
+            result?.Dispose();
+            throw;
         }
         finally
         {
@@ -91,7 +89,8 @@ internal static class LongCatSplitLinear
     }
 
     /// <summary>Per-head RMS norm on the BF16 route: the unit vector rounds, then the weight multiply rounds, as upstream's norm does. Reads
-    /// <paramref name="x"/> <c>[rows, heads·headDim]</c> and returns <c>[batch, rows / batch, heads, headDim]</c> F32 on the BF16 grid.</summary>
+    /// <paramref name="x"/> <c>[rows, heads·headDim]</c> and returns <c>[batch, rows / batch, heads, headDim]</c> F32 on the BF16 grid. The mean of the
+    /// squares is an F32 sum, as upstream's RMSNorm reduces in F32.</summary>
     public static Tensor HeadNorm(Tensor x, Tensor weight, int heads, float eps, int batch = 1)
     {
         int rows = (int)x.Shape[0], headDim = (int)weight.Shape[0];
@@ -104,10 +103,10 @@ internal static class LongCatSplitLinear
             for (int h = 0; h < heads; h++)
             {
                 int at = r * heads * headDim + h * headDim;
-                double sum = 0;
+                float sum = 0f;
                 for (int d = 0; d < headDim; d++)
-                    sum += (double)source[at + d] * source[at + d];
-                float inv = (float)(1.0 / Math.Sqrt(sum / headDim + eps));
+                    sum += source[at + d] * source[at + d];
+                float inv = 1f / MathF.Sqrt(sum / headDim + eps);
                 for (int d = 0; d < headDim; d++)
                 {
                     float unit = Bf16(source[at + d] * inv);

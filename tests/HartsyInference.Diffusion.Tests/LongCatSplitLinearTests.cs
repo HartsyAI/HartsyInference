@@ -71,9 +71,9 @@ public sealed class LongCatSplitLinearTests
             for (int h = 0; h < heads; h++)
             {
                 int at = r * heads * headDim + h * headDim;
-                double sum = 0;
-                for (int d = 0; d < headDim; d++) sum += (double)x[at + d] * x[at + d];
-                float inv = (float)(1.0 / Math.Sqrt(sum / headDim + eps));
+                float sum = 0f;
+                for (int d = 0; d < headDim; d++) sum += x[at + d] * x[at + d];
+                float inv = 1f / MathF.Sqrt(sum / headDim + eps);
                 for (int d = 0; d < headDim; d++)
                 {
                     float expected = Bf16(Bf16(x[at + d] * inv) * w[d]);
@@ -97,6 +97,25 @@ public sealed class LongCatSplitLinearTests
         float[] got = split.AsReadOnlySpan<float>().ToArray();
         for (int i = 0; i < got.Length; i++)
             Assert.Equal(Bf16(shared[i]), got[i]);
+    }
+
+    [Fact]
+    public void TheBaseViewKeepsTheQuantizationMetadataAndDropsTheAdjunct()
+    {
+        using Tensor weight = Make(new long[] { Out, In }, Values(Out * In, 21));
+        weight.Fp8ScaleFactor = 2f;
+        LowRankAdjunctTerm term = new() { Down = Make(new long[] { Rank, In }, Values(Rank * In, 22)), Up = Make(new long[] { Out, Rank }, Values(Out * Rank, 23)), Scale = 1f, Gate = null };
+        Tensor adjunct = weight.WithLowRankAdjunct(new LowRankAdjunct { Terms = [term] });
+
+        using Tensor baseWhole = adjunct.WithoutLowRankAdjunct();
+        Assert.Null(baseWhole.LowRankAdjunct);
+        Assert.Equal(2f, baseWhole.Fp8ScaleFactor);
+        Assert.Equal(Out, baseWhole.Shape[0]);
+
+        using Tensor baseWindow = adjunct.WithoutLowRankAdjunct(1, 2);
+        Assert.Null(baseWindow.LowRankAdjunct);
+        Assert.Equal(2f, baseWindow.Fp8ScaleFactor);
+        Assert.Equal(2, baseWindow.Shape[0]);
     }
 
     private static float Bf16(float value) => BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(value));
