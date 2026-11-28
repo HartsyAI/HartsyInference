@@ -18,6 +18,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
     private Tensor? _adaWeight, _adaBias;
     // The reference's x is BF16 on a BF16 or INT8 release, so each residual sum rounds to BF16 there; the F32 route (tiny F32 weights) does not.
     private bool _bf16Residual;
+
     private Tensor? _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias;
     private Tensor? _crossNormWeight, _crossNormBias;
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
@@ -85,6 +86,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             : null;
         _audio?.Dispose();
         _audio = audio;
+        _audio?.SetBf16Route(_bf16Residual);
         long bytes = 0;
         foreach (Tensor t in EnumerateWeights())
             bytes += t.DType.ComputeByteCount(t.ElementCount);
@@ -246,10 +248,79 @@ public sealed partial class LongCatBlock : IStreamingBlock
         _qkvTileRows = rows;
     }
 
+    /// <summary>The self-attention projection on the BF16 route: the qkv with its LoRA branch rounded apart, the q and k norms in two rounded steps,
+    /// and the split. Replaces the shared fused projection, which sums the LoRA branch in F32 and rounds only the sum.</summary>
+    private (Tensor Q, Tensor K, Tensor V) ProjectSelfBf16(IBackend backend, Tensor input)
+    {
+        int s = (int)input.Shape[0], dim = _config.HiddenSize, heads = _config.NumHeads, headDim = _config.HeadDim;
+        using Tensor qkv = LongCatSplitLinear.Linear(backend, input, _qkv!, _qkvBias, bf16: true);
+        Tensor? qRaw = null, kRaw = null, v = null;
+        try
+        {
+            qRaw = new(new TensorShape(s, dim), DType.F32);
+            kRaw = new(new TensorShape(s, dim), DType.F32);
+            v = new(new TensorShape(s, heads, headDim), DType.F32);
+            ReadOnlySpan<float> source = qkv.AsReadOnlySpan<float>();
+            Span<float> qs = qRaw.AsSpan<float>(), ks = kRaw.AsSpan<float>(), vs = v.AsSpan<float>();
+            for (int r = 0; r < s; r++)
+            {
+                source.Slice(r * 3 * dim, dim).CopyTo(qs.Slice(r * dim, dim));
+                source.Slice(r * 3 * dim + dim, dim).CopyTo(ks.Slice(r * dim, dim));
+                source.Slice(r * 3 * dim + 2 * dim, dim).CopyTo(vs.Slice(r * dim, dim));
+            }
+            Tensor q = LongCatSplitLinear.HeadNorm(qRaw, _qNorm!, heads, LongCatConfig.NormEps);
+            Tensor k;
+            try
+            {
+                k = LongCatSplitLinear.HeadNorm(kRaw, _kNorm!, heads, LongCatConfig.NormEps);
+            }
+            catch
+            {
+                q.Dispose();
+                throw;
+            }
+            Tensor value = v;
+            v = null;
+            return (q, k, value);
+        }
+        finally
+        {
+            qRaw?.Dispose();
+            kRaw?.Dispose();
+            v?.Dispose();
+        }
+    }
+
+    /// <summary>The output projection on the BF16 route: the flat attention output <c>[s, heads, D]</c> read as <c>[s, dim]</c>, projected with its LoRA
+    /// branch rounded apart. Disposes <paramref name="flat"/>.</summary>
+    private Tensor OutputBf16(IBackend backend, Tensor flat)
+    {
+        int rows = (int)flat.Shape[0];
+        int dim = (int)(flat.Shape.ElementCount / rows);
+        try
+        {
+            unsafe
+            {
+                using Tensor view = new((void*)flat.DataPointer, new TensorShape(rows, dim), DType.F32, flat.Device);
+                return LongCatSplitLinear.Linear(backend, view, _proj!, _projBias, bf16: true);
+            }
+        }
+        finally
+        {
+            flat.Dispose();
+        }
+    }
+
+    /// <summary>The BF16 route with the host projections: the backend runs on the CPU. On a device the route rounds the residuals and the sub-layer outputs
+    /// only, and the projections keep the shared kernels.</summary>
+    private bool Bf16Host(IBackend backend) => _bf16Residual && backend.Device.IsCpu;
+
     /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
     /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
     private (Tensor Q, Tensor K, Tensor V) ProjectSelfTiled(IBackend backend, Tensor input)
     {
+        if (Bf16Host(backend))
+            return ProjectSelfBf16(backend, input);
         int s = (int)input.Shape[0];
         int dim = (int)input.Shape[1];
         int tile = Math.Min(_qkvTileRows, s);
@@ -334,7 +405,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
         {
             AttentionSegment.Validate(inputs.Segments, s);
             // The fused path needs one projection tile, and it exposes no rotated queries and keys for the reference map.
-            if (speakers is null && inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
+            if (!_bf16Residual && speakers is null && inputs.Segments[0].KeyCount == s && s <= _qkvTileRows)
                 return _selfAttention!.Forward(backend, input, input, in context);
         }
 
@@ -342,6 +413,9 @@ public sealed partial class LongCatBlock : IStreamingBlock
         try
         {
             _selfAttention!.RotateQk(backend, q, k, in context);
+            // q and k round after the norm (in the projection hook) and again after the rotation: the reference's rope_3d output is BF16.
+            q = LongCatOps.RoundOwned(backend, q, _bf16Residual);
+            k = LongCatOps.RoundOwned(backend, k, _bf16Residual);
             if (probe is not null)
             {
                 probe($"{stage}.q", q);
@@ -354,8 +428,8 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 using Tensor referenceKeys = HeadMajorFirstRows(backend, k, inputs.TokensPerFrame);
                 speakerMap = speakers.ReferenceMap(backend, _selfAttention, q, inputs.CondFrames * inputs.TokensPerFrame, referenceKeys);
             }
-            Tensor flat = SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments);
-            return _selfAttention.ProjectOutput(backend, flat);
+            Tensor flat = LongCatOps.RoundOwned(backend, SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments), _bf16Residual);
+            return Bf16Host(backend) ? OutputBf16(backend, flat) : _selfAttention.ProjectOutput(backend, flat);
         }
         finally
         {
@@ -395,8 +469,34 @@ public sealed partial class LongCatBlock : IStreamingBlock
         return joined;
     }
 
+    /// <summary>The text cross-attention on the BF16 route: the query and the key and value (each with its LoRA branch rounded apart), the two-step
+    /// query and key norms, the head-major attention, and the output projection, all on the BF16 grid.</summary>
+    private Tensor CrossAttentionBf16(IBackend backend, Tensor queryInput, Tensor text)
+    {
+        int dim = _config.HiddenSize;
+        Tensor q = LongCatSplitLinear.Linear(backend, queryInput, _crossQ!, _crossQBias, bf16: true);
+        Tensor? k = null, v = null;
+        try
+        {
+            k = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: 0, rowCount: dim);
+            v = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: dim, rowCount: dim);
+        }
+        catch
+        {
+            q.Dispose();
+            k?.Dispose();
+            throw;
+        }
+        Tensor flat = LongCatSplitLinear.AttendNormed(backend, _crossAttention!, q, k!, v!, _crossQNorm!, _crossKNorm!, 1, _config.NumHeads,
+            LongCatConfig.NormEps, default, rotate: false);
+        using (flat)
+            return LongCatSplitLinear.Linear(backend, flat, _crossProj!, _crossProjBias, bf16: true);
+    }
+
     private Tensor CrossAttention(IBackend backend, Tensor queryInput, Tensor text)
     {
+        if (Bf16Host(backend))
+            return CrossAttentionBf16(backend, queryInput, text);
         int heads = _config.NumHeads, headDim = _config.HeadDim, dim = _config.HiddenSize;
         int rows = (int)queryInput.Shape[0], textRows = (int)text.Shape[0];
         Tensor q = new(new TensorShape(1, rows, heads, headDim), DType.F32);
@@ -408,6 +508,10 @@ public sealed partial class LongCatBlock : IStreamingBlock
             // kv_linear is one [2·dim, dim] weight: k is its first dim rows, v the next; windowed so a LoRA adjunct on it applies per part.
             backend.LinearWeightRows(k, text, _crossKv!, _crossKvBias, 0, dim);
             backend.LinearWeightRows(v, text, _crossKv!, _crossKvBias, dim, dim);
+            // The query, key and value projections round to BF16, as the reference's nn.Linear outputs do.
+            q = LongCatOps.RoundOwned(backend, q, _bf16Residual);
+            k = LongCatOps.RoundOwned(backend, k, _bf16Residual);
+            v = LongCatOps.RoundOwned(backend, v, _bf16Residual);
         }
         catch
         {
@@ -417,7 +521,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
             throw;
         }
         // Once its argument checks pass, Attend owns q, k and v and disposes them, even if it throws later; so it sits outside the catch above.
-        Tensor flat = _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default);
+        Tensor flat = LongCatOps.RoundOwned(backend, _crossAttention!.Attend(backend, q, k, v, new TensorShape(rows, dim), default), _bf16Residual);
         using (flat)
         {
             Tensor projected = new(new TensorShape(rows, dim), DType.F32);
@@ -467,17 +571,16 @@ public sealed partial class LongCatBlock : IStreamingBlock
     {
         int s = (int)x.Shape[0];
         int hidden = _config.FfnHiddenDim;
-        using Tensor gate = new(new TensorShape(s, hidden), DType.F32);
-        backend.Linear(gate, x, _w1!, null);
-        using Tensor activated = new(gate.Shape, DType.F32);
-        backend.Silu(activated, gate);
-        using Tensor up = new(gate.Shape, DType.F32);
-        backend.Linear(up, x, _w3!, null);
-        using Tensor product = new(gate.Shape, DType.F32);
-        backend.Mul(product, activated, up);
-        Tensor output = new(new TensorShape(s, _config.HiddenSize), DType.F32);
-        backend.Linear(output, product, _w2!, null);
-        return output;
+        // SwiGLU with the reference's BF16 rounding after each op: the gate, its SiLU, the up projection, the product and the output.
+        using Tensor gate = LongCatSplitLinear.Linear(backend, x, _w1!, null, _bf16Residual);
+        Tensor activatedRaw = new(gate.Shape, DType.F32);
+        backend.Silu(activatedRaw, gate);
+        using Tensor activated = LongCatOps.RoundOwned(backend, activatedRaw, _bf16Residual);
+        using Tensor up = LongCatSplitLinear.Linear(backend, x, _w3!, null, _bf16Residual);
+        Tensor productRaw = new(gate.Shape, DType.F32);
+        backend.Mul(productRaw, activated, up);
+        using Tensor product = LongCatOps.RoundOwned(backend, productRaw, _bf16Residual);
+        return LongCatSplitLinear.Linear(backend, product, _w2!, null, _bf16Residual);
     }
 
     private static Tensor SliceRows(IBackend backend, Tensor source, int start, int count, int dim)

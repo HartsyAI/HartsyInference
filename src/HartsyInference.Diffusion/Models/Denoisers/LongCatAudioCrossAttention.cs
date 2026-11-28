@@ -24,10 +24,15 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private readonly int _dim, _encoderDim, _heads, _headDim;
     private readonly AttentionLayerConfig _config;
     private AttentionLayer? _attention;
+    private bool _bf16Route;
     private Tensor? _qW, _qB, _qNorm, _kvW, _kvB, _kNorm, _projW, _projB;
     private List<Tensor> _owned = [];
     private bool _loaded;
     private int _disposed;
+
+    /// <summary>Turns the BF16 route on or off. On the CPU the projections, the norms and the attention round as the reference's do (see
+    /// <c>LongCatSplitLinear</c>).</summary>
+    internal void SetBf16Route(bool on) => _bf16Route = on;
 
     /// <summary>Creates the layer geometry. <paramref name="dim"/> must divide evenly by <paramref name="heads"/>.</summary>
     public LongCatAudioCrossAttention(int dim, int encoderDim, int heads)
@@ -161,6 +166,35 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private Tensor AttendBatched(IBackend backend, Tensor noisyX, Tensor noisyAudio, int batch, int tokens, int ctx,
         LongCatSpeakerRotation? rotation)
     {
+        if (_bf16Route && backend.Device.IsCpu)
+        {
+            // BF16 route on the CPU: the projections, the norms and the attention and its output round as the reference's do (see LongCatSplitLinear).
+            Tensor qBf = LongCatSplitLinear.Linear(backend, noisyX, _qW!, _qB, bf16: true);
+            Tensor? kBf = null, vBf = null;
+            try
+            {
+                kBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: 0, rowCount: _dim);
+                vBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: _dim, rowCount: _dim);
+            }
+            catch
+            {
+                qBf.Dispose();
+                kBf?.Dispose();
+                throw;
+            }
+            AttentionCallContext bf16Context = rotation is { } bf16Tables
+                ? new AttentionCallContext
+                {
+                    QueryRotation = new QkRotation(QkRotationKind.InterleavedPairs, bf16Tables.QueryCos, bf16Tables.QuerySin, batch * tokens),
+                    KeyRotation = new QkRotation(QkRotationKind.InterleavedPairs, bf16Tables.KeyCos, bf16Tables.KeySin, batch * ctx),
+                }
+                : default;
+            Tensor flatBf = LongCatSplitLinear.AttendNormed(backend, _attention!, qBf, kBf!, vBf!, _qNorm!, _kNorm!, batch, _heads, NormEps,
+                in bf16Context, rotate: rotation is not null);
+            using (flatBf)
+                return LongCatSplitLinear.Linear(backend, flatBf, _projW!, _projB, bf16: true);
+        }
+
         // The Linear and LinearWeightRows writes use the 4-D layout the attention layer reads; the element counts match.
         Tensor q = new(new TensorShape(batch, tokens, _heads, _headDim), DType.F32);
         Tensor k = new(new TensorShape(batch, ctx, _heads, _headDim), DType.F32);

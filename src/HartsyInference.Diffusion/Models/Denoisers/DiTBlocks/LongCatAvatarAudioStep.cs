@@ -70,6 +70,9 @@ internal sealed class LongCatAvatarAudioStep : IDisposable
             yield return t;
     }
 
+    /// <summary>Turns the BF16 route on or off for the audio cross-attention projections (the qkv and the normed query and key round).</summary>
+    internal void SetBf16Route(bool on) => _attention.SetBf16Route(on);
+
     /// <summary>The step's contribution to a block's stream.</summary>
     /// <param name="x">The stream after the text cross-attention, <c>[frames·S, dim]</c>.</param>
     /// <param name="audioTokens">The per-frame audio tokens, <c>[frames·ctx, encoderDim]</c>.</param>

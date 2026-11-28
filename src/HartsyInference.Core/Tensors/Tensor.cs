@@ -470,6 +470,25 @@ public sealed unsafe class Tensor : IDisposable
         return view;
     }
 
+    /// <summary>A view of rows <c>[rowOffset, rowOffset + rowCount)</c> of this tensor's bytes without its LoRA adjunct. The quantization metadata
+    /// (scales, the block layout) is kept; a row window keeps it only when it covers every row. The caller owns the view; disposing it does not free
+    /// the borrowed bytes.</summary>
+    public unsafe Tensor WithoutLowRankAdjunct(int rowOffset = 0, int rowCount = -1)
+    {
+        int count = rowCount < 0 ? (int)Shape[0] : rowCount;
+        long rowBytes = Shape.ElementCount / Shape[0] * DType.SizeInBytes;
+        byte* start = (byte*)DataPointer + rowOffset * rowBytes;
+        Tensor view = new(start, new TensorShape(count, Shape[1]), DType, Device);
+        view.SetKeepAlive(this);
+        // The per-tensor scalars ride along; the per-row scales are narrowed to the window, as IBackend.LinearWeightRows narrows them.
+        view.Fp8ScaleFactor = Fp8ScaleFactor;
+        view.Fp8InputScaleFactor = Fp8InputScaleFactor;
+        view.ForceF32Gemm = ForceF32Gemm;
+        view.SkipNativeFp8Gemm = SkipNativeFp8Gemm;
+        view.QuantInfo = QuantInfo?.SliceRows(rowOffset, count, "the weight viewed without its LoRA adjunct");
+        return view;
+    }
+
     /// <summary>Pointer to the raw tensor data. If GPU data is cached, triggers a lazy sync (D2H copy) first; otherwise the owned host buffer is allocated (zeroed) on first access.</summary>
     public void* DataPointer
     {
