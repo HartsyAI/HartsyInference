@@ -50,7 +50,8 @@ entry points (plan items 14 to 17), and the [Vulkan tiled F32 A/B](vulkan-tiled-
 comparison behind the default of `numerics.vkTiledAttention`, with the [workloads that default moves](vulkan-tiled-default-workloads.md)
 (a source audit). The
 [Blackwell rental campaign](blackwell-rental-campaign.md) is the stage plan and spending ceiling for the final
-hardware gate; nothing in it has been provisioned or run.
+hardware gate, written before any pod existed. The [RTX 5090 gate report](blackwell-5090-gate.md) records what ran
+afterwards: the gate is partly met, Vulkan did not run on Blackwell hardware and stages 3 and 4 were not run.
 
 [Block-sparse attention on an RTX 3060](block-sparse-3060.md) is the descriptive timing of `IBackend.BlockSparseAttention`
 beside dense attention; it is outside the PR 01 evidence program.
