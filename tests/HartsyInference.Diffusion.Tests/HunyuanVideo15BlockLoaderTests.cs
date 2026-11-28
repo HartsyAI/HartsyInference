@@ -295,6 +295,8 @@ public sealed class HunyuanVideo15BlockLoaderTests
         HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
         blockLoader.LoadShared();
         blockLoader.LoadBlock(0);
+        // Block 0 owns host copies before the release, so the failing release below is a real one.
+        Assert.True(blockLoader.LoadedBlockTensorCount > 0);
 
         // The first host release fails inside Dispose's own release of the block. That release already counted the block as released, so Dispose
         // must not count it again.
@@ -302,5 +304,28 @@ public sealed class HunyuanVideo15BlockLoaderTests
         Assert.Equal(-1, blockLoader.LoadedBlock);
         Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+    }
+
+    [Fact]
+    public void DisposeWithAFailingDeviceReleaseThenAFailingHostReleaseReportsTheDeviceFailure()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        FailingPlacement placement = new() { FailFreeOn = 1, FailDisposeHostOn = 1 };
+        HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
+        blockLoader.LoadShared();
+        blockLoader.LoadBlock(0);
+
+        // The device free fails first; Dispose then drops the block's host copies, and the first of them fails too. The device failure is the one
+        // reported, every host copy is still attempted, and the block is counted once.
+        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => blockLoader.Dispose());
+        Assert.Equal("forced release failure", thrown.Message);
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+        Assert.True(placement.HostReleaseCalls > 1, "Not every host copy was attempted after the first host release failed.");
     }
 }
