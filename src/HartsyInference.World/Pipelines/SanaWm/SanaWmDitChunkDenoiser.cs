@@ -55,8 +55,8 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
             throw new ArgumentException($"A chunk forward takes latents [1, C, T, H, W]; got {latents.Shape}.", nameof(latents));
 
         Branch inputs = BranchFor(branch, (int)latents.Shape[3], (int)latents.Shape[4]);
-        using Tensor x = Upload(latents);
-        using Tensor plucker = Upload(chunkPlucker);
+        using Tensor x = StreamingTensors.Clone(_backend, latents);
+        using Tensor plucker = StreamingTensors.Clone(_backend, chunkPlucker);
         using Tensor velocity = _dit.ForwardChunk(x, timesteps, inputs.Text, inputs.Mask, cameraConditions, plucker, inputs.Cache, commit);
         Tensor host = new(velocity.Shape, DType.F32, DeviceKind.Cpu);
         try
@@ -111,12 +111,12 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
             throw new InvalidOperationException($"The {branch} branch was not part of the stream's first chunk; a guidance "
                 + "branch cannot join a stream that is already under way.");
 
-        Tensor text = Upload(_text.Features(branch));
+        Tensor text = StreamingTensors.Clone(_backend, _text.Features(branch));
         Tensor? mask = null;
         SanaWmStreamCache? cache = null;
         try
         {
-            mask = Upload(_text.Mask(branch));
+            mask = StreamingTensors.Clone(_backend, _text.Mask(branch));
             cache = new SanaWmStreamCache(_backend, _config, latentHeight, latentWidth, _softmaxWindow, _stateDType);
             Branch created = new(text, mask, cache);
             _branches[branch] = created;
@@ -127,21 +127,6 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
             text.Dispose();
             mask?.Dispose();
             cache?.Dispose();
-            throw;
-        }
-    }
-
-    private Tensor Upload(Tensor host)
-    {
-        Tensor device = new(host.Shape, DType.F32, _backend.Device);
-        try
-        {
-            _backend.CopyTo(device, host);
-            return device;
-        }
-        catch
-        {
-            device.Dispose();
             throw;
         }
     }

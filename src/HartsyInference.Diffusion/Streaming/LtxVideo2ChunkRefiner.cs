@@ -116,7 +116,7 @@ public sealed class LtxVideo2ChunkRefiner : IStreamingLatentRefiner
                 ModelName = "LTX-2 refiner",
                 HeadroomBytes = checked(carried + options.HeadroomBytes),
             });
-            using (Tensor embeds = Upload(promptEmbeds))
+            using (Tensor embeds = StreamingTensors.Clone(backend, promptEmbeds))
                 caption = transformer.ProjectCaption(backend, embeds);
             backend.PinActivation(caption);
         }
@@ -168,7 +168,7 @@ public sealed class LtxVideo2ChunkRefiner : IStreamingLatentRefiner
             throw new ArgumentException($"The sink is {_state.SinkFrames} latent frames; got {frames}.", nameof(sinkLatents));
         cancel.ThrowIfCancellationRequested();
         using Tensor host = Pack(sinkLatents, frames);
-        using Tensor tokens = Upload(host);
+        using Tensor tokens = StreamingTensors.Clone(_backend, host);
         using LtxVideo2ChunkScope chunk = _transformer.OpenChunk(_backend, frames, _height, _width, _options.Fps, firstFrame: 0);
         try
         {
@@ -216,7 +216,7 @@ public sealed class LtxVideo2ChunkRefiner : IStreamingLatentRefiner
             if (_state.LastHistoryLayer >= 0)
             {
                 cancel.ThrowIfCancellationRequested();
-                using Tensor tokens = Upload(x);
+                using Tensor tokens = StreamingTensors.Clone(_backend, x);
                 _transformer.CaptureChunk(_backend, tokens, _caption, chunk, _state);
                 _placement.EndStep();
                 onPass?.Invoke(pass);
@@ -324,7 +324,7 @@ public sealed class LtxVideo2ChunkRefiner : IStreamingLatentRefiner
     // One prediction pass: the host tokens go up, the velocity comes back as a host tensor.
     private Tensor Velocity(Tensor x, float timestep, LtxVideo2ChunkScope chunk)
     {
-        using Tensor tokens = Upload(x);
+        using Tensor tokens = StreamingTensors.Clone(_backend, x);
         using Tensor velocity = _transformer.Predict(_backend, tokens, timestep, _caption, chunk, _state);
         _placement.EndStep();
         Tensor host = new(velocity.Shape, DType.F32, DeviceKind.Cpu);
@@ -381,21 +381,6 @@ public sealed class LtxVideo2ChunkRefiner : IStreamingLatentRefiner
         }
 
         return latents;
-    }
-
-    private Tensor Upload(Tensor host)
-    {
-        Tensor device = new(host.Shape, DType.F32, _backend.Device);
-        try
-        {
-            _backend.CopyTo(device, host);
-            return device;
-        }
-        catch
-        {
-            device.Dispose();
-            throw;
-        }
     }
 
     // Weights can be streamed; the carried state cannot. A window the device cannot hold fails here, not several blocks in.

@@ -37,10 +37,10 @@ internal static class SanaWmSyntheticLayout
 
     public static float PatternValue(int index) => (index % 251) * 0.004f - 0.5f;
 
-    /// <summary>Writes the layout to <paramref name="path"/>. <paramref name="edit"/> may drop, add or reshape specs first.</summary>
-    public static void WriteFile(string path, Action<List<SanaWmTensorSpec>>? edit = null)
+    /// <summary>Writes <paramref name="config"/>'s layout (default <see cref="Config"/>) after any <paramref name="edit"/> of its specs.</summary>
+    public static void WriteFile(string path, Action<List<SanaWmTensorSpec>>? edit = null, SanaWmConfig? config = null)
     {
-        List<SanaWmTensorSpec> specs = [.. SanaWmCheckpointConverter.ExpectedTensors(Config)];
+        List<SanaWmTensorSpec> specs = [.. SanaWmCheckpointConverter.ExpectedTensors(config ?? Config)];
         edit?.Invoke(specs);
         Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal);
         try
