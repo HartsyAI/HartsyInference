@@ -37,8 +37,10 @@ internal sealed class BackendBlockPlacement(IBackend backend) : IBlockPlacement
 /// converts and casts every block at once and holds the whole F16 DiT on the host (about 15.5 GiB for the released file); this holds one block.
 /// <para>Each block goes through the same converter and the same F32 to F16 cast as the resident load, so the forward's output is bit-identical.
 /// The shared (top-level) weights are converted and cast once, in <see cref="LoadShared"/>; the caller uploads them for the run.</para>
-/// <para>Failures: a load that throws at any step, including the upload, leaves no block loaded and releases what it created. A release that throws
-/// still clears the loaded block and its host copies. Releasing a block that is not loaded does nothing.</para>
+/// <para>Failures: a load that throws at any step, including the upload, leaves no block loaded and releases what it created. A release whose device
+/// free throws keeps the block loaded with its host copies, so a retry of the release frees it; a release whose host copies throw clears the block and
+/// releases the rest. Releasing a block that is not loaded does nothing. Dispose releases the block, or, if that release fails, drops its host copies
+/// and reports the failure; a device copy whose free failed may remain allocated.</para>
 /// <para>Wiring: <c>dit.LoadBlock = loader.LoadBlock</c> and <c>dit.UnloadBlock = loader.UnloadBlock</c>. The DiT calls them around each block's forward,
 /// so each block is loaded and released once per forward. No streaming scope may manage these blocks (<see cref="HunyuanVideo15Dit.StreamsBlockWeights"/>).</para>
 /// <para>File reads: a block's F32 tensors are read from the checkpoint with positional reads (<see cref="MmapHandle.ReadAt"/>) into owned buffers, not
@@ -171,21 +173,15 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
     {
         ThrowIfDisposed();
         if (index != _loaded) return;
-        Exception? failure = null;
-        try
-        {
-            _placement.Sync();
-            _placement.Free(_dit.GetBlock(index).EnumerateWeights());
-        }
-        catch (Exception ex)
-        {
-            failure = ex;
-        }
-        // The state is cleared before any host copy is released, so a release that throws cannot leave the block loaded.
+        // The device copy goes first. If the sync or the free throws, the block stays loaded with its host copies, so a retry frees it again.
+        _placement.Sync();
+        _placement.Free(_dit.GetBlock(index).EnumerateWeights());
+        // Only now is the state cleared; a host copy that fails to release is reported after the others are released.
         List<Tensor> owned = _blockOwned;
         _blockOwned = [];
         _loaded = -1;
         BlockReleases++;
+        Exception? failure = null;
         DisposeHostCopies(owned, ref failure);
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
@@ -202,6 +198,13 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
         catch (Exception ex)
         {
             failure = ex;
+            // The block's device release failed and the block stays loaded. Dispose cannot leave its host copies behind, so they are dropped here
+            // and the failure is reported; the device copy may remain allocated.
+            List<Tensor> owned = _blockOwned;
+            _blockOwned = [];
+            _loaded = -1;
+            BlockReleases++;
+            DisposeHostCopies(owned, ref failure);
         }
         // The shared copies are released even when the block's release failed.
         _disposed = true;
@@ -282,7 +285,7 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
         {
             if (_mapped.Contains(tensor)) continue;
             if (keep.Contains(tensor)) owned.Add(tensor);
-            else tensor.Dispose();
+            else _placement.DisposeHost(tensor);
         }
         return owned;
     }

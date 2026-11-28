@@ -87,7 +87,8 @@ public sealed class HunyuanVideo15BlockLoaderTests
         Assert.True(expected.AsReadOnlySpan<float>().SequenceEqual(again.AsReadOnlySpan<float>()));
     }
 
-    /// <summary>Does the CPU's no-op work and throws on a chosen call of the upload or the release (1-based; 0 never throws).</summary>
+    /// <summary>The CPU's no-op work, with the tensors it was asked to upload and to release recorded, and with chosen calls failing (1-based; 0 never
+    /// fails): the upload, the device release, and the host release.</summary>
     private sealed class FailingPlacement : IBlockPlacement
     {
         private readonly BackendBlockPlacement _inner = new(new CpuBackend());
@@ -100,13 +101,23 @@ public sealed class HunyuanVideo15BlockLoaderTests
 
         public int FailDisposeHostOn { get; init; }
 
-        private int _hostDisposes;
+        /// <summary>Every tensor an upload was asked to place, including the uploads that failed.</summary>
+        public List<Tensor> Preloaded { get; } = [];
+
+        /// <summary>Every tensor a host release was asked to release, including the releases that failed.</summary>
+        public HashSet<Tensor> HostDisposed { get; } = new(ReferenceEqualityComparer.Instance);
 
         public void Preload(IEnumerable<Tensor> weights)
         {
+            _uploadStarted = true;
+            List<Tensor> list = [.. weights];
+            Preloaded.AddRange(list);
             if (++_preloads == FailPreloadOn) throw new InvalidOperationException("forced upload failure");
-            _inner.Preload(weights);
+            _inner.Preload(list);
         }
+
+        private bool _uploadStarted;
+        private int _hostAfterUpload;
 
         public void Free(IEnumerable<Tensor> weights)
         {
@@ -118,7 +129,10 @@ public sealed class HunyuanVideo15BlockLoaderTests
 
         public void DisposeHost(Tensor tensor)
         {
-            if (++_hostDisposes == FailDisposeHostOn)
+            HostDisposed.Add(tensor);
+            // FailDisposeHostOn counts the host releases made after the first upload began, so it targets the unload or the rollback, not the
+            // loader's own releases of converter outputs before the upload.
+            if (_uploadStarted && ++_hostAfterUpload == FailDisposeHostOn)
             {
                 tensor.Dispose();
                 throw new InvalidOperationException("forced host release failure");
@@ -140,7 +154,7 @@ public sealed class HunyuanVideo15BlockLoaderTests
         blockLoader.LoadBlock(0);
 
         Assert.Throws<InvalidOperationException>(() => blockLoader.UnloadBlock(0));
-        // The block is released although one host copy failed to release: the state is clear and the other copies were released too.
+        // The device copy was freed first; one host copy failed to release, and the state is clear with the other copies released too.
         Assert.Equal(-1, blockLoader.LoadedBlock);
         Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
@@ -155,8 +169,8 @@ public sealed class HunyuanVideo15BlockLoaderTests
         loader.Load(path);
         HunyuanVideo15Config config = TinyConfig();
         using HunyuanVideo15Dit dit = new(config);
-        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailPreloadOn = 1, FailDisposeHostOn = 1 },
-            Source(loader), [], true);
+        FailingPlacement placement = new() { FailPreloadOn = 1, FailDisposeHostOn = 1 };
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
         blockLoader.LoadShared();
 
         InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => blockLoader.LoadBlock(0));
@@ -164,6 +178,9 @@ public sealed class HunyuanVideo15BlockLoaderTests
         Assert.Equal(-1, blockLoader.LoadedBlock);
         Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+        // Every tensor the failed upload was asked to place is released, even though one release failed.
+        Assert.NotEmpty(placement.Preloaded);
+        Assert.All(placement.Preloaded, tensor => Assert.Contains(tensor, placement.HostDisposed));
     }
 
     [Fact]
@@ -174,13 +191,17 @@ public sealed class HunyuanVideo15BlockLoaderTests
         loader.Load(path);
         HunyuanVideo15Config config = TinyConfig();
         using HunyuanVideo15Dit dit = new(config);
-        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailPreloadOn = 1 }, Source(loader), [], true);
+        FailingPlacement placement = new() { FailPreloadOn = 1 };
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
         blockLoader.LoadShared();
 
         Assert.Throws<InvalidOperationException>(() => blockLoader.LoadBlock(0));
         Assert.Equal(-1, blockLoader.LoadedBlock);
         Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+        // The tensors the failed upload was asked to place are disposed by the rollback.
+        Assert.NotEmpty(placement.Preloaded);
+        Assert.All(placement.Preloaded, tensor => Assert.Contains(tensor, placement.HostDisposed));
 
         // The next load works: the failed one left nothing behind to trip over.
         blockLoader.LoadBlock(0);
@@ -191,7 +212,7 @@ public sealed class HunyuanVideo15BlockLoaderTests
     }
 
     [Fact]
-    public void AFailedReleaseStillClearsTheBlockAndARetryIsSafe()
+    public void AFailedDeviceReleaseKeepsTheBlockForARetry()
     {
         string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
         using SafeTensorsLoader loader = new();
@@ -201,14 +222,50 @@ public sealed class HunyuanVideo15BlockLoaderTests
         using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailFreeOn = 1 }, Source(loader), [], true);
         blockLoader.LoadShared();
         blockLoader.LoadBlock(0);
+        int held = blockLoader.LoadedBlockTensorCount;
+        Assert.True(held > 0);
 
+        // The device free failed: the block stays loaded with its host copies, so the release can be retried.
         Assert.Throws<InvalidOperationException>(() => blockLoader.UnloadBlock(0));
+        Assert.Equal(0, blockLoader.LoadedBlock);
+        Assert.Equal(held, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads - 1, blockLoader.BlockReleases);
+
+        // The retry frees the device copy and releases the host copies.
+        blockLoader.UnloadBlock(0);
         Assert.Equal(-1, blockLoader.LoadedBlock);
         Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
 
-        // A second release of the same block does nothing and does not throw.
+        // A further release of a block that is not loaded does nothing.
         blockLoader.UnloadBlock(0);
         Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+    }
+
+    [Fact]
+    public void DisposeWithAFailingDeviceReleaseStillReleasesTheHostCopies()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        FailingPlacement placement = new() { FailFreeOn = 1 };
+        HunyuanVideo15BlockLoader blockLoader = new(dit, config, placement, Source(loader), [], true);
+        blockLoader.LoadShared();
+        blockLoader.LoadBlock(0);
+        int heldBlock = blockLoader.LoadedBlockTensorCount;
+        int disposedBefore = placement.HostDisposed.Count;
+
+        // Dispose reports the failed device release, but the block's host copies and the shared copies are released regardless.
+        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(() => blockLoader.Dispose());
+        Assert.Equal("forced release failure", thrown.Message);
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+        Assert.True(placement.HostDisposed.Count - disposedBefore > heldBlock, "The shared copies were not released.");
+
+        // Disposing again is a no-op.
+        blockLoader.Dispose();
     }
 }
