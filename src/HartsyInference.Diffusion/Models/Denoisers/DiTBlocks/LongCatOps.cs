@@ -6,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Per-frame adaLN operations of the LongCat DiT: every latent frame has its own timestep embedding row, so each modulation vector is
 /// shared by the <c>tokensPerFrame</c> consecutive token rows of its frame. The tables stay packed as the projection wrote them; no per-token
-/// copies are made.</summary>
+/// copies are made. Every function that returns a new tensor releases it when a backend call throws.</summary>
 internal static class LongCatOps
 {
     /// <summary><c>Linear(SiLU(timeEmbed))</c>: the packed modulation <c>[frames, width]</c>. Runs through <see cref="IBackend.Linear"/> so a runtime
@@ -15,9 +15,7 @@ internal static class LongCatOps
     {
         using Tensor activated = new(timeEmbed.Shape, DType.F32);
         backend.Silu(activated, timeEmbed);
-        Tensor packed = new(new TensorShape(timeEmbed.Shape[0], weight.Shape[0]), DType.F32);
-        backend.Linear(packed, activated, weight, bias);
-        return packed;
+        return Fill(new TensorShape(timeEmbed.Shape[0], weight.Shape[0]), DType.F32, packed => backend.Linear(packed, activated, weight, bias));
     }
 
     /// <summary><c>LayerNorm(x) · (1 + scale) + shift</c> with scale and shift read from <paramref name="packed"/> at the given column offsets,
@@ -26,9 +24,17 @@ internal static class LongCatOps
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor packed, int scaleOffset, int shiftOffset, int tokensPerFrame,
         bool roundOutput = false)
     {
-        Tensor output = new(x.Shape, DType.F32);
         ModulationSpec modulation = ModulationSpec.Packed(packed, packed.Shape[1], scaleOffset, shiftOffset, tokensPerFrame, ScaleMode.OnePlus);
-        backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, LongCatConfig.NormEps).WithModulation(in modulation));
+        Tensor output = new(x.Shape, DType.F32);
+        try
+        {
+            backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, LongCatConfig.NormEps).WithModulation(in modulation));
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
         return RoundOwned(backend, output, roundOutput);
     }
 
@@ -39,26 +45,25 @@ internal static class LongCatOps
         int lastDim = (int)encoder.Shape[encoder.Shape.Rank - 1];
         int l = (int)(encoder.Shape.ElementCount / lastDim);
         using Tensor input = RoundToBf16(backend, encoder);
-        Tensor h1Raw = new(new TensorShape(l, dim), DType.F32);
-        backend.Linear(h1Raw, input, w1, b1);
-        using Tensor h1 = RoundOwned(backend, h1Raw, on: true);
-        Tensor actRaw = new(h1.Shape, DType.F32);
-        backend.Gelu(actRaw, h1);
-        using Tensor act = RoundOwned(backend, actRaw, on: true);
-        Tensor outRaw = new(new TensorShape(l, dim), DType.F32);
-        backend.Linear(outRaw, act, w2, b2);
-        return RoundOwned(backend, outRaw, on: true);
+        using Tensor h1 = RoundOwned(backend, Fill(new TensorShape(l, dim), DType.F32, t => backend.Linear(t, input, w1, b1)), on: true);
+        using Tensor act = RoundOwned(backend, Fill(h1.Shape, DType.F32, t => backend.Gelu(t, h1)), on: true);
+        return RoundOwned(backend, Fill(new TensorShape(l, dim), DType.F32, t => backend.Linear(t, act, w2, b2)), on: true);
     }
 
-    /// <summary>The tensor rounded to the BF16 grid when <paramref name="on"/>: the input is disposed and a new tensor returned. Otherwise the
-    /// input itself is returned, so the caller's <c>using</c> disposes it either way.</summary>
+    /// <summary>The tensor rounded to the BF16 grid when <paramref name="on"/>. Takes ownership of <paramref name="owned"/>: it is disposed on every
+    /// path, and a new tensor is returned. Otherwise the input itself is returned, so the caller's <c>using</c> disposes it either way.</summary>
     public static Tensor RoundOwned(IBackend backend, Tensor owned, bool on)
     {
         if (!on)
             return owned;
-        Tensor rounded = RoundToBf16(backend, owned);
-        owned.Dispose();
-        return rounded;
+        try
+        {
+            return RoundToBf16(backend, owned);
+        }
+        finally
+        {
+            owned.Dispose();
+        }
     }
 
     /// <summary>Rounds an F32 tensor to BF16 (nearest-even) and back, so the values sit on the BF16 grid the reference's x holds. A new tensor.</summary>
@@ -66,9 +71,7 @@ internal static class LongCatOps
     {
         using Tensor bf16 = new(values.Shape, DType.BF16);
         backend.CastToBf16(bf16, values);
-        Tensor rounded = new(values.Shape, DType.F32);
-        backend.CastToF32(rounded, bf16);
-        return rounded;
+        return Fill(values.Shape, DType.F32, t => backend.CastToF32(t, bf16));
     }
 
     /// <summary><c>residual + gate · value</c> with the gate of each token's frame, read from <paramref name="packed"/> at
@@ -78,9 +81,7 @@ internal static class LongCatOps
     {
         using Tensor gates = new(new TensorShape(packed.Shape[0], width), DType.F32);
         backend.SliceLastDim(gates, packed, gateOffset);
-        Tensor output = new(residual.Shape, DType.F32);
-        backend.GatedResidualRowIndexed(output, residual, value, gates, frameRowIndex);
-        return output;
+        return Fill(residual.Shape, DType.F32, o => backend.GatedResidualRowIndexed(o, residual, value, gates, frameRowIndex));
     }
 
     /// <summary>I32 <c>[frames · tokensPerFrame]</c> mapping each token row to its frame's modulation row.</summary>
@@ -99,18 +100,26 @@ internal static class LongCatOps
         CheckpointTensors.RequireF32(weights, "LongCat", key, owned);
 
     /// <summary>A device-friendly copy of <paramref name="source"/>.</summary>
-    public static Tensor Copy(IBackend backend, Tensor source)
-    {
-        Tensor copy = new(source.Shape, source.DType);
-        backend.CopyInto(copy, source);
-        return copy;
-    }
+    public static Tensor Copy(IBackend backend, Tensor source) =>
+        Fill(source.Shape, source.DType, t => backend.CopyInto(t, source));
 
     /// <summary>Row-wise sum of two equal tensors.</summary>
-    public static Tensor Add(IBackend backend, Tensor a, Tensor b)
+    public static Tensor Add(IBackend backend, Tensor a, Tensor b) =>
+        Fill(a.Shape, DType.F32, o => backend.Add(o, a, b));
+
+    /// <summary>A new tensor filled by <paramref name="fill"/>. Released when the fill throws, so a caller receives a complete tensor or nothing.</summary>
+    private static Tensor Fill(TensorShape shape, DType dtype, Action<Tensor> fill)
     {
-        Tensor output = new(a.Shape, DType.F32);
-        backend.Add(output, a, b);
+        Tensor output = new(shape, dtype);
+        try
+        {
+            fill(output);
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
         return output;
     }
 }

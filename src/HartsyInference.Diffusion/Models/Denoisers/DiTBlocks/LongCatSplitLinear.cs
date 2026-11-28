@@ -25,11 +25,7 @@ internal static class LongCatSplitLinear
         bool split = bf16 && backend.Device.IsCpu && adjunct is { IsActive: true };
         if (!split)
         {
-            Tensor plain = new(new TensorShape(rows, count), DType.F32);
-            if (windowed)
-                backend.LinearWeightRows(plain, input, weight, bias, rowOffset, count);
-            else
-                backend.Linear(plain, input, weight, bias);
+            Tensor plain = Product(backend, input, weight, bias, rows, count, rowOffset, windowed);
             return bf16 ? LongCatOps.RoundOwned(backend, plain, on: true) : plain;
         }
 
@@ -51,33 +47,22 @@ internal static class LongCatSplitLinear
             {
                 if (!term.IsApplied)
                     continue;
-                Tensor down = LongCatOps.RoundOwned(backend, Product(backend, input, term.Down, null, rows, (int)term.Down.Shape[0]), on: true);
-                Tensor up;
-                if (term.Up is null)
+                Tensor branch = Branch(backend, input, term, rows);
+                Tensor previous = result!;
+                result = null;
+                Tensor summed;
+                try
                 {
-                    up = down;
+                    summed = Add(previous, branch);
                 }
-                else
+                finally
                 {
-                    Tensor upRaw;
-                    try
-                    {
-                        upRaw = Product(backend, down, term.Up, null, rows, (int)term.Up.Shape[0]);
-                    }
-                    finally
-                    {
-                        down.Dispose();
-                    }
-                    up = LongCatOps.RoundOwned(backend, upRaw, on: true);
+                    branch.Dispose();
+                    previous.Dispose();
                 }
-                Tensor scaled = Scale(up, term.EffectiveScale);
-                up.Dispose();
-                Tensor summed = Add(result, scaled);
-                scaled.Dispose();
-                result.Dispose();
                 result = LongCatOps.RoundOwned(backend, summed, on: true);
             }
-            return result;
+            return result!;
         }
         catch
         {
@@ -135,8 +120,13 @@ internal static class LongCatSplitLinear
             if (rotate)
             {
                 layer.RotateQk(backend, qn, kn, in context);
-                qn = LongCatOps.RoundOwned(backend, qn, on: true);
-                kn = LongCatOps.RoundOwned(backend, kn, on: true);
+                // Each owned tensor leaves its slot before the round, so a throw in the round releases it exactly once.
+                Tensor qOwned = qn;
+                qn = null;
+                qn = LongCatOps.RoundOwned(backend, qOwned, on: true);
+                Tensor kOwned = kn;
+                kn = null;
+                kn = LongCatOps.RoundOwned(backend, kOwned, on: true);
             }
             qMh = ToHeadMajor(qn, batch, sq, heads, headDim);
             kMh = ToHeadMajor(kn, batch, skv, heads, headDim);
@@ -159,13 +149,48 @@ internal static class LongCatSplitLinear
         }
     }
 
-    /// <summary>One product, the output released when the product throws.</summary>
-    private static Tensor Product(IBackend backend, Tensor input, Tensor weight, Tensor? bias, int rows, int count)
+    /// <summary>One active term's branch, <c>bf(bf(bf(x·Downᵀ)·Upᵀ)·scale)</c>, owned by the caller. Every intermediate is released on every path.</summary>
+    private static Tensor Branch(IBackend backend, Tensor input, LowRankAdjunctTerm term, int rows)
+    {
+        Tensor down = LongCatOps.RoundOwned(backend, Product(backend, input, term.Down, null, rows, (int)term.Down.Shape[0]), on: true);
+        Tensor up = term.Up is null ? down : ProjectRounded(backend, down, term.Up, rows);
+        try
+        {
+            return Scale(up, term.EffectiveScale);
+        }
+        finally
+        {
+            up.Dispose();
+        }
+    }
+
+    /// <summary>The product of <paramref name="consumed"/> through <paramref name="weight"/>, rounded. Consumes <paramref name="consumed"/> on every path.</summary>
+    private static Tensor ProjectRounded(IBackend backend, Tensor consumed, Tensor weight, int rows)
+    {
+        Tensor raw;
+        try
+        {
+            raw = Product(backend, consumed, weight, null, rows, (int)weight.Shape[0]);
+        }
+        finally
+        {
+            consumed.Dispose();
+        }
+        return LongCatOps.RoundOwned(backend, raw, on: true);
+    }
+
+    /// <summary>One product, the output released when the product throws. A windowed product takes the weight's rows from
+    /// <paramref name="rowOffset"/>.</summary>
+    private static Tensor Product(IBackend backend, Tensor input, Tensor weight, Tensor? bias, int rows, int count, int rowOffset = 0,
+        bool windowed = false)
     {
         Tensor output = new(new TensorShape(rows, count), DType.F32);
         try
         {
-            backend.Linear(output, input, weight, bias);
+            if (windowed)
+                backend.LinearWeightRows(output, input, weight, bias, rowOffset, count);
+            else
+                backend.Linear(output, input, weight, bias);
         }
         catch
         {

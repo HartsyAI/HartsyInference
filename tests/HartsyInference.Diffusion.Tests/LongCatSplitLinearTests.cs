@@ -150,7 +150,8 @@ public sealed class LongCatSplitLinearTests
         Tensor weight = new(new TensorShape(4, In), DType.I8);
         weight.AsSpan<byte>().Fill(3);
         Tensor scale = new(new TensorShape(4), DType.F32);
-        scale.AsSpan<float>().Fill(0.5f);
+        float[] rowScales = { 1f, 2f, 3f, 4f };
+        rowScales.CopyTo(scale.AsSpan<float>());
         weight.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = scale };
         LowRankAdjunctTerm term = new() { Down = Make(new long[] { Rank, In }, Values(Rank * In, 31)), Up = Make(new long[] { 4, Rank }, Values(4 * Rank, 32)), Scale = 1f, Gate = null };
         weight.LowRankAdjunct = new LowRankAdjunct { Terms = [term] };
@@ -160,7 +161,9 @@ public sealed class LongCatSplitLinearTests
         Assert.Equal(2, window.Shape[0]);
         Assert.NotNull(window.QuantInfo);
         Assert.Equal(2, window.QuantInfo!.RowScale!.Shape[0]);
-        Assert.Equal(0.5f, window.QuantInfo.RowScale.AsReadOnlySpan<float>()[0]);
+        ReadOnlySpan<float> windowScales = window.QuantInfo.RowScale.AsReadOnlySpan<float>();
+        Assert.Equal(2f, windowScales[0]);
+        Assert.Equal(3f, windowScales[1]);
         weight.Dispose();
         scale.Dispose();
     }

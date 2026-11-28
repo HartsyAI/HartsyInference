@@ -311,12 +311,12 @@ public sealed partial class LongCatBlock : IStreamingBlock
         }
     }
 
-    /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
-    /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
     /// <summary>The BF16 route with the host projections: the backend runs on the CPU. On a device the route rounds the residuals and the sub-layer outputs
     /// only, and the projections keep the shared kernels.</summary>
     private bool Bf16Host(IBackend backend) => _bf16Residual && backend.Device.IsCpu;
 
+    /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
+    /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
     private (Tensor Q, Tensor K, Tensor V) ProjectSelfTiled(IBackend backend, Tensor input)
     {
         if (Bf16Host(backend))
