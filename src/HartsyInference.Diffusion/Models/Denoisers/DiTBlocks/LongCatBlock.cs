@@ -19,9 +19,6 @@ public sealed partial class LongCatBlock : IStreamingBlock
     // The reference's x is BF16 on a BF16 or INT8 release, so each residual sum rounds to BF16 there; the F32 route (tiny F32 weights) does not.
     private bool _bf16Residual;
 
-    /// <summary>The BF16 route on the CPU: the self-attention and cross-attention projections run on the host (see LongCatSplitLinear). On a device
-    /// the route rounds the residuals and the sub-layer outputs only.</summary>
-    private bool Bf16HostRoute => _bf16Residual && _qkv is { Device.IsCpu: true };
     private Tensor? _qkv, _qkvBias, _qNorm, _kNorm, _proj, _projBias;
     private Tensor? _crossNormWeight, _crossNormBias;
     private Tensor? _crossQ, _crossQBias, _crossKv, _crossKvBias, _crossQNorm, _crossKNorm, _crossProj, _crossProjBias;
@@ -300,20 +297,29 @@ public sealed partial class LongCatBlock : IStreamingBlock
     {
         int rows = (int)flat.Shape[0];
         int dim = (int)(flat.Shape.ElementCount / rows);
-        unsafe
+        try
         {
-            using Tensor view = new((void*)flat.DataPointer, new TensorShape(rows, dim), DType.F32, flat.Device);
-            Tensor projected = LongCatSplitLinear.Linear(backend, view, _proj!, _projBias, bf16: true);
+            unsafe
+            {
+                using Tensor view = new((void*)flat.DataPointer, new TensorShape(rows, dim), DType.F32, flat.Device);
+                return LongCatSplitLinear.Linear(backend, view, _proj!, _projBias, bf16: true);
+            }
+        }
+        finally
+        {
             flat.Dispose();
-            return projected;
         }
     }
 
     /// <summary>The self-attention projection over row tiles. The projection is row-wise (a linear, then the per-head QK norm), so the joined Q, K and
     /// V equal the untiled projection; the rotation and the attention run after, on the joined tensors.</summary>
+    /// <summary>The BF16 route with the host projections: the backend runs on the CPU. On a device the route rounds the residuals and the sub-layer outputs
+    /// only, and the projections keep the shared kernels.</summary>
+    private bool Bf16Host(IBackend backend) => _bf16Residual && backend.Device.IsCpu;
+
     private (Tensor Q, Tensor K, Tensor V) ProjectSelfTiled(IBackend backend, Tensor input)
     {
-        if (Bf16HostRoute)
+        if (Bf16Host(backend))
             return ProjectSelfBf16(backend, input);
         int s = (int)input.Shape[0];
         int dim = (int)input.Shape[1];
@@ -423,7 +429,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
                 speakerMap = speakers.ReferenceMap(backend, _selfAttention, q, inputs.CondFrames * inputs.TokensPerFrame, referenceKeys);
             }
             Tensor flat = LongCatOps.RoundOwned(backend, SegmentedAttention.Run(backend, _selfAttention, q, k, v, inputs.Segments), _bf16Residual);
-            return Bf16HostRoute ? OutputBf16(backend, flat) : _selfAttention.ProjectOutput(backend, flat);
+            return Bf16Host(backend) ? OutputBf16(backend, flat) : _selfAttention.ProjectOutput(backend, flat);
         }
         finally
         {
@@ -469,9 +475,19 @@ public sealed partial class LongCatBlock : IStreamingBlock
     {
         int dim = _config.HiddenSize;
         Tensor q = LongCatSplitLinear.Linear(backend, queryInput, _crossQ!, _crossQBias, bf16: true);
-        Tensor k = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: 0, rowCount: dim);
-        Tensor v = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: dim, rowCount: dim);
-        Tensor flat = LongCatSplitLinear.AttendNormed(backend, _crossAttention!, q, k, v, _crossQNorm!, _crossKNorm!, 1, _config.NumHeads,
+        Tensor? k = null, v = null;
+        try
+        {
+            k = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: 0, rowCount: dim);
+            v = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: dim, rowCount: dim);
+        }
+        catch
+        {
+            q.Dispose();
+            k?.Dispose();
+            throw;
+        }
+        Tensor flat = LongCatSplitLinear.AttendNormed(backend, _crossAttention!, q, k!, v!, _crossQNorm!, _crossKNorm!, 1, _config.NumHeads,
             LongCatConfig.NormEps, default, rotate: false);
         using (flat)
             return LongCatSplitLinear.Linear(backend, flat, _crossProj!, _crossProjBias, bf16: true);
@@ -479,7 +495,7 @@ public sealed partial class LongCatBlock : IStreamingBlock
 
     private Tensor CrossAttention(IBackend backend, Tensor queryInput, Tensor text)
     {
-        if (Bf16HostRoute)
+        if (Bf16Host(backend))
             return CrossAttentionBf16(backend, queryInput, text);
         int heads = _config.NumHeads, headDim = _config.HeadDim, dim = _config.HiddenSize;
         int rows = (int)queryInput.Shape[0], textRows = (int)text.Shape[0];

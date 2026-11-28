@@ -22,7 +22,7 @@ internal static class LongCatSplitLinear
         int count = rowCount < 0 ? total : rowCount;
         bool windowed = rowOffset != 0 || count != total;
         LowRankAdjunct? adjunct = weight.LowRankAdjunct;
-        bool split = bf16 && weight.Device.IsCpu && adjunct is { IsActive: true };
+        bool split = bf16 && backend.Device.IsCpu && adjunct is { IsActive: true };
         if (!split)
         {
             Tensor plain = new(new TensorShape(rows, count), DType.F32);
@@ -44,18 +44,14 @@ internal static class LongCatSplitLinear
         Tensor? result = null;
         try
         {
-            Tensor baseRaw = new(new TensorShape(rows, count), DType.F32);
-            backend.Linear(baseRaw, input, baseWeight, baseBias);
-            result = LongCatOps.RoundOwned(backend, baseRaw, on: true);
+            result = LongCatOps.RoundOwned(backend, Product(backend, input, baseWeight, baseBias, rows, count), on: true);
 
             LowRankAdjunct window = windowed ? adjunct!.SliceRows(rowOffset, count) : adjunct!;
             foreach (LowRankAdjunctTerm term in window.Terms)
             {
                 if (!term.IsApplied)
                     continue;
-                Tensor downRaw = new(new TensorShape(rows, term.Down.Shape[0]), DType.F32);
-                backend.Linear(downRaw, input, term.Down, null);
-                Tensor down = LongCatOps.RoundOwned(backend, downRaw, on: true);
+                Tensor down = LongCatOps.RoundOwned(backend, Product(backend, input, term.Down, null, rows, (int)term.Down.Shape[0]), on: true);
                 Tensor up;
                 if (term.Up is null)
                 {
@@ -63,9 +59,15 @@ internal static class LongCatSplitLinear
                 }
                 else
                 {
-                    Tensor upRaw = new(new TensorShape(rows, term.Up.Shape[0]), DType.F32);
-                    backend.Linear(upRaw, down, term.Up, null);
-                    down.Dispose();
+                    Tensor upRaw;
+                    try
+                    {
+                        upRaw = Product(backend, down, term.Up, null, rows, (int)term.Up.Shape[0]);
+                    }
+                    finally
+                    {
+                        down.Dispose();
+                    }
                     up = LongCatOps.RoundOwned(backend, upRaw, on: true);
                 }
                 Tensor scaled = Scale(up, term.EffectiveScale);
@@ -118,25 +120,59 @@ internal static class LongCatSplitLinear
     }
 
     /// <summary>Attention on the BF16 route: each of <paramref name="q"/>, <paramref name="k"/> and <paramref name="v"/> (<c>[batch·S, heads·D]</c> F32 on the
-    /// grid) is consumed. The query and the key take the two-step norm, then the rotation when <paramref name="rotate"/>, then the attention runs
-    /// head-major on the layer's attention call. Returns the token-major output <c>[batch·Sq, heads·D]</c>, rounded.</summary>
+    /// grid) is consumed, on every path. The query and the key take the two-step norm; when <paramref name="rotate"/>, the rotation, and then q and k
+    /// round again, as upstream's rotated output is BF16 (the self-attention does the same). The attention runs head-major on the layer's attention
+    /// call. Returns the token-major output <c>[batch·Sq, heads·D]</c>, rounded.</summary>
     public static Tensor AttendNormed(IBackend backend, AttentionLayer layer, Tensor q, Tensor k, Tensor v, Tensor qNorm, Tensor kNorm, int batch,
         int heads, float eps, in AttentionCallContext context, bool rotate)
     {
-        using Tensor queries = q;
-        using Tensor keysRaw = k;
-        using Tensor valuesRaw = v;
         int sq = (int)q.Shape[0] / batch, skv = (int)k.Shape[0] / batch, headDim = (int)qNorm.Shape[0];
-        using Tensor qn = HeadNorm(q, qNorm, heads, eps, batch);
-        using Tensor kn = HeadNorm(k, kNorm, heads, eps, batch);
-        if (rotate)
-            layer.RotateQk(backend, qn, kn, in context);
-        using Tensor qMh = ToHeadMajor(qn, batch, sq, heads, headDim);
-        using Tensor kMh = ToHeadMajor(kn, batch, skv, heads, headDim);
-        using Tensor vMh = ToHeadMajor(valuesRaw, batch, skv, heads, headDim);
-        using Tensor attended = layer.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default, OperandOwnership.None);
-        Tensor flat = FromHeadMajor(attended, batch, sq, heads, headDim);
-        return LongCatOps.RoundOwned(backend, flat, on: true);
+        Tensor? qn = null, kn = null, qMh = null, kMh = null, vMh = null, attended = null;
+        try
+        {
+            qn = HeadNorm(q, qNorm, heads, eps, batch);
+            kn = HeadNorm(k, kNorm, heads, eps, batch);
+            if (rotate)
+            {
+                layer.RotateQk(backend, qn, kn, in context);
+                qn = LongCatOps.RoundOwned(backend, qn, on: true);
+                kn = LongCatOps.RoundOwned(backend, kn, on: true);
+            }
+            qMh = ToHeadMajor(qn, batch, sq, heads, headDim);
+            kMh = ToHeadMajor(kn, batch, skv, heads, headDim);
+            vMh = ToHeadMajor(v, batch, skv, heads, headDim);
+            attended = layer.AttendHeadMajorOperands(backend, qMh, kMh, vMh, default, OperandOwnership.None);
+            Tensor flat = FromHeadMajor(attended, batch, sq, heads, headDim);
+            return LongCatOps.RoundOwned(backend, flat, on: true);
+        }
+        finally
+        {
+            qn?.Dispose();
+            kn?.Dispose();
+            qMh?.Dispose();
+            kMh?.Dispose();
+            vMh?.Dispose();
+            attended?.Dispose();
+            q.Dispose();
+            k.Dispose();
+            v.Dispose();
+        }
+    }
+
+    /// <summary>One product, the output released when the product throws.</summary>
+    private static Tensor Product(IBackend backend, Tensor input, Tensor weight, Tensor? bias, int rows, int count)
+    {
+        Tensor output = new(new TensorShape(rows, count), DType.F32);
+        try
+        {
+            backend.Linear(output, input, weight, bias);
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
+        return output;
     }
 
     private static float Bf16(float value) => BFloat16Bits.ToFloat(BFloat16Bits.FromFloat(value));

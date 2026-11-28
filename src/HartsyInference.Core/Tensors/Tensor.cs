@@ -477,24 +477,14 @@ public sealed unsafe class Tensor : IDisposable
         int count = rowCount < 0 ? (int)Shape[0] : rowCount;
         long rowBytes = Shape.ElementCount / Shape[0] * DType.SizeInBytes;
         byte* start = (byte*)DataPointer + rowOffset * rowBytes;
-        TensorShape shape = new(count, Shape[1]);
-        Tensor view = new(start, shape, DType, Device);
+        Tensor view = new(start, new TensorShape(count, Shape[1]), DType, Device);
         view.SetKeepAlive(this);
-        if (rowOffset == 0 && count == Shape[0])
-        {
-            CopyQuantMetadataTo(view, rowsPreserved: true);
-        }
-        else
-        {
-            // A row window renumbers the rows, so the per-row scales cannot follow it; the per-tensor scalars can.
-            if (QuantInfo is not null)
-                throw new HartsyInferenceException($"A row window of {Shape} cannot keep its per-row quantization metadata ({QuantInfo.Format}).");
-            view.Fp8ScaleFactor = Fp8ScaleFactor;
-            view.Fp8InputScaleFactor = Fp8InputScaleFactor;
-            view.SkipNativeFp8Gemm = SkipNativeFp8Gemm;
-            view.ForceF32Gemm = ForceF32Gemm;
-        }
-        view.LowRankAdjunct = null;
+        // The per-tensor scalars ride along; the per-row scales are narrowed to the window, as IBackend.LinearWeightRows narrows them.
+        view.Fp8ScaleFactor = Fp8ScaleFactor;
+        view.Fp8InputScaleFactor = Fp8InputScaleFactor;
+        view.ForceF32Gemm = ForceF32Gemm;
+        view.SkipNativeFp8Gemm = SkipNativeFp8Gemm;
+        view.QuantInfo = QuantInfo?.SliceRows(rowOffset, count, "the weight viewed without its LoRA adjunct");
         return view;
     }
 

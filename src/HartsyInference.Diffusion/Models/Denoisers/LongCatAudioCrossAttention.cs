@@ -166,12 +166,22 @@ public sealed class LongCatAudioCrossAttention : IDisposable
     private Tensor AttendBatched(IBackend backend, Tensor noisyX, Tensor noisyAudio, int batch, int tokens, int ctx,
         LongCatSpeakerRotation? rotation)
     {
-        if (_bf16Route && _qW!.Device.IsCpu)
+        if (_bf16Route && backend.Device.IsCpu)
         {
             // BF16 route on the CPU: the projections, the norms and the attention and its output round as the reference's do (see LongCatSplitLinear).
             Tensor qBf = LongCatSplitLinear.Linear(backend, noisyX, _qW!, _qB, bf16: true);
-            Tensor kBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: 0, rowCount: _dim);
-            Tensor vBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: _dim, rowCount: _dim);
+            Tensor? kBf = null, vBf = null;
+            try
+            {
+                kBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: 0, rowCount: _dim);
+                vBf = LongCatSplitLinear.Linear(backend, noisyAudio, _kvW!, _kvB, bf16: true, rowOffset: _dim, rowCount: _dim);
+            }
+            catch
+            {
+                qBf.Dispose();
+                kBf?.Dispose();
+                throw;
+            }
             AttentionCallContext bf16Context = rotation is { } bf16Tables
                 ? new AttentionCallContext
                 {
@@ -179,7 +189,7 @@ public sealed class LongCatAudioCrossAttention : IDisposable
                     KeyRotation = new QkRotation(QkRotationKind.InterleavedPairs, bf16Tables.KeyCos, bf16Tables.KeySin, batch * ctx),
                 }
                 : default;
-            Tensor flatBf = LongCatSplitLinear.AttendNormed(backend, _attention!, qBf, kBf, vBf, _qNorm!, _kNorm!, batch, _heads, NormEps,
+            Tensor flatBf = LongCatSplitLinear.AttendNormed(backend, _attention!, qBf, kBf!, vBf!, _qNorm!, _kNorm!, batch, _heads, NormEps,
                 in bf16Context, rotate: rotation is not null);
             using (flatBf)
                 return LongCatSplitLinear.Linear(backend, flatBf, _projW!, _projB, bf16: true);

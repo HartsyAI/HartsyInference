@@ -51,7 +51,7 @@ public sealed class LongCatSplitLinearTests
 
         Assert.All(got, v => Assert.Equal(v, Bf16(v)));
         for (int i = 0; i < got.Length; i++)
-            Assert.True(Math.Abs(got[i] - expected[i]) <= 1e-2f * Math.Max(1f, Math.Abs(expected[i])), $"element {i}: {got[i]} vs {expected[i]}");
+            Assert.Equal(expected[i], got[i]);
     }
 
     [Fact]
@@ -142,5 +142,26 @@ public sealed class LongCatSplitLinearTests
         Tensor tensor = new(new TensorShape(shape), DType.F32);
         values.CopyTo(tensor.AsSpan<float>());
         return tensor;
+    }
+
+    [Fact]
+    public void ARowWindowKeepsItsPerRowScalesAndDropsTheAdjunct()
+    {
+        Tensor weight = new(new TensorShape(4, In), DType.I8);
+        weight.AsSpan<byte>().Fill(3);
+        Tensor scale = new(new TensorShape(4), DType.F32);
+        scale.AsSpan<float>().Fill(0.5f);
+        weight.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = scale };
+        LowRankAdjunctTerm term = new() { Down = Make(new long[] { Rank, In }, Values(Rank * In, 31)), Up = Make(new long[] { 4, Rank }, Values(4 * Rank, 32)), Scale = 1f, Gate = null };
+        weight.LowRankAdjunct = new LowRankAdjunct { Terms = [term] };
+
+        using Tensor window = weight.WithoutLowRankAdjunct(1, 2);
+        Assert.Null(window.LowRankAdjunct);
+        Assert.Equal(2, window.Shape[0]);
+        Assert.NotNull(window.QuantInfo);
+        Assert.Equal(2, window.QuantInfo!.RowScale!.Shape[0]);
+        Assert.Equal(0.5f, window.QuantInfo.RowScale.AsReadOnlySpan<float>()[0]);
+        weight.Dispose();
+        scale.Dispose();
     }
 }
