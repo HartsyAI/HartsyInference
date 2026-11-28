@@ -143,8 +143,9 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
     private void ReleaseStreamedBlock(int index)
     {
-        _resident = -1;
+        // Cleared only once the release has returned: if it throws, the entry point's finally releases the block again.
         UnloadBlock?.Invoke(index);
+        _resident = -1;
     }
 
     /// <summary>Releases the block still loaded when an entry point ends, on success, encode or throw, so no entry leaves a block resident.</summary>

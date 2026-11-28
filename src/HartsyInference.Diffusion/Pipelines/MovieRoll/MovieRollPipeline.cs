@@ -18,6 +18,7 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
     private readonly MovieRollSchedule _schedule;
     private readonly long _kvByteBudget;
     private readonly IStreamingWeightCache? _poolCache;
+    private readonly bool _trimEachStep;
 
     /// <summary>Activation headroom the block streamer keeps free, as the HunyuanVideo pipeline's: the sampler's windows and the decode's tiles.</summary>
     private const long ActivationHeadroomBytes = 6L << 30;
@@ -26,14 +27,17 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
     /// A run that would exceed it is refused before any write.</param>
     /// <param name="poolCache">The streaming cache whose stream-ordered pool is drained after a streamed run; null uses the backend's own
     /// <see cref="IBackend.StreamingCache"/>. Passing a cache is for tests that count the drains.</param>
+    /// <param name="trimEachStep">True (the default) drains the pool after each denoising step of a streamed run, as the engine's streaming scope does;
+    /// false drains only after the run and after the decode. The false setting is for tests that tell the drains apart.</param>
     public MovieRollPipeline(IBackend backend, HunyuanVideo15Dit dit, HunyuanVideo15Vae vae, MovieRollSchedule schedule, long kvByteBudget = long.MaxValue,
-        IStreamingWeightCache? poolCache = null)
+        IStreamingWeightCache? poolCache = null, bool trimEachStep = true)
         : base(backend)
     {
         _dit = dit ?? throw new ArgumentNullException(nameof(dit));
         _vae = vae ?? throw new ArgumentNullException(nameof(vae));
         _vaeResidency = new ResidentWeights(backend, () => _vae.EnumerateWeights());
         _schedule = schedule ?? throw new ArgumentNullException(nameof(schedule));
+        _trimEachStep = trimEachStep;
         if (kvByteBudget <= 0) throw new ArgumentOutOfRangeException(nameof(kvByteBudget), kvByteBudget, "The K and V budget is positive.");
         _kvByteBudget = kvByteBudget;
         _poolCache = poolCache;
@@ -102,7 +106,7 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         {
             // The pool keeps freed block buffers warm (vram.mempoolKeep, on by default); the engine's streaming scope trims it after each step
             // (BlockStreamingOptions.PerStepTrim). This path has no scope, so it trims after each step too.
-            MovieRollSampler sampler = new(Backend, _dit, _schedule) { StepCompleted = ReleaseStreamedPool };
+            MovieRollSampler sampler = new(Backend, _dit, _schedule) { StepCompleted = _trimEachStep ? ReleaseStreamedPool : null };
             return sampler.Sample(cache, options, qwen, byt5, negativeQwen, negativeByt5, noise);
         }
         finally

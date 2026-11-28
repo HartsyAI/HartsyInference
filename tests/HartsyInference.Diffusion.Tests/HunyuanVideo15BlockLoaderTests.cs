@@ -86,4 +86,76 @@ public sealed class HunyuanVideo15BlockLoaderTests
         using Tensor again = streamed.ForwardPerFrame(backend, latent, frameTimesteps, 1000f, qwen, byt5, conditioning: null);
         Assert.True(expected.AsReadOnlySpan<float>().SequenceEqual(again.AsReadOnlySpan<float>()));
     }
+
+    /// <summary>Does the CPU's no-op work and throws on a chosen call of the upload or the release (1-based; 0 never throws).</summary>
+    private sealed class FailingPlacement : IBlockPlacement
+    {
+        private readonly BackendBlockPlacement _inner = new(new CpuBackend());
+        private int _preloads;
+        private int _frees;
+
+        public int FailPreloadOn { get; init; }
+
+        public int FailFreeOn { get; init; }
+
+        public void Preload(IEnumerable<Tensor> weights)
+        {
+            if (++_preloads == FailPreloadOn) throw new InvalidOperationException("forced upload failure");
+            _inner.Preload(weights);
+        }
+
+        public void Free(IEnumerable<Tensor> weights)
+        {
+            if (++_frees == FailFreeOn) throw new InvalidOperationException("forced release failure");
+            _inner.Free(weights);
+        }
+
+        public void Sync() => _inner.Sync();
+    }
+
+    [Fact]
+    public void AFailedUploadRollsTheBlockBackAndTheLoaderRecovers()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailPreloadOn = 1 }, Source(loader), [], true);
+        blockLoader.LoadShared();
+
+        Assert.Throws<InvalidOperationException>(() => blockLoader.LoadBlock(0));
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+
+        // The next load works: the failed one left nothing behind to trip over.
+        blockLoader.LoadBlock(0);
+        Assert.Equal(0, blockLoader.LoadedBlock);
+        blockLoader.UnloadBlock(0);
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+    }
+
+    [Fact]
+    public void AFailedReleaseStillClearsTheBlockAndARetryIsSafe()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        HunyuanVideo15Config config = TinyConfig();
+        using HunyuanVideo15Dit dit = new(config);
+        using HunyuanVideo15BlockLoader blockLoader = new(dit, config, new FailingPlacement { FailFreeOn = 1 }, Source(loader), [], true);
+        blockLoader.LoadShared();
+        blockLoader.LoadBlock(0);
+
+        Assert.Throws<InvalidOperationException>(() => blockLoader.UnloadBlock(0));
+        Assert.Equal(-1, blockLoader.LoadedBlock);
+        Assert.Equal(0, blockLoader.LoadedBlockTensorCount);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+
+        // A second release of the same block does nothing and does not throw.
+        blockLoader.UnloadBlock(0);
+        Assert.Equal(blockLoader.BlockLoads, blockLoader.BlockReleases);
+    }
 }
