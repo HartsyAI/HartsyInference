@@ -451,8 +451,24 @@ public sealed partial class LongCatBlock : IStreamingBlock
         return joined;
     }
 
+    /// <summary>The text cross-attention on the BF16 route: the query and the key and value (each with its LoRA branch rounded apart), the two-step
+    /// query and key norms, the head-major attention, and the output projection, all on the BF16 grid.</summary>
+    private Tensor CrossAttentionBf16(IBackend backend, Tensor queryInput, Tensor text)
+    {
+        int dim = _config.HiddenSize;
+        Tensor q = LongCatSplitLinear.Linear(backend, queryInput, _crossQ!, _crossQBias, bf16: true);
+        Tensor k = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: 0, rowCount: dim);
+        Tensor v = LongCatSplitLinear.Linear(backend, text, _crossKv!, _crossKvBias, bf16: true, rowOffset: dim, rowCount: dim);
+        Tensor flat = LongCatSplitLinear.AttendNormed(backend, _crossAttention!, q, k, v, _crossQNorm!, _crossKNorm!, 1, _config.NumHeads,
+            LongCatConfig.NormEps, default, rotate: false);
+        using (flat)
+            return LongCatSplitLinear.Linear(backend, flat, _crossProj!, _crossProjBias, bf16: true);
+    }
+
     private Tensor CrossAttention(IBackend backend, Tensor queryInput, Tensor text)
     {
+        if (_bf16Residual)
+            return CrossAttentionBf16(backend, queryInput, text);
         int heads = _config.NumHeads, headDim = _config.HeadDim, dim = _config.HiddenSize;
         int rows = (int)queryInput.Shape[0], textRows = (int)text.Shape[0];
         Tensor q = new(new TensorShape(1, rows, heads, headDim), DType.F32);
