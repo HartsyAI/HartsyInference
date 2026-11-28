@@ -54,6 +54,18 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <inheritdoc/>
     public Action<int>? BeforeBlockForward { get; set; }
 
+    /// <summary>Runs before <see cref="BeforeBlockForward"/> for block i on every forward, and may load that block's weights first (streamed
+    /// loading, see <see cref="HunyuanVideo15BlockLoader"/>). Null keeps the weights loaded by <see cref="LoadWeights"/>.</summary>
+    public Action<int>? LoadBlock { get; set; }
+
+    /// <summary>Runs after block i's forward on every forward, when its weights are no longer needed by this forward. A loader that owns the
+    /// block's weights releases them here (device and host, after a sync).</summary>
+    public Action<int>? UnloadBlock { get; set; }
+
+    /// <summary>True when a loader sets <see cref="LoadBlock"/>: the blocks' weights are then loaded and released per forward by that loader,
+    /// so the streaming scope must not manage them.</summary>
+    public bool StreamsBlockWeights => LoadBlock is not null;
+
     /// <summary>Diagnostic tap: called with each block's output image tokens during the per-frame forward. The tensor is valid only inside the call.
     /// Null by default, so the forward is unchanged.</summary>
     internal Action<int, Tensor>? BlockOutputTap { get; set; }
@@ -71,7 +83,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
     /// <summary>The weights outside the blocks: the input and timestep projections, the ByT5 and text embedders, the token refiner and the final layer.
     /// <see cref="LoadWeights"/> calls this and then <see cref="LoadBlockWeights"/> for every block.</summary>
-    internal void LoadSharedWeights(IReadOnlyDictionary<string, Tensor> w)
+    public void LoadSharedWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _imgInW = F32(w, "img_in.proj.weight"); _imgInB = F32(w, "img_in.proj.bias");
         _timeW0 = F32(w, "time_in.mlp.0.weight"); _timeB0 = F32(w, "time_in.mlp.0.bias");
@@ -89,7 +101,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     }
 
     /// <summary>One block's weights under <c>transformer_blocks.{index}</c>. The block keeps references to these tensors until its next load.</summary>
-    internal void LoadBlockWeights(int index, IReadOnlyDictionary<string, Tensor> w)
+    public void LoadBlockWeights(int index, IReadOnlyDictionary<string, Tensor> w)
     {
         _blocks[index].AllowF16Attention = AllowF16Attention;
         _blocks[index].LoadWeights(w, $"transformer_blocks.{index}");
@@ -119,6 +131,29 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         public void Dispose() { }
     }
 
+    /// <summary>The block a loader has loaded and not yet released, or -1. Set by <see cref="LoadStreamedBlock"/>, cleared by <see cref="ReleaseStreamedBlock"/>.</summary>
+    private int _resident = -1;
+
+    private void LoadStreamedBlock(int index)
+    {
+        if (LoadBlock is null) return;
+        LoadBlock(index);
+        _resident = index;
+    }
+
+    private void ReleaseStreamedBlock(int index)
+    {
+        // Cleared only once the release has returned: if it throws, the entry point's finally releases the block again.
+        UnloadBlock?.Invoke(index);
+        _resident = -1;
+    }
+
+    /// <summary>Releases the block still loaded when an entry point ends, on success, encode or throw, so no entry leaves a block resident.</summary>
+    private void ReleaseResidentBlock()
+    {
+        if (_resident >= 0) ReleaseStreamedBlock(_resident);
+    }
+
     /// <summary>Every weight: shared tensors, then each block.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -133,6 +168,18 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// <param name="conditioning">Optional <c>[1, 33, T, H, W]</c> (conditioning latent then mask); null feeds zeros (text-to-video).</param>
     public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
     {
+        try
+        {
+            return ForwardCore(backend, latent, timestep, qwen, byt5, conditioning);
+        }
+        finally
+        {
+            ReleaseResidentBlock();
+        }
+    }
+
+    private Tensor ForwardCore(IBackend backend, Tensor latent, float timestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
+    {
         using IDisposable exactGemm = ExactGemm(backend);
         (int frames, int height, int width) = ValidateInputs(latent, qwen, byt5, conditioning);
         int tokens = frames * height * width;
@@ -144,10 +191,12 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
         for (int i = 0; i < _blocks.Length; i++)
         {
+            LoadStreamedBlock(i);
             BeforeBlockForward?.Invoke(i);
             (Tensor nextImg, Tensor nextTxt) = _blocks[i].Forward(backend, img, txt, temb, _rope, height, width, frames);
             img.Dispose(); txt.Dispose();
             img = nextImg; txt = nextTxt;
+            ReleaseStreamedBlock(i);
         }
         txt.Dispose();
 
@@ -160,6 +209,18 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// tokens take that frame's adaLN rows in every block and in the final layer. The text takes windowTimestep. Single window, no cache.
     /// With every frame at the same timestep this equals Forward.</summary>
     public Tensor ForwardPerFrame(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
+    {
+        try
+        {
+            return ForwardPerFrameCore(backend, latent, frameTimesteps, windowTimestep, qwen, byt5, conditioning);
+        }
+        finally
+        {
+            ReleaseResidentBlock();
+        }
+    }
+
+    private Tensor ForwardPerFrameCore(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor qwen, Tensor? byt5 = null, Tensor? conditioning = null)
     {
         using IDisposable exactGemm = ExactGemm(backend);
         ArgumentNullException.ThrowIfNull(frameTimesteps);
@@ -179,10 +240,12 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             frameTemb = TimestepMlpRows(backend, frameTimesteps);
             for (int i = 0; i < _blocks.Length; i++)
             {
+                LoadStreamedBlock(i);
                 BeforeBlockForward?.Invoke(i);
                 (Tensor nextImg, Tensor nextTxt) = _blocks[i].ForwardPerFrame(backend, img, txt, txtTemb, frameTemb, layout, _rope, height, width, frames);
                 img.Dispose(); txt.Dispose();
                 img = nextImg; txt = nextTxt;
+                ReleaseStreamedBlock(i);
                 BlockOutputTap?.Invoke(i, img);
             }
             txt.Dispose();
@@ -236,6 +299,19 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     private Tensor? StreamWindow(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor? qwen, Tensor? byt5,
         MovieRollKvCache cache, int fullHistoryBlocks, bool encode, int startFrame)
     {
+        try
+        {
+            return StreamWindowCore(backend, latent, frameTimesteps, windowTimestep, qwen, byt5, cache, fullHistoryBlocks, encode, startFrame);
+        }
+        finally
+        {
+            ReleaseResidentBlock();
+        }
+    }
+
+    private Tensor? StreamWindowCore(IBackend backend, Tensor latent, float[] frameTimesteps, float windowTimestep, Tensor? qwen, Tensor? byt5,
+        MovieRollKvCache cache, int fullHistoryBlocks, bool encode, int startFrame)
+    {
         using IDisposable exactGemm = ExactGemm(backend);
         ArgumentNullException.ThrowIfNull(frameTimesteps);
         ArgumentNullException.ThrowIfNull(cache);
@@ -264,6 +340,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
 
             for (int i = 0; i < _blocks.Length; i++)
             {
+                LoadStreamedBlock(i);
                 BeforeBlockForward?.Invoke(i);
                 string layer = StreamLayerName(i);
                 if (encode && i >= fullHistoryBlocks) cache.TrimToSink(layer, MovieRollSinkChunks);
@@ -307,6 +384,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
                     output.Keys?.Dispose();
                     output.Values?.Dispose();
                 }
+                ReleaseStreamedBlock(i);
             }
 
             if (encode)
@@ -336,6 +414,18 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
     /// frame 0 over the returned <c>T</c> frames, not the absolute frames the chunks came from, so the next window starts at frame <c>T</c>.
     /// The reference for this path is a transcription of MovieRoll's function, not the upstream code. Returns <c>T</c>.</summary>
     public int StreamRecompute(IBackend backend, Tensor latent, int[] chunkFrames, MovieRollKvCache cache, int fullHistoryBlocks)
+    {
+        try
+        {
+            return StreamRecomputeCore(backend, latent, chunkFrames, cache, fullHistoryBlocks);
+        }
+        finally
+        {
+            ReleaseResidentBlock();
+        }
+    }
+
+    private int StreamRecomputeCore(IBackend backend, Tensor latent, int[] chunkFrames, MovieRollKvCache cache, int fullHistoryBlocks)
     {
         using IDisposable exactGemm = ExactGemm(backend);
         ArgumentNullException.ThrowIfNull(backend);
@@ -373,6 +463,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
             {
                 (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, chunks!, chunkFrames, height, width, inputs!.Temb, inputs!.Layouts);
                 AdoptOrDispose(cache, StreamLayerName(i), keys, values, PackedRanges(chunkFrames));
+                ReleaseStreamedBlock(i);
             }
             if (fullHistoryBlocks == _blocks.Length)
                 return frames;
@@ -397,6 +488,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
                 {
                     (Tensor keys, Tensor values) = StreamChunkedBlock(backend, i, sinkRecent, srChunkFrames, height, width, srTemb, srLayouts);
                     AdoptOrDispose(cache, StreamLayerName(i), keys, values, srRanges);
+                    ReleaseStreamedBlock(i);
                 }
             }
             finally
@@ -497,6 +589,7 @@ public sealed unsafe class HunyuanVideo15Dit : IDisposable, IStreamableDenoiser
         Tensor[] temb, TokenSegmentLayout[] layouts)
     {
         // One hook per block, before any of its chunks run, so the streamer stages the block for the whole chunked pass.
+        LoadStreamedBlock(block);
         BeforeBlockForward?.Invoke(block);
         bool lastBlock = block == _blocks.Length - 1;
         if (lastBlock)
