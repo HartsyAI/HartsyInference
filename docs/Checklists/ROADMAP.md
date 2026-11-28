@@ -79,6 +79,10 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] W8A8: meet the existing end-to-end quality gate (SmoothQuant previously failed SSIM 0.95).
   Investigate grouped-K, mixed-precision layer selection, or timestep-aware calibration; do not weaken the gate.
 - [ ] Extend low-VRAM GGUF to unsupported formats/models; basic diffusion GGUF wiring already exists.
+- [ ] A LoRA adjunct ignores its base weight's `Tensor.Fp8ScaleFactor`: `LowRankAdjunctGemm.Accumulate` adds the
+  delta unscaled, so on a weight an F16 loop damps (`numerics.ditF16`, a LoRA that cannot merge into the base) the
+  delta would be too strong by the inverse of the damp (32 times at 1/32) relative to the base product, on CUDA and
+  Vulkan. Inferred from the code, not run.
 - [ ] Quantized KV beyond existing F16 storage; distinguish storage precision from paged-cache integration.
 - [ ] MMQ-style quantized prefill and missing fused dequant/GEMV variants; several common variants already ship.
 - [ ] IQ1/IQ2/IQ3 codec coverage: inspect the registry for the exact missing formats.

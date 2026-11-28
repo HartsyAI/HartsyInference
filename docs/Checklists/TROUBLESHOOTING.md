@@ -609,6 +609,21 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   writing into a caller's F32 buffer (2 bytes written, 4 read) → every other element garbage → NaN within
   1–2 ops → all-black Flux. Cast FP8 inputs up to F16 for the multiply but land the result in an
   output-dtype buffer.
+- **`Tensor.Fp8ScaleFactor` is a GEMM alpha on every weight dtype, not only on fp8.** The F16 block loops
+  (`numerics.ditF16`: Flux.1, Flux.2, Chroma, Qwen-Image, Z-Image, Ideogram 4) put their residual damp on it for
+  16-bit and F32 weights, and scale the bias values to match. A product path that reads the factor only for fp8
+  runs a BF16 or F16 checkpoint's stream undamped: it overflows F16 and the image is solid black, while an fp8
+  checkpoint of the same model is fine because its cast applies the factor. Tell: black on one checkpoint dtype
+  only, and `numerics.ditF16=false` gives a clean image. On Vulkan, `Linear`, `QuantizedMatMul`, `MatMul` and
+  `BatchedMatMul` pass `GemmScale(operand)` as alpha, and the two Linear paths without an alpha (`gemv_quant`, the
+  INT8 Linear) decline a scaled weight. Other ops that take a weight do not read the factor, among them `Conv2D`,
+  `Conv1d`, `ConvTranspose1d`, `ConvTranspose2d`, `Conv2dDepthwise`, `Fp8BlockLinear`, `BlockDiagonalLinear` and
+  `MoeExpertsGrouped`; no F16 loop damps their weights today, so damping one of those needs the op taught first.
+- **A step-graph capture that runs out of memory is not the cause of a wrong image.** Capture retains every
+  intermediate of the recorded step (Flux.2 Klein 4B at 512²: 4.3 GB beside 7.4 GB of weights, so it never fits
+  12 GB), the owner reruns the step eagerly, and the output is the eager output. The warning and its stack trace
+  sit right before a black image in the log and read like its cause; rule it in or out with
+  `numerics.ditGraphDefaultOn=false` (`numerics.ditGraph=false` does not turn off a default-on model).
 - **Tensor-core/coopmat paths must store to whatever dtype the pipeline allocated.** An F16-only output
   guard made the coopmat path inert on Flux (Linears allocate F32 output) — 1.4% "improvement" = never
   launched. Relax to F16-or-F32 with an `OUTPUT_F32` spec-const. Gate coopmat on actual shape enumeration

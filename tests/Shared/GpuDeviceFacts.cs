@@ -9,7 +9,15 @@ namespace HartsyInference.Tests.Shared;
 internal static class GpuDevices
 {
     private static readonly Lazy<string?> Cuda = new(static () => Probe(static () => OpenCuda().Dispose()));
-    private static readonly Lazy<string?> Vulkan = new(static () => Probe(static () => OpenVulkan().Dispose()));
+    private static readonly Lazy<string?> Vulkan = new(static () => Probe(static () =>
+    {
+        using VulkanBackend backend = OpenVulkan();
+        _vulkanF16 = backend.Capabilities.SupportsF16;
+    }));
+    private static bool _vulkanF16;
+
+    /// <summary>Whether a Vulkan device opens and has F16.</summary>
+    public static bool VulkanSupportsF16 => Vulkan.Value is null && _vulkanF16;
 
     /// <summary>Why CUDA cannot run, or null when it can.</summary>
     public static string? CudaFailure => Cuda.Value;
@@ -64,5 +72,15 @@ internal sealed class VulkanDeviceFactAttribute : FactAttribute
     public VulkanDeviceFactAttribute()
     {
         if (GpuDevices.VulkanFailure is { } failure) Skip = $"SKIPPED: no usable Vulkan device ({failure}).";
+    }
+}
+
+/// <summary>A fact reported as skipped, never passed, when no Vulkan device with F16 opens.</summary>
+internal sealed class VulkanF16DeviceFactAttribute : FactAttribute
+{
+    public VulkanF16DeviceFactAttribute()
+    {
+        if (GpuDevices.VulkanFailure is { } failure) Skip = $"SKIPPED: no usable Vulkan device ({failure}).";
+        else if (!GpuDevices.VulkanSupportsF16) Skip = "SKIPPED: this Vulkan device has no F16.";
     }
 }

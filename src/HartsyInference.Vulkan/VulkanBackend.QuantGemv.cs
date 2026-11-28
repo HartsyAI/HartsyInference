@@ -32,6 +32,8 @@ public sealed partial class VulkanBackend
     {
         if (!(QuantGemvTypes.Contains(weight.DType) || weight.DType == DType.F32) || weight.Shape.Rank != 2) return false;
         if (input.DType != DType.F32 || output.DType != DType.F32) return false;
+        // The kernel has no alpha; a scaled weight (an F16 block loop's damp) takes the GEMM, which applies it.
+        if (GemmScale(weight) != 1f) return false;
         long n = weight.Shape[0], k = weight.Shape[1];
         // K comes from the weight: the decode graph feeds the o-projection the head-major attention output
         // [1, heads, 1, headDim], whose last dim is the head size, not K (the rows are the same bytes as [1, 1, heads*headDim]).
