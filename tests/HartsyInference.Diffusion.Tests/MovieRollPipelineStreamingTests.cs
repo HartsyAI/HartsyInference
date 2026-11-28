@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -9,9 +10,9 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Two generations through <see cref="MovieRollPipeline"/> on the tiny DiT, resident and streamed. Each generation runs one forward per denoising
-/// step and window, so the streamed run loads and releases its blocks on every forward, and the second generation reuses the same pipeline and DiT.
-/// All four latents must be bit-identical.</summary>
+/// <summary>Generations through <see cref="MovieRollPipeline"/> on the tiny DiT, resident and streamed. Each generation runs one forward per denoising
+/// step and window, with KV recompute on, so the streamed run loads and releases its blocks on every forward, the recompute and the encode passes
+/// included; the second generation reuses the same pipeline and DiT. The pool drains are counted through a fake streaming cache.</summary>
 [Trait("Category", "SyntheticSmoke")]
 public sealed class MovieRollPipelineStreamingTests
 {
@@ -29,6 +30,12 @@ public sealed class MovieRollPipelineStreamingTests
     private static HunyuanVideo15VaeConfig TinyVaeConfig() => new()
     {
         LatentChannels = 2, BlockOutChannels = [4, 8, 16, 32, 32], LayersPerBlock = 2, SpatialCompression = 16, TemporalCompression = 4, ScalingFactor = 1f,
+    };
+
+    private static MovieRollSamplerOptions Options() => new()
+    {
+        ChunkFrames = 1, NumChunks = 5, FullHistoryBlocks = 1, ContextNoise = 0f,
+        KvRecomputeEnabled = true, KvRecomputeThreshold = 2, KvRecomputeRecentK = 1, Cfg = null,
     };
 
     private static Dictionary<string, Tensor> Source(SafeTensorsLoader loader) => loader.GetAllTensors()
@@ -50,6 +57,22 @@ public sealed class MovieRollPipelineStreamingTests
         return frames => RandomTensor(rng, 1, Channels, frames, Height, Width);
     }
 
+    /// <summary>A streaming cache that counts pool drains and does nothing else: the streamed path uses no upload or eviction.</summary>
+    private sealed class CountingPoolCache : IStreamingWeightCache
+    {
+        public int Drains { get; private set; }
+
+        public void DrainAndReleasePool() => Drains++;
+
+        public StreamingUploadToken BeginUploadAsync(IEnumerable<Tensor> weights) => throw new NotSupportedException();
+
+        public void AwaitWeights(StreamingUploadToken token) => throw new NotSupportedException();
+
+        public void EvictAsync(IEnumerable<Tensor> weights) => throw new NotSupportedException();
+
+        public long QueryAvailableWeightCacheBytes(long activationReserve) => throw new NotSupportedException();
+    }
+
     /// <summary>After a generation no block is loaded, every load has its release, and no block tensor is held.</summary>
     private static void AssertReleased(HunyuanVideo15BlockLoader loader, string when)
     {
@@ -58,53 +81,131 @@ public sealed class MovieRollPipelineStreamingTests
         Assert.Equal(loader.BlockLoads, loader.BlockReleases);
     }
 
+    private sealed class Rig : IDisposable
+    {
+        public Rig(CountingPoolCache pool)
+        {
+            string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
+            Loader = new SafeTensorsLoader();
+            Loader.Load(path);
+            Source = HunyuanVideo15BlockLoaderTestsSource.Of(Loader);
+            Config = TinyDitConfig();
+            Backend = new CpuBackend();
+            Vae = new HunyuanVideo15Vae(TinyVaeConfig());
+            Schedule = MovieRollSchedule.Distilled([1000, 800, 600, 400, 200], 5, 5.0);
+            Resident = new HunyuanVideo15Dit(Config);
+            Resident.LoadWeights(HunyuanVideo15CheckpointConverter.Convert(Source, Blocks, Hidden));
+            ResidentPipeline = new MovieRollPipeline(Backend, Resident, Vae, Schedule);
+            Streamed = new HunyuanVideo15Dit(Config);
+            BlockLoader = new HunyuanVideo15BlockLoader(Streamed, Config, Backend, Source, [], readBlocksFromFile: true);
+            BlockLoader.LoadShared();
+            Streamed.LoadBlock = BlockLoader.LoadBlock;
+            Streamed.UnloadBlock = BlockLoader.UnloadBlock;
+            StreamedPipeline = new MovieRollPipeline(Backend, Streamed, Vae, Schedule, poolCache: pool);
+        }
+
+        public SafeTensorsLoader Loader { get; }
+        public Dictionary<string, Tensor> Source { get; }
+        public HunyuanVideo15Config Config { get; }
+        public CpuBackend Backend { get; }
+        public HunyuanVideo15Vae Vae { get; }
+        public MovieRollSchedule Schedule { get; }
+        public HunyuanVideo15Dit Resident { get; }
+        public MovieRollPipeline ResidentPipeline { get; }
+        public HunyuanVideo15Dit Streamed { get; }
+        public HunyuanVideo15BlockLoader BlockLoader { get; }
+        public MovieRollPipeline StreamedPipeline { get; }
+
+        public void Dispose()
+        {
+            BlockLoader.Dispose();
+            Streamed.Dispose();
+            Resident.Dispose();
+            Vae.Dispose();
+            Loader.Dispose();
+        }
+    }
+
     [Fact]
     public void TwoGenerationsStreamedAndResidentGiveTheSameLatents()
     {
-        string path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "hy15_dit_tiny.safetensors");
-        using SafeTensorsLoader loader = new();
-        loader.Load(path);
-        Dictionary<string, Tensor> source = Source(loader);
-        HunyuanVideo15Config config = TinyDitConfig();
-        using CpuBackend backend = new();
-        MovieRollSchedule schedule = MovieRollSchedule.Distilled([1000, 800, 600, 400, 200], 5, 5.0);
-        MovieRollSamplerOptions options = new()
-        {
-            ChunkFrames = 1, NumChunks = 3, FullHistoryBlocks = 1, ContextNoise = 0f, KvRecomputeEnabled = false, Cfg = null,
-        };
+        CountingPoolCache pool = new();
+        using Rig rig = new(pool);
         Random textRng = new(3);
         using Tensor qwen = RandomTensor(textRng, 1, 3, 24);
         using Tensor byt5 = RandomTensor(textRng, 1, 2, 16);
-        using HunyuanVideo15Vae vae = new(TinyVaeConfig());
+        MovieRollSamplerOptions options = Options();
 
-        // Resident: the whole DiT converted, cast and loaded at once.
-        using HunyuanVideo15Dit resident = new(config);
-        resident.LoadWeights(HunyuanVideo15CheckpointConverter.Convert(source, Blocks, Hidden));
-        MovieRollPipeline residentPipeline = new(backend, resident, vae, schedule);
-
-        // Streamed: the loader owns the blocks; the pipeline keeps only the shared weights resident.
-        using HunyuanVideo15Dit streamed = new(config);
-        using HunyuanVideo15BlockLoader blockLoader = new(streamed, config, backend, source, [], readBlocksFromFile: true);
-        blockLoader.LoadShared();
-        streamed.LoadBlock = blockLoader.LoadBlock;
-        streamed.UnloadBlock = blockLoader.UnloadBlock;
-        MovieRollPipeline streamedPipeline = new(backend, streamed, vae, schedule);
-
-        using Tensor residentFirst = residentPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
-        using Tensor residentSecond = residentPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
-        using Tensor streamedFirst = streamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
-        AssertReleased(blockLoader, "first generation");
-        int loadsAfterFirst = blockLoader.BlockLoads;
+        using Tensor residentFirst = rig.ResidentPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        using Tensor residentSecond = rig.ResidentPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        using Tensor streamedFirst = rig.StreamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        AssertReleased(rig.BlockLoader, "first generation");
+        int loadsAfterFirst = rig.BlockLoader.BlockLoads;
         Assert.True(loadsAfterFirst > 0, "The first generation loaded no blocks.");
+        int drainsAfterFirst = pool.Drains;
 
-        using Tensor streamedSecond = streamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
-        AssertReleased(blockLoader, "second generation");
-        // The second generation loads the same blocks the first did, and nothing the first left stays behind.
-        Assert.Equal(2 * loadsAfterFirst, blockLoader.BlockLoads);
+        using Tensor streamedSecond = rig.StreamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        AssertReleased(rig.BlockLoader, "second generation");
+        // The second generation loads the same blocks the first did, and drains the pool again.
+        Assert.Equal(2 * loadsAfterFirst, rig.BlockLoader.BlockLoads);
+        Assert.True(pool.Drains > drainsAfterFirst, "The second generation did not drain the pool.");
 
         Assert.Equal(residentFirst.Shape, streamedFirst.Shape);
         Assert.True(residentFirst.AsReadOnlySpan<float>().SequenceEqual(residentSecond.AsReadOnlySpan<float>()), "Resident: the second generation differs.");
         Assert.True(residentFirst.AsReadOnlySpan<float>().SequenceEqual(streamedFirst.AsReadOnlySpan<float>()), "Streamed first generation differs from resident.");
         Assert.True(residentFirst.AsReadOnlySpan<float>().SequenceEqual(streamedSecond.AsReadOnlySpan<float>()), "Streamed second generation differs.");
     }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(9)]
+    public void AForcedThrowMidForwardLeavesNoBlockLoaded(int throwAtBlockForward)
+    {
+        CountingPoolCache pool = new();
+        using Rig rig = new(pool);
+        Random textRng = new(3);
+        using Tensor qwen = RandomTensor(textRng, 1, 3, 24);
+        using Tensor byt5 = RandomTensor(textRng, 1, 2, 16);
+        MovieRollSamplerOptions options = Options();
+
+        // The Nth block forward of the run throws with its block loaded.
+        int calls = 0;
+        rig.Streamed.BeforeBlockForward = _ =>
+        {
+            if (++calls == throwAtBlockForward) throw new InvalidOperationException("forced");
+        };
+        Assert.Throws<InvalidOperationException>(() =>
+            rig.StreamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11)));
+        Assert.Equal(-1, rig.BlockLoader.LoadedBlock);
+        AssertReleased(rig.BlockLoader, "after the forced throw");
+        Assert.True(pool.Drains > 0, "The pool was not drained after the failed run.");
+
+        // The pipeline and the DiT are still usable: the next generation runs and releases everything.
+        rig.Streamed.BeforeBlockForward = null;
+        using Tensor next = rig.StreamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        AssertReleased(rig.BlockLoader, "the generation after the throw");
+    }
+
+    [Fact]
+    public void DrainsAreCountedPerStepAndAfterTheRun()
+    {
+        CountingPoolCache pool = new();
+        using Rig rig = new(pool);
+        Random textRng = new(3);
+        using Tensor qwen = RandomTensor(textRng, 1, 3, 24);
+        using Tensor byt5 = RandomTensor(textRng, 1, 2, 16);
+
+        using Tensor latents = rig.StreamedPipeline.SampleLatents(Options(), qwen, byt5, null, null, Height, Width, Noise(11));
+        // One drain per denoising step (five steps, five chunks) and one after the KV cache is freed.
+        Assert.True(pool.Drains >= 6, $"Expected at least 6 drains, saw {pool.Drains}.");
+    }
+}
+
+/// <summary>The shared (top-level and block 0) weights of the tiny fixture, as the loader takes them.</summary>
+internal static class HunyuanVideo15BlockLoaderTestsSource
+{
+    public static Dictionary<string, Tensor> Of(SafeTensorsLoader loader) => loader.GetAllTensors()
+        .Where(pair => !pair.Key.StartsWith("ref.", StringComparison.Ordinal) && !pair.Key.StartsWith("in.", StringComparison.Ordinal)
+            && !pair.Key.StartsWith("win.", StringComparison.Ordinal) && !pair.Key.StartsWith("rec.", StringComparison.Ordinal))
+        .ToDictionary(pair => pair.Key, pair => pair.Value);
 }
