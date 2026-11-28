@@ -50,6 +50,14 @@ public sealed class MovieRollPipelineStreamingTests
         return frames => RandomTensor(rng, 1, Channels, frames, Height, Width);
     }
 
+    /// <summary>After a generation no block is loaded, every load has its release, and no block tensor is held.</summary>
+    private static void AssertReleased(HunyuanVideo15BlockLoader loader, string when)
+    {
+        Assert.True(loader.LoadedBlock == -1, $"{when}: block {loader.LoadedBlock} is still loaded.");
+        Assert.True(loader.LoadedBlockTensorCount == 0, $"{when}: {loader.LoadedBlockTensorCount} block tensors are still held.");
+        Assert.Equal(loader.BlockLoads, loader.BlockReleases);
+    }
+
     [Fact]
     public void TwoGenerationsStreamedAndResidentGiveTheSameLatents()
     {
@@ -85,7 +93,14 @@ public sealed class MovieRollPipelineStreamingTests
         using Tensor residentFirst = residentPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
         using Tensor residentSecond = residentPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
         using Tensor streamedFirst = streamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        AssertReleased(blockLoader, "first generation");
+        int loadsAfterFirst = blockLoader.BlockLoads;
+        Assert.True(loadsAfterFirst > 0, "The first generation loaded no blocks.");
+
         using Tensor streamedSecond = streamedPipeline.SampleLatents(options, qwen, byt5, null, null, Height, Width, Noise(11));
+        AssertReleased(blockLoader, "second generation");
+        // The second generation loads the same blocks the first did, and nothing the first left stays behind.
+        Assert.Equal(2 * loadsAfterFirst, blockLoader.BlockLoads);
 
         Assert.Equal(residentFirst.Shape, streamedFirst.Shape);
         Assert.True(residentFirst.AsReadOnlySpan<float>().SequenceEqual(residentSecond.AsReadOnlySpan<float>()), "Resident: the second generation differs.");

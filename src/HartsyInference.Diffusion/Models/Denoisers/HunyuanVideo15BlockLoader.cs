@@ -32,6 +32,18 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
     private int _loaded = -1;
     private bool _disposed;
 
+    /// <summary>Block loads so far. Each forward loads every block once, so this counts forwards times blocks.</summary>
+    public int BlockLoads { get; private set; }
+
+    /// <summary>Block releases so far. Equal to <see cref="BlockLoads"/> whenever no block is loaded.</summary>
+    public int BlockReleases { get; private set; }
+
+    /// <summary>The block now loaded, or -1 when none is.</summary>
+    public int LoadedBlock => _loaded;
+
+    /// <summary>Host tensors held for the loaded block; 0 when none is loaded. Shared weights are not counted.</summary>
+    public int LoadedBlockTensorCount => _blockOwned.Count;
+
     /// <param name="source">The checkpoint's tensors as mapped views (the container's <c>Weights</c>); they are read, never released.</param>
     /// <param name="castSources">The dtypes the F32 to F16 cast applies to (the same list the resident load uses for the backend).</param>
     /// <param name="readBlocksFromFile">True reads each F32 block tensor with positional reads of its file; false uses the views.</param>
@@ -105,6 +117,7 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
         _blockOwned = Settle(reads.Concat(converted.Values).Concat(cast.Values), cast);
         _dit.LoadBlockWeights(index, cast);
         _loaded = index;
+        BlockLoads++;
         _backend.PreloadWeights(_dit.GetBlock(index).EnumerateWeights());
     }
 
@@ -118,6 +131,7 @@ public sealed class HunyuanVideo15BlockLoader : IDisposable
         foreach (Tensor tensor in _blockOwned) tensor.Dispose();
         _blockOwned = [];
         _loaded = -1;
+        BlockReleases++;
     }
 
     /// <inheritdoc/>

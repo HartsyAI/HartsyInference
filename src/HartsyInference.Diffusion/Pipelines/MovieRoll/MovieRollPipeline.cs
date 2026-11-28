@@ -51,16 +51,19 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
         {
             // A loader owns the blocks' weights: it loads each block before that block's forward and releases it after, freeing the device copy in
             // the same step. Only the shared weights are resident for the run, so no streaming scope manages the blocks.
+            // The stream-ordered pool keeps freed block buffers warm (vram.mempoolKeep, on by default) and the device stays at its peak. The engine's own
+            // streaming scope trims the pool after each step (BlockStreamingOptions.PerStepTrim); this path does the same, since it has no scope.
             Backend.PreloadWeights(_dit.EnumerateSharedWeights());
             try
             {
-                MovieRollSampler streamedSampler = new(Backend, _dit, _schedule);
+                MovieRollSampler streamedSampler = new(Backend, _dit, _schedule) { StepCompleted = ReleaseStreamedPool };
                 return streamedSampler.Sample(cache, options, qwen, byt5, negativeQwen, negativeByt5, noise);
             }
             finally
             {
                 Backend.Sync();
                 Backend.FreeWeights(_dit.EnumerateSharedWeights());
+                ReleaseStreamedPool();
             }
         }
         // The DiT's blocks stream through BlockStreamingScope on a backend with a streaming cache, as the HunyuanVideo pipeline does: the shared
@@ -86,6 +89,9 @@ public sealed class MovieRollPipeline : DiffusionPipelineBase
             Backend.FreeWeights(_dit.EnumerateWeights());
         }
     }
+
+    /// <summary>Returns the device memory the streamed blocks freed to the stream-ordered pool, so the card holds only what is live.</summary>
+    private void ReleaseStreamedPool() => Backend.StreamingCache?.DrainAndReleasePool();
 
     /// <summary>Samples, unscales and decodes one clip to frames <c>[1, 3, T', 16·H, 16·W]</c> owned by the caller. Same noise contract as <see cref="SampleLatents"/>.</summary>
     public Tensor Generate(MovieRollSamplerOptions options, Tensor qwen, Tensor? byt5, Tensor? negativeQwen, Tensor? negativeByt5,

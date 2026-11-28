@@ -102,10 +102,11 @@ public static partial class EngineKnobs
 
     /// <summary>Loads the MovieRoll DiT's blocks from the checkpoint as the forward reaches them, on a backend with a streaming cache, instead of holding
     /// the whole F16 DiT on the host (about 15.5 GiB for the released file). Same conversion and cast, so the same bits; each forward reads the
-    /// checkpoint again (about 31 GiB). Off holds the DiT resident, as before.</summary>
+    /// checkpoint again (about 31 GiB). Off holds the DiT resident, as before. Off by default until the SwarmUI check of the streamed path passes after
+    /// the block-release and pool-trim fixes; turning it on before that check is the user's call.</summary>
     public static readonly Knob<bool> MovieRollStreamBlocks =
-        Bool("numerics.movieRollStreamBlocks", true, KnobScope.Construction, KnobDomain.Numerics,
-            "Loads MovieRoll DiT blocks from the checkpoint as the forward reaches them (one block of F16 host memory); off holds the whole F16 DiT on the host.");
+        Bool("numerics.movieRollStreamBlocks", false, KnobScope.Construction, KnobDomain.Numerics,
+            "Loads MovieRoll DiT blocks from the checkpoint as the forward reaches them (one block of F16 host memory); off, the default, holds the whole F16 DiT on the host.");
 
     /// <summary>Krea 2 honours each layer's <c>full_precision_matrix_mult</c> mark (dense GEMM for marked nvfp4 layers). Off
     /// by default: marked layers run the native block-scaled GEMM, which is about 60% faster per step on Blackwell.</summary>
